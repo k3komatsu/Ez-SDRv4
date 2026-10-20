@@ -5,7 +5,7 @@
 
 # Phase 8 段階 1b-4d-2 実装報告
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `273c120`（作業ツリーは未 commit）．読んだもの：`adjudication.md`，`sol-plan-report.md`，`test-plan.md`，`plan-brief.md`．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `ff2f61f`（作業ツリーは未 commit）．読んだもの：`adjudication.md`，`sol-plan-report.md`，`test-plan.md`，`plan-brief.md`．
 
 ## 1. 計画 v2
 
@@ -133,7 +133,7 @@ reviewer は DeepSeek（`opencode-go/deepseek-v4.1-flash#max`），回ごとに�
 
 # Phase 8 段階 1b-4d-2 修正の回 1（Sol の FAIL 4 件）
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `273c120`（1b-4d-2 は未 commit のまま）．読んだもの：`sol-report.md`，`adjudication.md`，`test-plan-v2.md`，`report.md`，`fix1-brief.md`．計画 `test-plan-v2.md` も今回の形に合わせて直した（S13・S14・S16a・S16b・T4・P1 と mutation の対応表）．commit・push・`git add` はしていない．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `ff2f61f`（1b-4d-2 は未 commit のまま）．読んだもの：`sol-report.md`，`adjudication.md`，`test-plan-v2.md`，`report.md`，`fix1-brief.md`．計画 `test-plan-v2.md` も今回の形に合わせて直した（S13・S14・S16a・S16b・T4・P1 と mutation の対応表）．commit・push・`git add` はしていない．
 
 ## 1. Sol major 1：start の途中の device loss
 

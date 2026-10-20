@@ -87,6 +87,6 @@
 - 指示された command lead・repeat 制約の Provider 間差を、この段階で保持している点。
 - server の既定 profile、fixture、Python の移行。既存テストの変更は概ね設計上の意味変更に対応していました。
 - 変更された mutation 32行について、`old` と適用後の `old2` が各1回一致することを確認しました。ただし R11 と CBX のテストの意味には上記の問題があります。
-- `rules.py --base d430ec8` は **0 problems**、`git diff --check` も問題なしでした。ただし前者は追加された whitelist の妥当性を保証しません。
+- `rules.py --base 0f0c46b` は **0 problems**、`git diff --check` も問題なしでした。ただし前者は追加された whitelist の妥当性を保証しません。
 
 **検証範囲:** ファイル変更、build、テスト suite、mutation、実機操作は行っていません。実装役の実行結果は独立再確認していません。実機での再現と、FPGA の halfband/CIC 実値に基づく639要素の適用可否は **INFERRED／bench 未確認**です。

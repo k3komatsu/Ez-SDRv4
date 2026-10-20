@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4c の実装報告（2 回目）
 
-対象: `/home/komatsu/local_work/Ez-SDRv4`（HEAD `278de14`，以下すべて未コミット）．
+対象: `/home/komatsu/local_work/Ez-SDRv4`（HEAD `4199e51`，以下すべて未コミット）．
 指示書: `~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4c/impl-brief.md`．
 段階の計画と裁定: 同ディレクトリ `test-plan.md`，`brief.md`，`sol-plan.md`．
 

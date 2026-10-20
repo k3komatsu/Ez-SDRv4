@@ -1,6 +1,6 @@
 # 1b-4d-3：実装の指示書
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `34dde0f`（履歴の書き直しで `d58da80`．tree は同じ），tree はきれい）．この段階は **risky ではない**（AGENTS.md §9：queue・期限・lifecycle・所有・FFI に触れず，Manifest の記録の形とテストを変える）．だからテスト計画を別に書かず，実装に入ります．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `d58da80`，tree はきれい）．この段階は **risky ではない**（AGENTS.md §9：queue・期限・lifecycle・所有・FFI に触れず，Manifest の記録の形とテストを変える）．だからテスト計画を別に書かず，実装に入ります．
 
 ## 1. 読むもの
 

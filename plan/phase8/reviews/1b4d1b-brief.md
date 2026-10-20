@@ -3,12 +3,12 @@
 ## 1. 計画の指示書（DeepSeek へ）
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b190918`，1b-4d-1a まで commit 済み）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `a52863c`，1b-4d-1a まで commit 済み）．
 この段階は **risky**（AGENTS.md §9：uhd-control と owner のどちらが device を操作するか＝ lifecycle と，fake と hardware の境界）．この回は **テスト計画だけ** を書く．コードは書かない．tree を変えない．
 
 ## 1. 背景
 
-- 1b-4d-1 の計画（1a と 1b を合わせたもの）は `plan/phase8/reviews/1b4d1-test-plan.md`．冒頭が orchestrator の裁定，後が計画の本文（§1〜§12）．1a は commit `b190918` で実装済み（記録は `plan/phase8/reviews/1b4d1-report.md`・`1b4d1-fix-reports.md`・`1b4d1-opus.md`）．
+- 1b-4d-1 の計画（1a と 1b を合わせたもの）は `plan/phase8/reviews/1b4d1-test-plan.md`．冒頭が orchestrator の裁定，後が計画の本文（§1〜§12）．1a は commit `a52863c` で実装済み（記録は `plan/phase8/reviews/1b4d1-report.md`・`1b4d1-fix-reports.md`・`1b4d1-opus.md`）．
 - 1b の範囲は plan 33 §5 の 1b-4 行「分け方」の 1b-4d-1b：busy，D1 の A，lock の順序の検査．計画の系列では S9，S11d，S13・S13b，S15，S17〜S19，S22〜S24，S26〜S28．
 - 計画は 1a の実装の前に書かれた．1a で名前と形が決まった（下の §2）．そのうえ orchestrator は 1a のコードと UHD のソースを読んで，busy の範囲と D1・D2 の裁定を §3 のとおり改めた．**§3 が計画と前の裁定より優先する．**
 
@@ -105,7 +105,7 @@
 ## 2. 実装の指示書（DeepSeek へ）
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b190918`，tree はきれい）．この段階は risky（AGENTS.md §9）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `a52863c`，tree はきれい）．この段階は risky（AGENTS.md §9）．
 
 ## 読むもの（`~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4d1b/`）
 
@@ -168,9 +168,9 @@ P1 が無くなるか 3 回まで．判定を出さずに終わった回は 1 �
 ## 3. 計画の差分レビューの指示書（Sol へ）
 
 
-You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `b190918`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
+You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `a52863c`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
-You reviewed the plan of stage 1b-4d-1 before (`plan/phase8/reviews/1b4d1-sol-plan.md`; the plan and the adjudication of your review are `plan/phase8/reviews/1b4d1-test-plan.md`). Its first half, 1a (one per-stream record of what the device holds: set, `(seq, version)`, generation), is implemented in `b190918`. This review is of **the second half, 1b, only**: who operates a stream's device (uhd-control's enable from no stream vs the stream's owner thread), D1's option A, and the lock-order check.
+You reviewed the plan of stage 1b-4d-1 before (`plan/phase8/reviews/1b4d1-sol-plan.md`; the plan and the adjudication of your review are `plan/phase8/reviews/1b4d1-test-plan.md`). Its first half, 1a (one per-stream record of what the device holds: set, `(seq, version)`, generation), is implemented in `a52863c`. This review is of **the second half, 1b, only**: who operates a stream's device (uhd-control's enable from no stream vs the stream's owner thread), D1's option A, and the lock-order check.
 
 The orchestrator changed parts of the adjudication you saw, after reading 1a's code and UHD 4.10: the brief `~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4d1b/plan-brief.md` §3 (B1–B6). In short: `busy` is no longer a claim over every streamer call but uhd-control's alone, during an enable from no stream (the owner's `idle` mark is its own claim); uhd-tx's report reads take a `reading` mark that an enable from no stream waits for (UHD's `"Attempting to reconnect input port!"` while the old streamer lives); D2 (fall back to an owner-booked change) is withdrawn; D1 A sends a record-only release as a timed command at the pending segment's origin when the record shows the configure will not be made again.
 
@@ -199,7 +199,7 @@ You are the independent reviewer (AGENTS.md §9 step 7). Repository: /home/komat
 
 ## What to review
 
-The uncommitted tree (`git diff` against HEAD `b190918`) implements stage 1b-4d-1b: who calls a stream's device. uhd-control's enable from no stream takes the stream (`StreamState.busy`) in the section that reads the owner's idle mark and the plan, and gives it back where it books or ends; owners that see `busy` make no device call and move neither cursor nor idle mark; uhd-tx's report read takes `reading` (now set in the same section as its plan read, `Tx::pass`/`plan_section`), which an enable from no stream waits for on the host clock (`Control::await_reading`); loss and `Provider::stop` exits; `Core::configure` checks `is_lost` before each channel's apply; the transmit shutdown's report read takes no busy check; a test-build lock-order check (`core::Locked`, `assert_line_free`). design/18 UR-3, UR-17, UR-23, UR-25 changed. B4 (D1 option A, the record-only release) is **out of scope** (stage 1c); say only if this stage makes it harder.
+The uncommitted tree (`git diff` against HEAD `a52863c`) implements stage 1b-4d-1b: who calls a stream's device. uhd-control's enable from no stream takes the stream (`StreamState.busy`) in the section that reads the owner's idle mark and the plan, and gives it back where it books or ends; owners that see `busy` make no device call and move neither cursor nor idle mark; uhd-tx's report read takes `reading` (now set in the same section as its plan read, `Tx::pass`/`plan_section`), which an enable from no stream waits for on the host clock (`Control::await_reading`); loss and `Provider::stop` exits; `Core::configure` checks `is_lost` before each channel's apply; the transmit shutdown's report read takes no busy check; a test-build lock-order check (`core::Locked`, `assert_line_free`). design/18 UR-3, UR-17, UR-23, UR-25 changed. B4 (D1 option A, the record-only release) is **out of scope** (stage 1c); say only if this stage makes it harder.
 
 Material in `~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4d1b/`: your plan review (end of `sol-plan.log`), the ruling `adjudication.md`, the plan `test-plan-1b-v2.md`, the report `report.md` (do not trust it; check the tree). UHD 4.10 sources: `docker run --rm ghcr.io/k3komatsu/uhd:v4.10 …` under `/root/tmp/uhd-4.10.0.0/` (a new streamer connecting while the old one lives throws "Attempting to reconnect input port!", `graph.cpp:187-197`).
 

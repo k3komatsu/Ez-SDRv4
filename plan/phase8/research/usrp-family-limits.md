@@ -1,6 +1,6 @@
 # USRP2, N2x0, X3x0, X410, X420, X440 against the v4 radio design
 
-Sonnet researcher, 2026-10-16, read-only, at the owner's request ("現状のv4の案でUSRPのデバイスの自由度や能力に制限を加えないか徹底的に調査"). Checked against v4 at `249d0bb` and the P1 (c) direction of `00-overview.md`. VERIFIED here means the researcher read it; the orchestrator's spot checks are in `00-overview.md`'s decision log.
+Sonnet researcher, 2026-10-16, read-only, at the owner's request ("現状のv4の案でUSRPのデバイスの自由度や能力に制限を加えないか徹底的に調査"). Checked against v4 at `9f025b5` and the P1 (c) direction of `00-overview.md`. VERIFIED here means the researcher read it; the orchestrator's spot checks are in `00-overview.md`'s decision log.
 
 RESULT: v4 today is an X300/X310-only design, and the Phase 8 (c) direction as written keeps that restriction. (c) removes the one-setting-per-direction and one-stream-per-direction limits. It does not touch the master clock, the rate grid, the gain model, the timed-update class, the selector's source names or the throughput model. Each of those is an X3xx constant today.
 

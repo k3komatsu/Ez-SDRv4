@@ -4,7 +4,7 @@ STATUS: blocked: orchestrator review O1–O5 の修正と最終 gate が別実�
 
 ## 証跡の基準
 
-- 対象は前セッションの HEAD `e4ca550` からの実装。現在進行中のレビュー修正は含めない。
+- 対象は前セッションの HEAD `aeaf48f` からの実装。現在進行中のレビュー修正は含めない。
 - 「最後の編集」は、前セッションの `impl.log` で最後に記録された、`plan/phase3/tools/mutations.json` の M34 retarget とする。後続の `remote-mutate-m34-retarget.log` と `cargo-test-workspace-final.log` はこの編集後。ほかの各ログの前後関係は §8 に記す。
 - 指示書の確認1〜7は再実行していない。記載は保存ログと `impl.log` の出力であり、最終 gate で orchestrator が流し直す。
 

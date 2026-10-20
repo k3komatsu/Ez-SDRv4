@@ -3,7 +3,7 @@
 ## plan-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `7968d98`，tree はきれい）．この段階は **risky**（AGENTS.md §9：device に出す更新の経路と，configuration の版という identity を変える）．だから今回は **テスト計画だけ** を書きます．コードは書きません（Sol が計画をレビューした後に，別の指示書で実装します）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `cddad68`，tree はきれい）．この段階は **risky**（AGENTS.md §9：device に出す更新の経路と，configuration の版という identity を変える）．だから今回は **テスト計画だけ** を書きます．コードは書きません（Sol が計画をレビューした後に，別の指示書で実装します）．
 
 ## 1. 読むもの
 
@@ -81,7 +81,7 @@
 ## impl-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `7968d98`，tree はきれい）．この段階は risky（AGENTS.md §9）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `cddad68`，tree はきれい）．この段階は risky（AGENTS.md §9）．
 
 ## 読むもの（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/`）
 
@@ -146,7 +146,7 @@ P1 が無くなるか 3 回まで．判定を出さずに終わった回は 1 �
 ## fix1-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `7968d98`，tree に 1b-4d-1c の実装が未 commit で入っている．あなたが書いたもの）．Sol のコードレビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-review.log` の末尾，`判定：FAIL` 以降）の 4 件を，次の裁定のとおり直してください．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `cddad68`，tree に 1b-4d-1c の実装が未 commit で入っている．あなたが書いたもの）．Sol のコードレビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-review.log` の末尾，`判定：FAIL` 以降）の 4 件を，次の裁定のとおり直してください．
 
 ## 裁定
 
@@ -180,7 +180,7 @@ P1 が無くなるか 3 回まで．判定を出さずに終わった回は 1 �
 ## fix2-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `7968d98`，tree に 1b-4d-1c と修正の回 1 が未 commit で入っている．あなたが書いたもの）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `cddad68`，tree に 1b-4d-1c と修正の回 1 が未 commit で入っている．あなたが書いたもの）．
 
 ## なぜ（設計の判断，three strikes）
 
@@ -241,7 +241,7 @@ Sol の修正の再レビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c
 ## fix3-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `7968d98`，tree に 1b-4d-1c と修正の回 1・2 が未 commit で入っている．あなたが書いたもの）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `cddad68`，tree に 1b-4d-1c と修正の回 1・2 が未 commit で入っている．あなたが書いたもの）．
 
 ## なぜ（orchestrator のレビュー）
 
@@ -286,7 +286,7 @@ UR-24 の「recorded … decided again」の文を，「channel を待つ comman
 ## fix4-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `7968d98`，tree に 1b-4d-1c と修正の回 1〜3 が未 commit で入っている）．Sol の再レビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-rereview2.log` の末尾，`判定：FAIL` 以降）の 3 件を，次のとおり直してください．規則 1〜3（booking で時刻を確定，channel 待ちは held に残って release を止める，`released_at` の畳み込み）は変えない．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `cddad68`，tree に 1b-4d-1c と修正の回 1〜3 が未 commit で入っている）．Sol の再レビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-rereview2.log` の末尾，`判定：FAIL` 以降）の 3 件を，次のとおり直してください．規則 1〜3（booking で時刻を確定，channel 待ちは held に残って release を止める，`released_at` の畳み込み）は変えない．
 
 ## 1. Sol major 1：畳み込みの順序（採る）
 
@@ -317,7 +317,7 @@ UR-24 の「recorded … decided again」の文を，「channel を待つ comman
 ## sol-plan-brief
 
 
-You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `7968d98`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
+You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `cddad68`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
 ## The step
 
@@ -348,7 +348,7 @@ Japanese. Severity major / minor for each item, `path:line` where it applies. Ma
 ## sol-plan2-brief
 
 
-You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `7968d98`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
+You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `cddad68`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
 You reviewed plan v1 (`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/test-plan.md`; your review is the end of `sol-plan.log` in the same directory, verdict 要修正). The orchestrator adopted all your findings and changed the form to F' (`adjudication.md` in that directory): a release with no live channel goes to the device as a **timed command at its own effective instant**, on the channels of the unrefused segments planned to begin at or after it, through the same path as a live release (`released`, `issued()`, late behind a released command); the queue counts those channels; the applied row stays `at: e`, `note: "no channel"`; the configuration version is removed. Plan v2 is `test-plan-v2.md` there.
 
@@ -364,7 +364,7 @@ Japanese. Severity major / minor, `path:line`. Mark unverified points INFERRED. 
 ## sol-plan3-brief
 
 
-You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `7968d98`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
+You are the independent reviewer (AGENTS.md §9 step 3). Repository: /home/komatsu/local_work/Ez-SDRv4 (HEAD `cddad68`, clean). **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
 In `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/`: your re-review of plan v2 is the end of `sol-plan2.log` (要修正, majors 1–6); the orchestrator's ruling on it is `adjudication-2.md`; plan v3 is `test-plan-v3.md` (its §0 lists the changes from v2).
 
@@ -381,7 +381,7 @@ Japanese. Severity major / minor, `path:line`. Mark unverified points INFERRED. 
 
 You are the independent reviewer (AGENTS.md §9 step 7). Repository: /home/komatsu/local_work/Ez-SDRv4. **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push. Read-only commands are fine.
 
-The uncommitted tree (`git diff` against HEAD `7968d98`) implements stage 1b-4d-1c, whose plan you reviewed three times (`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/`: `sol-plan.log`, `sol-plan2.log`, `sol-plan3.log`; rulings `adjudication.md`, `adjudication-2.md`, `adjudication-3.md` — the last one wins: it withdrew the put-back at the depth and the removal of a failed update, and accepted your clock findings; plan `test-plan-v3.md` with its §10; the implementer's `report.md` — do not trust it, check the tree).
+The uncommitted tree (`git diff` against HEAD `cddad68`) implements stage 1b-4d-1c, whose plan you reviewed three times (`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/`: `sol-plan.log`, `sol-plan2.log`, `sol-plan3.log`; rulings `adjudication.md`, `adjudication-2.md`, `adjudication-3.md` — the last one wins: it withdrew the put-back at the depth and the removal of a failed update, and accepted your clock findings; plan `test-plan-v3.md` with its §10; the implementer's `report.md` — do not trust it, check the tree).
 
 In short: `Control::targets` gives a timed command its channels (live ones, else those of unrefused segments planned at or after the instant); `release` sends every non-empty target set through the one timed path (`Some(effective)`, `released`, `issued()`), recording a pending one `at: e`, `note: "no channel"`, `issued: true`; `book_timed` counts with `targets` under the current keys; the configuration version is gone (`configured: Option<u64>`, `owner_step` by set and command).
 
@@ -398,7 +398,7 @@ Output in Japanese. First line `判定：PASS` or `判定：FAIL`. Numbered find
 
 You are the independent reviewer (AGENTS.md §9 step 8). Repository: /home/komatsu/local_work/Ez-SDRv4. **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
-Your code review of this stage is the end of `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-review.log` (FAIL: majors 1–2, minors 3–4). The orchestrator adopted all four (`fix1-brief.md` in that directory); the implementer's account is `fix1-report.md` (do not trust it; check the tree, `git diff` against HEAD `7968d98`).
+Your code review of this stage is the end of `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-review.log` (FAIL: majors 1–2, minors 3–4). The orchestrator adopted all four (`fix1-brief.md` in that directory); the implementer's account is `fix1-report.md` (do not trust it; check the tree, `git diff` against HEAD `cddad68`).
 
 The fix for major 1: in `Control::release`'s recorded-only branch, when `effective > e`, every projection's entry moves from `(e, seq)` to `(effective, seq)` with the same `issued()` and lock as the live branch; the row and `config.insert` are unchanged; test `ur_24_a_release_recorded_behind_a_released_command_moves_its_projection`, row P425.
 
@@ -415,7 +415,7 @@ Japanese. First line `判定：PASS` or `判定：FAIL`. Numbered findings with 
 
 You are the independent reviewer (AGENTS.md §9 step 8). Repository: /home/komatsu/local_work/Ez-SDRv4. **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
-Your last re-review is the end of `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-rereview.log` (FAIL: moving a projection entry to `effective` at release cannot reach a configure that already read it; a later segment took the value too early from `config`). The orchestrator treated this as a third strike on one mechanism and removed the cause instead of patching (`fix2-brief.md`, then `fix3-brief.md` after its own review found an ordering hole in the implementer's round-2 additions). Accounts: `fix2-report.md`, `fix3-report.md` (do not trust them; check `git diff` against HEAD `7968d98`).
+Your last re-review is the end of `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-rereview.log` (FAIL: moving a projection entry to `effective` at release cannot reach a configure that already read it; a later segment took the value too early from `config`). The orchestrator treated this as a third strike on one mechanism and removed the cause instead of patching (`fix2-brief.md`, then `fix3-brief.md` after its own review found an ordering hole in the implementer's round-2 additions). Accounts: `fix2-report.md`, `fix3-report.md` (do not trust them; check `git diff` against HEAD `cddad68`).
 
 The rules now:
 1. A timed command's instant is fixed at booking: `e = max(requested, now + device lead, latest released)`; an `at` the floor moves is `LATE_COMMAND` at booking. Release never moves it (`debug_assert_eq!(effective, e)`); no projection entry moves after booking (`ColdConfig::issued` is gone).
@@ -437,7 +437,7 @@ Japanese. First line `判定：PASS` or `判定：FAIL`. Numbered findings with 
 
 You are the independent reviewer (AGENTS.md §9 step 8). Repository: /home/komatsu/local_work/Ez-SDRv4. **Read-only**: no edits, no builds into the tree, no `cargo fmt`, no mutation tools, no commit or push.
 
-Your last re-review is the end of `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-rereview2.log` (FAIL: major 1 the settlement order of a released command and one without a channel; major 2 no loss check between a release's channels; minor 3 a reason in UR-24). The fix brief is `fix4-brief.md`, the implementer's account `fix4-report.md` (do not trust it; check `git diff` against HEAD `7968d98`).
+Your last re-review is the end of `~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d1c/sol-rereview2.log` (FAIL: major 1 the settlement order of a released command and one without a channel; major 2 no loss check between a release's channels; minor 3 a reason in UR-24). The fix brief is `fix4-brief.md`, the implementer's account `fix4-report.md` (do not trust it; check `git diff` against HEAD `cddad68`).
 
 Check:
 1. Your three findings: closed, with the sequences you gave (tests `ur_24_a_released_command_and_one_without_a_channel_settle_in_instant_order`, `ur_29_a_loss_published_between_a_release_s_channels_stops_the_rest`, `ur_29_a_loss_after_a_release_s_command_stops_the_one_behind_it`; rows P432–P435).

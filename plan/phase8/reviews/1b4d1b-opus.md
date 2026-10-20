@@ -1,6 +1,6 @@
 # 1b-4d-1b：orchestrator のレビューと裁定
 
-読んだもの：`git diff b190918` の `provider/{core,control,rx,tx}.rs` の本体，`design/18` の差分，`report.md`．テストは名前と helper と S9・S22 の本文だけ読んだ（テストの力は Sol の 7 に任せる）．
+読んだもの：`git diff a52863c` の `provider/{core,control,rx,tx}.rs` の本体，`design/18` の差分，`report.md`．テストは名前と helper と S9・S22 の本文だけ読んだ（テストの力は Sol の 7 に任せる）．
 
 ## 指示書との一致
 

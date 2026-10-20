@@ -1,6 +1,6 @@
 # 実装の指示書：Phase 8 段階 1b-4c（UHD Module の新しい key のモード：開くときの照合，channel ごとの設定，stream は方向ごとに 1 本）
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `278de14`，clean）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `4199e51`，clean）．
 
 **この段階は 2 回に分けて起動する（AGENTS.md §9．リスクのある段階：装置との境界〈開くときの照合〉，同一性〈serial〉，寿命〈serial の登録と解放〉，queue と期限〈床と timed command〉が変わる）：**
 - **1 回目（今回）**：テスト計画だけを書く．コードと tree には触れない．
@@ -30,7 +30,7 @@
   - `design/18-uhd-radio.md` の UR-2，UR-5，UR-9〜UR-13，UR-20，UR-24〜UR-26，UR-30，UR-33．
   - `design/07-radio-model.md` の RM-25，RM-27〜RM-33．
   - `design/09-mock-radio.md` の MR-18，MR-38〜MR-40．
-- 参考：MockRadio で同じモードを入れた commit `e4ca550`（1b-3b．`git show e4ca550`）と，その報告 `plan/phase8/reviews/1b3b-report.md` の §11 の 4・9．
+- 参考：MockRadio で同じモードを入れた commit `aeaf48f`（1b-3b．`git show aeaf48f`）と，その報告 `plan/phase8/reviews/1b3b-report.md` の §11 の 4・9．
 - コード：
   - `crates/ezsdr-radio-uhd/src/provider/`（`mod.rs` の `from_binding`/`prepare`/`arm`，`core.rs` の `Core::settings`/`channels`/`configure`，`control.rs`，`rx.rs`，`tx.rs`）
   - `crates/ezsdr-radio-uhd/src/device.rs`（`Device` の trait と `FakeDevice` の `set_subdev_spec`・`rates`・`serial`・`front_end`）

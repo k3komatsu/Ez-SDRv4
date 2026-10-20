@@ -1,6 +1,6 @@
 # 1b-4b orchestrator review（AGENTS.md §9 の 6：指示書への忠実さ・変えてはならない振る舞い・設計の意図）
 
-対象: HEAD `05e8d2f` からの未コミットの diff（13 ファイル，+1626/−284），`report.md`．
+対象: HEAD `fdfdf3b` からの未コミットの diff（13 ファイル，+1626/−284），`report.md`．
 
 ## 変えてはならない振る舞い — production の各書き換え
 

@@ -1702,7 +1702,7 @@ fn sc_13_tm_13c_rate_change_is_a_new_domain_not_a_gap() {
 #[test]
 fn sc_30b_a_carry_on_a_contiguous_block_is_not_discarded() {
     // SC-30b's obligation is that the builder "records the dropped block count in the
-    // gap's `link_dropped`", and its text at `398fd66` said why the counts merge:
+    // gap's `link_dropped`", and its text at `86ecbc6` said why the counts merge:
     // a rule that dropped the count would "discard exactly the number it was written
     // to preserve". Under `DropNewest` the refused block is newer than everything
     // queued, so the block delivered after the drop is **contiguous** — the consumer

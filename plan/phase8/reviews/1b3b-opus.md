@@ -1,6 +1,6 @@
 # Phase 8 段階 1b-3b — orchestrator（Opus）のレビュー
 
-対象：作業ツリー（HEAD `7993a16` からの diff）．報告 `report.md`．
+対象：作業ツリー（HEAD `9b36a91` からの diff）．報告 `report.md`．
 
 ## 判定：差し戻し（major 1，minor 2）
 

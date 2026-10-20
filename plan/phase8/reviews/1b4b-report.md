@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4b（UHD Module の内部を stream ごとに組み直す）実装報告
 
-指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4b/impl-brief.md`（HEAD `05e8d2f`，clean から開始）．
+指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4b/impl-brief.md`（HEAD `fdfdf3b`，clean から開始）．
 計画: 同 `brief.md`・`test-plan.md`（冒頭の orchestrator の裁定と Sol のテスト計画レビューの裁定が優先）・`sol-plan.md`．
 
 ## 1. 変えたファイルと要点

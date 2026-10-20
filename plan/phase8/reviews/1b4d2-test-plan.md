@@ -1,6 +1,6 @@
 # Phase 8 段階 1b-4d-2 テスト計画 v2 — layout の stream 1 以上を stream 0 と同じに動かす
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `273c120`．v1：`test-plan.md`．裁定：`adjudication.md`（v1 と食い違う所は裁定が優先）．Sol の計画レビュー：`sol-plan-report.md`．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `ff2f61f`．v1：`test-plan.md`．裁定：`adjudication.md`（v1 と食い違う所は裁定が優先）．Sol の計画レビュー：`sol-plan-report.md`．
 
 v2 は v1 に裁定 §2 の 1〜13 と §3 を適用したもの．v1 から変えたのは，S11・S12・S13・S16 の書き直し，TX の隔離 4 系列，configure 中の loss，start の途中の失敗，off・空の on・halt，mutation の対応表，H2・H3，見積もり．
 

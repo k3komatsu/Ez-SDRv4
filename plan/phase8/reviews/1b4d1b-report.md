@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4d-1b 実装の報告
 
-リポジトリ `/home/komatsu/local_work/Ez-SDRv4`，HEAD `b190918`．計画は `test-plan-1b-v2.md`（裁定 §0 の分け方で書き直し，セルフレビューの 2 回・3 回の扱いを §10・§11 に追記）．commit・push・`git add` はしていない．tree は次の 8 ファイルが未 commit で変わっている：
+リポジトリ `/home/komatsu/local_work/Ez-SDRv4`，HEAD `a52863c`．計画は `test-plan-1b-v2.md`（裁定 §0 の分け方で書き直し，セルフレビューの 2 回・3 回の扱いを §10・§11 に追記）．commit・push・`git add` はしていない．tree は次の 8 ファイルが未 commit で変わっている：
 
 ```
 crates/ezsdr-radio-uhd/src/provider/{core,control,rx,tx,test_support}.rs

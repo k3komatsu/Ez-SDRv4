@@ -22,7 +22,7 @@
 
 ## 確認して妥当だった点
 
-- HEAD `05e8d2f` との差分を確認。stream 0 の動作を変える production regression は見つからなかった。
+- HEAD `fdfdf3b` との差分を確認。stream 0 の動作を変える production regression は見つからなかった。
 - instance-wide の seq／ended／stop／version、stream ごとの状態、End の記帳、prune の局所性、device call 前の lock 解放、既存 thread 名と join 順序は維持されている。
 - P242–P280 と当て直し19行を照合。当て直しの破壊対象は HEAD と同じ。全6リスト **1039行の `old`／`old2` は各1回一致**した。
 - spec 18 の変更した Test 行と assertion を確認。追加の DA-1 違反は見つからなかった。

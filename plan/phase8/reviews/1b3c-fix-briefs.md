@@ -2,7 +2,7 @@
 
 # 修正の指示書：Phase 8 段階 1b-3c 修正の回 1
 
-あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `e4ca550`，作業ツリーに段階 1b-3c の未 commit の変更がある）．
+あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `aeaf48f`，作業ツリーに段階 1b-3c の未 commit の変更がある）．
 
 最初に次を読んでください．
 - `AGENTS.md` の全部（特に §2 の DA-1，§7，§9）
@@ -81,7 +81,7 @@
 
 # 修正の指示書：Phase 8 段階 1b-3c 修正の回 2
 
-あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `e4ca550`，作業ツリーに段階 1b-3c と修正の回 1 の未 commit の変更がある）．
+あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `aeaf48f`，作業ツリーに段階 1b-3c と修正の回 1 の未 commit の変更がある）．
 
 最初に次を読んでください．
 - `AGENTS.md` の全部
@@ -149,7 +149,7 @@ MR-40 は「changes neither line, the configuration nor the planned segment orde
 
 # 修正の指示書：Phase 8 段階 1b-3c 修正の回 3
 
-あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `e4ca550`，作業ツリーに 1b-3c と修正の回 1・2 の未 commit の変更がある）．
+あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `aeaf48f`，作業ツリーに 1b-3c と修正の回 1・2 の未 commit の変更がある）．
 
 最初に読むもの：
 - `AGENTS.md`
@@ -202,7 +202,7 @@ MR-40 は「changes neither line, the configuration nor the planned segment orde
 
 # 修正の指示書：Phase 8 段階 1b-3c 修正の回 4
 
-あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `e4ca550`，作業ツリーに 1b-3c と修正の回 1〜3 の未 commit の変更がある）．
+あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `aeaf48f`，作業ツリーに 1b-3c と修正の回 1〜3 の未 commit の変更がある）．
 
 最初に読むもの：
 - `AGENTS.md`

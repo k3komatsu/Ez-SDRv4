@@ -83,7 +83,7 @@ P364–P367 は各 `old` が対象ファイルに一回一致することを確�
    - **場所：** `crates/ezsdr-radio-uhd/src/provider/control.rs:762–810,833`、`crates/ezsdr-radio-uhd/src/provider/core.rs:243–249`、`crates/ezsdr-radio-uhd/src/provider/rx.rs:291–314`
    - **根拠：** `configured` は segment ごとの過去の実施記録です。後続の from-none が同じ streamer を置換しても、古い segment のフラグは残ります。`stale` は owner の集合キャッシュを無効化しますが、この近道を無効化しません。
    - **系列：** owner を idle のまま止める → 将来の B=`{0,1}` を control が open/configure → さらに後の cold 更新で集合を空にし、B を正の長さで終わらせる → その後の C=`{0}` を control が from-none として open/configure → owner を再開する。最初に読む B は `configured=true` なので、実際には C の streamer・設定のまま B を開始します。**操作列の実行再現は未実施：INFERRED。**
-   - **HEAD との比較：** `278de14` にもあります。旧 `control.rs:557–581` は同じ from-none 判定とフラグ保存を持ち、旧 `rx.rs:283–289` も無条件に configure/open を省きます。旧キーの `radio.rx.channels` を `2 → 0 → 1` とする系列でも成立する構造です。
+   - **HEAD との比較：** `4199e51` にもあります。旧 `control.rs:557–581` は同じ from-none 判定とフラグ保存を持ち、旧 `rx.rs:283–289` も無条件に configure/open を省きます。旧キーの `radio.rx.channels` を `2 → 0 → 1` とする系列でも成立する構造です。
    - **修正：** segment の「一度設定した」ではなく、device に最後に成功適用した集合・設定との一致で省略を判断します。
    - **延期判断：** 1b-4d で同じ所有権境界を一般化するため、その冒頭で統合修正する方が合理的です。ただし、これを minor として却下・失念せず、上の系列を最初の回帰テストとし、修正前の状態を実機 parity の根拠にしないことが条件です。
 

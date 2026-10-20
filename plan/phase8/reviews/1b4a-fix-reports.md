@@ -6,7 +6,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4a 修正の回 1 の報告
 
-指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4a/fix-brief.md`（HEAD `9816d78`，未コミットの作業ツリー）．裁定で採られた 7 件（Sol 1〜6，Opus O1〜O3）をすべて直した．
+指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4a/fix-brief.md`（HEAD `b8fdea0`，未コミットの作業ツリー）．裁定で採られた 7 件（Sol 1〜6，Opus O1〜O3）をすべて直した．
 
 ## 1. 変えたファイルと要点
 
@@ -93,7 +93,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4a 修正の回 2 の報告
 
-指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4a/fix2-brief.md`（HEAD `9816d78`，未 commit の作業ツリー）．裁定で採られた Sol の再レビューの 3 件をすべて直した．あわせて，セルフレビュー 3 回の指摘（P1 は計画の文と証跡，P2 は引用・文言・mutation の行の追加）を直した．
+指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4a/fix2-brief.md`（HEAD `b8fdea0`，未 commit の作業ツリー）．裁定で採られた Sol の再レビューの 3 件をすべて直した．あわせて，セルフレビュー 3 回の指摘（P1 は計画の文と証跡，P2 は引用・文言・mutation の行の追加）を直した．
 
 ## 1. 変えたファイルと要点
 

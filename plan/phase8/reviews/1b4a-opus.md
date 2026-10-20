@@ -1,4 +1,4 @@
-# Opus のレビュー：Phase 8 段階 1b-4a（作業ツリー，HEAD `9816d78`）
+# Opus のレビュー：Phase 8 段階 1b-4a（作業ツリー，HEAD `b8fdea0`）
 
 読んだ範囲：`git diff HEAD` の provider・device.rs・uhd.rs の全差分，spec 18 の差分（word diff），実装役の報告．Basic/LF の front end の表と名前は image の UHD 4.10 のソース（`db_basic_and_lf.hpp:26-27`，`.cpp:104-107`）で確かめた．テストと mutation は実装役のログだけを見た．
 

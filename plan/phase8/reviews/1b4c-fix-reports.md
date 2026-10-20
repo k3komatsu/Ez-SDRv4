@@ -5,7 +5,7 @@
 ## 回 1：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `278de14` に 1b-4c の未コミットの変更．あなたが実装したもの）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `4199e51` に 1b-4c の未コミットの変更．あなたが実装したもの）．
 
 ### 最初に読むもの
 
@@ -316,7 +316,7 @@ STATUS: done
 ## 回 2：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `278de14` に 1b-4c と修正の回 1 の未コミットの変更）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `4199e51` に 1b-4c と修正の回 1 の未コミットの変更）．
 守ること：`impl-brief.md` の「守ること」と同じ（cargo fmt・rustfmt 禁止，mutation は remote_mutate.py だけ，commit しない，`mutations.json` は変える行だけを周りの書式で書く）．
 前の回の報告：`fix-report.md`（同じディレクトリ）．その §5 と §7 を読むこと．
 
@@ -369,7 +369,7 @@ STATUS: done
 - 送信の from-none 拒否は，owner の拒否と同じにした（clock を入れない．switch の時刻は進める）．差を観測するテストを先に書き，直す前の形（P358）を殺した．
 - 最後の木で `cargo test --workspace --no-fail-fast` は 1396 件すべて通った．clippy は警告 0．`rules.py --base HEAD` は 0 件．変えた行はすべて，ファイルにちょうど一回一致する．mutation は 12 行を一回流し，11 行が killed，P313 は同値（equivalent）として通った．
 - セルフレビュー（`anthropic/claude-haiku-5-5#high`，`--agent plan`，read-only）を二回．P1 は両回とも 0．P2・P3 はすべて直すか，理由を書いて退けた（§5）．
-- 何もコミット・push・add していない．HEAD は `278de14` のまま．
+- 何もコミット・push・add していない．HEAD は `4199e51` のまま．
 
 ### 1. 三つの項目
 
@@ -530,12 +530,12 @@ reviewer は `anthropic/claude-haiku-5-5#high`，`--agent plan`，read-only（�
 - **F8（HEAD にもある）**：`start_rx` は `Streams::book` の結果を見ない（`control.rs:418`，HEAD の `:331`）．失敗は `book` が RM-26 として報告する（`core.rs:173–190`）．残るのは，どの item も指さない `configs` の項目一つで，読まれず，prune（`core.rs:229`）で消える．この回では変えていない．
 - parity の `note` 行（回 1 の P2-5）は残る．依頼どおり触れていない．design/18 の「Phase 8 measures」は，HEAD の 5 行のうち 58 行が回 1 で「the bench measures」に直してあり，残る 4 行（241，313，314，319 行）は回 2 では触れていない．design 33 の参照の数も触れていない（`rules.py` は通る）．
 - 全 list の mutation は流していない．この回の行だけを流した（最後の gate は orchestrator）．
-- 未コミット（HEAD `278de14`）．コミットは owner が行う．
+- 未コミット（HEAD `4199e51`）．コミットは owner が行う．
 
 ## 回 3：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `278de14` に 1b-4c と修正の回 1・2 の未コミットの変更）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `4199e51` に 1b-4c と修正の回 1・2 の未コミットの変更）．
 
 ### 守ること
 
@@ -666,7 +666,7 @@ reviewer は `opencode-go/deepseek-v4.1-flash#max`，`--agent plan`，回ごと�
 ## 回 4：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `278de14` に 1b-4c と修正の回 1〜3 の未コミットの変更）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `4199e51` に 1b-4c と修正の回 1〜3 の未コミットの変更）．
 「守ること」「セルフレビュー」の形は `fix3-brief.md`（同じディレクトリ）と同じ（DeepSeek の reviewer，P1 が無くなるか 3 回まで）．
 
 ### 読むもの（`~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4c/`）

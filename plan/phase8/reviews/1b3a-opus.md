@@ -1,6 +1,6 @@
 # Phase 8 段階 1b-3a — orchestrator（Opus）のレビュー
 
-対象：作業ツリー（HEAD `5228a35` からの diff：`crates/ezsdr-mock-radio/src/lib.rs` と mutation 3 list）．
+対象：作業ツリー（HEAD `9c05a65` からの diff：`crates/ezsdr-mock-radio/src/lib.rs` と mutation 3 list）．
 
 ## 判定：差し戻しなし（指摘 0，記録のみ 3）
 

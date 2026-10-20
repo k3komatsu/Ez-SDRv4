@@ -5,7 +5,7 @@
 
 # 1b-4d-1c 実装の報告 — 記録だけになった release を device に届ける（形 F'）と，版の削除
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `7968d98`．裁定は `adjudication-3.md` を最優先，次に `adjudication-2.md`，`adjudication.md`，計画 `test-plan-v3.md`（§10 に実装後の追記）．commit・push・`git add` はしていない．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `cddad68`．裁定は `adjudication-3.md` を最優先，次に `adjudication-2.md`，`adjudication.md`，計画 `test-plan-v3.md`（§10 に実装後の追記）．commit・push・`git add` はしていない．
 
 ## 1. 実装したもの
 
@@ -107,7 +107,7 @@
 
 # 修正の回 1 の報告 — Phase 8 段階 1b-4d-1c
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `7968d98`．tree の未 commit の 1b-4d-1c の実装に，Sol のコードレビュー（`sol-review.log` の `判定：FAIL`）の 4 件を裁定どおり直した．commit・push・`git add` はしていない．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `cddad68`．tree の未 commit の 1b-4d-1c の実装に，Sol のコードレビュー（`sol-review.log` の `判定：FAIL`）の 4 件を裁定どおり直した．commit・push・`git add` はしていない．
 
 ## 1. 4 件の直し
 
@@ -152,7 +152,7 @@
 
 # 修正の回 2 の報告 — Phase 8 段階 1b-4d-1c
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `7968d98`．tree の未 commit の 1b-4d-1c と修正の回 1 に，Sol の再レビュー（`sol-rereview.log` 末尾，`判定：FAIL`）の major 1・2 を，指示書のとおり「timed command の効く時刻を booking で確定する」形で直した．commit・push・`git add` はしていない．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `cddad68`．tree の未 commit の 1b-4d-1c と修正の回 1 に，Sol の再レビュー（`sol-rereview.log` 末尾，`判定：FAIL`）の major 1・2 を，指示書のとおり「timed command の効く時刻を booking で確定する」形で直した．commit・push・`git add` はしていない．
 
 ## 1. 直し
 
@@ -249,7 +249,7 @@
 
 # 修正の回 3 の報告 — Phase 8 段階 1b-4d-1c
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `7968d98`．tree の未 commit の 1b-4d-1c と修正の回 1・2 に，指示書のとおり「channel を待つ command は held に残し，release はそこで止まる」形を入れた．`recorded` の集合は消した．commit・push・`git add` はしていない．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `cddad68`．tree の未 commit の 1b-4d-1c と修正の回 1・2 に，指示書のとおり「channel を待つ command は held に残し，release はそこで止まる」形を入れた．`recorded` の集合は消した．commit・push・`git add` はしていない．
 
 ## 1. 直し
 
@@ -353,7 +353,7 @@
 
 # 修正の回 4 の報告 — Phase 8 段階 1b-4d-1c
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `7968d98`．tree の未 commit の 1b-4d-1c と修正の回 1〜3 に，Sol の再レビュー（`sol-rereview2.log` の末尾，判定 FAIL）の 3 件を指示書のとおり入れた．規則 1〜3（booking で時刻を確定，channel 待ちは held に残って release を止める，`released_at` の畳み込み）は変えていない．commit・push・`git add` はしていない．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `cddad68`．tree の未 commit の 1b-4d-1c と修正の回 1〜3 に，Sol の再レビュー（`sol-rereview2.log` の末尾，判定 FAIL）の 3 件を指示書のとおり入れた．規則 1〜3（booking で時刻を確定，channel 待ちは held に残って release を止める，`released_at` の畳み込み）は変えていない．commit・push・`git add` はしていない．
 
 ## 1. 直し
 

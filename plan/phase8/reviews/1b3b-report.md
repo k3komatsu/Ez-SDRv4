@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-3b — MockRadio の新しい key のモード（layout の builder，複数 stream，channel ごとの設定，D14 の宛先）
 
-指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/brief.md`．HEAD `7993a16` から．実行したコマンドとログは `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/` にある（ゲートのログは `*.log`，コードのハッシュは `code-hashes-before-doc-edits.txt`）．commit・push・`git add` はしていない（`git status` は下のファイルのみ）．
+指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/brief.md`．HEAD `9b36a91` から．実行したコマンドとログは `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/` にある（ゲートのログは `*.log`，コードのハッシュは `code-hashes-before-doc-edits.txt`）．commit・push・`git add` はしていない（`git status` は下のファイルのみ）．
 
 ## 1. 変えたファイルと要点
 

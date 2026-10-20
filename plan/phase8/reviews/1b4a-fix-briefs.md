@@ -3,7 +3,7 @@
 ## 修正の回 1
 
 
-あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `9816d78`，作業ツリーに 1b-4a の未 commit の変更がある）．
+あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b8fdea0`，作業ツリーに 1b-4a の未 commit の変更がある）．
 
 最初に読むもの：
 - `AGENTS.md`
@@ -119,7 +119,7 @@ UHD の `subdev_spec.cpp` は，次のように動く．
 ## 修正の回 2
 
 
-あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `9816d78`，作業ツリーに 1b-4a と修正の回 1 の未 commit の変更がある）．
+あなたは実装役（修正の回）です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b8fdea0`，作業ツリーに 1b-4a と修正の回 1 の未 commit の変更がある）．
 
 最初に読むもの：
 - `AGENTS.md`

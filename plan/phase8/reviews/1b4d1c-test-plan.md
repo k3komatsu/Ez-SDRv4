@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4d-1c テスト計画 v3 — channel が無い release を，pending の segment の origin までに device へ届ける（形 F'）
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `7968d98`（tree はきれい）．指示書：`plan-brief.md`．**裁定は `adjudication-2.md` を最優先**とし（`adjudication.md` と v2 より優先），Sol の再レビュー `sol-plan2.log` の末尾（1372 行「**推奨：F' の方針は維持し…**」以降）に従う．v2 は `test-plan-v2.md`，v1 は `test-plan.md`．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `cddad68`（tree はきれい）．指示書：`plan-brief.md`．**裁定は `adjudication-2.md` を最優先**とし（`adjudication.md` と v2 より優先），Sol の再レビュー `sol-plan2.log` の末尾（1372 行「**推奨：F' の方針は維持し…**」以降）に従う．v2 は `test-plan-v2.md`，v1 は `test-plan.md`．
 
 コードは書いていない．tree は変えていない．`cargo test`・`cargo fmt`・`rustfmt`・`mutate.py`・`remote_mutate.py`・commit・push・`git add` はしていない．テストも流していない．以下の `path:line` は HEAD のもの．
 

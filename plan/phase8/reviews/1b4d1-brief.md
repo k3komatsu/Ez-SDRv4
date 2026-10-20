@@ -1,6 +1,6 @@
 # 指示書：Phase 8 段階 1b-4d-1 — stream ごとに device が持つものを 1 つの記録にする
 
-リポジトリ：/home/komatsu/local_work/Ez-SDRv4（HEAD `b5596e8`，1b-4c まで commit 済み）．
+リポジトリ：/home/komatsu/local_work/Ez-SDRv4（HEAD `f487877`，1b-4c まで commit 済み）．
 この段階は **risky**（AGENTS.md §9：lifecycle と，fake と hardware の境界．owner と uhd-control のどちらが device を操作したか）．手順は §9 の 2 から：**まずテスト計画だけを書く**．コードは書かない．
 
 ## 1. なぜ（three strikes）
@@ -9,7 +9,7 @@
 
 - TX：`tx.rs` の `channels` と `verified`（`do_switch`）．
 - RX：`rx.rs` の `opened` と，`StreamState.stale`（`core.rs`，uhd-control が立てる印）．
-- 両方：segment の `configured`（`StreamState.configs` の bool，`Planned.configured`）．uhd-control の from-none が configure した segment を owner が開かずに始める近道．後の from-none が device を置き換えても残る（HEAD `278de14` からある．Sol の再レビュー 3 の指摘 1）．
+- 両方：segment の `configured`（`StreamState.configs` の bool，`Planned.configured`）．uhd-control の from-none が configure した segment を owner が開かずに始める近道．後の from-none が device を置き換えても残る（HEAD `4199e51` からある．Sol の再レビュー 3 の指摘 1）．
 
 ## 2. 設計（orchestrator の裁定．計画はこれに沿って書く）
 

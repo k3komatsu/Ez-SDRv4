@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4a（UHD Module の device 境界を stream ごと・subdev spec つきに広げる）実装報告
 
-指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4a/brief.md`（HEAD `9816d78`，未コミットの作業ツリー）．
+指示書: `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b4a/brief.md`（HEAD `b8fdea0`，未コミットの作業ツリー）．
 
 ## 1. 変えたファイルと要点
 

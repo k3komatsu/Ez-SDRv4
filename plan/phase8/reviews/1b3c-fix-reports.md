@@ -4,7 +4,7 @@ STATUS: done
 
 # 修正の報告：Phase 8 段階 1b-3c，orchestrator のレビュー O1〜O5
 
-作業ツリー（HEAD `e4ca550` からの未 commit の変更）に対して直しました．commit・push・`git add` はしていません．`cargo fmt`・`rustfmt` は使っていません．mutant は作業ツリーに当てていません（mutation は全部 `remote_mutate.py`）．3つのテストファイル（`mock_radio.rs`・`mock_channel.rs`・`timeline.rs`）の差分は空です．版は上げていません．
+作業ツリー（HEAD `aeaf48f` からの未 commit の変更）に対して直しました．commit・push・`git add` はしていません．`cargo fmt`・`rustfmt` は使っていません．mutant は作業ツリーに当てていません（mutation は全部 `remote_mutate.py`）．3つのテストファイル（`mock_radio.rs`・`mock_channel.rs`・`timeline.rs`）の差分は空です．版は上げていません．
 
 ## 1. 指摘ごとの修正
 
@@ -111,7 +111,7 @@ STATUS: done
 
 # 修正の回 2 の報告：Phase 8 段階 1b-3c，F1（stream に入った channel の untimed tune）・F2（MR-39）・F3（MR-40）
 
-作業ツリー（HEAD `e4ca550` からの未 commit の変更）に対して直しました．commit・push・`git add` はしていません．`cargo fmt`・`rustfmt` は使っていません．mutant は作業ツリーに当てていません（mutation はすべて `remote_mutate.py`）．3つのテストファイル（`mock_radio.rs`・`mock_channel.rs`・`timeline.rs`）の `git diff HEAD` は空です．版は上げていません．
+作業ツリー（HEAD `aeaf48f` からの未 commit の変更）に対して直しました．commit・push・`git add` はしていません．`cargo fmt`・`rustfmt` は使っていません．mutant は作業ツリーに当てていません（mutation はすべて `remote_mutate.py`）．3つのテストファイル（`mock_radio.rs`・`mock_channel.rs`・`timeline.rs`）の `git diff HEAD` は空です．版は上げていません．
 
 確かめた結果，F1・F2・F3 は閉じました．ただし次の 2 点は範囲外として残しました（§6）．TX の move と rate change を直接確かめるテストがないこと，同じ instant での untimed tune と周波数更新の順序が規定されていないこと．
 
@@ -258,7 +258,7 @@ STATUS: done
 
 # Phase 8 段階 1b-3c 修正の回 3 の報告
 
-作業ツリー（HEAD `e4ca550` からの未 commit の変更）に対して直しました．commit・push・`git add` はしていません．`cargo fmt`・`rustfmt` は使っていません．mutant は作業ツリーに当てていません（mutation はすべて `remote_mutate.py`）．`mock_radio.rs`・`mock_channel.rs`・`timeline.rs` の `git diff HEAD` は空です（`fix3-tests-diff.log`，0 バイト）．版は上げていません．
+作業ツリー（HEAD `aeaf48f` からの未 commit の変更）に対して直しました．commit・push・`git add` はしていません．`cargo fmt`・`rustfmt` は使っていません．mutant は作業ツリーに当てていません（mutation はすべて `remote_mutate.py`）．`mock_radio.rs`・`mock_channel.rs`・`timeline.rs` の `git diff HEAD` は空です（`fix3-tests-diff.log`，0 バイト）．版は上げていません．
 
 採ったのは指示書 §6 の 1（G2），2 と 3（G1）です．ほかは変えていません．
 

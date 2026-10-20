@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4d-1b テスト計画 v2（裁定 §0 の分け方で書き直したもの）
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `b190918`．根拠：`plan-brief.md` §2・§3，`adjudication.md`（優先），`test-plan-1b.md`（裁定で直すところ以外），`sol-plan.log` の末尾．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `a52863c`．根拠：`plan-brief.md` §2・§3，`adjudication.md`（優先），`test-plan-1b.md`（裁定で直すところ以外），`sol-plan.log` の末尾．
 
 この段階は **B1（busy）・B2（reading）・B3（D2 の取り下げ）・B5（lock の順序の検査）と，loss・stop の出口**だけ．**B4（D1 の A，`release` の記録だけの枝，S11d，S28 の重ね合わせ）は 1c に送り，この段階では触らない**．したがって `release` の枝・`applied` の行・parity・UR-24・UR-36 は変えない．S11d の 2 本，S28 の重ね合わせ，Sol major 1〜3 は 1c へ（§7）．
 

@@ -64,7 +64,7 @@ STATUS: blocked: 実装の範囲が 1 回の実装として閉じられない．
 
 ## 段階 1b-4d-1 実装報告（実装者，未完）
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `b5596e8`．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `f487877`．
 
 ### 結果
 

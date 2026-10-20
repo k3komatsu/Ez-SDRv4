@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-3a — MockRadio の内部を stream ごとの状態に組み直す（挙動は変えない）
 
-指示書: `~/.cache/ezsdr-fixes/2026-10-17-phase8-1b3a/brief.md`．HEAD `5228a35` から．
+指示書: `~/.cache/ezsdr-fixes/2026-10-17-phase8-1b3a/brief.md`．HEAD `9c05a65` から．
 自分の作業ログ（実行したコマンドと出力の写し）: `~/.cache/ezsdr-fixes/2026-10-17-phase8-1b3a/impl.log`．
 
 ## 1. 変えたファイル

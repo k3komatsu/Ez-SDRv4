@@ -2,7 +2,7 @@ STATUS: done
 
 # Phase 8 段階 1b-3b 修正回（第1回）— F1〜F5 の反映
 
-指示書: `/home/komatsu/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/fix-brief.md`（裁定 F1〜F5）．元の指示書 `brief.md` の「守ること」はすべて守っている（`cargo fmt`/`rustfmt` 不使用，mutation は `remote_mutate.py` だけ，`git add`・commit・push なし，今のモードのテストは1行も変えていない，2分超のコマンドは `nohup`＋`kill -0`）．ログと検証スクリプトは `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/`（`fix3-*.log` と `fix-remote-mutate-final.log` が最終ツリーでの gate，`fix-self-review-1..3.log` がセルフレビュー）．HEAD `7993a16` からの変更ファイルは `git status` の10件だけ．
+指示書: `/home/komatsu/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/fix-brief.md`（裁定 F1〜F5）．元の指示書 `brief.md` の「守ること」はすべて守っている（`cargo fmt`/`rustfmt` 不使用，mutation は `remote_mutate.py` だけ，`git add`・commit・push なし，今のモードのテストは1行も変えていない，2分超のコマンドは `nohup`＋`kill -0`）．ログと検証スクリプトは `~/.cache/ezsdr-fixes/2026-10-18-phase8-1b3b/`（`fix3-*.log` と `fix-remote-mutate-final.log` が最終ツリーでの gate，`fix-self-review-1..3.log` がセルフレビュー）．HEAD `9b36a91` からの変更ファイルは `git status` の10件だけ．
 
 | file | この修正回での変更 |
 |---|---|

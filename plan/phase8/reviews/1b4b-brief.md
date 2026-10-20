@@ -1,6 +1,6 @@
 # 実装の指示書：Phase 8 段階 1b-4b（UHD Module の内部を stream ごとに組み直す．挙動は変えない）
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `9816d78` に 1b-4a の未 commit の変更．gate を通った最終の tree で，間もなく commit される）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b8fdea0` に 1b-4a の未 commit の変更．gate を通った最終の tree で，間もなく commit される）．
 
 **この段階は 2 回に分けて起動する（AGENTS.md §9 の新しい手順．リスクのある段階）：**
 - **1 回目（今回）**：テスト計画だけを書く．コードと tree には触れない．
@@ -11,7 +11,7 @@
 - `AGENTS.md` を全部．特に §2 の DA-1，§3，§6，§7，§9（新しい手順）．
 - 設計 `plan/phase8/33-channels-and-streams.md` の §3，§4 D3，D15，§5 の 1b-3 と 1b-4 の行．
 - `design/18-uhd-radio.md` の UR-15，UR-16，UR-24〜UR-29．
-- 参考：MockRadio で同じ組み直しをした commit `b8ec8c3`（1b-3a．`git show b8ec8c3`）．
+- 参考：MockRadio で同じ組み直しをした commit `f1024cf`（1b-3a．`git show f1024cf`）．
 - コード：
   - `crates/ezsdr-radio-uhd/src/provider/`（`core.rs` の `Streams`，`mod.rs` の `start`/`stop`/`spawn`/`join`，`control.rs`，`rx.rs`，`tx.rs`）
   - `crates/ezsdr-radio/src/timeline.rs` の `Lines`

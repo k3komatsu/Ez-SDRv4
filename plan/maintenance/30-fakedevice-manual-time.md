@@ -6,7 +6,7 @@
 | 作成日 | 2026-10-12 |
 | owner の判断 | 2026-10-12「私が決めることはあなたの推奨でOKです」：D1 は受け入れる。手動の時計にするのは smoke set だけで、既定は実時間。D2 は段階Aの実測のあとに決める。同日「所要時間が変わらなくても並列化できるのと決定的になるだけでよいです」：短縮は目標にしない |
 | 独立レビュー | Sol 6.1、第1回 REJECT（P0 1・P1 8・P2 1）、第2回 REJECT（P0 は解消、P1 2・P2 1）、第3回 REJECT（P1 1）、第4回 APPROVE_WITH_CHANGES（P2 2）。全件採用。反映先は §11〜§13 |
-| 調査時の基準 | `main`、HEAD `a50348a`、作業ツリー clean |
+| 調査時の基準 | `main`、HEAD `205c3eb`、作業ツリー clean |
 | 対象 | [#60](https://github.com/k3komatsu/Ez-SDRv4/issues/60)（spec 22 の Follow-ups 3、VH-8）、[failure-mechanisms.md](failure-mechanisms.md) の `mech:wall-clock-test-oracle` |
 | 目標 | FakeDevice の smoke set を、負荷をかけても結果が変わらない（決定的な）テストにし、mutation を高い並列度で流せるようにする。所要時間の短縮は目標にしない |
 
@@ -320,7 +320,7 @@ Sol は、S02 と S03 を解消と判定した。S01 も、予約された domai
 | U01 P2 | 本番の経路で変わることの記述が足りない。「domain ごと」は「root の時間軸ごと」と書くべき。§4.3 の表に `root_tick` が残っていた | §4.3 の表、§4.6、§8 |
 | U02 P2 | これから来る HOST の期限を待っている間のテストがない | §4.6、§7 |
 
-## 14. 段階0の記録（2026-10-12、HEAD `27e3c27`）
+## 14. 段階0の記録（2026-10-12、HEAD `e4eaca2`）
 
 **実行環境:** sim03（32 コア、負荷なし）。mutation と同じ Docker image（`plan/maintenance/tools/remote/Dockerfile`）を使い、CPU を `--cpus` で制限した。suite は3つ（`-p ezsdr-radio-uhd --test fake`、`-p ezsdr-acceptance --test uhd`、`-p ezsdr-server --test protocol`）で、各条件を3周した。ログは sim03 の `~/ezsdr-stress/out/`。
 

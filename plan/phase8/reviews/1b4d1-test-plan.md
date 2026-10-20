@@ -66,7 +66,7 @@ STATUS: done
 
 # Phase 8 段階 1b-4d-1 テスト計画（改訂版）
 
-対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `b5596e8`．
+対象：`/home/komatsu/local_work/Ez-SDRv4`，HEAD `f487877`．
 根拠：`brief.md`（指示書）と `adjudication.md`（orchestrator の裁定，指示書より優先）．
 コードは書いていない．tree は変えていない．mutation・`cargo fmt`・commit・push・`git add` はしていない．
 
@@ -105,7 +105,7 @@ STATUS: done
 
 **Owner に上げる未決（orchestrator の判断が要る）**
 
-- **D1（S11d）**：from-none の configure の後，owner が segment を始める前に，その origin より前に効く timed 更新が記帳されると，owner はその segment を始める時点で skip を決めてしまい，版の上がった後に record-only release が device に届かない（§S11d に詳しい）．既存の hazard（HEAD `b5596e8` の 1b-4c にもある）．選択肢：（A）record-only の更新を，次の segment が channel を持つときに device へ送る（UR-24 を変える）．（B）pending な from-none の cold change の origin で `e` を切り上げる（RM-25 が layout に行っていることと同じ．UR-24・RM-25 を変える）．（C）版だけに頼る（棄却：窓が残る）．**推奨は B**．
+- **D1（S11d）**：from-none の configure の後，owner が segment を始める前に，その origin より前に効く timed 更新が記帳されると，owner はその segment を始める時点で skip を決めてしまい，版の上がった後に record-only release が device に届かない（§S11d に詳しい）．既存の hazard（HEAD `f487877` の 1b-4c にもある）．選択肢：（A）record-only の更新を，次の segment が channel を持つときに device へ送る（UR-24 を変える）．（B）pending な from-none の cold change の origin で `e` を切り上げる（RM-25 が layout に行っていることと同じ．UR-24・RM-25 を変える）．（C）版だけに頼る（棄却：窓が残る）．**推奨は B**．
 - **D2（busy と from-none）**：from-none の瞬間に busy が立っていたら，from-none は device を呼ばず，通常の cold change として記帳する．owner は次の poll で拾う（待たない）．現在の計画は D2 を採った前提で書く．orchestrator の確認を待つ．
 
 ## 1. 設計：1 つの記録（`StreamState`）
@@ -275,7 +275,7 @@ STATUS: done
 
 **S11d（D1，未決）**：from-none の configure の後，owner が segment を始める前に，その origin より前に効く timed 更新が記帳される．その後 release が channel を空にする．
 - 現象：owner は pending の segment を即座に始める（`rx.rs` `turn()` → `begin`，`tx.rs` `read()` / `retarget`，cut は MIN）．その時点で，owner は timed 更新の skip を決めてしまい，版は後で上がるが，record-only の release は device に届かない．
-- 状態：既存の hazard（HEAD `b5596e8` の 1b-4c にもある）．
+- 状態：既存の hazard（HEAD `f487877` の 1b-4c にもある）．
 - テスト：D1 の裁定を待つ．選択肢ごとに形が変わる．
   - （A）`ur_24_a_record_only_release_is_sent_to_the_device_when_the_next_segment_holds_the_channel`：record-only の更新を device に出す．
   - （B）`ur_24_a_timed_update_is_floored_at_the_origin_of_a_pending_from_none_change`：pending な from-none の cold change の origin で `e` を切り上げる．RM-25 が layout に使っている形と同じ．

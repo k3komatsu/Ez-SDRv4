@@ -155,4 +155,4 @@ docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(i
   - UHD spike（branch `spike/uhd`，merge しない）：[plan/spikes/2026-09-26-uhd.md](plan/spikes/2026-09-26-uhd.md)．
   - 実装役の報告・レビュー・gate のログ：`~/.cache/ezsdr-fixes/<日付>-<作業>/`（リポジトリ外，消えうる）．
   - Phase 7 クローズ（2026-10-01）から spec 20 までの保守と監査（#1〜#38）：[audits-2026-10.md](plan/maintenance/audits-2026-10.md)．
-  - 2026-10-14 までの handoff の全文は git の履歴（`git show 60c7494:plan/handoff-archive.md`）．そこから移した記録は，上の各ファイル（と Phase 7 の bench 手順 `plan/phase7/bench.md`）の末尾の節「handoff からの記録（2026-10-14 に移動）」にある（`grep -rl "handoff からの記録" plan`）．
+  - 2026-10-14 までの handoff の全文は git の履歴（`git show c5bb58e:plan/handoff-archive.md`）．そこから移した記録は，上の各ファイル（と Phase 7 の bench 手順 `plan/phase7/bench.md`）の末尾の節「handoff からの記録（2026-10-14 に移動）」にある（`grep -rl "handoff からの記録" plan`）．

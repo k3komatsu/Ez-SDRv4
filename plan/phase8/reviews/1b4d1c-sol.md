@@ -200,7 +200,7 @@ booking floor の規則に続く「so that … a configuration projected … nev
 
 判定：PASS
 
-`7968d98` からの差分を確認しました。前回3件は解消されており、追加の阻害指摘はありません。
+`cddad68` からの差分を確認しました。前回3件は解消されており、追加の阻害指摘はありません。
 
 1. **前回 major 1：解消 — settlement の順序**
    - `crates/ezsdr-radio-uhd/src/provider/control.rs:643–666`：channel なしも `released_at` に入り、唯一の最終 loop が `(e, seq)` 順に畳み込みます。

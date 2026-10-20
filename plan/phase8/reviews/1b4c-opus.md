@@ -1,6 +1,6 @@
 # 1b-4c の orchestrator のレビュー（AGENTS.md §9 の 6：指示書への忠実さ・変えてはならない振る舞い・設計の意図）
 
-対象：HEAD `278de14` からの未コミットの diff（`mutations.json` は空白の差を戻して読んだ），`report.md`．
+対象：HEAD `4199e51` からの未コミットの diff（`mutations.json` は空白の差を戻して読んだ），`report.md`．
 
 ## 所見
 
@@ -79,7 +79,7 @@ O1 を直せば通る．Sol のレビューと合わせて裁定し，修正の�
 - O1・Sol 1〜3 は major として修正の回 1 で直す．O2 は採る（R23 削除，R26 当て直し）．O3 は Sol 3 を受けて撤回し，P344・P345 の `equivalent` を消して殺すテストを書かせた．O4 は Sol 4 を受けて撤回し，layout のモードの LATE_COMMAND を Mock と同じ順序にした．O5 は採る（1b-5 で畳む）．Sol 4〜7 の minor はすべて採った．指示書と報告は [1b4c-fix-reports.md](1b4c-fix-reports.md)．
 - 修正の回 1 の報告で実装役が退けた Sol 3 の順序テスト（control が owner の最初の poll より先に join する）は，`Control::new` が owner の thread を起動する前に stream 0 の `idle` を決めるので起こらない，という反論を採った．Sol も再レビュー 1 で撤回した．代わりに，owner の最初の open が方向の唯一の照合になる経路のテストで P344 を殺した（修正の回 2）．
 - 採らなかったもの：parity が UHD だけの `note` 行を除くこと（UHD の診断の行），parity の clock の cut の 200 tick の許容差（run ごとの格子），spec 18 の「Phase 8 measures」（HEAD からある文）．Sol は再レビュー 1 で異議なし．
-- 再レビュー（[1b4c-sol-rereviews.md](1b4c-sol-rereviews.md)）：1 は TX の拒否された switch が開いていない集合を「開いている」と残す major（修正の回 3），2 は RX の owner が uhd-control の開いた別の集合を古い集合と取り違える major（修正の回 4），3 は PASS．3 が見つけた `configured` の近道の欠陥（HEAD `278de14` にもある）は，1b-4d の最初の手順として延期した（下）．
+- 再レビュー（[1b4c-sol-rereviews.md](1b4c-sol-rereviews.md)）：1 は TX の拒否された switch が開いていない集合を「開いている」と残す major（修正の回 3），2 は RX の owner が uhd-control の開いた別の集合を古い集合と取り違える major（修正の回 4），3 は PASS．3 が見つけた `configured` の近道の欠陥（HEAD `4199e51` にもある）は，1b-4d の最初の手順として延期した（下）．
 
 ## 指摘の数（source・重さ・機構）
 

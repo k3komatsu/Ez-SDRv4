@@ -2,7 +2,7 @@ STATUS: done
 
 # 1b-4d-3：実装の報告
 
-対象: HEAD `34dde0f`（履歴の書き直しで `d58da80`．tree は同じ） からの未コミットの変更（7 ファイル）．commit・push・`git add` はしていない．
+対象: HEAD `d58da80` からの未コミットの変更（7 ファイル）．commit・push・`git add` はしていない．
 
 ## 1. 直したこと
 

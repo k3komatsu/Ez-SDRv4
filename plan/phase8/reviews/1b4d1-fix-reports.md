@@ -5,7 +5,7 @@
 ## 回 1：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b5596e8` に 1b-4d-1a の未コミットの変更）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `f487877` に 1b-4d-1a の未コミットの変更）．
 「守ること」は `impl-brief.md` と同じ．範囲は `impl-a-brief.md` の 1a．計画は `test-plan.md`，裁定は `adjudication.md`（同じディレクトリ `~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4d1/`）．
 
 ### orchestrator のレビュー（直すこと）
@@ -138,7 +138,7 @@ P372 が残った．arm の記録を消しても S12 のテストは落ちない
 ## 回 2：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b5596e8` に 1b-4d-1a と修正の回 1 の未コミットの変更）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `f487877` に 1b-4d-1a と修正の回 1 の未コミットの変更）．
 「守ること」は `impl-brief.md` と同じ．範囲は `impl-a-brief.md` の 1a．計画は `test-plan.md`，裁定は `adjudication.md`，前の回の報告は `report.md` と `fix1-report.md`（同じディレクトリ `~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4d1/`）．
 
 ### 読むもの
@@ -276,7 +276,7 @@ STATUS: done
 
 ### 本体・テストの変更（量）
 
-`git diff --stat`（HEAD `b5596e8` から，1a とこの回の合計）：11 files changed, 966 insertions(+), 254 deletions(-)．この回で足した・変えた主なもの：`core.rs`（`generation`・`record_open`・`owner_configure` の引数），`tx.rs`（`streamer`・`do_switch`・テスト 3 本の追加／作り直し・helper `control_of`・`tx_channels_from_none`・`plan_of`），`control.rs`（`changed_projections`・release／cancel の版・テスト 3 本の作り直しと S21 の追加），`rx.rs`（`owner_configure` の引数・S25 の wrapper），`mod.rs`（S20 と `NoLink`），`test_support.rs`（`ApplyFails`），`device.rs`（FakeFault 2 つを削除），`tests/fake.rs`（S12 の作り直し），`design/18-uhd-radio.md`（UR-36・UR-37・参照・Changes の行），`plan/maintenance/tools/mutations.json`（P371 当て直し・P373〜P378 追加），`plan/phase7/tools/mutations.json`（U40 当て直し）．
+`git diff --stat`（HEAD `f487877` から，1a とこの回の合計）：11 files changed, 966 insertions(+), 254 deletions(-)．この回で足した・変えた主なもの：`core.rs`（`generation`・`record_open`・`owner_configure` の引数），`tx.rs`（`streamer`・`do_switch`・テスト 3 本の追加／作り直し・helper `control_of`・`tx_channels_from_none`・`plan_of`），`control.rs`（`changed_projections`・release／cancel の版・テスト 3 本の作り直しと S21 の追加），`rx.rs`（`owner_configure` の引数・S25 の wrapper），`mod.rs`（S20 と `NoLink`），`test_support.rs`（`ApplyFails`），`device.rs`（FakeFault 2 つを削除），`tests/fake.rs`（S12 の作り直し），`design/18-uhd-radio.md`（UR-36・UR-37・参照・Changes の行），`plan/maintenance/tools/mutations.json`（P371 当て直し・P373〜P378 追加），`plan/phase7/tools/mutations.json`（U40 当て直し）．
 
 ### 残り・正直に書く
 
@@ -289,7 +289,7 @@ STATUS: done
 ## 回 3：指示書
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `b5596e8` に 1b-4d-1a と修正の回 1・2 の未コミットの変更）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `f487877` に 1b-4d-1a と修正の回 1・2 の未コミットの変更）．
 「守ること」は `impl-brief.md` と同じ（同じディレクトリ `~/.cache/ezsdr-fixes/2026-10-19-phase8-1b4d1/`）．前の回の報告は `fix2-report.md`．
 
 ### 読むもの

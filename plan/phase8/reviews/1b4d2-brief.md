@@ -3,7 +3,7 @@
 ## plan-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `273c120`，tree はきれい）．この段階は **risky**（AGENTS.md §9：thread の lifecycle，stream の identity，stop の順序を変える）．だから今回は **テスト計画だけ** を書きます．コードは書きません（Sol が計画をレビューした後に，別の指示書で実装します）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `ff2f61f`，tree はきれい）．この段階は **risky**（AGENTS.md §9：thread の lifecycle，stream の identity，stop の順序を変える）．だから今回は **テスト計画だけ** を書きます．コードは書きません（Sol が計画をレビューした後に，別の指示書で実装します）．
 
 ## 1. 読むもの
 
@@ -16,7 +16,7 @@
   - `control.rs`：`Control::new`（line は stream 0 だけ），`book`（Stop，start_rx），`projections`・`channels_at`・`channel_live`・`targets`（`booked_stream(dir)`），`book_cold`（`channel_in_later_stream` の拒否，`from_none` の `k`），`book_burst`（`Addressed::Stream { k: 0 }` だけ），`:1100` の TIME_ERROR の source，`:245` の `rx_packet_samples(0)`．
   - `mode.rs`：`channel_in_later_stream`，`stream_of`，`stream_channels`，`stream_rate`，`stream_node`，`rx_port`．
   - `rx.rs`・`tx.rs`：すでに `self.k` を持つ．`rx.rs:568` の publish（全 link），`begin`（`rx.rs:277-`），`tx.rs` の `do_switch`．
-- Mock の同じもの（1b-3b，commit `e4ca550`）：stream ごとの links（`lib.rs:2365-2390`），`cold_streams` の移動の拒否．
+- Mock の同じもの（1b-3b，commit `aeaf48f`）：stream ごとの links（`lib.rs:2365-2390`），`cold_streams` の移動の拒否．
 
 ## 2. 何をするか
 
@@ -87,7 +87,7 @@ layout（`keys: "channel"`）の stream 1 以上を動かす．今は `Mode::cha
 ## impl-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `273c120`，tree はきれい）．この段階は risky（AGENTS.md §9）．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `ff2f61f`，tree はきれい）．この段階は risky（AGENTS.md §9）．
 
 ## 読むもの（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d2/`）
 
@@ -146,7 +146,7 @@ P1 が無くなるか 3 回まで．判定を出さずに終わった回は 1 �
 ## fix1-brief
 
 
-あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `273c120`，tree に 1b-4d-2 が未 commit で入っている）．Sol のコードレビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d2/sol-report.md`，判定 FAIL）の 4 件を，次のとおり直してください．計画は `test-plan-v2.md`，裁定は `adjudication.md`，前の報告は `report.md`．
+あなたは実装役です．リポジトリは /home/komatsu/local_work/Ez-SDRv4（HEAD `ff2f61f`，tree に 1b-4d-2 が未 commit で入っている）．Sol のコードレビュー（`~/.cache/ezsdr-fixes/2026-10-20-phase8-1b4d2/sol-report.md`，判定 FAIL）の 4 件を，次のとおり直してください．計画は `test-plan-v2.md`，裁定は `adjudication.md`，前の報告は `report.md`．
 
 ## 1. Sol major 1：start の途中の device loss（採る）
 

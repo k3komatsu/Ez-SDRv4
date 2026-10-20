@@ -1,4 +1,4 @@
-# Opus のレビュー：Phase 8 段階 1b-3c（作業ツリー，HEAD `e4ca550`）
+# Opus のレビュー：Phase 8 段階 1b-3c（作業ツリー，HEAD `aeaf48f`）
 
 レビューした範囲：`git diff HEAD`（12ファイル）のうち `crates/ezsdr-mock-radio/src/{lib,channel}.rs` の全差分，design 07・08・09・11・Vision の差分，セルフレビュー3回目のログ．mutation は流していない．テストは実装役のログ（11:52 の最終確認）だけを見た．
 

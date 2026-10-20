@@ -655,7 +655,7 @@ loss を見つけた thread が呼ぶのは `Core::device_lost`（`crates/ezsdr-
 
 **足すテストは無し**．c2〜c6，c9，c10 は既存のテストが捕まえ，c1・c8 と k=0 の取り違えはこの段階では観測できない．新しい行 B・C・D は「既存テストが固定しているが行が無い規則」を，この段階で文言が動く箇所に付けるためのもの．
 
-**テストの機械的な書き換え**（弱めない）: `lines` が `timeline::Lines` になると，`rx()` の `lines[Dir::Rx] = Some(Line::new(…))`（`rx.rs:646`），`plan()` の `.plan = …`（`rx.rs:669`），`tx.rs:992,1023,1050`，`rx/differential.rs:756` は `Lines::insert((Direction::Rx, 0), line)` の形に直る．`streams.book(core, Dir::Rx, item)` の呼び出し（`core.rs:132`，`control.rs:305,324,573`，`rx/differential.rs:509`，テストの `book()` ヘルパ `rx.rs:673-677`）は key を取る形になり，`control.rs:909` の `delivered` の直接代入も stream ごとの器の名前に直る．assert と入力は変えない．**当て直しが要りそうな既存の行**（`old` が一致しなくなったものだけ）: J49（`rx.rs:332` の `streams.prune(Dir::Rx, by);`），J51（`core.rs:144` の `self.configs[dir as usize].retain(…)`），J52・J53（`stream.follow(&streams)` の引数が変わる場合），J54（tuple の形を変えた場合），J46（代入先を変えた場合）．J13・J23・J45・J55・G03・G04・G58・G60・J60 は文言がそのまま残る見込み．`MockRadio` の 1b-3a（`b8ec8c3`）は床を stop 時に stream ごとに計算する（`crates/ezsdr-mock-radio/src/lib.rs:1254-1261`）が，UHD は `Provider::stop` と `device_lost` が別スレッドなので，その形は採れない（c2）．
+**テストの機械的な書き換え**（弱めない）: `lines` が `timeline::Lines` になると，`rx()` の `lines[Dir::Rx] = Some(Line::new(…))`（`rx.rs:646`），`plan()` の `.plan = …`（`rx.rs:669`），`tx.rs:992,1023,1050`，`rx/differential.rs:756` は `Lines::insert((Direction::Rx, 0), line)` の形に直る．`streams.book(core, Dir::Rx, item)` の呼び出し（`core.rs:132`，`control.rs:305,324,573`，`rx/differential.rs:509`，テストの `book()` ヘルパ `rx.rs:673-677`）は key を取る形になり，`control.rs:909` の `delivered` の直接代入も stream ごとの器の名前に直る．assert と入力は変えない．**当て直しが要りそうな既存の行**（`old` が一致しなくなったものだけ）: J49（`rx.rs:332` の `streams.prune(Dir::Rx, by);`），J51（`core.rs:144` の `self.configs[dir as usize].retain(…)`），J52・J53（`stream.follow(&streams)` の引数が変わる場合），J54（tuple の形を変えた場合），J46（代入先を変えた場合）．J13・J23・J45・J55・G03・G04・G58・G60・J60 は文言がそのまま残る見込み．`MockRadio` の 1b-3a（`f1024cf`）は床を stop 時に stream ごとに計算する（`crates/ezsdr-mock-radio/src/lib.rs:1254-1261`）が，UHD は `Provider::stop` と `device_lost` が別スレッドなので，その形は採れない（c2）．
 
 ### 関わる他の順序
 
@@ -739,7 +739,7 @@ loss を見つけた thread が呼ぶのは `Core::device_lost`（`crates/ezsdr-
 
 ## 9. 同じ instant の `cold` 変更と timed 変更の順序（UC-2，RM-25 の床は instance 全体の `seq`）
 
-この順序で固定すべきなのは，(i) 同じ instant に `cold` 変更（channels / sample_rate）と `hardware_timed` 変更（frequency / gain）が来たとき，互いの effective instant を動かさないこと（`cold` は RM-25 の床，timed は device lead と release の床だけ），(ii) その instant の timed 値が `cold` の始める新しい segment の設定に載ること，(iii) その順序の根拠になる到着順 `seq` が **instance 全体の1つの counter**（`Streams.seq`）であること，の3つ．HEAD（`05e8d2f`）の仕組みは5か所に分かれている:
+この順序で固定すべきなのは，(i) 同じ instant に `cold` 変更（channels / sample_rate）と `hardware_timed` 変更（frequency / gain）が来たとき，互いの effective instant を動かさないこと（`cold` は RM-25 の床，timed は device lead と release の床だけ），(ii) その instant の timed 値が `cold` の始める新しい segment の設定に載ること，(iii) その順序の根拠になる到着順 `seq` が **instance 全体の1つの counter**（`Streams.seq`）であること，の3つ．HEAD（`fdfdf3b`）の仕組みは5か所に分かれている:
 
 - **到着順の counter は instance に1つ**: `Streams.seq` は instance の field（`crates/ezsdr-radio-uhd/src/provider/core.rs:68`）で，`next_seq()` が1つずつ進める（`core.rs:84-87`）．booking はすべてここから取る — `cold` は `control.rs:512`，timed は `control.rs:422`（`lock(&self.core.streams).next_seq()`），`Stop` は `control.rs:304`，`start_rx` は `control.rs:321`，`Streams::end` は `core.rs:130`（loss だけ 0）．
 - **RM-25 の床**: `timeline::command_instant`（`crates/ezsdr-radio/src/timeline.rs:380-389`）が `effective`（`timeline.rs:367-373`）で「同じ line の，先に受けた（`earlier.seq < item.seq`）`cold` item の最大 `e`」まで押し上げる．timed 変更は line の item ではないので床にも床の対象にもならない．比較に使う `seq` が instance の `next_seq` の値．
@@ -1070,7 +1070,7 @@ grep -n -E 'device\.(rx_recv|rx_open|rx_start|rx_stop|rx_packet_samples|tx_open|
 ### (b) 当て直しが要りそうな既存の mutation の行の見込み
 
 前提: provider の行は `plan/maintenance/tools/mutations.json` に 53 行（以下 **M**），`plan/phase7/tools/mutations.json` に 81 行（以下 **P7**），計 134 行。4b は provider だけを触るので，`crates/ezsdr-radio/src/timeline.rs` の 62 行，`crates/ezsdr-radio-uhd/src/device.rs` の 54 行，`tests` の 1 行は無傷の見込み（timeline の注意は下）。
-前例: 1b-4a は device 境界に stream 番号が入ったとき，`old` に呼び出しの全文を持つ B01・B15・B20・B22・B28 を `0,` を足して当て直した（05e8d2f）。今回はその `0` が `k` になるので同じ行がまた当たる。
+前例: 1b-4a は device 境界に stream 番号が入ったとき，`old` に呼び出しの全文を持つ B01・B15・B20・B22・B28 を `0,` を足して当て直した（fdfdf3b）。今回はその `0` が `k` になるので同じ行がまた当たる。
 
 **ほぼ確実**（`old` が，4b が必ず書き換える構文（`lines[`・`configs[`・`.tx_clocks`・`.delivered`・device 呼び出しの `0`）を含む）:
 
