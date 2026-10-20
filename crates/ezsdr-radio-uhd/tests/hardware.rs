@@ -1,5 +1,6 @@
-//! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 with one OBX
-//! (the `x3xx` profile, an OBX layout), the layout the one its front ends name.
+//! The bench steps of `plan/phase7/bench.md` (UR-34), on a USRP X310 or X300 whose slot A
+//! holds the bench board, cabled in loopback (the `x3xx` profile; the layout is slot A's
+//! board and any of its kind after it, `layout_of`).
 //! Compiled only with the feature `uhd`, every test ignored, the device from
 //! `EZSDR_UHD_ARGS` (GZ-8). Run each as `bench.md` says;
 //! each prints what `bench-results.md` records.
@@ -32,7 +33,6 @@ fn hw_b1_probe() {
     // The layout's channels and front ends, as UR-5 checks them.
     let board = board_of(&*device);
     println!("B1 board: {}", board.name());
-    assert_eq!(board, ezsdr_radio::x3xx::Board::Obx, "bench.md: the bench is one OBX in slot A");
     let (rx, tx) = layout_of(&*device);
     for (dir, elements) in [(Dir::Rx, &rx), (Dir::Tx, &tx)] {
         let have = device.channels(dir);

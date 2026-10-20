@@ -81,15 +81,16 @@ pub fn board_of(device: &dyn Device) -> ezsdr_radio::x3xx::Board {
     ezsdr_radio::x3xx::Board::of_front_end(&name).expect("the board of the device's first rx front end")
 }
 
-/// The `x3xx` layout of the device's front ends: each receive and transmit channel whose
-/// front end names a board this stage describes, in slot order (design 33 D5).
+/// The `x3xx` layout of the device's front ends: each receive and transmit channel, in slot
+/// order from slot A, whose front end is a board of slot A's kind (design 33 D5; UR-5: one
+/// device carries one kind, so a UBX in A and a CBX in B lays out slot A alone).
 pub fn layout_of(device: &dyn Device) -> (Json, Json) {
+    let first = board_of(device);
     let elements = |dir: ezsdr_radio_uhd::Dir| -> Json {
         let boards: Vec<&'static str> = (0..device.channels(dir))
-            .filter_map(|chan| {
-                let name = device.front_end(dir, chan).ok()?;
-                ezsdr_radio::x3xx::Board::of_front_end(&name).map(|board| board.name())
-            })
+            .map_while(|chan| device.front_end(dir, chan).ok().and_then(|name| ezsdr_radio::x3xx::Board::of_front_end(&name)))
+            .take_while(|board| *board == first)
+            .map(|board| board.name())
             .collect();
         Json::Array(
             boards
