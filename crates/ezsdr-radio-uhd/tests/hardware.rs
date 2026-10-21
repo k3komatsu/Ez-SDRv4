@@ -361,10 +361,15 @@ impl Read {
 /// Reads until `until(read)` holds or `limit` passes; `keep`, the ticks a sample, keeps
 /// the samples with their ticks.
 fn read(device: &dyn Device, limit: Wall, keep: Option<i64>, until: impl Fn(&Read) -> bool) -> Read {
+    read_on(device, 0, limit, keep, until)
+}
+
+/// `read` on stream `k`'s streamer.
+fn read_on(device: &dyn Device, k: usize, limit: Wall, keep: Option<i64>, until: impl Fn(&Read) -> bool) -> Read {
     let mut out = Read::default();
     let begun = Instant::now();
     while begun.elapsed() < limit && !until(&out) {
-        match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
+        match device.rx_recv(k, 2_000, Wall::from_millis(100)) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
                 if let Some(per) = keep {
@@ -1124,4 +1129,96 @@ fn hw_b8_burst_one_sample_after_a_burst() {
         assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty());
         assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
     }
+}
+
+/// Where a block sequence leaves a gap or an overlap: (expected first tick, got).
+fn breaks(r: &Read, per: i64) -> Vec<(i64, i64)> {
+    r.blocks.windows(2).filter(|w| w[0].0 + w[0].1 as i64 * per != w[1].0).map(|w| (w[0].0 + w[0].1 as i64 * per, w[1].0)).collect()
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_m1_rx_front_end_moves_between_streamers() {
+    // 1b-4e-2's INFERRED point (UR-25, UR-33): a front end that a closed streamer held opens
+    // on another stream's streamer and streams from its timed start without a gap. A second
+    // open while one streamer holds the front end is not tried here: on UHD 4.10 it is
+    // refused ("Attempting to reconnect output port"), but the attempt cuts the holder's
+    // edge ("no neighbour found" on its stop) and the process then aborts (`map::at`,
+    // SIGABRT); plan/phase8/bench-results.md, 2026-10-21.
+    let device = raw();
+    raw_rx(&*device, 1e6, 1e9);
+    let per = 200; // ticks a sample at 1 MS/s on the 200 MHz master clock
+    let start = (device.time_now().unwrap() / per + 50_000) * per;
+    device.rx_start(0, start).unwrap();
+    let first = read_on(&*device, 0, Wall::from_secs(2), None, |r| r.end(per).is_some_and(|e| e >= start + 100 * TICKS_PER_MS));
+    device.rx_stop(0, None).unwrap();
+    let rest = read_on(&*device, 0, Wall::from_secs(3), None, |r| r.other.len() >= 2 && r.other[r.other.len() - 2..].iter().all(|(_, o)| o == "Timeout"));
+    println!("M1 rx s0: first block {:?}, {} blocks, breaks {:?}, after stop {} blocks, other {:?}",
+        first.blocks.first(), first.blocks.len(), breaks(&first, per), rest.blocks.len(),
+        first.other.iter().chain(&rest.other).filter(|(_, o)| o != "Timeout").collect::<Vec<_>>());
+    assert_eq!(first.blocks.first().map(|b| b.0), Some(start), "stream 0 starts at its tick");
+    device.rx_close(0);
+    device.rx_open(1, &[0]).expect("the front end opens on stream 1 once stream 0's streamer is closed");
+    let start = (device.time_now().unwrap() / per + 50_000) * per;
+    device.rx_start(1, start).unwrap();
+    let moved = read_on(&*device, 1, Wall::from_secs(2), None, |r| r.end(per).is_some_and(|e| e >= start + 500 * TICKS_PER_MS));
+    let other: Vec<_> = moved.other.iter().filter(|(_, o)| o != "Timeout").collect();
+    println!("M1 rx s1 after the move: first block {:?} (start {start}), {} blocks to {:?}, breaks {:?}, other {other:?}",
+        moved.blocks.first(), moved.blocks.len(), moved.end(per), breaks(&moved, per));
+    assert_eq!(moved.blocks.first().map(|b| b.0), Some(start), "stream 1 starts at its tick");
+    assert!(breaks(&moved, per).is_empty() && other.is_empty(), "stream 1 streams 500 ms without a gap");
+    device.rx_stop(1, None).unwrap();
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_m2_tx_front_end_moves_between_streamers() {
+    // As M1 for transmit: a burst on stream 0, its streamer closed, the front end opened on
+    // stream 1 and a burst from there, while a receiver on the loopback reads throughout;
+    // both tones arrive. (A second open while one streamer holds the front end: see M1.)
+    let device = raw();
+    raw_rx(&*device, 1e6, 1e9);
+    raw_tx(&*device, 1e6, 1e9);
+    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
+    let (per, ms) = (200, TICKS_PER_MS);
+    // A 100 kHz tone of amplitude 0.3, 20 ms long.
+    let tone: Vec<ezsdr_radio_uhd::Iq> = (0..20_000).map(|i| {
+        let p = 2.0 * std::f32::consts::PI * 0.1 * i as f32;
+        [0.3 * p.cos(), 0.3 * p.sin()]
+    }).collect();
+    let t0 = (device.time_now().unwrap() / per + 200_000) * per;
+    let (b0, b1) = (t0 + 100 * ms, t0 + 600 * ms);
+    // Waits for stream k's burst acknowledgement, keeping every report.
+    let ack = |k: usize| {
+        let mut codes = Vec::new();
+        let begun = Instant::now();
+        while begun.elapsed() < Wall::from_secs(2) && !codes.iter().any(|c| c == "BurstAck") {
+            if let Some(report) = device.tx_async(k, Wall::from_millis(50)).unwrap() { codes.push(format!("{:?}", report.code)); }
+        }
+        codes
+    };
+    device.rx_start(0, t0).unwrap();
+    let (rx, acks0, acks1, opened) = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| read_on(&*device, 0, Wall::from_secs(4), Some(per), |r| r.end(per).is_some_and(|e| e >= t0 + 800 * ms)));
+        device.tx_send(0, &[&tone], Some(b0), true, true, Wall::from_millis(500)).unwrap();
+        let acks0 = ack(0);
+        device.tx_close(0);
+        let opened = device.tx_open(1, &[0]);
+        let acks1 = if opened.is_ok() {
+            device.tx_send(1, &[&tone], Some(b1), true, true, Wall::from_millis(500)).unwrap();
+            ack(1)
+        } else { Vec::new() };
+        (reader.join().unwrap(), acks0, acks1, opened)
+    });
+    device.rx_stop(0, None).unwrap();
+    let rms = |from: i64, to: i64| {
+        let w: Vec<f32> = rx.samples.iter().filter(|(t, _)| *t >= from && *t < to).map(|(_, s)| s[0] * s[0] + s[1] * s[1]).collect();
+        ((w.iter().sum::<f32>() / w.len().max(1) as f32).sqrt(), w.len())
+    };
+    let (quiet, burst0, burst1) = (rms(t0 + 20 * ms, t0 + 80 * ms), rms(b0 + 2 * ms, b0 + 18 * ms), rms(b1 + 2 * ms, b1 + 18 * ms));
+    println!("M2 tx: open on s1 {opened:?}; acks s0 {acks0:?}, s1 {acks1:?}; rx rms (value, samples): quiet {quiet:?}, s0 burst {burst0:?}, s1 burst {burst1:?}; rx first {:?}, breaks {:?}, other {:?}",
+        rx.blocks.first(), breaks(&rx, per), rx.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>());
+    opened.expect("the front end opens on stream 1 once stream 0's streamer is closed");
+    assert!(acks0 == ["BurstAck"] && acks1 == ["BurstAck"], "both bursts are played on time");
+    assert!(burst0.1 > 0 && burst1.1 > 0 && burst0.0 > 10.0 * quiet.0 && burst1.0 > 10.0 * quiet.0, "both bursts reach the loopback receiver");
 }
