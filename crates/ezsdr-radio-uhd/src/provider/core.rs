@@ -8,16 +8,17 @@ use std::time::Duration as Wall;
 use ezsdr_kernel::event::{ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
-use ezsdr_kernel::spec::{Key, Scalar, Value};
+#[cfg(test)]
+use ezsdr_kernel::spec::Key;
 use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
 use ezsdr_radio::payloads::CommandRejectedPayload;
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey, NO_RELEASE};
-use ezsdr_radio::{keys, kinds};
+use ezsdr_radio::kinds;
 use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
-use super::mode::{channel_list, Mode};
+use super::mode::{DescriptionExt, channel_list};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 
 const POLL: Wall = Wall::from_millis(1);
@@ -69,6 +70,7 @@ pub(crate) fn assert_line_free(what: &str) {
 #[cfg(test)]
 pub(crate) type Probe = Arc<dyn Fn(Option<&Streams>) + Send + Sync>;
 
+#[cfg(test)]
 pub(crate) fn key(name: &str) -> Key {
     Key::parse(name).expect("a declared radio key")
 }
@@ -122,7 +124,7 @@ pub(crate) struct Streams {
 }
 
 impl Default for Streams {
-    /// One stream per direction: the current keys' shape (design 33 D4).
+    /// One stream per direction in the default test state (design 33 D4).
     fn default() -> Streams {
         Streams::with_streams(1, 1)
     }
@@ -220,8 +222,8 @@ pub(crate) fn dir_of(stream: StreamKey) -> Dir {
     }
 }
 
-/// The stream a command under the current keys names (RM-29): stream 0 of its direction.
-/// Under the layout the code names its stream with [`stream_key`].
+/// The stream the command names (RM-29).
+#[cfg(test)]
 pub(crate) fn booked_stream(dir: Dir) -> StreamKey {
     stream_key(dir, 0)
 }
@@ -544,10 +546,10 @@ pub(crate) struct Core {
     /// Serializes streamer open/close admission with publishing device loss (UR-29).
     device_gate: Mutex<()>,
     pub id: ResourceId,
-    /// Stream 0's node of each direction (RM-29): `<id>/rx` and `<id>/tx` under the
-    /// current keys, `<id>/rx/s0` and `<id>/tx/s0` under the layout. Every other stream
-    /// names its own with [`Core::stream_node`].
+    /// Stream 0's node of each direction (tests).
+    #[cfg(test)]
     pub rx_id: ResourceId,
+    #[cfg(test)]
     pub tx_id: ResourceId,
     pub mcr: u64,
     pub root: ClockDomainId,
@@ -559,8 +561,8 @@ pub(crate) struct Core {
     pub inputs: Arc<dyn InputStore>,
     /// Each receive stream's links, by its number (RM-29): the port `rx<k>`'s.
     pub links: Vec<Vec<Arc<dyn DataLink>>>,
-    /// The key set this instance presents (RM-26, RM-27).
-    pub mode: Mode,
+    /// The description built from the binding's layout (RM-29).
+    pub description: ezsdr_radio::channels::Description,
     pub block_len: usize,
     pub rec: Mutex<Records>,
     pub streams: Mutex<Streams>,
@@ -588,19 +590,21 @@ impl Core {
         events: Arc<dyn EventSink>,
         inputs: Arc<dyn InputStore>,
         mut links: Vec<Vec<Arc<dyn DataLink>>>,
-        mode: Mode,
+        description: ezsdr_radio::channels::Description,
     ) -> Result<Core, ModuleError> {
-        let rx_id = mode.stream_node(&id, Dir::Rx, 0);
-        let tx_id = mode.stream_node(&id, Dir::Tx, 0);
-        let rx_count = mode.stream_count(Dir::Rx);
-        let tx_count = mode.stream_count(Dir::Tx);
+        #[cfg(test)]
+        let rx_id = description.stream_node(&id, Dir::Rx, 0);
+        #[cfg(test)]
+        let tx_id = description.stream_node(&id, Dir::Tx, 0);
+        let rx_count = description.stream_count(Dir::Rx);
+        let tx_count = description.stream_count(Dir::Tx);
         links.resize_with(rx_count, Vec::new);
         // UR-12, UR-20: every receive stream's node is below the instance root the Kernel
         // handed this instance, so the bound view resolves it; a refusal is a Module error,
         // not a Kernel event (item 3).
         let mut overflow = Vec::with_capacity(rx_count);
         for k in 0..rx_count {
-            let node = mode.stream_node(&id, Dir::Rx, k);
+            let node = description.stream_node(&id, Dir::Rx, k);
             overflow.push(
                 events
                     .resolve(&EventSource::Node { node }, &EventKind::parse(kinds::RX_OVERFLOW).expect("a radio kind"))
@@ -609,11 +613,13 @@ impl Core {
         }
         Ok(Core {
             mcr: device.master_clock_rate(),
-            block_len: mode.block_len() as usize,
+            block_len: description.block_len as usize,
             device,
             device_gate: Mutex::new(()),
             id,
+            #[cfg(test)]
             rx_id,
+            #[cfg(test)]
             tx_id,
             root,
             time,
@@ -622,7 +628,7 @@ impl Core {
             overflow,
             inputs,
             links,
-            mode,
+            description,
             rec: Mutex::new(Records::default()),
             streams: Mutex::new(Streams::with_streams(rx_count, tx_count)),
             held: Mutex::new(BTreeSet::new()),
@@ -770,36 +776,10 @@ impl Core {
         }
     }
 
-    /// A direction's full configuration from a configuration map (UR-12).
-    pub fn settings(config: &BTreeMap<Key, Value>, dir: Dir) -> Settings {
-        let number = |name: &str| config.get(&key(&format!("radio.{}.{name}", dir.name()))).and_then(Value::as_scalar).and_then(super::mode::scalar_number);
-        Settings {
-            rate: number("sample_rate_hz"),
-            freq: number("frequency_hz"),
-            gain: number("gain_db"),
-            antenna: match config.get(&key(&format!("radio.{}.antenna", dir.name()))) {
-                Some(Value::Scalar(Scalar::Str(s))) => Some(s.clone()),
-                _ => None,
-            },
-        }
-    }
-
     /// The node stream `k` of `dir` reports from (RM-29, UR-17, UR-20): `<id>/rx` and
-    /// `<id>/tx` under the current keys, `<id>/rx/s<k>` and `<id>/tx/s<k>` under the layout.
-    /// The one place a Provider reads a stream's event source from.
+    /// `<id>/tx/s<k>`. The one place a Provider reads a stream's event source from.
     pub fn stream_node(&self, dir: Dir, k: usize) -> ResourceId {
-        self.mode.stream_node(&self.id, dir, k)
-    }
-
-    pub fn channels(config: &BTreeMap<Key, Value>, dir: Dir) -> usize {
-        let name = match dir {
-            Dir::Rx => keys::RX_CHANNELS,
-            Dir::Tx => keys::TX_CHANNELS,
-        };
-        match config.get(&key(name)) {
-            Some(Value::Scalar(Scalar::Int(n))) if *n > 0 => *n as usize,
-            _ => 0,
-        }
+        self.description.stream_node(&self.id, dir, k)
     }
 
     /// UR-13, design 33 D5: the rate set the device reports for one channel of `dir` is the
@@ -825,7 +805,7 @@ impl Core {
             return Err(DeviceError { lost: true, message: "UR-29: the device is lost before the rate comparison".to_owned() });
         }
         let outcome = match self.device.rates(dir, chan) {
-            Ok(ranges) if ezsdr_radio::device::rate_set_matches(self.mode.rates(), &ranges) => Ok(()),
+            Ok(ranges) if ezsdr_radio::device::rate_set_matches(&self.description.rates, &ranges) => Ok(()),
             Ok(_) => Err(format!("UR-13: the {} rates the device reports are not the profile's rate set", dir.name())),
             Err(error) => Err(format!("UR-13: {}", error.message)),
         };
@@ -863,35 +843,27 @@ impl Core {
                 ("gain_db", settings.gain, applied.gain),
             ] {
                 rec.applied.push(json!({
-                    "key": self.mode.applied_key(dir, *chan, k, name), "channel": chan,
+                    "key": self.description.applied_key(dir, *chan, k, name), "channel": chan,
                     "claimed": claimed, "read_back": read, "difference": claimed.map(|c| read - c), "at": at,
                 }));
             }
             if let Some(antenna) = &settings.antenna {
-                if self.mode.is_layout() {
-                    // design 33 D16: the read-back is recorded and compared; a front end
-                    // whose getter disagrees with the claimed antenna is refused.
-                    rec.applied.push(json!({
-                        "key": self.mode.applied_key(dir, *chan, k, "antenna"), "channel": chan,
-                        "claimed": antenna, "read_back": applied.antenna, "at": at,
-                    }));
-                } else {
-                    rec.applied.push(json!({ "key": self.mode.applied_key(dir, *chan, k, "antenna"), "channel": chan, "claimed": antenna, "at": at }));
-                }
+                rec.applied.push(json!({
+                    "key": self.description.applied_key(dir, *chan, k, "antenna"), "channel": chan,
+                    "claimed": antenna, "read_back": applied.antenna, "at": at,
+                }));
             }
             drop(rec);
             if applied.rate != rate {
                 return Err(DeviceError::failed(format!("UR-12: the device applied {} S/s for the claimed {rate}", applied.rate)));
             }
-            if self.mode.is_layout() {
-                if let (Some(antenna), read) = (settings.antenna.as_ref(), applied.antenna.as_deref()) {
-                    if read != Some(antenna.as_str()) {
-                        return Err(DeviceError::failed(format!(
-                            "UR-12: the device reads back {} for the claimed {antenna} antenna of {}",
-                            read.unwrap_or("no antenna"),
-                            self.mode.applied_key(dir, *chan, k, "antenna")
-                        )));
-                    }
+            if let (Some(antenna), read) = (settings.antenna.as_ref(), applied.antenna.as_deref()) {
+                if read != Some(antenna.as_str()) {
+                    return Err(DeviceError::failed(format!(
+                        "UR-12: the device reads back {} for the claimed {antenna} antenna of {}",
+                        read.unwrap_or("no antenna"),
+                        self.description.applied_key(dir, *chan, k, "antenna")
+                    )));
                 }
             }
         }
@@ -1091,7 +1063,7 @@ impl Core {
 
     /// Declares and registers stream `k`'s clock with origin `origin` (UR-12, RM-25).
     pub fn register_in(&self, dir: Dir, k: usize, n: i64, origin: i64) -> Result<Clock, String> {
-        let stream = self.mode.stream_node(&self.id, dir, k);
+        let stream = self.description.stream_node(&self.id, dir, k);
         let ratio = Rational::new(n as u64, 1).map_err(|e| e.to_string())?;
         let handle = self.clocks.declare_sample_clock(stream, self.root, ratio).map_err(|e| e.to_string())?;
         let domain = self.clocks.register_sample_clock(&handle, origin).map_err(|e| e.to_string())?;
@@ -1498,7 +1470,7 @@ mod tests {
             streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
             let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
             streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            streams.stream_mut(to).configs.insert(seq, Arc::new(ColdConfig::new(Settings::default())));
+            streams.stream_mut(to).configs.insert(seq, Arc::new(ColdConfig::new(BTreeMap::new())));
             streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).unwrap()
         };
         let (entered, reached) = std::sync::mpsc::channel();
@@ -1613,7 +1585,7 @@ mod tests {
             streams.lines.book_move(from, to, 0, Some(10_000), 0, move_seq, 0).unwrap();
             streams.changed(&core, from);
             streams.changed(&core, to);
-            streams.stream_mut(to).configs.insert(move_seq, Arc::new(super::super::control::ColdConfig::new(Settings::default())));
+            streams.stream_mut(to).configs.insert(move_seq, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
             let cold_seq = streams.next_seq();
             assert!(streams.book(&core, to, Item { e: 20_000, seq: cold_seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }));
             streams.changed(&core, to);

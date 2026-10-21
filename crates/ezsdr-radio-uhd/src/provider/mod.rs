@@ -42,7 +42,7 @@ use serde_json::{Value as Json, json};
 
 use self::core::{Clock, Core, lock};
 use self::control::Control;
-use self::mode::Mode;
+use self::mode::DescriptionExt;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
 use crate::device::{Device, Dir, Settings};
@@ -91,7 +91,7 @@ struct Prepared {
     core: Arc<Core>,
     actions: Arc<dyn ActionReceiver>,
     config: BTreeMap<Key, Value>,
-    /// One entry per receive stream of the layout (RM-29): the current keys have one, `k = 0`.
+    /// One entry per receive stream of the layout (RM-29).
     rx: Vec<PreparedStream>,
     /// One entry per transmit stream of the layout.
     tx: Vec<PreparedStream>,
@@ -178,8 +178,8 @@ pub struct UhdRadio {
     clock_source: String,
     /// The epoch of the root its own Authority registers (UR-6).
     epoch: ezsdr_kernel::time::EpochRef,
-    /// The key set this instance presents (UR-5, RM-27).
-    mode: Mode,
+    /// The description built from this binding's layout (RM-29).
+    description: channels::Description,
     /// Its hold on the device's serial (UR-5): released when this instance drops.
     _serial: SerialGuard,
     rx_stall: Option<(Wall, Wall)>,
@@ -247,17 +247,9 @@ impl UhdRadio {
             Some(Value::Scalar(Scalar::Int(n))) if (1..=65_536).contains(n) => *n as u32,
             Some(_) => return Err(rejected("UR-5: selector `block_len` must be an Int in 1..=65536")),
         };
-        // RM-38: `keys: "channel"` picks the layout builder's key set; another value is
-        // refused, and the two sets never meet (RM-27).
-        let channel_keys = ezsdr_radio::channel_keys(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
-        let selection = match channel_keys {
-            false => Some(x3xx::from_selector(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?),
-            true => None,
-        };
-        let layout = match channel_keys {
-            true => Some(channels::from_selector(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?),
-            false => None,
-        };
+        // RM-38: `keys` is accepted for now, but every accepted binding uses the layout.
+        ezsdr_radio::channel_keys(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
+        let layout = channels::from_selector(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
         // UR-5, design 33 D5: the serial is the device's identity and the first device
         // call; a live instance already bound to it is refused before anything is written
         // to the device (H4: a second binding would silently overwrite the first's spec).
@@ -270,22 +262,13 @@ impl UhdRadio {
                 x3xx::PROFILE
             )));
         }
-        let mode = match &layout {
-            Some(layout) => Mode::Layout(Box::new(channels::Description::new(layout, block_len, &profile::terms()))),
-            None => Mode::Current(Box::new(profile::description(selection.as_ref().expect("a selection"), block_len))),
-        };
+        let description = channels::Description::new(&layout, block_len, &profile::terms());
         // UR-5, H1, H2: the device's channel map is set from the layout — one call per
         // direction with elements, `<slot>:<front end>` in logical order — before its
         // channels and front ends are read; a direction with no element keeps its map.
-        let (rx_elements, tx_elements) = match (&layout, &selection) {
-            (Some(channels::Layout::X3xx { rx, tx, .. }), _) => (layout_elements(rx), layout_elements(tx)),
-            (None, Some(selection)) => (
-                selection.rx.iter().map(|e| (e.slot, e.frontend)).collect::<Vec<_>>(),
-                selection.tx.iter().map(|e| (e.slot, e.frontend)).collect::<Vec<_>>(),
-            ),
-            // `channels::from_selector` reads the `x3xx` selector alone: no other layout or
-            // selection reaches this Module's binding (RM-28).
-            _ => unreachable!("RM-28: a UHD binding's layout is the x3xx selector's"),
+        let (rx_elements, tx_elements) = match &layout {
+            channels::Layout::X3xx { rx, tx, .. } => (layout_elements(rx), layout_elements(tx)),
+            _ => unreachable!("UR-5: a UHD binding's layout is x3xx"),
         };
         let mut subdev_spec = BTreeMap::new();
         for (dir, elements) in [(Dir::Rx, &rx_elements), (Dir::Tx, &tx_elements)] {
@@ -302,38 +285,20 @@ impl UhdRadio {
         // channels: slot B empty is a channel on UHD's unknown board. The spec set from the
         // elements above is what makes the device's channels those elements' (H1): a device
         // with fewer refuses the spec itself, with UHD's text.
-        match (&layout, &selection) {
-            (Some(channels::Layout::X3xx { rx, tx, .. }), _) => {
-                for (dir, name, elements) in [(Dir::Rx, "rx", rx), (Dir::Tx, "tx", tx)] {
-                    for (chan, element) in elements.iter().enumerate() {
-                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!("UR-5: {}", e.message)))?;
-                        if !front_end_matches(element, &front_end) {
-                            return Err(rejected(format!(
-                                "UR-5: the layout's {name} channel {chan} is `{front_end}`, not `{}` front end {}",
-                                element.front_end.name(),
-                                element.frontend
-                            )));
-                        }
-                    }
+        let channels::Layout::X3xx { rx, tx, .. } = &layout else {
+            unreachable!("UR-5: a UHD binding's layout is x3xx")
+        };
+        for (dir, name, elements) in [(Dir::Rx, "rx", rx), (Dir::Tx, "tx", tx)] {
+            for (chan, element) in elements.iter().enumerate() {
+                let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!("UR-5: {}", e.message)))?;
+                if !front_end_matches(element, &front_end) {
+                    return Err(rejected(format!(
+                        "UR-5: the layout's {name} channel {chan} is `{front_end}`, not `{}` front end {}",
+                        element.front_end.name(),
+                        element.frontend
+                    )));
                 }
             }
-            (None, Some(selection)) => {
-                for (dir, name, elements) in [(Dir::Rx, "rx", &selection.rx), (Dir::Tx, "tx", &selection.tx)] {
-                    for (chan, element) in elements.iter().enumerate() {
-                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!("UR-5: {}", e.message)))?;
-                        if !front_end.starts_with(element.board.uhd_name()) {
-                            return Err(rejected(format!(
-                                "UR-5: profile {} needs {} front ends; {name} channel {chan} is `{front_end}`",
-                                x3xx::PROFILE,
-                                element.board.uhd_name()
-                            )));
-                        }
-                    }
-                }
-            }
-            // `channels::from_selector` reads the `x3xx` selector alone: no other layout or
-            // selection reaches this Module's binding (RM-28).
-            _ => unreachable!("RM-28: a UHD binding's layout is the x3xx selector's"),
         }
         let mut describe = device.describe();
         if let Some(object) = describe.as_object_mut() {
@@ -344,13 +309,13 @@ impl UhdRadio {
         }
         let mut sections = BTreeMap::new();
         sections.insert(section("device"), describe);
-        sections.insert(section("envelope"), serde_json::to_value(mode.envelope()).expect("an envelope"));
-        let timing = mode.timing();
+        sections.insert(section("envelope"), serde_json::to_value(description.envelope()).expect("an envelope"));
+        let timing = description.timing;
         let instance = ProviderInstance {
             id: resource.clone(),
             module: crate::module_ref(),
             profile: binding.profile.clone(),
-            tree: mode.tree(&resource, HOST_MEMORY),
+            tree: description.tree(&resource, HOST_MEMORY),
             fidelity: device.fidelity(),
             driving: Driving { stepped: false },
             arm_after: Vec::new(),
@@ -362,7 +327,7 @@ impl UhdRadio {
             device,
             clock_source,
             epoch,
-            mode,
+            description,
             _serial: registration,
             rx_stall: None,
             reopened: None,
@@ -461,7 +426,7 @@ impl Provider for UhdRadio {
 
     /// RM-26's coercion over the profile: pure, no device call (UR-11, MA-11).
     fn coerce(&self, request: &Requested) -> Result<CoerceReport, ModuleError> {
-        self.mode.coerce(&self.instance.id, request)
+        self.description.coerce(&self.instance.id, request)
     }
 
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
@@ -497,32 +462,21 @@ impl Provider for UhdRadio {
         if epoch.as_ref() != Some(&self.epoch) {
             return Err(rejected("UR-6: the primary root is not this device's; bind the Authority to the radio's own binding"));
         }
-        let mut config = self.mode.defaults();
+        let mut config = self.description.defaults();
         for (key, value) in report.applied {
-            if self.mode.is_configuration(&key) {
+            if channels::is_configuration(&key) {
                 config.insert(key, value);
             }
         }
-        // UR-12: a requested channel count above `device.channels(dir)` is refused. Under
-        // the layout the count is the binding's own, which `from_binding` already checked
-        // (UR-5); only the current keys' requested count is judged here.
-        if let Mode::Current(_) = &self.mode {
-            for dir in [Dir::Rx, Dir::Tx] {
-                let n = Core::channels(&config, dir);
-                if n > self.device.channels(dir) {
-                    return Err(rejected(format!("UR-12: {n} {} channels, and the device has {}", dir.name(), self.device.channels(dir))));
-                }
-            }
-        }
-        // UR-12, RM-29: each receive stream takes its own port's links — `rx` under the
-        // current keys, `rx<k>` under the layout —; a link on another port is refused.
-        let rx_count = self.mode.stream_count(Dir::Rx);
+        // UR-12, RM-29: each receive stream takes its own port's links; a link on another
+        // port is refused.
+        let rx_count = self.description.stream_count(Dir::Rx);
         let mut links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = vec![Vec::new(); rx_count];
         for attached in &ctx.links {
             match &attached.endpoint {
                 Endpoint::StreamOut(link) if attached.component == f.id => {
                     let port = attached.port.as_str();
-                    let Some(k) = (0..rx_count).find(|k| self.mode.rx_port(*k) == port) else {
+                    let Some(k) = (0..rx_count).find(|k| self.description.rx_port(*k) == port) else {
                         return Err(rejected("UR-12: only a StreamOut link on this fragment's rx port may be attached"));
                     };
                     if link.policy() == BackPressure::Block {
@@ -546,7 +500,7 @@ impl Provider for UhdRadio {
             ctx.events.clone(),
             ctx.inputs.clone(),
             links,
-            self.mode.clone(),
+            self.description.clone(),
         )?);
         if let Some(error) = &self.reopened {
             core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
@@ -555,21 +509,21 @@ impl Provider for UhdRadio {
         // SampleClock (UR-12).
         let prepared = |dir: Dir| -> Result<Vec<PreparedStream>, ModuleError> {
             let mut streams = Vec::new();
-            for k in 0..self.mode.stream_count(dir) {
-                let channels = self.mode.stream_channels(&config, dir, k);
+            for k in 0..self.description.stream_count(dir) {
+                let channels = self.description.stream_channels(&config, dir == Dir::Rx, k as u32);
                 let mut stream = PreparedStream { k, handle: None, channels, clock: None };
                 if !channels.is_empty() {
-                    let rate = self.mode.stream_rate(&config, dir, k);
+                    let rate = self.description.stream_rate(&config, dir, k);
                     let entries: Vec<(usize, Settings)> = channels
                         .iter()
                         .map(|chan| {
-                            let mut settings = self.mode.settings(&config, dir, k, chan as usize);
+                            let mut settings = self.description.settings(&config, dir, k, chan as usize);
                             settings.rate = Some(rate);
                             (chan as usize, settings)
                         })
                         .collect();
                     let n = core.configure(dir, &entries, rate, k).map_err(|e| rejected(e.message))?;
-                    let node = self.mode.stream_node(&self.instance.id, dir, k);
+                    let node = self.description.stream_node(&self.instance.id, dir, k);
                     let ratio = ezsdr_kernel::time::Rational::new(n as u64, 1).map_err(|e| rejected(format!("UR-12: {e}")))?;
                     stream.handle = Some(ctx.clocks.declare_sample_clock(node, root, ratio).map_err(|e| rejected(format!("UR-12: {e}")))?);
                 }
@@ -588,7 +542,7 @@ impl Provider for UhdRadio {
         let prepared = self.prepared.as_mut().ok_or_else(|| rejected("UR-13: prepare must precede arm"))?;
         let core = prepared.core.clone();
         let a = core.now();
-        let s = a + core.ticks(core.mode.timing().startup_latency_ns);
+        let s = a + core.ticks(core.description.timing.startup_latency_ns);
         core.start_up.store(s, Ordering::Release);
         if clock_source != "internal" {
             match self.device.ref_locked() {
@@ -654,7 +608,7 @@ impl Provider for UhdRadio {
             core.emit(&core.id, kinds::LATE_COMMAND, Severity::Warning, payload);
             return Err(rejected(format!(
                 "UR-15: the start at {t0} precedes the device's start-up at {s}; the profile needs ezsdr.time.start_lead_ns ≥ {}",
-                core.mode.timing().startup_latency_ns
+                core.description.timing.startup_latency_ns
             )));
         }
         // RM-25, UR-15: each receive stream's first segment starts at T0 when its streamer
@@ -927,19 +881,8 @@ mod tests {
         assert!(radio.running.as_ref().unwrap().threads.is_empty(), "every thread was joined");
     }
 
-    #[test]
-    fn ur_15_the_current_keys_name_their_one_stream_s_threads() {
-        // UR-15 (U2): the current keys declare one stream per direction, named `s0` too.
-        let mut radio = prepared_with(1, 1);
-        radio.start(None).unwrap();
-        assert_eq!(thread_names(&radio), ["uhd-rx-s0", "uhd-tx-s0", "uhd-control"]);
-        radio.stop(StopMode::Orderly).unwrap();
-        assert!(radio.detached.is_empty(), "{:?}", radio.detached);
-        assert!(radio.running.as_ref().unwrap().threads.is_empty(), "every thread was joined");
-    }
-
-    /// The layout's key set with two receive front ends and one transmit one (P1b).
-    fn two_rx_mode() -> Mode {
+    /// A layout with two receive front ends and one transmit one (P1b).
+    fn two_rx_description() -> channels::Description {
         use ezsdr_kernel::spec::{Ident, Scalar, Value};
         let selector = BTreeMap::from([
             (Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
@@ -947,7 +890,7 @@ mod tests {
             (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
         ]);
         let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
-        Mode::Layout(Box::new(ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())))
+        ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())
     }
 
     /// A `FakeDevice` whose first receive call of stream 0 finds the device lost (P1b): that
@@ -1014,7 +957,7 @@ mod tests {
         device.rx_open(0, &[0]).unwrap();
         device.rx_open(1, &[1]).unwrap();
         let links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = (0..2).map(|_| vec![Arc::new(NoLink) as Arc<dyn ezsdr_kernel::stream::DataLink>]).collect();
-        let (core, _time, _events) = test_support::rig_on_mode_links(device, links, BTreeMap::new(), two_rx_mode());
+        let (core, _time, _events) = test_support::rig_on_description_links(device, links, BTreeMap::new(), two_rx_description());
         let handle = |k: usize| core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, k), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
         radio.prepared = Some(Prepared {
             core: core.clone(),

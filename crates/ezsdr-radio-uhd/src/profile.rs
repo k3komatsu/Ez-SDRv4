@@ -2,8 +2,7 @@
 //! values are `ezsdr_radio::x3xx`'s, one place for both Providers (design 33 D5).
 
 use ezsdr_kernel::module_api::ProfileRef;
-use ezsdr_radio::device::DeviceDescription;
-use ezsdr_radio::x3xx::{self, ProviderTerms, Selection};
+use ezsdr_radio::x3xx::{self, ProviderTerms};
 
 /// The X310's master clock the profile needs (UR-5).
 pub const MASTER_CLOCK_HZ: u64 = x3xx::MASTER_CLOCK_HZ;
@@ -32,23 +31,4 @@ pub fn terms() -> ProviderTerms {
 /// The profile this Module's binding must name (UR-9, design 33 D5).
 pub fn profile_ref() -> ProfileRef {
     x3xx::profile_ref()
-}
-
-/// UR-9's values, from the binding's layout, as RM-26's description; `block_len` is the
-/// selector's (UR-5).
-pub fn description(selection: &Selection, block_len: u32) -> DeviceDescription {
-    x3xx::description(selection, block_len, &terms())
-}
-
-/// The `x3xx` layout the Module's rigs use: a UBX in slot A and slot B, both directions
-/// (tests).
-#[cfg(test)]
-pub(crate) fn ubx() -> Selection {
-    Selection::of(x3xx::Board::Ubx, &[x3xx::Slot::A, x3xx::Slot::B], &[x3xx::Slot::A, x3xx::Slot::B])
-}
-
-/// [`ubx`]'s description with `block_len` (tests).
-#[cfg(test)]
-pub(crate) fn ubx_description(block_len: u32) -> DeviceDescription {
-    description(&ubx(), block_len)
 }

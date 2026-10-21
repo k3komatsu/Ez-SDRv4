@@ -147,8 +147,8 @@ pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environ
 pub fn profile(dir: &TempDir, selector: Json, environment: Json, session: bool) -> Json {
     let mut radio_selector = json!({
         "args": ARGS, "id": "usrp",
-        "rx": ["0:A:ubx:0", "0:B:ubx:0"],
-        "tx": ["0:A:ubx:0", "0:B:ubx:0"]
+        "rx": ["0:A:ubx:0"],
+        "tx": ["0:A:ubx:0"]
     });
     radio_selector.as_object_mut().unwrap().extend(selector.as_object().cloned().unwrap_or_default());
     let mut rec = json!({
@@ -156,7 +156,7 @@ pub fn profile(dir: &TempDir, selector: Json, environment: Json, session: bool) 
         "selector": { "dir": dir.0.to_string_lossy() }
     });
     if session {
-        rec["feed"] = json!({ "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 });
+        rec["feed"] = json!({ "port": { "component": "radio", "port": "rx0" }, "policy": "drop_oldest", "capacity": 64 });
     }
     let mut env = json!({
         "ezsdr.time": { "class": "hardware_in_loop", "start_lead_ns": 2_000_000_000u64 },
@@ -172,7 +172,7 @@ pub fn profile(dir: &TempDir, selector: Json, environment: Json, session: bool) 
         "authority": "radio",
         "placements": { "links": [{
             "link": { "id": "ezsdr.link.host", "version": { "major": 1, "minor": 0, "patch": 0 } },
-            "from": { "component": "radio", "port": "rx" },
+            "from": { "component": "radio", "port": "rx0" },
             "to": { "component": "rec", "port": "in" }
         }] },
         "environment": env
@@ -180,30 +180,30 @@ pub fn profile(dir: &TempDir, selector: Json, environment: Json, session: bool) 
 }
 
 pub fn receive_spec(channels: i64, rate: f64, frequency: f64, capture: Option<i64>) -> Json {
+    assert!(matches!(channels, 0 | 1), "receive_spec supports one channel, got {channels}");
     let mut output = json!({
         "id": "rec", "kind": "sink.capture", "params": {},
-        "feed": { "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 }
+        "feed": { "port": { "component": "radio", "port": "rx0" }, "policy": "drop_oldest", "capacity": 64 }
     });
     if let Some(n) = capture {
         output["params"]["sink.capture_samples"] = json!(n);
     }
+    let mut requires = json!({ "radio.rx.s0.sample_rate_hz": { "kind": "eq", "value": rate } });
+    requires["radio.rx.c0.stream"] = json!({ "kind": "eq", "value": if channels > 0 { 0 } else { -1 } });
+    requires["radio.rx.c0.frequency_hz"] = json!({ "kind": "eq", "value": frequency });
     json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
-        "resources": { "radio": { "kind": "radio.device", "requires": {
-            "radio.rx.channels": { "kind": "eq", "value": channels },
-            "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate },
-            "radio.rx.frequency_hz": { "kind": "eq", "value": frequency }
-        } } },
+        "resources": { "radio": { "kind": "radio.device", "requires": requires } },
         "outputs": [output]
     })
 }
 
 pub fn with_tx(mut spec: Json, rate: f64) -> Json {
     let requires = &mut spec["resources"]["radio"]["requires"];
-    requires["radio.tx.channels"] = json!({ "kind": "eq", "value": 1 });
-    requires["radio.tx.sample_rate_hz"] = json!({ "kind": "eq", "value": rate });
-    requires["radio.tx.frequency_hz"] = requires["radio.rx.frequency_hz"].clone();
+    requires["radio.tx.c0.stream"] = json!({ "kind": "eq", "value": 0 });
+    requires["radio.tx.s0.sample_rate_hz"] = json!({ "kind": "eq", "value": rate });
+    requires["radio.tx.c0.frequency_hz"] = requires["radio.rx.c0.frequency_hz"].clone();
     spec
 }
 
@@ -212,7 +212,7 @@ pub fn with_burst(mut spec: Json, waveform: &ArtifactRef, repeat: bool, late: &s
         "at": { "clock": "radio", "offset_ticks": offset },
         "action": {
             "kind": "tx_burst",
-            "target": serde_json::to_value(resource("radio/tx")).unwrap(),
+            "target": serde_json::to_value(resource("radio/tx/s0")).unwrap(),
             "waveform": waveform, "repeat": repeat, "late_policy": late, "metadata": {}
         }
     }]);
@@ -343,7 +343,7 @@ pub fn past_t0(run: &mut RunHandle, extra: i64) {
 /// Advances past the origin of the transmit clock a change from 0 channels registered,
 /// the start lead after it (RM-25; spec 22, VH-4), so that a burst sent then is on time.
 pub fn past_tx_origin(run: &mut RunHandle) {
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path() == "usrp/tx" && r.ended_at.is_none()).expect("a transmit clock");
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path() == "usrp/tx/s0" && r.ended_at.is_none()).expect("a transmit clock");
     let _ = run.advance_to(TimePoint::new(clock.origin.domain(), clock.origin.ticks_in(clock.root).unwrap() + ms(1)));
 }
 
@@ -461,7 +461,7 @@ pub fn calls(device: &FakeDevice, prefix: &str) -> Vec<String> {
 }
 
 pub fn tx_clock_origin(manifest: &Manifest, nth: usize) -> i64 {
-    manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(nth).unwrap().origin.ticks_in(manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx").unwrap()).nth(nth).unwrap().root).unwrap()
+    manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap()).nth(nth).unwrap().origin.ticks_in(manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap()).nth(nth).unwrap().root).unwrap()
 }
 
 
@@ -568,7 +568,7 @@ pub fn rehearse_receive_at_t0(device: Arc<dyn Device>) -> Manifest {
     assert!(map.gaps.is_empty(), "{:?}", map.gaps);
     let first = section(&manifest, "timing").as_array().unwrap().iter().find(|r| r["what"] == "first_rx_block").cloned().unwrap();
     assert_eq!(first["index"], 0);
-    let rate = section(&manifest, "applied").as_array().unwrap().iter().find(|r| r["key"] == "radio.rx.sample_rate_hz").cloned().unwrap();
+    let rate = section(&manifest, "applied").as_array().unwrap().iter().find(|r| r["key"] == "radio.rx.s0.sample_rate_hz").cloned().unwrap();
     assert_eq!(rate["claimed"], rate["read_back"]);
     manifest
 }
@@ -677,16 +677,16 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let envelope = bench_envelope(&*device);
     let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.channels", Value::from(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.c0.stream", Value::from(0)), None).unwrap()));
     past_tx_origin(&mut run);
     let wave = pn(1_000);
     let (bytes, _) = waveform_of(&wave);
-    assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx"), None, &[]), Some(&bytes)).unwrap()));
+    assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&bytes)).unwrap()));
     let at = after_ticks(&run, ms(50));
     assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", Value::from(5_000))]), None).unwrap()));
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-    let refused = run.submit(set("radio.tx.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();
+    let refused = run.submit(set("radio.tx.c0.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();
     assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope")), "{refused:?}");
     if !exact {
         println!("B7 refused: {:?}", refused.outcome);

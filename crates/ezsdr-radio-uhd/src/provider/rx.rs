@@ -21,6 +21,7 @@ use serde_json::json;
 
 use super::control::Planned;
 use super::core::{stream_key, Clock, Core, Streams, lock};
+use super::mode::DescriptionExt;
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
@@ -330,7 +331,7 @@ impl Rx {
             self.core.device_failed(None, "update_parameter", &error);
             return true;
         }
-        let stream = self.core.mode.stream_node(&self.core.id, Dir::Rx, self.k);
+        let stream = self.core.description.stream_node(&self.core.id, Dir::Rx, self.k);
         let declared = self.core.clocks.declare_sample_clock(stream, self.core.root, next.segment.config.ratio).map_err(|e| e.to_string());
         match declared {
             Ok(handle) => {
@@ -449,7 +450,7 @@ impl Rx {
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays. The new start
                 // waits the profile's start lead from now (spec 20, VF-6).
-                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.mode.timing(), Direction::Rx))), stream.config.ratio) {
+                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))), stream.config.ratio) {
                     Ok(restart) => restart,
                     Err(error) => return self.core.command_rejected(None, "start", &format!("UR-17: {error}")),
                 };
@@ -665,6 +666,7 @@ mod tests {
     use ezsdr_kernel::module_api::Link;
     use ezsdr_kernel::stream::BackPressure;
     use ezsdr_radio::timeline::{Item, Kind, Line, Segment, NO_RELEASE};
+    use std::collections::BTreeMap;
 
     fn link() -> Arc<dyn ezsdr_kernel::stream::DataLink> {
         let decl = ezsdr_kernel::stream::DataLinkDecl {
@@ -698,7 +700,7 @@ mod tests {
             direction: Direction::Rx,
             origin: 0,
             config,
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.mode.timing(), Direction::Rx)),
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
             call: core.block_len as i64,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         }));
@@ -715,7 +717,7 @@ mod tests {
         let mut streams = lock(&core.streams);
         let key = stream_key(Dir::Rx, 0);
         for by in segments.iter().filter_map(|(_, _, by)| *by) {
-            streams.stream_mut(key).configs.insert(by, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            streams.stream_mut(key).configs.insert(by, Arc::new(ColdConfig::new(BTreeMap::new())));
         }
         let mut line = streams.line(key).expect("the receive line").clone();
         line.plan = segments.iter().map(|&(origin, cut, by)| Segment { origin, cut, config, by }).collect();
@@ -726,7 +728,7 @@ mod tests {
     fn book(core: &Core, e: i64, seq: u64, kind: Kind) {
         let key = stream_key(Dir::Rx, 0);
         let mut streams = lock(&core.streams);
-        streams.stream_mut(key).configs.insert(seq, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+        streams.stream_mut(key).configs.insert(seq, Arc::new(ColdConfig::new(BTreeMap::new())));
         assert!(streams.book(core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
     }
 
@@ -823,16 +825,15 @@ mod tests {
         core.clocks.sample_clock_records().iter().map(|record| (record.origin.ticks_in(record.root).unwrap(), record.ended_at.map(|end| end.ticks_in(record.root).unwrap()))).collect()
     }
 
-    /// The layout's key set: two receive front ends, so that stream 1 exists (RM-29).
-    fn layout_mode() -> super::super::mode::Mode {
+    /// A layout with two receive front ends, so that stream 1 exists (RM-29).
+    fn layout_description() -> ezsdr_radio::channels::Description {
         use ezsdr_kernel::spec::{Ident, Scalar, Value};
         let selector = std::collections::BTreeMap::from([
-            (Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
             (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
             (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
         ]);
         let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
-        super::super::mode::Mode::Layout(Box::new(ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())))
+        ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())
     }
 
     #[test]
@@ -840,7 +841,7 @@ mod tests {
         // UR-20, RM-29 (R19): stream 1's RX_OVERFLOW goes by stream 1's handle, from
         // `usrp/rx/s1`, with RM-24's bytes; stream 0's stay its own (the existing test).
         let link = link();
-        let (core, _device, _time, events) = super::super::test_support::rig_with_links_on(1, vec![link.clone()], layout_mode());
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links_on(1, vec![link.clone()], layout_description());
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
         lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
             direction: Direction::Rx,
@@ -993,7 +994,7 @@ mod tests {
     fn ur_26_a_stream_s_delivered_is_cleared_alone() {
         // RM-16 (S12c): a stream's `finish` clears its own delivered floor; the other
         // stream's stands for the end that comes later.
-        let (core, _device, _time, _events) = super::super::test_support::rig_with_links_on(1, vec![link()], layout_mode());
+        let (core, _device, _time, _events) = super::super::test_support::rig_with_links_on(1, vec![link()], layout_description());
         lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 700));
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
         lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
@@ -1395,7 +1396,7 @@ mod tests {
         {
             let key = stream_key(Dir::Rx, 0);
             let mut streams = lock(&core.streams);
-            streams.stream_mut(key).configs.insert(2, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            streams.stream_mut(key).configs.insert(2, Arc::new(ColdConfig::new(BTreeMap::new())));
             let kind = Kind::Cold(Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() });
             assert!(streams.book(&core, key, Item { e: ms(20), seq: 2, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
         }
@@ -1544,7 +1545,7 @@ mod tests {
             direction: Direction::Tx,
             origin: 0,
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.mode.timing(), Direction::Tx)),
+            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Tx)),
             call: core.block_len as i64,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         })
@@ -1600,7 +1601,7 @@ mod tests {
             // something a refusal could move.
             let mut streams = lock(&core.streams);
             streams.lines.insert(tx_key, tx_line(&core));
-            streams.stream_mut(tx_key).configs.insert(1, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            streams.stream_mut(tx_key).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
             assert!(streams.book(&core, tx_key, Item { e: ms(20), seq: 1, ready: ms(20), release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() }) }));
         }
         let snapshot = |key: StreamKey| -> Held {
@@ -1628,7 +1629,7 @@ mod tests {
         // own, keeps its items, plan and clocks.
         let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }));
-        let (core, _, _) = super::super::test_support::rig_on_mode(device, vec![link()], Default::default(), layout_mode());
+        let (core, _, _) = super::super::test_support::rig_on_description(device, vec![link()], Default::default(), layout_description());
         let (mut rx, _) = rx(&core, 1);
         let (rx_key, other) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -1642,7 +1643,7 @@ mod tests {
                 call: 0,
                 allowance: 0,
             }));
-            streams.stream_mut(other).configs.insert(1, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            streams.stream_mut(other).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
             assert!(streams.book(&core, other, Item { e: ms(30), seq: 1, ready: ms(30), release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(0).with(1), ratio: Rational::new(100, 1).unwrap() }) }));
         }
         let snapshot = |key: StreamKey| -> Held {
@@ -1688,8 +1689,8 @@ mod tests {
                 Segment { origin: ms(200), cut: None, config: configs[1], by: Some(2) },
             ];
             streams.lines.insert(key, line);
-            streams.stream_mut(key).configs.insert(1, Arc::new(ColdConfig::new(crate::device::Settings::default())));
-            streams.stream_mut(key).configs.insert(2, Arc::new(ColdConfig::new(crate::device::Settings::default())));
+            streams.stream_mut(key).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
+            streams.stream_mut(key).configs.insert(2, Arc::new(ColdConfig::new(BTreeMap::new())));
         }
         // The cut ends the stream at the untimed stop; the next segment configures alone, the
         // one after it reopens the streamer for its channel count.

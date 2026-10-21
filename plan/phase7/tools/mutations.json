@@ -651,12 +651,12 @@
   "test_bin": "fake",
   "filter": "ur_23_a_stop_ends_the_burst_within_the_in_flight_window"
  },
- {
-  "id": "U20",
+  {
+    "id": "U20",
   "name": "the command queue not counted",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        if pending + cost > depth {",
-  "new": "        if false && pending + cost > depth {",
+    "old": "        if pending + 1 > depth {",
+    "new": "        if false && pending + 1 > depth {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_24_hardware_timed_updates"
@@ -940,8 +940,8 @@
   "old": "    let asked = at.unwrap_or(now);\n    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);",
   "new": "    let asked = now;\n    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_rx_channels_from_zero_starts_at_its_instant"
+    "test_bin": "lib",
+    "filter": "ur_25_a_start_rx_takes_the_line_lock_once_for_its_instant_and_its_booking"
  },
  {
   "id": "R05",
@@ -1053,32 +1053,22 @@
   "test_bin": "fake",
   "filter": "ur_25_a_receive_session_follows_its_recorded_plan"
  },
- {
-  "id": "R21",
-  "name": "UR-24's depth counted one per update again (Review M, N-7)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        if pending + cost > depth {",
-  "new": "        if self.held.len() + self.released.len() + 1 > depth + 0 * pending {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_24_the_queue_counts_a_command_per_channel"
- },
- {
-  "id": "R22",
-  "name": "UR-5's front-end check removed (the one-CBX bench, 2026-09-30)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "                if !front_end.starts_with(element.board.uhd_name()) {",
-  "new": "                if false && !front_end.starts_with(element.board.uhd_name()) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
+  {
+    "id": "R21",
+   "name": "UR-24's depth check drops the newly booked command's slot",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "        if pending + 1 > depth {",
+   "new": "        if pending > depth {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
  },
  {
   "id": "R24",
-  "name": "the CBX keeps RM-5's 1 GHz default (the one-CBX bench)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "        let value = Scalar::try_from(board.default_frequency_hz()).expect(\"a finite default\");",
-  "new": "        let value = Scalar::try_from(1.0e9).expect(\"a finite default\");",
+  "name": "the layout's CBX default frequency comes from its front end",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "            default_frequency_hz: front_end.default_frequency_hz(),",
+  "new": "            default_frequency_hz: 1.0e9,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_09_the_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
@@ -1092,26 +1082,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_09_the_cbx_is_one_channel_from_1_2_ghz_defaulting_to_2_45_ghz"
- },
- {
-  "id": "R26",
-  "name": "UR-5's element lookup falls back to element 0, which panics on a direction with no elements (Review of 09f11b4, P2-2)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "                    for (chan, element) in elements.iter().enumerate() {\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
-  "new": "                    for chan in 0..device.channels(dir) {\n                        let element = elements.get(chan).unwrap_or(&elements[0]);\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_05_a_direction_without_elements_sets_no_spec"
- },
- {
-  "id": "R27",
-  "name": "UR-5 checks channel 0 only (Review of 09f11b4, P2-2)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "                    for (chan, element) in elements.iter().enumerate() {\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
-  "new": "                    for (chan, element) in elements.iter().enumerate().take(elements.len().min(1)) {\n                        let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!(\"UR-5: {}\", e.message)))?;\n                        if !front_end.starts_with(element.board.uhd_name()) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_05_the_profile_must_be_the_device_s_front_ends"
  },
  {
   "id": "R28",

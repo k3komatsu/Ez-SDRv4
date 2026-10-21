@@ -12,7 +12,7 @@ use ezsdr_kernel::module_api::{ActionReceiver, UpdateClass};
 use ezsdr_kernel::spec::{Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Rational};
-use ezsdr_radio::timeline::{Channels, Config, Stream, plan};
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Stream, NO_RELEASE, plan};
 use super::super::test_support::target_of;
 use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
 
@@ -78,6 +78,82 @@ fn terms(direction: Direction) -> Terms {
     Terms { t0: T0, root_hz: 200_000_000, timed_lead: ticks(DEVICE_LEAD_NS), stream }
 }
 
+/// The generated operations' effective instants with the layout's instance-wide cold floor.
+fn layout_schedule(sequence: &Sequence, terms: &Terms) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = sequence.faults.iter().enumerate().map(|(index, (at, _))| {
+        let e = terms.t0 + terms.ticks(*at);
+        Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
+    }).collect();
+    let mut cold = Vec::new();
+    for (index, (round, op)) in sequence.ops().enumerate() {
+        let receipt = terms.t0 + terms.ticks(round);
+        let at_ns = match *op {
+            Op::Cold { at_ns, .. } | Op::Timed { at_ns, .. } => at_ns,
+            _ => None,
+        };
+        let requested = at_ns.map(|ns| terms.t0 + terms.ticks(ns));
+        let e = match *op {
+            Op::Stop { .. } | Op::StartRx => receipt,
+            Op::Cold { direction, .. } => {
+                let start = (direction == Direction::Rx).then_some(terms.t0);
+                let (e, _) = ezsdr_radio::timeline::layout_instant(requested, receipt, start, cold.iter().copied());
+                cold.push(e);
+                e
+            }
+            Op::Timed { .. } => requested.unwrap_or(i64::MIN).max(receipt + terms.timed_lead),
+        };
+        entries.push(Entry { e, seq: (sequence.faults.len() + index) as u64, receipt, event: Event::Op(index) });
+    }
+    entries.sort_by_key(|entry| (entry.e, entry.seq));
+    entries
+}
+
+/// A generated channel count is expanded as c0/c1 membership changes at the same instant.
+fn layout_items(sequence: &Sequence, terms: &Terms) -> Vec<Item> {
+    let receive = terms.stream.direction == Direction::Rx;
+    let ops: Vec<&Op> = sequence.ops().map(|(_, op)| op).collect();
+    let mut config = terms.stream.config;
+    let mut items = Vec::new();
+    for entry in layout_schedule(sequence, terms) {
+        if let Event::Op(index) = entry.event {
+            if let Op::Cold { direction, change: Change::Channels(count), .. } = *ops[index] {
+                if direction != terms.stream.direction { continue; }
+                let desired = Channels::first(u32::from(count));
+                let mut sub = 0;
+                for channel in 0..2 {
+                    let wanted = desired.contains(channel);
+                    if config.channels.contains(channel) == wanted { continue; }
+                    config.channels = if wanted { config.channels.with(channel) } else { config.channels.without(channel) };
+                    items.push(Item { e: entry.e, seq: entry.seq * 2 + sub, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config) });
+                    sub += 1;
+                }
+                continue;
+            }
+        }
+        let kind = match entry.event {
+            Event::Fault(index) if sequence.faults[index].1 == Fault::Loss => Kind::End { abort: false },
+            Event::Fault(_) => continue,
+            Event::Op(index) => match *ops[index] {
+                Op::Stop { .. } if receive => Kind::Stop,
+                Op::StartRx if receive => Kind::Start,
+                Op::Cold { direction, change, .. } if direction == terms.stream.direction => {
+                    match change {
+                        Change::Channels(_) => unreachable!("channel changes are expanded above"),
+                        Change::Rate(rate) => {
+                            config.ratio = terms.ratio(rate);
+                            if config.channels.is_empty() { continue; }
+                        }
+                    }
+                    Kind::Cold(config)
+                }
+                _ => continue,
+            },
+        };
+        items.push(Item { e: entry.e, seq: entry.seq * 2, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind });
+    }
+    items
+}
+
 /// Per field, how many sequences show it and the first seed that does.
 type Divergences = BTreeMap<&'static str, (usize, u64)>;
 
@@ -86,8 +162,19 @@ fn rm_26_the_timeline_against_uhd_control() {
     let shown: Option<u64> = std::env::var("EZSDR_TIMELINE_SEED").ok().and_then(|seed| seed.parse().ok());
     let mut summary: BTreeMap<Class, (usize, Divergences)> = BTreeMap::new();
     let (mut failed, mut uncompared) = (Vec::new(), 0);
+    let (mut became_two, mut reduced_from_two) = (0, 0);
     for seed in 0..1_000 {
         let sequence = generator::sequence(seed, &generator::RATES);
+        let mut memberships = [1u16; 2];
+        for (_, op) in sequence.ops() {
+            if let Op::Cold { direction, change: Change::Channels(next), .. } = *op {
+                let index = usize::from(direction == Direction::Tx);
+                let before = memberships[index];
+                if before < 2 && next == 2 { became_two += 1; }
+                if before == 2 && next < 2 { reduced_from_two += 1; }
+                memberships[index] = next;
+            }
+        }
         let expected = expect(&sequence);
         let observed = run(&sequence);
         let diverged = observed.diverged(&expected);
@@ -107,6 +194,8 @@ fn rm_26_the_timeline_against_uhd_control() {
             fields.entry(field).or_insert((0, seed)).0 += 1;
         }
     }
+    eprintln!("layer 2: two-channel transitions in 1,000 seeds: became two {became_two}, reduced from two {reduced_from_two}");
+    assert!(became_two > 0 && reduced_from_two > 0, "the generated sequences must cover both two-channel membership transitions");
     for (class, (count, fields)) in &summary {
         let equal: Vec<_> = divergent(*class).iter().filter(|field| !fields.contains_key(*field)).collect();
         eprintln!("layer 2, {class:?}: {count} sequences; printed {fields:?}; listed but equal {equal:?}");
@@ -123,7 +212,7 @@ fn rm_26_the_timeline_against_uhd_control() {
 /// MockRadio models the release window is the owner's decision (#62). Detected from the
 /// sequence alone, with the rig's 1 ms poll as margin.
 fn release_window_matters(sequence: &Sequence) -> bool {
-    let schedule = sequence.schedule(&terms(Direction::Rx));
+    let schedule = layout_schedule(sequence, &terms(Direction::Rx));
     let ops: Vec<&Op> = sequence.ops().map(|(_, op)| op).collect();
     let margin = (RELEASE_WINDOW_NS + 1_000_000) / 5;
     let timed: Vec<&Entry> = schedule.iter().filter(|entry| matches!(entry.event, Event::Op(op) if matches!(ops[op], Op::Timed { .. }))).collect();
@@ -136,16 +225,16 @@ fn release_window_matters(sequence: &Sequence) -> bool {
 /// and after a loss nothing more is booked.
 fn expect(sequence: &Sequence) -> Record {
     let (rx, tx) = (terms(Direction::Rx), terms(Direction::Tx));
-    let clocks = |terms: &Terms| plan(&terms.stream, &sequence.items(terms)).unwrap().iter()
+    let clocks = |terms: &Terms| plan(&terms.stream, &layout_items(sequence, terms)).unwrap().iter()
         .map(|s| (s.origin, s.cut.map(|k| s.instant(k).unwrap()))).collect();
-    let schedule = sequence.schedule(&rx);
+    let schedule = layout_schedule(sequence, &rx);
     let lost = schedule.iter().position(|entry| matches!(entry.event, Event::Fault(i) if sequence.faults[i].1 == Fault::Loss));
     let ops: Vec<&Op> = sequence.ops().map(|(_, op)| op).collect();
     let timed = schedule.iter().enumerate()
         .filter(|(index, _)| !lost.is_some_and(|lost| *index > lost))
         .filter_map(|(_, entry)| match entry.event {
             Event::Op(op) => match *ops[op] {
-                Op::Timed { direction, gain_db, .. } => Some((format!("radio.{}.gain_db", side(direction)), gain_db, entry.e)),
+                Op::Timed { direction, gain_db, .. } => Some((format!("radio.{}.c0.gain_db", side(direction)), gain_db, entry.e)),
                 _ => None,
             },
             Event::Fault(_) => None,
@@ -192,11 +281,11 @@ fn run(sequence: &Sequence) -> Record {
     let fake = FakeConfig { command_queue: usize::MAX, ..FakeConfig::default() };
     let (core, device, time, _) = super::super::test_support::rig_with(fake, vec![Arc::new(NoLink)]);
     let tx = core.register(Dir::Tx, 200, 0).unwrap();
-    device.rx_open(0, &[0]).unwrap();
-    device.tx_open(0, &[0]).unwrap();
+    device.rx_open(0, &[0, 1]).unwrap();
+    device.tx_open(0, &[0, 1]).unwrap();
     let (to_tx, from_tx) = channel();
-    let mut config = core.mode.defaults();
-    config.insert(key("radio.tx.channels"), Value::from(1));
+    let mut config = core.description.defaults();
+    config.insert(key("radio.tx.c0.stream"), Value::from(0));
     let start = super::Start {
         t0: T0,
         rx: vec![Some((ezsdr_radio::timeline::Channels::first(1), 200))],
@@ -207,6 +296,7 @@ fn run(sequence: &Sequence) -> Record {
     let at = |ns: Option<i64>| ns.map(|ns| AbsoluteDeadline::new(core.at(T0 + ticks(ns))));
     let loss = sequence.faults.iter().filter(|(_, fault)| *fault == Fault::Loss).map(|(ns, _)| T0 + ticks(*ns)).min();
     let mut rounds = sequence.rounds.iter().peekable();
+    let mut memberships = [[true, false], [true, false]];
     // The idealized uhd-rx: each planned segment's clock, once registered, and whether ended.
     let mut receive: Vec<(i64, ezsdr_radio::timeline::Config, ClockDomainId, bool)> = Vec::new();
     let mut now = T0;
@@ -217,6 +307,36 @@ fn run(sequence: &Sequence) -> Record {
         }
         while let Some((_, ops)) = rounds.next_if(|(round, _)| T0 + ticks(*round) <= now) {
             for op in ops {
+                if let Op::Cold { direction, change: Change::Channels(count), at_ns } = *op {
+                    if !core.is_lost() {
+                        let side = side(direction);
+                        let index = usize::from(direction == Direction::Tx);
+                        let mut changed = false;
+                        for (channel, member) in memberships[index].iter_mut().enumerate() {
+                            let selected = channel < usize::from(count);
+                            if *member == selected { continue; }
+                            changed = true;
+                            *member = selected;
+                            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), Action::UpdateParameter {
+                                target: target_of(&core.id),
+                                key: key(&format!("radio.{side}.c{channel}.stream")),
+                                value: Value::from(if selected { 0 } else { -1 }),
+                                class: UpdateClass::Cold,
+                                at: at(at_ns),
+                            }, Some(core.id.clone())));
+                        }
+                        if !changed {
+                            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), Action::UpdateParameter {
+                                target: target_of(&core.id),
+                                key: key(&format!("radio.{side}.c0.stream")),
+                                value: Value::from(if count == 0 { -1 } else { 0 }),
+                                class: UpdateClass::Cold,
+                                at: at(at_ns),
+                            }, Some(core.id.clone())));
+                        }
+                    }
+                    continue;
+                }
                 if !core.is_lost() {
                     // The node each Action is resolved to (KC-23); its target only names it.
                     let (action, node) = match *op {
@@ -227,13 +347,13 @@ fn run(sequence: &Sequence) -> Record {
                         Op::StartRx => (Action::Command { target: target_of(&core.rx_id), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None }, core.rx_id.clone()),
                         Op::Cold { direction, change, at_ns } => {
                             let (name, value) = match change {
-                                Change::Channels(n) => ("channels", Value::from(i64::from(n))),
-                                Change::Rate(rate) => ("sample_rate_hz", Value::num(rate as f64).unwrap()),
+                                Change::Channels(n) => ("c0.stream", Value::from(if n == 0 { -1 } else { 0 })),
+                                Change::Rate(rate) => ("s0.sample_rate_hz", Value::num(rate as f64).unwrap()),
                             };
                             (Action::UpdateParameter { target: target_of(&core.id), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }, core.id.clone())
                         }
                         Op::Timed { direction, gain_db, at_ns } => (Action::UpdateParameter {
-                            target: target_of(&core.id), key: key(&format!("radio.{}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
+                            target: target_of(&core.id), key: key(&format!("radio.{}.c0.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
                         }, core.id.clone()),
                     };
                     control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), action, Some(node)));

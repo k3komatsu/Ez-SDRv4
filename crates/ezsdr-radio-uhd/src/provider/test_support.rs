@@ -10,6 +10,7 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
+use ezsdr_kernel::spec::{Ident, Scalar, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority, TimePoint};
 use ezsdr_kernel::run::RunError;
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
@@ -52,18 +53,26 @@ pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::s
 /// `rig_on` with the Run's Command inputs.
 pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32, inputs: BTreeMap<ContentHash, Arc<[u8]>>)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
-    rig_on_mode(device, links, inputs, super::mode::Mode::Current(Box::new(crate::profile::ubx_description(block_len))))
+    rig_on_description(device, links, inputs, default_description(block_len))
 }
 
-/// `rig_on_inputs` with the key set the instance presents (RM-27): the current keys, or
-/// the layout builder's, whose stream nodes are `<id>/rx/s<k>` and `<id>/tx/s<k>`.
-pub(super) fn rig_on_mode(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
+pub(super) fn default_description(block_len: u32) -> ezsdr_radio::channels::Description {
+    let selector = BTreeMap::from([
+        (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+        (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+    ]);
+    let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+    ezsdr_radio::channels::Description::new(&layout, block_len, &crate::profile::terms())
+}
+
+/// `rig_on_inputs` with a specific layout description.
+pub(super) fn rig_on_description(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
-    rig_on_mode_links(device, vec![links], inputs, mode)
+    rig_on_description_links(device, vec![links], inputs, description)
 }
 
-/// `rig_on_mode` with each receive stream's links (RM-29): index `k` is stream `k`'s.
-pub(super) fn rig_on_mode_links(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
+/// `rig_on_description` with each receive stream's links (RM-29): index `k` is stream `k`'s.
+pub(super) fn rig_on_description_links(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
@@ -75,27 +84,27 @@ pub(super) fn rig_on_mode_links(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn 
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
     // The instance's own nodes, under either key set (RM-29): a layout's events come from
     // its stream nodes.
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
+    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
-    let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, mode);
+    let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, description);
     (core, time, events)
 }
 
 /// A layout rig with `links` on receive stream `k` alone.
-pub(super) fn rig_with_links_on(k: usize, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, mode: super::mode::Mode)
+pub(super) fn rig_with_links_on(k: usize, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, description: ezsdr_radio::channels::Description)
     -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let device = Arc::new(FakeDevice::new(FakeConfig::default()));
     let mut per_stream: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = Vec::new();
     per_stream.resize_with(k + 1, Vec::new);
     per_stream[k] = links;
-    let (core, time, events) = rig_on_mode_links(device.clone(), per_stream, BTreeMap::new(), mode);
+    let (core, time, events) = rig_on_description_links(device.clone(), per_stream, BTreeMap::new(), description);
     (core, device, time, events)
 }
 
-/// `rig_on_mode` through a sink that witnesses which events are emitted while the line lock
+/// `rig_on_description` through a sink that witnesses which events are emitted while the line lock
 /// is held (UR-25): the test keeps the witness and reads it.
-pub(super) fn rig_on_mode_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, mode: super::mode::Mode)
+pub(super) fn rig_on_description_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
@@ -105,19 +114,19 @@ pub(super) fn rig_on_mode_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ez
     let mut kinds = EventKindRegistry::with_kernel_kinds();
     ezsdr_radio::register(&mut ModuleRegistry::new(),
         &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx", "usrp/tx", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
+    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let witness = Arc::new(SectionWitness::new(Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()))));
-    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, vec![links], mode);
+    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, vec![links], description);
     witness.watch(&core);
     (core, time, witness)
 }
 
 /// The rig's `Core` on `sink`.
-fn core_on(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, time: Arc<ManualTimeAuthority>, events: Arc<dyn EventSink>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, mode: super::mode::Mode) -> Arc<Core> {
+fn core_on(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, time: Arc<ManualTimeAuthority>, events: Arc<dyn EventSink>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, description: ezsdr_radio::channels::Description) -> Arc<Core> {
     let root = time.primary_root();
     Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
-        root, time, clocks, events, Arc::new(inputs), links, mode)
+        root, time, clocks, events, Arc::new(inputs), links, description)
         .expect("the rx node is inside the instance root"))
 }
 

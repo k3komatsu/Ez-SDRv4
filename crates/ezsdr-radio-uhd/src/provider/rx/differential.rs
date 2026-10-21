@@ -90,7 +90,7 @@ fn extra(seed: u64, sequence: &Sequence) -> Extra {
 /// receive call of `block_len` (the scripted device's packet is the request), the delivery
 /// allowance (UR-25, VH-4).
 fn terms(block: i64) -> Terms {
-    let description = crate::profile::ubx_description(block as u32);
+    let description = super::super::test_support::default_description(block as u32);
     let ticks = |ns: i64| (ns + 4) / 5;
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
@@ -502,7 +502,7 @@ impl World {
                 let mut streams = lock(&core.streams);
                 let stream = booked_stream(Dir::Rx);
                 if matches!(item.kind, Kind::Cold(_) | Kind::Start) {
-                    streams.stream_mut(stream).configs.insert(item.seq, Arc::new(ColdConfig::new(Settings::default())));
+                    streams.stream_mut(stream).configs.insert(item.seq, Arc::new(ColdConfig::new(BTreeMap::new())));
                 }
                 assert!(streams.book(&core, stream, item), "booked");
                 self.booked += 1;
@@ -779,7 +779,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     device.rx_open(0, &[0]).unwrap();
     lock(&core.streams).record_open(crate::provider::core::stream_key(Dir::Rx, 0), Some(Channels::first(1)));
     device.rx_start(0, T0).unwrap();
-    let handle = core.clocks.declare_sample_clock(core.id.child("rx").unwrap(), core.root, Rational::new(200, 1).unwrap()).unwrap();
+    let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(200, 1).unwrap()).unwrap();
     let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), T0)), None);
     for turn in 0.. {
         assert!(turn < 1_000_000, "uhd-rx makes no progress");

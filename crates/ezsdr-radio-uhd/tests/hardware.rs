@@ -174,12 +174,12 @@ fn hw_b8_leads() {
         let envelope = bench_envelope(&*device);
         let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), envelope, true), device);
         past_t0(&mut run, ms(1));
-        assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::from(1)), None).unwrap()));
+        assert!(admitted(&run.submit(set("radio.tx.c0.stream", ezsdr_kernel::spec::Value::from(0)), None).unwrap()));
         past_tx_origin(&mut run);
         let (bytes, _) = waveform_of(&pn(100));
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
         let at = TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead_us * 200 - clock.origin.ticks_in(clock.root).unwrap()).div_euclid(200) + 1);
-        let _ = run.submit(verb("send", resource("radio/tx"), Some(at), &[]), Some(&bytes));
+        let _ = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&bytes));
         wait(&mut run, ms(100));
         let manifest = run.finish();
         println!("B8 lead {lead_us} µs: TIME_ERROR {:?}", events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
@@ -214,8 +214,8 @@ fn hw_b9_unplug_transmit_only() {
     // reads touch the device (UR-29's 500 ms read).
     let dir = TempDir::new();
     let mut run = tx_session(usrp(), &dir);
-    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::from(0)), None).unwrap();
-    println!("B9 transmit only: radio.rx.channels 0: {:?}", off.outcome);
+    let off = run.submit(set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None).unwrap();
+    println!("B9 transmit only: radio.rx.c0.stream -1: {:?}", off.outcome);
     println!("B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC {:.3}", utc_now());
     let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
@@ -669,7 +669,7 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
     let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device);
     past_t0(&mut run, ms(100));
     if from != 1e6 {
-        assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
+        assert!(admitted(&run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
         wait(&mut run, ms(300));
     }
     let at = after_ticks(&run, ms(20));
@@ -677,7 +677,7 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
     assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(n))]), None).unwrap()));
     wait(&mut run, ms(60));
     let booked = run.now();
-    let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
+    let entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
     println!("B8 cold {from} → {to} S/s, block_len {block_len:?}: capture asked at {at:?}; rate change submitted at {booked:?}: {:?}", entry.outcome);
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
@@ -696,7 +696,7 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
             println!("B8 cold: event {} from {:?} at {:?}: {}", event.kind, event.source, event.time, event.payload);
         }
     }
-    let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/rx")).collect();
+    let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/rx/s0")).collect();
     let (old, new) = (clocks[clocks.len() - 2], clocks[clocks.len() - 1]);
     let e1_k = (old.ended_at.unwrap().ticks_in(old.root).unwrap() - old.origin.ticks_in(old.root).unwrap()) / old.root_ticks_per_tick.num() as i64;
     assert_eq!(artifact.continuity.len(), 2, "{:?}", artifact.continuity);
@@ -711,7 +711,7 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
 
 /// The transmit sample `lead` root ticks from now, on the running transmit clock.
 fn tx_at(run: &ezsdr_kernel::coordinator::RunHandle, lead: i64) -> TimePoint {
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
     let n = clock.root_ticks_per_tick.num() as i64;
     TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))
 }
@@ -720,14 +720,14 @@ fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinat
     let envelope = bench_envelope(&*device);
     let mut run = session(&bench_profile(&*device, dir, serde_json::json!({}), envelope, true), device);
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.channels", ezsdr_kernel::spec::Value::from(1)), None).unwrap()));
+    assert!(admitted(&run.submit(set("radio.tx.c0.stream", ezsdr_kernel::spec::Value::from(0)), None).unwrap()));
     past_tx_origin(&mut run);
     run
 }
 
 /// The receive SampleClock's origin (root ticks) and root ticks a sample.
 fn rx_clock(manifest: &ezsdr_kernel::manifest::Manifest) -> (i64, i64) {
-    let clock = manifest.clocks.sample_clocks.iter().find(|r| r.stream.to_string().ends_with("usrp/rx")).unwrap();
+    let clock = manifest.clocks.sample_clocks.iter().find(|r| r.stream.to_string().ends_with("usrp/rx/s0")).unwrap();
     (clock.origin.ticks_in(clock.root).unwrap(), clock.root_ticks_per_tick.num() as i64)
 }
 
@@ -740,12 +740,12 @@ fn hw_b8_stop_end() {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
         let (bytes, _) = waveform_of(&pn(1_000));
-        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx"), None, &[]), Some(&bytes)).unwrap()));
+        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&bytes)).unwrap()));
         let at = after_ticks(&run, ms(20));
         assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));
         let _ = run.advance_to(TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + ms(50)));
         let s = run.now();
-        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx")) }, None);
+        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
         let horizon = after_ticks(&run, ms(3_000));
         let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
         let manifest = run.finish();
@@ -765,7 +765,7 @@ fn hw_b8_stop_end() {
             power[last + 2..].iter().sum::<f32>() / (power.len() - last - 2).max(1) as f32,
             section(&manifest, "bursts")
         );
-        println!("B8 stop end, trial {trial}: tx clocks {:?}", manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx")).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.root_ticks_per_tick.num())).collect::<Vec<_>>());
+        println!("B8 stop end, trial {trial}: tx clocks {:?}", manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx/s0")).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.root_ticks_per_tick.num())).collect::<Vec<_>>());
     }
 }
 
@@ -778,11 +778,11 @@ fn hw_b8_preemption() {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
         let (repeat, _) = waveform_of(&pn(1_000));
-        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx"), None, &[]), Some(&repeat)).unwrap()));
+        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&repeat)).unwrap()));
         wait(&mut run, ms(100));
         let (burst, _) = waveform_of(&pn(100));
         let at = tx_at(&run, ms(lead_ms));
-        let entry = run.submit(verb("send", resource("radio/tx"), Some(at), &[]), Some(&burst)).unwrap();
+        let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&burst)).unwrap();
         wait(&mut run, ms(100));
         let manifest = run.finish();
         println!("B8 preempt lead {lead_ms} ms: {:?}; TIME_ERROR {:?}", entry.outcome, events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
@@ -916,8 +916,8 @@ fn hw_b9_transmit_only_session() {
     // nothing sent, the receiver off if the Session allows it; no false DEVICE_LOST.
     let dir = TempDir::new();
     let mut run = tx_session(usrp(), &dir);
-    let off = run.submit(set("radio.rx.channels", ezsdr_kernel::spec::Value::from(0)), None).unwrap();
-    println!("B9 transmit only: radio.rx.channels 0: {:?}", off.outcome);
+    let off = run.submit(set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None).unwrap();
+    println!("B9 transmit only: radio.rx.c0.stream -1: {:?}", off.outcome);
     wait(&mut run, ms(60_000));
     let manifest = run.finish();
     let lost = events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST);
@@ -983,15 +983,15 @@ fn hw_b8_burst_at_a_sent_burst_s_end() {
         wait(&mut run, ms(1));
         let a = tx_at(&run, ms(40));
         let (first, _) = waveform_of(&pn(30_000));
-        assert!(admitted(&run.submit(verb("send", resource("radio/tx"), Some(a), &[]), Some(&first)).unwrap()));
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
         let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
         while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
             wait(&mut run, ms(1) / 4);
         }
         let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000);
         let (second, _) = waveform_of(&pn(1_000));
-        let entry = run.submit(verb("send", resource("radio/tx"), Some(b), &[]), Some(&second)).unwrap();
+        let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(60));
         let manifest = run.finish();
         println!("B8 burst at a sent burst's end, trial {trial}: {:?}; {} ms before A's end; TIME_ERROR {:?}; async {}; bursts {}",
@@ -1066,10 +1066,10 @@ fn hw_b8_cold_change_timing_at_the_extremes() {
             let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
             let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device.clone());
             past_t0(&mut run, ms(100));
-            assert!(admitted(&run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
+            assert!(admitted(&run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
             wait(&mut run, ms(300 + phase * 37));
             let packet = spp(&*device);
-            let entry = run.submit(set("radio.rx.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
+            let entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
             wait(&mut run, ms(500));
             let manifest = run.finish();
             let timing = section(&manifest, "timing").as_array().unwrap().clone();
@@ -1110,8 +1110,8 @@ fn hw_b8_burst_one_sample_after_a_burst() {
         wait(&mut run, ms(1));
         let a = tx_at(&run, ms(40));
         let (first, _) = waveform_of(&pn(30_000));
-        assert!(admitted(&run.submit(verb("send", resource("radio/tx"), Some(a), &[]), Some(&first)).unwrap()));
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx") && r.ended_at.is_none()).unwrap();
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
+        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
         let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
         if late_booking {
             while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
@@ -1120,7 +1120,7 @@ fn hw_b8_burst_one_sample_after_a_burst() {
         }
         let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_001);
         let (second, _) = waveform_of(&pn(1_000));
-        let entry = run.submit(verb("send", resource("radio/tx"), Some(b), &[]), Some(&second)).unwrap();
+        let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(80));
         let manifest = run.finish();
         println!("B8 burst one sample after a burst, booked late {late_booking}: {:?}; TIME_ERROR {:?}; async {}; bursts {}",
