@@ -1082,6 +1082,20 @@ impl Device for UhdDevice {
         self.lost.store(true, Ordering::Release);
     }
 
+    fn rx_close(&self, stream: usize) {
+        let _control = lock(&self.control);
+        #[cfg(test)]
+        debug_assert!(self.control.try_lock().is_err(), "rx_close must serialize with rx_open");
+        drop(lock(&self.rx).remove(&stream));
+    }
+
+    fn tx_close(&self, stream: usize) {
+        let _control = lock(&self.control);
+        #[cfg(test)]
+        debug_assert!(self.control.try_lock().is_err(), "tx_close must serialize with tx_open");
+        drop(lock(&self.tx).remove(&stream));
+    }
+
     fn close_streams(&self) {
         // UR-2, UR-16: every streamer of both directions; dropping the device's reference
         // frees each only once no thread still holds its Arc (and never a lost device's, F4).
@@ -1105,6 +1119,7 @@ mod ffi_tests {
     static ACTIVE: AtomicUsize = AtomicUsize::new(0);
     static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
     static ENTERED: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+    static RX_STREAM_FREES: AtomicUsize = AtomicUsize::new(0);
 
     fn native_entry() {
         if !PROBE.load(Ordering::SeqCst) { return; }
@@ -1281,6 +1296,77 @@ mod ffi_tests {
     }
     fn start(device: &UhdDevice) { device.rx_start(0, 0).unwrap(); }
     fn report(device: &UhdDevice) { assert!(device.tx_async(0, Duration::from_secs(1)).unwrap().is_none()); }
+
+    fn rx_open(device: &UhdDevice) { device.rx_open(0, &[0]).unwrap(); }
+    fn rx_open_then_close(device: &UhdDevice) { device.rx_open(0, &[0]).unwrap(); device.rx_close(0); }
+
+    fn rx_dummy(lost: bool) -> Arc<UhdDevice> {
+        Arc::new(UhdDevice {
+            usrp: std::ptr::null_mut(), args: "ffi-rx-test-no-device".to_owned(), mcr: 200_000_000,
+            control: Mutex::new(()), rx: Mutex::new(BTreeMap::new()), tx: Mutex::new(BTreeMap::new()),
+            lost: Arc::new(AtomicBool::new(lost)),
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_rx_streamer_make(h: *mut uhd_rx_streamer_handle) -> c_int {
+        // SAFETY: the caller supplies a live output slot; the paired free stub owns this box.
+        unsafe { *h = Box::into_raw(Box::new(0u8)) as uhd_rx_streamer_handle; }
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_rx_streamer_free(h: *mut uhd_rx_streamer_handle) -> c_int {
+        RX_STREAM_FREES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the test open stub allocated this handle once; the caller frees it once.
+        unsafe { if !(*h).is_null() { drop(Box::from_raw(*h as *mut u8)); *h = std::ptr::null_mut(); } }
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_usrp_get_rx_stream(_usrp: uhd_usrp_handle, _args: *mut uhd_stream_args_t, _h: uhd_rx_streamer_handle) -> c_int {
+        native_entry();
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_rx_streamer_max_num_samps(_h: uhd_rx_streamer_handle, n: *mut usize) -> c_int {
+        // SAFETY: the caller supplies a live output slot.
+        unsafe { *n = 64; }
+        UHD_ERROR_NONE
+    }
+
+    #[test]
+    fn uhd_close_drops_its_map_reference_but_an_in_flight_arc_keeps_the_streamer() {
+        let _test = lock(&TEST_LOCK);
+        RX_STREAM_FREES.store(0, Ordering::SeqCst);
+        let device = rx_dummy(false);
+        device.rx_open(0, &[0]).unwrap();
+        let held = lock(&device.rx).get(&0).unwrap().clone();
+        assert_eq!(Arc::strong_count(&held), 2, "the map and the call hold the streamer");
+        device.rx_close(0);
+        assert!(lock(&device.rx).get(&0).is_none(), "close removed the map entry");
+        assert_eq!(Arc::strong_count(&held), 1, "the in-flight call still owns the streamer");
+        assert_eq!(RX_STREAM_FREES.load(Ordering::SeqCst), 0);
+        drop(held);
+        assert_eq!(RX_STREAM_FREES.load(Ordering::SeqCst), 1);
+        std::mem::forget(device);
+    }
+
+    #[test]
+    fn uhd_stream_close_and_open_compete_under_the_control_mutex() {
+        let _test = lock(&TEST_LOCK);
+        let device = rx_dummy(true);
+        pair(&device, rx_open_then_close, rx_open);
+        let streams = lock(&device.rx);
+        assert!(streams.len() <= 1, "one stream number has at most one map entry");
+        drop(streams);
+        device.rx_open(0, &[0]).unwrap();
+        assert!(lock(&device.rx).contains_key(&0));
+        device.rx_close(0);
+        assert!(lock(&device.rx).is_empty());
+        std::mem::forget(device);
+    }
 
     #[test]
     fn uhd_safe_shared_device_serializes_receive_and_reports() {

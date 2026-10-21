@@ -213,6 +213,10 @@ pub trait Device: Send + Sync {
     /// Stream `stream`'s next asynchronous transmit report, if one arrives within the
     /// timeout; a call that fails is an error, not the absence of a report (UR-3).
     fn tx_async(&self, stream: usize, timeout: Duration) -> Result<Option<TxReport>, DeviceError>;
+    /// Frees one stream's streamer if it is open; no-op when it is not (UR-33).
+    fn rx_close(&self, stream: usize);
+    /// Frees one stream's streamer if it is open; no-op when it is not (UR-33).
+    fn tx_close(&self, stream: usize);
     /// Frees every streamer of both directions (UR-2, UR-16); called only when no thread
     /// holds one.
     fn close_streams(&self);
@@ -1676,6 +1680,18 @@ impl Device for FakeDevice {
         Ok(None)
     }
 
+    fn rx_close(&self, stream: usize) {
+        let mut st = self.lock();
+        st.calls.push(format!("rx_close {stream}"));
+        st.rx.remove(&stream);
+    }
+
+    fn tx_close(&self, stream: usize) {
+        let mut st = self.lock();
+        st.calls.push(format!("tx_close {stream}"));
+        st.tx.remove(&stream);
+    }
+
     fn close_streams(&self) {
         // UR-2, UR-16: every streamer of both directions, as UHD frees each of a device's.
         let mut st = self.lock();
@@ -1694,6 +1710,24 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn ur_33_a_close_of_an_unopened_stream_does_nothing() {
+        let device = FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
+        device.rx_close(3);
+        device.tx_close(3);
+        device.rx_open(0, &[0]).unwrap();
+        device.rx_close(0);
+        device.rx_open(1, &[0]).unwrap();
+        device.tx_open(0, &[0]).unwrap();
+        device.tx_close(0);
+        device.tx_open(1, &[0]).unwrap();
+        assert!(device.calls().ends_with(&[
+            "rx_close 3".to_owned(), "tx_close 3".to_owned(), "rx_open 0 [0]".to_owned(),
+            "rx_close 0".to_owned(), "rx_open 1 [0]".to_owned(), "tx_open 0 [0]".to_owned(),
+            "tx_close 0".to_owned(), "tx_open 1 [0]".to_owned(),
+        ]), "{:?}", device.calls());
+    }
 
     #[test]
     fn ur_33_a_real_fake_s_time_counts_from_its_own_creation() {

@@ -857,8 +857,8 @@
   "id": "U40",
   "name": "a rate mismatch at the switch accepted",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        if let Err(error) = self.core.owner_configure(Dir::Rx, self.k, &next) {",
-  "new": "        if let Err(error) = self.core.owner_configure(Dir::Rx, self.k, &next).or(Ok(())) {",
+   "old": "        match self.core.owner_configure(Dir::Rx, self.k, &next) {",
+   "new": "        match self.core.owner_configure(Dir::Rx, self.k, &next).or(Ok(true)) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"

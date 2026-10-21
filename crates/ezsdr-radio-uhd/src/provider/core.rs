@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration as Wall;
 
 use ezsdr_kernel::event::{ActionId, Event, EventHandle, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
@@ -18,6 +19,8 @@ use serde_json::{Value as Json, json};
 use super::control::{ColdConfig, Planned};
 use super::mode::{channel_list, Mode};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
+
+const POLL: Wall = Wall::from_millis(1);
 
 /// A guard of the instance's state (UR-25): a `MutexGuard`, except that the test build counts
 /// how many `core::lock` guards this thread holds — `streams`, `rec`, `held` and `rates` all
@@ -176,11 +179,18 @@ pub(crate) struct StreamState {
     /// after a failed configure or open. The owner configures again unless this is its own
     /// segment's command and the record holds its set open (UR-36).
     pub configured: Option<u64>,
+    /// The segment this stream's owner is still processing, through its cut (A2).
+    pub active: Option<(i64, Config, Option<u64>)>,
+    /// Segments its owner finished processing; a segment with a finite cut remains needed
+    /// until its owner records completion (A2).
+    pub completed: Vec<(i64, Config, Option<u64>)>,
     /// uhd-control's enable from no stream owns the stream's streamer from the section that
     /// decides it until the section that books the change or ends the enable without one: an
     /// owner that finds it set makes no device call and moves neither its cursor nor its idle
     /// mark (UR-25).
     pub busy: bool,
+    /// The owner configuration whose device outcome is still being recorded, if any (RM-34).
+    pub busy_seq: Option<u64>,
     /// uhd-tx's report read is in flight: an enable from no stream waits for it before its
     /// first device call (UR-25).
     pub reading: bool,
@@ -276,9 +286,15 @@ impl Streams {
         if self.lines.line(stream).is_none() {
             return false;
         }
+        let moved = self.lines.move_lines(seq);
         match self.lines.refuse(stream, seq) {
             Ok(refused) => {
-                self.changed(core, stream);
+                if let Some((from, to)) = moved.filter(|_| refused) {
+                    self.changed(core, from);
+                    self.changed(core, to);
+                } else {
+                    self.changed(core, stream);
+                }
                 refused
             }
             Err(error) => {
@@ -345,6 +361,44 @@ impl Streams {
         }
     }
 
+    /// Another stream's recorded streamer owns any channel in `set` (D2, D3).
+    pub fn held_elsewhere(&self, stream: StreamKey, set: Channels) -> Option<StreamKey> {
+        (0..self.count(dir_of(stream))).map(|k| stream_key(dir_of(stream), k)).find(|other| {
+            *other != stream && match self.stream(*other).set {
+                DeviceSet::Open(open) => open.iter().any(|channel| set.contains(channel)),
+                DeviceSet::Unknown => false,
+            }
+        })
+    }
+
+    /// An earlier, unprocessed segment owns the channel before `origin` (A2's finite chain).
+    pub fn needed_before(&self, stream: StreamKey, set: Channels, origin: i64) -> bool {
+        (0..self.count(dir_of(stream))).map(|k| stream_key(dir_of(stream), k)).any(|other| {
+            if other == stream { return false; }
+            let state = self.stream(other);
+            self.planned(other).iter().any(|planned| {
+                let identity = (planned.segment.origin, planned.segment.config, planned.segment.by);
+                planned.segment.origin <= origin && !planned.refused && !state.completed.contains(&identity)
+                    && !planned.segment.cut.is_some_and(|cut| planned.segment.instant(cut).is_ok_and(|end| end <= planned.segment.origin))
+                    && planned.segment.config.channels.iter().any(|channel| set.contains(channel))
+            })
+        })
+    }
+
+    /// A move destination waits only for its source's configuration of that same move.
+    pub fn move_source_busy(&self, stream: StreamKey, seq: Option<u64>) -> bool {
+        let Some(seq) = seq else { return false };
+        self.lines.move_lines(seq).is_some_and(|(from, to)| {
+            to == stream && self.stream(from).busy && self.stream(from).busy_seq == Some(seq)
+        })
+    }
+
+    /// Records a segment its owner finished carrying out.
+    pub fn complete(&mut self, stream: StreamKey, segment: (i64, Config, Option<u64>)) {
+        let completed = &mut self.stream_mut(stream).completed;
+        if !completed.contains(&segment) { completed.push(segment); }
+    }
+
     /// The record of an open of `stream`'s streamer: the set it is open on, or unknown after a
     /// failed open; the generation moves on for each successful open, so that a correlation
     /// against the replaced streamer's reports is told from the new one's (UR-28, UR-36). Any
@@ -385,13 +439,16 @@ impl Streams {
     }
 
     /// A plan changed: the transmit clocks follow it (RM-25, VH-2).
-    fn changed(&mut self, core: &Core, stream: StreamKey) {
+    pub fn changed(&mut self, core: &Core, stream: StreamKey) {
         self.version += 1;
         if stream.0 == Direction::Tx {
             if let Err(error) = self.reconcile(core, stream) {
                 core.command_rejected(None, "update_parameter", &format!("UR-25: {error}"));
             }
         }
+        let planned: Vec<_> = self.lines.line(stream).into_iter().flat_map(|line| &line.plan)
+            .map(|segment| (segment.origin, segment.config, segment.by)).collect();
+        self.stream_mut(stream).completed.retain(|done| planned.contains(done));
     }
 
     /// Each transmit segment's clock, registered when its change is booked and ended at its
@@ -484,6 +541,8 @@ impl Default for Records {
 /// The context `prepare` gathered, shared by uhd-control, uhd-rx and uhd-tx.
 pub(crate) struct Core {
     pub device: Arc<dyn Device>,
+    /// Serializes streamer open/close admission with publishing device loss (UR-29).
+    device_gate: Mutex<()>,
     pub id: ResourceId,
     /// Stream 0's node of each direction (RM-29): `<id>/rx` and `<id>/tx` under the
     /// current keys, `<id>/rx/s0` and `<id>/tx/s0` under the layout. Every other stream
@@ -552,6 +611,7 @@ impl Core {
             mcr: device.master_clock_rate(),
             block_len: mode.block_len() as usize,
             device,
+            device_gate: Mutex::new(()),
             id,
             rx_id,
             tx_id,
@@ -596,6 +656,18 @@ impl Core {
         }
         #[cfg(not(test))]
         let _ = (name, streams);
+    }
+
+    /// Opens and closes of streamers cannot cross the publication of device loss.
+    fn lock_device_gate(&self) -> MutexGuard<'_, ()> {
+        match self.device_gate.try_lock() {
+            Ok(gate) => gate,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.probe("device_gate_waiting", None);
+                self.device_gate.lock().unwrap_or_else(|error| error.into_inner())
+            }
+        }
     }
 
     /// The current instant on the primary root.
@@ -664,6 +736,13 @@ impl Core {
     /// thread that finds the loss books it on both streams, before any thread can see the
     /// device lost (RM-16).
     pub fn device_lost(&self, message: &str) {
+        assert_line_free("device_lost");
+        let _device_gate = self.lock_device_gate();
+        self.device_lost_locked(message);
+    }
+
+    /// Publishes loss while the caller owns `device_gate`.
+    fn device_lost_locked(&self, message: &str) {
         let mut streams = lock(&self.streams);
         if self.lost.load(Ordering::Acquire) {
             return;
@@ -728,6 +807,9 @@ impl Core {
     /// the outcome held for every later open. A mismatch is the refusal `UR-13:`.
     pub fn check_rates(&self, dir: Dir, chan: usize) -> Result<(), DeviceError> {
         self.probe("rates", None);
+        if self.is_lost() {
+            return Err(DeviceError { lost: true, message: "UR-29: the device is lost before the rate comparison".to_owned() });
+        }
         {
             let checks = lock(&self.rates);
             if let Some(outcome) = &checks[dir as usize] {
@@ -737,12 +819,19 @@ impl Core {
         // The device is read outside the lock: no device call is made under one (UR-25).
         // Two directions never share a slot and a repeated read of one answers the same
         // set, so the first outcome stored is the one every later open sees.
+        self.probe("rates_before_gate", None);
+        let device_gate = self.lock_device_gate();
+        if self.is_lost() {
+            return Err(DeviceError { lost: true, message: "UR-29: the device is lost before the rate comparison".to_owned() });
+        }
         let outcome = match self.device.rates(dir, chan) {
             Ok(ranges) if ezsdr_radio::device::rate_set_matches(self.mode.rates(), &ranges) => Ok(()),
             Ok(_) => Err(format!("UR-13: the {} rates the device reports are not the profile's rate set", dir.name())),
             Err(error) => Err(format!("UR-13: {}", error.message)),
         };
+        drop(device_gate);
         lock(&self.rates)[dir as usize] = Some(outcome.clone());
+        self.probe("rates_returned", None);
         outcome.map_err(DeviceError::failed)
     }
 
@@ -816,11 +905,18 @@ impl Core {
     /// line-lock section it already takes (UR-25).
     pub fn open_device(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         self.probe("open", None);
+        let device_gate = self.lock_device_gate();
+        if self.is_lost() {
+            return Err(DeviceError { lost: true, message: "UR-29: the device is lost before opening a streamer".to_owned() });
+        }
         let list = channel_list(set);
-        match dir {
+        let opened = match dir {
             Dir::Rx => self.device.rx_open(k, &list),
             Dir::Tx => self.device.tx_open(k, &list),
-        }
+        };
+        drop(device_gate);
+        self.probe("open_returned", None);
+        opened
     }
 
     /// UR-13, UR-36: the rate comparison after an open on `set`, the direction's first one or
@@ -836,33 +932,151 @@ impl Core {
         let stream = stream_key(dir, k);
         let opened = self.open_device(dir, k, set);
         let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };
+        if opened.is_ok() && checked.is_err() && !self.is_lost() {
+            self.close_device(dir, k);
+        }
         lock(&self.streams).record_opened(stream, set, &opened, &checked);
         opened.and(checked)
+    }
+
+    pub fn close_device(&self, dir: Dir, k: usize) {
+        let _device_gate = self.lock_device_gate();
+        if self.is_lost() { return; }
+        match dir {
+            Dir::Rx => self.device.rx_close(k),
+            Dir::Tx => self.device.tx_close(k),
+        }
+    }
+
+    /// Releases an idle stream's streamer only when another line still has an unprocessed
+    /// segment that needs one of its channels (D1, A2).
+    pub fn release_unneeded(&self, dir: Dir, k: usize) -> bool {
+        let stream = stream_key(dir, k);
+        {
+            let mut streams = lock(&self.streams);
+            if self.is_lost() { return false; }
+            let state = streams.stream(stream);
+            if state.busy || !state.idle || state.active.is_some() { return false; }
+            let DeviceSet::Open(set) = state.set else { return false };
+            if !streams.needed_before(stream, set, i64::MAX) { return false; }
+            let state = streams.stream_mut(stream);
+            state.busy = true;
+            state.busy_seq = None;
+        }
+        if self.is_lost() {
+            let mut streams = lock(&self.streams);
+            let state = streams.stream_mut(stream);
+            state.busy = false;
+            state.busy_seq = None;
+            return false;
+        }
+        self.close_device(dir, k);
+        let mut streams = lock(&self.streams);
+        streams.record_open(stream, None);
+        let state = streams.stream_mut(stream);
+        state.busy = false;
+        state.busy_seq = None;
+        true
+    }
+
+    /// Waits for another stream's recorded streamer to release a target segment's channels.
+    /// The segment is read again after each wait; an absent, refused, stopped or changed
+    /// segment is an abort, not a refusal (A4).
+    fn await_release(&self, dir: Dir, k: usize, expected: &Planned) -> Option<Planned> {
+        let stream = stream_key(dir, k);
+        let mut waiting_since = None;
+        loop {
+            let streams = lock(&self.streams);
+            if self.is_lost() || streams.stop.is_some() { return None; }
+            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == expected.segment)?;
+            if current.refused {
+                return None;
+            }
+            if let Some(since) = waiting_since {
+                if dir == Dir::Tx && streams.line(stream).is_some_and(|line| line.items.iter().any(|item| item.seq > since && item.kind == Kind::Stop)) {
+                    return None;
+                }
+            }
+            if streams.held_elsewhere(stream, current.set()).is_none()
+                && !streams.needed_before(stream, current.set(), current.segment.origin)
+                && !streams.move_source_busy(stream, current.segment.by)
+            {
+                return Some(current);
+            }
+            let first_wait = waiting_since.is_none();
+            waiting_since.get_or_insert(streams.seq);
+            drop(streams);
+            if first_wait { self.probe("wait_release", None); }
+            self.device.host().sleep(POLL);
+        }
     }
 
     /// The owner's device calls for a segment it begins (UR-13, UR-36): the record decides what
     /// is opened and configured. Each device call is made with `streams` released, and its
     /// outcome is recorded after it; a successful open moves the record's generation on, which
     /// is how a thread holding correlations against the replaced streamer learns of it (UR-28).
-    pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<(), DeviceError> {
+    /// On error, the caller books the refusal before releasing the busy mark.
+    pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<bool, DeviceError> {
         let stream = stream_key(dir, k);
-        let set = next.set();
-        let step = lock(&self.streams).owner_step(stream, set, next.segment.by);
-        if step == Owner::Nothing {
-            return Ok(());
+        let (mut current, mut step, release_first) = {
+            let mut streams = lock(&self.streams);
+            if self.is_lost() { return Ok(false); }
+            if streams.stream(stream).busy { return Ok(false); }
+            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };
+            if current.refused { return Ok(false); }
+            let step = streams.owner_step(stream, current.set(), current.segment.by);
+            if step == Owner::Nothing { return Ok(true); }
+            let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()
+                || streams.needed_before(stream, current.set(), current.segment.origin)
+                || streams.move_source_busy(stream, current.segment.by));
+            let state = streams.stream_mut(stream);
+            state.busy = true;
+            state.busy_seq = current.segment.by;
+            (current, step, release_first)
+        };
+        if release_first {
+            if self.is_lost() {
+                let mut streams = lock(&self.streams);
+                let state = streams.stream_mut(stream);
+                state.busy = false;
+                state.busy_seq = None;
+                return Ok(false);
+            }
+            let open = lock(&self.streams).stream(stream).set;
+            if matches!(open, DeviceSet::Open(_)) {
+                self.close_device(dir, k);
+                lock(&self.streams).record_open(stream, None);
+            }
+            let Some(latest) = self.await_release(dir, k, &current) else {
+                let mut streams = lock(&self.streams);
+                let state = streams.stream_mut(stream);
+                state.busy = false;
+                state.busy_seq = None;
+                return Ok(false);
+            };
+            current = latest;
+            step = Owner::Open;
         }
-        if step == Owner::Open {
-            self.open_streamer(dir, k, set)?;
+        let opened = if step == Owner::Open { self.open_streamer(dir, k, current.set()) } else { Ok(()) };
+        if let Err(error) = opened {
+            let mut streams = lock(&self.streams);
+            streams.record_configured(stream, None);
+            return Err(error);
         }
-        match next.configure(self, dir) {
+        match current.configure(self, dir) {
             Ok(_) => {
                 // UR-36: the record's mark is published only once the configuration returned.
                 self.probe("configured", None);
-                lock(&self.streams).record_configured(stream, next.segment.by);
-                Ok(())
+                let mut streams = lock(&self.streams);
+                streams.record_configured(stream, current.segment.by);
+                let state = streams.stream_mut(stream);
+                state.busy = false;
+                state.busy_seq = None;
+                Ok(true)
             }
             Err(error) => {
-                lock(&self.streams).record_configured(stream, None);
+                let mut streams = lock(&self.streams);
+                streams.record_configured(stream, None);
                 Err(error)
             }
         }
@@ -905,8 +1119,8 @@ mod tests {
         })
     }
 
-    fn two_by_two() -> Arc<Core> {
-        let (core, _, _, _) = super::super::test_support::rig();
+    fn two_by_two_with_device() -> (Arc<Core>, Arc<crate::device::FakeDevice>) {
+        let (core, device, _, _) = super::super::test_support::rig();
         {
             let mut streams = lock(&core.streams);
             *streams = Streams::with_streams(2, 2);
@@ -916,7 +1130,572 @@ mod tests {
                 }
             }
         }
-        core
+        (core, device)
+    }
+
+    fn two_by_two() -> Arc<Core> {
+        two_by_two_with_device().0
+    }
+
+    fn waiting_move() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Planned, StreamKey, StreamKey, u64) {
+        let (core, device) = two_by_two_with_device();
+        let (from, to) = (stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 0));
+        let ratio = Rational::new(200, 1).unwrap();
+        let rx_line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        device.rx_open(0, &[0]).unwrap();
+        device.rx_open(1, &[1]).unwrap();
+        let mut streams = lock(&core.streams);
+        streams.lines.insert(from, rx_line(Channels::first(2).without(0)));
+        streams.lines.insert(to, rx_line(Channels::first(1)));
+        streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
+        streams.stream_mut(to).set = DeviceSet::Open(Channels::first(1));
+        let seq = 1;
+        streams.lines.book_move(from, to, 1, Some(10_000), 0, seq, 0).unwrap();
+        streams.changed(&core, from);
+        streams.changed(&core, to);
+        let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).expect("the destination move segment");
+        drop(streams);
+        (core, device, next, from, to, seq)
+    }
+
+    #[test]
+    fn ur_34_a_device_loss_waits_for_an_admitted_streamer_open_and_close() {
+        for (call, opening) in [("rx_open", true), ("rx_close", false)] {
+            let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+                clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
+            }));
+            let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+            spy.watch(&core);
+            let gate = spy.stop_before(call);
+            let call_core = core.clone();
+            let call_thread = core.device.host().spawn("streamer-lifecycle", move || {
+                if opening {
+                    call_core.open_device(Dir::Rx, 0, Channels::first(1)).unwrap();
+                } else {
+                    call_core.close_device(Dir::Rx, 0);
+                }
+            }).unwrap();
+            gate.wait();
+
+            let (waiting, reached) = std::sync::mpsc::channel();
+            let (continue_loss, continue_rx) = std::sync::mpsc::channel();
+            let continue_rx = Mutex::new(continue_rx);
+            super::super::test_support::probe(&core, "device_gate_waiting", move |_| {
+                let _ = waiting.send(());
+                let _ = continue_rx.lock().unwrap().recv();
+            });
+            let loss_core = core.clone();
+            let loss_thread = core.device.host().spawn("device-loss", move || loss_core.device_lost("test loss")).unwrap();
+            assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "loss waits for the admitted {call}");
+            let _ = continue_loss.send(());
+            gate.release();
+            call_thread.join().unwrap();
+            loss_thread.join().unwrap();
+
+            let log = spy.log();
+            let call = log.iter().position(|entry| entry == if opening { "rx_open 0 [0]" } else { "rx_close 0" })
+                .unwrap_or_else(|| panic!("{call}: {log:?}"));
+            let marked_lost = log.iter().position(|entry| entry == "mark_lost").unwrap_or_else(|| panic!("no mark_lost: {log:?}"));
+            assert!(call < marked_lost, "the admitted call completed before loss publication: {log:?}");
+            let before = log.len();
+            assert!(core.open_device(Dir::Rx, 0, Channels::first(1)).unwrap_err().lost);
+            core.close_device(Dir::Rx, 0);
+            assert_eq!(spy.log().len(), before, "no open or close reaches a lost device: {:?}", spy.log());
+        }
+    }
+
+    #[test]
+    fn ur_34_a_rate_read_waiting_for_device_gate_does_not_call_after_loss() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
+        }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (resume, waiting) = std::sync::mpsc::channel();
+        let waiting = Mutex::new(waiting);
+        super::super::test_support::probe(&core, "rates_before_gate", move |_| {
+            let _ = entered.send(());
+            let _ = waiting.lock().unwrap().recv();
+        });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let reader = core.device.host().spawn("rate-read", move || {
+            let _ = done.send(worker.check_rates(Dir::Rx, 0));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the rate read passed its first loss check before waiting for the gate");
+        core.device_lost("test loss");
+        let _ = resume.send(());
+        reader.join().unwrap();
+        assert!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap().unwrap_err().lost);
+        assert!(!spy.log().iter().any(|call| call.starts_with("rates ")), "the rate read called a lost device: {:?}", spy.log());
+    }
+
+    #[test]
+    fn ur_34_a_waited_open_waits_for_a_finite_unprocessed_move_segment() {
+        let (core, _device) = two_by_two_with_device();
+        let (a, b, c) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 2));
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        let (middle, destination) = {
+            let mut streams = lock(&core.streams);
+            *streams = Streams::with_streams(3, 1);
+            streams.lines.insert(a, line(Channels::first(1)));
+            streams.lines.insert(b, line(Channels::first(0).with(1)));
+            streams.lines.insert(c, line(Channels::first(0)));
+            streams.lines.book_move(a, b, 0, Some(1_000), 0, 1, 0).unwrap();
+            streams.changed(&core, a);
+            streams.changed(&core, b);
+            streams.lines.book_move(b, c, 0, Some(3_000), 0, 2, 0).unwrap();
+            streams.changed(&core, b);
+            streams.changed(&core, c);
+            let a_initial = streams.planned(a).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
+            streams.complete(a, (a_initial.segment.origin, a_initial.segment.config, a_initial.segment.by));
+            let middle = streams.planned(b).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
+            assert!(middle.segment.cut.is_some_and(|cut| middle.segment.instant(cut).is_ok_and(|end| end > middle.segment.origin)), "B has a finite segment with samples");
+            let destination = streams.planned(c).into_iter().find(|planned| planned.segment.by == Some(2)).unwrap();
+            streams.stream_mut(b).set = DeviceSet::Unknown;
+            (middle, destination)
+        };
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-finite-chain", move || {
+            let _ = done.send(worker.await_release(Dir::Rx, c.1 as usize, &destination));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "C waits for B's finite segment despite B's Unknown device set");
+        assert!(result_rx.try_recv().is_err(), "the destination did not pass B's unfinished segment");
+        {
+            let mut streams = lock(&core.streams);
+            streams.complete(b, (middle.segment.origin, middle.segment.config, middle.segment.by));
+        }
+        owner.join().unwrap();
+        assert!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap().is_some(), "the owner continued after B completed");
+    }
+
+    #[test]
+    fn ur_34_a_waited_open_waits_for_same_move_source_configuration() {
+        let (core, device, next, from, to, seq) = waiting_move();
+        {
+            let mut streams = lock(&core.streams);
+            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
+            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
+            let source = streams.stream_mut(from);
+            source.set = DeviceSet::Unknown;
+            source.busy = true;
+            source.busy_seq = Some(seq);
+        }
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-move-source", move || {
+            let _ = done.send(worker.await_release(Dir::Rx, to.1 as usize, &next));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination reached its source wait");
+        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "it did not open during the source configure: {:?}", device.calls());
+        {
+            let mut streams = lock(&core.streams);
+            assert!(streams.refuse(&core, from, seq), "the source's refusal refuses the move");
+            let source = streams.stream_mut(from);
+            source.busy = false;
+            source.busy_seq = None;
+        }
+        let interrupted_on_refusal = result_rx.recv_timeout(Wall::from_secs(10)).is_ok_and(|result| result.is_none());
+        if !interrupted_on_refusal {
+            core.device_lost("test: release wait did not re-read the refused plan");
+        }
+        owner.join().unwrap();
+        assert!(interrupted_on_refusal, "the refused plan was not re-read before the watchdog");
+        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "the destination stayed unopened: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_34_a_move_destination_waits_for_source_busy_after_channel_release() {
+        let (core, device) = two_by_two_with_device();
+        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        device.rx_open(0, &[0]).unwrap();
+        let next = {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(from, line(Channels::first(2)));
+            streams.lines.insert(to, line(Channels::first(0)));
+            streams.lines.book_move(from, to, 1, Some(10_000), 0, 1, 0).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
+            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
+            let source = streams.stream_mut(from);
+            source.set = DeviceSet::Open(Channels::first(1));
+            source.busy = true;
+            source.busy_seq = Some(1);
+            streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap()
+        };
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-move-destination", move || {
+            let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &next));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination waits when the source released the moved channel but still configures the move");
+        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the destination stayed unopened: {:?}", device.calls());
+        {
+            let mut streams = lock(&core.streams);
+            assert!(streams.refuse(&core, from, 1), "source refusal records the move on both lines");
+            let source = streams.stream_mut(from);
+            source.busy = false;
+            source.busy_seq = None;
+        }
+        owner.join().unwrap();
+        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)), "the refused destination segment was interrupted");
+        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the refused destination never opened: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_34_a_release_skips_a_stream_held_busy_by_from_none() {
+        let (core, device) = two_by_two_with_device();
+        let stream = stream_key(Dir::Rx, 0);
+        {
+            let mut streams = lock(&core.streams);
+            let state = streams.stream_mut(stream);
+            state.set = DeviceSet::Open(Channels::first(1));
+            state.busy = true;
+            state.idle = true;
+        }
+        assert!(!core.release_unneeded(Dir::Rx, 0), "a from-none owner still holds the stream");
+        assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "the owner's close overlapped from-none: {:?}", device.calls());
+        assert!(lock(&core.streams).stream(stream).busy);
+    }
+
+    #[test]
+    fn ur_34_a_release_closes_an_idle_streamer_needed_by_a_move() {
+        let (core, device, _next, from, _to, _seq) = waiting_move();
+        lock(&core.streams).stream_mut(from).idle = true;
+        assert!(core.release_unneeded(Dir::Rx, from.1 as usize));
+        assert!(device.calls().iter().any(|call| call == "rx_close 1"), "{:?}", device.calls());
+        assert_eq!(lock(&core.streams).stream(from).set, DeviceSet::Unknown);
+    }
+
+    #[test]
+    fn ur_34_a_release_keeps_an_idle_streamer_with_no_peer_need() {
+        let (core, device) = two_by_two_with_device();
+        let stream = stream_key(Dir::Rx, 0);
+        device.rx_open(0, &[1]).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            let state = streams.stream_mut(stream);
+            state.set = DeviceSet::Open(Channels::first(0).with(1));
+            state.idle = true;
+        }
+        assert!(!core.release_unneeded(Dir::Rx, 0));
+        assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "{:?}", device.calls());
+        assert_eq!(lock(&core.streams).stream(stream).set, DeviceSet::Open(Channels::first(0).with(1)));
+    }
+
+    #[test]
+    fn ur_34_a_waited_open_reloads_a_move_refused_while_it_waits() {
+        let (core, device, next, from, to, seq) = waiting_move();
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-test", move || { let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next)); }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its device wait");
+        let mark = device.calls().len();
+        {
+            let mut streams = lock(&core.streams);
+            assert!(streams.refuse(&core, from, seq), "the source's device refusal refuses the move");
+        }
+        owner.join().unwrap();
+        let result = result_rx.recv_timeout(Wall::from_secs(10)).unwrap();
+        assert!(matches!(result, Ok(false)), "the stale segment was interrupted: {result:?}");
+        assert!(lock(&core.streams).line(to).unwrap().halted(10_000));
+        assert!(!device.calls()[mark..].iter().any(|call| call == "rx_open 0 [0, 1]"), "the stale destination was not opened: {:?}", device.calls());
+        assert!(!lock(&core.streams).stream(to).busy, "the interrupted owner released its busy mark");
+    }
+
+    #[test]
+    fn ur_34_a_owner_does_not_open_a_move_plan_removed_before_its_turn() {
+        let (core, device) = two_by_two_with_device();
+        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        device.rx_open(0, &[0]).unwrap();
+        let stale = {
+            let mut streams = lock(&core.streams);
+            *streams = Streams::with_streams(2, 2);
+            streams.lines.insert(from, line(Channels::first(2)));
+            streams.lines.insert(to, line(Channels::first(0)));
+            streams.lines.book_move(from, to, 1, Some(10_000), 0, 1, 0).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
+            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
+            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
+            let stale = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
+            assert!(streams.refuse(&core, from, 1), "the source refusal removes the destination plan");
+            stale
+        };
+
+        assert!(matches!(core.owner_configure(Dir::Rx, to.1 as usize, &stale), Ok(false)));
+        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the removed plan never opens: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_34_a_waited_open_aborts_when_the_planned_segment_changes() {
+        let (core, device) = two_by_two_with_device();
+        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        device.rx_open(0, &[0]).unwrap();
+        let next = {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(from, line(Channels::first(1)));
+            streams.lines.insert(to, line(Channels::first(0)));
+            let seq = streams.next_seq();
+            assert!(streams.book(&core, to, Item {
+                e: 10_000, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false,
+                kind: Kind::Cold(Config { channels: Channels::first(1), ratio }),
+            }));
+            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
+            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
+            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
+            streams.stream_mut(to).configs.insert(seq, Arc::new(ColdConfig::new(Settings::default())));
+            streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).unwrap()
+        };
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let expected = next.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-replan", move || {
+            let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &expected));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination reaches its source wait");
+        let changed_by = {
+            let mut streams = lock(&core.streams);
+            let seq = streams.next_seq();
+            assert!(streams.book(&core, to, Item {
+                e: next.segment.origin + 5_000,
+                seq,
+                ready: core.now(),
+                release: NO_RELEASE,
+                delivered: None,
+                refused: false,
+                kind: Kind::Cold(Config {
+                    channels: next.segment.config.channels,
+                    ratio: Rational::new(100, 1).unwrap(),
+                }),
+            }), "the destination plan changes without a refusal");
+            let new = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).expect("the accepted replacement segment");
+            assert!(new.segment.origin > next.segment.origin && new.segment.config.ratio == Rational::new(100, 1).unwrap() && !new.refused);
+            streams.record_open(from, None);
+            seq
+        };
+        owner.join().unwrap();
+        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
+        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [0]"), "the stale segment did not open: {:?}", device.calls());
+        assert!(!lock(&core.streams).stream(to).busy, "the interrupted owner gave back its busy mark after replan {changed_by}");
+    }
+
+    #[test]
+    fn ur_34_a_rate_refusal_leaves_the_stream_record_unknown() {
+        let (core, device) = two_by_two_with_device();
+        lock(&core.rates)[Dir::Rx as usize] = Some(Err("UR-13: test rate-set refusal".to_owned()));
+        assert!(core.open_streamer(Dir::Rx, 0, Channels::first(1)).is_err());
+        let streams = lock(&core.streams);
+        let state = streams.stream(stream_key(Dir::Rx, 0));
+        assert_eq!(state.set, DeviceSet::Unknown);
+        assert_eq!(state.configured, None);
+        let calls = device.calls();
+        let open = calls.iter().position(|call| call == "rx_open 0 [0]").unwrap();
+        let close = calls.iter().position(|call| call == "rx_close 0").unwrap();
+        assert!(open < close, "the opened streamer was closed before the record was refused: {calls:?}");
+    }
+
+    #[test]
+    fn ur_34_a_waited_open_ends_at_device_loss_without_closing_after_loss() {
+        let (core, device, next, _from, _to, _seq) = waiting_move();
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-loss-wait", move || { let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next)); }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
+        core.device_lost("test: lost while waiting for a streamer");
+        owner.join().unwrap();
+        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
+        let log = device.calls();
+        let marked = log.iter().position(|call| call == "mark_lost").unwrap();
+        assert!(!log[marked + 1..].iter().any(|call| call.starts_with("rx_close") || call.starts_with("rx_open")), "a lost device is never closed or reopened: {log:?}");
+        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).busy);
+    }
+
+    #[test]
+    fn ur_34_a_waited_open_ends_at_provider_stop_without_opening() {
+        let (core, device, next, _from, _to, _seq) = waiting_move();
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-stop-wait", move || { let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next)); }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
+        {
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, StopMode::Orderly));
+            streams.end(&core, at, false, false);
+        }
+        owner.join().unwrap();
+        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
+        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "{:?}", device.calls());
+        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).busy);
+    }
+
+    #[test]
+    fn ur_34_a_waited_transmit_open_observes_provider_stop_with_a_later_cold_reserved() {
+        let (core, device) = two_by_two_with_device();
+        let (from, to) = (stream_key(Dir::Tx, 1), stream_key(Dir::Tx, 0));
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Tx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 1_000,
+            call: 0,
+            allowance: 0,
+        });
+        device.tx_open(1, &[0]).unwrap();
+        let (source, next) = {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(from, line(Channels::first(1)));
+            streams.lines.insert(to, line(Channels::first(0)));
+            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
+            let move_seq = streams.next_seq();
+            streams.lines.book_move(from, to, 0, Some(10_000), 0, move_seq, 0).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+            streams.stream_mut(to).configs.insert(move_seq, Arc::new(super::super::control::ColdConfig::new(Settings::default())));
+            let cold_seq = streams.next_seq();
+            assert!(streams.book(&core, to, Item { e: 20_000, seq: cold_seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }));
+            streams.changed(&core, to);
+            let source = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).expect("the old source segment");
+            let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(move_seq)).expect("the moved transmit segment");
+            assert!(next.segment.cut.is_some_and(|cut| next.segment.instant(cut).unwrap() > next.segment.origin));
+            (source, next)
+        };
+
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let worker = core.clone();
+        let next_for_owner = next.clone();
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("tx-stop-with-later-cold", move || { let _ = done.send(worker.owner_configure(Dir::Tx, 0, &next_for_owner)); }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the transmit owner reached its release wait");
+        let still_planned = {
+            let mut streams = lock(&core.streams);
+            streams.stop = Some((5_000, StopMode::Orderly));
+            streams.end(&core, 5_000, false, false);
+            streams.planned(to).iter().any(|planned| planned.segment == next.segment)
+        };
+        core.close_device(Dir::Tx, 1);
+        {
+            let mut streams = lock(&core.streams);
+            streams.record_open(from, None);
+            streams.complete(from, (source.segment.origin, source.segment.config, source.segment.by));
+        }
+        owner.join().unwrap();
+        let result = result_rx.recv_timeout(Wall::from_secs(10)).unwrap();
+        let calls = device.calls();
+        assert!(still_planned, "TX End before the origin leaves the reserved move segment in the plan");
+        assert!(!result.unwrap(), "Provider stop ends the wait");
+        assert!(!calls.iter().any(|call| call == "tx_open 0 [0]"), "no target streamer opens after stop: {calls:?}");
+        assert!(!lock(&core.streams).stream(to).busy);
+    }
+
+    #[test]
+    fn ur_34_a_refused_move_reconciles_both_transmit_clocks() {
+        let core = two_by_two();
+        let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
+        let ratio = Rational::new(200, 1).unwrap();
+        let config = |channels| Config { channels, ratio };
+        let line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Tx,
+            origin: 0,
+            config: config(channels),
+            lead: core.ticks(50_000_000),
+            call: 0,
+            allowance: 0,
+        });
+        {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(from, line(Channels::first(2)));
+            streams.lines.insert(to, line(Channels::first(3).without(0).without(1)));
+            let e = 10_000 * 200;
+            streams.lines.book_move(from, to, 1, Some(e), 0, 1, 0).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+            assert!(streams.refuse(&core, from, 1), "the move is refused on both lines");
+            assert!(streams.line(from).unwrap().halted(e));
+            assert!(streams.line(to).unwrap().halted(e));
+        }
+        let streams = lock(&core.streams);
+        let source = streams.stream(from).clocks.clone();
+        let destination = streams.stream(to).clocks.clone();
+        drop(streams);
+        let records = core.clocks.sample_clock_records();
+        let record = |clock: &Clock| records.iter().find(|record| record.domain == clock.domain).expect("a clock's record");
+        assert_eq!(source.len(), 2, "the source's refused segment clock was registered: {source:?}");
+        assert_eq!(destination.len(), 2, "the destination's refused segment clock was registered: {destination:?}");
+        for (_, ended) in [&source, &destination].into_iter().flat_map(|clocks| clocks.iter()) {
+            assert!(*ended, "both lines' clocks were reconciled after refusal: {source:?} {destination:?}");
+        }
+        let old_source = record(&source[0].0);
+        assert_eq!(old_source.ended_at.unwrap().ticks_in(old_source.root).unwrap(), 10_000 * 200, "the old source clock ends at the move cut");
+        let old_destination = record(&destination[0].0);
+        assert_eq!(old_destination.ended_at.unwrap().ticks_in(old_destination.root).unwrap(), 10_000 * 200, "the old destination clock ends at the move cut");
+        for (clock, _) in [&source[1], &destination[1]] {
+            let refused = record(clock);
+            assert_eq!(refused.ended_at.unwrap().ticks_in(refused.root).unwrap(), refused.origin.ticks_in(refused.root).unwrap(), "a refused move clock ends at its own origin");
+        }
     }
 
     #[test]

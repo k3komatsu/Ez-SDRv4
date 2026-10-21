@@ -780,6 +780,115 @@ fn rm_34_a_pruned_move_keeps_its_release_floor() {
     assert_eq!(started.config.channels.iter().collect::<Vec<_>>(), [1], "the folded configuration, with the moved channel");
 }
 
+fn pruned_move_order(source_first: bool) {
+    let mut unpruned = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[], 1_000_000));
+    unpruned.book(FROM, item(1_000 * MS, 0, 1_000 * MS, Kind::Stop)).unwrap();
+    unpruned.book(FROM, item(1_000 * MS, 1, 1_000 * MS, Kind::Start)).unwrap();
+    unpruned.book_move(FROM, TO, 1, Some(1_000 * MS), 1_000 * MS, 2, 1_000 * MS).unwrap();
+    let release_before = released(&unpruned, FROM, 1, 2).expect("the start's segment releases the channel");
+    assert!(release_before > 1_000 * MS, "the source Start segment is cut at its origin");
+    let destination_before = by(&unpruned, TO, 2).origin;
+    assert_eq!(destination_before, release_before + 50 * MS, "the destination waits the source release");
+    let mut pruned = unpruned.clone();
+    let first = if source_first { FROM } else { TO };
+    let second = if source_first { TO } else { FROM };
+    pruned.prune_stream(first, 1_001 * MS);
+    assert!(pruned.line(FROM).unwrap().items.iter().any(|item| item.seq == 2), "the first line keeps its move item");
+    assert!(pruned.line(TO).unwrap().items.iter().any(|item| item.seq == 2), "the peer keeps its move item");
+    assert_eq!(planned_at(&pruned, FROM), planned_at(&unpruned, FROM));
+    assert_eq!(planned_at(&pruned, TO), planned_at(&unpruned, TO));
+
+    // The Start at the move's instant puts the source's segment after the move; its refusal
+    // moves the release back to the Stop's cut, even after the source requested pruning.
+    assert!(pruned.refuse(FROM, 1).unwrap());
+    assert!(unpruned.refuse(FROM, 1).unwrap());
+    let release_after = released(&pruned, FROM, 1, 2).expect("the refused move still has a source release");
+    assert!(release_after < release_before, "refusing the Start changes the release");
+    assert_eq!(release_after, released(&unpruned, FROM, 1, 2).unwrap());
+    let destination_after = by(&pruned, TO, 2).origin;
+    assert_eq!(destination_after, by(&unpruned, TO, 2).origin, "the refused Start updates the destination release");
+    assert!(destination_after < destination_before, "the destination's planned move segment follows the changed release");
+    assert_eq!(planned_at(&pruned, FROM), planned_at(&unpruned, FROM));
+    assert_eq!(planned_at(&pruned, TO), planned_at(&unpruned, TO));
+
+    // A move refusal still reaches both item records after a one-sided prune.
+    assert!(pruned.refuse(FROM, 2).unwrap());
+    assert!(unpruned.refuse(FROM, 2).unwrap());
+    assert!(line_halted(&pruned, FROM, 1_000 * MS) && line_halted(&pruned, TO, 1_000 * MS), "both lines halt");
+    assert_eq!(planned_at(&pruned, FROM), planned_at(&unpruned, FROM));
+    assert_eq!(planned_at(&pruned, TO), planned_at(&unpruned, TO));
+
+    // The second stream's request completes the pair. Its source release remains the
+    // destination floor after both move items and their record have been folded away.
+    pruned.prune_stream(second, 1_001 * MS);
+    assert!(pruned.line(FROM).unwrap().items.is_empty() && pruned.line(TO).unwrap().items.is_empty(), "both requests fold the move");
+    assert_eq!(planned_at(&pruned, FROM), planned_at(&unpruned, FROM));
+    assert_eq!(planned_at(&pruned, TO), planned_at(&unpruned, TO));
+    let next = item(900 * MS, 3, 900 * MS, Kind::Cold(set_config(&[1], 1_000_000)));
+    pruned.book(TO, next).unwrap();
+    unpruned.book(TO, next).unwrap();
+    assert_eq!(by(&pruned, TO, 3).origin, by(&unpruned, TO, 3).origin, "the release floor matches the unpruned dependency");
+    assert!(by(&pruned, TO, 3).origin >= release_after + 50 * MS, "the move's release survives the completed prune");
+}
+
+#[test]
+fn rm_34_a_source_first_prune_keeps_move_dependencies_until_both_lines_pass() {
+    // RM-34: a source-only prune retains both move items, later release changes still reach
+    // the destination, refusal halts both lines, and the completed prune preserves the floor.
+    pruned_move_order(true);
+}
+
+#[test]
+fn rm_34_a_destination_first_prune_keeps_move_dependencies_until_both_lines_pass() {
+    // The destination-first order has the same move dependency and floor guarantees.
+    pruned_move_order(false);
+}
+
+fn chained_move_prune_order(prune_b_first: bool) {
+    let (a, b, c) = ((Direction::Rx, 0), (Direction::Rx, 1), (Direction::Rx, 2));
+    let mut unpruned = Lines::new();
+    unpruned.insert(a, Line::new(rx_stream(&[0], 1_000_000)));
+    unpruned.insert(b, Line::new(rx_stream(&[], 1_000_000)));
+    unpruned.insert(c, Line::new(rx_stream(&[], 1_000_000)));
+    unpruned.book_move(a, b, 0, Some(10 * MS), 10 * MS, 1, 10 * MS).unwrap();
+    unpruned.book_move(b, c, 0, Some(20 * MS), 20 * MS, 2, 20 * MS).unwrap();
+
+    let mut pruned = unpruned.clone();
+    let (first, second) = if prune_b_first { (b, c) } else { (c, b) };
+    pruned.prune_stream(first, 30 * MS);
+    for stream in [a, b, c] {
+        assert_eq!(planned_at(&pruned, stream), planned_at(&unpruned, stream), "after pruning {first:?}");
+    }
+    pruned.prune_stream(second, 30 * MS);
+    for stream in [a, b, c] {
+        assert_eq!(planned_at(&pruned, stream), planned_at(&unpruned, stream), "after pruning {second:?}");
+    }
+    assert_eq!(pruned.move_lines(2), Some((b, c)), "the second move remains recorded");
+    for stream in [b, c] {
+        assert!(pruned.line(stream).unwrap().items.iter().any(|item| item.seq == 2), "{stream:?} keeps the second move item");
+    }
+    assert_eq!(released(&pruned, b, 0, 2), released(&unpruned, b, 0, 2), "release reads the retained source item");
+
+    assert!(pruned.refuse_move(2).unwrap());
+    assert!(unpruned.refuse_move(2).unwrap());
+    assert!(line_halted(&pruned, c, 20 * MS), "refusing B→C halts C");
+    for stream in [a, b, c] {
+        assert_eq!(planned_at(&pruned, stream), planned_at(&unpruned, stream), "after refusing B→C on {stream:?}");
+    }
+}
+
+#[test]
+fn rm_34_a_chain_prune_reaches_a_fixed_point_from_b_then_c() {
+    // A→B at 10 and B→C at 20: only B and C request a prune at 30. A's missing
+    // boundary clamps B to 10, which in turn clamps C to 20.
+    chained_move_prune_order(true);
+}
+
+#[test]
+fn rm_34_a_chain_prune_reaches_a_fixed_point_from_c_then_b() {
+    chained_move_prune_order(false);
+}
+
 /// RM-34: the destination waits the greatest cut of the moves into it, not the last booked: a
 /// later move whose source releases earlier does not shorten what an earlier one released.
 #[test]

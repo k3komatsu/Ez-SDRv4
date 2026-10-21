@@ -151,7 +151,15 @@ impl Rx {
             let clock = Clock { domain: handle.id(), origin: t0, n: handle.root_ticks_per_tick().num() as i64 };
             Stream::new(clock, handle, channels, None)
         });
-        lock(&core.streams).stream_mut(stream_key(Dir::Rx, k)).delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
+        let key = stream_key(Dir::Rx, k);
+        let mut streams = lock(&core.streams);
+        let active = stream.as_ref().and_then(|stream| streams.planned(key).into_iter()
+            .find(|planned| planned.segment.origin == stream.clock.origin && planned.segment.config == stream.config)
+            .map(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by)));
+        let state = streams.stream_mut(key);
+        state.delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
+        state.active = active;
+        drop(streams);
         let host = core.device.host();
         let now = host.now();
         Rx {
@@ -287,17 +295,29 @@ impl Rx {
             streams.stream_mut(key).idle = next.is_none();
             next
         };
-        let Some(next) = next else { return false };
+        let Some(next) = next else {
+            self.core.release_unneeded(Dir::Rx, self.k);
+            return false;
+        };
         let origin = next.segment.origin;
         // The record decides what is opened and configured (UR-13, UR-36).
-        if let Err(error) = self.core.owner_configure(Dir::Rx, self.k, &next) {
-            // Not begun. A refusal the plan cannot take — its command pruned — skips the segment.
-            let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, key, by));
-            if !refused {
-                self.from = origin.saturating_add(1);
+        match self.core.owner_configure(Dir::Rx, self.k, &next) {
+            Ok(true) => {}
+            Ok(false) => return true,
+            Err(error) => {
+                // Not begun. A refusal the plan cannot take — its command pruned — skips the segment.
+                let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, key, by));
+                if !refused {
+                    self.from = origin.saturating_add(1);
+                }
+                let mut streams = lock(&self.core.streams);
+                let state = streams.stream_mut(key);
+                state.busy = false;
+                state.busy_seq = None;
+                drop(streams);
+                self.core.device_failed(None, "update_parameter", &error);
+                return true;
             }
-            self.core.device_failed(None, "update_parameter", &error);
-            return true;
         }
         self.from = origin.saturating_add(1);
         // UR-29: another thread found the device lost while the configuration ran; no start
@@ -317,7 +337,11 @@ impl Rx {
                 let clock = Clock { domain: handle.id(), origin, n: next.n() };
                 self.pool = HostPool::new(self.core.block_len * channels.count().max(1) as usize * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
-                lock(&self.core.streams).stream_mut(key).delivered = Some((origin, next.segment.config, 0));
+                let mut streams = lock(&self.core.streams);
+                let state = streams.stream_mut(key);
+                state.delivered = Some((origin, next.segment.config, 0));
+                state.active = Some((origin, next.segment.config, next.segment.by));
+                drop(streams);
                 self.last_samples = self.host.now();
                 self.follow();
             }
@@ -341,7 +365,10 @@ impl Rx {
                 self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
             }
         }
+        let active = streams.stream(key).active;
         streams.stream_mut(key).delivered = None;
+        streams.stream_mut(key).active = None;
+        if let Some(active) = active { streams.complete(key, active); }
         let by = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
         streams.prune(key, by);
     }
@@ -634,6 +661,7 @@ mod differential;
 mod tests {
     use super::*;
     use super::super::control::ColdConfig;
+    use crate::device::Device;
     use ezsdr_kernel::module_api::Link;
     use ezsdr_kernel::stream::BackPressure;
     use ezsdr_radio::timeline::{Item, Kind, Line, Segment, NO_RELEASE};
@@ -700,6 +728,78 @@ mod tests {
         let mut streams = lock(&core.streams);
         streams.stream_mut(key).configs.insert(seq, Arc::new(ColdConfig::new(crate::device::Settings::default())));
         assert!(streams.book(core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind }));
+    }
+
+    #[test]
+    fn ur_29_a_lost_receive_owner_configure_releases_stream_lock_before_reporting() {
+        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let device: Arc<dyn Device> = Arc::new(super::super::test_support::ApplyFails::lost(inner.clone(), Dir::Rx, Some(0)));
+        let (core, _time, events) = super::super::test_support::rig_on(device, vec![link()], 2_000);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        plan(&core, &[(10_000, None, Some(1))]);
+
+        assert!(rx.begin(), "the owner handled the lost configure: {:?}", inner.calls());
+        assert!(core.is_lost());
+        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).busy);
+        assert!(!inner.calls().iter().any(|call| call.starts_with("rx_start")), "the lost owner began a segment: {:?}", inner.calls());
+        assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+            .any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    }
+
+    #[test]
+    fn ur_34_a_waited_receive_open_exits_when_stop_removes_its_segment() {
+        let (core, device, _time, events) = super::super::test_support::rig_with_links(vec![link()]);
+        let from = stream_key(Dir::Rx, 1);
+        let to = stream_key(Dir::Rx, 0);
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        device.rx_open(1, &[1]).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            *streams = Streams::with_streams(2, 1);
+            streams.lines.insert(from, line(Channels::first(2).without(0)));
+            streams.lines.insert(to, line(Channels::first(1)));
+            streams.stream_mut(from).set = super::super::core::DeviceSet::Open(Channels::first(2).without(0));
+            streams.seq = 1;
+            streams.lines.book_move(from, to, 1, Some(10_000), 0, 1, 0).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+        }
+        let next = lock(&core.streams).planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
+        rx.from = next.segment.origin;
+        let from_cursor = rx.cursor();
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let (done, finished) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-wait-stop", move || {
+            let began = rx.begin();
+            let _ = done.send((began, rx.cursor()));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
+        {
+            let mut streams = lock(&core.streams);
+            let seq = streams.next_seq();
+            assert!(streams.book(&core, to, Item { e: 0, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop }));
+        }
+        owner.join().unwrap();
+        let (began, cursor) = finished.recv_timeout(Wall::from_secs(10)).unwrap();
+        assert!(began, "the owner handled the planned turn");
+        assert_eq!(cursor, from_cursor, "an interrupted wait did not advance RX `from`");
+        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "the removed segment was not opened: {:?}", device.calls());
+        assert!(!lock(&core.streams).stream(to).busy);
+        assert!(!lock(&core.streams).line(to).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "Stop is not a device refusal");
+        assert!(!events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+            .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "Stop interruption emits no refusal");
     }
 
     fn rate(rate: u64) -> Kind {

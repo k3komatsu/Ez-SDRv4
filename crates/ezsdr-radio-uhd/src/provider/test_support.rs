@@ -241,8 +241,8 @@ struct Hold {
 /// while one is held" check.
 fn family(name: &str) -> Option<Dir> {
     match name {
-        "rx_open" | "rx_start" | "rx_recv" | "rx_packet_samples" | "rx_stop" => Some(Dir::Rx),
-        "tx_open" | "tx_send" | "tx_async" => Some(Dir::Tx),
+        "rx_open" | "rx_close" | "rx_start" | "rx_recv" | "rx_packet_samples" | "rx_stop" => Some(Dir::Rx),
+        "tx_open" | "tx_close" | "tx_send" | "tx_async" => Some(Dir::Tx),
         _ => None,
     }
 }
@@ -255,6 +255,7 @@ pub(super) struct LockSpy {
     inner: FakeDevice,
     core: Mutex<Weak<Core>>,
     calls: Mutex<BTreeMap<&'static str, usize>>,
+    order: Mutex<Vec<&'static str>>,
     hosts: Mutex<Vec<bool>>,
     before: Mutex<BTreeMap<&'static str, Hold>>,
     after: Mutex<BTreeMap<&'static str, Hold>>,
@@ -268,6 +269,7 @@ impl LockSpy {
             inner: FakeDevice::new(config),
             core: Mutex::new(Weak::new()),
             calls: Mutex::new(BTreeMap::new()),
+            order: Mutex::new(Vec::new()),
             hosts: Mutex::new(Vec::new()),
             before: Mutex::new(BTreeMap::new()),
             after: Mutex::new(BTreeMap::new()),
@@ -283,6 +285,11 @@ impl LockSpy {
     /// How many calls of `name` the spy saw.
     pub fn seen(&self, name: &str) -> usize {
         self.calls.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    /// Device call order, including calls the underlying fake does not record.
+    pub fn order(&self) -> Vec<&'static str> {
+        self.order.lock().unwrap().clone()
     }
 
     /// Every call the fake behind the spy saw, in order.
@@ -312,6 +319,7 @@ impl LockSpy {
     /// Records the call, fails when its caller holds the line, and holds it at its gate.
     fn enter(&self, name: &'static str) {
         *self.calls.lock().unwrap().entry(name).or_default() += 1;
+        self.order.lock().unwrap().push(name);
         assert_line_free(name);
         if let Some(other) = *self.holding.lock().unwrap() {
             if other != name && family(other).is_some() && family(other) == family(name) {
@@ -377,6 +385,8 @@ impl Device for LockSpy {
         self.call("tx_send", || self.inner.tx_send(stream, samples, at, sob, eob, timeout))
     }
     fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.call("tx_async", || self.inner.tx_async(stream, timeout)) }
+    fn rx_close(&self, stream: usize) { self.call("rx_close", || self.inner.rx_close(stream)) }
+    fn tx_close(&self, stream: usize) { self.call("tx_close", || self.inner.tx_close(stream)) }
     fn close_streams(&self) { self.call("close_streams", || self.inner.close_streams()) }
     fn mark_lost(&self) { self.call("mark_lost", || self.inner.mark_lost()) }
     fn host(&self) -> HostClock {
@@ -409,6 +419,11 @@ pub(super) struct ApplyFails {
 impl ApplyFails {
     pub fn new(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
         ApplyFails::of(inner, dir, chan, false, false)
+    }
+
+    /// The first untimed `apply` of `dir` — of `chan`, when one is named — fails as a lost device.
+    pub fn lost(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
+        ApplyFails::of(inner, dir, chan, false, true)
     }
 
     /// The first timed `apply` of `dir` — of `chan`, when one is named — fails.
@@ -466,6 +481,8 @@ impl Device for ApplyFails {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
     fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
+    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
+    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
     fn host(&self) -> HostClock { self.inner.host() }
@@ -535,6 +552,8 @@ impl Device for HoldApply {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
     fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
+    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
+    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
     fn host(&self) -> HostClock { self.inner.host() }
@@ -596,6 +615,8 @@ impl Device for ReportFeed {
             None => self.inner.tx_async(stream, timeout),
         }
     }
+    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
+    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
     fn host(&self) -> HostClock { self.inner.host() }

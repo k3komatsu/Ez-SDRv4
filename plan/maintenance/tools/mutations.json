@@ -538,8 +538,8 @@
   "id": "J11",
   "name": "VH-6 (spec 22, H11): a device Stop cancels held timed updates",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                for k in tx {\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
-  "new": "                self.cancel_held(\"Stop\");\n                for k in tx {\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
+   "old": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });\n                    drop(streams);\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
+   "new": "                self.cancel_held(\"Stop\");\n                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });\n                    drop(streams);\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stop_cancels_no_update"
@@ -648,8 +648,8 @@
   "id": "J25",
   "name": "RM-25 (spec 22, step 3; note 23): a refused segment counts as begun, so a replanned segment at its origin is skipped",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            if !refused {\n                self.from = origin.saturating_add(1);\n            }\n",
-  "new": "            let _ = refused;\n            self.from = origin.saturating_add(1);\n",
+   "old": "                if !refused {\n                    self.from = origin.saturating_add(1);\n                }",
+   "new": "                let _ = refused;\n                self.from = origin.saturating_add(1);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_a_refused_segment_is_booked_by_uhd_rx"
@@ -949,8 +949,8 @@
   "id": "J62",
   "name": "UR-23, VH-2 (note 23 review, Z03): a transmit change booked as refused does not end its clock until a later booking",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "            Ok(refused) => {\n                self.changed(core, stream);\n                refused\n            }",
-  "new": "            Ok(refused) => {\n                refused\n            }",
+   "old": "                } else {\n                    self.changed(core, stream);\n                }",
+   "new": "                } else {\n                    let _ = stream;\n                }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_refused_transmit_change_ends_its_clock_at_its_origin"
@@ -4876,13 +4876,13 @@
   "new": "        if !next.line_mut(stream).refuse(seq)? {\n            return Ok(false);\n        }\n",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
-  "filter": "rm_34_a_refused_source_change_moves_the_destination"
+   "filter": "rm_34_a_source_first_prune_keeps_move_dependencies_until_both_lines_pass"
  },
  {
   "id": "P103",
   "name": "RM-34: a pruned move's record is kept",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "        next.moves.retain(|moved| holds(moved.from, moved.seq) && holds(moved.to, moved.seq));\n",
+   "old": "        self.moves.retain(|moved| holds(moved.from, moved.seq) && holds(moved.to, moved.seq));",
   "new": "",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
@@ -4932,8 +4932,8 @@
   "id": "P108",
   "name": "RM-34: a pruning keeps no release floor",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "        for (to, cut) in dropped {\n            next.raise_floor(to, cut);\n        }\n",
-  "new": "",
+   "old": "        for (to, cut) in completed {\n            self.raise_floor(to, cut);\n        }",
+   "new": "        let _ = completed;",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_34_a_pruned_move_keeps_its_release_floor"
@@ -5962,8 +5962,8 @@
    "id": "P219",
    "name": "a refused reopen leaves the stream's old streamer open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        st.rx.remove(&stream);",
-   "new": "        // a refused reopen leaves the old streamer (UR-33)",
+   "old": "        // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is\n        // made, so a refused reopen leaves the stream with none.\n        st.rx.remove(&stream);",
+   "new": "        // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is\n        // made, so a refused reopen leaves the stream with none.",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
@@ -5992,8 +5992,8 @@
    "id": "P222",
    "name": "a refused transmit reopen leaves the stream's old streamer open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        st.tx.remove(&stream);",
-   "new": "        // a refused reopen leaves the old streamer (UR-33)",
+    "old": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        st.tx.remove(&stream);",
+    "new": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
@@ -6294,7 +6294,7 @@
    "id": "P252",
    "name": "an enable from no stream is never configured by uhd-control (UR-25, VH-4)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let from_none = !channels.is_empty() && idle && planned;",
+    "old": "        let from_none = !channels.is_empty() && idle && planned && !streams.stream(stream).busy\n            && streams.held_elsewhere(stream, channels).is_none()\n            && !streams.needed_before(stream, channels, i64::MAX);",
    "new": "        let from_none = false;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -6304,7 +6304,7 @@
    "id": "P253",
    "name": "every cold change is configured by uhd-control at booking (UR-25, VH-4)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let from_none = !channels.is_empty() && idle && planned;",
+    "old": "        let from_none = !channels.is_empty() && idle && planned && !streams.stream(stream).busy\n            && streams.held_elsewhere(stream, channels).is_none()\n            && !streams.needed_before(stream, channels, i64::MAX);",
    "new": "        let from_none = !channels.is_empty();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -6454,8 +6454,8 @@
    "id": "P269",
    "name": "uhd-rx holds the line lock across the beginning of a segment's device calls (UR-25, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "        let Some(next) = next else { return false };",
-   "new": "        let Some(next) = next else { return false };\n        let _core = self.core.clone();\n        let _held = lock(&_core.streams);",
+   "old": "        let Some(next) = next else {\n            self.core.release_unneeded(Dir::Rx, self.k);\n            return false;\n        };",
+   "new": "        let Some(next) = next else {\n            self.core.release_unneeded(Dir::Rx, self.k);\n            return false;\n        };\n        let _core = self.core.clone();\n        let _held = lock(&_core.streams);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_the_line_lock_is_free_inside_every_receive_device_call"
@@ -6542,13 +6542,13 @@
   },
   {
    "id": "P278",
-   "name": "a per-stream prune folds the instance's other lines with it (RM-26, RM-34)",
+   "name": "a per-stream prune drops one side of an unfinished move (RM-34)",
    "file": "crates/ezsdr-radio/src/timeline.rs",
-   "old": "    pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {\n        self.line_mut(stream).prune(before);\n    }",
-   "new": "    pub fn prune_stream(&mut self, _stream: StreamKey, before: i64) {\n        self.prune(before);\n    }",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_17_a_stream_s_prune_leaves_the_other_stream_alone"
+   "old": "    pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {\n        let mut next = self.clone();\n        next.line_mut(stream);\n        next.request_prune(stream, before);\n        next.prune_requested();\n        *self = next;\n    }",
+   "new": "    pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {\n        self.line_mut(stream).prune(before);\n    }",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_34_a_source_first_prune_keeps_move_dependencies_until_both_lines_pass"
   },
   {
    "id": "P279",
@@ -7054,8 +7054,8 @@
    "id": "P335",
    "name": "a value-only layout change records no row for the device not asked (UR-30)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            lock(&self.core.rec).applied.push(json!({ \"key\": key, \"claimed\": value, \"read_back\": null, \"at\": self.core.at(e) }));",
-   "new": "            let _ = (&key, &value);",
+   "old": "        if empty_layout {\n            // A layout stream no channel is in takes its value and nothing else (RM-21): the\n            // device is not asked, so the row reads no antenna back (UR-30).\n            lock(&self.core.rec).applied.push(json!({ \"key\": key, \"claimed\": value, \"read_back\": null, \"at\": self.core.at(e) }));",
+   "new": "        if empty_layout {\n            // A layout stream no channel is in takes its value and nothing else (RM-21): the\n            // device is not asked, so the row reads no antenna back (UR-30).\n            let _ = (&key, &value);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_25_an_antenna_change_of_a_channel_in_no_stream_only_records"
@@ -7281,14 +7281,14 @@
    "filter": "ur_25_a_start_rx_takes_the_line_lock_once_for_its_instant_and_its_booking"
   },
   {
-   "id": "P358",
-   "name": "a transmit segment uhd-control refused from no stream starts its clock (UR-25)",
+    "id": "P358",
+    "name": "a transmit segment uhd-control refused from no stream starts its clock (UR-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "Ok(()) if to.refused => self.at += 1,",
-   "new": "Ok(()) if false && to.refused => self.at += 1,",
+   "old": "                Ok(true) if to.refused => self.at += 1,",
+   "new": "                Ok(true) if false && to.refused => self.at += 1,",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_25_a_transmit_refusal_from_no_stream_starts_no_clock"
+   "test_bin": "lib",
+    "filter": "ur_25_a_refused_enable_with_a_later_cold_has_no_tx_clock"
   },
   {
    "id": "P359",
@@ -7297,8 +7297,8 @@
    "old": "refused: segment.by.is_some_and(|by| line.items.iter().any(|item| item.seq == by && item.refused)),",
    "new": "refused: false,",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_25_a_transmit_refusal_from_no_stream_starts_no_clock"
+   "test_bin": "lib",
+   "filter": "ur_25_a_refused_enable_with_a_later_cold_has_no_tx_clock"
   },
   {
    "id": "P360",
@@ -7344,8 +7344,8 @@
     "id": "P371",
     "name": "the transmit owner adopts a refused change's clock and configures it (UR-25, S14)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "            let configured = if to.refused { Ok(()) } else { self.core.owner_configure(Dir::Tx, self.k, &to) };",
-    "new": "            let configured = self.core.owner_configure(Dir::Tx, self.k, &to);",
+   "old": "            let configured = if to.refused { Ok(true) } else { self.core.owner_configure(Dir::Tx, self.k, &to) };",
+   "new": "            let configured = self.core.owner_configure(Dir::Tx, self.k, &to);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_25_a_refused_transmit_clock_is_not_adopted"
@@ -7444,8 +7444,8 @@
    "id": "P384",
    "name": "an enable from no stream keeps no ownership of the streamer (UR-25, S9, S23, S24)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            let state = streams.stream_mut(stream);\n            state.busy = true;\n            reading = state.reading;",
-   "new": "            let state = streams.stream_mut(stream);\n            reading = state.reading;",
+   "old": "            let state = streams.stream_mut(stream);\n            state.busy = true;\n            state.busy_seq = None;\n            reading = state.reading;",
+   "new": "            let state = streams.stream_mut(stream);\n            state.busy_seq = None;\n            reading = state.reading;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_from_none_holds_the_streamer_from_its_decision_to_its_booking"
@@ -7464,7 +7464,7 @@
    "id": "P386",
    "name": "an enable from no stream gives the streamer back after its success (UR-25, S24)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        if from_none {\n            streams.stream_mut(stream).busy = false;\n        }\n        drop(streams);",
+   "old": "        if from_none {\n            let state = streams.stream_mut(stream);\n            state.busy = false;\n            state.busy_seq = None;\n        }\n        drop(streams);",
    "new": "        drop(streams);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -7484,8 +7484,8 @@
    "id": "P388",
    "name": "uhd-tx never takes back a report read (UR-25, S23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        self.end_reading();\n        self.step()",
-   "new": "        self.step()",
+   "old": "        self.reports(Wall::ZERO);\n        self.end_reading();\n        let worked = self.step();",
+   "new": "        self.reports(Wall::ZERO);\n        let worked = self.step();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_from_none_enable_waits_for_a_transmit_report_read"
@@ -7494,7 +7494,7 @@
    "id": "P389",
    "name": "an enable from no stream keeps its ownership on an early return (UR-25, S26, S27)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                streams.stream_mut(stream).busy = false;\n                drop(streams);",
+   "old": "                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                let state = streams.stream_mut(stream);\n                state.busy = false;\n                state.busy_seq = None;\n                drop(streams);",
    "new": "                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                drop(streams);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -7584,8 +7584,8 @@
    "id": "P399",
    "name": "an enable from no stream books its change after a loss or stop instead of ending (UR-25, UR-29)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            if !may_call || self.core.is_lost() || streams.stop.is_some() {\n                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                streams.stream_mut(stream).busy = false;\n                drop(streams);\n                return;\n            }",
-   "new": "            if false {\n                streams.stream_mut(stream).busy = false;\n                drop(streams);\n                return;\n            }",
+   "old": "            if !may_call || self.core.is_lost() || streams.stop.is_some() {\n                // UR-25: the ownership goes back, and nothing of the enable is booked.\n                let state = streams.stream_mut(stream);\n                state.busy = false;\n                state.busy_seq = None;\n                drop(streams);\n                return;\n            }",
+   "new": "            if false {\n                let state = streams.stream_mut(stream);\n                state.busy = false;\n                state.busy_seq = None;\n                drop(streams);\n                return;\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_lost_stream_starts_no_rate_check_apply_or_booking_after_the_call"
@@ -7624,8 +7624,8 @@
    "id": "P403",
    "name": "the owner's open is recorded before the device call (UR-25, S13b)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
-   "new": "        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "old": "        let stream = stream_key(dir, k);\n        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "new": "        let stream = stream_key(dir, k);\n        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_an_open_is_recorded_only_after_the_device_returns"
@@ -8018,14 +8018,14 @@
   "new": "                if was >= 0 && is >= 0 && was == is {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_25_a_move_between_streams_is_refused_and_changes_nothing"
+   "filter": "ur_34_a_move_cuts_both_streams_and_the_source_reopens_before_the_destination_opens"
  },
  {
   "id": "P450",
   "name": "a burst reads stream 0's clock and plan whatever stream it names (UR-21, RM-29)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            let stream = stream_key(Dir::Tx, k);",
-  "new": "            let stream = booked_stream(Dir::Tx);",
+   "old": "        let current = {\n            let streams = lock(&self.core.streams);\n            let stream = stream_key(Dir::Tx, k);\n            let last = streams.line(stream).and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());\n            streams.stream(stream).clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| segment.config.channels.count() as usize))\n        };",
+   "new": "        let current = {\n            let streams = lock(&self.core.streams);\n            let stream = booked_stream(Dir::Tx);\n            let last = streams.line(stream).and_then(|line| line.plan.last()).filter(|segment| segment.cut.is_none());\n            streams.stream(stream).clocks.last().map(|(clock, _)| *clock).zip(last.map(|segment| segment.config.channels.count() as usize))\n        };",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_21_a_burst_targets_its_own_transmit_stream"
@@ -8094,8 +8094,8 @@
   "id": "P457",
   "name": "a transmit owner adopts its clock after a configure that found the device lost (UR-29)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                Ok(()) if self.core.is_lost() => self.at += 1,",
-  "new": "                Ok(()) if false => self.at += 1,",
+   "old": "                Ok(true) if self.core.is_lost() => self.at += 1,",
+   "new": "                Ok(true) if false => self.at += 1,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_loss_after_a_configure_adopts_no_transmit_clock"
@@ -8264,8 +8264,8 @@
   "id": "P474",
   "name": "a transmit owner re-reads Provider::stop after its configuration (UR-26, S16b)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                Ok(()) if self.core.is_lost() => self.at += 1,",
-  "new": "                Ok(()) if self.core.is_lost() || lock(&self.core.streams).stop.is_some() => self.at += 1,",
+   "old": "                Ok(true) if self.core.is_lost() => self.at += 1,",
+   "new": "                Ok(true) if self.core.is_lost() || lock(&self.core.streams).stop.is_some() => self.at += 1,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_transmit_switch_at_a_stop_keeps_its_clock_and_sends_nothing"
@@ -8408,6 +8408,348 @@
   "new": "    let e = base;",
   "crate": "ezsdr-acceptance",
   "test_bin": "parity",
-  "filter": "vh_8_the_instance_floor_crosses_streams"
- }
-]
+   "filter": "vh_8_the_instance_floor_crosses_streams"
+  },
+  {
+   "id": "P489",
+   "name": "an idle owner keeps a streamer another stream still needs (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            if !streams.needed_before(stream, set, i64::MAX) { return false; }",
+    "new": "            if streams.needed_before(stream, set, i64::MAX) { return false; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_release_closes_an_idle_streamer_needed_by_a_move"
+  },
+  {
+   "id": "P490",
+   "name": "an owner opens a conflicting segment before releasing and waiting (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        if release_first {",
+   "new": "        if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_a_move_into_an_empty_stream_opens_it_after_the_source_s_release"
+  },
+  {
+   "id": "P491",
+   "name": "an owner skips an earlier unprocessed segment in the move chain (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            if streams.held_elsewhere(stream, current.set()).is_none()\n                && !streams.needed_before(stream, current.set(), current.segment.origin)",
+   "new": "            if streams.held_elsewhere(stream, current.set()).is_none()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_waited_open_waits_for_a_finite_unprocessed_move_segment"
+  },
+  {
+   "id": "P492",
+   "name": "a waited open does not re-read the latest refused plan (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == expected.segment)?;",
+   "new": "            let current = expected.clone();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_waited_open_reloads_a_move_refused_while_it_waits"
+  },
+  {
+    "id": "P493",
+   "name": "a waited open ignores Provider stop (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            if self.is_lost() || streams.stop.is_some() { return None; }",
+   "new": "            if self.is_lost() { return None; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+    "filter": "ur_34_a_waited_transmit_open_observes_provider_stop_with_a_later_cold_reserved"
+  },
+  {
+   "id": "P495",
+   "name": "a waited transmit open misses the queued Stop (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                if dir == Dir::Tx && streams.line(stream).is_some_and(|line| line.items.iter().any(|item| item.seq > since && item.kind == Kind::Stop)) {",
+   "new": "                if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_transmit_stop_during_release_wait_cancels_later_bursts"
+  },
+  {
+   "id": "P496",
+   "name": "uhd-control opens a from-none stream while another stream holds its channel (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "        let from_none = !channels.is_empty() && idle && planned && !streams.stream(stream).busy\n            && streams.held_elsewhere(stream, channels).is_none()\n            && !streams.needed_before(stream, channels, i64::MAX);",
+    "new": "        let from_none = !channels.is_empty() && idle && planned && !streams.stream(stream).busy\n            && !streams.needed_before(stream, channels, i64::MAX);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_an_idle_destination_leaves_its_join_to_the_owner_when_another_streamer_holds_the_channel"
+  },
+  {
+   "id": "P497",
+   "name": "a move books only one line (RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                        Ok((effective, _)) if effective == e => streams.lines = lines,",
+   "new": "                        Ok((effective, _)) if effective == e => {},",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_move_books_one_item_on_both_lines_and_both_configurations"
+  },
+  {
+   "id": "P498",
+   "name": "refusing a move leaves the destination transmit clock stale (RM-34, RM-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                    self.changed(core, to);",
+   "new": "                    let _ = to;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_refused_move_reconciles_both_transmit_clocks"
+  },
+  {
+   "id": "P499",
+   "name": "a failed from-none rate comparison leaves its streamer open (UR-13, UR-36)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                if open.is_ok() && check.is_err() && !self.core.is_lost() {",
+   "new": "                if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_a_rate_check_refusal_closes_the_streamer_before_a_later_move"
+  },
+  {
+   "id": "P500",
+   "name": "an owner leaves its streamer open after a refused rate comparison (UR-13, UR-36)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        if opened.is_ok() && checked.is_err() && !self.is_lost() {",
+   "new": "        if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_13_arm_refuses_a_pre_chain_rate_set_after_the_open"
+  },
+  {
+   "id": "P501",
+   "name": "a booked move is omitted from the applied section (UR-30, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                    lock(&self.core.rec).applied.push(json!({ \"key\": key, \"claimed\": value, \"read_back\": null, \"at\": self.core.at(e) }));",
+   "new": "                    let _ = (key, value);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_move_books_one_item_on_both_lines_and_both_configurations"
+  },
+  {
+   "id": "P502",
+   "name": "a booked move is omitted from the timing section (UR-30, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                    self.core.timing(json!({ \"what\": \"move\", \"sequence\": seq, \"channel\": number, \"from\": was, \"to\": is, \"e\": e, \"booked_at\": now, \"ready\": now }));",
+   "new": "                    let _ = (seq, number, was, is, e, now);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_move_books_one_item_on_both_lines_and_both_configurations"
+  },
+  {
+   "id": "P503",
+   "name": "a transmitted Stop is not booked on its line (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });",
+   "new": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    let _ = (stream, seq, now);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_transmit_stop_books_the_wait_exit_and_queues_the_owner_stop"
+  },
+  {
+   "id": "P504",
+   "name": "destination-first pruning drops an unfinished move dependency (RM-34)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "    pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {\n        let mut next = self.clone();\n        next.line_mut(stream);\n        next.request_prune(stream, before);\n        next.prune_requested();\n        *self = next;\n    }",
+   "new": "    pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {\n        self.line_mut(stream).prune(before);\n    }",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_34_a_destination_first_prune_keeps_move_dependencies_until_both_lines_pass"
+  },
+  {
+   "id": "P505",
+   "name": "a destination opens while the source is still configuring the same move (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                && !streams.move_source_busy(stream, current.segment.by)",
+   "new": "                && true",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_move_destination_waits_for_source_busy_after_channel_release"
+  },
+  {
+   "id": "P506",
+   "name": "a transmit owner opens a segment that ends at its origin (UR-23, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            if to.segment.cut.is_some_and(|cut| to.segment.instant(cut).is_ok_and(|end| end <= to.segment.origin)) {",
+   "new": "            if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock"
+  },
+  {
+   "id": "P507",
+   "name": "a zero-duration intermediate segment blocks a reciprocal move (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                planned.segment.origin <= origin && !planned.refused && !state.completed.contains(&identity)\n                    && !planned.segment.cut.is_some_and(|cut| planned.segment.instant(cut).is_ok_and(|end| end <= planned.segment.origin))",
+   "new": "                planned.segment.origin <= origin && !planned.refused && !state.completed.contains(&identity)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock"
+  },
+  {
+   "id": "P508",
+   "name": "an idle owner closes a streamer no other stream needs (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            if !streams.needed_before(stream, set, i64::MAX) { return false; }",
+    "new": "            if streams.needed_before(stream, set, i64::MAX) { return false; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_release_keeps_an_idle_streamer_with_no_peer_need"
+  },
+  {
+   "id": "P509",
+   "name": "a transmit cold switch discards its held last sample (UR-23, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if device_eob && device_open && !self.core.is_lost() {\n            self.close_device_burst(tail);",
+   "new": "        if device_eob && device_open && !self.core.is_lost() {\n            self.close_device_burst(None);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_a_transmit_move_ends_the_old_burst_and_sends_the_new_burst_on_its_stream"
+  },
+  {
+   "id": "P510",
+   "name": "a lost device still accepts streamer opens and closes (UR-29, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        if self.is_lost() {\n            return Err(DeviceError { lost: true, message: \"UR-29: the device is lost before opening a streamer\".to_owned() });\n        }",
+   "new": "        if false {\n            return Err(DeviceError { lost: true, message: \"UR-29: the device is lost before opening a streamer\".to_owned() });\n        }",
+   "old2": "        if self.is_lost() { return; }",
+   "new2": "        if false { return; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_device_loss_waits_for_an_admitted_streamer_open_and_close"
+  },
+  {
+   "id": "P511",
+   "name": "a rate read starts after device loss while waiting for the lifecycle gate (UR-29)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        let device_gate = self.lock_device_gate();\n        if self.is_lost() {\n            return Err(DeviceError { lost: true, message: \"UR-29: the device is lost before the rate comparison\".to_owned() });\n        }",
+   "new": "        let device_gate = self.lock_device_gate();\n        if false {\n            return Err(DeviceError { lost: true, message: \"UR-29: the device is lost before the rate comparison\".to_owned() });\n        }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_rate_read_waiting_for_device_gate_does_not_call_after_loss"
+  },
+  {
+   "id": "P512",
+   "name": "a destination opens after the source streamer releases the channel but before its move configure (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()\n                || streams.needed_before(stream, current.set(), current.segment.origin)\n                || streams.move_source_busy(stream, current.segment.by));",
+   "new": "            let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()\n                || streams.needed_before(stream, current.set(), current.segment.origin));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_move_destination_waits_for_source_busy_after_channel_release"
+  },
+  {
+   "id": "P513",
+   "name": "an owner falls back to a stale move plan removed before its turn (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };",
+   "new": "            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment).unwrap_or_else(|| next.clone());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_owner_does_not_open_a_move_plan_removed_before_its_turn"
+  },
+  {
+   "id": "P514",
+   "name": "a refused rate comparison leaves the stream recorded open (UR-13, UR-36)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "                self.record_refused(stream);",
+   "new": "                let _ = stream;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_rate_refusal_leaves_the_stream_record_unknown"
+  },
+  {
+   "id": "P515",
+   "name": "control booking is blocked by an owner holding the line through close (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "        self.close_device(dir, k);\n        let mut streams = lock(&self.streams);",
+   "new": "        let streams = lock(&self.streams);\n        self.close_device(dir, k);\n        drop(streams);\n        let mut streams = lock(&self.streams);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_control_books_the_next_action_while_an_owner_close_is_gated"
+  },
+  {
+   "id": "P517",
+   "name": "a transmit switch closes before reading its report queue (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        self.read_reports_before_close();",
+   "new": "        let _ = switch;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_transmit_stop_during_release_wait_cancels_later_bursts"
+  },
+  {
+   "id": "P518",
+   "name": "a prebooked burst on the move destination is not adopted after the repeat cut (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            if Some(held.domain) == domain {\n                self.held.insert(held.k, held);",
+   "new": "            if false {\n                self.held.insert(held.k, held);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_a_transmit_move_carries_a_prebooked_burst_across_the_repeat_cut"
+  },
+  {
+   "id": "P519",
+   "name": "a move is ready at its requested instant instead of its booking (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                    self.core.timing(json!({ \"what\": \"move\", \"sequence\": seq, \"channel\": number, \"from\": was, \"to\": is, \"e\": e, \"booked_at\": now, \"ready\": now }));",
+   "new": "                    self.core.timing(json!({ \"what\": \"move\", \"sequence\": seq, \"channel\": number, \"from\": was, \"to\": is, \"e\": e, \"booked_at\": now, \"ready\": e }));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_34_a_move_into_an_empty_stream_opens_it_after_the_source_s_release"
+  },
+  {
+   "id": "P520",
+   "name": "a waited open ignores the destination's changed configuration (UR-25, RM-34)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+   "old": "            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == expected.segment)?;",
+   "new": "            let current = expected.clone();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_34_a_waited_open_aborts_when_the_planned_segment_changes"
+  },
+  {
+   "id": "P521",
+   "name": "RX reports a lost owner configuration while holding the stream lock (UR-29, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+   "old": "                drop(streams);\n                self.core.device_failed(None, \"update_parameter\", &error);",
+   "new": "                self.core.device_failed(None, \"update_parameter\", &error);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_29_a_lost_receive_owner_configure_releases_stream_lock_before_reporting"
+  },
+  {
+    "id": "P522",
+   "name": "TX reports a lost owner configuration while holding the stream lock (UR-29, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "                    drop(streams);\n                    self.core.device_failed(None, \"update_parameter\", &error);",
+   "new": "                    self.core.device_failed(None, \"update_parameter\", &error);",
+   "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_29_a_lost_transmit_owner_configure_releases_stream_lock_before_reporting"
+  },
+  {
+    "id": "P523",
+    "name": "a from-none open passes an earlier unprocessed segment (UR-25, RM-34)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "            && !streams.needed_before(stream, channels, i64::MAX);",
+    "new": ";",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_34_a_from_none_join_yields_to_an_earlier_unprocessed_segment"
+  },
+  {
+    "id": "P524",
+    "name": "a per-stream prune stops before the effective boundaries reach a fixed point (RM-34)",
+    "file": "crates/ezsdr-radio/src/timeline.rs",
+    "old": "            if next == boundaries { break; }\n            boundaries = next;",
+    "new": "            boundaries = next;\n            break;",
+    "crate": "ezsdr-radio",
+    "test_bin": "timeline",
+    "filter": "rm_34_a_chain_prune_reaches_a_fixed_point_from_b_then_c"
+  }
+ ]

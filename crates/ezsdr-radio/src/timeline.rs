@@ -438,6 +438,9 @@ pub struct Lines {
     /// RM-34: the release floor a pruning leaves on a stream, from the source's release of a
     /// move whose two items the pruning folded away; a later booking into that stream waits it.
     floors: Vec<(StreamKey, i64)>,
+    /// RM-34: each stream's latest requested per-stream prune. A move's two items are folded
+    /// only after both streams' requests have passed its instant.
+    pruned: Vec<(StreamKey, i64)>,
 }
 
 /// RM-34: one move as its lines record it.
@@ -508,39 +511,23 @@ impl Lines {
     /// them, which every item booked into that stream afterwards waits.
     pub fn prune(&mut self, before: i64) {
         let mut next = self.clone();
-        // The source's release is fixed once the pruning has folded both items into the lines'
-        // state, so read it with the plans as they stand.
-        let dropped: Vec<(StreamKey, i64)> = next
-            .moves
-            .iter()
-            .filter(|moved| moved.e < before)
-            .filter_map(|moved| next.line(moved.from).and_then(|line| line.released(moved.channel, moved.seq)).map(|cut| (moved.to, cut)))
-            .collect();
-        for (to, cut) in dropped {
-            next.raise_floor(to, cut);
+        let streams: Vec<StreamKey> = next.lines.iter().map(|(stream, _)| *stream).collect();
+        for stream in streams {
+            next.request_prune(stream, before);
         }
-        for (_, line) in &mut next.lines {
-            line.prune(before);
-        }
-        let holds = |stream: StreamKey, seq: u64| {
-            next.lines
-                .iter()
-                .find(|(key, _)| *key == stream)
-                .is_some_and(|(_, line)| line.items.iter().any(|item| item.seq == seq))
-        };
-        next.moves.retain(|moved| holds(moved.from, moved.seq) && holds(moved.to, moved.seq));
+        next.prune_requested();
         *self = next;
     }
 
-    /// RM-26: prunes `stream`'s line before `before`, and nothing of the instance's other
-    /// lines (UR-17's per-stream prune; the UHD Module prunes the stream whose segment
-    /// ended).
-    ///
-    /// RM-34's moves are the instance's, and this prunes one of a move's two lines: a
-    /// Provider that books moves prunes both with [`Lines::prune`], whose release floors
-    /// hold. One that books none — the UHD Module until 1b-4d — prunes its own streams here.
+    /// RM-26: requests a prune of `stream`'s line before `before`; it does not request a prune
+    /// of another stream. RM-34: an item of a move stays on both lines until both effective
+    /// prune boundaries pass its instant, preserving later release changes and refusal.
     pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {
-        self.line_mut(stream).prune(before);
+        let mut next = self.clone();
+        next.line_mut(stream);
+        next.request_prune(stream, before);
+        next.prune_requested();
+        *self = next;
     }
 
     /// RM-34: books `channel` leaving `from`'s line for `to`'s, as one `Cold` item on both
@@ -643,6 +630,11 @@ impl Lines {
         Ok(true)
     }
 
+    /// The streams recorded by a move's `seq`, if it names one (RM-34).
+    pub fn move_lines(&self, seq: u64) -> Option<(StreamKey, StreamKey)> {
+        self.moves.iter().find(|moved| moved.seq == seq).map(|moved| (moved.from, moved.to))
+    }
+
     /// RM-34: the configuration `stream`'s line leaves in effect at `e`, the state its
     /// pruned items have been folded into included; a Provider builds a later `cold`
     /// change's configuration from this.
@@ -675,6 +667,63 @@ impl Lines {
             Some((_, floor)) => *floor = (*floor).max(cut),
             None => self.floors.push((stream, cut)),
         }
+    }
+
+    /// RM-34: remembers the greatest prune instant requested for one stream.
+    fn request_prune(&mut self, stream: StreamKey, before: i64) {
+        match self.pruned.iter_mut().find(|(key, _)| *key == stream) {
+            Some((_, held)) => *held = (*held).max(before),
+            None => self.pruned.push((stream, before)),
+        }
+    }
+
+    /// The latest per-stream prune request, if any.
+    fn prune_before(&self, stream: StreamKey) -> Option<i64> {
+        self.pruned.iter().find(|(key, _)| *key == stream).map(|(_, before)| *before)
+    }
+
+    /// RM-34: completes requested pruning without folding one side of an unfinished move. The
+    /// effective boundaries converge before a move's release is fixed as a destination floor.
+    fn prune_requested(&mut self) {
+        let mut boundaries: Vec<(StreamKey, i64)> = self.lines.iter().filter_map(|(stream, _)| {
+            self.prune_before(*stream).map(|before| (*stream, before))
+        }).collect();
+        loop {
+            let mut next = boundaries.clone();
+            for moved in &self.moves {
+                let before = |stream| boundaries.iter().find(|(key, _)| *key == stream).map(|(_, before)| *before);
+                let from_passes = before(moved.from).is_some_and(|before| moved.e < before);
+                let to_passes = before(moved.to).is_some_and(|before| moved.e < before);
+                if from_passes && !to_passes {
+                    if let Some((_, before)) = next.iter_mut().find(|(key, _)| *key == moved.from) {
+                        *before = (*before).min(moved.e);
+                    }
+                } else if to_passes && !from_passes {
+                    if let Some((_, before)) = next.iter_mut().find(|(key, _)| *key == moved.to) {
+                        *before = (*before).min(moved.e);
+                    }
+                }
+            }
+            if next == boundaries { break; }
+            boundaries = next;
+        }
+        let boundary = |stream| boundaries.iter().find(|(key, _)| *key == stream).map(|(_, before)| *before);
+        let completed: Vec<(StreamKey, i64)> = self.moves.iter()
+            .filter(|moved| boundary(moved.from).is_some_and(|before| moved.e < before)
+                && boundary(moved.to).is_some_and(|before| moved.e < before)
+                && self.line(moved.from).is_some_and(|line| line.items.iter().any(|item| item.seq == moved.seq))
+                && self.line(moved.to).is_some_and(|line| line.items.iter().any(|item| item.seq == moved.seq)))
+            .filter_map(|moved| self.line(moved.from).and_then(|line| line.released(moved.channel, moved.seq)).map(|cut| (moved.to, cut)))
+            .collect();
+        for (to, cut) in completed {
+            self.raise_floor(to, cut);
+        }
+        for (stream, before) in boundaries {
+            self.line_mut(stream).prune(before);
+        }
+        let lines = &self.lines;
+        let holds = |stream: StreamKey, seq: u64| lines.iter().find(|(key, _)| *key == stream).is_some_and(|(_, line)| line.items.iter().any(|item| item.seq == seq));
+        self.moves.retain(|moved| holds(moved.from, moved.seq) && holds(moved.to, moved.seq));
     }
 
     /// RM-34: after any operation, every item of every destination line at or after a move

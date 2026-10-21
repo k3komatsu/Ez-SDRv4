@@ -708,6 +708,8 @@ impl Device for Scripted {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
     fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
+    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
+    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
 }

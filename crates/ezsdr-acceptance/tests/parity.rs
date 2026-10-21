@@ -955,6 +955,19 @@ fn uhd_plan(instance: &ProviderInstance, t0: i64) -> Vec<SegmentRow> {
     segments
 }
 
+/// Manifest `sequence` is instance-local; compare the rank of each distinct value.
+fn ranked_segments(mut rows: Vec<SegmentRow>) -> Vec<SegmentRow> {
+    let mut sequences: Vec<u64> = rows.iter().filter_map(|row| row.2).collect();
+    sequences.sort();
+    sequences.dedup();
+    let ranks: BTreeMap<u64, u64> = sequences.into_iter().enumerate().map(|(rank, seq)| (seq, rank as u64)).collect();
+    for row in &mut rows {
+        row.2 = row.2.map(|seq| ranks[&seq]);
+    }
+    rows.sort();
+    rows
+}
+
 /// Two rigs of one stream comparison, armed and started at each one's own T0 — the Mock's
 /// at `t0`, the UHD's at its own now plus the same lead after `arm` — and brought to the
 /// same relative instant. The UHD's T0 is on the lattice every stream of these comparisons
@@ -969,10 +982,14 @@ struct Started {
 
 impl Started {
     fn new(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str]) -> Started {
+        Started::with_fake_config(selector, constraints, ports, FakeConfig::default())
+    }
+
+    fn with_fake_config(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str], fake: FakeConfig) -> Started {
         let t0 = ms(2_000) + ms(1);
         let mut mock = MockRig::with_ports(selector.clone(), constraints, ports);
         mock.arm_start(t0);
-        let mut uhd = UhdRig::with_ports(selector, constraints, FakeConfig::default(), ports).unwrap();
+        let mut uhd = UhdRig::with_ports(selector, constraints, fake, ports).unwrap();
         uhd.arm().unwrap();
         // The UHD's own T0: the same lead after `arm` as the Mock's T0 is after its own
         // arm. The 200-tick lattice is the one these comparisons' streams share — their
@@ -1300,4 +1317,64 @@ fn vh_8_the_same_manifest_sequence() {
     };
     assert_eq!(ranks(&mock_rows), ranks(&uhd_rows), "the same arrival order: {mock_rows:?} {uhd_rows:?}");
     assert_eq!(ranks(&mock_rows), [None, None, Some(0), Some(1), Some(2)], "{mock_rows:?}");
+}
+
+#[test]
+fn vh_8_a_move_between_streams_leaves_the_same_clocks_segments_and_update() {
+    // S11/A10: stream 0 retains c0 while c1 moves into s1; compare plan sequence by rank and
+    // compare the one logical move row in `applied` as well as clocks and plan.
+    let selector = selector(&["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], &[]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c2.stream", eq(Scalar::from(1))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(2e6).unwrap())),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+        ("radio.rx.s2.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+    ];
+    let mut pair = Started::with_fake_config(selector, &constraints, &["rx0", "rx1"], FakeConfig { front_ends: vec!["UBX", "BasicRX"], ..FakeConfig::default() });
+    pair.cold("radio.rx.c1.stream", Value::from(1), 10, Some(100), 500);
+    let mock_clocks = pair.mock_rows();
+    let uhd_clocks = pair.uhd_rows();
+    let (t0, uhd_t0) = (pair.t0, pair.uhd_t0);
+    let (mock, uhd) = pair.finish(600);
+    assert_eq!(mock_clocks, uhd_clocks, "the clock rows from each T0");
+    let mock_segments = ranked_segments(mock_segments(&mock, t0));
+    let uhd_segments = ranked_segments(uhd_plan(&uhd, uhd_t0));
+    assert_eq!(mock_segments, uhd_segments, "the segment rows with sequence ranks");
+    let mock_applied = &mock.sections[&Namespace::parse("ezsdr.radio.mock.applied").unwrap()];
+    let uhd_applied = &uhd.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let mock_updates = updates(mock_applied, t0);
+    let uhd_updates = updates(uhd_applied, uhd_t0);
+    assert_eq!(mock_updates, uhd_updates, "the applied logical move row");
+    assert_eq!(mock_updates, [("radio.rx.c1.stream".to_owned(), json!(1), ms(100))]);
+}
+
+#[test]
+fn vh_8_a_move_into_an_empty_stream_leaves_the_same_first_segment_and_update() {
+    // S3/S11/A10: an empty destination stays unopened by uhd-control at booking; its first
+    // segment, plan sequence rank and logical move row match the Mock's.
+    let selector = selector(&["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], &[]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.rx.c2.stream", eq(Scalar::from(-1))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(2e6).unwrap())),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+        ("radio.rx.s2.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap())),
+    ];
+    let mut pair = Started::with_fake_config(selector, &constraints, &["rx0", "rx1", "rx2"], FakeConfig { front_ends: vec!["UBX", "BasicRX"], ..FakeConfig::default() });
+    pair.cold("radio.rx.c1.stream", Value::from(2), 10, Some(100), 500);
+    let mock_clocks = pair.mock_rows();
+    let uhd_clocks = pair.uhd_rows();
+    let (t0, uhd_t0) = (pair.t0, pair.uhd_t0);
+    let (mock, uhd) = pair.finish(600);
+    assert_eq!(mock_clocks, uhd_clocks, "the clock rows from each T0");
+    assert_eq!(ranked_segments(mock_segments(&mock, t0)), ranked_segments(uhd_plan(&uhd, uhd_t0)), "the segment rows with sequence ranks");
+    let mock_applied = &mock.sections[&Namespace::parse("ezsdr.radio.mock.applied").unwrap()];
+    let uhd_applied = &uhd.sections[&Namespace::parse("ezsdr.radio.uhd.applied").unwrap()];
+    let mock_updates = updates(mock_applied, t0);
+    let uhd_updates = updates(uhd_applied, uhd_t0);
+    assert_eq!(mock_updates, uhd_updates, "the applied logical move row");
+    assert_eq!(mock_updates, [("radio.rx.c1.stream".to_owned(), json!(2), ms(100))]);
 }

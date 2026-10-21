@@ -17,10 +17,13 @@
 ## 2. 次にすること
 
 1. **実機**：2026-10-20 に BP0 と BP5 を 2 台で済ませた（[bench-results.md](plan/phase8/bench-results.md)：Phase 7 の hardware テスト 29 本が #1＋OBX・#2＋UBX とも通り，悪くなった数値は無い）．今つながっているのは #1＋OBX．組み換えは owner に頼む（2026-10-20 夜は翌朝まで不可）．
-2. **Phase 8 の段階 1b-4e-2**（UHD の moves，RM-34．[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-4 行「分け方」）．1b-4e-1（VH-8 の harness の stream 次元）は 2026-10-20 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4e1-opus.md](plan/phase8/reviews/1b4e1-opus.md)．§7 が 1b-4e-2 へ送るもの）．
+2. **Phase 8 の段階 1b-5**（切り替え：server・Python・fixture を新しい key に移し，今の key のモードを消して畳む．[設計 33](plan/phase8/33-channels-and-streams.md) §5）．1b-4e-2（UHD の moves，RM-34）は 2026-10-21 に完了（[00-overview](plan/phase8/00-overview.md) §8，[reviews/1b4e2-opus.md](plan/phase8/reviews/1b4e2-opus.md)）．**owner の指示（2026-10-20）で 1b-4e-2 の gate の後は止めている．1b-5 は owner の再開の指示を待つ．**
    - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
-   - **次は 4e-2**：moves（RM-34，plan 33 の (6)）．risky なのでテスト計画から．4d-3 の持ち越し：`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Session の Manifest ファイルまで通さない．
+   - bench 行き（1b-4e-2）：X300 で front end を別の streamer へ移した後の sample の連続（INFERRED．UHD 4.10 の source では streamer の破棄が graph の edge を外す）．
+   - 4d-3 の持ち越し：`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Session の Manifest ファイルまで通さない．4e-2 の持ち越し：待ちが origin を越える場合，close の時点で読めない TX の report，`effective != e` の到達性（[1b4e2-opus](plan/phase8/reviews/1b4e2-opus.md) §1）．
+   - **owner に確かめること**：`stream-lifecycle-scattered` が 1b-4d-2・1b-4e-2 で 5 件（loss の周り）．1b-5 の後に stream の lifecycle を 1 つの状態にするかを見直す（[failure-mechanisms](plan/maintenance/failure-mechanisms.md)）．
+   - mutation の見張り（`mutation_watchdog.py`）は，削除の mutant（`new` ⊂ `old`）と `new` がよくある語の行で，実装役の当て直し中に誤報を出す（1b-4e-2 で 4 回）．直すか，書き換えの多い段階では行の検査を外して gate で全行の一致を確かめる．
    - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
    - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c・4d-1c・4d-2 の記録（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §4 など）．
    - **持ち越し**：
@@ -29,7 +32,6 @@
      - [1b-3c の裁定](plan/phase8/reviews/1b3c-opus.md) の minor 1（RX と TX の同じ origin の引き順のテスト，1b-5）．
      - 1b-4c の O5：front end の照合が 2 つのモードの腕に分かれている（1b-5 で畳む）．
    - **その後**：
-     - 1b-5（切り替え．今の key のモードを消して畳む）．
      - 2（#51 の設計メモ→#51・D2，#62 と D9 の DDC/DUC の release の規則，#59，A2 のテスト）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
