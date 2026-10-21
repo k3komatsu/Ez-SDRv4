@@ -1,9 +1,8 @@
 """The Easy API: a Session and its radios (spec 16 EA-16, EA-17).
 
 Every change is a Kernel ``SessionAction`` the server submits, and every advance of
-time is the server's (EA-1). What this module adds are names — ``rx.frequency`` for
-the Radio Model key ``radio.rx.frequency_hz`` — and ``capture``, composed of a submit,
-a wait and a read.
+time is the server's (EA-1). What this module adds are names for the Radio Model's
+channel and stream keys, and ``capture``, composed of a submit, a wait and a read.
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ class Target:
     """What an action addresses, as the Kernel's ``Target`` document (KC-23, EA-16): a
     resource with a sub-path below it, an output (a recorder) or a graph component. A
     plain string passed to ``Session.set`` or ``Session.stop`` is always a resource
-    target, ``"radio/rx"`` being ``Target.resource("radio", "rx")``."""
+    target, ``"radio/rx/s0"`` being ``Target.resource("radio", "rx/s0")``."""
 
     @staticmethod
     def resource(name: str, path: str = "") -> dict:
@@ -181,43 +180,79 @@ _PARAMS = {
     "sample_rate": ("sample_rate_hz", float),
     "gain": ("gain_db", float),
     "antenna": ("antenna", str),
-    "channels": ("channels", int),
+    "stream": ("stream", int),
 }
 
 
 def _param(name: str) -> property:
     suffix, convert = _PARAMS[name]
 
-    def get(self: "_Side") -> Any:
-        return self._session.effective[self._radio][self._key(suffix)]
+    def get(self: Any) -> Any:
+        return _effective(self._session, self._radio, self._key(suffix))
 
-    def set_(self: "_Side", value: Any) -> None:
+    def set_(self: Any, value: Any) -> None:
         self._session.set(self._radio, self._key(suffix), convert(value))
 
-    return property(get, set_, doc=f"The effective ``radio.<rx|tx>.{suffix}``; setting it submits SetParameter.")
+    return property(get, set_, doc="The effective value; setting it submits SetParameter.")
 
 
-class _Side:
-    def __init__(self, session: "Session", radio: str, direction: str):
+def _effective(session: "Session", radio: str, key: str) -> Any:
+    try:
+        return session.effective[radio][key]
+    except KeyError as error:
+        raise Error(f"EA-16: {radio} has no key {key}") from error
+
+
+def _indices(effective: Dict[str, Any], direction: str, segment: str, leaf: str) -> List[int]:
+    prefix = f"radio.{direction}.{segment}"
+    numbers = set()
+    for key in effective:
+        stem, _, suffix = key.rpartition(".")
+        number = stem[len(prefix):] if suffix == leaf and stem.startswith(prefix) else ""
+        if number.isascii() and number.isdecimal():
+            numbers.add(int(number))
+    return sorted(numbers)
+
+
+class _Channel:
+    def __init__(self, session: "Session", radio: str, direction: str, number: int):
         self._session = session
         self._radio = radio
         self._direction = direction
+        self._number = number
 
     def _key(self, suffix: str) -> str:
-        return f"radio.{self._direction}.{suffix}"
+        return f"radio.{self._direction}.c{self._number}.{suffix}"
 
     frequency = _param("frequency")
-    sample_rate = _param("sample_rate")
     gain = _param("gain")
     antenna = _param("antenna")
-    channels = _param("channels")
+    stream = _param("stream")
+
+
+class _Stream:
+    def __init__(self, session: "Session", radio: str, direction: str, number: int):
+        self._session = session
+        self._radio = radio
+        self._direction = direction
+        self._number = number
+
+    def _key(self, suffix: str) -> str:
+        return f"radio.{self._direction}.s{self._number}.{suffix}"
+
+    sample_rate = _param("sample_rate")
+
+    @property
+    def channels(self) -> List[int]:
+        effective = self._session.effective[self._radio]
+        return [number for number in _indices(effective, self._direction, "c", "stream")
+                if effective[f"radio.{self._direction}.c{number}.stream"] == self._number]
 
     def stop(self) -> dict:
-        """Submits ``Stop`` for this side's stream: after ``rx.stop()`` or ``stop("<radio>")``
-        the receive stream stays stopped through every parameter change until ``rx.start()``,
-        and after ``tx.stop()`` or ``stop("<radio>")`` the next ``repeat`` transmits (RM-16,
-        RM-21; EA-16)."""
-        return self._session.stop(Target.resource(self._radio, self._direction))
+        """Submits ``Stop`` for this stream: a receive stream stays stopped through every
+        parameter change until ``start()``, and a transmit stream sends again on its next
+        ``repeat()`` (RM-16, RM-21; EA-16)."""
+        return self._session.stop(Target.resource(self._radio, f"{self._direction}/s{self._number}"))
 
 
 class CaptureRequest:
@@ -232,8 +267,11 @@ class CaptureRequest:
         self._start = start
 
 
-class Rx(_Side):
-    """A radio's receive side."""
+class Rx(_Stream):
+    """A radio's receive stream."""
+
+    def __init__(self, session: "Session", radio: str, number: int = 0):
+        super().__init__(session, radio, "rx", number)
 
     def start(self, at: Optional[dict] = None) -> dict:
         """Submits ``radio.start_rx`` on this radio's receive stream with ``at``, a
@@ -248,7 +286,7 @@ class Rx(_Side):
             "kind": "vocabulary",
             "ns": "radio",
             "verb": "start_rx",
-            "target": Target.resource(self._radio, "rx"),
+            "target": Target.resource(self._radio, f"rx/s{self._number}"),
             "at": at if at is not None else self._session._aligned or self._session.now,
             "params": {},
         }
@@ -267,13 +305,14 @@ class Rx(_Side):
             raise Error("EA-16: next_at needs a start on the primary root, as after() names")
         ahead = self._session._duration(ahead)["ticks"]
         status = self._session._status()
-        clocks = [c for c in status["sample_clocks"] if c["stream"]["path"] == f"{self._radio}/rx"]
+        path = f"{self._radio}/rx/s{self._number}"
+        clocks = [c for c in status["sample_clocks"] if c["stream"]["path"] == path]
         if not clocks:
-            raise Error(f"EA-16: {self._radio}/rx has no SampleClock yet")
+            raise Error(f"EA-16: {path} has no SampleClock yet")
         clock = clocks[-1]
         origin = clock["origin"]["ticks"]
         if clock["ended_at"] is not None or origin > start["ticks"]:
-            raise Error(f"EA-16: {self._radio}/rx is not on the SampleClock it ran at start (stopped, or its rate changed since)")
+            raise Error(f"EA-16: {path} is not on the SampleClock it ran at start (stopped, or its rate changed since)")
         per = Fraction(clock["root_ticks_per_tick"]["num"], clock["root_ticks_per_tick"]["den"])
         first = math.ceil((start["ticks"] - origin) / per)
         earliest = math.ceil((status["now"]["ticks"] + ahead - origin) / per)
@@ -281,7 +320,7 @@ class Rx(_Side):
         return {"domain": start["domain"], "ticks": origin + math.ceil(index * per)}
 
     def capture(self, n: int, at: Optional[dict] = None, timeout: Optional[float] = None) -> np.ndarray:
-        """Captures ``n`` samples from this radio's recorder and returns them (EA-17).
+        """Captures ``n`` samples from this stream's recorder and returns them (EA-17).
         ``at`` is a ``TimePoint``; ``timeout`` is in seconds of Run time."""
         if self._session._aligned is not None:
             raise Error("EA-16: capture waits, so it is refused inside aligned; use request, and result after the block")
@@ -294,7 +333,7 @@ class Rx(_Side):
         """Asks the recorder for ``n`` samples and returns at once (EA-17). Requests are
         served one after another, each from the end of the one before it (HD-10), so
         requests made before the earlier ones are answered capture contiguous samples."""
-        recorder = self._session._recorder(self._radio)
+        recorder = self._session._recorder(self._radio, self._number)
         start = self._session._status()["events"]
         action = {
             "kind": "vocabulary",
@@ -333,23 +372,27 @@ class Rx(_Side):
             return samples(self._session.read(artifact), artifact)
 
 
-class Tx(_Side):
-    """A radio's transmit side."""
+class Tx(_Stream):
+    """A radio's transmit stream."""
+
+    def __init__(self, session: "Session", radio: str, number: int = 0):
+        super().__init__(session, radio, "tx", number)
 
     def repeat(self, x: Any, at: Optional[dict] = None) -> dict:
-        """Transmits ``x`` repeatedly: sets ``radio.tx.channels`` to its channel count when
-        it differs, then submits ``radio.start_repeat`` with its bytes (EA-16). ``at`` is a
-        ``TimePoint``, as ``capture`` takes, at which the first sample goes out — a whole
-        second of a root whose epoch is ``pps`` is a PPS edge (UR-7, ``next_pps``); without
-        one, ``aligned``'s instant inside its block, else the next instant the radio allows."""
+        """Transmits ``x`` repeatedly on this stream (EA-16). Its channel count must match
+        this stream's membership. ``at`` is a ``TimePoint`` as ``capture`` takes, at which
+        its first sample goes out — a whole second of a root whose epoch is ``pps`` is a PPS
+        edge (UR-7, ``next_pps``); without one, ``aligned``'s instant inside its block, else
+        the next instant the radio allows."""
         channels, data = _cf32(x)
-        if self.channels != channels:
-            self.channels = channels
+        assigned = len(self.channels)
+        if assigned != channels:
+            raise Error(f"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}")
         action = {
             "kind": "vocabulary",
             "ns": "radio",
             "verb": "start_repeat",
-            "target": Target.resource(self._radio, "tx"),
+            "target": Target.resource(self._radio, f"tx/s{self._number}"),
             "at": at if at is not None else self._session._aligned,
             "params": {},
         }
@@ -361,8 +404,25 @@ class Radio:
 
     def __init__(self, session: "Session", name: str):
         self.name = name
-        self.rx = Rx(session, name, "rx")
-        self.tx = Tx(session, name, "tx")
+        effective = session.effective[name]
+        self.rx_channels = [_Channel(session, name, "rx", n) for n in _indices(effective, "rx", "c", "stream")]
+        self.tx_channels = [_Channel(session, name, "tx", n) for n in _indices(effective, "tx", "c", "stream")]
+        self.rx_streams = [Rx(session, name, k) for k in _indices(effective, "rx", "s", "sample_rate_hz")]
+        self.tx_streams = [Tx(session, name, k) for k in _indices(effective, "tx", "s", "sample_rate_hz")]
+
+    def _first_stream(self, direction: str) -> Any:
+        streams = self.rx_streams if direction == "rx" else self.tx_streams
+        if not streams:
+            raise Error(f"EA-16: radio {self.name} has no {direction} stream 0")
+        return streams[0]
+
+    @property
+    def rx(self) -> Rx:
+        return self._first_stream("rx")
+
+    @property
+    def tx(self) -> Tx:
+        return self._first_stream("tx")
 
 
 class RunResult:
@@ -542,19 +602,36 @@ class Session:
     def tx(self) -> Tx:
         return self.radio().tx
 
-    def _recorder(self, radio: str) -> str:
-        """The one binding whose feed starts at ``radio``'s receive port (EA-17). With none
-        or several it raises before any request is sent: the helper never chooses among
-        recorders (spec 20, VF-1; issue #42)."""
+    @property
+    def rx_channels(self) -> List[_Channel]:
+        return self.radio().rx_channels
+
+    @property
+    def tx_channels(self) -> List[_Channel]:
+        return self.radio().tx_channels
+
+    @property
+    def rx_streams(self) -> List[Rx]:
+        return self.radio().rx_streams
+
+    @property
+    def tx_streams(self) -> List[Tx]:
+        return self.radio().tx_streams
+
+    def _recorder(self, radio: str, stream: int) -> str:
+        """The one binding whose feed starts at ``radio``'s ``rx<stream>`` port (EA-17).
+        With none or several it raises before any request is sent: the helper never chooses
+        among recorders (spec 20, VF-1; issue #42)."""
+        port_name = f"rx{stream}"
         found = []
         for name, binding in self.profile["bindings"].items():
             port = (binding.get("feed") or {}).get("port", {})
-            if port.get("component") == radio and port.get("port") == "rx":
+            if port.get("component") == radio and port.get("port") == port_name:
                 found.append(name)
         if not found:
-            raise Error(f"EA-17: no recorder is fed from {radio}'s receive port in the Session's profile")
+            raise Error(f"EA-17: no recorder is fed from {radio}'s receive port {port_name} in the Session's profile")
         if len(found) > 1:
-            raise Error(f"EA-17: {len(found)} recorders are fed from {radio}'s receive port {sorted(found)}; submit sink.capture naming one")
+            raise Error(f"EA-17: {len(found)} recorders are fed from {radio}'s receive port {port_name} {sorted(found)}; submit sink.capture naming one")
         return found[0]
 
     # -- artifacts and child Runs

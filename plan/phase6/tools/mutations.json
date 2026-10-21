@@ -267,13 +267,13 @@
   "new": "",
   "python": "test_easy_api.EasyApi.test_v57_repeat_then_capture_in_software"
  },
- {
-  "id": "P01",
-  "name": "EA-16 repeat does not set the channel count",
-  "file": "python/ezsdr/session.py",
-  "old": "        if self.channels != channels:\n            self.channels = channels\n",
-  "new": "",
-  "python": "test_easy_api.EasyApi.test_v57_repeat_then_capture_in_software"
+  {
+   "id": "P01",
+   "name": "EA-16 repeat refuses a channel-count mismatch before submitting",
+   "file": "python/ezsdr/session.py",
+   "old": "        if assigned != channels:\n            raise Error(f\"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}\")",
+   "new": "",
+   "python": "test_easy_api.EasyApi.test_ea_16_repeat_refuses_a_channel_count_mismatch_before_submit"
  },
  {
   "id": "P02",
@@ -499,13 +499,13 @@
   "new": "",
   "python": "test_easy_api.EasyApi.test_ea_17_a_capture_the_recorder_refuses_raises"
  },
- {
-  "id": "P11",
-  "name": "EA-16 repeat always sets the channel count",
-  "file": "python/ezsdr/session.py",
-  "old": "        if self.channels != channels:\n            self.channels = channels\n",
-  "new": "        self.channels = channels\n",
-  "python": "test_easy_api.EasyApi.test_ea_16_repeat_sets_the_channel_count_only_when_it_differs"
+  {
+   "id": "P11",
+   "name": "EA-16 repeat requires the matching channel count",
+   "file": "python/ezsdr/session.py",
+   "old": "        if assigned != channels:\n            raise Error(f\"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}\")",
+   "new": "        if assigned == channels:\n            raise Error(f\"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}\")",
+   "python": "test_easy_api.EasyApi.test_ea_16_repeat_uses_stream_membership_without_setting_it"
  },
  {
   "id": "P12",

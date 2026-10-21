@@ -219,8 +219,8 @@
   "id": "F03",
   "name": "the zero case's message advises naming a recorder",
   "file": "python/ezsdr/session.py",
-  "old": "receive port in the Session's profile\")",
-  "new": "receive port in the Session's profile; submit sink.capture naming one\")",
+   "old": "receive port {port_name} in the Session's profile\")",
+   "new": "receive port {port_name} in the Session's profile; submit sink.capture naming one\")",
   "python": "test_easy_api.RecorderChoice.test_ea_17_capture_needs_exactly_one_recorder"
  },
  {
@@ -8773,13 +8773,187 @@
     "filter": "ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop"
   },
   {
-    "id": "P527",
-    "name": "the fake's drop lets a test that would have aborted a real device pass (UR-33)",
-    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-    "old": "                panic!(\"UR-33: {open} — on UHD 4.10 this aborts the process\");",
-    "new": "                let _ = open;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
-    "filter": "ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop"
+   "id": "P527",
+   "name": "the fake's drop lets a test that would have aborted a real device pass (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                panic!(\"UR-33: {open} — on UHD 4.10 this aborts the process\");",
+   "new": "                let _ = open;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop"
+  },
+  {
+   "id": "P528",
+   "name": "the built-in profile selects layout keys (EA-9, RM-38)",
+   "file": "crates/ezsdr-server/src/catalogue.rs",
+   "old": "                    \"keys\": \"channel\",\n",
+   "new": "",
+   "crate": "ezsdr-server",
+   "test_bin": "protocol",
+   "filter": "ea_09_the_default_profile_loops_back"
+  },
+  {
+   "id": "P529",
+   "name": "the default capture feed uses receive port rx0 (EA-9)",
+   "file": "crates/ezsdr-server/src/catalogue.rs",
+   "old": "                \"feed\": { \"port\": { \"component\": \"radio\", \"port\": \"rx0\" }, \"policy\": \"drop_oldest\", \"capacity\": 64 }",
+   "new": "                \"feed\": { \"port\": { \"component\": \"radio\", \"port\": \"rx\" }, \"policy\": \"drop_oldest\", \"capacity\": 64 }",
+   "crate": "ezsdr-server",
+   "test_bin": "protocol",
+   "filter": "ea_09_the_default_profile_loops_back"
+  },
+  {
+   "id": "P530",
+   "name": "the default link originates at receive port rx0 (EA-9)",
+   "file": "crates/ezsdr-server/src/catalogue.rs",
+   "old": "                \"from\": { \"component\": \"radio\", \"port\": \"rx0\" },",
+   "new": "                \"from\": { \"component\": \"radio\", \"port\": \"rx\" },",
+   "crate": "ezsdr-server",
+   "test_bin": "protocol",
+   "filter": "ea_09_the_default_profile_loops_back"
+  },
+  {
+   "id": "P531",
+   "name": "channel attributes use numbered channel keys (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "        return f\"radio.{self._direction}.c{self._number}.{suffix}\"",
+   "new": "        return f\"radio.{self._direction}.{suffix}\"",
+   "python": "test_easy_api.EasyApi.test_ea_16_channel_keys_and_stream_membership"
+  },
+  {
+   "id": "P532",
+   "name": "stream sample rate uses the numbered stream key (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "        return f\"radio.{self._direction}.s{self._number}.{suffix}\"",
+   "new": "        return f\"radio.{self._direction}.{suffix}\"",
+   "python": "test_easy_api.EasyApi.test_ea_16_channel_keys_and_stream_membership"
+  },
+  {
+   "id": "P533",
+   "name": "stream channels compare the same effective snapshot to the stream number (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "if effective[f\"radio.{self._direction}.c{number}.stream\"] == self._number",
+   "new": "if effective[f\"radio.{self._direction}.c{number}.stream\"] == 0",
+   "python": "test_easy_api.EasyApi.test_ea_16_channel_keys_and_stream_membership"
+  },
+  {
+   "id": "P534",
+   "name": "stream channels remain read-only (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "    @property\n    def channels(self) -> List[int]:",
+   "new": "    def channels(self) -> List[int]:",
+   "python": "test_easy_api.EasyApi.test_ea_16_stream_channels_are_read_only"
+  },
+  {
+   "id": "P535",
+   "name": "capture on stream k selects port rxk (EA-17)",
+   "file": "python/ezsdr/session.py",
+   "old": "        port_name = f\"rx{stream}\"",
+   "new": "        port_name = \"rx\"",
+   "python": "test_easy_api.EasyApi.test_ea_17_stream_one_capture_uses_its_recorder"
+  },
+  {
+   "id": "P536",
+   "name": "next_at selects this receive stream's SampleClock (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "        path = f\"{self._radio}/rx/s{self._number}\"",
+   "new": "        path = f\"{self._radio}/rx/s0\"",
+   "python": "test_easy_api.DurationRequests.test_ea_16_next_at_counts_samples_at_a_fractional_rate"
+  },
+  {
+   "id": "P537",
+   "name": "repeat refuses a waveform whose channel count differs from stream membership (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "        if assigned != channels:\n            raise Error(f\"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}\")",
+   "new": "        if False:\n            raise Error(f\"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}\")",
+   "python": "test_easy_api.EasyApi.test_ea_16_repeat_refuses_a_channel_count_mismatch_before_submit"
+  },
+  {
+   "id": "P538",
+   "name": "Radio.rx is the first receive stream (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "        return self._first_stream(\"rx\")",
+   "new": "        return self._first_stream(\"tx\")",
+   "python": "test_easy_api.EasyApi.test_ea_16_radio_side_is_stream_zero"
+  },
+  {
+   "id": "P539",
+   "name": "Session.rx aliases radio().rx_streams[0] (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "    def rx(self) -> Rx:\n        return self.radio().rx",
+   "new": "    def rx(self) -> Rx:\n        return self.radio().rx_streams[1]",
+   "python": "test_easy_api.EasyApi.test_ea_16_radio_side_is_stream_zero"
+  },
+  {
+   "id": "P540",
+   "name": "Session.tx aliases radio().tx_streams[0] (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "    def tx(self) -> Tx:\n        return self.radio().tx",
+   "new": "    def tx(self) -> Tx:\n        return self.radio().tx_streams[1]",
+   "python": "test_easy_api.EasyApi.test_ea_16_radio_side_is_stream_zero"
+  },
+  {
+   "id": "P541",
+   "name": "start_rx targets its stream node (EA-16, RM-29)",
+   "file": "python/ezsdr/session.py",
+   "old": "            \"target\": Target.resource(self._radio, f\"rx/s{self._number}\"),",
+   "new": "            \"target\": Target.resource(self._radio, \"rx\"),",
+   "python": "test_easy_api.EasyApi.test_ea_16_stream_one_actions_target_their_nodes"
+  },
+  {
+   "id": "P542",
+   "name": "start_repeat targets its transmit stream node (EA-16, RM-29)",
+   "file": "python/ezsdr/session.py",
+   "old": "            \"target\": Target.resource(self._radio, f\"tx/s{self._number}\"),",
+   "new": "            \"target\": Target.resource(self._radio, \"tx\"),",
+   "python": "test_easy_api.EasyApi.test_ea_16_stream_one_actions_target_their_nodes"
+  },
+  {
+   "id": "P543",
+   "name": "Stop targets its receive stream node (EA-16, RM-29)",
+   "file": "python/ezsdr/session.py",
+   "old": "        return self._session.stop(Target.resource(self._radio, f\"{self._direction}/s{self._number}\"))",
+   "new": "        return self._session.stop(Target.resource(self._radio, self._direction))",
+   "python": "test_easy_api.EasyApi.test_ea_16_stream_one_actions_target_their_nodes"
+  },
+  {
+   "id": "P544",
+   "name": "stream membership is read from its own direction (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "f\"radio.{self._direction}.c{number}.stream\"",
+   "new": "f\"radio.rx.c{number}.stream\"",
+   "python": "test_easy_api.EasyApi.test_ea_16_channel_keys_and_stream_membership"
+  },
+  {
+   "id": "P545",
+   "name": "channel and stream numbers come from the effective keys, not selector counts (EA-16, EA-18)",
+   "file": "python/ezsdr/session.py",
+   "old": "    return sorted(numbers)",
+   "new": "    return [0]",
+   "python": "test_easy_api.DurationRequests.test_ea_16_collections_follow_effective_keys_without_selector"
+  },
+  {
+   "id": "P546",
+   "name": "a missing stream-zero alias raises Error (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "        if not streams:\n            raise Error(f\"EA-16: radio {self.name} has no {direction} stream 0\")",
+   "new": "        if False:\n            raise Error(f\"EA-16: radio {self.name} has no {direction} stream 0\")",
+   "python": "test_easy_api.EasyApi.test_ea_16_alias_without_stream_zero_raises_error"
+  },
+  {
+   "id": "P547",
+   "name": "an absent effective key reports the Easy API Error (EA-16)",
+   "file": "python/ezsdr/session.py",
+   "old": "    except KeyError as error:\n        raise Error(f\"EA-16: {radio} has no key {key}\") from error",
+   "new": "    except KeyError as error:\n        raise",
+   "python": "test_easy_api.DurationRequests.test_ea_16_missing_layout_key_raises_error"
+  },
+  {
+   "id": "P548",
+   "name": "a stream membership list reads one effective snapshot (EA-16, EA-18)",
+   "file": "python/ezsdr/session.py",
+   "old": "        effective = self._session.effective[self._radio]\n        return [number for number in _indices(effective, self._direction, \"c\", \"stream\")\n                if effective[f\"radio.{self._direction}.c{number}.stream\"] == self._number]",
+   "new": "        return [number for number in _indices(self._session.effective[self._radio], self._direction, \"c\", \"stream\")\n                if _effective(self._session, self._radio, f\"radio.{self._direction}.c{number}.stream\") == self._number]",
+   "python": "test_easy_api.DurationRequests.test_ea_16_collections_follow_effective_keys_without_selector"
   }
- ]
+  ]

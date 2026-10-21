@@ -23,6 +23,7 @@ def found(y: np.ndarray) -> int:
 
 
 with ezsdr.connect() as sdr:
+    sdr.tx_channels[0].stream = 0
     sdr.tx.repeat(x)
     # A capture meant to start at an instant names one ahead of the Run's time (EA-17).
     ahead = sdr.after(0.05)
@@ -34,7 +35,7 @@ with ezsdr.connect() as sdr:
     print(f"sample rate {sdr.rx.sample_rate} S/s (coerced, a new SampleClock)")
     # The RF envelope limits what is emitted (RM-19): a transmit retune outside it.
     try:
-        sdr.tx.frequency = 2.4e9
+        sdr.tx_channels[0].frequency = 2.4e9
         print("the transmit retune outside the RF envelope was admitted: check radio.rf_envelope")
     except ezsdr.Rejected as rejected:
         print(f"the transmit retune outside the RF envelope was refused: {rejected}")

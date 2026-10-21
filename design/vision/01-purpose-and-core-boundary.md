@@ -54,6 +54,7 @@ The system may become sophisticated internally, but basic use must remain simple
 import ezsdr
 
 with ezsdr.connect() as sdr:
+    sdr.tx_channels[0].stream = 0
     sdr.tx.repeat(x)
     y = sdr.rx.capture(100_000)
 ```
@@ -62,10 +63,11 @@ A slightly more explicit experiment should remain natural:
 
 ```python
 with ezsdr.connect() as sdr:
-    sdr.rx.frequency = 2.45e9
+    sdr.rx_channels[0].frequency = 2.45e9
     sdr.rx.sample_rate = 20e6
-    sdr.rx.gain = 20
+    sdr.rx_channels[0].gain = 20
 
+    sdr.tx_channels[0].stream = 0
     sdr.tx.repeat(x)
     y = sdr.rx.capture(1_000_000)
 ```
@@ -105,7 +107,7 @@ Interactive use is a long-lived context in which the user changes configuration,
 
 Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-4, RS-12…RS-25a; the implicit Spec's derivation in [design/03-spec-and-binding.md](../03-spec-and-binding.md), SB-22c; the Python client, its server and the protocol between them in [design/16-easy-api.md](../16-easy-api.md); child Runs in [design/06-kernel-coordinator.md](../06-kernel-coordinator.md), KC-37a; the admission order in the same spec, KC-24.
 
-`sdr.tx.repeat(x); y = sdr.rx.capture(N)` therefore yields a Manifest containing the waveform hash, the capture's first sample time and validity flags, and the effective RF configuration, with no extra code from the user.
+Assigning the transmit channel to stream 0, then calling `sdr.tx.repeat(x); y = sdr.rx.capture(N)`, yields a Manifest containing the waveform hash, the capture's first sample time and validity flags, and the effective RF configuration.
 
 ---
 

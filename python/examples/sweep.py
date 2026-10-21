@@ -11,7 +11,7 @@ def build_experiment(gain_db):
         "resources": {
             "radio": {
                 "kind": "radio.device",
-                "requires": {"radio.rx.gain_db": {"kind": "eq", "value": gain_db}},
+                "requires": {"radio.rx.c0.gain_db": {"kind": "eq", "value": gain_db}},
             }
         },
         "outputs": [
@@ -19,7 +19,7 @@ def build_experiment(gain_db):
                 "id": "rec",
                 "kind": "sink.capture",
                 "params": {"sink.capture_samples": 10_000},
-                "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64},
+                "feed": {"port": {"component": "radio", "port": "rx0"}, "policy": "drop_oldest", "capacity": 64},
             }
         ],
     }

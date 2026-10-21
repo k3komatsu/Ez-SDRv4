@@ -3,6 +3,7 @@
     import ezsdr
 
     with ezsdr.connect() as sdr:
+        sdr.tx_channels[0].stream = 0
         sdr.tx.repeat(x)
         y = sdr.rx.capture(100_000)
 

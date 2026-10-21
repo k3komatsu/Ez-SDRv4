@@ -39,8 +39,8 @@ def ramp(n: int = 1000, channel: int = 0) -> np.ndarray:
 
 
 def rotation(y: np.ndarray, x: np.ndarray) -> tuple:
-    """The offset at which the repeated ``x`` appears in ``y``, and the unit phasor that
-    takes it there (the LO phases of an ``x3xx`` loopback, MR-34), checked on every sample."""
+    """The offset and unit phasor for a non-silent repeated ``x`` (MR-34), checked per sample."""
+    assert np.min(np.abs(y)) > 1e-6, "capture is silent"
     offset = int(np.argmin(np.abs(np.abs(x) - np.abs(y[0]))))
     shifted = np.resize(np.roll(x, -offset), y.shape)
     phasor = y[0] / shifted[0]
@@ -63,11 +63,38 @@ class EasyApi(unittest.TestCase):
         with self.connect() as sdr:
             return copy.deepcopy(sdr.profile)
 
+    def assign_tx(self, sdr: ezsdr.Session, channels: int = 1) -> None:
+        for number in range(channels):
+            sdr.tx_channels[number].stream = 0
+
+    def wait_for_tx_signal(self, sdr: ezsdr.Session) -> None:
+        status = sdr._status()
+        clocks = [c for c in status["sample_clocks"] if c["stream"]["path"] == "radio/tx/s0"]
+        clock = max(clocks, key=lambda c: c["origin"]["ticks"])
+        # x3xx's TX path is 45 samples; wait one further sample from the active clock origin.
+        step = clock["root_ticks_per_tick"]
+        delay = (46 * step["num"] + step["den"] - 1) // step["den"]
+        at = {"domain": status["now"]["domain"], "ticks": max(status["now"]["ticks"], clock["origin"]["ticks"] + delay)}
+        sdr.wait_until(at)
+
+    def add_recorder(self, profile: dict, stream: int) -> str:
+        name = f"rec{stream}"
+        binding = copy.deepcopy(profile["bindings"]["rec"])
+        binding["selector"]["dir"] = str(Path(self.runs) / f"captures-{stream}")
+        binding["feed"]["port"]["port"] = f"rx{stream}"
+        profile["bindings"][name] = binding
+        link = copy.deepcopy(profile["placements"]["links"][0])
+        link["from"]["port"] = f"rx{stream}"
+        link["to"]["component"] = name
+        profile["placements"]["links"].append(link)
+        return name
+
     # -- Vision §57 and §58 #13
 
     def test_v57_repeat_then_capture_in_software(self) -> None:
         x = ramp()
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             sdr.tx.repeat(x)
             # The transmit clock the enable starts begins the profile's 50 ms start lead
             # later, and the untimed repeat there, on time (RS-19, RM-25).
@@ -94,10 +121,11 @@ class EasyApi(unittest.TestCase):
         self.assertEqual(continuity["valid"], [[{"start": continuity["first"], "len": 3000}]])
         # The effective configuration, in the `radio` fragment's own report (SB-41).
         report = manifest["prepare"]["reports"]["radio"]
-        self.assertIn("radio.rx.sample_rate_hz", report["effective"])
+        self.assertIn("radio.rx.s0.sample_rate_hz", report["effective"])
 
     def test_v58_13_the_session_manifest_is_written_and_complete(self) -> None:
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             sdr.tx.repeat(ramp())
             with self.assertRaises(ezsdr.Rejected):
                 sdr.rx.sample_rate = 1e12
@@ -112,26 +140,108 @@ class EasyApi(unittest.TestCase):
         profile = self.default_profile()
         profile["environment"]["radio.rf_envelope"] = {"allowed_bands": [{"lo_hz": 2.4e9, "hi_hz": 2.5e9}]}
         with self.connect(profile) as sdr:
-            sdr.tx.frequency = 2.45e9
-            sdr.tx.channels = 1  # the envelope judges what may radiate: a transmitting channel
+            sdr.tx_channels[0].frequency = 2.45e9
+            self.assign_tx(sdr)
             with self.assertRaises(ezsdr.Rejected) as raised:
-                sdr.tx.frequency = 2.6e9
-            self.assertTrue(any(v["check"] == "radio.rf_envelope" and v["key"] == "radio.tx.frequency_hz" for v in raised.exception.violations))
-            self.assertEqual(sdr.tx.frequency, 2.45e9, "the rejected value was never applied")
+                sdr.tx_channels[0].frequency = 2.6e9
+            self.assertTrue(any(v["check"] == "radio.rf_envelope" and v["key"] == "radio.tx.c0.frequency_hz" for v in raised.exception.violations))
+            self.assertEqual(sdr.tx_channels[0].frequency, 2.45e9, "the rejected value was never applied")
         self.assertEqual(sdr.manifest["action_log"][-1], raised.exception.entry)
 
     # -- Vision §3's second snippet
 
     def test_v3_parameters_through_attributes(self) -> None:
         with self.connect() as sdr:
-            sdr.rx.frequency = 2.45e9
+            sdr.rx_channels[0].frequency = 2.45e9
             sdr.rx.sample_rate = 20e6
-            sdr.rx.gain = 20
-            self.assertEqual((sdr.rx.frequency, sdr.rx.sample_rate, sdr.rx.gain), (2.45e9, 20e6, 20.0))
-            entry = sdr.set("radio", "radio.rx.sample_rate_hz", 19.5e6)
+            sdr.rx_channels[0].gain = 20
+            sdr.rx_channels[0].antenna = "TX/RX"
+            self.assertEqual((sdr.rx_channels[0].frequency, sdr.rx.sample_rate, sdr.rx_channels[0].gain, sdr.rx_channels[0].antenna), (2.45e9, 20e6, 20.0, "TX/RX"))
+            entry = sdr.set("radio", "radio.rx.s0.sample_rate_hz", 19.5e6)
             self.assertEqual(sdr.rx.sample_rate, 20e6, "19.5 Msps is coerced to the x3xx grid")
             coercion = entry["outcome"]["coercions"][0]
-            self.assertEqual((coercion["key"], coercion["requested"], coercion["applied"]), ("radio.rx.sample_rate_hz", 19.5e6, 20e6))
+            self.assertEqual((coercion["key"], coercion["requested"], coercion["applied"]), ("radio.rx.s0.sample_rate_hz", 19.5e6, 20e6))
+
+    def test_ea_16_channel_keys_and_stream_membership(self) -> None:
+        with self.connect() as sdr:
+            rx, tx = sdr.rx_channels[0], sdr.tx_channels[0]
+            rx.frequency, rx.gain, rx.antenna = 2.45e9, 10, "RX2"
+            rx.stream = 1
+            tx.frequency, tx.gain, tx.antenna = 2.45e9, 10, "TX/RX"
+            tx.stream = 0
+            sdr.rx_streams[1].sample_rate = 20e6
+            self.assertEqual((rx.frequency, rx.gain, rx.antenna, rx.stream), (2.45e9, 10.0, "RX2", 1))
+            self.assertEqual((tx.frequency, tx.gain, tx.antenna, tx.stream), (2.45e9, 10.0, "TX/RX", 0))
+            self.assertEqual((sdr.rx_streams[0].channels, sdr.rx_streams[1].channels), ([], [0]))
+            self.assertEqual((sdr.tx_streams[0].channels, sdr.tx_streams[1].channels), ([0], []))
+            self.assertEqual(sdr.rx_streams[1].sample_rate, 20e6)
+        self.assertEqual([entry["action"]["kind"] for entry in sdr.manifest["action_log"]], ["set_parameter"] * 9)
+        self.assertEqual(
+            [entry["action"].get("key") for entry in sdr.manifest["action_log"]],
+            ["radio.rx.c0.frequency_hz", "radio.rx.c0.gain_db", "radio.rx.c0.antenna", "radio.rx.c0.stream",
+             "radio.tx.c0.frequency_hz", "radio.tx.c0.gain_db", "radio.tx.c0.antenna", "radio.tx.c0.stream",
+             "radio.rx.s1.sample_rate_hz"],
+        )
+
+    def test_ea_16_stream_channels_are_read_only(self) -> None:
+        with self.connect() as sdr:
+            stream = sdr.rx_streams[0]
+            self.assertEqual(stream.channels, [0])
+            with self.assertRaises(AttributeError):
+                stream.channels = [1]
+            sdr.rx_channels[1].stream = 0
+            self.assertEqual(stream.channels, [0, 1])
+
+    def test_ea_16_radio_side_is_stream_zero(self) -> None:
+        with self.connect() as sdr:
+            radio = sdr.radio()
+            self.assertIs(radio.rx, radio.rx_streams[0])
+            self.assertIs(radio.tx, radio.tx_streams[0])
+            sdr.rx_streams[1].sample_rate = 20e6
+            sdr.tx_streams[1].sample_rate = 20e6
+            sdr.tx_streams[0].sample_rate = 2e6
+            self.assertEqual(sdr.rx.sample_rate, sdr.radio().rx_streams[0].sample_rate)
+            self.assertEqual(sdr.tx.sample_rate, sdr.radio().tx_streams[0].sample_rate)
+            self.assertEqual(sdr.rx_channels[0].stream, radio.rx_channels[0].stream)
+            self.assertEqual(sdr.rx_streams[0].channels, radio.rx_streams[0].channels)
+
+    def test_ea_16_alias_without_stream_zero_raises_error(self) -> None:
+        profile = self.default_profile()
+        profile["bindings"]["radio"]["profile"] = {"name": "ideal", "version": {"major": 2, "minor": 0, "patch": 0}}
+        profile["bindings"]["radio"]["selector"] = {"id": "radio", "keys": "channel", "rx": 1, "tx": 0}
+        profile["environment"]["sim.channel"]["couplings"] = []
+        with self.connect(profile) as sdr:
+            with self.assertRaises(ezsdr.Error):
+                _ = sdr.tx
+
+    def test_ea_16_stream_one_actions_target_their_nodes(self) -> None:
+        with self.connect() as sdr:
+            sdr.rx_channels[1].stream = 1
+            started = sdr.rx_streams[1].start()
+            stopped = sdr.rx_streams[1].stop()
+            sdr.tx_channels[1].stream = 1
+            repeated = sdr.tx_streams[1].repeat(ramp())
+        self.assertEqual(started["action"]["target"]["path"], "rx/s1")
+        self.assertEqual(stopped["action"]["target"]["path"], "rx/s1")
+        self.assertEqual(repeated["action"]["target"]["path"], "tx/s1")
+
+    def test_ea_16_repeat_refuses_a_channel_count_mismatch_before_submit(self) -> None:
+        with self.connect() as sdr:
+            sdr.tx_channels[0].stream = 0
+            with self.assertRaises(ezsdr.Error) as raised:
+                sdr.tx_streams[0].repeat(np.stack([ramp(), ramp()]))
+            self.assertIn("1 channels", str(raised.exception))
+            self.assertIn("waveform has 2", str(raised.exception))
+        actions = [entry["action"] for entry in sdr.manifest["action_log"]]
+        self.assertEqual([action.get("key") for action in actions], ["radio.tx.c0.stream"])
+
+    def test_ea_17_stream_one_capture_uses_its_recorder(self) -> None:
+        profile = self.default_profile()
+        name = self.add_recorder(profile, 1)
+        with self.connect(profile) as sdr:
+            sdr.rx_channels[1].stream = 1
+            self.assertEqual(sdr.rx_streams[1].capture(100).shape, (100,))
+        self.assertEqual(set(sdr.manifest["artifacts"]), {name})
 
     # -- Vision §54
 
@@ -142,14 +252,14 @@ class EasyApi(unittest.TestCase):
             "resources": {"radio": {"kind": "radio.device", "requires": {}}},
             "outputs": [{
                 "id": "rec", "kind": "sink.capture", "params": {"sink.capture_samples": 1000},
-                "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64},
+                "feed": {"port": {"component": "radio", "port": "rx0"}, "policy": "drop_oldest", "capacity": 64},
             }],
         }
         results = []
         with self.connect() as sdr:
             for gain in (0.0, 10.0, 20.0):
                 child = copy.deepcopy(spec)
-                child["resources"]["radio"]["requires"]["radio.rx.gain_db"] = {"kind": "eq", "value": gain}
+                child["resources"]["radio"]["requires"]["radio.rx.c0.gain_db"] = {"kind": "eq", "value": gain}
                 result = sdr.run(child, duration=0.01)
                 self.assertEqual(result.manifest["run"]["parent"], sdr.run_id)
                 self.assertEqual(result.termination, {"kind": "stopped", "cause": {"kind": "client"}})
@@ -175,7 +285,7 @@ class EasyApi(unittest.TestCase):
                 "requirements": {"vocabularies": [{"id": "radio", "major": 2}, {"id": "sink", "major": 1}]},
                 "resources": {"radio": {"kind": "radio.device", "requires": {}}},
                 "outputs": [{"id": name, "kind": "sink.capture", "params": {"sink.capture_samples": 1},
-                             "feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}],
+                              "feed": {"port": {"component": "radio", "port": "rx0"}, "policy": "drop_oldest", "capacity": 64}}],
             }
             result = sdr.run(spec, profile=profile, duration=0.001)
             self.assertEqual((result.termination["kind"], result.termination["stage"]), ("failed", "run"))
@@ -198,6 +308,7 @@ class EasyApi(unittest.TestCase):
     def test_v58_03_the_same_calls_give_the_same_samples(self) -> None:
         def session() -> np.ndarray:
             with self.connect() as sdr:
+                self.assign_tx(sdr)
                 sdr.tx.repeat(ramp())
                 sdr.sleep(0.003)
                 return sdr.rx.capture(2000)
@@ -206,17 +317,19 @@ class EasyApi(unittest.TestCase):
 
     def test_v58_01_the_same_script_under_another_profile(self) -> None:
         def script(sdr: ezsdr.Session) -> np.ndarray:
+            self.assign_tx(sdr)
             sdr.tx.repeat(ramp())
-            sdr.sleep(0.005)
+            self.wait_for_tx_signal(sdr)
             return sdr.rx.capture(2000)
 
         with self.connect() as sdr:
             rotated = script(sdr)
         ideal = self.default_profile()
         ideal["bindings"]["radio"]["profile"] = {"name": "ideal", "version": {"major": 2, "minor": 0, "patch": 0}}
-        # An `ideal` binding carries no layout at this stage (design 33 D5).
-        ideal["bindings"]["radio"]["selector"] = {"id": "radio"}
+        # `ideal` uses channel counts rather than an X3xx physical layout (design 33 D5).
+        ideal["bindings"]["radio"]["selector"] = {"id": "radio", "keys": "channel", "rx": 1, "tx": 2}
         with self.connect(ideal) as sdr:
+            self.assertEqual((len(sdr.rx_channels), len(sdr.tx_channels), len(sdr.tx_streams)), (1, 2, 2))
             exact = script(sdr)
         rotation(rotated, ramp())
         offset, phasor = rotation(exact, ramp())
@@ -231,10 +344,11 @@ class EasyApi(unittest.TestCase):
         )
         x = np.stack([ramp(channel=0), ramp(channel=1) * 0.5])
         with self.connect(profile) as sdr:
-            sdr.rx.channels = 2
+            sdr.rx_channels[1].stream = 0
+            self.assign_tx(sdr, 2)
             sdr.tx.repeat(x)
-            self.assertEqual(sdr.tx.channels, 2)
-            sdr.sleep(0.005)
+            self.assertEqual(sdr.tx_streams[0].channels, [0, 1])
+            self.wait_for_tx_signal(sdr)
             y = sdr.rx.capture(2000)
         self.assertEqual(y.shape, (2, 2000))
         for channel in range(2):
@@ -261,7 +375,7 @@ class EasyApi(unittest.TestCase):
                 sdr.rx.capture(10_000_000, timeout=0.001)
             sdr.stop()
             with self.assertRaises(ezsdr.RunEnded) as ended:
-                sdr.rx.gain = 1
+                sdr.rx_channels[0].gain = 1
             self.assertEqual(ended.exception.termination, {"kind": "stopped", "cause": {"kind": "client"}})
         self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client"}})
 
@@ -285,7 +399,7 @@ class EasyApi(unittest.TestCase):
             # RS-17).
             for action, outcome in (
                 ({"kind": "set_parameter", "target": {"kind": "output", "output": "rec"}, "key": "sink.capture_samples", "value": 555}, "admitted"),
-                ({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "resource", "resource": "radio", "path": "rx"}, "at": None, "params": {"sink.capture_samples": 333}}, "rejected"),
+                ({"kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "resource", "resource": "radio", "path": "rx/s0"}, "at": None, "params": {"sink.capture_samples": 333}}, "rejected"),
             ):
                 self.assertEqual(sdr.submit(action)["outcome"]["kind"], outcome)
                 self.assertEqual(sdr.rx.capture(100).shape, (100,), f"not {action['kind']}'s request")
@@ -318,8 +432,9 @@ class EasyApi(unittest.TestCase):
         # before the first is answered are served one after another (HD-10), as v3's
         # receiveRequestOnly/receiveResponseOnly split did.
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             sdr.tx.repeat(ramp())
-            sdr.sleep(0.005)
+            self.wait_for_tx_signal(sdr)
             first, second = sdr.rx.request(1000), sdr.rx.request(1500)
             self.assertNotEqual(first.entry["outcome"]["dispatched"], second.entry["outcome"]["dispatched"])
             b = sdr.rx.result(second)
@@ -349,6 +464,7 @@ class EasyApi(unittest.TestCase):
     def test_ea_16_repeat_at_an_instant(self) -> None:
         x = ramp()
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             at = sdr.after(0.2)
             entry = sdr.tx.repeat(x, at=at)
             y = sdr.rx.capture(3000, at=dict(at, ticks=at["ticks"] - 1_000_000))
@@ -365,6 +481,7 @@ class EasyApi(unittest.TestCase):
     def test_ea_16_aligned_gives_its_calls_one_instant(self) -> None:
         x = ramp()
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             at = sdr.after(0.2)
             with sdr.aligned(at):
                 sent = sdr.tx.repeat(x)
@@ -386,6 +503,7 @@ class EasyApi(unittest.TestCase):
     def test_ea_16_next_at_finds_the_waveform_s_start_again(self) -> None:
         x = ramp()
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             at0 = sdr.after(0.2)
             with sdr.aligned(at0):
                 sdr.tx.repeat(x)
@@ -480,10 +598,10 @@ class EasyApi(unittest.TestCase):
             sdr.rx.stop()
             sdr.rx.start()
             self.assertEqual(len(sdr.rx.capture(1000)), 1000)
-            self.assertEqual(len(sdr.effective["radio"]), 10)
+            self.assertEqual(len(sdr.effective["radio"]), 20)
         # The first segment, stopped at T0 before its first sample, has no clock (RM-25); the
         # four others end at their cuts, the last at the Session's close.
-        clocks = [c for c in sdr.manifest["clocks"]["sample_clocks"] if c["stream"]["path"] == "radio/rx"]
+        clocks = [c for c in sdr.manifest["clocks"]["sample_clocks"] if c["stream"]["path"] == "radio/rx/s0"]
         self.assertEqual(len(clocks), 4, clocks)
         self.assertTrue(all(c.get("ended_at") is not None for c in clocks), clocks)
         self.assertEqual([c["root_ticks_per_tick"]["num"] for c in clocks], [500, 500, 1000, 1000], clocks)
@@ -492,12 +610,15 @@ class EasyApi(unittest.TestCase):
         lead, received = 50_000_000, at["ticks"] - 20_000_000
         self.assertLessEqual(abs(clocks[1]["origin"]["ticks"] - max(at["ticks"], received + lead)), 500, (clocks, at))
 
-    def test_ea_16_repeat_sets_the_channel_count_only_when_it_differs(self) -> None:
+    def test_ea_16_repeat_uses_stream_membership_without_setting_it(self) -> None:
         with self.connect() as sdr:
+            self.assign_tx(sdr)
             sdr.tx.repeat(ramp())
             sdr.tx.repeat(ramp(500))
-        kinds = [entry["action"]["kind"] for entry in sdr.manifest["action_log"]]
-        self.assertEqual(kinds, ["set_parameter", "vocabulary", "vocabulary"])
+        actions = [entry["action"] for entry in sdr.manifest["action_log"]]
+        self.assertEqual([action["kind"] for action in actions], ["set_parameter", "vocabulary", "vocabulary"])
+        self.assertEqual([action.get("key") for action in actions], ["radio.tx.c0.stream", None, None])
+        self.assertEqual(actions[1]["target"], {"kind": "resource", "resource": "radio", "path": "tx/s0"})
 
     def test_ea_16_close_after_the_server_exited(self) -> None:
         sdr = self.connect()
@@ -529,7 +650,7 @@ class DurationRequests(unittest.TestCase):
     def session(self, reply: dict, rate: tuple = (1_000_000_000, 1), epoch: dict = None) -> ezsdr.Session:
         connection = Mock()
         connection.call.return_value = (reply, b"")
-        fed = {"feed": {"port": {"component": "radio", "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}
+        fed = {"feed": {"port": {"component": "radio", "port": "rx0"}, "policy": "drop_oldest", "capacity": 64}}
         at = {"domain": self.ROOT, "ticks": 0}
         connected = {
             "run": "test", "dir": "", "profile": {"bindings": {"radio": {}, "rec": fed}},
@@ -541,7 +662,7 @@ class DurationRequests(unittest.TestCase):
 
     def callers(self, sdr: ezsdr.Session, seconds: object) -> dict:
         handle = ezsdr.session.CaptureRequest("rec", 0, 1, {"outcome": {"kind": "admitted", "dispatched": []}})
-        rx = ezsdr.session.Rx(sdr, "radio", "rx")
+        rx = ezsdr.session.Rx(sdr, "radio", 0)
         return {
             "sleep": lambda: sdr.sleep(seconds),
             "wait_for": lambda: sdr.wait_for(["test.EVENT"], seconds),
@@ -626,15 +747,41 @@ class DurationRequests(unittest.TestCase):
         # 3 MS/s on a 1 GHz root: 1 000/3 ticks a sample, origin at tick 7. A start at tick 100
         # is sample 1; now + 50 ms is tick 50 010 000, first reached by sample 150 030. Periods
         # of 10 samples from sample 1 give sample 150 031, at tick 7 + ceil(150 031 · 1 000/3).
-        clock = {"stream": {"node": 0, "path": "radio/rx"}, "root_ticks_per_tick": {"num": 1000, "den": 3},
+        other = {"stream": {"node": 0, "path": "radio/rx/s0"}, "root_ticks_per_tick": {"num": 100, "den": 1},
+                 "origin": {"domain": self.ROOT, "ticks": 0}, "ended_at": None}
+        clock = {"stream": {"node": 0, "path": "radio/rx/s1"}, "root_ticks_per_tick": {"num": 1000, "den": 3},
                  "origin": {"domain": self.ROOT, "ticks": 7}, "ended_at": None}
-        sdr = self.session({"now": {"domain": self.ROOT, "ticks": 10_000}, "sample_clocks": [clock]})
-        rx = ezsdr.session.Rx(sdr, "radio", "rx")
+        sdr = self.session({"now": {"domain": self.ROOT, "ticks": 10_000}, "sample_clocks": [clock, other]})
+        rx = ezsdr.session.Rx(sdr, "radio", 1)
         at = rx.next_at({"domain": self.ROOT, "ticks": 100}, 10)
         self.assertEqual(at, {"domain": self.ROOT, "ticks": 50_010_341})
         clock["origin"]["ticks"] = 200
         with self.assertRaises(ezsdr.Error):
             rx.next_at({"domain": self.ROOT, "ticks": 100}, 10)
+
+    def test_ea_16_collections_follow_effective_keys_without_selector(self) -> None:
+        effective = {
+            "radio.rx.c0.stream": 0,
+            "radio.rx.c1.stream": 1,
+            "radio.rx.s0.sample_rate_hz": 1e6,
+            "radio.rx.s1.sample_rate_hz": 2e6,
+            "radio.tx.c0.stream": 0,
+            "radio.tx.s0.sample_rate_hz": 1e6,
+        }
+        sdr = self.session({"effective": {"radio": effective}})
+        sdr.profile["bindings"]["radio"]["selector"] = {}
+        radio = sdr.radio("radio")
+        self.assertEqual((len(radio.rx_channels), len(radio.rx_streams), len(radio.tx_channels), len(radio.tx_streams)), (2, 2, 1, 1))
+        self.assertIs(radio.tx, radio.tx_streams[0])
+        sdr._connection.call.assert_called_once_with({"op": "status"}, b"")
+        sdr._connection.reset_mock()
+        self.assertEqual(radio.rx_streams[0].channels, [0])
+        sdr._connection.call.assert_called_once_with({"op": "status"}, b"")
+
+    def test_ea_16_missing_layout_key_raises_error(self) -> None:
+        sdr = self.session({"effective": {"radio": {"radio.full_duplex": True}}})
+        with self.assertRaisesRegex(ezsdr.Error, "EA-16: radio has no key radio.rx.s0.sample_rate_hz"):
+            ezsdr.session.Rx(sdr, "radio", 0).sample_rate
 
     PPS = {"kind": "pps", "set_by": "ezsdr.radio.uhd.set_time_unknown_pps:addr=192.0.2.1"}
 
@@ -676,7 +823,7 @@ class DurationRequests(unittest.TestCase):
         ]
         handle = ezsdr.session.CaptureRequest("rec", 1, 2, {"outcome": {"kind": "admitted", "dispatched": [5]}})
         with self.assertRaises(ezsdr.CaptureTimeout):
-            ezsdr.session.Rx(sdr, "radio", "rx").result(handle, 1e-12)
+            ezsdr.session.Rx(sdr, "radio", 0).result(handle, 1e-12)
         requests = [call.args[0] for call in sdr._connection.call.call_args_list]
         self.assertEqual(requests, [
             {"op": "wait_for", "kinds": [ezsdr.session.CAPTURE_WRITTEN, ezsdr.session.REQUEST_REJECTED], "from": 2, "within": {"domain": self.ROOT, "ticks": 1}},
@@ -688,15 +835,15 @@ class Targets(unittest.TestCase):
     """The typed targets the wire carries (KC-23, EA-16; spec 27)."""
 
     def test_ea_16_set_and_stop_take_a_target_or_a_resource_string(self) -> None:
-        self.assertEqual(ezsdr.Target.resource("radio", "rx"), {"kind": "resource", "resource": "radio", "path": "rx"})
+        self.assertEqual(ezsdr.Target.resource("radio", "rx/s0"), {"kind": "resource", "resource": "radio", "path": "rx/s0"})
         self.assertEqual(ezsdr.Target.output("rec"), {"kind": "output", "output": "rec"})
         self.assertEqual(ezsdr.Target.component("c1"), {"kind": "component", "component": "c1"})
         sdr = DurationRequests.session(DurationRequests(), {"entry": {"outcome": {"kind": "admitted"}}})
         sent = lambda: sdr._connection.call.call_args.args[0]["action"]["target"]
         # A string is always a resource target, never a role read from a prefix.
-        for string, target in [("radio", ezsdr.Target.resource("radio")), ("radio/rx", ezsdr.Target.resource("radio", "rx")),
+        for string, target in [("radio", ezsdr.Target.resource("radio")), ("radio/rx/s0", ezsdr.Target.resource("radio", "rx/s0")),
                                ("sink/rec", ezsdr.Target.resource("sink", "rec"))]:
-            sdr.set(string, "radio.rx.gain_db", 1.0)
+            sdr.set(string, "radio.rx.c0.gain_db", 1.0)
             self.assertEqual(sent(), target)
             sdr.stop(string)
             self.assertEqual(sent(), target)
@@ -713,9 +860,9 @@ class RecorderChoice(unittest.TestCase):
         # EA-17 (spec 20, VF-1): exactly one binding fed from the radio's receive port, or
         # an Error before any request; the helper never chooses among recorders.
         def fed(component: str) -> dict:
-            return {"feed": {"port": {"component": component, "port": "rx"}, "policy": "drop_oldest", "capacity": 64}}
-        several = "EA-17: 2 recorders are fed from radio's receive port ['rec_a', 'rec_b']; submit sink.capture naming one"
-        none = "EA-17: no recorder is fed from radio's receive port in the Session's profile"
+            return {"feed": {"port": {"component": component, "port": "rx0"}, "policy": "drop_oldest", "capacity": 64}}
+        several = "EA-17: 2 recorders are fed from radio's receive port rx0 ['rec_a', 'rec_b']; submit sink.capture naming one"
+        none = "EA-17: no recorder is fed from radio's receive port rx0 in the Session's profile"
         for bindings, error in [
             ({"rec_b": fed("radio"), "rec_a": fed("radio")}, several),
             ({"radio": {}, "rec": {"feed": None}}, none),
@@ -729,7 +876,7 @@ class RecorderChoice(unittest.TestCase):
                     "run": "test", "dir": "", "profile": {"bindings": bindings}, "start_instant": at, "now": at,
                     "root_rate": {"num": 1_000_000_000, "den": 1},
                 })
-                rx = ezsdr.session.Rx(sdr, "radio", "rx")
+                rx = ezsdr.session.Rx(sdr, "radio", 0)
                 if error is None:
                     self.assertEqual(rx.request(100).recorder, "rec_a")
                     action = connection.call.call_args.args[0]["action"]

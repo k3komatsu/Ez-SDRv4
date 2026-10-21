@@ -166,6 +166,7 @@ The architecture is successful if the same Core naturally supports all of the fo
 
 ```python
 with ezsdr.connect() as sdr:
+    sdr.tx_channels[0].stream = 0
     sdr.tx.repeat(x)
     y = sdr.rx.capture(100_000)
 ```

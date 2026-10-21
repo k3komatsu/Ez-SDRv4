@@ -188,6 +188,7 @@ pub fn default_profile(dir: &str) -> serde_json::Value {
                 "module": { "id": RADIO, "version": { "major": 2, "minor": 0, "patch": 0 } },
                 "selector": {
                     "id": "radio",
+                    "keys": "channel",
                     "master_clock_hz": [200_000_000],
                     "image": ["hg"],
                     "links": [1],
@@ -200,7 +201,7 @@ pub fn default_profile(dir: &str) -> serde_json::Value {
             "rec": {
                 "module": { "id": SINK, "version": { "major": 1, "minor": 2, "patch": 0 } },
                 "selector": { "dir": dir },
-                "feed": { "port": { "component": "radio", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 }
+                "feed": { "port": { "component": "radio", "port": "rx0" }, "policy": "drop_oldest", "capacity": 64 }
             },
             "sim": {
                 "module": { "id": AUTHORITY, "version": { "major": 1, "minor": 0, "patch": 0 } },
@@ -211,7 +212,7 @@ pub fn default_profile(dir: &str) -> serde_json::Value {
         "placements": {
             "links": [{
                 "link": { "id": LINK, "version": { "major": 1, "minor": 0, "patch": 0 } },
-                "from": { "component": "radio", "port": "rx" },
+                "from": { "component": "radio", "port": "rx0" },
                 "to": { "component": "rec", "port": "in" }
             }]
         },

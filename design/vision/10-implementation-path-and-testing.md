@@ -33,6 +33,7 @@ At this stage this should already work:
 
 ```python
 with ezsdr.connect() as sdr:
+    sdr.tx_channels[0].stream = 0
     sdr.tx.repeat(x)
     y = sdr.rx.capture(N)
 ```
