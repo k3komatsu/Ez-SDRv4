@@ -353,7 +353,7 @@ fn v58_09_a_reactor_runs_in_a_child_run_of_a_session() {
     // and no Executor, which only the child places.
     let mut session_profile = child_profile.clone();
     session_profile["bindings"].as_object_mut().unwrap().remove("exec");
-    session_profile["bindings"]["rec"]["feed"] = json!({ "port": { "component": "a", "port": "rx" }, "policy": "drop_oldest", "capacity": 64 });
+    session_profile["bindings"]["rec"]["feed"] = ezsdr_acceptance::experiments::rx_feed("a", 0);
     session_profile["placements"] = json!({ "links": [child_profile["placements"]["links"][0].clone()] });
 
     let mut server = ezsdr_server::Server::new(ezsdr_server::Config { implementations: vec![responder::implementation()], ..ezsdr_server::Config::new(temp.0.join("runs")) });

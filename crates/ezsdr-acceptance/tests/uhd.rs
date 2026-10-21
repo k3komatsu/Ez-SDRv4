@@ -166,11 +166,11 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
 fn uhd_59_a_session_retune_outside_the_rf_envelope_is_rejected() {
     let temp = rig::TempDir::new("uhd-59-rf");
     let mut run = uhd_session(&temp);
-    admitted(&mut run, set("radio.tx.channels", Value::from(1)), None);
-    let entry = run.submit(set("radio.tx.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap();
+    admitted(&mut run, set("radio.tx.c0.stream", Value::from(0)), None);
+    let entry = run.submit(set("radio.tx.c0.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap();
     let Outcome::Rejected { violations } = &entry.outcome else { panic!("outside the band was admitted") };
-    assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope" && v.key.as_ref().is_some_and(|k| k.as_str() == "radio.tx.frequency_hz")));
-    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.frequency_hz").unwrap()], Value::num(1.0e9).unwrap());
+    assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope" && v.key.as_ref().is_some_and(|k| k.as_str() == "radio.tx.c0.frequency_hz")));
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.c0.frequency_hz").unwrap()], Value::num(1.0e9).unwrap());
     let manifest = run.finish();
     assert!(manifest.action_log.iter().any(|logged| logged.seq == entry.seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");
 }
@@ -181,11 +181,11 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
     let mut run = uhd_session(&temp);
     let wave = pn(1_000);
     let (bytes, _) = experiments::waveform_of(&wave);
-    admitted(&mut run, set("radio.tx.channels", Value::from(1)), None);
+    admitted(&mut run, set("radio.tx.c0.stream", Value::from(0)), None);
     let repeat = SessionAction::Vocabulary {
         ns: Namespace::parse("radio").unwrap(),
         verb: Ident::parse("start_repeat").unwrap(),
-        target: resource("radio/tx"),
+        target: resource("radio/tx/s0"),
         at: None,
         params: BTreeMap::new(),
     };
@@ -228,7 +228,7 @@ fn uhd_61_02_capture_starts_at_the_requested_sample_index() {
     // The receive SampleClock is registered at its first block (RM-25, UR-17).
     let first_block = TimePoint::new(run.now().domain(), run.now().ticks_in(run.now().domain()).unwrap() + 10 * MS);
     run.advance_to(first_block).unwrap();
-    let rx = run.sample_clocks().into_iter().find(|r| r.stream == ResourceId::parse("usrp/rx").unwrap()).expect("the receive SampleClock");
+    let rx = run.sample_clocks().into_iter().find(|r| r.stream == ResourceId::parse("usrp/rx/s0").unwrap()).expect("the receive SampleClock");
     let n = rx.root_ticks_per_tick.num() as i64;
     // A sample index 100 ms ahead of the Run's time (v3's capture at a sample index).
     let index = (run.now().ticks_in(run.now().domain()).unwrap() - rx.origin.ticks_in(rx.origin.domain()).unwrap()) / n + 100_000;

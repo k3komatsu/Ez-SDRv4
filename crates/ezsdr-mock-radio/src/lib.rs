@@ -115,8 +115,8 @@ struct ChannelMode {
     /// applied frequency updates reach the Mock, so its output stays a function of its seed
     /// (MR-30).
     lo_retune: SimRng,
-    /// Layout receive channels keep their own gain, frequency and phase timelines.
-    rx_channels: Option<Vec<channel::RxChannelModel>>,
+    /// Receive channels keep their own gain, frequency and phase timelines.
+    rx_channels: Vec<channel::RxChannelModel>,
 }
 
 #[derive(Clone)]
@@ -153,15 +153,14 @@ impl Rx {
 }
 
 /// One receive stream of an instance (RM-29, MR-10): its node and port, the SampleClock it
-/// was declared with, the segment it is delivering, the links its port publishes to, and —
-/// in channel mode — what it models of the channel (MR-7, MR-12, MR-25, MR-33…MR-35).
+/// was declared with, the segment it is delivering, the links its port publishes to, and
+/// its channel-mode state (MR-7, MR-12, MR-25, MR-33…MR-35).
 struct RxStream {
-    /// Its node, `<device>/rx` or, with a layout description, `<device>/rx/s<k>` (MR-10,
-    /// RM-29): the stream its SampleClock is declared for (RM-7) and the node a `Stop` or
-    /// `start_rx` names (RM-21).
+    /// Its node, `<device>/rx/s<k>` (MR-10, RM-29): the stream its SampleClock is declared
+    /// for (RM-7) and the node a `Stop` or `start_rx` names (RM-21).
     node: ResourceId,
-    /// The stream's node below the device, `rx` or `rx/s<k>`: the path the context's
-    /// source root gives it (MR-28).
+    /// The stream's node below the device, `rx/s<k>`: the path the context's source root
+    /// gives it (MR-28).
     path: String,
     /// The name of the port its links attach to (MR-7, RM-29).
     port: String,
@@ -178,10 +177,8 @@ struct RxStream {
     links: Vec<std::sync::Arc<dyn DataLink>>,
     /// The pool its blocks come from (MR-13).
     pool: Option<HostPool>,
-    /// `block_len_jitter`'s generator, `<device>/rx` (MR-12).
+    /// `block_len_jitter`'s generator, `<device>/rx/s<k>` (MR-12).
     rng: Option<SimRng>,
-    /// Current-key channel mode's receive parameters (MR-33…MR-35); layout models are logical-channel scoped.
-    model: Option<channel::RxModel>,
     /// The last segment whose untimed tunes were taken, by its origin and arrival order (MR-34).
     tuned: Option<(i64, Option<u64>)>,
 }
@@ -199,7 +196,6 @@ impl RxStream {
             links: Vec::new(),
             pool: None,
             rng: None,
-            model: None,
             tuned: None,
         }
     }
@@ -209,11 +205,11 @@ impl RxStream {
 /// registered, the bursts booked on them, and the tracker and device model of the clock
 /// that is current (MR-15, MR-18, MR-25).
 struct TxStream {
-    /// Its node, `<device>/tx` or, with a layout description, `<device>/tx/s<k>` (MR-10,
+    /// Its node, `<device>/tx/s<k>` (MR-10,
     /// RM-29): the stream its SampleClock is declared for (RM-7) and the node a `TxBurst`
     /// names (RM-15).
     node: ResourceId,
-    /// The stream's node below the device, `tx` or `tx/s<k>`: the path the context's
+    /// The stream's node below the device, `tx/s<k>`: the path the context's
     /// source root gives it (MR-28).
     path: String,
     /// The transmit SampleClock declared in `prepare`, registered at `arm` (MR-9).
@@ -232,7 +228,7 @@ struct TxStream {
     held: BTreeMap<i64, HeldBurst>,
     /// The burst being transmitted (MR-15).
     open: Option<OpenBurst>,
-    /// The shared current-key transmit plan, or the instance-wide layout transmitter (MR-32).
+    /// The instance-wide transmitter, read by logical channel and clock segment (MR-32).
     plan: Option<std::sync::Arc<channel::TxShared>>,
     /// The last segment whose untimed tunes were taken, by its origin and arrival order (MR-34).
     tuned: Option<(i64, Option<u64>)>,
@@ -317,11 +313,9 @@ enum WorkKind {
 }
 
 impl MockRadio {
-    /// The instance's streams: one receive and one transmit stream per stream number of
-    /// the profile's key set (RM-29, MR-10). Every direction has as many streams as its
-    /// layout has channels; under the current keys, one each. A stream whose direction has
-    /// no channel holds no channel, declares no SampleClock and publishes no block (MR-3,
-    /// MR-5).
+    /// The instance's streams: one receive and one transmit stream per channel in its
+    /// layout (RM-29, MR-10). A stream whose direction has no channel holds no channel,
+    /// declares no SampleClock and publishes no block (MR-3, MR-5).
     fn streams(profile: &Profile, id: &ResourceId) -> (Vec<RxStream>, Vec<TxStream>) {
         let rx = (0..profile.rx_streams())
             .map(|k| {
@@ -364,18 +358,13 @@ impl MockRadio {
         if binding.feed.is_some() {
             return Err(reject("Provider binding cannot carry a feed"));
         }
-        // MR-38: `keys: "channel"` picks the layout builder's channel and stream keys; an
-        // instance uses one key set, never both (RM-27). The judgement is `ezsdr_radio`'s,
-        // so that the UHD Module reads the same one (UR-5).
-        let channel_keys = ezsdr_radio::channel_keys(&binding.selector).map_err(|why| reject(&why))?;
-        // The shared keys of design 33 D5 are the `x3xx` layout and its companions; `ideal`
-        // has no layout at this stage, so its binding may not carry them (design 33 D5).
-        // A layout instance reads its channel counts from `rx` and `tx` in either profile
-        // (RM-28).
+        // The selector is validated by the shared Vocabulary rule; MockRadio always uses
+        // the layout description whether `keys` is absent or `channel`.
+        ezsdr_radio::channel_keys(&binding.selector).map_err(|why| reject(&why))?;
         let allowed: Vec<&str> = ["id", "block_len_jitter", "rx_test_pattern", "arm_after", KEYS]
             .into_iter()
             .chain(x3xx::SELECTOR_KEYS.into_iter().filter(|_| kind == ProfileKind::X3xx))
-            .chain(["rx", "tx"].into_iter().filter(|_| channel_keys))
+            .chain(["rx", "tx"])
             .collect();
         if let Some(name) = binding
             .selector
@@ -415,16 +404,11 @@ impl MockRadio {
                 .collect::<Result<Vec<_>, _>>()?,
             _ => return Err(reject("selector `arm_after` must be a list")),
         };
-        let selection = match (kind, channel_keys) {
-            (ProfileKind::X3xx, false) => Some(x3xx::from_selector(&binding.selector).map_err(|why| reject(&why))?),
-            _ => None,
+        let layout = match kind {
+            ProfileKind::X3xx => channels::from_selector(&binding.selector).map_err(|why| reject(&why))?,
+            ProfileKind::Ideal => channels::ideal_from_selector(&binding.selector).map_err(|why| reject(&why))?,
         };
-        let layout = match (kind, channel_keys) {
-            (ProfileKind::X3xx, true) => Some(channels::from_selector(&binding.selector).map_err(|why| reject(&why))?),
-            (ProfileKind::Ideal, true) => Some(channels::ideal_from_selector(&binding.selector).map_err(|why| reject(&why))?),
-            _ => None,
-        };
-        let profile = Profile::new(kind, selection, layout);
+        let profile = Profile::new(kind, layout);
         let timing = profile.timing();
         let mut sections = BTreeMap::new();
         sections.insert(section("envelope"), serde_json::to_value(profile.envelope()).expect("serializable envelope"));
@@ -433,7 +417,7 @@ impl MockRadio {
         sections.insert(section("rejected"), serde_json::json!([]));
         sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
         sections.insert(section("applied"), serde_json::json!([]));
-        if profile.is_layout() { sections.insert(section("segments"), serde_json::json!([])); }
+        sections.insert(section("segments"), serde_json::json!([]));
         let instance = ProviderInstance {
             id: id.clone(),
             module: module_ref(),
@@ -501,7 +485,7 @@ impl MockRadio {
         ezsdr_radio::addressed(
             &self.instance.id,
             node,
-            self.profile.is_layout(),
+            true,
             self.rx.first().map(|stream| &stream.node),
             self.tx.first().map(|stream| &stream.node),
             |direction| match direction {
@@ -513,43 +497,24 @@ impl MockRadio {
 
     /// Whether `key` is a configuration key of this instance's key set (RM-5, RM-27).
     fn is_configuration(&self, key: &ezsdr_kernel::spec::Key) -> bool {
-        if self.profile.is_layout() {
-            ezsdr_radio::channels::is_configuration(key)
-        } else {
-            ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str())
-        }
+        ezsdr_radio::channels::is_configuration(key)
     }
 
     /// MR-18's and RM-27's class an update of `key` must state; `None` when `key` is no
     /// configuration key of this instance or its declaration states no class.
     fn update_class_of(&self, key: &ezsdr_kernel::spec::Key) -> Option<UpdateClass> {
-        if self.profile.is_layout() {
-            return ezsdr_radio::channels::update_class(key);
-        }
-        if is_hardware_key(key.as_str()) {
-            Some(UpdateClass::HardwareTimed)
-        } else if is_rx_cold_key(key.as_str()) || is_tx_cold_key(key.as_str()) {
-            Some(UpdateClass::Cold)
-        } else {
-            None
-        }
+        ezsdr_radio::channels::update_class(key)
     }
 
     /// RM-3, RM-30: the channel set and sample rate stream `k` of `direction` has in
-    /// `configuration`; the current keys give one stream the direction's channel count and
-    /// rate (RM-4), a layout description the channels whose `stream` is `k` (RM-27).
+    /// `configuration`.
     fn stream_set(&self, direction: Direction, k: usize, configuration: &BTreeMap<ezsdr_kernel::spec::Key, Value>) -> (timeline::Channels, f64) {
         let side = if direction == Direction::Rx { "rx" } else { "tx" };
-        match self.profile.channels() {
-            Some(description) => (
-                description.stream_channels(configuration, direction == Direction::Rx, k as u32),
-                num_config(configuration, &ezsdr_radio::keys::stream(side, k as u32)),
-            ),
-            None => (
-                timeline::Channels::first(int_config(configuration, &format!("radio.{side}.channels")).max(0) as u32),
-                num_config(configuration, &format!("radio.{side}.sample_rate_hz")),
-            ),
-        }
+        let description = self.profile.channels();
+        (
+            description.stream_channels(configuration, direction == Direction::Rx, k as u32),
+            num_config(configuration, &ezsdr_radio::keys::stream(side, k as u32)),
+        )
     }
 
     /// RM-3, RM-30: how many channels stream `k` of `direction` holds in the configuration
@@ -679,9 +644,9 @@ impl MockRadio {
         if self.rx[k].pool.is_none() { return Err(self.reject("MR-13: receive pool is absent")); }
         let (origin, ratio) = self.rx[k].running.as_ref().map(|rx| (rx.origin, rx.ratio)).expect("a receive stream publishes");
         let mut clipped = 0u64;
-        let received: Option<Vec<(f32, f32)>> = if self.profile.is_layout() && self.channel.as_ref().is_some_and(|mode| mode.rx_channels.is_some()) {
+        let received: Option<Vec<(f32, f32)>> = if self.channel.is_some() {
             let Some((mode, models, channel_set)) = self.channel.as_ref().and_then(|mode| {
-                Some((mode, mode.rx_channels.as_ref()?, self.rx[k].running.as_ref()?.channels))
+                Some((mode, &mode.rx_channels, self.rx[k].running.as_ref()?.channels))
             }) else { return Err(self.reject("MR-35: layout receive channel model is absent")); };
             let length = len as usize;
             let mut out = vec![(0.0, 0.0); channels as usize * length];
@@ -702,24 +667,7 @@ impl MockRadio {
             }
             Some(out)
         } else {
-            self.rx[k].model.as_ref().zip(self.channel.as_ref()).map(|(model, mode)| {
-                let mut out = Vec::with_capacity(channels as usize * len as usize);
-                for c in 0..channels {
-                    let phase = model.phase.get(usize::from(c));
-                    for sample in first..stop {
-                        let stamp = RootInstant::of_sample(origin, ratio, sample);
-                        let (fr, fi) = mode.medium.field(&mode.fragment, c, model.frequency_hz.at(stamp), stamp);
-                        let amplitude = 10f64.powf(model.gain_db.at(stamp) / 20.0);
-                        let (sin, cos) = phase.map_or(0.0, |p| p.at(stamp)).sin_cos();
-                        let re = amplitude * (fr * cos + fi * sin);
-                        let im = amplitude * (fi * cos - fr * sin);
-                        let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));
-                        if cre != re || cim != im { clipped += 1; }
-                        out.push((cre as f32, cim as f32));
-                    }
-                }
-                out
-            })
+            None
         };
         let pool = self.rx[k].pool.as_mut().expect("pool was checked");
         let bytes = pool.fill(bytes_len, |buffer| {
@@ -1054,7 +1002,7 @@ impl MockRadio {
             match direction {
                 Direction::Rx => {
                     if let Some(mode) = self.channel.as_mut() {
-                        if let Some(model) = mode.rx_channels.as_mut().and_then(|models| models.get_mut(*number as usize)) {
+                        if let Some(model) = mode.rx_channels.get_mut(*number as usize) {
                             if model.phase_behavior != "deterministic" {
                                 model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));
                                 model.phase_fixed.set(tick, 0.0);
@@ -1065,7 +1013,7 @@ impl MockRadio {
                 Direction::Tx => {
                     if let (Some(mode), Some(shared)) = (self.channel.as_mut(), self.tx.iter().find_map(|stream| stream.plan.clone())) {
                         let mut plan = shared.plan();
-                        if let Some(model) = plan.channel_models.as_mut().and_then(|models| models.get_mut(*number as usize)) {
+                        if let Some(model) = plan.channel_models.get_mut(*number as usize) {
                             if model.phase_behavior != "deterministic" {
                                 model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));
                                 model.phase_fixed.set(tick, 0.0);
@@ -1080,21 +1028,20 @@ impl MockRadio {
 
     /// MR-27: records the logical channel order of a layout SampleClock segment.
     fn layout_phase_basis(&self, direction: Direction, channels: &[u32], at: i64) -> (String, bool) {
-        if !self.profile.is_layout() || self.channel.is_none() { return ("unmodelled".to_owned(), false); }
+        if self.channel.is_none() { return ("unmodelled".to_owned(), false); }
         let at = RootInstant::tick(at);
         let mut fixed = true;
         let mut timed = false;
         for number in channels {
             let (behavior, is_fixed) = match direction {
                 Direction::Rx => {
-                    let Some(model) = self.channel.as_ref().and_then(|mode| mode.rx_channels.as_ref())
-                        .and_then(|models| models.get(*number as usize)) else { return ("unmodelled".to_owned(), false); };
+                    let Some(model) = self.channel.as_ref().and_then(|mode| mode.rx_channels.get(*number as usize)) else { return ("unmodelled".to_owned(), false); };
                     (model.phase_behavior.as_str().to_owned(), model.phase_fixed.at(at) >= 0.5)
                 }
                 Direction::Tx => {
                     let Some(shared) = self.tx.iter().find_map(|stream| stream.plan.clone()) else { return ("unmodelled".to_owned(), false); };
                     let plan = shared.plan();
-                    let Some(model) = plan.channel_models.as_ref().and_then(|models| models.get(*number as usize)) else { return ("unmodelled".to_owned(), false); };
+                    let Some(model) = plan.channel_models.get(*number as usize) else { return ("unmodelled".to_owned(), false); };
                     (model.phase_behavior.clone(), model.phase_fixed.at(at) >= 0.5)
                 }
             };
@@ -1141,7 +1088,6 @@ impl MockRadio {
     }
 
     fn end_layout_segment(&mut self, direction: Direction, k: usize, origin: i64, sequence: Option<u64>, at: i64) {
-        if !self.profile.is_layout() { return; }
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
             if let Some(row) = rows.iter_mut().find(|row| {
                 row["direction"] == if direction == Direction::Rx { "rx" } else { "tx" }
@@ -1156,7 +1102,6 @@ impl MockRadio {
 
     /// MR-27: records the logical channel order and D13 phase basis of a layout segment.
     fn record_layout_segment(&mut self, direction: Direction, k: usize, origin: i64, sequence: Option<u64>, channels: timeline::Channels) {
-        if !self.profile.is_layout() { return; }
         let channel_numbers: Vec<u32> = channels.iter().collect();
         let phase_behavior: Vec<&str> = channel_numbers.iter().map(|number| self.profile.channel_model_terms(direction, *number as usize).0).collect();
         let (basis, valid) = self.layout_phase_basis(direction, &channel_numbers, origin);
@@ -1485,20 +1430,15 @@ impl MockRadio {
     }
 
     /// `node` is what the Kernel resolved the target to (KC-23), which is what a
-    /// Provider matches on: the instance's own node, or, with a layout description, one of
-    /// its stream nodes (RM-12, D14).
+    /// Provider matches on: the instance's own node or one of its stream nodes (RM-12, D14).
     fn handle_action(&mut self, dispatched: Dispatched, now: i64) -> Result<(), ModuleError> {
         let id = dispatched.id;
         let node = dispatched.node.as_ref();
         match dispatched.action {
-            // MR-13, MR-16: a burst names a transmit stream; under the current keys the
-            // instance has one transmit stream and MR-16's own check tests its node, after
-            // the clock (a burst with no transmit channel is refused there). Under `keys`
-            // the node must name the instance's transmit stream, and no other node.
-            action @ Action::TxBurst { .. } => match (self.profile.is_layout(), self.addressed(node)) {
-                (false, _) => self.handle_tx_burst(0, id, action, node, now),
-                (true, Addressed::Stream { direction: Direction::Tx, k }) => self.handle_tx_burst(k, id, action, node, now),
-                (true, _) => {
+            // MR-13, MR-16: a burst names its transmit stream (RM-13, RM-29).
+            action @ Action::TxBurst { .. } => match self.addressed(node) {
+                Addressed::Stream { direction: Direction::Tx, k } => self.handle_tx_burst(k, id, action, node, now),
+                _ => {
                     self.refuse_tx_burst(id, now)?;
                     Ok(())
                 }
@@ -1805,11 +1745,9 @@ impl MockRadio {
     #[allow(clippy::too_many_arguments)]
     fn handle_update(&mut self, id: ActionId, node: Option<&ResourceId>, key: ezsdr_kernel::spec::Key, value: Value, class: UpdateClass, at: Option<AbsoluteDeadline>, now: i64) -> Result<(), ModuleError> {
         // RM-12, D14: the node names the instance or one of its streams and selects the
-        // SpecTime clock alone; what changes is what `key` says. Under the current keys an
-        // update targets the device (MR-18).
+        // SpecTime clock alone; what changes is what `key` says.
         let addressed = match self.addressed(node) {
-            Addressed::Instance => true,
-            Addressed::Stream { .. } => self.profile.is_layout(),
+            Addressed::Instance | Addressed::Stream { .. } => true,
             Addressed::Other => false,
         };
         let Some(expected) = self.update_class_of(&key).filter(|_| addressed) else {
@@ -1851,7 +1789,7 @@ impl MockRadio {
                 self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested, earliest), TimePoint::new(root, now))?;
             }
             requested.max(earliest)
-        } else if self.profile.is_layout() {
+        } else {
             // RM-25, RM-27: a layout instance's `cold` change never takes effect before a
             // `cold` change the instance received earlier, of whatever direction, stream or
             // line, nor before a receive stream's start; one so floored is late (UC-2). The
@@ -1861,15 +1799,6 @@ impl MockRadio {
             let start = (direction == Some(Direction::Rx) && self.started).then_some(self.start_tick).flatten();
             let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective);
             let (e, is_late) = timeline::layout_instant(requested_tick, now, start, floor);
-            if is_late {
-                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), e), TimePoint::new(root, now))?;
-            }
-            e
-        } else {
-            // The current keys: the change is floored at a `cold` change of its own stream
-            // received earlier, so the line is the stream's the key names (MR-18, RM-25).
-            let line = if is_rx_cold_key(key.as_str()) { self.lines.line(Self::rx_key(0)) } else { self.lines.line(Self::tx_key(0)) };
-            let (e, is_late) = timeline::command_instant(line, requested_tick, now, order, true);
             if is_late {
                 self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), e), TimePoint::new(root, now))?;
             }
@@ -1947,11 +1876,7 @@ impl MockRadio {
                     } else {
                         self.book_tx(k, item)?;
                         let count = self.lines.line(stream).map_or(0, |line| line.plan.len());
-                        let to_clock = if self.profile.is_layout() {
-                            self.lines.line(stream).and_then(|line| line.plan.iter().position(|segment| segment.by == Some(order)))
-                        } else {
-                            (!channels.is_empty()).then(|| count - 1)
-                        };
+                        let to_clock = self.lines.line(stream).and_then(|line| line.plan.iter().position(|segment| segment.by == Some(order)));
                         self.tx_reconcile(k)?;
                         tx.push((k, to_clock, count));
                     }
@@ -1972,13 +1897,6 @@ impl MockRadio {
         projected: &BTreeMap<ezsdr_kernel::spec::Key, Value>,
         candidate: &BTreeMap<ezsdr_kernel::spec::Key, Value>,
     ) -> ColdChange {
-        if !self.profile.is_layout() {
-            return ColdChange::Streams(match key.as_str() {
-                name if is_rx_cold_key(name) => vec![(Direction::Rx, 0)],
-                name if is_tx_cold_key(name) => vec![(Direction::Tx, 0)],
-                _ => Vec::new(),
-            });
-        }
         let Some(concrete) = ezsdr_radio::concrete(key) else { return ColdChange::Streams(Vec::new()) };
         match concrete {
             Concrete::Stream { rx, number } => ColdChange::Streams(vec![(direction_of(rx), number as usize)]),
@@ -2014,7 +1932,7 @@ impl MockRadio {
     /// RM-30: the stream a layout configuration puts logical channel `number` of
     /// `direction` in, or −1 when it is in none.
     fn channel_stream(&self, configuration: &BTreeMap<ezsdr_kernel::spec::Key, Value>, direction: Direction, number: u32) -> i64 {
-        let description = self.profile.channels().expect("MR-27: a layout description");
+        let description = self.profile.channels();
         description.stream_of(configuration, direction == Direction::Rx, number)
     }
 
@@ -2024,49 +1942,7 @@ impl MockRadio {
         let Some(update) = self.updates.remove(&(effective, order)) else { return Ok(()); };
         self.config.insert(update.key.clone(), update.value.clone());
         self.record_update(&update.key, &update.value, tick);
-        if self.profile.is_layout() {
-            self.apply_layout_channel_update(&update.key, &update.value, tick);
-        } else if let Some(mode) = self.channel.as_mut() {
-            // Preserve the current-key channel mode's draw and calculation order.
-            if let Some(value) = match update.value.as_scalar() { Some(Scalar::Num(v)) => Some(v.get()), Some(Scalar::Int(v)) => Some(*v as f64), _ => None } {
-                match update.key.as_str() {
-                    ezsdr_radio::keys::TX_GAIN_DB => {
-                        if let Some(shared) = self.tx[0].plan.clone() { shared.plan().gain_db.set(tick, value); }
-                    }
-                    ezsdr_radio::keys::TX_FREQUENCY_HZ => {
-                        if let Some(shared) = self.tx[0].plan.clone() {
-                            let mut plan = shared.plan();
-                            plan.frequency_hz.set(tick, value);
-                            if self.profile.timed_tune_fixes_phase() {
-                                let timed = plan.timed_phase.clone();
-                                for (phase, value) in plan.phase.iter_mut().zip(timed) { phase.set(tick, value); }
-                            } else {
-                                // MR-34: a `random` channel redraws its phase at every applied tune,
-                                // every channel of the direction in draw order (design 33 D13).
-                                let count = plan.phase.len();
-                                let values: Vec<f64> = (0..count).map(|_| channel::lo_phase(&mut mode.lo_retune)).collect();
-                                for (phase, value) in plan.phase.iter_mut().zip(values) { phase.set(tick, value); }
-                            }
-                        }
-                    }
-                    ezsdr_radio::keys::RX_GAIN_DB => {
-                        if let Some(model) = self.rx[0].model.as_mut() { model.gain_db.set(tick, value); }
-                    }
-                    ezsdr_radio::keys::RX_FREQUENCY_HZ => {
-                        if let Some(model) = self.rx[0].model.as_mut() {
-                            model.frequency_hz.set(tick, value);
-                            if self.profile.timed_tune_fixes_phase() {
-                                for (phase, value) in model.phase.iter_mut().zip(model.timed_phase.iter()) { phase.set(tick, *value); }
-                            } else {
-                                let values: Vec<f64> = (0..model.phase.len()).map(|_| channel::lo_phase(&mut mode.lo_retune)).collect();
-                                for (phase, value) in model.phase.iter_mut().zip(values) { phase.set(tick, value); }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        self.apply_layout_channel_update(&update.key, &update.value, tick);
         for (k, to, passed) in update.tx {
             self.stop_tx(k, tick, "MR-18: cancelled by a cold change", true)?;
             self.tx_switch(k, to, passed)?;
@@ -2080,18 +1956,18 @@ impl MockRadio {
         let Some(value) = value.as_scalar().and_then(|value| match value { Scalar::Num(value) => Some(value.get()), Scalar::Int(value) => Some(*value as f64), _ => None }) else { return; };
         if leaf == "gain_db" {
             if rx {
-                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.as_mut()).and_then(|models| models.get_mut(number as usize)) {
+                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {
                     model.gain_db.set(tick, value);
                 }
             } else if let Some(shared) = self.tx.iter().find_map(|stream| stream.plan.clone()) {
-                if let Some(model) = shared.plan().channel_models.as_mut().and_then(|models| models.get_mut(number as usize)) {
+                if let Some(model) = shared.plan().channel_models.get_mut(number as usize) {
                     model.gain_db.set(tick, value);
                 }
             }
         } else if leaf == "frequency_hz" {
             if rx {
                 if let Some(mode) = self.channel.as_mut() {
-                    if let Some(model) = mode.rx_channels.as_mut().and_then(|models| models.get_mut(number as usize)) {
+                    if let Some(model) = mode.rx_channels.get_mut(number as usize) {
                         let phase = match model.phase_behavior.as_str() {
                             "random_unless_timed_tune" => model.timed_phase,
                             "random" => channel::lo_phase(&mut mode.lo_retune),
@@ -2105,14 +1981,14 @@ impl MockRadio {
             } else if let (Some(mode), Some(shared)) = (self.channel.as_mut(), self.tx.iter().find_map(|stream| stream.plan.clone())) {
                 let phase = {
                     let plan = shared.plan();
-                    plan.channel_models.as_ref().and_then(|models| models.get(number as usize)).map(|model| match model.phase_behavior.as_str() {
+                    plan.channel_models.get(number as usize).map(|model| match model.phase_behavior.as_str() {
                         "random_unless_timed_tune" => model.timed_phase,
                         "random" => channel::lo_phase(&mut mode.lo_retune),
                         _ => 0.0,
                     })
                 };
                 let mut plan = shared.plan();
-                if let Some(model) = plan.channel_models.as_mut().and_then(|models| models.get_mut(number as usize)) {
+                if let Some(model) = plan.channel_models.get_mut(number as usize) {
                     model.frequency_hz.set(tick, value);
                     model.phase.set(tick, phase.unwrap_or(0.0));
                     model.phase_fixed.set(tick, if model.phase_behavior != "random" { 1.0 } else { 0.0 });
@@ -2148,7 +2024,7 @@ impl MockRadio {
             // so a `cold` change at `now` that equals the origin of a transmit clock the loop has
             // already passed cuts that clock at sample 0 after its untimed tune has drawn (design 09
             // MR-34's ceiling).
-            if self.started && self.profile.is_layout() {
+            if self.started {
                 for k in 0..self.rx.len() {
                     if let Some(key) = self.tune_next(Direction::Rx, k) {
                         candidates.push((key.0, 2, tune_order(Direction::Rx, k), WorkKind::Tune { direction: Direction::Rx, stream: k, key }));
@@ -2247,10 +2123,6 @@ fn rm26(error: ezsdr_kernel::time::TimeError) -> ModuleError {
     ModuleError::rejected(format!("RM-26: {error}"))
 }
 
-fn int_config(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> i64 {
-    int_config_opt(config, name).unwrap_or(0)
-}
-
 /// The integer `configuration` holds for `name`, if it holds one.
 fn int_config_opt(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> Option<i64> {
     let key = ezsdr_kernel::spec::Key::parse(name).expect("radio key");
@@ -2286,20 +2158,6 @@ fn tune_order(direction: Direction, k: usize) -> u64 {
 fn num_config(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> f64 {
     let key = ezsdr_kernel::spec::Key::parse(name).expect("radio key");
     match config.get(&key).and_then(Value::as_scalar) { Some(Scalar::Num(value)) => value.get(), Some(Scalar::Int(value)) => *value as f64, _ => 0.0 }
-}
-
-fn is_rx_cold_key(key: &str) -> bool {
-    matches!(key, ezsdr_radio::keys::RX_CHANNELS | ezsdr_radio::keys::RX_SAMPLE_RATE_HZ)
-}
-
-fn is_tx_cold_key(key: &str) -> bool {
-    matches!(key, ezsdr_radio::keys::TX_CHANNELS | ezsdr_radio::keys::TX_SAMPLE_RATE_HZ)
-}
-
-fn is_hardware_key(key: &str) -> bool {
-    matches!(key,
-        ezsdr_radio::keys::RX_FREQUENCY_HZ | ezsdr_radio::keys::TX_FREQUENCY_HZ
-        | ezsdr_radio::keys::RX_GAIN_DB | ezsdr_radio::keys::TX_GAIN_DB)
 }
 
 /// One of a MockRadio instance's six Manifest sections, `ezsdr.radio.mock.<suffix>`; the
@@ -2413,88 +2271,53 @@ impl Provider for MockRadio {
                     let max = if coupling.rx == f.id { rx_max } else { tx_max };
                     return Err(self.reject(format!("MR-31: a coupling {} -> {} names a channel beyond this profile's {max}", coupling.tx, coupling.rx)));
                 }
-                let (tx, rx, rx_channels, lo_retune) = if self.profile.is_layout() {
-                    let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
-                    let mut phases = |direction, count: usize, timed: bool| {
-                        (0..count).map(|number| {
-                            let (behavior, _) = self.profile.channel_model_terms(direction, number);
-                            let draw = if timed { behavior == "random_unless_timed_tune" } else { behavior != "deterministic" };
-                            if draw { channel::lo_phase(&mut lo) } else { 0.0 }
-                        }).collect::<Vec<_>>()
-                    };
-                    let rx_phase = phases(Direction::Rx, rx_max as usize, false);
-                    let tx_phase = phases(Direction::Tx, tx_max as usize, false);
-                    let rx_timed = phases(Direction::Rx, rx_max as usize, true);
-                    let tx_timed = phases(Direction::Tx, tx_max as usize, true);
-                    let rx_channels = (0..rx_max as usize).map(|number| {
-                        let side = "rx";
-                        let (behavior, delay) = self.profile.channel_model_terms(Direction::Rx, number);
-                        channel::RxChannelModel {
-                            gain_db: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "gain_db"))),
-                            frequency_hz: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "frequency_hz"))),
-                            phase: channel::Timeline::new(rx_phase[number]),
-                            phase_fixed: channel::Timeline::new(if behavior == "deterministic" { 1.0 } else { 0.0 }),
-                            timed_phase: rx_timed[number],
-                            phase_behavior: behavior.to_owned(),
-                            path_delay_samples: delay,
-                        }
-                    }).collect();
-                    let tx_channels = (0..tx_max as usize).map(|number| {
-                        let side = "tx";
-                        let (behavior, delay) = self.profile.channel_model_terms(Direction::Tx, number);
-                        channel::ChannelModel {
-                            gain_db: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "gain_db"))),
-                            frequency_hz: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "frequency_hz"))),
-                            phase: channel::Timeline::new(tx_phase[number]),
-                            phase_fixed: channel::Timeline::new(if behavior == "deterministic" { 1.0 } else { 0.0 }),
-                            timed_phase: tx_timed[number],
-                            phase_behavior: behavior.to_owned(),
-                            path_delay_samples: delay,
-                        }
-                    }).collect();
-                    let tx = channel::TxShared::new(channel::TxPlan {
-                        segments: BTreeMap::new(),
-                        gain_db: channel::Timeline::new(0.0),
-                        frequency_hz: channel::Timeline::new(0.0),
-                        phase: Vec::new(),
-                        timed_phase: Vec::new(),
-                        path_delay: 0,
-                        channel_models: Some(tx_channels),
-                    });
-                    (tx, None, Some(rx_channels), SimRng::new(seed, &format!("{}/lo/retune", self.selector_id())))
-                } else {
-                    let random = self.profile.random_phase_on_untimed_tune();
-                    let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
-                    // MR-34: keep the current-key draw order and arithmetic unchanged.
-                    let fixes = random && self.profile.timed_tune_fixes_phase();
-                    let draw = |count: i64, rng: &mut SimRng, live: bool| (0..count).map(|_| if live { channel::lo_phase(rng) } else { 0.0 }).collect::<Vec<f64>>();
-                    let rx_phase: Vec<channel::Timeline> = draw(rx_max, &mut lo, random).into_iter().map(channel::Timeline::new).collect();
-                    let tx_phase: Vec<channel::Timeline> = draw(tx_max, &mut lo, random).into_iter().map(channel::Timeline::new).collect();
-                    let rx_timed = draw(rx_max, &mut lo, fixes);
-                    let tx_timed = draw(tx_max, &mut lo, fixes);
-                    let lo_retune = SimRng::new(seed, &format!("{}/lo/retune", self.selector_id()));
-                    let tx = channel::TxShared::new(channel::TxPlan {
-                        segments: BTreeMap::new(),
-                        gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_GAIN_DB)),
-                        frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::TX_FREQUENCY_HZ)),
-                        phase: tx_phase,
-                        timed_phase: tx_timed,
-                        path_delay: self.profile.channel_model_terms(Direction::Tx, 0).1,
-                        channel_models: None,
-                    });
-                    let rx = channel::RxModel {
-                        gain_db: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_GAIN_DB)),
-                        frequency_hz: channel::Timeline::new(num_config(&config, ezsdr_radio::keys::RX_FREQUENCY_HZ)),
-                        phase: rx_phase,
-                        timed_phase: rx_timed,
-                    };
-                    (tx, Some(rx), None, lo_retune)
+                let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
+                let mut phases = |direction, count: usize, timed: bool| {
+                    (0..count).map(|number| {
+                        let (behavior, _) = self.profile.channel_model_terms(direction, number);
+                        let draw = if timed { behavior == "random_unless_timed_tune" } else { behavior != "deterministic" };
+                        if draw { channel::lo_phase(&mut lo) } else { 0.0 }
+                    }).collect::<Vec<_>>()
                 };
+                let rx_phase = phases(Direction::Rx, rx_max as usize, false);
+                let tx_phase = phases(Direction::Tx, tx_max as usize, false);
+                let rx_timed = phases(Direction::Rx, rx_max as usize, true);
+                let tx_timed = phases(Direction::Tx, tx_max as usize, true);
+                let rx_channels = (0..rx_max as usize).map(|number| {
+                    let side = "rx";
+                    let (behavior, delay) = self.profile.channel_model_terms(Direction::Rx, number);
+                    channel::RxChannelModel {
+                        gain_db: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "gain_db"))),
+                        frequency_hz: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "frequency_hz"))),
+                        phase: channel::Timeline::new(rx_phase[number]),
+                        phase_fixed: channel::Timeline::new(if behavior == "deterministic" { 1.0 } else { 0.0 }),
+                        timed_phase: rx_timed[number],
+                        phase_behavior: behavior.to_owned(),
+                        path_delay_samples: delay,
+                    }
+                }).collect();
+                let tx_channels = (0..tx_max as usize).map(|number| {
+                    let side = "tx";
+                    let (behavior, delay) = self.profile.channel_model_terms(Direction::Tx, number);
+                    channel::ChannelModel {
+                        gain_db: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "gain_db"))),
+                        frequency_hz: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "frequency_hz"))),
+                        phase: channel::Timeline::new(tx_phase[number]),
+                        phase_fixed: channel::Timeline::new(if behavior == "deterministic" { 1.0 } else { 0.0 }),
+                        timed_phase: tx_timed[number],
+                        phase_behavior: behavior.to_owned(),
+                        path_delay_samples: delay,
+                    }
+                }).collect();
+                let tx = channel::TxShared::new(channel::TxPlan {
+                    segments: BTreeMap::new(),
+                    channel_models: tx_channels,
+                });
+                let lo_retune = SimRng::new(seed, &format!("{}/lo/retune", self.selector_id()));
                 // One transmitter covers the instance's logical channels; segment membership
                 // selects the owning stream at each instant (MR-32, RM-34).
                 medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!("MR-31: {error}")))?;
                 for stream in &mut self.tx { stream.plan = Some(tx.clone()); }
-                if let Some(rx) = rx { self.rx[0].model = Some(rx); }
                 Some(ChannelMode { medium, fragment: f.id.clone(), inputs: ctx.inputs.clone(), lo_retune, rx_channels })
             }
         };
@@ -2590,12 +2413,10 @@ impl Provider for MockRadio {
         // clock registered at its first block.
         for k in 0..self.rx.len() {
             if self.rx[k].links.is_empty() {
-                if self.profile.is_layout() {
-                    let line = self.line(Direction::Rx, k, target, &self.config)?;
-                    self.lines.insert(Self::rx_key(k), line);
-                    let seq = self.arrival();
-                    self.lines.book(Self::rx_key(k), Item { e: target, seq, ready: target, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop }).map_err(rm26)?;
-                }
+                let line = self.line(Direction::Rx, k, target, &self.config)?;
+                self.lines.insert(Self::rx_key(k), line);
+                let seq = self.arrival();
+                self.lines.book(Self::rx_key(k), Item { e: target, seq, ready: target, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop }).map_err(rm26)?;
                 continue;
             }
             let line = self.line(Direction::Rx, k, target, &self.config)?;

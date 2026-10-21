@@ -3904,9 +3904,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "    if timekeeper != 0 {",
   "new": "    if false {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_02_from_binding_refusals"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
  },
  {
   "id": "P05",
@@ -3914,9 +3914,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "    if let Some(other) = rx.iter().chain(&tx).find(|element| element.board != board) {",
   "new": "    if let Some(other) = rx.iter().chain(&tx).find(|_element| false) {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_02_from_binding_refusals"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
  },
  {
   "id": "P06",
@@ -3924,9 +3924,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "    let slot = Slot::parse(slot)\n        .ok_or_else(|| format!(\"the layout element `{raw}` names slot `{slot}`, not A or B\"))?;",
   "new": "    let slot = Slot::parse(slot).unwrap_or(Slot::A);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_02_from_binding_refusals"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
  },
  {
   "id": "P07",
@@ -3934,9 +3934,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "    if frontend != 0 {",
   "new": "    if false {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_02_from_binding_refusals"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
  },
  {
   "id": "P08",
@@ -3944,9 +3944,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "            check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?;",
   "new": "            let _ = (direction, position, element.slot, element.frontend, element.board.name(), &seen);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_02_from_binding_refusals"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
  },
  {
   "id": "P09",
@@ -3954,19 +3954,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "            check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?;",
   "new": "            if position == 0 { check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?; }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_02_from_binding_refusals"
- },
- {
-  "id": "P10",
-  "name": "a CBX's `random` phase is fixed by a timed tune rather than redrawn (MR-34, design 33 D13)",
-  "file": "crates/ezsdr-mock-radio/src/profile.rs",
-  "old": "            Mode::Current(description) => description.phase_behavior_on_retune != \"random\",",
-  "new": "            Mode::Current(_) => true,",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_34_a_random_phase_is_redrawn_by_every_tune"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
  },
  {
   "id": "P11",
@@ -3977,16 +3967,6 @@
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_26_each_stream_takes_its_own_directions_start_lead"
- },
- {
-  "id": "P12",
-  "name": "MockRadio describes a gain range of its own, not the Vocabulary's (documentation audit D3)",
-  "file": "crates/ezsdr-mock-radio/src/profile.rs",
-  "old": "            None => Mode::Current(Box::new(match kind {\n                ProfileKind::X3xx => x3xx::description(\n                    selection.as_ref().expect(\"an x3xx layout\"),\n                    BLOCK_LEN,\n                    &Profile::terms(),\n                ),",
-  "new": "            None => Mode::Current(Box::new(match kind {\n                ProfileKind::X3xx => {\n                    let mut description = x3xx::description(\n                        selection.as_ref().expect(\"an x3xx layout\"),\n                        BLOCK_LEN,\n                        &Profile::terms(),\n                    );\n                    description.gain = Grid::Step { lo: 0.0, hi: 37.5, step: 0.5 };\n                    description\n                },",
-  "crate": "ezsdr-acceptance",
-  "test_bin": "x3xx",
-  "filter": "d3_the_two_providers_describe_one_layout_alike"
  },
  {
   "id": "P13",
@@ -4034,9 +4014,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "    let rx_default = i64::from(!selection.rx.is_empty());",
   "new": "    let rx_default = 1;",
-  "crate": "ezsdr-acceptance",
-  "test_bin": "x3xx",
-  "filter": "d3_a_layout_without_receive_channels_requests_none_on_both_providers"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_description_is_the_one_profile_both_providers_name"
  },
  {
   "id": "P18",
@@ -4044,9 +4024,9 @@
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "        coherent: board.coherent(),",
   "new": "        coherent: true,",
-  "crate": "ezsdr-acceptance",
-  "test_bin": "x3xx",
-  "filter": "d3_a_cbx_layout_is_not_coherent_on_either_provider"
+   "crate": "ezsdr-radio",
+   "test_bin": "device",
+   "filter": "rm_26_the_description_is_the_one_profile_both_providers_name"
  },
  {
   "id": "P19",
@@ -5079,16 +5059,6 @@
   "filter": "mr_38_a_layout_instance_uses_one_key_set"
  },
  {
-  "id": "P123",
-  "name": "an `ideal` instance under `keys` presents the current description, not the layout's",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            (ProfileKind::Ideal, true) => Some(channels::ideal_from_selector(&binding.selector).map_err(|why| reject(&why))?),",
-  "new": "            (ProfileKind::Ideal, true) => None,",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_layout",
-  "filter": "mr_38_the_tree_and_capabilities_are_the_layout_s"
- },
- {
   "id": "P124",
   "name": "a layout description declares one receive port named `rx` for every stream",
   "file": "crates/ezsdr-radio/src/channels.rs",
@@ -5412,8 +5382,8 @@
    "id": "P157",
    "name": "a transmit gain update changes channel 0's timeline instead of the named channel",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "if let Some(model) = shared.plan().channel_models.as_mut().and_then(|models| models.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
-   "new": "if let Some(model) = shared.plan().channel_models.as_mut().and_then(|models| models.get_mut(0)) {\n                    model.gain_db.set(tick, value);\n                }",
+    "old": "                if let Some(model) = shared.plan().channel_models.get_mut(number as usize) {\n                    model.gain_db.set(tick, value);\n                }",
+    "new": "                if let Some(model) = shared.plan().channel_models.get_mut(0) {\n                    model.gain_db.set(tick, value);\n                }",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
@@ -5422,8 +5392,8 @@
    "id": "P158",
    "name": "layout LO initialization draws transmit phases before receive phases",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                    let rx_phase = phases(Direction::Rx, rx_max as usize, false);\n                    let tx_phase = phases(Direction::Tx, tx_max as usize, false);",
-   "new": "                    let tx_phase = phases(Direction::Tx, tx_max as usize, false);\n                    let rx_phase = phases(Direction::Rx, rx_max as usize, false);",
+    "old": "                let rx_phase = phases(Direction::Rx, rx_max as usize, false);\n                let tx_phase = phases(Direction::Tx, tx_max as usize, false);",
+    "new": "                let tx_phase = phases(Direction::Tx, tx_max as usize, false);\n                let rx_phase = phases(Direction::Rx, rx_max as usize, false);",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_34_layout_mixed_boards_have_per_channel_timed_phase_behavior"
@@ -5432,8 +5402,8 @@
    "id": "P159",
    "name": "a random layout channel takes its timed constant instead of redrawing on tune",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "plan.channel_models.as_ref().and_then(|models| models.get(number as usize)).map(|model| match model.phase_behavior.as_str() {\n                        \"random_unless_timed_tune\" => model.timed_phase,\n                        \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                        _ => 0.0,\n                    })",
-   "new": "plan.channel_models.as_ref().and_then(|models| models.get(number as usize)).map(|model| match model.phase_behavior.as_str() {\n                        \"random_unless_timed_tune\" => model.timed_phase,\n                        \"random\" => model.timed_phase,\n                        _ => 0.0,\n                    })",
+    "old": "                    plan.channel_models.get(number as usize).map(|model| match model.phase_behavior.as_str() {\n                        \"random_unless_timed_tune\" => model.timed_phase,\n                        \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                        _ => 0.0,\n                    })",
+    "new": "                    plan.channel_models.get(number as usize).map(|model| match model.phase_behavior.as_str() {\n                        \"random_unless_timed_tune\" => model.timed_phase,\n                        \"random\" => model.timed_phase,\n                        _ => 0.0,\n                    })",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_34_a_cbx_layout_redraws_only_the_retuned_channel"
@@ -5442,7 +5412,7 @@
    "id": "P160",
    "name": "a deterministic layout channel draws a random initial phase",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                            let draw = if timed { behavior == \"random_unless_timed_tune\" } else { behavior != \"deterministic\" };",
+    "old": "                        let draw = if timed { behavior == \"random_unless_timed_tune\" } else { behavior != \"deterministic\" };",
    "new": "                            let draw = true;",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
@@ -5462,8 +5432,8 @@
    "id": "P162",
    "name": "a layout instance is refused in channel mode with the withdrawn MR-41 error",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "            None => None,\n            Some(spec) => {",
-   "new": "            None => None,\n            Some(_) if self.profile.is_layout() => { return Err(self.reject(\"MR-41: a Mock that uses the layout keys takes no sim.channel\")); }\n            Some(spec) => {",
+   "old": "            Some(spec) => {",
+   "new": "            Some(_) => { return Err(self.reject(\"MR-41: a Mock that uses the layout keys takes no sim.channel\")); },\n            Some(spec) => {",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_31_a_layout_instance_joins_simulation_channel"
@@ -5502,8 +5472,8 @@
    "id": "P166",
    "name": "a transmit frequency update changes channel 0's timeline instead of the named channel",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                if let Some(model) = plan.channel_models.as_mut().and_then(|models| models.get_mut(number as usize)) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
-   "new": "                if let Some(model) = plan.channel_models.as_mut().and_then(|models| models.get_mut(0)) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
+    "old": "                if let Some(model) = plan.channel_models.get_mut(number as usize) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
+    "new": "                if let Some(model) = plan.channel_models.get_mut(0) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
@@ -5512,8 +5482,8 @@
    "id": "P167",
    "name": "a receive gain update changes channel 0's timeline instead of the named channel",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.as_mut()).and_then(|models| models.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
-   "new": "if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.as_mut()).and_then(|models| models.get_mut(0)) {\n                    model.gain_db.set(tick, value);\n                }",
+    "old": "                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
+    "new": "                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(0)) {\n                    model.gain_db.set(tick, value);\n                }",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
@@ -5522,8 +5492,8 @@
    "id": "P168",
    "name": "a receive frequency update changes channel 0's timeline instead of the named channel",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "mode.rx_channels.as_mut().and_then(|models| models.get_mut(number as usize))",
-   "new": "mode.rx_channels.as_mut().and_then(|models| models.get_mut(0))",
+    "old": "                    if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => model.timed_phase,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+    "new": "                    if let Some(model) = mode.rx_channels.get_mut(0) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => model.timed_phase,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
@@ -5552,8 +5522,8 @@
    "id": "P171",
    "name": "a layout transmitter ignores its declared channel path delay",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                        let (behavior, delay) = self.profile.channel_model_terms(Direction::Tx, number);",
-   "new": "                        let (behavior, _delay) = self.profile.channel_model_terms(Direction::Tx, number);\n                        let delay = 0;",
+    "old": "                    let (behavior, delay) = self.profile.channel_model_terms(Direction::Tx, number);",
+    "new": "                    let (behavior, _delay) = self.profile.channel_model_terms(Direction::Tx, number);\n                    let delay = 0;",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_32_a_layout_transmit_path_delay_silences_samples_before_the_antenna"
@@ -8781,16 +8751,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop"
-  },
-  {
-   "id": "P528",
-   "name": "the built-in profile selects layout keys (EA-9, RM-38)",
-   "file": "crates/ezsdr-server/src/catalogue.rs",
-   "old": "                    \"keys\": \"channel\",\n",
-   "new": "",
-   "crate": "ezsdr-server",
-   "test_bin": "protocol",
-   "filter": "ea_09_the_default_profile_loops_back"
   },
   {
    "id": "P529",

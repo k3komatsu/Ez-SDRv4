@@ -27,6 +27,9 @@ use ezsdr_mock_radio::MockRadio;
 use ezsdr_radio::payloads::RxOverflowPayload;
 use ezsdr_sim::channel::Medium;
 
+#[path = "../../ezsdr-acceptance/src/layout.rs"]
+mod layout_support;
+
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 const HOST: ClockDomainId = ClockDomainId::HOST_MONOTONIC;
 /// A `x3xx` arm at instant 0 ends its synchronisation at 2 s (MR-9), so T0 is at least
@@ -432,11 +435,7 @@ fn two() -> Value { elements(&["0:A:ubx:0", "0:B:ubx:0"]) }
 fn mr_38_a_layout_instance_uses_one_key_set() {
     // MR-38: `keys: "channel"` picks the layout builder's keys; another value is refused.
     let selector = |keys: Option<Value>, rx: Value, tx: Value| {
-        let mut selector = BTreeMap::from([
-            (Ident::parse("id").unwrap(), Value::from("mock".to_owned())),
-            (Ident::parse("rx").unwrap(), rx),
-            (Ident::parse("tx").unwrap(), tx),
-        ]);
+        let mut selector = layout_support::layout_selector("mock", rx, tx);
         if let Some(keys) = keys {
             selector.insert(Ident::parse("keys").unwrap(), keys);
         }
@@ -455,15 +454,16 @@ fn mr_38_a_layout_instance_uses_one_key_set() {
         (Ident::parse("rx").unwrap(), count(2)),
     ]), profile: Some(ProfileRef { name: "ideal".to_owned(), version: Version::new(2, 0, 0) }), feed: None };
     assert!(MockRadio::from_binding(&ideal).is_ok());
-    // The two key sets are disjoint: the current keys are no radio keys of a layout
-    // instance, and a layout key is none of a current-key instance (RM-27).
+    // An absent selector key still selects the layout; the removed direction-wide key is
+    // not part of its description.
     let requested = |name: &str, constraint: Constraint| Requested { resource: rid("mock"), constraints: BTreeMap::from([(key(name), constraint)]) };
     let layout_instance = MockRadio::from_binding(&layout(Some("channel"))).unwrap();
     let report = layout_instance.coerce(&requested("radio.rx.channels", eq(Scalar::from(1)))).unwrap();
     assert_eq!(report.rejected.len(), 1);
     assert!(report.rejected[0].reason.contains("RM-4: not a radio key"), "{:?}", report.rejected[0].reason);
-    let current_instance = MockRadio::from_binding(&layout(None)).unwrap();
-    let report = current_instance.coerce(&requested("radio.rx.c0.frequency_hz", eq(Scalar::try_from(1.0e9).unwrap()))).unwrap();
+    let without_key = MockRadio::from_binding(&layout(None)).unwrap();
+    assert_eq!(without_key.instance().tree.children.iter().map(|child| child.id.path()).collect::<Vec<_>>(), ["mock/rx/s0", "mock/rx/s1", "mock/tx/s0"]);
+    let report = without_key.coerce(&requested("radio.rx.channels", eq(Scalar::from(1)))).unwrap();
     assert_eq!(report.rejected.len(), 1);
     assert!(report.rejected[0].reason.contains("RM-4: not a radio key"), "{:?}", report.rejected[0].reason);
     // A layout instance's own keys are the ones its description declares (RM-27, RM-30).
@@ -616,7 +616,7 @@ fn mr_12_d14_the_actions_of_a_layout_instance_name_a_stream() {
     assert_eq!(harness.applied().iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(), ["radio.rx.c0.frequency_hz", "radio.rx.c1.gain_db"]);
     // The wrong destinations: the device for a burst, a receive stream for one, a stream
     // number the instance does not have, and a node that is neither.
-    harness.push(burst("mock/tx", tx_domain, 3_100, 100));
+    harness.push(burst("mock", tx_domain, 3_100, 100));
     harness.push(burst("mock/rx/s0", tx_domain, 3_200, 100));
     harness.push(stop("mock/rx/s9"));
     harness.push(update_at("mock/tx/s9", "radio.tx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, None));

@@ -36,18 +36,10 @@ impl Drop for TempDir {
     }
 }
 
-/// The `x3xx` layout every Mock binding of the rig declares: a UBX in slot A and slot B,
-/// both directions (design 33 D5). An `ideal` binding carries no layout.
+/// The layout every binding of the rig declares, with a UBX in slot A and slot B for
+/// `x3xx` and two channels per direction for `ideal` (design 33 D5).
 fn layout(profile: &str, selector: JsonValue) -> JsonValue {
-    let mut selector = selector;
-    if profile != "x3xx" {
-        return selector;
-    }
-    if let Some(object) = selector.as_object_mut() {
-        object.entry("rx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
-        object.entry("tx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
-    }
-    selector
+    crate::layout::binding_selector(profile, selector)
 }
 
 /// A profile document: `x3xx` 0.1.0, or `ideal` 2.0.0 (design 33 D5).
@@ -89,11 +81,7 @@ fn recorder(dir: &Path, component: Option<&str>) -> JsonValue {
         "selector": { "dir": dir.to_string_lossy() }
     });
     if let Some(component) = component {
-        recorder["feed"] = json!({
-            "port": { "component": component, "port": "rx" },
-            "policy": "drop_oldest",
-            "capacity": 64
-        });
+        recorder["feed"] = crate::experiments::rx_feed(component, 0);
     }
     recorder
 }
@@ -117,7 +105,7 @@ fn profile_document(profile: &str, selector: JsonValue, dir: &Path, environment:
         "placements": {
             "links": [{
                 "link": link_module(),
-                "from": { "component": "radio", "port": "rx" },
+                "from": { "component": "radio", "port": "rx0" },
                 "to": { "component": "rec", "port": "in" }
             }]
         },
@@ -157,7 +145,7 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
         "bindings": bindings,
         "authority": "sim",
         "placements": {
-            "links": [{ "link": link_module(), "from": { "component": rx, "port": "rx" }, "to": { "component": "rec", "port": "in" } }]
+        "links": [{ "link": link_module(), "from": { "component": rx, "port": "rx0" }, "to": { "component": "rec", "port": "in" } }]
         },
         "environment": env_section(environment)
     })
@@ -193,8 +181,8 @@ pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jit
             "islands": [{ "id": { "node": 0, "local": 0 }, "executor": "exec",
                           "components": [{ "component": "responder", "memory_domain": { "node": 0, "local": 0 } }] }],
             "links": [
-                { "link": link_module(), "from": { "component": pinger, "port": "rx" }, "to": { "component": "rec", "port": "in" } },
-                { "link": link_module(), "from": { "component": responder_radio, "port": "rx" }, "to": { "component": "responder", "port": "rx" } }
+                { "link": link_module(), "from": { "component": pinger, "port": "rx0" }, "to": { "component": "rec", "port": "in" } },
+                { "link": link_module(), "from": { "component": responder_radio, "port": "rx0" }, "to": { "component": "responder", "port": "rx" } }
             ]
         },
         "environment": env_section(environment)
@@ -225,6 +213,7 @@ pub fn uhd_profile(dir: &Path, session: bool, environment: JsonValue) -> JsonVal
                 "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
                 "selector": {
                     "args": "addr=192.0.2.1", "id": "usrp",
+                    "keys": "channel",
                     "rx": ["0:A:ubx:0", "0:B:ubx:0"],
                     "tx": ["0:A:ubx:0", "0:B:ubx:0"]
                 }
@@ -235,7 +224,7 @@ pub fn uhd_profile(dir: &Path, session: bool, environment: JsonValue) -> JsonVal
         "placements": {
             "links": [{
                 "link": link_module(),
-                "from": { "component": "radio", "port": "rx" },
+                "from": { "component": "radio", "port": "rx0" },
                 "to": { "component": "rec", "port": "in" }
             }]
         },

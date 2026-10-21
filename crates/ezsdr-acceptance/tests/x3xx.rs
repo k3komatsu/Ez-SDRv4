@@ -1,5 +1,5 @@
 //! The documentation audit's D3: from one selector, MockRadio and the UHD Module describe
-//! one device alike, because both build their description with `ezsdr_radio::x3xx`
+//! one device alike, because both build their description with `ezsdr_radio::channels`
 //! (design 33 D5). Board-derived values only: the two Providers differ by design in their
 //! command lead and repeat constraints at this stage, and those are not the board's.
 
@@ -13,15 +13,6 @@ use ezsdr_mock_radio::MockRadio;
 use std::sync::Arc;
 
 use ezsdr_radio_uhd::{FakeConfig, FakeDevice, UhdRadio};
-
-/// The shared selector of one layout (design 33 D5).
-fn selector(rx: &[String], tx: &[String]) -> BTreeMap<Ident, Value> {
-    let list = |elements: &[String]| Value::List(elements.iter().map(|e| Scalar::from(e.as_str())).collect());
-    BTreeMap::from([
-        (Ident::parse("rx").unwrap(), list(rx)),
-        (Ident::parse("tx").unwrap(), list(tx)),
-    ])
-}
 
 fn mock_binding(selector: BTreeMap<Ident, Value>) -> Binding {
     Binding {
@@ -43,23 +34,25 @@ fn uhd_binding(mut selector: BTreeMap<Ident, Value>) -> Binding {
 }
 
 /// The capability keys that come from the layout's board: the ones D3 asks about.
-const BOARD_KEYS: [&str; 17] = [
-    "radio.rx.channels",
-    "radio.tx.channels",
-    "radio.rx.sample_rate_hz",
-    "radio.tx.sample_rate_hz",
-    "radio.rx.frequency_hz",
-    "radio.tx.frequency_hz",
-    "radio.rx.frequency_step_hz",
-    "radio.tx.frequency_step_hz",
-    "radio.rx.gain_db",
-    "radio.tx.gain_db",
-    "radio.rx.gain_step_db",
-    "radio.tx.gain_step_db",
-    "radio.rx.antenna",
-    "radio.tx.antenna",
-    "radio.rx.coherent",
-    "radio.phase_behavior_on_retune",
+const BOARD_KEYS: [&str; 19] = [
+    "radio.rx.c0.frequency_hz",
+    "radio.tx.c0.frequency_hz",
+    "radio.rx.s0.sample_rate_hz",
+    "radio.tx.s0.sample_rate_hz",
+    "radio.rx.c0.frequency_step_hz",
+    "radio.tx.c0.frequency_step_hz",
+    "radio.rx.c0.gain_db",
+    "radio.tx.c0.gain_db",
+    "radio.rx.c0.gain_step_db",
+    "radio.tx.c0.gain_step_db",
+    "radio.rx.c0.antenna",
+    "radio.tx.c0.antenna",
+    "radio.rx.c0.phase_behavior_on_retune",
+    "radio.tx.c0.phase_behavior_on_retune",
+    "radio.rx.c0.path_delay_samples",
+    "radio.tx.c0.path_delay_samples",
+    "radio.full_duplex",
+    "radio.hardware_time",
     "radio.rx.block_len",
 ];
 
@@ -79,7 +72,7 @@ fn d3_the_two_providers_describe_one_layout_alike() {
     // The front end name UHD reports for each board (UR-5's comparison).
     for (board, front) in [("ubx", "UBX"), ("obx", "OBX"), ("cbx", "CBX-120")] {
         let elements = vec![format!("0:A:{board}:0"), format!("0:B:{board}:0")];
-        let selector = selector(&elements, &elements);
+        let selector = ezsdr_acceptance::layout::x3xx_selector(&elements, &elements);
         let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
         let device = Arc::new(FakeDevice::new(FakeConfig { front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
         let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
@@ -95,17 +88,17 @@ fn d3_the_two_providers_describe_one_layout_alike() {
         }
         // The board's default frequency reaches both directions, the same on both
         // Providers (RM-5, design 33 D12).
-        for key in ["radio.rx.frequency_hz", "radio.tx.frequency_hz"] {
+        for key in ["radio.rx.c0.frequency_hz", "radio.tx.c0.frequency_hz"] {
             assert_eq!(default_of(&mock, key), default_of(&uhd, key), "{board}: the default `{key}` differs");
         }
         if board == "cbx" {
-            assert_eq!(default_of(&mock, "radio.rx.frequency_hz"), Value::num(2_450_000_000.0).unwrap());
+            assert_eq!(default_of(&mock, "radio.rx.c0.frequency_hz"), Value::num(2_450_000_000.0).unwrap());
             assert_eq!(
-                mock_capabilities[&Key::parse("radio.phase_behavior_on_retune").unwrap()],
+                mock_capabilities[&Key::parse("radio.rx.c0.phase_behavior_on_retune").unwrap()],
                 CapabilityValue::One { value: Scalar::from("random".to_owned()) },
             );
         } else {
-            assert_eq!(default_of(&mock, "radio.rx.frequency_hz"), Value::num(1_000_000_000.0).unwrap());
+            assert_eq!(default_of(&mock, "radio.rx.c0.frequency_hz"), Value::num(1_000_000_000.0).unwrap());
         }
     }
 }
@@ -114,17 +107,19 @@ fn d3_the_two_providers_describe_one_layout_alike() {
 fn d3_the_layout_decides_the_channels_on_both_providers() {
     // Asymmetric layouts: the length of each direction's list is its channel count, and
     // the rate grid does not depend on the layout at all.
-    let selector = selector(&["0:A:ubx:0".to_owned()], &["0:A:ubx:0".to_owned(), "0:B:ubx:0".to_owned()]);
+    let selector = ezsdr_acceptance::layout::x3xx_selector(&["0:A:ubx:0".to_owned()], &["0:A:ubx:0".to_owned(), "0:B:ubx:0".to_owned()]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
     let device = Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>;
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
     let range = |min, max| CapabilityValue::Range { min, max };
     for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
         let capabilities = &provider.instance().tree.capabilities;
-        assert_eq!(capabilities[&Key::parse("radio.rx.channels").unwrap()], range(Scalar::from(0), Scalar::from(1)));
-        assert_eq!(capabilities[&Key::parse("radio.tx.channels").unwrap()], range(Scalar::from(0), Scalar::from(2)));
+        assert_eq!(capabilities[&Key::parse("radio.rx.c0.stream").unwrap()], range(Scalar::from(-1), Scalar::from(0)));
+        for key in ["radio.tx.c0.stream", "radio.tx.c1.stream"] {
+            assert_eq!(capabilities[&Key::parse(key).unwrap()], range(Scalar::from(-1), Scalar::from(1)));
+        }
     }
-    let rates = |provider: &dyn Provider| provider.instance().tree.capabilities[&Key::parse("radio.rx.sample_rate_hz").unwrap()].clone();
+    let rates = |provider: &dyn Provider| provider.instance().tree.capabilities[&Key::parse("radio.rx.s0.sample_rate_hz").unwrap()].clone();
     assert_eq!(rates(&mock), rates(&uhd));
     let CapabilityValue::AnyOf { values } = rates(&mock) else { panic!("a Values grid is an AnyOf capability") };
     assert_eq!(values.len(), 639);
@@ -132,51 +127,41 @@ fn d3_the_layout_decides_the_channels_on_both_providers() {
 
 #[test]
 fn d3_a_layout_without_receive_channels_requests_none_on_both_providers() {
-    // RM-5's default receive channel count follows the layout (design 33 D5): with
-    // `rx: []` a Spec that does not request `radio.rx.channels` gets 0 from either
-    // Provider, so neither opens a receive stream on a device with no receive front end.
-    let selector = selector(&[], &["0:A:ubx:0".to_owned()]);
+    // An empty receive layout has no receive channel or stream keys.
+    let selector = ezsdr_acceptance::layout::x3xx_selector(&[] as &[&str], &["0:A:ubx:0"]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
     let device = Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>;
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
-    let range = |min, max| CapabilityValue::Range { min, max };
     for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
         let capabilities = &provider.instance().tree.capabilities;
-        assert_eq!(capabilities[&Key::parse("radio.rx.channels").unwrap()], range(Scalar::from(0), Scalar::from(0)));
-        assert_eq!(capabilities[&Key::parse("radio.tx.channels").unwrap()], range(Scalar::from(0), Scalar::from(1)));
-        assert_eq!(default_of(provider, "radio.rx.channels"), Value::from(0));
-        assert_eq!(default_of(provider, "radio.tx.channels"), Value::from(0));
+        assert!(!capabilities.keys().any(|key| key.as_str().starts_with("radio.rx.c") || key.as_str().starts_with("radio.rx.s")));
+        assert!(capabilities.contains_key(&Key::parse("radio.tx.c0.stream").unwrap()));
+        assert_eq!(default_of(provider, "radio.tx.c0.stream"), Value::from(-1));
     }
 }
 
 #[test]
 fn d3_a_cbx_layout_is_not_coherent_on_either_provider() {
-    // RM-9: `radio.rx.coherent` is the board's (design 33 D13). A CBX's channels align in
-    // samples but their phases do not, so both Providers refuse a Spec that requires
-    // `Eq(true)` on it; a UBX's accept the same request.
+    // A layout describes the board's per-channel phase behavior instead of a direction-wide
+    // `radio.rx.coherent` capability (design 33 D13).
     let elements = |board: &str| vec![format!("0:A:{board}:0"), format!("0:B:{board}:0")];
     for (board, front, coherent) in [("cbx", "CBX-120", false), ("ubx", "UBX", true)] {
-        let selector = selector(&elements(board), &elements(board));
+        let channels = elements(board);
+        let selector = ezsdr_acceptance::layout::x3xx_selector(&channels, &channels);
         let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
         let device = Arc::new(FakeDevice::new(FakeConfig { front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
         let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
         for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
-            assert_eq!(default_of(provider, "radio.rx.coherent"), Value::from(coherent), "{board}");
+            let phase = if coherent { "random_unless_timed_tune" } else { "random" };
+            assert_eq!(default_of(provider, "radio.rx.c0.phase_behavior_on_retune"), Value::from(phase), "{board}");
             let request = Requested {
                 resource: provider.instance().id.clone(),
-                constraints: BTreeMap::from([(
-                    Key::parse("radio.rx.coherent").unwrap(),
-                    Constraint::Eq { value: Scalar::Bool(true) },
-                )]),
+                constraints: BTreeMap::from([(Key::parse("radio.rx.coherent").unwrap(), Constraint::Eq { value: Scalar::from(true) })]),
             };
             let report = provider.coerce(&request).unwrap();
-            if coherent {
-                assert_eq!(report.applied[&Key::parse("radio.rx.coherent").unwrap()], Value::from(true), "{board}");
-                assert!(report.rejected.is_empty(), "{board}: {:?}", report.rejected);
-            } else {
-                let refusal = report.rejected.iter().find(|r| r.key.as_str() == "radio.rx.coherent").unwrap_or_else(|| panic!("{board}: {report:?}"));
-                assert!(refusal.reason.starts_with("RM-8: "), "{board}: {}", refusal.reason);
-            }
+            assert!(report.applied.is_empty(), "{board}");
+            assert_eq!(report.rejected.len(), 1, "{board}");
+            assert!(report.rejected[0].reason.contains("RM-4: not a radio key"), "{board}: {:?}", report.rejected);
         }
     }
 }
@@ -185,13 +170,13 @@ fn d3_a_cbx_layout_is_not_coherent_on_either_provider() {
 fn d3_the_layout_is_a_node_id_of_neither_provider() {
     // The layout names front ends, not nodes: the tree keeps one device and its two
     // stream children on both Providers (RM-2).
-    let selector = selector(&["0:A:ubx:0".to_owned()], &["0:A:ubx:0".to_owned()]);
+    let selector = ezsdr_acceptance::layout::x3xx_selector(&["0:A:ubx:0".to_owned()], &["0:A:ubx:0".to_owned()]);
     let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
     let uhd = UhdRadio::from_binding(&uhd_binding(selector), Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>).unwrap();
     for (provider, id) in [(&mock as &dyn Provider, "mock"), (&uhd as &dyn Provider, "usrp")] {
         let tree = &provider.instance().tree;
         assert_eq!(tree.id, ResourceId::parse(id).unwrap());
         let children: Vec<_> = tree.children.iter().map(|child| child.id.path()).collect();
-        assert_eq!(children, [format!("{id}/rx"), format!("{id}/tx")]);
+        assert_eq!(children, [format!("{id}/rx/s0"), format!("{id}/tx/s0")]);
     }
 }

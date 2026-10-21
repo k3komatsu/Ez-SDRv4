@@ -46,7 +46,7 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
     let rx_clock = run
         .sample_clocks()
         .into_iter()
-        .find(|record| record.stream == ResourceId::parse("mock/rx").unwrap())
+        .find(|record| record.stream == ResourceId::parse("mock/rx/s0").unwrap())
         .expect("receive SampleClock registered");
     let entry = run
         .submit(
@@ -120,15 +120,15 @@ fn v61_04_pps_source_is_armed_first_and_streams_align() {
     let radio_resource = json!({
         "kind": "radio.device",
         "requires": {
-            "radio.rx.channels": { "kind": "eq", "value": 1 },
-            "radio.rx.sample_rate_hz": { "kind": "eq", "value": 1.0e6 },
-            "radio.rx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
+            "radio.rx.c0.stream": { "kind": "eq", "value": 0 },
+            "radio.rx.s0.sample_rate_hz": { "kind": "eq", "value": 1.0e6 },
+            "radio.rx.c0.frequency_hz": { "kind": "eq", "value": 1.0e9 }
         }
     });
     let output = |id: &str, component: &str| json!({
         "id": id,
         "kind": "sink.capture",
-        "feed": { "port": { "component": component, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 },
+        "feed": ezsdr_acceptance::experiments::rx_feed(component, 0),
         "params": {}
     });
     let spec = json!({
@@ -147,7 +147,7 @@ fn v61_04_pps_source_is_armed_first_and_streams_align() {
     let ids: Vec<&str> = plan.fragments.iter().map(|fragment| fragment.id.as_str()).collect();
     assert!(ids.iter().position(|id| *id == "pps") < ids.iter().position(|id| *id == "follow"));
     assert!(plan.deps.contains(&(Ident::parse("pps").unwrap(), Ident::parse("follow").unwrap())));
-    for stream in ["pps/rx", "follow/rx"] {
+    for stream in ["pps/rx/s0", "follow/rx/s0"] {
         let record = manifest
             .clocks
             .sample_clocks

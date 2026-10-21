@@ -303,38 +303,38 @@
   "id": "M31",
   "name": "MR-34 rx retune keeps phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                                for (phase, value) in model.phase.iter_mut().zip(model.timed_phase.iter()) { phase.set(tick, *value); }",
-  "new": "                                for (_phase, _value) in model.phase.iter_mut().zip(model.timed_phase.iter()) { }",
+   "old": "model.phase.set(tick, phase);",
+   "new": "let _ = (tick, phase);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_34_a_timed_tune"
+   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
  },
  {
   "id": "M32",
   "name": "MR-34 tx retune keeps phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                                for (phase, value) in plan.phase.iter_mut().zip(timed) { phase.set(tick, value); }",
-  "new": "                                for (_phase, _value) in plan.phase.iter_mut().zip(timed) { }",
+   "old": "model.phase.set(tick, phase.unwrap_or(0.0));",
+   "new": "let _ = (tick, phase);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_34_a_timed_tune"
+   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
  },
  {
   "id": "M33",
   "name": "MR-34 no random phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                let draw = |count: i64, rng: &mut SimRng, live: bool| (0..count).map(|_| if live { channel::lo_phase(rng) } else { 0.0 }).collect::<Vec<f64>>();",
-  "new": "                let draw = |count: i64, rng: &mut SimRng, live: bool| (0..count).map(|_| if false && live { channel::lo_phase(rng) } else { 0.0 }).collect::<Vec<f64>>();",
+   "old": "                        let draw = if timed { behavior == \"random_unless_timed_tune\" } else { behavior != \"deterministic\" };",
+   "new": "                        let draw = false;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_34_a_timed_tune"
+   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
  },
  {
   "id": "M34",
   "name": "MR-32 transmit path delay ignored",
   "file": "crates/ezsdr-mock-radio/src/channel.rs",
-    "old": "            let delay = model.map_or(plan.path_delay, |model| model.path_delay_samples);\n            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(delay);",
-    "new": "            let delay = 0;\n            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(delay);",
+   "old": "            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(model.path_delay_samples);",
+   "new": "            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(0);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_32_the_transmit"
@@ -353,8 +353,8 @@
   "id": "M36",
   "name": "MR-36 rx clip removed",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                        let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));\n                        if cre != re",
-   "new": "                        let (cre, cim) = (re, im);\n                        if cre != re",
+     "old": "                    let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));\n                    if cre != re",
+     "new": "                    let (cre, cim) = (re, im);\n                    if cre != re",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_36"
@@ -453,18 +453,18 @@
   "id": "M46",
   "name": "MR-34 timed constant equals the untimed phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                    let rx_timed = draw(rx_max, &mut lo, fixes);\n                    let tx_timed = draw(tx_max, &mut lo, fixes);",
-   "new": "                    let _ = draw(rx_max, &mut lo, fixes);\n                    let _ = draw(tx_max, &mut lo, fixes);\n                    let rx_timed: Vec<f64> = rx_phase.iter().map(|p| p.at(RootInstant::tick(0))).collect();\n                    let tx_timed: Vec<f64> = tx_phase.iter().map(|p| p.at(RootInstant::tick(0))).collect();",
+    "old": "                let rx_timed = phases(Direction::Rx, rx_max as usize, true);\n                let tx_timed = phases(Direction::Tx, tx_max as usize, true);",
+    "new": "                let rx_timed = rx_phase.clone();\n                let tx_timed = tx_phase.clone();",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_34_a_timed_tune"
+   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
  },
  {
   "id": "M47",
   "name": "MR-33 rx gain ignored",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "let (fr, fi) = mode.medium.field(&mode.fragment, c, model.frequency_hz.at(stamp), stamp);\n                        let amplitude = 10f64.powf(model.gain_db.at(stamp) / 20.0);",
-   "new": "let (fr, fi) = mode.medium.field(&mode.fragment, c, model.frequency_hz.at(stamp), stamp);\n                        let amplitude = 10f64.powf(0.0 * model.gain_db.at(stamp) / 20.0);",
+    "old": "                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
+    "new": "                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {\n                    model.gain_db.set(tick, 0.0);\n                }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_33_gain"
@@ -473,8 +473,8 @@
   "id": "M48",
   "name": "MR-33 tx gain ignored",
   "file": "crates/ezsdr-mock-radio/src/channel.rs",
-   "old": "            let gain = model.map_or_else(|| plan.gain_db.at(stamp), |model| model.gain_db.at(stamp));\n            let amplitude = 10f64.powf(gain / 20.0);",
-   "new": "            let gain = model.map_or_else(|| 0.0, |model| model.gain_db.at(stamp));\n            let amplitude = 10f64.powf(gain / 20.0);",
+    "old": "            let gain = model.gain_db.at(stamp);",
+    "new": "            let gain = 0.0;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_33_gain"
@@ -493,8 +493,8 @@
   "id": "M50",
   "name": "MR-32 a channel the burst lacks radiates",
   "file": "crates/ezsdr-mock-radio/src/channel.rs",
-   "old": "            let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else { continue; };\n            let model = plan.channel_models.as_ref().and_then(|models| models.get(usize::from(channel)));\n            if plan.channel_models.is_some() && model.is_none() { continue; }",
-   "new": "            let position = segment.channel_numbers.iter().position(|number| *number == channel).unwrap_or(0);\n            let model = plan.channel_models.as_ref().and_then(|models| models.get(usize::from(channel)));\n            if plan.channel_models.is_some() && model.is_none() { continue; }",
+    "old": "            let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else { continue; };",
+    "new": "            let position = segment.channel_numbers.iter().position(|number| *number == channel).unwrap_or(0);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_32_a_loopback"
@@ -542,11 +542,11 @@
  {
   "name": "MR-34/35 rx LO rotation sign flipped",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                        let re = amplitude * (fr * cos + fi * sin);\n                        let im = amplitude * (fi * cos - fr * sin);",
-   "new": "                        let re = amplitude * (fr * cos - fi * sin);\n                        let im = amplitude * (fi * cos + fr * sin);",
+    "old": "let re = amplitude * (fr * cos + fi * sin);\n                    let im = amplitude * (fi * cos - fr * sin);",
+    "new": "let re = amplitude * (fr * cos - fi * sin);\n                    let im = amplitude * (fi * cos + fr * sin);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+    "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant",
   "id": "M55"
  },
  {
@@ -562,11 +562,11 @@
  {
   "name": "MR-36 rx_clipped counts re only",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "let (sin, cos) = phase.map_or(0.0, |p| p.at(stamp)).sin_cos();\n                        let re = amplitude * (fr * cos + fi * sin);\n                        let im = amplitude * (fi * cos - fr * sin);\n                        let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));\n                        if cre != re || cim != im { clipped += 1; }",
-   "new": "let (sin, cos) = phase.map_or(0.0, |p| p.at(stamp)).sin_cos();\n                        let re = amplitude * (fr * cos + fi * sin);\n                        let im = amplitude * (fi * cos - fr * sin);\n                        let (cre, cim) = (re.clamp(-1.0, 1.0), im.clamp(-1.0, 1.0));\n                        if cre != re { clipped += 1; }",
+    "old": "if cre != re || cim != im { clipped += 1; }",
+    "new": "if cre != re { clipped += 1; }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+    "filter": "mr_36_clipping_at_full_scale_is_counted",
   "id": "M57"
  },
  {
@@ -582,11 +582,11 @@
  {
   "name": "MR-34 LO stream keyed by fragment id",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "let random = self.profile.random_phase_on_untimed_tune();\n                    let mut lo = SimRng::new(seed, &format!(\"{}/lo\", self.selector_id()));",
-   "new": "let random = self.profile.random_phase_on_untimed_tune();\n                    let mut lo = SimRng::new(seed, &format!(\"{}/lo\", f.id));",
+    "old": "                let mut lo = SimRng::new(seed, &format!(\"{}/lo\", self.selector_id()));",
+    "new": "                let mut lo = SimRng::new(seed, &format!(\"{}/lo\", f.id));",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+    "filter": "mr_34_a_random_phase_is_redrawn_by_every_tune",
   "id": "M59"
  },
  {
@@ -622,21 +622,21 @@
  {
   "name": "MR-34 rx timed tune takes the tx constants",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "for (phase, value) in model.phase.iter_mut().zip(model.timed_phase.iter()) { phase.set(tick, *value); }",
-  "new": "let tx_timed = self.tx[0].plan.clone().expect(\"channel mode\").plan().timed_phase.clone(); for (phase, value) in model.phase.iter_mut().zip(tx_timed.iter()) { phase.set(tick, *value); }",
+   "old": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => model.timed_phase,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+   "new": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => 0.0,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant",
   "id": "M63"
  },
  {
   "name": "MR-33 tx frequency timeline not updated",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                            plan.frequency_hz.set(tick, value);\n",
-  "new": "                            let _ = &plan.frequency_hz;\n",
+   "old": "                if let Some(model) = plan.channel_models.get_mut(number as usize) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
+   "new": "                if let Some(model) = plan.channel_models.get_mut(number as usize) {\n                    let _ = (&model.frequency_hz, tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+   "filter": "mr_33_a_receiver_hears_only_its_own_frequency",
   "id": "M64"
  },
  {
@@ -652,11 +652,11 @@
  {
   "name": "MR-35 rx frequency timeline ignored by the gate",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "mode.medium.field(&mode.fragment, c, model.frequency_hz.at(stamp), stamp)",
-  "new": "mode.medium.field(&mode.fragment, c, model.frequency_hz.at(RootInstant::tick(i64::MIN)), stamp)",
+   "old": "mode.medium.field(&mode.fragment, logical as u16, model.frequency_hz.at(stamp), antenna)",
+   "new": "mode.medium.field(&mode.fragment, logical as u16, model.frequency_hz.at(RootInstant::tick(i64::MIN)), antenna)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+   "filter": "mr_33_a_receiver_hears_only_its_own_frequency",
   "id": "M66"
  },
  {
@@ -743,8 +743,8 @@
   "id": "M75",
   "name": "MR-31 a join refusal lacks the MR-31 prefix",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": ".map_err(|error| self.reject(format!(\"MR-31: {error}\")))?;\n                for stream in &mut self.tx { stream.plan = Some(tx.clone()); }\n                if let Some(rx) = rx { self.rx[0].model = Some(rx); }\n                Some(ChannelMode",
-   "new": ".map_err(|error| self.reject(format!(\"{error}\")))?;\n                for stream in &mut self.tx { stream.plan = Some(tx.clone()); }\n                if let Some(rx) = rx { self.rx[0].model = Some(rx); }\n                Some(ChannelMode",
+  "old": "medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!(\"MR-31: {error}\")))?;",
+  "new": "medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!(\"{error}\")))?;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_31_channel_mode"

@@ -48,7 +48,7 @@ Rules are `EA-n`; decisions are `A1`…`A8` (§6).
   { "version": 1,
     "bindings": {
       "radio": { "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
-                 "selector": { "id": "radio", "keys": "channel",
+                 "selector": { "id": "radio",
                                "master_clock_hz": [200000000], "image": ["hg"], "links": [1], "link_gbps": [10],
                                "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] },
                  "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } } },

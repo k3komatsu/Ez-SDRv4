@@ -50,17 +50,11 @@ pub(crate) struct Segment {
     pub end: Option<i64>,
 }
 
-/// The transmit side's plan: every admitted burst keyed by its origin, arrival, stream, clock and start,
-/// and the parameters that shape what it radiates (MR-32, MR-33, MR-34).
+/// The transmit side's plan: every admitted burst and its logical channels' radio model
+/// (MR-32, MR-33, MR-34).
 pub(crate) struct TxPlan {
     pub segments: BTreeMap<(i64, Option<u64>, usize, u32, i64), Segment>,
-    pub gain_db: Timeline,
-    pub frequency_hz: Timeline,
-    pub phase: Vec<Timeline>,
-    /// The phase each channel's LO takes after every timed tune (MR-34).
-    pub timed_phase: Vec<f64>,
-    pub path_delay: i64,
-    pub channel_models: Option<Vec<ChannelModel>>,
+    pub channel_models: Vec<ChannelModel>,
 }
 
 /// One layout channel's parameters and phase history (RM-29, MR-33, MR-34).
@@ -92,10 +86,8 @@ impl Transmitter for TxShared {
         let plan = self.plan();
         for segment in plan.segments.values().rev() {
             let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else { continue; };
-            let model = plan.channel_models.as_ref().and_then(|models| models.get(usize::from(channel)));
-            if plan.channel_models.is_some() && model.is_none() { continue; }
-            let delay = model.map_or(plan.path_delay, |model| model.path_delay_samples);
-            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(delay);
+            let Some(model) = plan.channel_models.get(usize::from(channel)) else { continue; };
+            let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(model.path_delay_samples);
             if j < segment.start {
                 continue;
             }
@@ -107,11 +99,11 @@ impl Transmitter for TxShared {
             let index = (n * usize::from(segment.channels) + position) * 2;
             let (re, im) = (f64::from(segment.samples[index]), f64::from(segment.samples[index + 1]));
             let stamp = RootInstant::of_sample(segment.origin, segment.ratio, j);
-            let gain = model.map_or_else(|| plan.gain_db.at(stamp), |model| model.gain_db.at(stamp));
+            let gain = model.gain_db.at(stamp);
             let amplitude = 10f64.powf(gain / 20.0);
-            let phase = model.map_or_else(|| plan.phase.get(position).map_or(0.0, |phase| phase.at(stamp)), |model| model.phase.at(stamp));
+            let phase = model.phase.at(stamp);
             let (sin, cos) = phase.sin_cos();
-            let frequency = model.map_or_else(|| plan.frequency_hz.at(stamp), |model| model.frequency_hz.at(stamp));
+            let frequency = model.frequency_hz.at(stamp);
             return Some(Radiated {
                 re: amplitude * (re * cos - im * sin),
                 im: amplitude * (re * sin + im * cos),
@@ -120,16 +112,6 @@ impl Transmitter for TxShared {
         }
         None
     }
-}
-
-/// The receive side's parameters (MR-33, MR-34, MR-35). Its antenna instant is the
-/// sample's own: both profiles declare `radio.rx.path_delay_samples` 0 (MR-3).
-pub(crate) struct RxModel {
-    pub gain_db: Timeline,
-    pub frequency_hz: Timeline,
-    pub phase: Vec<Timeline>,
-    /// The phase each channel's LO takes after every timed tune (MR-34).
-    pub timed_phase: Vec<f64>,
 }
 
 /// One layout receive channel's parameters and phase history (RM-29, MR-33…MR-35).

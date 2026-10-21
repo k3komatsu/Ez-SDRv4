@@ -24,6 +24,9 @@ use ezsdr_sim::channel::Medium;
 use ezsdr_sim::SimRng;
 use serde_json::json;
 
+#[path = "../../ezsdr-acceptance/src/layout.rs"]
+mod layout_support;
+
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn rid(name: &str) -> ResourceId { ResourceId::parse(name).unwrap() }
@@ -120,19 +123,15 @@ struct Options<'a> {
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { profile: "ideal", fragment: "radio", id: "mock", constraints: &[("radio.tx.channels", Constraint::Eq { value: Scalar::Int(1) })], selector: &[], medium: true }
+        Options { profile: "ideal", fragment: "radio", id: "mock", constraints: &[("radio.tx.c0.stream", Constraint::Eq { value: Scalar::Int(0) })], selector: &[], medium: true }
     }
 }
 
 fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
-    let mut selector = BTreeMap::from([(Ident::parse("id").unwrap(), Value::from(options.id.to_owned()))]);
-    // The `x3xx` binding carries the layout the Mock reads its channels from (design 33 D5).
-    let version = if options.profile == "x3xx" {
-        selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]));
-        selector.insert(Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]));
-        Version::new(0, 1, 0)
+    let (mut selector, version) = if options.profile == "x3xx" {
+        (layout_support::mock_x3xx_selector(options.id, &["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]), Version::new(0, 1, 0))
     } else {
-        Version::new(2, 0, 0)
+        (layout_support::ideal_selector(options.id, 2, 2), Version::new(2, 0, 0))
     };
     for (name, value) in options.selector {
         selector.insert(Ident::parse(name).unwrap(), value.clone());
@@ -149,7 +148,7 @@ fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
     ezsdr_sim::register(&mut registry, &mut checks, &mut kinds).unwrap();
     let event_kinds = kinds.kinds();
     let id = options.id.to_owned();
-    let pairs: Vec<_> = [rid(&id), rid(&format!("{id}/rx")), rid(&format!("{id}/tx"))].into_iter().map(|node| EventSource::Node { node })
+    let pairs: Vec<_> = [rid(&id), rid(&format!("{id}/rx/s0")), rid(&format!("{id}/rx/s1")), rid(&format!("{id}/tx/s0")), rid(&format!("{id}/tx/s1"))].into_iter().map(|node| EventSource::Node { node })
         .flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind)))
         .collect();
     let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
@@ -167,7 +166,7 @@ fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
         ctx.run = RunId::from_string("mock-channel".to_owned());
         ctx.environment = world.environment.clone();
         ctx.inputs = world.inputs.clone();
-        ctx.links = vec![AttachedPort::new(Ident::parse(options.fragment).unwrap(), Ident::parse("rx").unwrap(), Endpoint::StreamOut(link.clone()))];
+        ctx.links = vec![AttachedPort::new(Ident::parse(options.fragment).unwrap(), Ident::parse("rx0").unwrap(), Endpoint::StreamOut(link.clone()))];
         ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
         ctx
     };
@@ -190,7 +189,7 @@ impl Radio {
     fn push(&self, action: Action) { self.actions.0.lock().unwrap().push_back(action); }
 
     fn tx_domain(&self, world: &World) -> ClockDomainId {
-        world.clocks.sample_clock_records().iter().rev().find(|record| record.stream == rid(&format!("{}/tx", self.id))).unwrap().domain
+        world.clocks.sample_clock_records().iter().rev().find(|record| record.stream == rid(&format!("{}/tx/s0", self.id))).unwrap().domain
     }
 
     /// Every received sample of channel `channel`, by sample index, in arrival order.
@@ -218,7 +217,7 @@ impl Radio {
 
 fn burst(radio: &Radio, world: &World, waveform: ArtifactRef, at: i64, repeat: bool) -> Action {
     Action::TxBurst {
-        target: tgt(&format!("{}/tx", radio.id)),
+        target: tgt(&format!("{}/tx/s0", radio.id)),
         waveform,
         repeat,
         at: AbsoluteDeadline::new(TimePoint::new(radio.tx_domain(world), at)),
@@ -255,8 +254,8 @@ fn ramp(len: usize) -> Vec<(f32, f32)> {
 /// sample rates, each with one transmit channel.
 fn two(environment: serde_json::Value, a_rate: f64, b_rate: f64) -> (World, Radio, Radio) {
     let world = World::new(environment);
-    let a_constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.tx.sample_rate_hz", eq(Scalar::try_from(a_rate).unwrap())), ("radio.rx.sample_rate_hz", eq(Scalar::try_from(a_rate).unwrap()))];
-    let b_constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.tx.sample_rate_hz", eq(Scalar::try_from(b_rate).unwrap())), ("radio.rx.sample_rate_hz", eq(Scalar::try_from(b_rate).unwrap()))];
+    let a_constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(a_rate).unwrap())), ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(a_rate).unwrap()))];
+    let b_constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(b_rate).unwrap())), ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(b_rate).unwrap()))];
     let mut a = prepare(&world, Options { fragment: "a", id: "dev_a", constraints: &a_constraints, ..Options::default() }).unwrap();
     let mut b = prepare(&world, Options { fragment: "b", id: "dev_b", constraints: &b_constraints, ..Options::default() }).unwrap();
     for radio in [&mut a, &mut b] {
@@ -448,8 +447,8 @@ fn mr_32_b_the_transmitted_timelines_are_read_at_the_samples_own_instant() {
     // 2 000 000 + k, less the profile's 45-sample advance: heard from k = 2 045.
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
     let switch = 2_002_500_000;
-    radio.push(update(&radio, "radio.tx.frequency_hz", Value::num(1.0e9).unwrap(), switch));
-    radio.push(update(&radio, "radio.rx.frequency_hz", Value::num(1.0e9).unwrap(), switch));
+    radio.push(update(&radio, "radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), switch));
+    radio.push(update(&radio, "radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), switch));
     // handle the burst in the round at t0, where its target is inside the 2 ms lead; a
     // later round would find it late and MR-17 would move it
     step(&world, &mut [&mut radio], t0);
@@ -504,8 +503,8 @@ fn mr_32_c_the_transmitted_frequency_is_read_at_the_samples_own_instant() {
     let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
     let switch = 2_002_500_000;
-    radio.push(update(&radio, "radio.tx.frequency_hz", Value::num(2.0e9).unwrap(), switch));
-    radio.push(update(&radio, "radio.rx.frequency_hz", Value::num(2.0e9).unwrap(), switch));
+    radio.push(update(&radio, "radio.tx.c0.frequency_hz", Value::num(2.0e9).unwrap(), switch));
+    radio.push(update(&radio, "radio.rx.c0.frequency_hz", Value::num(2.0e9).unwrap(), switch));
     step(&world, &mut [&mut radio], t0);
     run_to(&world, &mut [&mut radio], 2_004_000_000);
 
@@ -521,9 +520,7 @@ fn mr_32_c_the_transmitted_frequency_is_read_at_the_samples_own_instant() {
 
 #[test]
 fn mr_34_a_a_timed_tune_reaches_every_transmit_channel() {
-    // MR-34: after a timed tune every channel of that direction takes the same timed-tune
-    // constant, not only the first. `mr_34_a_timed_tune_…` runs one transmit channel, so
-    // a loop that stopped after it would pass there.
+    // MR-34: a per-channel timed tune changes that channel's phase on both transmit channels.
     let t0 = 2_000_000_000;
     let environment = json!({
         "sim.seed": 1,
@@ -533,7 +530,10 @@ fn mr_34_a_a_timed_tune_reaches_every_transmit_channel() {
         ] }
     });
     let world = World::new(environment);
-    let constraints = [("radio.tx.channels", eq(Scalar::from(2))), ("radio.rx.channels", eq(Scalar::from(2)))];
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+    ];
     let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
@@ -542,7 +542,8 @@ fn mr_34_a_a_timed_tune_reaches_every_transmit_channel() {
     // channel would be a length of 1 and refused by MR-16's repeat constraints.
     let waveform = world.waveform(&[(0.5, 0.0), (0.25, 0.0), (0.5, 0.0), (0.25, 0.0)]);
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
-    radio.push(update(&radio, "radio.tx.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 4_000_000));
+    radio.push(update(&radio, "radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 4_000_000));
+    radio.push(update(&radio, "radio.tx.c1.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 4_000_000));
     // handle the burst in the round at t0, where its target is inside the 2 ms lead
     step(&world, &mut [&mut radio], t0);
     run_to(&world, &mut [&mut radio], t0 + 10_000_001);
@@ -620,7 +621,7 @@ fn mr_25_a_stopped_burst_transmits_every_sample_before_the_stop() {
         let held = world.waveform(&[(0.75, 0.75)]);
         radio.push(burst(&radio, &world, held, 4_000, true));
         step(&world, &mut [&mut radio], 2_000_001);
-        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
         step(&world, &mut [&mut radio], 2_500_500);
         step(&world, &mut [&mut radio], 6_000_001);
         let records: Vec<BurstRecord> = serde_json::from_value(radio.section("bursts")).unwrap();
@@ -647,9 +648,9 @@ fn mr_33_gain_scales_the_samples_from_its_instant() {
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
     let waveform = world.waveform(&[(0.5, 0.25)]);
     radio.push(burst(&radio, &world, waveform, 0, true));
-    radio.push(update(&radio, "radio.tx.gain_db", Value::num(-6.0).unwrap(), 1_000_500));
-    radio.push(update(&radio, "radio.rx.gain_db", Value::num(6.0).unwrap(), 3_000_000));
-    radio.push(update(&radio, "radio.tx.gain_db", Value::num(-12.0).unwrap(), 4_000_000));
+    radio.push(update(&radio, "radio.tx.c0.gain_db", Value::num(-6.0).unwrap(), 1_000_500));
+    radio.push(update(&radio, "radio.rx.c0.gain_db", Value::num(6.0).unwrap(), 3_000_000));
+    radio.push(update(&radio, "radio.tx.c0.gain_db", Value::num(-12.0).unwrap(), 4_000_000));
     step(&world, &mut [&mut radio], 0);
     step(&world, &mut [&mut radio], 6_000_001);
     let down = 10f64.powf(-6.0 / 20.0);
@@ -669,8 +670,8 @@ fn mr_33_a_receiver_hears_only_its_own_frequency() {
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
     let waveform = world.waveform(&[(0.5, 0.25)]);
     radio.push(burst(&radio, &world, waveform, 0, true));
-    radio.push(update(&radio, "radio.tx.frequency_hz", Value::num(2.0e9).unwrap(), 1_000_000));
-    radio.push(update(&radio, "radio.rx.frequency_hz", Value::num(2.0e9).unwrap(), 3_000_000));
+    radio.push(update(&radio, "radio.tx.c0.frequency_hz", Value::num(2.0e9).unwrap(), 1_000_000));
+    radio.push(update(&radio, "radio.rx.c0.frequency_hz", Value::num(2.0e9).unwrap(), 3_000_000));
     step(&world, &mut [&mut radio], 0);
     step(&world, &mut [&mut radio], 6_000_001);
     for (k, re, im) in radio.received(0) {
@@ -701,16 +702,18 @@ fn mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant() {
         ] }
     });
     let world = World::new(environment);
-    let constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.rx.channels", eq(Scalar::from(2)))];
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.rx.c1.stream", eq(Scalar::from(0)))];
     let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     step(&world, &mut [&mut radio], t0);
     let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
-    radio.push(update(&radio, "radio.rx.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 6_000_000));
-    radio.push(update(&radio, "radio.tx.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 8_000_000));
-    radio.push(update(&radio, "radio.rx.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 9_500_000));
+    radio.push(update(&radio, "radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 6_000_000));
+    radio.push(update(&radio, "radio.rx.c1.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 6_000_000));
+    radio.push(update(&radio, "radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 8_000_000));
+    radio.push(update(&radio, "radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 9_500_000));
+    radio.push(update(&radio, "radio.rx.c1.frequency_hz", Value::num(1.0e9).unwrap(), t0 + 9_500_000));
     step(&world, &mut [&mut radio], t0);
     step(&world, &mut [&mut radio], t0 + 10_000_001);
     let Phases { rx, tx, rx_timed, tx_timed } = phases(1, "mock");
@@ -753,8 +756,8 @@ fn cbx_phases(seed: u64, device: &str) -> CbxPhases {
     // The receive phases of channels 0 … rx_max − 1, then the transmit phases (MR-34); a
     // `random` board's timed-tune constants are never drawn (design 33 D13).
     let initial = [phase(&mut lo), phase(&mut lo), phase(&mut lo)];
-    // Every applied frequency update redraws its own direction's channels, in application
-    // order: the receive retune, then the transmit one, twice.
+    // Each per-channel frequency update redraws only that channel, in application order:
+    // RX c0, RX c1, TX c0, twice.
     let mut retune = SimRng::new(seed, &format!("{device}/lo/retune"));
     let first = [phase(&mut retune), phase(&mut retune), phase(&mut retune)];
     let second = [phase(&mut retune), phase(&mut retune), phase(&mut retune)];
@@ -779,7 +782,7 @@ fn mr_34_a_random_phase_is_redrawn_by_every_tune() {
     let world = World::new(environment);
     let cbx = Value::List(vec![Scalar::from("0:A:cbx:0"), Scalar::from("0:B:cbx:0")]);
     let cbx_one = Value::List(vec![Scalar::from("0:A:cbx:0")]);
-    let constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.rx.channels", eq(Scalar::from(2)))];
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.rx.c1.stream", eq(Scalar::from(0)))];
     let selector = [("rx", cbx), ("tx", cbx_one)];
     let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, selector: &selector, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
@@ -788,10 +791,12 @@ fn mr_34_a_random_phase_is_redrawn_by_every_tune() {
     let waveform = world.waveform(&[(0.5, 0.0), (0.5, 0.0)]);
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
     for (key, hz, at) in [
-        ("radio.rx.frequency_hz", 2.4e9, t0 + 4_000_000),
-        ("radio.tx.frequency_hz", 2.4e9, t0 + 4_500_000),
-        ("radio.rx.frequency_hz", 2.3e9, t0 + 6_000_000),
-        ("radio.tx.frequency_hz", 2.3e9, t0 + 6_500_000),
+        ("radio.rx.c0.frequency_hz", 2.4e9, t0 + 4_000_000),
+        ("radio.rx.c1.frequency_hz", 2.4e9, t0 + 4_000_000),
+        ("radio.tx.c0.frequency_hz", 2.4e9, t0 + 4_500_000),
+        ("radio.rx.c0.frequency_hz", 2.3e9, t0 + 6_000_000),
+        ("radio.rx.c1.frequency_hz", 2.3e9, t0 + 6_000_000),
+        ("radio.tx.c0.frequency_hz", 2.3e9, t0 + 6_500_000),
     ] {
         radio.push(update(&radio, key, Value::num(hz).unwrap(), at));
     }
@@ -822,11 +827,11 @@ fn mr_34_a_random_phase_is_redrawn_by_every_tune() {
     }
     assert!(((initial[0] - initial[1]) - (first[0] - first[1])).abs() > 1e-3, "the two receive channels' own offset changes with the first pair");
     assert!(((first[0] - first[1]) - (second[0] - second[1])).abs() > 1e-3, "and with the second");
-    // The four retunes applied: a refused one would leave the phases where they are, and
+    // All six per-channel retunes applied: a refused one would leave the phases where they are, and
     // the values above would prove nothing (MR-18, RM-9).
     let section = |suffix: &str| radio.mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{suffix}")).unwrap()].clone();
     let applied: Vec<_> = section("applied").as_array().unwrap().iter().filter(|row| row["key"].as_str().is_some_and(|key| key.ends_with("frequency_hz"))).cloned().collect();
-    assert_eq!(applied.len(), 4, "the four retunes applied: {applied:?}");
+    assert_eq!(applied.len(), 6, "each channel retune applied: {applied:?}");
     assert!(section("rejected").as_array().unwrap().is_empty(), "no retune was refused: {}", section("rejected"));
 }
 
@@ -836,7 +841,7 @@ fn mr_34_the_deterministic_profile_keeps_every_phase_zero() {
         { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
     ] } });
     let world = World::new(environment);
-    let constraints = [("radio.tx.channels", eq(Scalar::from(1))), ("radio.rx.channels", eq(Scalar::from(2)))];
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.rx.c1.stream", eq(Scalar::from(0)))];
     let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
@@ -860,7 +865,7 @@ fn mr_32_the_transmit_path_delay_shifts_a_loopback() {
     let samples = ramp(1_000);
     let waveform = world.waveform(&samples);
     radio.push(burst(&radio, &world, waveform, 2_002_000, false));
-    radio.push(update(&radio, "radio.tx.gain_db", Value::num(6.0).unwrap(), t0 + 2_500_000));
+    radio.push(update(&radio, "radio.tx.c0.gain_db", Value::num(6.0).unwrap(), t0 + 2_500_000));
     step(&world, &mut [&mut radio], t0);
     step(&world, &mut [&mut radio], t0 + 4_000_001);
     let Phases { rx, tx, .. } = phases(3, "mock");
@@ -888,7 +893,7 @@ fn mr_36_clipping_at_full_scale_is_counted() {
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
     let waveform = world.waveform(&[(2.0, -3.0), (0.05, 0.05), (0.05, 1.5), (0.02, 0.05)]);
     radio.push(burst(&radio, &world, waveform, 0, true));
-    radio.push(update(&radio, "radio.rx.gain_db", Value::num(20.0).unwrap(), 1_000_000));
+    radio.push(update(&radio, "radio.rx.c0.gain_db", Value::num(20.0).unwrap(), 1_000_000));
     step(&world, &mut [&mut radio], 0);
     step(&world, &mut [&mut radio], 2_000_001);
     let received = radio.received(0);
@@ -933,7 +938,7 @@ fn ch_09_the_receive_output_does_not_depend_on_the_stepping_order() {
         a.push(burst(&a, &world, waveform, 1_999, false));
         order(&world, &mut a, &mut b, 1_999_000);
         order(&world, &mut a, &mut b, 1_999_001);
-        a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
+        a.push(Action::Stop { target: Some(tgt("dev_a/tx/s0")) });
         order(&world, &mut a, &mut b, 2_000_500);
         order(&world, &mut a, &mut b, 6_000_001);
         (b.received(0), samples)
@@ -978,7 +983,7 @@ fn mr_32_a_cold_transmit_change_ends_the_old_radiation() {
     let before = world.waveform(&[(0.5, 0.0)]);
     radio.push(burst(&radio, &world, before, 0, true));
     step(&world, &mut [&mut radio], 0);
-    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.s0.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
     step(&world, &mut [&mut radio], 2_000_500);
     let after = world.waveform(&[(0.0, 0.5)]);
     // RM-25: the new clock starts at 2 001 000, the lattice instant at or after the
@@ -1007,10 +1012,10 @@ fn mr_35_a_cold_receive_change_samples_the_field_on_the_new_clock() {
     let waveform = world.waveform(&samples);
     radio.push(burst(&radio, &world, waveform, 0, false));
     step(&world, &mut [&mut radio], 0);
-    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.rx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.rx.s0.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: None });
     step(&world, &mut [&mut radio], 1_000_000);
     step(&world, &mut [&mut radio], 4_000_001);
-    let first_domain = world.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx")).unwrap().domain;
+    let first_domain = world.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx/s0")).unwrap().domain;
     let mut checked = (0, 0);
     while let Some((block, _)) = radio.link.receive() {
         let header = block.header().clone();
@@ -1041,16 +1046,16 @@ fn mr_25_a_stop_at_a_held_burst_s_start_silences_the_transmitter() {
         let (tick, reason) = match end {
             End::StopBefore => {
                 run_to(&world, &mut [&mut radio], 3_999_499);
-                radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+                radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
                 (3_999_500, "cancelled by stop")
             }
             End::StopInTheRound => {
                 run_to(&world, &mut [&mut radio], 3_999_999);
-                radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+                radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
                 (4_000_000, "cancelled by stop")
             }
             End::ColdChange => {
-                radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 3_999_500))) });
+                radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.s0.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 3_999_500))) });
                 run_to(&world, &mut [&mut radio], 3_999_499);
                 (3_999_500, "cancelled by a cold change")
             }
@@ -1146,7 +1151,7 @@ fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
             if due.ticks_in(ROOT).unwrap() >= 666_334 { break; }
             ordered(&world, &mut a, &mut b, due.ticks_in(ROOT).unwrap(), a_first);
         }
-        a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
+        a.push(Action::Stop { target: Some(tgt("dev_a/tx/s0")) });
         ordered(&world, &mut a, &mut b, 666_334, a_first);
         while let Some(due) = world.auth.next_due() {
             if due.ticks_in(ROOT).unwrap() > 2_000_001 { break; }
@@ -1173,14 +1178,17 @@ fn mr_32_a_two_channel_waveform_is_channel_interleaved() {
         { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
         { "tx": "radio", "tx_channel": 1, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
     ] } }));
-    let constraints = [("radio.tx.channels", eq(Scalar::from(2))), ("radio.rx.channels", eq(Scalar::from(2)))];
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+    ];
     let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
     let interleaved: Vec<(f32, f32)> = (0..2_000).flat_map(|n| [((n + 1) as f32 / 4096.0, 0.0), (0.0, (n + 1) as f32 / 4096.0)]).collect();
     let waveform = world.waveform(&interleaved);
     radio.push(Action::TxBurst {
-        target: tgt("mock/tx"),
+        target: tgt("mock/tx/s0"),
         waveform,
         repeat: false,
         at: AbsoluteDeadline::new(TimePoint::new(radio.tx_domain(&world), 0)),
@@ -1210,7 +1218,7 @@ fn mr_25_a_stop_on_a_sample_instant_does_not_transmit_that_sample() {
     radio.push(burst(&radio, &world, waveform, 0, true));
     step(&world, &mut [&mut radio], 0);
     step(&world, &mut [&mut radio], 2_000_001);
-    radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], 2_500_000);
     step(&world, &mut [&mut radio], 4_000_001);
     assert_eq!(records(&radio)[0].samples, 2_500, "sample 2 500 is at the stop instant 2 500 000 and is not transmitted");
@@ -1244,7 +1252,7 @@ fn mr_35_the_receive_gain_scales_the_noise_with_the_signal() {
     let sigma = (10f64.powf(-20.0 / 10.0) / 2.0).sqrt();
     let seed = 7u64;
     let world = World::new(json!({ "sim.seed": seed, "sim.channel": { "couplings": [], "noise_dbfs": { "radio": -20.0 } } }));
-    let constraints = [("radio.rx.gain_db", eq(Scalar::try_from(6.0).unwrap()))];
+    let constraints = [("radio.rx.c0.gain_db", eq(Scalar::try_from(6.0).unwrap()))];
     let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
@@ -1273,7 +1281,7 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     a.push(burst(&a, &world, first, 0, true));
     a.push(burst(&a, &world, second, 1_500, true));
     step(&world, &mut [&mut a, &mut b], 0);
-    a.push(Action::UpdateParameter { target: tgt("dev_a"), key: key("radio.tx.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 2_000_500))) });
+    a.push(Action::UpdateParameter { target: tgt("dev_a"), key: key("radio.tx.s0.sample_rate_hz"), value: Value::num(2_000_000.0).unwrap(), class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, 2_000_500))) });
     run_to(&world, &mut [&mut a, &mut b], 2_000_500);
     let samples = ramp(100);
     let third = world.waveform(&samples);
@@ -1282,7 +1290,7 @@ fn mr_32_a_stop_after_a_cold_change_keeps_the_old_clock_s_radiation() {
     a.push(burst(&a, &world, third, 2, false));
     step(&world, &mut [&mut a, &mut b], 2_001_000);
     run_to(&world, &mut [&mut a, &mut b], 2_002_249);
-    a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
+    a.push(Action::Stop { target: Some(tgt("dev_a/tx/s0")) });
     step(&world, &mut [&mut a, &mut b], 2_002_250);
     run_to(&world, &mut [&mut a, &mut b], 6_000_001);
     step(&world, &mut [&mut a, &mut b], 6_000_001);
@@ -1325,7 +1333,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
         let second = world.waveform(&[(0.0, 0.5)]);
         radio.push(burst(&radio, &world, second, 1_000, true));
         step(&world, &mut [&mut radio], 1_000_000);
-        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
         step(&world, &mut [&mut radio], 3_000_500);
         step(&world, &mut [&mut radio], 6_000_001);
         assert_eq!(radio.section("rejected")[0]["reason"], refused);
@@ -1349,7 +1357,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
     radio.push(burst(&radio, &world, third, 1_002, true));
     step(&world, &mut [&mut radio], 1_000_001);
     run_to(&world, &mut [&mut radio], 1_500_000);
-    radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], 1_500_500);
     run_to(&world, &mut [&mut radio], 3_000_001);
     assert_eq!(radio.section("rejected").as_array().unwrap().len(), 1);
@@ -1379,7 +1387,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
     let second = world.waveform(&[(0.0, 0.5)]);
     radio.push(burst(&radio, &world, second, 500, true));
     step(&world, &mut [&mut radio], 1_000_500);
-    radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], 3_000_500);
     step(&world, &mut [&mut radio], 6_000_001);
     assert_eq!(radio.section("rejected"), json!([]));
@@ -1413,7 +1421,7 @@ fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
     for (environment, medium) in [(loopback(None), true), (json!({}), false)] {
         // a stop: the burst transmits samples 0 … 998, is recorded with 999 and radiates 999
         let (world, mut radio) = first_pass(environment.clone(), medium, &samples, true);
-        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
         step(&world, &mut [&mut radio], 999_000);
         run_to(&world, &mut [&mut radio], 3_000_001);
         step(&world, &mut [&mut radio], 3_000_001);
@@ -1432,7 +1440,7 @@ fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
         radio.push(burst(&radio, &world, second, 999, true));
         step(&world, &mut [&mut radio], 999_000);
         run_to(&world, &mut [&mut radio], 1_500_000);
-        radio.push(Action::Stop { target: Some(tgt("mock/tx")) });
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
         step(&world, &mut [&mut radio], 1_500_500);
         run_to(&world, &mut [&mut radio], 3_000_001);
         step(&world, &mut [&mut radio], 3_000_001);
@@ -1462,7 +1470,7 @@ fn mr_25_a_stop_transmits_every_held_burst_before_it() {
         a.push(burst(&a, &world, fourth, 3_000, true));
         ordered(&world, &mut a, &mut b, 0, a_first);
         ordered(&world, &mut a, &mut b, 1_000_000, a_first);
-        a.push(Action::Stop { target: Some(tgt("dev_a/tx")) });
+    a.push(Action::Stop { target: Some(tgt("dev_a/tx/s0")) });
         ordered(&world, &mut a, &mut b, 3_200_500, a_first);
         ordered(&world, &mut a, &mut b, 8_000_001, a_first);
         let summary: Vec<_> = records(&a).iter().map(|record| (record.samples, record.end)).collect();

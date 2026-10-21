@@ -188,7 +188,6 @@ pub fn default_profile(dir: &str) -> serde_json::Value {
                 "module": { "id": RADIO, "version": { "major": 2, "minor": 0, "patch": 0 } },
                 "selector": {
                     "id": "radio",
-                    "keys": "channel",
                     "master_clock_hz": [200_000_000],
                     "image": ["hg"],
                     "links": [1],

@@ -1,4 +1,5 @@
 //! Portable experiment documents expressed only through the Kernel contract.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -6,6 +7,39 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::spec::{Ident, Namespace};
 use serde_json::{json, Value};
+
+/// The layout configuration key for a logical channel.
+pub fn channel_key(direction: &str, channel: u32, leaf: &str) -> String {
+    format!("radio.{direction}.c{channel}.{leaf}")
+}
+
+/// The layout configuration key for a stream's sample rate.
+pub fn stream_key(direction: &str, stream: u32) -> String {
+    format!("radio.{direction}.s{stream}.sample_rate_hz")
+}
+
+/// A recorder feed attached to receive stream `stream`.
+pub fn rx_feed(component: &str, stream: usize) -> Value {
+    json!({
+        "port": { "component": component, "port": format!("rx{stream}") },
+        "policy": "drop_oldest",
+        "capacity": 64
+    })
+}
+
+fn direction_requires(direction: &str, channels: i64, rate_hz: f64, frequency_hz: f64) -> serde_json::Map<String, Value> {
+    let mut requires = serde_json::Map::new();
+    requires.insert(stream_key(direction, 0), json!({ "kind": "eq", "value": rate_hz }));
+    requires.insert(channel_key(direction, 0, "frequency_hz"), json!({ "kind": "eq", "value": frequency_hz }));
+    if channels == 0 {
+        requires.insert(channel_key(direction, 0, "stream"), json!({ "kind": "eq", "value": -1 }));
+    } else {
+        for channel in 0..channels {
+            requires.insert(channel_key(direction, channel as u32, "stream"), json!({ "kind": "eq", "value": 0 }));
+        }
+    }
+    requires
+}
 
 /// A receive experiment with a recorder connected to the receive port.
 pub fn receive(channels: i64, rate_hz: f64, frequency_hz: f64, capture: Option<i64>) -> Value {
@@ -16,11 +50,7 @@ pub fn receive(channels: i64, rate_hz: f64, frequency_hz: f64, capture: Option<i
     let mut output = json!({
         "id": "rec",
         "kind": "sink.capture",
-        "feed": {
-            "port": { "component": "radio", "port": "rx" },
-            "policy": "drop_oldest",
-            "capacity": 64
-        },
+        "feed": rx_feed("radio", 0),
         "params": {}
     });
     for (key, value) in params {
@@ -32,11 +62,7 @@ pub fn receive(channels: i64, rate_hz: f64, frequency_hz: f64, capture: Option<i
         "resources": {
             "radio": {
                 "kind": "radio.device",
-                "requires": {
-                    "radio.rx.channels": { "kind": "eq", "value": channels },
-                    "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
-                    "radio.rx.frequency_hz": { "kind": "eq", "value": frequency_hz }
-                }
+                "requires": direction_requires("rx", channels, rate_hz, frequency_hz)
             }
         },
         "outputs": [output],
@@ -55,14 +81,12 @@ pub fn transmit(
     capture: Option<i64>,
 ) -> Value {
     let mut spec = receive(1, rate_hz, 1.0e9, capture);
-    spec["resources"]["radio"]["requires"]["radio.tx.channels"] = json!({ "kind": "eq", "value": 1 });
-    spec["resources"]["radio"]["requires"]["radio.tx.sample_rate_hz"] = json!({ "kind": "eq", "value": rate_hz });
-    spec["resources"]["radio"]["requires"]["radio.tx.frequency_hz"] = json!({ "kind": "eq", "value": 1.0e9 });
+    spec["resources"]["radio"]["requires"].as_object_mut().unwrap().extend(direction_requires("tx", 1, rate_hz, 1.0e9));
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": offset_ticks },
         "action": {
             "kind": "tx_burst",
-            "target": { "kind": "resource", "resource": "radio", "path": "tx" },
+            "target": { "kind": "resource", "resource": "radio", "path": "tx/s0" },
             "waveform": waveform,
             "repeat": repeat,
             "late_policy": late_policy,
@@ -120,21 +144,13 @@ pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_tic
     let mut resources = serde_json::Map::new();
     resources.insert(tx.to_owned(), json!({
         "kind": "radio.device",
-        "requires": {
-            "radio.tx.channels": { "kind": "eq", "value": 1 },
-            "radio.tx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
-            "radio.tx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
-        }
+        "requires": direction_requires("tx", 1, rate_hz, 1.0e9)
     }));
     resources.insert(rx.to_owned(), json!({
         "kind": "radio.device",
-        "requires": {
-            "radio.rx.channels": { "kind": "eq", "value": 1 },
-            "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
-            "radio.rx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
-        }
+        "requires": direction_requires("rx", 1, rate_hz, 1.0e9)
     }));
-    let target = json!({ "kind": "resource", "resource": tx, "path": "tx" });
+    let target = json!({ "kind": "resource", "resource": tx, "path": "tx/s0" });
     json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
@@ -142,7 +158,7 @@ pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_tic
         "outputs": [{
             "id": "rec",
             "kind": "sink.capture",
-            "feed": { "port": { "component": rx, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 },
+            "feed": rx_feed(rx, 0),
             "params": { "sink.capture_samples": capture }
         }],
         "schedule": [{
@@ -180,22 +196,16 @@ pub fn ping_pong(
     capture: i64,
     implementation: (&str, &ContentHash),
 ) -> Value {
-    let radio = || json!({
-        "kind": "radio.device",
-        "requires": {
-            "radio.rx.channels": { "kind": "eq", "value": 1 },
-            "radio.rx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
-            "radio.rx.frequency_hz": { "kind": "eq", "value": 1.0e9 },
-            "radio.tx.channels": { "kind": "eq", "value": 1 },
-            "radio.tx.sample_rate_hz": { "kind": "eq", "value": rate_hz },
-            "radio.tx.frequency_hz": { "kind": "eq", "value": 1.0e9 }
-        }
-    });
+    let radio = || {
+        let mut requires = direction_requires("rx", 1, rate_hz, 1.0e9);
+        requires.extend(direction_requires("tx", 1, rate_hz, 1.0e9));
+        json!({ "kind": "radio.device", "requires": requires })
+    };
     let mut resources = serde_json::Map::new();
     resources.insert(pinger.to_owned(), radio());
     resources.insert(responder_radio.to_owned(), radio());
     let param = |key: &str, default: Value| json!({ "key": key, "schema": {}, "update_class": "cold", "default": default });
-    let ping_target = json!({ "kind": "resource", "resource": pinger, "path": "tx" });
+    let ping_target = json!({ "kind": "resource", "resource": pinger, "path": "tx/s0" });
     json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
@@ -211,7 +221,7 @@ pub fn ping_pong(
                         param("ext.ezsdr.exec.native.ping.threshold", json!(0.02)),
                         param("ext.ezsdr.exec.native.ping.turnaround_ns", json!(turnaround_ns)),
                         param("ext.ezsdr.exec.native.ping.rearm_samples", json!(100)),
-                        param("ext.ezsdr.exec.native.ping.target", json!(format!("{responder_radio}/tx"))),
+                        param("ext.ezsdr.exec.native.ping.target", json!(format!("{responder_radio}/tx/s0"))),
                         param("ext.ezsdr.exec.native.ping.waveform", json!(pong.hash)),
                         param("ext.ezsdr.exec.native.ping.late_policy", json!(late_policy))
                     ],
@@ -221,7 +231,7 @@ pub fn ping_pong(
                 }
             },
             "links": [{
-                "from": { "component": responder_radio, "port": "rx" },
+                "from": { "component": responder_radio, "port": "rx0" },
                 "to": { "component": "responder", "port": "rx" },
                 "policy": "drop_oldest",
                 "capacity": 64
@@ -230,7 +240,7 @@ pub fn ping_pong(
         "outputs": [{
             "id": "rec",
             "kind": "sink.capture",
-            "feed": { "port": { "component": pinger, "port": "rx" }, "policy": "drop_oldest", "capacity": 64 },
+            "feed": rx_feed(pinger, 0),
             "params": { "sink.capture_samples": capture }
         }],
         "schedule": [{
