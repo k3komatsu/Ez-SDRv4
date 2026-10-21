@@ -22,7 +22,7 @@
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
    - bench 行き（1b-4e-2）：X300 で front end を別の streamer へ移した後の sample の連続（INFERRED．UHD 4.10 の source では streamer の破棄が graph の edge を外す）．
    - 4d-3 の持ち越し：`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Session の Manifest ファイルまで通さない．4e-2 の持ち越し：待ちが origin を越える場合，close の時点で読めない TX の report，`effective != e` の到達性（[1b4e2-opus](plan/phase8/reviews/1b4e2-opus.md) §1）．
-   - **owner に確かめること**：`stream-lifecycle-scattered` が 1b-4d-2・1b-4e-2 で 5 件（loss の周り）．1b-5 の後に stream の lifecycle を 1 つの状態にするかを見直す（[failure-mechanisms](plan/maintenance/failure-mechanisms.md)）．
+   - **1b-5 の次の段階**（owner 2026-10-21）：UHD Module の stream ごとの状態を 1 つの明示的な状態にまとめる．`stream-lifecycle-scattered` が 1b-4d-2・1b-4e-2 で 5 件（loss の周り）出たため（[failure-mechanisms](plan/maintenance/failure-mechanisms.md)）．今は `StreamState` の印（`set`，`configured`，`idle`，`busy`，`busy_seq`，`reading`，`active`／`completed`）と `device_gate`・`lost` を各 thread が別々に読み書きしている．設計メモ（印を状態と遷移に置き換える案，消せる印，テストで固める遷移）から始める risky な段階．
    - mutation の見張り（`mutation_watchdog.py`）は，削除の mutant（`new` ⊂ `old`）と `new` がよくある語の行で，実装役の当て直し中に誤報を出す（1b-4e-2 で 4 回）．直すか，書き換えの多い段階では行の検査を外して gate で全行の一致を確かめる．
    - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
    - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c・4d-1c・4d-2 の記録（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §4 など）．
