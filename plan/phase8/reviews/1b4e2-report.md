@@ -19,7 +19,7 @@ STATUS: done
 
 ### 裁定 A1–A10
 
-裁定の対応表と実施テスト一覧は [`test-plan-v2.md`](test-plan-v2.md) §§2.1–2.13、特に lines 7–20 と 156–168。
+裁定の対応表と実施テスト一覧は [`test-plan-v2.md`](1b4e2-test-plan.md) §§2.1–2.13、特に lines 7–20 と 156–168。
 
 | 裁定 | 対応 |
 |---|---|
