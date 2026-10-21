@@ -553,6 +553,10 @@ struct Fake {
     fired: Vec<bool>,
     rates_seen: Vec<f64>,
     calls: Vec<String>,
+    /// An open of a front end another stream's streamer held: UHD 4.10 refuses it, cuts the
+    /// holder's edge and later aborts the process (`bench-results.md`, 2026-10-21), so the
+    /// fake's drop fails the test unless the test takes it with `take_abort`.
+    aborted: Option<String>,
 }
 
 /// A wall-clock double of a USRP, faithful in the ways the tests depend on (UR-33).
@@ -566,6 +570,16 @@ pub struct FakeDevice {
     /// `FakeFault::SlowTimeRead` does from its instant on: a test's one wide bracket (UR-7).
     #[cfg(test)]
     pub(crate) slow_next_read: Mutex<Option<Duration>>,
+}
+
+impl Drop for FakeDevice {
+    fn drop(&mut self) {
+        if let Some(open) = self.lock().aborted.take() {
+            if !std::thread::panicking() {
+                panic!("UR-33: {open} — on UHD 4.10 this aborts the process");
+            }
+        }
+    }
 }
 
 const OVERRUN_BEHIND: Duration = Duration::from_millis(100);
@@ -609,6 +623,7 @@ impl FakeDevice {
                 fired,
                 rates_seen: Vec::new(),
                 calls: Vec::new(),
+                aborted: None,
             }),
             config,
             host,
@@ -682,6 +697,12 @@ impl FakeDevice {
     /// Every call the fake saw, in order (UR-33).
     pub fn calls(&self) -> Vec<String> {
         self.lock().calls.clone()
+    }
+
+    /// The open that would have aborted a real device's process, cleared so the drop
+    /// does not fail a test that makes it on purpose.
+    pub fn take_abort(&self) -> Option<String> {
+        self.lock().aborted.take()
     }
 
     /// The shortest timeout any `rx_recv` was given (UHD truncates it to whole
@@ -1145,7 +1166,11 @@ impl Device for FakeDevice {
                 return Err(DeviceError::failed(format!("fake: no rx channel {chan}")));
             }
             if seen.contains(chan) || st.rx.values().any(|streamer| streamer.channels.contains(chan)) {
-                return Err(DeviceError::failed("fake: uhd_usrp_get_rx_stream: UHD error 47: RfnocError: Attempting to reconnect output port!"));
+                let message = "fake: uhd_usrp_get_rx_stream: UHD error 47: RfnocError: Attempting to reconnect output port!";
+                if !seen.contains(chan) {
+                    st.aborted.get_or_insert(format!("rx_open({stream}, {channels:?}): {message}"));
+                }
+                return Err(DeviceError::failed(message));
             }
             seen.push(*chan);
         }
@@ -1444,7 +1469,11 @@ impl Device for FakeDevice {
                 return Err(DeviceError::failed(format!("fake: no tx channel {chan}")));
             }
             if seen.contains(chan) || st.tx.values().any(|streamer| streamer.channels.contains(chan)) {
-                return Err(DeviceError::failed("fake: uhd_usrp_get_tx_stream: UHD error 47: RfnocError: Attempting to reconnect input port!"));
+                let message = "fake: uhd_usrp_get_tx_stream: UHD error 47: RfnocError: Attempting to reconnect input port!";
+                if !seen.contains(chan) {
+                    st.aborted.get_or_insert(format!("tx_open({stream}, {channels:?}): {message}"));
+                }
+                return Err(DeviceError::failed(message));
             }
             seen.push(*chan);
         }

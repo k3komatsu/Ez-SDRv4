@@ -8751,5 +8751,35 @@
     "crate": "ezsdr-radio",
     "test_bin": "timeline",
     "filter": "rm_34_a_chain_prune_reaches_a_fixed_point_from_b_then_c"
+  },
+  {
+    "id": "P525",
+    "name": "the fake's receive open of a held front end is a plain refusal again (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "                    st.aborted.get_or_insert(format!(\"rx_open({stream}, {channels:?}): {message}\"));",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
+  },
+  {
+    "id": "P526",
+    "name": "the fake's transmit open of a held front end is a plain refusal again (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "                    st.aborted.get_or_insert(format!(\"tx_open({stream}, {channels:?}): {message}\"));",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop"
+  },
+  {
+    "id": "P527",
+    "name": "the fake's drop lets a test that would have aborted a real device pass (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "                panic!(\"UR-33: {open} — on UHD 4.10 this aborts the process\");",
+    "new": "                let _ = open;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop"
   }
  ]

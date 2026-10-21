@@ -2518,10 +2518,22 @@ fn ur_33_one_channel_is_opened_by_one_streamer() {
     device.tx_open(1, &[1]).unwrap();
     assert!(device.tx_open(2, &[1]).is_err(), "channel 1 is stream 1's");
     assert!(device.tx_open(0, &[0, 1]).is_err(), "channel 1 is stream 1's");
+    assert!(device.take_abort().is_some_and(|open| open.starts_with("rx_open(1, [0])")), "the first open that would abort a real device's process");
     // Every streamer is freed: a channel one of them held can be opened again.
     device.close_streams();
     device.rx_open(2, &[0, 1]).unwrap();
     device.tx_open(2, &[0, 1]).unwrap();
+}
+
+#[test]
+#[should_panic(expected = "on UHD 4.10 this aborts the process")]
+fn ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop() {
+    // UR-33: on UHD 4.10 an open of a front end another stream's streamer holds is refused,
+    // but it cuts the holder's edge and the process aborts later (bench-results.md,
+    // 2026-10-21); the fake's drop fails a test that makes one and does not take it.
+    let device = fake(FakeConfig::default());
+    device.tx_open(0, &[0]).unwrap();
+    assert!(device.tx_open(1, &[0]).is_err());
 }
 
 #[test]
@@ -2540,12 +2552,14 @@ fn ur_33_an_empty_channel_list_is_channel_zero() {
     }
     let error = device.rx_open(1, &[]).expect_err("channel 0 is stream 0's").message;
     assert!(error.contains("Attempting to reconnect output port!"), "{error}");
+    assert!(device.take_abort().is_some());
     let device = fake(FakeConfig::default());
     device.tx_open(0, &[]).unwrap();
     let wave = vec![[0.1f32, 0.0]; 8];
     assert_eq!(device.tx_send(0, &[&wave], None, false, false, Wall::from_secs(1)).unwrap(), 8, "one buffer is its channel 0's");
     let error = device.tx_open(1, &[]).expect_err("channel 0 is stream 0's").message;
     assert!(error.contains("Attempting to reconnect input port!"), "{error}");
+    assert!(device.take_abort().is_some());
 }
 
 #[test]
