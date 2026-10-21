@@ -61,3 +61,16 @@ ref PLL の lock 失敗は最初の回で約 35 回の open のうち 2 回．�
 ### 見ていないもの
 
 複数 stream の layout（2 本の受信 streamer，H1），CBX，混在構成（BP4b），XG と 10 GbE 2 本（BP4c），抜線（B9）．
+
+## 2026-10-21：front end を streamer から streamer へ移す（1b-4e-2 の INFERRED，X300 #1＋OBX）
+
+`hw_m1_rx_front_end_moves_between_streamers`・`hw_m2_tx_front_end_moves_between_streamers`（`crates/ezsdr-radio-uhd/tests/hardware.rs`），UHD 4.10 の image，1 GHz・1 Msps・gain 0・振幅 0.3，30 dB の loopback．ログは `~/ezsdr-bench/dd4746a-36/`，失敗した版は `~/ezsdr-bench/7b71f8f-36/`．
+
+| 系列 | 結果 |
+|---|---|
+| 受信：stream 0 で受けて止め，`rx_close(0)`，同じ front end を stream 1 で開いて timed start | stream 1 の最初の block は指定の tick ちょうど，500 ms・250 block に隙間も overflow もない．**VERIFIED** |
+| 送信：stream 0 で burst，`tx_close(0)`，stream 1 で開いて burst（受信は通して読む） | 両方 `BurstAck`．loopback の rms は 0.00670（s0）と 0.00670（s1），静かなとき 0.000085．**VERIFIED** |
+| 1 本の streamer が front end を持ったまま，別の stream で同じ front end を開く | 拒否される（`UHD error 47`，`lost: false`．UHD のログは "Attempting to reconnect output port 0/DDC#0:0"・"input port 0/DUC#0:0"．`uhd_usrp_last_error` の文は空）．**ただし拒否で済まない**：受信では，持っている側の streamer のその後の stop が "Cannot forward action stream_cmd … no neighbour found"（試みが Radio→DDC の edge を外した），受信・送信とも後で `std::out_of_range`（`map::at`）でプロセスが abort（SIGABRT）．**VERIFIED** |
+
+- 1b-4e-2 の設計の前提（閉じた streamer の front end は別の stream の streamer で開ける）は実機でも成り立つ．
+- FakeDevice は 2 本目の open を「拒否して，持っている streamer はそのまま」とまねるが，実機では持っている streamer を壊し，プロセスを落とす．Module はその open をしない設計（待ちと from-none の委譲）なので今の挙動は変わらない．FakeDevice の reconnect をテストの失敗（致命）にするかは次の段階で決める（handoff）．
