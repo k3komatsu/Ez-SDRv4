@@ -24,7 +24,7 @@ use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, S
 use ezsdr_radio::kinds;
 use serde_json::json;
 
-use super::core::{assert_line_free, stream_key, Clock, Core, lock};
+use super::core::{assert_line_free, stream_key, Clock, Core, Holder, lock};
 #[cfg(test)]
 use super::core::booked_stream;
 use super::mode::{DescriptionExt, scalar_number};
@@ -692,17 +692,20 @@ impl Control {
     fn await_reading(&self, stream: StreamKey) -> bool {
         self.core.probe("wait_reading", None);
         loop {
-            let (reading, stop) = {
+            let (may_call, stop) = {
                 let streams = lock(&self.core.streams);
-                (streams.stream(stream).reading, streams.stop.is_some())
+                (streams.may_call_from_none(stream), streams.stop.is_some())
             };
             if stop || self.core.is_lost() {
                 return false;
             }
-            if !reading {
+            if may_call {
                 self.core.probe("reading_done", None);
                 return true;
             }
+            // UR-25: the judgement that the read is still in flight has just been made; the
+            // probe lets a test see the wait from here, with no device call made yet.
+            self.core.probe("reading_wait", None);
             self.host.sleep(POLL);
         }
     }
@@ -852,9 +855,11 @@ impl Control {
         // RM-25, VH-4: an enable from no stream — its owner idle, nothing planned to run —
         // is configured by uhd-control itself, which opens the streamer, and is ready when
         // that configuration ends; any other change by the owner at the cut (UR-17, UR-23).
-        let from_none = !channels.is_empty() && idle && planned && !streams.stream(stream).busy
+        let wants_from_none = !channels.is_empty() && idle && planned && streams.holder(stream) == Holder::Free
             && streams.held_elsewhere(stream, channels).is_none()
             && !streams.needed_before(stream, channels, i64::MAX);
+        let mut from_none_claim = if wants_from_none { streams.claim_from_none(stream) } else { None };
+        let from_none = from_none_claim.is_some();
         let mut ready = now;
         let mut failure: Option<DeviceError> = None;
         let mut reading = false;
@@ -862,11 +867,8 @@ impl Control {
         if from_none {
             // UR-25: the streamer is uhd-control's from this section — the one that read the
             // owner's idle mark and the plan — until the section that books the change, on
-            // every path. An owner that finds it set makes no device call.
-            let state = streams.stream_mut(stream);
-            state.busy = true;
-            state.busy_seq = None;
-            reading = state.reading;
+            // every path. An owner that finds the claim makes no device call.
+            reading = streams.reading(stream);
             stopped = streams.stop.is_some();
         }
         if from_none {
@@ -921,9 +923,7 @@ impl Control {
             }
             if !may_call || self.core.is_lost() || streams.stop.is_some() {
                 // UR-25: the ownership goes back, and nothing of the enable is booked.
-                let state = streams.stream_mut(stream);
-                state.busy = false;
-                state.busy_seq = None;
+                if let Some(claim) = from_none_claim.take() { streams.give_back(claim); }
                 drop(streams);
                 return;
             }
@@ -949,11 +949,7 @@ impl Control {
         } else {
             streams.stream_mut(stream).configs.remove(&seq);
         }
-        if from_none {
-            let state = streams.stream_mut(stream);
-            state.busy = false;
-            state.busy_seq = None;
-        }
+        if let Some(claim) = from_none_claim.take() { streams.give_back(claim); }
         drop(streams);
         if let Some(error) = failure {
             self.core.device_failed(Some(id), "update_parameter", &error);
@@ -2694,8 +2690,9 @@ mod tests {
     /// The receive record, as the ownership tests read it.
     fn rx_record(core: &Core) -> (bool, bool, super::super::core::DeviceSet, Option<u64>) {
         let streams = lock(&core.streams);
-        let state = streams.stream(booked_stream(Dir::Rx));
-        (state.busy, state.reading, state.set, state.configured)
+        let k = booked_stream(Dir::Rx);
+        let state = streams.stream(k);
+        (streams.holder(k) != Holder::Free, streams.reading(k), state.set, state.configured)
     }
 
     #[test]
@@ -2795,14 +2792,14 @@ mod tests {
             let weak = Arc::downgrade(&core);
             crate::provider::test_support::probe(&core, name, move |_| {
                 if let Some(core) = weak.upgrade() {
-                    seen.lock().unwrap().push(lock(&core.streams).stream(booked_stream(Dir::Rx)).busy);
+                    seen.lock().unwrap().push(lock(&core.streams).holder(booked_stream(Dir::Rx)) == Holder::FromNone);
                 }
             });
         }
         {
             let seen = seen.clone();
             crate::provider::test_support::probe(&core, "cold_booking", move |streams| {
-                seen.lock().unwrap().push(streams.expect("the booking's line").stream(booked_stream(Dir::Rx)).busy);
+                seen.lock().unwrap().push(streams.expect("the booking's line").holder(booked_stream(Dir::Rx)) == Holder::FromNone);
             });
         }
         let (mut control, _tx) = control(&core, &[]);

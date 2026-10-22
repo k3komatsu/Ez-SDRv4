@@ -20,7 +20,7 @@ use ezsdr_radio::timeline::{Channels, Config, StreamKey};
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{stream_key, Clock, Core, Streams, lock};
+use super::core::{stream_key, Clock, Core, Holder, Streams, lock};
 use super::mode::DescriptionExt;
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
@@ -287,9 +287,10 @@ impl Rx {
         let key = stream_key(Dir::Rx, self.k);
         let next: Option<Planned> = {
             let mut streams = lock(&self.core.streams);
-            if streams.stream(key).busy {
-                // UR-25: uhd-control's enable from no stream owns the streamer this turn; the
-                // plan is read again at the next, and the idle mark and the cursor stand.
+            if streams.holder(key) != Holder::Free {
+                // UR-25: uhd-control's enable from no stream (or a move's release) owns the
+                // streamer this turn; the plan is read again at the next, and the idle mark
+                // and the cursor stand.
                 return false;
             }
             let next = streams.planned(key).into_iter().find(|planned| planned.segment.origin >= self.from);
@@ -305,17 +306,18 @@ impl Rx {
         match self.core.owner_configure(Dir::Rx, self.k, &next) {
             Ok(true) => {}
             Ok(false) => return true,
-            Err(error) => {
-                // Not begun. A refusal the plan cannot take — its command pruned — skips the segment.
-                let refused = next.segment.by.is_some_and(|by| lock(&self.core.streams).refuse(&self.core, key, by));
+            Err((error, claim)) => {
+                // Not begun. A refusal the plan cannot take — its command pruned — skips the
+                // segment. The refusal is booked while the claim still holds the stream, in
+                // this one section, so no owner finds it free before the line holds it.
+                let mut streams = lock(&self.core.streams);
+                self.core.probe("refused_booking", Some(&streams));
+                let refused = next.segment.by.is_some_and(|by| streams.refuse(&self.core, key, by));
+                streams.give_back(claim);
+                drop(streams);
                 if !refused {
                     self.from = origin.saturating_add(1);
                 }
-                let mut streams = lock(&self.core.streams);
-                let state = streams.stream_mut(key);
-                state.busy = false;
-                state.busy_seq = None;
-                drop(streams);
                 self.core.device_failed(None, "update_parameter", &error);
                 return true;
             }
@@ -742,7 +744,7 @@ mod tests {
 
         assert!(rx.begin(), "the owner handled the lost configure: {:?}", inner.calls());
         assert!(core.is_lost());
-        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).busy);
+        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
         assert!(!inner.calls().iter().any(|call| call.starts_with("rx_start")), "the lost owner began a segment: {:?}", inner.calls());
         assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
             .any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST));
@@ -798,7 +800,7 @@ mod tests {
         assert!(began, "the owner handled the planned turn");
         assert_eq!(cursor, from_cursor, "an interrupted wait did not advance RX `from`");
         assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "the removed segment was not opened: {:?}", device.calls());
-        assert!(!lock(&core.streams).stream(to).busy);
+        assert_eq!(lock(&core.streams).holder(to), Holder::Free);
         assert!(!lock(&core.streams).line(to).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "Stop is not a device refusal");
         assert!(!events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
             .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "Stop interruption emits no refusal");
@@ -1704,6 +1706,49 @@ mod tests {
             assert!(spy.seen(name) > 0, "the spy never saw {name}");
         }
         assert_eq!(spy.seen("rx_open"), 2, "the reopen of the two-channel segment");
+    }
+
+    #[test]
+    fn ur_25_a_refused_receive_owner_books_and_gives_back_in_one_line_section() {
+        // UR-25 (S2, receive): uhd-rx books the refusal while its claim still holds the
+        // streamer, in the section that holds the line; a move's source keeps `Owner { seq }`
+        // until both lines hold the refusal.
+        let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
+        let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
+        let (mut rx, _) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book(&core, ms(10), 1, rate(2_000_000));
+        rx.poll();
+        rx.receive(samples(0, 10_000));
+        assert!(rx.stream.is_none());
+
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(Some(wait));
+        let (seen, holders) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "refused_booking", move |streams| {
+            if let Some(wait) = wait.lock().unwrap().take() {
+                let streams = streams.expect("the caller's section");
+                let _ = seen.send(streams.holder(stream_key(Dir::Rx, 0)));
+                let _ = entered.send(());
+                let _ = wait.recv();
+            }
+        });
+        let owner = std::thread::spawn(move || {
+            let mut rx = rx;
+            assert!(rx.begin(), "the owner handled the refusal");
+        });
+        reached.recv_timeout(Wall::from_secs(10)).expect("the owner reached its refusal book");
+        assert_eq!(holders.recv().unwrap(), Holder::Owner { seq: Some(1) }, "the claim still holds the stream");
+        assert!(core.streams.try_lock().is_err(), "the refusal is booked under the line lock");
+        let _ = resume.send(());
+        owner.join().expect("the receive owner");
+        let streams = lock(&core.streams);
+        assert_eq!(streams.holder(stream_key(Dir::Rx, 0)), Holder::Free);
+        assert!(!streams.reading(stream_key(Dir::Rx, 0)));
+        assert!(streams.line(stream_key(Dir::Rx, 0)).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "the refusal is booked");
+        drop(streams);
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start")), "{:?}", device.calls());
     }
 
 }

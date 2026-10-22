@@ -165,6 +165,50 @@ pub(crate) enum Owner {
     Open,
 }
 
+/// One stream's device-call holder and report read (UR-25). Only [`Streams`]'s transitions
+/// change them; a [`Claim`] holds a taken holder until the caller gives it back.
+#[derive(Default)]
+pub(crate) struct Claims {
+    holder: Holder,
+    reading: bool,
+}
+
+/// Who may call a stream's device now (UR-25).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Holder {
+    /// Nobody: an owner or uhd-control may take the stream.
+    #[default]
+    Free,
+    /// Its owner: a receive or transmit segment's device calls, with the move's `seq` while
+    /// that command is still unrecorded or refused (RM-34, UR-25).
+    Owner { seq: Option<u64> },
+    /// The idle stream's own owner closing its streamer, which another line needs (UR-25, RM-34).
+    Release,
+    /// uhd-control's enable from no stream, from the section that decides it until the
+    /// section that books it or ends it without one (UR-25).
+    FromNone,
+}
+
+/// A holder taken from a stream, to be given back once the section that booked its outcome is
+/// done (UR-25). The test build panics when one is dropped without [`Streams::give_back`];
+/// the production build does not, and takes no lock.
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct Claim {
+    stream: StreamKey,
+    holder: Holder,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        // Not while another panic unwinds: a second panic would abort the test binary.
+        #[cfg(test)]
+        if !std::thread::panicking() {
+            panic!("UR-25: a claim of {:?} was not given back", self.holder);
+        }
+    }
+}
+
 /// One stream's own state (RM-29, design 33 D15): stream `k` of its direction, and not the
 /// instance's other streams.
 #[derive(Default)]
@@ -186,16 +230,9 @@ pub(crate) struct StreamState {
     /// Segments its owner finished processing; a segment with a finite cut remains needed
     /// until its owner records completion (A2).
     pub completed: Vec<(i64, Config, Option<u64>)>,
-    /// uhd-control's enable from no stream owns the stream's streamer from the section that
-    /// decides it until the section that books the change or ends the enable without one: an
-    /// owner that finds it set makes no device call and moves neither its cursor nor its idle
-    /// mark (UR-25).
-    pub busy: bool,
-    /// The owner configuration whose device outcome is still being recorded, if any (RM-34).
-    pub busy_seq: Option<u64>,
-    /// uhd-tx's report read is in flight: an enable from no stream waits for it before its
-    /// first device call (UR-25).
-    pub reading: bool,
+    /// Who may call the stream's device and whether uhd-tx's report read is in flight
+    /// (UR-25).
+    claims: Claims,
     /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
     /// delivered: RM-16's floor, which reaches the plan as `Item.delivered` (UR-17).
     pub delivered: Option<(i64, Config, i64)>,
@@ -243,6 +280,96 @@ impl Streams {
             Direction::Rx => &mut self.rx[stream.1 as usize],
             Direction::Tx => &mut self.tx[stream.1 as usize],
         }
+    }
+
+    /// Who may call the stream's device now (UR-25).
+    pub fn holder(&self, stream: StreamKey) -> Holder {
+        self.stream(stream).claims.holder
+    }
+
+    /// Whether uhd-tx's report read is in flight (UR-25).
+    pub fn reading(&self, stream: StreamKey) -> bool {
+        self.stream(stream).claims.reading
+    }
+
+    /// UR-25: takes `stream` for its owner's device calls; `None`, with nothing changed, when
+    /// another holder has it.
+    #[must_use]
+    pub fn claim_owner(&mut self, stream: StreamKey, seq: Option<u64>) -> Option<Claim> {
+        let claims = &mut self.stream_mut(stream).claims;
+        if claims.holder != Holder::Free { return None; }
+        claims.holder = Holder::Owner { seq };
+        Some(Claim { stream, holder: Holder::Owner { seq } })
+    }
+
+    /// UR-25, RM-34: takes an idle, active-less `stream` for its owner's close of a
+    /// streamer another line needs; `None` when it is held or not idle.
+    #[must_use]
+    pub fn claim_release(&mut self, stream: StreamKey) -> Option<Claim> {
+        let state = self.stream_mut(stream);
+        if state.claims.holder != Holder::Free || !state.idle || state.active.is_some() { return None; }
+        state.claims.holder = Holder::Release;
+        Some(Claim { stream, holder: Holder::Release })
+    }
+
+    /// UR-25: takes `stream` for uhd-control's enable from no stream. A report read in flight
+    /// does not refuse it: the enable waits for that read before its first device call.
+    #[must_use]
+    pub fn claim_from_none(&mut self, stream: StreamKey) -> Option<Claim> {
+        let claims = &mut self.stream_mut(stream).claims;
+        if claims.holder != Holder::Free { return None; }
+        claims.holder = Holder::FromNone;
+        Some(Claim { stream, holder: Holder::FromNone })
+    }
+
+    /// UR-25: the from-none enable holds the stream and no report read is in flight, so its
+    /// first device call may be made.
+    pub fn may_call_from_none(&self, stream: StreamKey) -> bool {
+        let claims = &self.stream(stream).claims;
+        claims.holder == Holder::FromNone && !claims.reading
+    }
+
+    /// UR-25: uhd-tx takes the stream for a report read; `false`, with nothing changed, when
+    /// its holder is not `Free` or a read is already in flight.
+    pub fn begin_read(&mut self, stream: StreamKey) -> bool {
+        let claims = &mut self.stream_mut(stream).claims;
+        if claims.holder != Holder::Free || claims.reading { return false; }
+        claims.reading = true;
+        true
+    }
+
+    /// UR-25: the shutdown's report read takes no holder check, so that a detached uhd-control
+    /// left in `FromNone` cannot hold it (UR-16).
+    pub fn begin_shutdown_read(&mut self, stream: StreamKey) {
+        self.stream_mut(stream).claims.reading = true;
+    }
+
+    /// UR-25: the report read in flight ends; in the test build, one that never began panics.
+    pub fn end_read(&mut self, stream: StreamKey) {
+        let claims = &mut self.stream_mut(stream).claims;
+        if !claims.reading {
+            #[cfg(test)]
+            panic!("UR-25: end_read without a read in flight");
+            #[cfg(not(test))]
+            return;
+        }
+        claims.reading = false;
+    }
+
+    /// UR-25: gives a taken holder back. The test build panics if the stream no longer holds
+    /// what the claim took; the production build leaves the stream as it is.
+    pub fn give_back(&mut self, claim: Claim) {
+        let (stream, holder) = (claim.stream, claim.holder);
+        let current = self.holder(stream);
+        if current != holder {
+            std::mem::forget(claim);
+            #[cfg(test)]
+            panic!("UR-25: a claim of {holder:?} was given back to {current:?}");
+            #[cfg(not(test))]
+            return;
+        }
+        self.stream_mut(stream).claims.holder = Holder::Free;
+        std::mem::forget(claim);
     }
 
     /// How many streams of `dir` the instance holds (RM-29).
@@ -391,7 +518,7 @@ impl Streams {
     pub fn move_source_busy(&self, stream: StreamKey, seq: Option<u64>) -> bool {
         let Some(seq) = seq else { return false };
         self.lines.move_lines(seq).is_some_and(|(from, to)| {
-            to == stream && self.stream(from).busy && self.stream(from).busy_seq == Some(seq)
+            to == stream && self.holder(from) == Holder::Owner { seq: Some(seq) }
         })
     }
 
@@ -924,30 +1051,26 @@ impl Core {
     /// segment that needs one of its channels (D1, A2).
     pub fn release_unneeded(&self, dir: Dir, k: usize) -> bool {
         let stream = stream_key(dir, k);
-        {
+        let claim = {
             let mut streams = lock(&self.streams);
             if self.is_lost() { return false; }
             let state = streams.stream(stream);
-            if state.busy || !state.idle || state.active.is_some() { return false; }
+            if !state.idle || state.active.is_some() { return false; }
             let DeviceSet::Open(set) = state.set else { return false };
             if !streams.needed_before(stream, set, i64::MAX) { return false; }
-            let state = streams.stream_mut(stream);
-            state.busy = true;
-            state.busy_seq = None;
-        }
+            let Some(claim) = streams.claim_release(stream) else { return false };
+            claim
+        };
+        // UR-25, UR-29: the claim is taken; a loss found now gives it back before the close.
+        self.probe("release_claimed", None);
         if self.is_lost() {
-            let mut streams = lock(&self.streams);
-            let state = streams.stream_mut(stream);
-            state.busy = false;
-            state.busy_seq = None;
+            lock(&self.streams).give_back(claim);
             return false;
         }
         self.close_device(dir, k);
         let mut streams = lock(&self.streams);
         streams.record_open(stream, None);
-        let state = streams.stream_mut(stream);
-        state.busy = false;
-        state.busy_seq = None;
+        streams.give_back(claim);
         true
     }
 
@@ -987,13 +1110,13 @@ impl Core {
     /// is opened and configured. Each device call is made with `streams` released, and its
     /// outcome is recorded after it; a successful open moves the record's generation on, which
     /// is how a thread holding correlations against the replaced streamer learns of it (UR-28).
-    /// On error, the caller books the refusal before releasing the busy mark.
-    pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<bool, DeviceError> {
+    /// On error, the caller books the refusal before giving the claim back (UR-25).
+    pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<bool, (DeviceError, Claim)> {
         let stream = stream_key(dir, k);
-        let (mut current, mut step, release_first) = {
+        let (mut current, mut step, release_first, claim) = {
             let mut streams = lock(&self.streams);
             if self.is_lost() { return Ok(false); }
-            if streams.stream(stream).busy { return Ok(false); }
+            if streams.holder(stream) != Holder::Free { return Ok(false); }
             let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };
             if current.refused { return Ok(false); }
             let step = streams.owner_step(stream, current.set(), current.segment.by);
@@ -1001,17 +1124,12 @@ impl Core {
             let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()
                 || streams.needed_before(stream, current.set(), current.segment.origin)
                 || streams.move_source_busy(stream, current.segment.by));
-            let state = streams.stream_mut(stream);
-            state.busy = true;
-            state.busy_seq = current.segment.by;
-            (current, step, release_first)
+            let Some(claim) = streams.claim_owner(stream, current.segment.by) else { return Ok(false) };
+            (current, step, release_first, claim)
         };
         if release_first {
             if self.is_lost() {
-                let mut streams = lock(&self.streams);
-                let state = streams.stream_mut(stream);
-                state.busy = false;
-                state.busy_seq = None;
+                lock(&self.streams).give_back(claim);
                 return Ok(false);
             }
             let open = lock(&self.streams).stream(stream).set;
@@ -1020,10 +1138,7 @@ impl Core {
                 lock(&self.streams).record_open(stream, None);
             }
             let Some(latest) = self.await_release(dir, k, &current) else {
-                let mut streams = lock(&self.streams);
-                let state = streams.stream_mut(stream);
-                state.busy = false;
-                state.busy_seq = None;
+                lock(&self.streams).give_back(claim);
                 return Ok(false);
             };
             current = latest;
@@ -1031,9 +1146,8 @@ impl Core {
         }
         let opened = if step == Owner::Open { self.open_streamer(dir, k, current.set()) } else { Ok(()) };
         if let Err(error) = opened {
-            let mut streams = lock(&self.streams);
-            streams.record_configured(stream, None);
-            return Err(error);
+            lock(&self.streams).record_configured(stream, None);
+            return Err((error, claim));
         }
         match current.configure(self, dir) {
             Ok(_) => {
@@ -1041,15 +1155,12 @@ impl Core {
                 self.probe("configured", None);
                 let mut streams = lock(&self.streams);
                 streams.record_configured(stream, current.segment.by);
-                let state = streams.stream_mut(stream);
-                state.busy = false;
-                state.busy_seq = None;
+                streams.give_back(claim);
                 Ok(true)
             }
             Err(error) => {
-                let mut streams = lock(&self.streams);
-                streams.record_configured(stream, None);
-                Err(error)
+                lock(&self.streams).record_configured(stream, None);
+                Err((error, claim))
             }
         }
     }
@@ -1263,15 +1374,13 @@ mod tests {
     #[test]
     fn ur_34_a_waited_open_waits_for_same_move_source_configuration() {
         let (core, device, next, from, to, seq) = waiting_move();
-        {
+        let claim = {
             let mut streams = lock(&core.streams);
             let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
             streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            let source = streams.stream_mut(from);
-            source.set = DeviceSet::Unknown;
-            source.busy = true;
-            source.busy_seq = Some(seq);
-        }
+            streams.stream_mut(from).set = DeviceSet::Unknown;
+            streams.claim_owner(from, Some(seq)).expect("the source is free")
+        };
         let (entered, reached) = std::sync::mpsc::channel();
         super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
         let worker = core.clone();
@@ -1284,9 +1393,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             assert!(streams.refuse(&core, from, seq), "the source's refusal refuses the move");
-            let source = streams.stream_mut(from);
-            source.busy = false;
-            source.busy_seq = None;
+            streams.give_back(claim);
         }
         let interrupted_on_refusal = result_rx.recv_timeout(Wall::from_secs(10)).is_ok_and(|result| result.is_none());
         if !interrupted_on_refusal {
@@ -1311,7 +1418,7 @@ mod tests {
             allowance: 0,
         });
         device.rx_open(0, &[0]).unwrap();
-        let next = {
+        let (next, claim) = {
             let mut streams = lock(&core.streams);
             streams.lines.insert(from, line(Channels::first(2)));
             streams.lines.insert(to, line(Channels::first(0)));
@@ -1320,11 +1427,10 @@ mod tests {
             streams.changed(&core, to);
             let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
             streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            let source = streams.stream_mut(from);
-            source.set = DeviceSet::Open(Channels::first(1));
-            source.busy = true;
-            source.busy_seq = Some(1);
-            streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap()
+            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
+            let claim = streams.claim_owner(from, Some(1)).expect("the source is free");
+            let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
+            (next, claim)
         };
         let (entered, reached) = std::sync::mpsc::channel();
         super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
@@ -1338,9 +1444,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             assert!(streams.refuse(&core, from, 1), "source refusal records the move on both lines");
-            let source = streams.stream_mut(from);
-            source.busy = false;
-            source.busy_seq = None;
+            streams.give_back(claim);
         }
         owner.join().unwrap();
         assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)), "the refused destination segment was interrupted");
@@ -1351,16 +1455,20 @@ mod tests {
     fn ur_34_a_release_skips_a_stream_held_busy_by_from_none() {
         let (core, device) = two_by_two_with_device();
         let stream = stream_key(Dir::Rx, 0);
-        {
+        let claim = {
             let mut streams = lock(&core.streams);
             let state = streams.stream_mut(stream);
             state.set = DeviceSet::Open(Channels::first(1));
-            state.busy = true;
             state.idle = true;
-        }
+            streams.claim_from_none(stream).expect("the stream is free")
+        };
         assert!(!core.release_unneeded(Dir::Rx, 0), "a from-none owner still holds the stream");
         assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "the owner's close overlapped from-none: {:?}", device.calls());
-        assert!(lock(&core.streams).stream(stream).busy);
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.holder(stream), Holder::FromNone);
+        }
+        lock(&core.streams).give_back(claim);
     }
 
     #[test]
@@ -1407,7 +1515,7 @@ mod tests {
         assert!(matches!(result, Ok(false)), "the stale segment was interrupted: {result:?}");
         assert!(lock(&core.streams).line(to).unwrap().halted(10_000));
         assert!(!device.calls()[mark..].iter().any(|call| call == "rx_open 0 [0, 1]"), "the stale destination was not opened: {:?}", device.calls());
-        assert!(!lock(&core.streams).stream(to).busy, "the interrupted owner released its busy mark");
+        assert_eq!(lock(&core.streams).holder(to), Holder::Free, "the interrupted owner released its claim");
     }
 
     #[test]
@@ -1505,7 +1613,7 @@ mod tests {
         owner.join().unwrap();
         assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
         assert!(!device.calls().iter().any(|call| call == "rx_open 1 [0]"), "the stale segment did not open: {:?}", device.calls());
-        assert!(!lock(&core.streams).stream(to).busy, "the interrupted owner gave back its busy mark after replan {changed_by}");
+        assert_eq!(lock(&core.streams).holder(to), Holder::Free, "the interrupted owner gave back its claim after replan {changed_by}");
     }
 
     #[test]
@@ -1538,7 +1646,7 @@ mod tests {
         let log = device.calls();
         let marked = log.iter().position(|call| call == "mark_lost").unwrap();
         assert!(!log[marked + 1..].iter().any(|call| call.starts_with("rx_close") || call.starts_with("rx_open")), "a lost device is never closed or reopened: {log:?}");
-        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).busy);
+        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
     }
 
     #[test]
@@ -1559,7 +1667,7 @@ mod tests {
         owner.join().unwrap();
         assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
         assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "{:?}", device.calls());
-        assert!(!lock(&core.streams).stream(stream_key(Dir::Rx, 0)).busy);
+        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
     }
 
     #[test]
@@ -1620,7 +1728,7 @@ mod tests {
         assert!(still_planned, "TX End before the origin leaves the reserved move segment in the plan");
         assert!(!result.unwrap(), "Provider stop ends the wait");
         assert!(!calls.iter().any(|call| call == "tx_open 0 [0]"), "no target streamer opens after stop: {calls:?}");
-        assert!(!lock(&core.streams).stream(to).busy);
+        assert_eq!(lock(&core.streams).holder(to), Holder::Free);
     }
 
     #[test]
@@ -1711,6 +1819,243 @@ mod tests {
                 assert_eq!((ends[0].e, ends[0].seq), (5_000, 1), "{dir:?} {k}");
             }
         }
+    }
+
+    // ------------------------------------------------------------ 1b-6a: the holder and the read
+
+    #[test]
+    fn ur_25_a_claim_owner_takes_only_a_free_stream() {
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        assert_eq!(streams.holder(k), Holder::Free);
+        let claim = streams.claim_owner(k, None).expect("a free stream");
+        assert_eq!(streams.holder(k), Holder::Owner { seq: None });
+        assert!(streams.claim_owner(k, Some(7)).is_none());
+        assert!(streams.claim_from_none(k).is_none());
+        assert!(streams.claim_release(k).is_none());
+        assert_eq!(streams.holder(k), Holder::Owner { seq: None });
+        streams.give_back(claim);
+        assert_eq!(streams.holder(k), Holder::Free);
+        let claim = streams.claim_owner(k, Some(9)).expect("free again");
+        assert_eq!(streams.holder(k), Holder::Owner { seq: Some(9) });
+        assert!(!streams.move_source_busy(k, Some(9)), "no move names this stream");
+        streams.give_back(claim);
+        assert_eq!(streams.holder(k), Holder::Free);
+    }
+
+    #[test]
+    fn ur_25_a_claim_release_needs_a_free_idle_stream_with_no_active_segment() {
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        streams.stream_mut(k).idle = true;
+        let claim = streams.claim_release(k).expect("idle and free");
+        assert_eq!(streams.holder(k), Holder::Release);
+        assert!(streams.claim_owner(k, None).is_none());
+        assert!(streams.claim_from_none(k).is_none());
+        assert!(streams.claim_release(k).is_none());
+        streams.give_back(claim);
+        assert_eq!(streams.holder(k), Holder::Free);
+
+        streams.stream_mut(k).idle = false;
+        assert!(streams.claim_release(k).is_none(), "not idle");
+        assert_eq!(streams.holder(k), Holder::Free);
+        streams.stream_mut(k).idle = true;
+        streams.stream_mut(k).active = Some((0, cfg(1), None));
+        assert!(streams.claim_release(k).is_none(), "an active segment");
+        streams.stream_mut(k).active = None;
+
+        let claim = streams.claim_owner(k, None).expect("free");
+        streams.stream_mut(k).idle = true;
+        assert!(streams.claim_release(k).is_none(), "the holder alone refuses");
+        assert_eq!(streams.holder(k), Holder::Owner { seq: None });
+        streams.give_back(claim);
+        let claim = streams.claim_release(k).expect("idle, free, no active segment");
+        streams.give_back(claim);
+    }
+
+    #[test]
+    fn ur_25_a_claim_from_none_admits_a_read_in_flight() {
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        assert!(streams.begin_read(k));
+        let claim = streams.claim_from_none(k).expect("a read does not refuse from-none");
+        assert_eq!(streams.holder(k), Holder::FromNone);
+        assert!(streams.claim_from_none(k).is_none(), "a from-none claim is not taken twice");
+        assert!(!streams.may_call_from_none(k), "the read is in flight");
+        streams.end_read(k);
+        assert!(streams.may_call_from_none(k));
+        assert!(!streams.reading(k));
+        streams.give_back(claim);
+        assert_eq!(streams.holder(k), Holder::Free);
+
+        let claim = streams.claim_from_none(k).expect("free again");
+        assert!(!streams.begin_read(k), "a from-none holder owns the stream");
+        assert!(!streams.reading(k));
+        streams.give_back(claim);
+        let claim = streams.claim_owner(k, Some(1)).expect("free");
+        assert!(!streams.may_call_from_none(k));
+        streams.give_back(claim);
+        streams.stream_mut(k).idle = true;
+        let claim = streams.claim_release(k).expect("free, idle");
+        assert!(!streams.may_call_from_none(k));
+        streams.give_back(claim);
+        assert!(!streams.may_call_from_none(k), "a free stream is not a from-none holder");
+    }
+
+    #[test]
+    fn ur_25_a_begin_read_needs_a_free_stream_and_no_read() {
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        assert!(streams.begin_read(k));
+        assert!(streams.reading(k));
+        assert_eq!(streams.holder(k), Holder::Free);
+        assert!(!streams.begin_read(k), "a read is already in flight");
+        assert!(streams.reading(k));
+        streams.end_read(k);
+        assert!(!streams.reading(k));
+
+        let claim = streams.claim_owner(k, None).expect("free");
+        assert!(!streams.begin_read(k));
+        assert!(!streams.reading(k));
+        streams.give_back(claim);
+        let claim = streams.claim_from_none(k).expect("free");
+        assert!(!streams.begin_read(k), "a from-none enable owns the stream");
+        streams.give_back(claim);
+        streams.stream_mut(k).idle = true;
+        let claim = streams.claim_release(k).expect("free, idle");
+        assert!(!streams.begin_read(k));
+        streams.give_back(claim);
+    }
+
+    #[test]
+    fn ur_25_a_begin_shutdown_read_ignores_the_holder() {
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+
+        streams.begin_shutdown_read(k);
+        assert!(streams.reading(k));
+        assert_eq!(streams.holder(k), Holder::Free);
+        streams.end_read(k);
+
+        let claim = streams.claim_owner(k, Some(3)).expect("free");
+        streams.begin_shutdown_read(k);
+        assert!(streams.reading(k));
+        assert_eq!(streams.holder(k), Holder::Owner { seq: Some(3) });
+        streams.end_read(k);
+        streams.give_back(claim);
+
+        let claim = streams.claim_from_none(k).expect("free");
+        streams.begin_shutdown_read(k);
+        assert!(streams.reading(k));
+        assert_eq!(streams.holder(k), Holder::FromNone);
+        streams.end_read(k);
+        streams.give_back(claim);
+
+        streams.stream_mut(k).idle = true;
+        let claim = streams.claim_release(k).expect("free, idle");
+        streams.begin_shutdown_read(k);
+        assert!(streams.reading(k));
+        assert_eq!(streams.holder(k), Holder::Release);
+        streams.end_read(k);
+        streams.give_back(claim);
+
+        let claim = streams.claim_from_none(k).expect("free");
+        streams.begin_shutdown_read(k);
+        streams.begin_shutdown_read(k);
+        assert!(streams.reading(k), "a second shutdown read leaves it set");
+        streams.end_read(k);
+        assert!(!streams.reading(k));
+        streams.give_back(claim);
+    }
+
+    #[test]
+    #[should_panic(expected = "UR-25: end_read without a read in flight")]
+    fn ur_25_an_end_read_without_a_read_panics_in_the_test_build() {
+        let mut streams = Streams::with_streams(1, 1);
+        streams.end_read(stream_key(Dir::Rx, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "UR-25: a claim of Owner { seq: None } was not given back")]
+    fn ur_25_a_claim_dropped_without_give_back_panics_in_the_test_build() {
+        let mut streams = Streams::with_streams(1, 1);
+        let claim = streams.claim_owner(stream_key(Dir::Rx, 0), None).expect("free");
+        drop(claim);
+    }
+
+    #[test]
+    fn ur_25_a_give_back_of_another_holder_panics_in_the_test_build_and_changes_nothing() {
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        let claim = streams.claim_owner(k, None).expect("free");
+        let wrong = Claim { stream: k, holder: Holder::Free };
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            streams.give_back(wrong);
+        }));
+        assert!(caught.is_err(), "a claim the stream does not hold is refused");
+        assert_eq!(streams.holder(k), Holder::Owner { seq: None }, "the real holder is untouched");
+        streams.give_back(claim);
+        assert_eq!(streams.holder(k), Holder::Free);
+    }
+
+    #[test]
+    fn ur_25_move_source_busy_reads_the_owner_of_the_move() {
+        let mut streams = Streams::with_streams(2, 1);
+        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
+        let ratio = Rational::new(200, 1).unwrap();
+        let rx_line = |channels| Line::new(timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            allowance: 0,
+        });
+        streams.lines.insert(from, rx_line(Channels::first(2)));
+        streams.lines.insert(to, rx_line(Channels::first(1)));
+        streams.lines.book_move(from, to, 1, Some(10_000), 0, 7, 0).unwrap();
+
+        let claim = streams.claim_owner(from, Some(7)).expect("free");
+        assert!(streams.move_source_busy(to, Some(7)));
+        assert!(!streams.move_source_busy(to, Some(8)), "another command's move");
+        assert!(!streams.move_source_busy(to, None));
+        streams.give_back(claim);
+
+        let claim = streams.claim_owner(from, Some(8)).expect("free");
+        assert!(!streams.move_source_busy(to, Some(7)), "a different seq");
+        streams.give_back(claim);
+        let claim = streams.claim_from_none(from).expect("free");
+        assert!(!streams.move_source_busy(to, Some(7)), "from-none is not the owner");
+        streams.give_back(claim);
+        streams.stream_mut(from).idle = true;
+        let claim = streams.claim_release(from).expect("free, idle");
+        assert!(!streams.move_source_busy(to, Some(7)), "release is not the owner");
+        streams.give_back(claim);
+        assert!(!streams.move_source_busy(to, Some(7)), "free is not the owner");
+    }
+
+    #[test]
+    fn ur_34_a_release_gives_back_a_claim_when_loss_arrives_after_the_claim() {
+        let (core, device, _next, from, _to, _seq) = waiting_move();
+        lock(&core.streams).stream_mut(from).idle = true;
+        let before = device.calls().len();
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        super::super::test_support::probe(&core, "release_claimed", move |_| {
+            let _ = entered.send(());
+            let _ = wait.lock().unwrap().recv();
+        });
+        let worker = core.clone();
+        let release = std::thread::spawn(move || worker.release_unneeded(Dir::Rx, from.1 as usize));
+        reached.recv_timeout(Wall::from_secs(10)).expect("the release took its claim");
+        assert_eq!(lock(&core.streams).holder(from), Holder::Release);
+        core.device_lost("test: a loss between the release claim and its close");
+        let _ = resume.send(());
+        assert!(!release.join().expect("the release thread"), "the lost stream is not closed");
+        assert_eq!(lock(&core.streams).holder(from), Holder::Free, "the claim is given back");
+        assert_eq!(lock(&core.streams).stream(from).set, DeviceSet::Open(Channels::first(1)), "no close is recorded");
+        assert!(!device.calls()[before..].iter().any(|call| call == "rx_close 1"), "{:?}", device.calls());
     }
 
 }
