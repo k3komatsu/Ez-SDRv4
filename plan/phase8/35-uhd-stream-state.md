@@ -118,4 +118,4 @@ Sol 6.1（2026-10-22）：修正して採用．major 4（from-none の中断で�
 ## 8. 実装
 
 - R1：段階 1b-6a（2026-10-22，[reviews/1b6a-opus.md](reviews/1b6a-opus.md)）．
-- R2：段階 1b-6b（次）．
+- R2：段階 1b-6b（2026-10-22，[reviews/1b6b-opus.md](reviews/1b6b-opus.md)）．`delivered` は §2 R2 の `Option<i64>` でなく今の組 `(origin, config, k)` を残した．

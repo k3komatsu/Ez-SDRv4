@@ -257,12 +257,12 @@ impl Control {
                 if let Some(line) = line.clone() {
                     streams.lines.insert(stream_key(Dir::Rx, k), line);
                 }
-                streams.stream_mut(stream_key(Dir::Rx, k)).idle = start.rx.get(k).copied().flatten().is_none();
+                streams.starting(stream_key(Dir::Rx, k), start.rx.get(k).copied().flatten().is_some());
             }
             for (k, line) in tx.iter().enumerate() {
                 streams.stream_mut(stream_key(Dir::Tx, k)).clocks = start.tx.get(k).copied().flatten().map(|(clock, _)| (clock, false)).into_iter().collect();
                 streams.lines.insert(stream_key(Dir::Tx, k), line.clone());
-                streams.stream_mut(stream_key(Dir::Tx, k)).idle = start.tx.get(k).copied().flatten().is_none();
+                streams.starting(stream_key(Dir::Tx, k), start.tx.get(k).copied().flatten().is_some());
             }
         }
         Control {
@@ -833,7 +833,7 @@ impl Control {
             // The stream's own state is read only for a stream a channel enters (RM-29):
             // one with no channel and no line has none.
             if !channels.is_empty() && line.is_some() {
-                (line.map(|line| line.stream.config), streams.stream(stream).idle, line.is_some_and(|line| line.plan.iter().all(|segment| segment.cut.is_some())))
+                (line.map(|line| line.stream.config), streams.is_idle(stream), line.is_some_and(|line| line.plan.iter().all(|segment| segment.cut.is_some())))
             } else {
                 (line.map(|line| line.stream.config), false, false)
             }
@@ -1210,17 +1210,17 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         // The receive stream is stopped and its owner idle: an enable from no stream.
         control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         assert!(matches!(lock(&core.streams).stream(booked_stream(Dir::Rx)).set, super::super::core::DeviceSet::Unknown));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(200)))));
         assert_eq!(device.calls().iter().filter(|call| call.starts_with("rx_open")).count(), 2, "{:?}", device.calls());
     }
 
     /// Books an enable of the receive stream at `ms` from no stream, the owner idle (UR-13).
     fn enable_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, rate: f64) {
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(id), key("radio.rx.s0.sample_rate_hz"), Value::num(rate).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
     }
 
@@ -1333,7 +1333,7 @@ mod tests {
         let (a, b, c) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 2));
         let mut streams = lock(&core.streams);
         streams.record_open(a, Some(Channels::first(1)));
-        streams.stream_mut(a).idle = true;
+        streams.search(a, false);
         let a_segment = streams.planned(a).into_iter().find(|planned| planned.segment.by.is_none()).expect("the initial source segment");
         drop(streams);
 
@@ -1392,7 +1392,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             streams.complete(b, (next_b.segment.origin, next_b.segment.config, next_b.segment.by));
-            streams.stream_mut(b).idle = true;
+            streams.search(b, false);
         }
         let b_released = core.release_unneeded(Dir::Rx, 1);
         c_owner.join().unwrap();
@@ -1436,7 +1436,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stream_mut(stream_key(Dir::Rx, 0)).set = super::super::core::DeviceSet::Open(Channels::first(1));
             streams.stream_mut(stream_key(Dir::Rx, 1)).set = super::super::core::DeviceSet::Open(Channels::first(2).without(0));
-            streams.stream_mut(stream_key(Dir::Rx, 1)).idle = true;
+            streams.search(stream_key(Dir::Rx, 1), false);
         }
         let move_e = core.ticks(100_000_000);
         control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(move_e))));
@@ -1688,14 +1688,14 @@ mod tests {
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
         let gain = key("radio.rx.c0.gain_db");
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_timed(ActionId(2), gain.clone(), Value::num(1.0).unwrap(), at(10_000));
         time.advance_to(core.at(us(7_500))).unwrap();
         control.release();
         control.book_timed(ActionId(3), gain.clone(), Value::num(2.0).unwrap(), at(11_000));
         time.advance_to(core.at(us(8_500))).unwrap();
         // A channel comes into force before the waiting command's instant.
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(4), key("radio.rx.c0.stream"), Value::from(0), at(9_500));
         control.release();
         let applied: Vec<(String, String)> = device.calls().into_iter()
@@ -1728,7 +1728,7 @@ mod tests {
         control.release();
         assert_eq!(control.held.keys().map(|(e, _)| *e).collect::<Vec<_>>(), [us(100_500)], "a command with no channel is not held");
         control.book_timed(ActionId(2), tx.clone(), Value::num(4.0).unwrap(), at(99_800));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(3), key("radio.rx.c0.stream"), Value::from(0), at(100_300));
         control.release();
         let applied: Vec<(String, i64)> = device.calls().into_iter()
@@ -1820,7 +1820,7 @@ mod tests {
     /// Books a receive-channel membership change at `ms` from no stream (UR-13): the
     /// owner is idle, as its `read` leaves it.
     fn channels_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, channels: i64) {
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(id), key("radio.rx.c0.stream"), Value::from(if channels > 0 { 0 } else { -1 }), Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))));
     }
 
@@ -2017,7 +2017,11 @@ mod tests {
             let (_control, _tx) = control(&core, &[Dir::Rx]);
             time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
             let config = plan_of(&core, Dir::Rx)[0].segment.config;
-            lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).delivered = delivered.map(|k| (0, config, k));
+            if let Some(k) = delivered {
+                let mut streams = lock(&core.streams);
+                streams.started(booked_stream(Dir::Rx), Some((0, config, None)), 0, config);
+                streams.delivered(booked_stream(Dir::Rx), 0, config, k);
+            }
             lock(&core.streams).end(&core, core.ticks(5_000_000), false, false);
             assert_eq!(plan_of(&core, Dir::Rx)[0].segment.cut, Some(cut));
         }
@@ -2671,7 +2675,7 @@ mod tests {
     /// Books an enable of the receive stream's `channels` at `ms` from no stream, its owner
     /// idle, through the Action path (uhi-control's own booking).
     fn rx_enable_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, channels: i64) {
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = true;
+        lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book(Dispatched::new(ActionId(id), Action::UpdateParameter {
             target: super::super::test_support::target_of(&core.id),
             key: key("radio.rx.c0.stream"),
@@ -2723,7 +2727,7 @@ mod tests {
         let mark = spy.log().len();
         assert!(!rx.begin(), "the owner began a segment while uhd-control owns the streamer");
         assert_eq!(rx.cursor(), cursor, "the owner moved its cursor");
-        assert!(lock(&core.streams).stream(booked_stream(Dir::Rx)).idle, "the owner moved its idle mark");
+        assert!(lock(&core.streams).is_idle(booked_stream(Dir::Rx)), "the owner moved its phase");
         assert_eq!(spy.log().len(), mark, "the owner called the device: {:?}", spy.log());
         gate.release();
         assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not book");
@@ -2830,12 +2834,12 @@ mod tests {
             rx.begin();
         }).expect("a participant thread");
         gate.wait();
-        assert!(!lock(&core.streams).stream(booked_stream(Dir::Rx)).idle, "the owner has not begun");
+        assert!(!lock(&core.streams).is_idle(booked_stream(Dir::Rx)), "the owner has not begun");
         let mark = spy.log().len();
         let planned = plan_of(&core, Dir::Rx).len();
         control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
         assert_eq!(spy.log().len(), mark, "uhd-control called the device while the owner owns the streamer: {:?}", spy.log());
-        let after_book = lock(&core.streams).stream(booked_stream(Dir::Rx)).idle;
+        let after_book = lock(&core.streams).is_idle(booked_stream(Dir::Rx));
         assert!(!after_book, "the enable's booking left the owner idle");
         assert_eq!(plan_of(&core, Dir::Rx).len(), planned + 1, "the enable was not booked as a cold change");
         gate.release();
@@ -3064,7 +3068,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let origin = plan_of(&core, Dir::Rx)[0].segment.origin;
         let gain = key("radio.rx.c0.gain_db");
@@ -3092,7 +3096,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let planned = plan_of(&core, Dir::Rx);
         let (by, origin) = (planned[0].segment.by.expect("the enable"), planned[0].segment.origin);
@@ -3246,7 +3250,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         let stream_of_c1 = key("radio.rx.c1.stream");
         control.book_cold(ActionId(1), stream_of_c1.clone(), Value::from(0), at(100));
         control.book_cold(ActionId(1), stream_of_c1.clone(), Value::from(-1), at(200));
@@ -3269,7 +3273,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.tx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Tx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Tx), true);
         control.book_cold(ActionId(2), key("radio.tx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let by = plan_of(&core, Dir::Tx)[0].segment.by.expect("the enable");
         assert!(lock(&core.streams).refuse(&core, booked_stream(Dir::Tx), by));
@@ -3293,7 +3297,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let by = plan_of(&core, Dir::Rx)[0].segment.by.expect("the enable");
         assert!(lock(&core.streams).refuse(&core, booked_stream(Dir::Rx), by));
@@ -3318,7 +3322,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let by = plan_of(&core, Dir::Rx)[0].segment.by.expect("the enable");
         let gain = key("radio.rx.c0.gain_db");
@@ -3342,7 +3346,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let gain = key("radio.rx.c0.gain_db");
         control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50)))));
@@ -3378,7 +3382,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let gain = key("radio.rx.c0.gain_db");
         control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50)))));
@@ -3401,7 +3405,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let gain = key("radio.rx.c0.gain_db");
         control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50)))));
@@ -3496,7 +3500,7 @@ mod tests {
         let first_seq = lock(&core.streams).seq;
         time.advance_to(core.at(us(7_500))).unwrap();
         control.release();
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(-1), at(9_000));
         control.book_cold(ActionId(3), key("radio.rx.c0.stream"), Value::from(0), at(100_000));
         control.book_timed(ActionId(4), gain.clone(), Value::num(2.0).unwrap(), at(9_700));
@@ -3587,7 +3591,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[]);
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Tx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Tx), true);
         // The stream's channel leaves long before the instant, so a segment booked now may
         // begin before it: the receive call's floor is the cut's plus one call.
         control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(0), at(10_000));
@@ -3627,7 +3631,7 @@ mod tests {
         control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), at(100_000));
         time.advance_to(core.at(us(97_500))).unwrap();
         control.book_timed(ActionId(4), key("radio.tx.c0.gain_db"), Value::num(1.0).unwrap(), at(100_500));
@@ -3681,7 +3685,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         control.book_cold(ActionId(1), key("radio.rx.c0.stream"), Value::from(-1), at(100));
         control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), at(200));
         let gain = key("radio.rx.c0.gain_db");
@@ -3709,7 +3713,7 @@ mod tests {
         let (mut control, _tx) = control(&core, &[Dir::Tx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
-        lock(&core.streams).stream_mut(booked_stream(Dir::Tx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Tx), true);
         control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(-1), at(100));
         control.book_cold(ActionId(2), key("radio.tx.c0.stream"), Value::from(0), at(200));
         let gain = key("radio.tx.c0.gain_db");
@@ -3739,7 +3743,7 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
         assert_eq!(plan_of(&core, Dir::Rx)[0].segment.config.channels, Channels::first(2), "the initial segment is not both front ends'");
-        lock(&core.streams).stream_mut(booked_stream(Dir::Rx)).idle = false;
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
         let stream_of_c1 = key("radio.rx.c1.stream");
         control.book_cold(ActionId(1), stream_of_c1.clone(), Value::from(-1), at(100));
         control.book_cold(ActionId(2), stream_of_c1.clone(), Value::from(0), at(200));

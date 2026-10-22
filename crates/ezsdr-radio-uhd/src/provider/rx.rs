@@ -157,9 +157,9 @@ impl Rx {
         let active = stream.as_ref().and_then(|stream| streams.planned(key).into_iter()
             .find(|planned| planned.segment.origin == stream.clock.origin && planned.segment.config == stream.config)
             .map(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by)));
-        let state = streams.stream_mut(key);
-        state.delivered = stream.as_ref().map(|stream| (stream.clock.origin, stream.config, 0));
-        state.active = active;
+        if let Some(stream) = stream.as_ref() {
+            streams.started(key, active, stream.clock.origin, stream.config);
+        }
         drop(streams);
         let host = core.device.host();
         let now = host.now();
@@ -289,12 +289,12 @@ impl Rx {
             let mut streams = lock(&self.core.streams);
             if streams.holder(key) != Holder::Free {
                 // UR-25: uhd-control's enable from no stream (or a move's release) owns the
-                // streamer this turn; the plan is read again at the next, and the idle mark
-                // and the cursor stand.
+                // streamer this turn; the plan is read again at the next, and the phase and
+                // the cursor stand.
                 return false;
             }
             let next = streams.planned(key).into_iter().find(|planned| planned.segment.origin >= self.from);
-            streams.stream_mut(key).idle = next.is_none();
+            streams.search(key, next.is_some());
             next
         };
         let Some(next) = next else {
@@ -341,9 +341,7 @@ impl Rx {
                 self.pool = HostPool::new(self.core.block_len * channels.count().max(1) as usize * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
                 let mut streams = lock(&self.core.streams);
-                let state = streams.stream_mut(key);
-                state.delivered = Some((origin, next.segment.config, 0));
-                state.active = Some((origin, next.segment.config, next.segment.by));
+                streams.started(key, Some((origin, next.segment.config, next.segment.by)), origin, next.segment.config);
                 drop(streams);
                 self.last_samples = self.host.now();
                 self.follow();
@@ -368,10 +366,7 @@ impl Rx {
                 self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
             }
         }
-        let active = streams.stream(key).active;
-        streams.stream_mut(key).delivered = None;
-        streams.stream_mut(key).active = None;
-        if let Some(active) = active { streams.complete(key, active); }
+        if let Some(active) = streams.finished(key) { streams.complete(key, active); }
         let by = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
         streams.prune(key, by);
     }
@@ -503,7 +498,7 @@ impl Rx {
                 ended = true;
             }
             if k + len > stream.expected {
-                streams.stream_mut(stream_key(Dir::Rx, self.k)).delivered = Some((clock.origin, stream.config, k + len));
+                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, k + len);
             }
         }
         if let Some(cut) = stream.cut.filter(|_| ended && !stream.stopped) {
@@ -669,6 +664,7 @@ mod tests {
     use ezsdr_kernel::stream::BackPressure;
     use ezsdr_radio::timeline::{Item, Kind, Line, Segment, NO_RELEASE};
     use std::collections::BTreeMap;
+    use super::super::core::Phase;
 
     fn link() -> Arc<dyn ezsdr_kernel::stream::DataLink> {
         let decl = ezsdr_kernel::stream::DataLinkDecl {
@@ -938,6 +934,10 @@ mod tests {
         assert!(running.join().unwrap(), "the owner found its segment");
         assert!(!inner.calls().iter().any(|call| call.starts_with("rx_start")), "{:?}", inner.calls());
         assert!(core.clocks.sample_clock_records().is_empty(), "{:?}", core.clocks.sample_clock_records());
+        let streams = lock(&core.streams);
+        assert_eq!(streams.phase(stream_key(Dir::Rx, 0)), Phase::Pending, "a lost configure leaves the owner pending");
+        assert!(streams.active(stream_key(Dir::Rx, 0)).is_none());
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), None);
     }
 
     #[test]
@@ -989,6 +989,11 @@ mod tests {
         assert_eq!((stop["cut"].as_i64().unwrap(), stop["at"].as_i64().unwrap()), (origin, origin), "{stop}");
         to_rx.send(RxCmd::Shutdown(StopMode::Orderly)).unwrap();
         assert_eq!(rx.turn(), Turn::Exit, "the owner ends through its own loop");
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.phase(stream_key(Dir::Rx, 0)), Phase::Pending, "the ended segment leaves the owner pending");
+            assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), None);
+        }
         running.join().expect("the owner's begin thread");
     }
 
@@ -997,7 +1002,12 @@ mod tests {
         // RM-16 (S12c): a stream's `finish` clears its own delivered floor; the other
         // stream's stands for the end that comes later.
         let (core, _device, _time, _events) = super::super::test_support::rig_with_links_on(1, vec![link()], layout_description());
-        lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 700));
+        let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
+        {
+            let mut streams = lock(&core.streams);
+            streams.started(stream_key(Dir::Rx, 0), Some((0, config, None)), 0, config);
+            streams.delivered(stream_key(Dir::Rx, 0), 0, config, 700);
+        }
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
         lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
             direction: Direction::Rx,
@@ -1010,10 +1020,64 @@ mod tests {
         let (to_rx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(to_rx);
         let mut rx = Rx::new(core.clone(), 1, cmds, Some((handle, Channels::first(1), 0)), None);
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.phase(stream_key(Dir::Rx, 1)), Phase::Active {
+                segment: Some((0, config, None)),
+                delivered: Some((0, config, 0)),
+            }, "the T0 stream begins at its planned segment");
+            assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((0, config, 700)), "stream 0's floor stands");
+        }
         rx.finish();
         let streams = lock(&core.streams);
-        assert_eq!(streams.stream(stream_key(Dir::Rx, 0)).delivered, Some((0, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 700)), "stream 0's floor stands");
-        assert_eq!(streams.stream(stream_key(Dir::Rx, 1)).delivered, None, "stream 1's floor is cleared");
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((0, config, 700)), "stream 0's floor stands");
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 1)), None, "stream 1's floor is cleared");
+        assert_eq!(streams.phase(stream_key(Dir::Rx, 1)), Phase::Pending);
+    }
+
+    #[test]
+    fn ur_26_a_receive_start_of_no_planned_segment() {
+        // RM-16 (P1b): a loss between the start and uhd-rx's creation of its T0 stream removes
+        // the segment from the plan. uhd-rx still begins the stream: its phase is active with
+        // no segment and the delivered tuple it started with; finishing records nothing, and
+        // the loss's end is untouched.
+        let (core, _device, _time, _events) = super::super::test_support::rig_with_links(vec![link()]);
+        let key = stream_key(Dir::Rx, 0);
+        let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
+        let t0 = core.ticks(10_000_000);
+        let loss = core.ticks(5_000_000);
+        let node = core.stream_node(Dir::Rx, 0);
+        let handle = core.clocks.declare_sample_clock(node, core.root, config.ratio).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(key, Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: t0,
+                config,
+                lead: 0,
+                call: 2_000,
+                allowance: 0,
+            }));
+            streams.end(&core, loss, false, false);
+            assert!(streams.planned(key).is_empty(), "the loss removed the T0 segment");
+        }
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), t0)), None);
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.phase(key), Phase::Active { segment: None, delivered: Some((t0, config, 0)) });
+            assert_eq!(streams.first_undelivered(key), Some((t0, config, 0)), "HEAD keeps the tuple");
+        }
+        rx.finish();
+        let streams = lock(&core.streams);
+        assert_eq!(streams.phase(key), Phase::Pending);
+        assert_eq!(streams.first_undelivered(key), None);
+        assert!(streams.stream(key).completed.is_empty(), "no segment to record");
+        assert!(streams.planned(key).is_empty(), "finishing invented no segment");
+        let ends: Vec<_> = streams.line(key).unwrap().items.iter().filter(|item| matches!(item.kind, Kind::End { .. })).collect();
+        assert_eq!(ends.len(), 1, "one end");
+        assert_eq!(ends[0].e, loss, "the loss's end is unchanged");
     }
 
     #[test]
@@ -1448,12 +1512,23 @@ mod tests {
         rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.phase(stream_key(Dir::Rx, 0)), Phase::Pending, "a refused segment leaves the owner pending");
+            assert!(streams.active(stream_key(Dir::Rx, 0)).is_none());
+            assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), None);
+        }
         assert!(rx.begin());
         assert!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
         assert_eq!(starts, [format!("rx_start 0 {}", ms(65))]);
         assert_eq!(rx.stream.as_ref().map(|stream| stream.config.ratio.num()), Some(100), "the refused rate is the stream's (KC-27)");
+        let streams = lock(&core.streams);
+        let active = streams.active(stream_key(Dir::Rx, 0)).expect("the resumed segment");
+        assert_eq!((active.0, active.2), (ms(65), Some(2)), "the command that began the resumed segment is the Start's");
+        assert_eq!(active.1.ratio.num(), 100);
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(65), active.1, 0)));
     }
 
     #[test]

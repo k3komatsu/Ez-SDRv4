@@ -196,7 +196,7 @@ impl Tx {
     /// Reads the transmit plan it shares with uhd-control again, when it has changed (UR-25),
     /// pruning first the items before the command that began the segment `passed` (#63).
     /// False when uhd-control's enable from no stream owns the streamer this turn: the plan is
-    /// read again at the next, and the version, the switch and the idle mark stand.
+    /// read again at the next, and the version, the switch and the phase stand.
     pub(super) fn read(&mut self, passed: Option<Option<u64>>) -> bool {
         let core = self.core.clone();
         let key = stream_key(Dir::Tx, self.k);
@@ -219,11 +219,10 @@ impl Tx {
         self.version = Some(streams.version);
         self.plan = streams.planned(key);
         self.retarget();
-        let state = streams.stream_mut(key);
-        state.idle = self.clock.is_none() && self.switch.is_none();
-        state.active = self.clock.and_then(|_| self.plan.get(self.at)).map(|planned| {
+        let segment = self.clock.and_then(|_| self.plan.get(self.at)).map(|planned| {
             (planned.segment.origin, planned.segment.config, planned.segment.by)
         });
+        streams.plan_read(key, self.clock.is_some(), self.switch.is_some(), segment);
         true
     }
 
@@ -717,8 +716,7 @@ impl Tx {
         {
             let mut streams = lock(&self.core.streams);
             let stream = stream_key(Dir::Tx, self.k);
-            if let Some(active) = streams.stream(stream).active { streams.complete(stream, active); }
-            streams.stream_mut(stream).active = None;
+            if let Some(active) = streams.finished(stream) { streams.complete(stream, active); }
         }
         self.tracker = None;
         let mut interrupted = false;
@@ -915,7 +913,7 @@ mod tests {
     use super::{Held, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, Settings, TxCode, TxReport};
     use super::super::test_support::{HoldApply, ReportFeed};
-    use crate::provider::core::{stream_key, Clock, Core, Holder, lock};
+    use crate::provider::core::{stream_key, Clock, Core, Holder, Phase, lock};
     use crate::provider::test_support::device_at;
     use ezsdr_radio::timeline::Channels;
     use super::super::mode::DescriptionExt;
@@ -1104,7 +1102,7 @@ mod tests {
             let key = crate::provider::core::key(&format!("radio.tx.c{channel}.stream"));
             let value = Value::from(if channels.contains(&channel) { 0 } else { -1 });
             if control.config_at(at).get(&key) == Some(&value) { continue; }
-            lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).idle = true;
+            lock(&core.streams).search(stream_key(Dir::Tx, 0), false);
             control.book(Dispatched::new(ActionId(id * 2 + u64::from(channel)), Action::UpdateParameter {
                 target: super::super::test_support::target_of(&core.id),
                 key,
@@ -1168,14 +1166,22 @@ mod tests {
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         tx.read(None);
+        assert_eq!(lock(&core.streams).phase(stream_key(Dir::Tx, 0)), Phase::Pending, "a switch waits for the owner to make it");
         assert!(tx.step(), "B's switch");
         assert_eq!(tx.clock, b.clock, "B is adopted after the owner's own open");
+        assert_eq!(lock(&core.streams).active(stream_key(Dir::Tx, 0)), Some((b.segment.origin, b.segment.config, b.segment.by)), "B is the active segment");
         let cut = b.clock.expect("B's clock").instant(b.segment.cut.expect("the empty change cuts B"));
         time.advance_to(core.at(cut)).unwrap();
         tx.read(None);
         assert!(tx.step(), "the zero-duration intermediate membership change is skipped");
+        assert_eq!(lock(&core.streams).phase(stream_key(Dir::Tx, 0)), Phase::Pending, "the skipped change leaves the next switch waiting");
         assert!(tx.step(), "C's switch");
         assert_eq!(tx.clock, c.clock, "C is adopted after the owner's own open");
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.active(stream_key(Dir::Tx, 0)), Some((c.segment.origin, c.segment.config, c.segment.by)), "C is the active segment");
+            assert!(streams.stream(stream_key(Dir::Tx, 0)).completed.contains(&(b.segment.origin, b.segment.config, b.segment.by)), "B is recorded as finished");
+        }
         let opens: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("tx_open")).collect();
         assert_eq!(opens, ["tx_open 0 [0, 1]", "tx_open 0 [0]", "tx_open 0 [0, 1]", "tx_open 0 [0]"], "{opens:?}");
     }
@@ -1305,6 +1311,44 @@ mod tests {
         let calls = device.calls();
         assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "{calls:?}");
         assert!(tx.clock.is_some(), "the accepted change starts its clock");
+    }
+
+    #[test]
+    fn ur_25_a_refused_last_transmit_change_ends_idle() {
+        // UR-25 (Sol's plan review, P6): a refused change with nothing after it completes the
+        // segment it switched from, starts no clock, and leaves the owner idle.
+        use ezsdr_radio::timeline::{Channels, Config, Line, Segment, Stream};
+        let (core, device, _, _) = super::super::test_support::rig();
+        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+        let key = stream_key(Dir::Tx, 0);
+        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
+        let c1 = core.register(Dir::Tx, 200, 0).unwrap();
+        let e = core.ticks(1_000_000_000);
+        {
+            let mut streams = lock(&core.streams);
+            streams.stream_mut(key).clocks = vec![(c0, false), (c1, false)];
+            let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
+            let mut line = Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 });
+            line.plan = vec![
+                Segment { origin: 0, cut: Some(c0.at_or_after(e)), config: config(200), by: None },
+                Segment { origin: e, cut: None, config: config(100), by: Some(1) },
+            ];
+            streams.lines.insert(key, line);
+        }
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
+        tx.read(None);
+        let switch = tx.switch.as_mut().expect("the change's switch");
+        assert_eq!(switch.cut, e, "the first segment's cut is the next segment's origin");
+        switch.to.as_mut().expect("the change's target").refused = true;
+        tx.do_switch();
+        let streams = lock(&core.streams);
+        assert!(tx.clock.is_none(), "a refused change starts no clock");
+        assert!(tx.switch.is_none(), "nothing follows");
+        assert_eq!(streams.phase(key), Phase::Idle, "no clock and no switch");
+        assert!(streams.active(key).is_none());
+        assert!(streams.stream(key).completed.contains(&(0, config(200), None)), "the segment switched from is recorded");
+        assert!(device.calls().iter().all(|call| !call.starts_with("tx_open")), "a refused change makes no device call: {:?}", device.calls());
     }
 
     #[test]
@@ -1492,6 +1536,13 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
         tx.read(None);
         assert!(tx.switch.is_none());
+        {
+            let streams = lock(&core.streams);
+            assert_eq!(streams.phase(stream_key(Dir::Tx, 0)), Phase::Active {
+                segment: Some((0, config(200), None)),
+                delivered: None,
+            }, "the current clock's segment");
+        }
         let e = core.ticks(1_000_000_000);
         {
             let mut streams = lock(&core.streams);
@@ -1503,6 +1554,53 @@ mod tests {
         let switch = tx.switch.as_ref().expect("a switch");
         assert_eq!(switch.cut, e);
         assert_eq!(switch.to.as_ref().and_then(|to| to.clock), Some(c1));
+        {
+            let streams = lock(&core.streams);
+            assert!(!streams.is_idle(stream_key(Dir::Tx, 0)), "a pending switch keeps the current segment active");
+            assert_eq!(streams.active(stream_key(Dir::Tx, 0)), Some((0, config(200), None)));
+        }
+    }
+
+    #[test]
+    fn ur_25_a_transmit_read_sets_idle_pending_or_active() {
+        // UR-25: a read with no clock and nothing to switch to leaves the owner idle; one
+        // with a clock is active at the plan's current segment (none when the plan has none);
+        // one with no clock but a switch leaves it pending the switch.
+        let (core, _device, _, _) = super::super::test_support::rig();
+        let key = stream_key(Dir::Tx, 0);
+        let config = ezsdr_radio::timeline::Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() };
+
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        tx.read(None);
+        assert_eq!(lock(&core.streams).phase(key), Phase::Idle, "nothing to begin");
+
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        tx.read(None);
+        assert_eq!(lock(&core.streams).phase(key), Phase::Active { segment: None, delivered: None }, "a clock with no planned segment");
+
+        {
+            let mut streams = lock(&core.streams);
+            let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
+            streams.lines.insert(key, ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream {
+                direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config, lead, call: 0, allowance: 0,
+            }));
+        }
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        tx.read(None);
+        assert!(tx.switch.is_some(), "the line's first segment is the switch");
+        assert_eq!(lock(&core.streams).phase(key), Phase::Pending, "a change waits for its switch");
+
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        tx.read(None);
+        let streams = lock(&core.streams);
+        assert_eq!(streams.phase(key), Phase::Active { segment: Some((0, config, None)), delivered: None });
+        assert_eq!(streams.first_undelivered(key), None, "a transmit stream has no floor");
+        assert!(!streams.is_idle(key));
     }
 
     #[test]
@@ -1562,6 +1660,18 @@ mod tests {
             }
             tx.do_switch();
             let case = format!("refused {refused}");
+            {
+                let streams = lock(&core.streams);
+                if refused {
+                    assert_eq!(streams.phase(stream_key(Dir::Tx, 0)), Phase::Pending, "{case}: the refused change waits for the next one");
+                } else {
+                    let adopted = streams.planned(stream_key(Dir::Tx, 0))[1].segment;
+                    assert_eq!(streams.phase(stream_key(Dir::Tx, 0)), Phase::Active {
+                        segment: Some((adopted.origin, adopted.config, adopted.by)),
+                        delivered: None,
+                    }, "{case}: the adopted change is the active segment");
+                }
+            }
             assert_eq!(tx.clock, (!refused).then_some(c1), "{case}");
             assert_eq!(tx.later.iter().map(|h| h.domain).collect::<Vec<_>>(), [c2.domain], "{case}");
             assert_eq!(tx.held.len(), usize::from(!refused), "{case}");
@@ -1576,6 +1686,17 @@ mod tests {
             // #63: switching from the second change's clock prunes the first change.
             tx.held.clear();
             tx.do_switch();
+            {
+                let streams = lock(&core.streams);
+                let planned = streams.planned(stream_key(Dir::Tx, 0));
+                let last = planned[3].segment;
+                let second = planned[2].segment;
+                assert_eq!(streams.phase(stream_key(Dir::Tx, 0)), Phase::Active {
+                    segment: Some((last.origin, last.config, last.by)),
+                    delivered: None,
+                }, "{case}: the third change is active, not idle");
+                assert!(streams.stream(stream_key(Dir::Tx, 0)).completed.contains(&(second.origin, second.config, second.by)), "{case}: the segment switched from is recorded");
+            }
             let items: Vec<u64> = lock(&core.streams).line(stream_key(Dir::Tx, 0)).unwrap().items.iter().map(|item| item.seq).collect();
             assert_eq!(items, [2, 3], "{case}");
         }
@@ -2196,7 +2317,7 @@ mod tests {
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         let mark = spy.log().len();
-        let idle = || lock(&core.streams).stream(stream_key(Dir::Tx, 0)).idle;
+        let idle = || lock(&core.streams).is_idle(stream_key(Dir::Tx, 0));
         let before = idle();
         assert!(!tx.read(None), "uhd-tx read the plan while uhd-control owns the streamer");
         assert_eq!((tx.at, tx.switch.is_some(), idle()), (0, false, before), "the owner's cursor, switch or idle mark moved");
@@ -2235,7 +2356,7 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         let mark = spy.log().len();
         assert!(!tx.read(None));
-        assert!(lock(&core.streams).stream(stream_key(Dir::Tx, 0)).idle, "the poll moved the stream's idle mark");
+        assert!(lock(&core.streams).is_idle(stream_key(Dir::Tx, 0)), "the poll moved the stream's phase");
         tx.pass();
         assert_eq!(spy.seen("tx_async"), 0, "the poll read reports during a control open");
         assert_eq!(spy.log().len(), mark, "the poll called the device: {:?}", spy.log());

@@ -6241,14 +6241,14 @@
    "filter": "ur_29_a_loss_takes_effect_before_a_change_at_its_instant"
   },
   {
-   "id": "P258",
-   "name": "the delivered floor is the block's first sample, not its end (RM-16)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "                streams.stream_mut(stream_key(Dir::Rx, self.k)).delivered = Some((clock.origin, stream.config, k + len));",
-   "new": "                streams.stream_mut(stream_key(Dir::Rx, self.k)).delivered = Some((clock.origin, stream.config, k));",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
+    "id": "P258",
+    "name": "the delivered floor is the block's first sample, not its end (RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+    "old": "                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, k + len);",
+    "new": "                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, k);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
   },
   {
    "id": "P259",
@@ -6960,16 +6960,16 @@
     "test_bin": "lib",
     "filter": "ur_36_a_successful_open_moves_the_generation_on_even_when_its_check_refuses"
   },
- {
-   "id": "P382",
-   "name": "the receive owner begins behind an enable from no stream (UR-25, S9)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "            if streams.holder(key) != Holder::Free {\n                // UR-25: uhd-control's enable from no stream (or a move's release) owns the\n                // streamer this turn; the plan is read again at the next, and the idle mark\n                // and the cursor stand.\n                return false;\n            }",
-   "new": "            if false {\n                return false;\n            }",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_25_an_owner_waiting_behind_a_from_none_open_starts_nothing"
- },
+  {
+    "id": "P382",
+    "name": "the receive owner begins behind an enable from no stream (UR-25, S9)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+    "old": "            if streams.holder(key) != Holder::Free {\n                // UR-25: uhd-control's enable from no stream (or a move's release) owns the\n                // streamer this turn; the plan is read again at the next, and the phase and\n                // the cursor stand.\n                return false;\n            }",
+    "new": "            if false {\n                return false;\n            }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_an_owner_waiting_behind_a_from_none_open_starts_nothing"
+  },
  {
    "id": "P383",
    "name": "the transmit owner reads the plan behind an enable from no stream (UR-25, S9, S22)",
@@ -7170,16 +7170,16 @@
    "test_bin": "lib",
    "filter": "ur_25_an_open_is_recorded_only_after_the_device_returns"
  },
- {
-   "id": "P404",
-   "name": "a transmit owner held behind an enable from no stream clears its idle mark (UR-25, S9)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if streams.holder(key) != Holder::Free {\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
-   "new": "        if streams.holder(key) != Holder::Free {\n            streams.stream_mut(key).idle = false;\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_25_a_transmit_poll_during_a_control_open_starts_no_streamer_call"
- },
+  {
+    "id": "P404",
+    "name": "a transmit owner held behind an enable from no stream clears its idle mark (UR-25, S9)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "        if streams.holder(key) != Holder::Free {\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
+    "new": "        if streams.holder(key) != Holder::Free {\n            streams.search(key, true);\n            return false;\n        }\n        self.plan_section(&mut streams, key, passed)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_transmit_poll_during_a_control_open_starts_no_streamer_call"
+  },
  {
    "id": "P409",
    "name": "a release is a timed command (UR-24, S1, S12, S16)",
@@ -7411,16 +7411,16 @@
   "test_bin": "fake",
   "filter": "ur_25_a_transmit_rate_change_of_a_later_stream_cuts_that_stream_alone"
  },
- {
-  "id": "P445",
-  "name": "an end reads stream 0's delivered for every stream (UR-26, RM-16)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "        let delivered = self.stream(stream).delivered;",
-  "new": "        let delivered = self.stream(booked_stream(dir_of(stream))).delivered;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_an_end_takes_delivered_from_each_segment_s_own_stream"
- },
+  {
+    "id": "P445",
+    "name": "an end reads stream 0's delivered for every stream (UR-26, RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        let delivered = self.first_undelivered(stream);",
+    "new": "        let delivered = self.first_undelivered(booked_stream(dir_of(stream)));",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_26_an_end_takes_delivered_from_each_segment_s_own_stream"
+  },
  {
   "id": "P446",
   "name": "`start_rx` books stream 0 whatever stream it names (UR-26, RM-29)",
@@ -7621,16 +7621,16 @@
   "test_bin": "fake",
   "filter": "ur_26_a_start_rx_of_a_channel_less_linked_stream_starts_nothing"
  },
- {
-  "id": "P470",
-  "name": "a stream's finish clears every receive stream's delivered (UR-26, RM-16)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        streams.stream_mut(key).delivered = None;",
-  "new": "        for k in 0..streams.count(Dir::Rx) {\n            streams.stream_mut(stream_key(Dir::Rx, k)).delivered = None;\n        }",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_26_a_stream_s_delivered_is_cleared_alone"
- },
+  {
+    "id": "P470",
+    "name": "a stream's finish clears every receive stream's delivered (UR-26, RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        let phase = &mut self.stream_mut(stream).phase;\n        let active = std::mem::replace(phase, Phase::Pending);\n        active.active()",
+    "new": "        let phase = &mut self.stream_mut(stream).phase;\n        let active = std::mem::replace(phase, Phase::Pending);\n        for k in 0..self.count(Dir::Rx) {\n            self.stream_mut(stream_key(Dir::Rx, k)).phase = Phase::Pending;\n        }\n        active.active()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_26_a_stream_s_delivered_is_cleared_alone"
+  },
  {
   "id": "P471",
   "name": "a transmit owner's thread lacks its stream's name (UR-15, UR-29)",
@@ -7641,16 +7641,16 @@
   "test_bin": "lib",
   "filter": "ur_15_every_declared_stream_starts_its_own_thread"
  },
- {
-  "id": "P472",
-  "name": "a finished stream clears every receive stream's delivered, seen on the abort cut (UR-26, RM-16)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        streams.stream_mut(key).delivered = None;",
-  "new": "        for k in 0..streams.count(Dir::Rx) {\n            streams.stream_mut(stream_key(Dir::Rx, k)).delivered = None;\n        }",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_26_two_receive_streams_end_at_their_own_stops"
- },
+  {
+    "id": "P472",
+    "name": "a finished stream clears every receive stream's delivered, seen on the abort cut (UR-26, RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        let phase = &mut self.stream_mut(stream).phase;\n        let active = std::mem::replace(phase, Phase::Pending);\n        active.active()",
+    "new": "        let phase = &mut self.stream_mut(stream).phase;\n        let active = std::mem::replace(phase, Phase::Pending);\n        for k in 0..self.count(Dir::Rx) {\n            self.stream_mut(stream_key(Dir::Rx, k)).phase = Phase::Pending;\n        }\n        active.active()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_26_a_finished_stream_clears_only_its_own_floor"
+  },
  {
   "id": "P473",
   "name": "a receive owner re-reads Provider::stop after its configuration (UR-26, S16a)",
@@ -8846,5 +8846,95 @@
     "crate": "ezsdr-radio",
     "test_bin": "channels",
     "filter": "rm_30_coerce_cases"
+  },
+  {
+    "id": "P552",
+    "name": "UR-25: start gives a held stream Idle and an empty one Pending",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        self.stream_mut(stream).phase = if held { Phase::Pending } else { Phase::Idle };",
+    "new": "        self.stream_mut(stream).phase = if held { Phase::Idle } else { Phase::Pending };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_stream_starts_idle_or_waiting"
+  },
+  {
+    "id": "P553",
+    "name": "UR-25: a search that finds a segment leaves the stream Idle",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        self.stream_mut(stream).phase = if found { Phase::Pending } else { Phase::Idle };",
+    "new": "        self.stream_mut(stream).phase = if found { Phase::Idle } else { Phase::Pending };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_search_leaves_the_stream_pending_or_idle"
+  },
+  {
+    "id": "P554",
+    "name": "UR-17: a started receive segment has no floor at zero",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        self.stream_mut(stream).phase = Phase::Active { segment, delivered: Some((origin, config, 0)) };",
+    "new": "        self.stream_mut(stream).phase = Phase::Active { segment, delivered: None };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_17_a_receive_segment_moves_from_pending_to_active_to_pending"
+  },
+  {
+    "id": "P555",
+    "name": "UR-17: a delivered block moves the floor one sample short",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            *delivered = Some((origin, config, k));",
+    "new": "            *delivered = Some((origin, config, k - 1));",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_17_a_receive_segment_moves_from_pending_to_active_to_pending"
+  },
+  {
+    "id": "P556",
+    "name": "UR-17: finishing a segment leaves the stream active",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        let active = std::mem::replace(phase, Phase::Pending);",
+    "new": "        let active = std::mem::replace(phase, Phase::Active { segment: None, delivered: None });",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_17_a_receive_segment_moves_from_pending_to_active_to_pending"
+  },
+  {
+    "id": "P557",
+    "name": "UR-25: a transmit plan read takes a switch for a clock",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        self.stream_mut(stream).phase = if clock {\n            Phase::Active { segment, delivered: None }\n        } else if switch {\n            Phase::Pending",
+    "new": "        self.stream_mut(stream).phase = if switch {\n            Phase::Active { segment, delivered: None }\n        } else if clock {\n            Phase::Pending",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_transmit_read_sets_idle_pending_or_active"
+  },
+  {
+    "id": "P558",
+    "name": "RM-16: a booking sees no first sample not yet delivered",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "        self.phase(stream).delivered()",
+    "new": "        { let _ = self.phase(stream); None }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_26_a_finished_stream_clears_only_its_own_floor"
+  },
+  {
+    "id": "P559",
+    "name": "UR-26: uhd-rx finishes a stream without clearing its phase",
+    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+    "old": "        if let Some(active) = streams.finished(key) { streams.complete(key, active); }",
+    "new": "        if false { let _ = streams.finished(key); }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_26_a_stream_s_delivered_is_cleared_alone"
+  },
+  {
+    "id": "P560",
+    "name": "UR-25: a transmit clock with a planned segment is active with none",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "            Phase::Active { segment, delivered: None }",
+    "new": "            Phase::Active { segment: None, delivered: None }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_25_a_transmit_read_sets_idle_pending_or_active"
   }
 ]

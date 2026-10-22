@@ -209,6 +209,47 @@ impl Drop for Claim {
     }
 }
 
+/// A planned segment, as a stream's phase and its owner name it: origin, configuration and
+/// the command that began it (UR-17, UR-25).
+pub(crate) type Segment = (i64, Config, Option<u64>);
+
+/// What a stream's owner is doing with it (UR-17, UR-25). Only [`Streams`]'s transitions
+/// change it; the phase is one value, so a stream the owner has not begun cannot be idle and
+/// active at once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Phase {
+    /// The owner has nothing to begin.
+    Idle,
+    /// The owner has a segment or a switch to begin, or finished one and has not looked for
+    /// the next.
+    Pending,
+    /// The owner is processing a segment; `delivered` is uhd-rx's, the first sample of the
+    /// segment not yet delivered, and `segment` is absent when the plan has none where the
+    /// owner is (a loss during `start`, or a transmit clock past the plan).
+    Active { segment: Option<Segment>, delivered: Option<(i64, Config, i64)> },
+}
+
+impl Default for Phase {
+    /// `StreamState::default` is the state before `start`: nothing begun, but not idle.
+    fn default() -> Phase { Phase::Pending }
+}
+
+impl Phase {
+    pub(crate) fn is_idle(self) -> bool { matches!(self, Phase::Idle) }
+    pub(crate) fn active(self) -> Option<Segment> {
+        match self {
+            Phase::Active { segment, .. } => segment,
+            _ => None,
+        }
+    }
+    pub(crate) fn delivered(self) -> Option<(i64, Config, i64)> {
+        match self {
+            Phase::Active { delivered, .. } => delivered,
+            _ => None,
+        }
+    }
+}
+
 /// One stream's own state (RM-29, design 33 D15): stream `k` of its direction, and not the
 /// instance's other streams.
 #[derive(Default)]
@@ -225,19 +266,14 @@ pub(crate) struct StreamState {
     /// after a failed configure or open. The owner configures again unless this is its own
     /// segment's command and the record holds its set open (UR-36).
     pub configured: Option<u64>,
-    /// The segment this stream's owner is still processing, through its cut (A2).
-    pub active: Option<(i64, Config, Option<u64>)>,
     /// Segments its owner finished processing; a segment with a finite cut remains needed
     /// until its owner records completion (A2).
-    pub completed: Vec<(i64, Config, Option<u64>)>,
+    pub completed: Vec<Segment>,
     /// Who may call the stream's device and whether uhd-tx's report read is in flight
     /// (UR-25).
     claims: Claims,
-    /// uhd-rx's segment, as its origin and configuration, and the first sample of it not yet
-    /// delivered: RM-16's floor, which reaches the plan as `Item.delivered` (UR-17).
-    pub delivered: Option<(i64, Config, i64)>,
-    /// The owner has no stream and nothing planned to begin (UR-25).
-    pub idle: bool,
+    /// What the owner is doing with the stream (UR-17, UR-25).
+    phase: Phase,
     /// The transmit clocks registered, in the order of the transmit plan's segments, and
     /// whether each has ended (RM-25).
     pub clocks: Vec<(Clock, bool)>,
@@ -306,8 +342,10 @@ impl Streams {
     /// streamer another line needs; `None` when it is held or not idle.
     #[must_use]
     pub fn claim_release(&mut self, stream: StreamKey) -> Option<Claim> {
+        let idle = self.is_idle(stream);
+        let active = self.active(stream).is_some();
         let state = self.stream_mut(stream);
-        if state.claims.holder != Holder::Free || !state.idle || state.active.is_some() { return None; }
+        if state.claims.holder != Holder::Free || !idle || active { return None; }
         state.claims.holder = Holder::Release;
         Some(Claim { stream, holder: Holder::Release })
     }
@@ -380,6 +418,72 @@ impl Streams {
         }
     }
 
+    /// UR-25: `start` gives the stream `held` (it has a segment from T0, or a clock) or
+    /// nothing to begin.
+    pub fn starting(&mut self, stream: StreamKey, held: bool) {
+        self.stream_mut(stream).phase = if held { Phase::Pending } else { Phase::Idle };
+    }
+
+    /// UR-25: uhd-rx's search for the next planned segment found one or none.
+    pub fn search(&mut self, stream: StreamKey, found: bool) {
+        self.stream_mut(stream).phase = if found { Phase::Pending } else { Phase::Idle };
+    }
+
+    /// UR-17, UR-25: uhd-rx begins a segment; `delivered` is the first sample not delivered
+    /// (zero), named by the clock and configuration uhd-rx's stream has.
+    pub fn started(&mut self, stream: StreamKey, segment: Option<Segment>, origin: i64, config: Config) {
+        self.stream_mut(stream).phase = Phase::Active { segment, delivered: Some((origin, config, 0)) };
+    }
+
+    /// UR-17: uhd-rx delivered its segment up to `k`.
+    pub fn delivered(&mut self, stream: StreamKey, origin: i64, config: Config, k: i64) {
+        let phase = &mut self.stream_mut(stream).phase;
+        if let Phase::Active { delivered, .. } = phase {
+            *delivered = Some((origin, config, k));
+        }
+    }
+
+    /// UR-17, UR-25: the owner finishes its segment: its phase clears and the segment is
+    /// returned for `complete`, by the caller that records it.
+    pub fn finished(&mut self, stream: StreamKey) -> Option<Segment> {
+        let phase = &mut self.stream_mut(stream).phase;
+        let active = std::mem::replace(phase, Phase::Pending);
+        active.active()
+    }
+
+    /// UR-25: uhd-tx reads its plan: `clock` is its current clock, `switch` a change it has
+    /// not made, `segment` the planned segment at its clock's index.
+    pub fn plan_read(&mut self, stream: StreamKey, clock: bool, switch: bool, segment: Option<Segment>) {
+        self.stream_mut(stream).phase = if clock {
+            Phase::Active { segment, delivered: None }
+        } else if switch {
+            Phase::Pending
+        } else {
+            Phase::Idle
+        };
+    }
+
+    /// The stream's phase, as the transitions left it (UR-25).
+    pub fn phase(&self, stream: StreamKey) -> Phase {
+        self.stream(stream).phase
+    }
+
+    /// UR-25: the owner has nothing to begin.
+    pub fn is_idle(&self, stream: StreamKey) -> bool {
+        self.phase(stream).is_idle()
+    }
+
+    /// The segment the stream's owner is processing (A2).
+    pub fn active(&self, stream: StreamKey) -> Option<Segment> {
+        self.phase(stream).active()
+    }
+
+    /// UR-17, RM-16: the first sample of the segment uhd-rx is delivering that it has not yet
+    /// delivered.
+    pub fn first_undelivered(&self, stream: StreamKey) -> Option<(i64, Config, i64)> {
+        self.phase(stream).delivered()
+    }
+
     /// The line of `stream`, if it has one.
     pub fn line(&self, stream: StreamKey) -> Option<&Line> {
         self.lines.line(stream)
@@ -394,7 +498,7 @@ impl Streams {
     /// first sample uhd-rx has not delivered of the segment it cuts (RM-16). False when the
     /// stream has no line, or when its plan cannot be represented, which refuses it.
     pub fn book(&mut self, core: &Core, stream: StreamKey, mut item: Item) -> bool {
-        let delivered = self.stream(stream).delivered;
+        let delivered = self.first_undelivered(stream);
         let Some(line) = self.lines.line(stream) else { return false };
         if stream.0 == Direction::Rx && matches!(item.kind, Kind::End { .. }) {
             let cuts = |origin, config| line.made(origin, config, item.e, item.seq).ok().flatten().is_some_and(|s| s.cut.is_none());
@@ -1055,7 +1159,7 @@ impl Core {
             let mut streams = lock(&self.streams);
             if self.is_lost() { return false; }
             let state = streams.stream(stream);
-            if !state.idle || state.active.is_some() { return false; }
+            if !streams.is_idle(stream) || streams.active(stream).is_some() { return false; }
             let DeviceSet::Open(set) = state.set else { return false };
             if !streams.needed_before(stream, set, i64::MAX) { return false; }
             let Some(claim) = streams.claim_release(stream) else { return false };
@@ -1459,7 +1563,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             let state = streams.stream_mut(stream);
             state.set = DeviceSet::Open(Channels::first(1));
-            state.idle = true;
+            streams.search(stream, false);
             streams.claim_from_none(stream).expect("the stream is free")
         };
         assert!(!core.release_unneeded(Dir::Rx, 0), "a from-none owner still holds the stream");
@@ -1474,7 +1578,7 @@ mod tests {
     #[test]
     fn ur_34_a_release_closes_an_idle_streamer_needed_by_a_move() {
         let (core, device, _next, from, _to, _seq) = waiting_move();
-        lock(&core.streams).stream_mut(from).idle = true;
+        lock(&core.streams).search(from, false);
         assert!(core.release_unneeded(Dir::Rx, from.1 as usize));
         assert!(device.calls().iter().any(|call| call == "rx_close 1"), "{:?}", device.calls());
         assert_eq!(lock(&core.streams).stream(from).set, DeviceSet::Unknown);
@@ -1489,7 +1593,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             let state = streams.stream_mut(stream);
             state.set = DeviceSet::Open(Channels::first(0).with(1));
-            state.idle = true;
+            streams.search(stream, false);
         }
         assert!(!core.release_unneeded(Dir::Rx, 0));
         assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "{:?}", device.calls());
@@ -1785,8 +1889,10 @@ mod tests {
         let core = two_by_two();
         {
             let mut streams = lock(&core.streams);
-            streams.stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, cfg(1), 1_000));
-            streams.stream_mut(stream_key(Dir::Rx, 1)).delivered = Some((0, cfg(1), 500));
+            for (stream, k) in [(stream_key(Dir::Rx, 0), 1_000), (stream_key(Dir::Rx, 1), 500)] {
+                streams.started(stream, Some((0, cfg(1), None)), 0, cfg(1));
+                streams.delivered(stream, 0, cfg(1), k);
+            }
             streams.end(&core, 5_000, true, false);
         }
         let streams = lock(&core.streams);
@@ -1796,8 +1902,10 @@ mod tests {
         let core = two_by_two();
         {
             let mut streams = lock(&core.streams);
-            streams.stream_mut(stream_key(Dir::Rx, 0)).delivered = Some((0, cfg(1), 3_000));
-            streams.stream_mut(stream_key(Dir::Rx, 1)).delivered = Some((0, cfg(1), 500));
+            for (stream, k) in [(stream_key(Dir::Rx, 0), 3_000), (stream_key(Dir::Rx, 1), 500)] {
+                streams.started(stream, Some((0, cfg(1), None)), 0, cfg(1));
+                streams.delivered(stream, 0, cfg(1), k);
+            }
             streams.end(&core, 400_000, false, false);
         }
         let streams = lock(&core.streams);
@@ -1847,7 +1955,7 @@ mod tests {
     fn ur_25_a_claim_release_needs_a_free_idle_stream_with_no_active_segment() {
         let mut streams = Streams::with_streams(1, 1);
         let k = stream_key(Dir::Rx, 0);
-        streams.stream_mut(k).idle = true;
+        streams.search(k, false);
         let claim = streams.claim_release(k).expect("idle and free");
         assert_eq!(streams.holder(k), Holder::Release);
         assert!(streams.claim_owner(k, None).is_none());
@@ -1856,21 +1964,150 @@ mod tests {
         streams.give_back(claim);
         assert_eq!(streams.holder(k), Holder::Free);
 
-        streams.stream_mut(k).idle = false;
+        streams.search(k, true);
         assert!(streams.claim_release(k).is_none(), "not idle");
         assert_eq!(streams.holder(k), Holder::Free);
-        streams.stream_mut(k).idle = true;
-        streams.stream_mut(k).active = Some((0, cfg(1), None));
+        streams.started(k, Some((0, cfg(1), None)), 0, cfg(1));
         assert!(streams.claim_release(k).is_none(), "an active segment");
-        streams.stream_mut(k).active = None;
+        let _ = streams.finished(k);
 
         let claim = streams.claim_owner(k, None).expect("free");
-        streams.stream_mut(k).idle = true;
+        streams.search(k, false);
         assert!(streams.claim_release(k).is_none(), "the holder alone refuses");
         assert_eq!(streams.holder(k), Holder::Owner { seq: None });
         streams.give_back(claim);
         let claim = streams.claim_release(k).expect("idle, free, no active segment");
         streams.give_back(claim);
+    }
+
+    // ------------------------------------------------------------ 1b-6b: the owner's phase
+
+    #[test]
+    fn ur_25_a_stream_starts_idle_or_waiting() {
+        // UR-25: `start` gives a stream with a segment from T0 (or a transmit clock) a
+        // `Pending` phase and one without anything to begin `Idle`; the default state before
+        // `start` is not idle, so a release does not close its streamer.
+        let mut streams = Streams::with_streams(1, 1);
+        let (rx, tx) = (stream_key(Dir::Rx, 0), stream_key(Dir::Tx, 0));
+        assert_eq!(streams.phase(rx), Phase::Pending, "the default before start");
+        assert_eq!(streams.phase(tx), Phase::Pending);
+        assert!(!streams.is_idle(rx));
+        assert!(streams.active(rx).is_none());
+        assert!(streams.claim_release(rx).is_none(), "a stream before start is not idle");
+
+        streams.starting(rx, false);
+        assert_eq!(streams.phase(rx), Phase::Idle);
+        let claim = streams.claim_release(rx).expect("start gave the stream nothing to begin");
+        streams.give_back(claim);
+
+        streams.starting(rx, true);
+        assert_eq!(streams.phase(rx), Phase::Pending);
+        assert!(!streams.is_idle(rx));
+        assert!(streams.active(rx).is_none());
+
+        streams.starting(tx, true);
+        assert_eq!(streams.phase(tx), Phase::Pending, "a transmit clock waits for its first plan read");
+        streams.starting(tx, false);
+        assert_eq!(streams.phase(tx), Phase::Idle);
+    }
+
+    #[test]
+    fn ur_26_a_receive_start_without_a_segment_stays_active() {
+        // RM-16: uhd-rx begins its T0 stream even when the plan no longer has its segment (a
+        // loss during `start`): the phase is active with no segment, and the delivered tuple
+        // stays; finishing it records nothing and leaves the stream pending.
+        let mut streams = Streams::with_streams(1, 1);
+        let rx = stream_key(Dir::Rx, 0);
+        let config = cfg(1);
+        streams.started(rx, None, 0, config);
+        assert_eq!(streams.phase(rx), Phase::Active { segment: None, delivered: Some((0, config, 0)) });
+        assert!(!streams.is_idle(rx));
+        streams.delivered(rx, 0, config, 500);
+        assert_eq!(streams.first_undelivered(rx), Some((0, config, 500)), "the tuple is kept");
+
+        assert_eq!(streams.finished(rx), None);
+        assert_eq!(streams.phase(rx), Phase::Pending);
+        assert_eq!(streams.first_undelivered(rx), None);
+        assert!(streams.stream(rx).completed.is_empty(), "no segment to record");
+    }
+
+    #[test]
+    fn ur_25_a_search_leaves_the_stream_pending_or_idle() {
+        // UR-25: the search for the next planned segment moves the stream between `Pending`
+        // and `Idle` only, and a found segment is not yet active.
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        streams.search(k, true);
+        assert_eq!(streams.phase(k), Phase::Pending);
+        assert!(!streams.is_idle(k));
+        assert!(streams.active(k).is_none(), "a planned segment is not begun");
+        assert!(streams.claim_release(k).is_none(), "the owner found a segment to begin");
+
+        streams.search(k, false);
+        assert_eq!(streams.phase(k), Phase::Idle);
+        let claim = streams.claim_release(k).expect("nothing left to begin");
+        streams.give_back(claim);
+
+        // Unreachable in production (`begin` runs only with no stream), but the phase is one
+        // value: a later search replaces an active segment rather than leaving it beside Idle.
+        streams.started(k, Some((0, cfg(1), None)), 0, cfg(1));
+        streams.search(k, false);
+        assert_eq!(streams.phase(k), Phase::Idle);
+        assert!(streams.active(k).is_none());
+    }
+
+    #[test]
+    fn ur_17_a_receive_segment_moves_from_pending_to_active_to_pending() {
+        // UR-17: a found segment becomes active with its floor at zero, each block moves the
+        // floor, and finishing returns the segment for the caller's record. A floor written
+        // while the stream is not active is not kept.
+        let mut streams = Streams::with_streams(1, 1);
+        let k = stream_key(Dir::Rx, 0);
+        let config = cfg(1);
+        let segment = (0, config, None);
+        streams.search(k, true);
+        streams.delivered(k, 0, config, 500);
+        assert_eq!(streams.phase(k), Phase::Pending);
+        assert_eq!(streams.first_undelivered(k), None, "nothing is being delivered");
+
+        streams.started(k, Some(segment), 0, config);
+        assert_eq!(streams.phase(k), Phase::Active { segment: Some(segment), delivered: Some((0, config, 0)) });
+        streams.delivered(k, 0, config, 3_000);
+        assert_eq!(streams.first_undelivered(k), Some((0, config, 3_000)));
+
+        assert_eq!(streams.finished(k), Some(segment));
+        assert_eq!(streams.phase(k), Phase::Pending);
+        assert_eq!(streams.first_undelivered(k), None);
+        streams.delivered(k, 0, config, 4_000);
+        assert_eq!(streams.phase(k), Phase::Pending, "a finished segment's floor cannot reappear");
+        assert!(streams.stream(k).completed.is_empty(), "the caller records completion");
+
+        streams.complete(k, segment);
+        assert_eq!(streams.stream(k).completed, [segment]);
+    }
+
+    #[test]
+    fn ur_26_a_finished_stream_clears_only_its_own_floor() {
+        // UR-26, RM-16: finishing stream 1 clears its own floor and leaves stream 0's; an
+        // abort's end after both delivered floors cuts stream 0 at its own floor and stream 1,
+        // no longer running, at the end's instant instead.
+        let core = two_by_two();
+        let (rx0, rx1) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
+        let segment = (0, cfg(1), None);
+        {
+            let mut streams = lock(&core.streams);
+            for (stream, k) in [(rx0, 3_000), (rx1, 500)] {
+                streams.started(stream, Some(segment), 0, cfg(1));
+                streams.delivered(stream, 0, cfg(1), k);
+            }
+            assert_eq!(streams.finished(rx1), Some(segment));
+            assert_eq!(streams.first_undelivered(rx0), Some((0, cfg(1), 3_000)), "stream 0's floor stands");
+            assert_eq!(streams.first_undelivered(rx1), None, "stream 1's floor is cleared");
+            streams.end(&core, 800_000, true, false);
+        }
+        let streams = lock(&core.streams);
+        assert_eq!(streams.planned(rx0)[0].segment.cut, Some(3_000), "stream 0's own delivered floor");
+        assert_eq!(streams.planned(rx1)[0].segment.cut, Some(4_000), "stream 1 is cut at the end's instant, not its old floor");
     }
 
     #[test]
@@ -1895,7 +2132,7 @@ mod tests {
         let claim = streams.claim_owner(k, Some(1)).expect("free");
         assert!(!streams.may_call_from_none(k));
         streams.give_back(claim);
-        streams.stream_mut(k).idle = true;
+        streams.search(k, false);
         let claim = streams.claim_release(k).expect("free, idle");
         assert!(!streams.may_call_from_none(k));
         streams.give_back(claim);
@@ -1921,7 +2158,7 @@ mod tests {
         let claim = streams.claim_from_none(k).expect("free");
         assert!(!streams.begin_read(k), "a from-none enable owns the stream");
         streams.give_back(claim);
-        streams.stream_mut(k).idle = true;
+        streams.search(k, false);
         let claim = streams.claim_release(k).expect("free, idle");
         assert!(!streams.begin_read(k));
         streams.give_back(claim);
@@ -1951,7 +2188,7 @@ mod tests {
         streams.end_read(k);
         streams.give_back(claim);
 
-        streams.stream_mut(k).idle = true;
+        streams.search(k, false);
         let claim = streams.claim_release(k).expect("free, idle");
         streams.begin_shutdown_read(k);
         assert!(streams.reading(k));
@@ -2027,7 +2264,7 @@ mod tests {
         let claim = streams.claim_from_none(from).expect("free");
         assert!(!streams.move_source_busy(to, Some(7)), "from-none is not the owner");
         streams.give_back(claim);
-        streams.stream_mut(from).idle = true;
+        streams.search(from, false);
         let claim = streams.claim_release(from).expect("free, idle");
         assert!(!streams.move_source_busy(to, Some(7)), "release is not the owner");
         streams.give_back(claim);
@@ -2037,7 +2274,7 @@ mod tests {
     #[test]
     fn ur_34_a_release_gives_back_a_claim_when_loss_arrives_after_the_claim() {
         let (core, device, _next, from, _to, _seq) = waiting_move();
-        lock(&core.streams).stream_mut(from).idle = true;
+        lock(&core.streams).search(from, false);
         let before = device.calls().len();
         let (entered, reached) = std::sync::mpsc::channel();
         let (resume, wait) = std::sync::mpsc::channel();
