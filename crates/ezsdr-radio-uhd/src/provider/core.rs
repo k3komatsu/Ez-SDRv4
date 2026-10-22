@@ -105,7 +105,7 @@ impl Clock {
 /// [`StreamState`] (RM-29, design 33 D15). Lock order: a segment configuration's `updates`,
 /// then this, then `rec`; never held across a device call.
 pub(crate) struct Streams {
-    /// The instance's lines, one per stream, keyed by `(direction, k)` (RM-26, RM-29,
+    /// The instance's lines, one per stream, keyed by `(direction, k)` (RM-25, RM-29,
     /// RM-34); none for a receive side with no link.
     pub lines: timeline::Lines,
     /// The instance's receive streams; `k` is a stream's number (RM-29).
@@ -274,7 +274,7 @@ impl Streams {
             item.delivered = item.delivered.or(delivered.filter(|(origin, config, _)| cuts(*origin, *config)).map(|(_, _, k)| k));
         }
         if let Err(error) = self.lines.book(stream, item) {
-            core.command_rejected(None, "update_parameter", &format!("RM-26: {error}"));
+            core.command_rejected(None, "update_parameter", &format!("RM-25: {error}"));
             return false;
         }
         self.changed(core, stream);
@@ -300,7 +300,7 @@ impl Streams {
                 refused
             }
             Err(error) => {
-                core.command_rejected(None, "update_parameter", &format!("RM-26: {error}"));
+                core.command_rejected(None, "update_parameter", &format!("RM-25: {error}"));
                 false
             }
         }

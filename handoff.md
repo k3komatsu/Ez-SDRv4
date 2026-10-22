@@ -17,25 +17,22 @@
 ## 2. 次にすること
 
 1. **実機**：2026-10-20 に BP0 と BP5 を 2 台で済ませた（[bench-results.md](plan/phase8/bench-results.md)：Phase 7 の hardware テスト 29 本が #1＋OBX・#2＋UBX とも通り，悪くなった数値は無い）．今つながっているのは #1＋OBX．組み換えは owner に頼む（2026-10-20 夜は翌朝まで不可）．
-2. **Phase 8 の段階 1b-5c-2**（`ezsdr_radio` の `DeviceDescription`・`x3xx::description`・今の key の宣言・`channel_keys`，selector の `keys`〈Mock，UHD，`crates/ezsdr-server/tests/protocol.rs`，`python/tests/test_easy_api.py`，acceptance の rig〉を消す．spec 07 と Vision の今の key の文〈§8 の `radio.rx.channels` など〉．1b-3c の minor 1〈RX を TX より先に tune するテスト，MR-30 の `tune_order`〉．[設計 33](plan/phase8/33-channels-and-streams.md) §5 の 1b-5 行）．1b-5a（server と Python），1b-5b（MockRadio），1b-5c-1（UHD Module）は完了（[00-overview](plan/phase8/00-overview.md) §8．1b-5c-2 へ送るものは [reviews/1b5c1-opus.md](plan/phase8/reviews/1b5c1-opus.md) §3）．実装は Luna，セルフレビューは DeepSeek（owner 2026-10-21）．指示書には「orchestrator のファイルは読むだけ，見張りのプロセスは止めない，到達できる系列のテストを代わりなしで消さない，differential の操作を縮めない」を入れる．
+2. **Phase 8 の次の段階：UHD Module の stream ごとの状態を 1 つの明示的な状態にまとめる**（owner 2026-10-21）．`stream-lifecycle-scattered` が 1b-4d-2・1b-4e-2 で 5 件（loss の周り）出たため（[failure-mechanisms](plan/maintenance/failure-mechanisms.md)）．今は `StreamState` の印（`set`，`configured`，`idle`，`busy`，`busy_seq`，`reading`，`active`／`completed`）と `device_gate`・`lost` を各 thread が別々に読み書きしている．設計メモ（印を状態と遷移に置き換える案，消せる印，テストで固める遷移）から始める risky な段階．Sol に設計メモを見せてよい．P472（`ur_26_two_receive_streams_end_at_their_own_stops` の `delivered` の kill）は負荷で揺れる（[reviews/1b5c1-opus.md](plan/phase8/reviews/1b5c1-opus.md) §6）．この段階で観測を決定的にする．1b-5（今の key を消す切り替え）は 1b-5a〜1b-5c-2 で完了（[00-overview](plan/phase8/00-overview.md) §8，最後は [reviews/1b5c2-opus.md](plan/phase8/reviews/1b5c2-opus.md)）．**実装役とセルフレビューは `opencode/deepseek-v4.1-flash-free#max`，同時に 1 本だけ**（owner 2026-10-22．上限に当たったら走っていた本数を記録して owner に伝え，勝手にモデルを変えない）．指示書には「orchestrator のファイルは読むだけ，見張りのプロセスは止めない，到達できる系列のテストを代わりなしで消さない，differential の操作を縮めない，消した名前を `new` に持つ行と消したテストを `filter` に持つ行を grep する」を入れる．
    - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
-   - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．今の key の queue の会計は 1b-5 で消える．
+   - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．
    - 1b-4e-2 の実機（2026-10-21，[bench-results](plan/phase8/bench-results.md)）：閉じた streamer の front end を別の stream で開くのは受信・送信とも VERIFIED．**持ったまま 2 本目を開くと，UHD は拒否するが持っている streamer の edge を壊し，プロセスが abort する**．FakeDevice は同じ日から，その open を拒否したうえで fake の drop でテストを失敗させる（UR-33，`take_abort`）．
    - 4d-3 の持ち越し：`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Session の Manifest ファイルまで通さない．4e-2 の持ち越し：待ちが origin を越える場合，close の時点で読めない TX の report，`effective != e` の到達性（[1b4e2-opus](plan/phase8/reviews/1b4e2-opus.md) §1）．
-   - **1b-5 の次の段階**（owner 2026-10-21）：UHD Module の stream ごとの状態を 1 つの明示的な状態にまとめる．`stream-lifecycle-scattered` が 1b-4d-2・1b-4e-2 で 5 件（loss の周り）出たため（[failure-mechanisms](plan/maintenance/failure-mechanisms.md)）．今は `StreamState` の印（`set`，`configured`，`idle`，`busy`，`busy_seq`，`reading`，`active`／`completed`）と `device_gate`・`lost` を各 thread が別々に読み書きしている．設計メモ（印を状態と遷移に置き換える案，消せる印，テストで固める遷移）から始める risky な段階．P472（`ur_26_two_receive_streams_end_at_their_own_stops` の `delivered` の kill）は負荷で揺れる（9 回中 1 回 survived．[reviews/1b5c1-opus.md](plan/phase8/reviews/1b5c1-opus.md) §6）．この段階で観測を決定的にする．
    - mutation の見張り（`mutation_watchdog.py`）は，削除の mutant（`new` ⊂ `old`）と `new` がよくある語の行で，実装役の当て直し中に誤報を出す（1b-4e-2 で 4 回）．直すか，書き換えの多い段階では行の検査を外して gate で全行の一致を確かめる．
    - **大きさ**（owner 2026-10-19）：1 段階は本体とテストで約 1,500 行．指示書でテストの繰り返し（Manifest の section を引く式，拒否の理由，device の準備）を helper にさせ，テスト計画は順序ごとに assert を 1〜2 個に絞る．
    - **手順**：AGENTS.md §9．計画を先に書く手順の評価は 4b・4c・4d-1c・4d-2 の記録（[1b4d2-opus](plan/phase8/reviews/1b4d2-opus.md) §4 など）．
    - **持ち越し**：
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
-     - [1b-3c の裁定](plan/phase8/reviews/1b3c-opus.md) の minor 1（RX と TX の同じ origin の引き順のテスト，1b-5）．
-     - 1b-4c の O5：front end の照合が 2 つのモードの腕に分かれている（1b-5 で畳む）．
    - **その後**：
      - 2（#51 の設計メモ→#51・D2，#62 と D9 の DDC/DUC の release の規則，#59，A2 のテスト）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
-   - **実装役**（owner 2026-10-19）：判断の多い段階（設計の作り替え，テスト計画，並行処理）は DeepSeek（`opencode-go/deepseek-v4.1-flash#max`），指示の決まった小さな修正の回は Claude Code の Haiku のサブエージェント（`model: haiku`）．回ごとに枠の消費を owner に報告する．セルフレビューは DeepSeek．1b-4d-1a では 5 回とも判定を出さずに終わったが，1b-4d-1b でチェックリストを 4 項目にし，`timeout 2400`，mutation を流さないと明記したら 3 回とも判定が出た．OpenCode2・Claude Code・Codex には ponytail が入っている．
+   - **セルフレビュー**：checklist は 4 項目，`timeout 2400`，mutation を流さないと明記する（1b-4d-1a では判定が出ず，1b-4d-1b でこうしたら出た）．OpenCode2・Claude Code・Codex には ponytail が入っている．
 3. **実機の残り**：複数 stream の layout（H1，1b-4e と段階 3 の後），CBX，混在構成（BP4b），XG（BP4c）．`DeviceAuthority` の UR-7 のやり直しはまだ一度も働いていない．用意できる機材（2026-10-16）：X300 × 2，OBX，UBX（壊れているかも），CBX，LFTX・LFRX・BasicTX・BasicRX（どれも2枚ずつ可，ただし他の実験から借りるので手間）．揃ったら最初に BP0（probe，UBX が動くか，2台目の FPGA image の版と HG/XG）．各段階で要るもの（根拠：Vision §67〈`design/vision/11-boundaries-invariants-and-roadmap.md:317-337`〉，`plan/phase7/00-overview.md:103`「One device is enough for §59's claim」）：
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE は usrp-lnx03 の X710 の空きポート（§6.2）が使える．
@@ -77,6 +74,7 @@
 - [ ] 文書の種類ごとに受け付ける版を設定する（今は共通の `SUPPORTED_VERSIONS`．項目5で凍結時に延期，[24-prefreeze-audit.md](plan/maintenance/24-prefreeze-audit.md) の 2026-10-09 item 5 の行）．
 - [ ] Kernel API を 4.0.0 に，`SCHEMA_CHANGELOG.md` の見出しを凍結後の形式に．凍結までは版を上げず changelog も書かない（AGENTS.md §6）．
 - [ ] 凍結後の OV-12 を道具で守る：`EZSDR_UPDATE_SCHEMAS=1` は形の変わった `*.v1.json` を書き換えず拒否する（説明文の修正だけ許す）．
+- [ ] 将来の設定エディタ（GUI，[34-future-config-editor.md](plan/maintenance/34-future-config-editor.md)）のために Kernel の型を変える必要がないことを確かめる．
 
 ## 5. 進め方と道具
 

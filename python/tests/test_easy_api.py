@@ -208,7 +208,7 @@ class EasyApi(unittest.TestCase):
     def test_ea_16_alias_without_stream_zero_raises_error(self) -> None:
         profile = self.default_profile()
         profile["bindings"]["radio"]["profile"] = {"name": "ideal", "version": {"major": 2, "minor": 0, "patch": 0}}
-        profile["bindings"]["radio"]["selector"] = {"id": "radio", "keys": "channel", "rx": 1, "tx": 0}
+        profile["bindings"]["radio"]["selector"] = {"id": "radio", "rx": 1, "tx": 0}
         profile["environment"]["sim.channel"]["couplings"] = []
         with self.connect(profile) as sdr:
             with self.assertRaises(ezsdr.Error):
@@ -327,7 +327,7 @@ class EasyApi(unittest.TestCase):
         ideal = self.default_profile()
         ideal["bindings"]["radio"]["profile"] = {"name": "ideal", "version": {"major": 2, "minor": 0, "patch": 0}}
         # `ideal` uses channel counts rather than an X3xx physical layout (design 33 D5).
-        ideal["bindings"]["radio"]["selector"] = {"id": "radio", "keys": "channel", "rx": 1, "tx": 2}
+        ideal["bindings"]["radio"]["selector"] = {"id": "radio", "rx": 1, "tx": 2}
         with self.connect(ideal) as sdr:
             self.assertEqual((len(sdr.rx_channels), len(sdr.tx_channels), len(sdr.tx_streams)), (1, 2, 2))
             exact = script(sdr)

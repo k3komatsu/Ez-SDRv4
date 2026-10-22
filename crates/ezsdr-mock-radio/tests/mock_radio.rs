@@ -412,9 +412,7 @@ fn mr_02_from_binding_refusals() {
     b.selector.remove(&Ident::parse("rx").unwrap());
     b.selector.remove(&Ident::parse("tx").unwrap());
     assert_eq!(MockRadio::from_binding(&b).unwrap().instance().tree.children.iter().map(|child| child.id.path()).collect::<Vec<_>>(), ["mock/rx/s0"]);
-    b.selector.remove(&Ident::parse("keys").unwrap());
-    assert_eq!(MockRadio::from_binding(&b).unwrap().instance().tree.children.iter().map(|child| child.id.path()).collect::<Vec<_>>(), ["mock/rx/s0"]);
-    // Without `keys`, x3xx still reads a layout; its required `rx` and `tx` are validated.
+    // An x3xx layout requires `rx` and `tx`.
     b = binding("x3xx");
     b.selector.clear();
     assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("needs `rx`"));
@@ -523,7 +521,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
 
 #[test]
 fn mr_03_a_cbx_layer_starts_at_its_board_s_default_frequency() {
-    // The Mock's configuration starts from its description's defaults (RM-5, RM-26, design
+    // The Mock's configuration starts from its layout description's defaults (RM-5, RM-29, design
     // 33 D5), so a CBX layer starts on the CBX's own 2.45 GHz, not on a fixed 1 GHz that
     // its own range excludes (design 33 D12).
     let cbx = Value::List(vec![Scalar::from("0:A:cbx:0")]);
@@ -567,6 +565,9 @@ fn mr_06_coerce_cases() {
     assert!(!out_of_range.applied.contains_key(&key("radio.rx.c0.frequency_hz")));
     assert_eq!(out_of_range.rejected.len(), 1);
     assert!(out_of_range.rejected[0].reason.starts_with("RM-8: 7000000000"));
+    let absent_channel = radio.coerce(&request(&[("radio.rx.c2.gain_db", eq(Scalar::from(0)))] )).unwrap();
+    assert_eq!(absent_channel.rejected.len(), 1);
+    assert_eq!(absent_channel.rejected[0].reason, "RM-4: no such channel c2");
 
     let tie = radio.coerce(&request(&[("radio.rx.c0.gain_db", eq(Scalar::try_from(20.25).unwrap()))] )).unwrap();
     assert_eq!(tie.applied[&key("radio.rx.c0.gain_db")], Value::num(20.0).unwrap());
@@ -691,8 +692,7 @@ fn mr_07_prepare_reports_the_coercions_coerce_reported() {
 }
 
 #[test]
-fn mr_08_effective_holds_exactly_the_ten_configuration_keys() {
-    // Keep spec 07's citation until 1b-5c; the assertion now covers RM-27's layout key set.
+fn mr_08_effective_holds_one_channel_and_its_stream_rate() {
     let selector = [("rx", Value::from(1)), ("tx", Value::from(0))];
     let harness = Harness::new("ideal", &[], &selector, &[], None);
     let expected: BTreeSet<Key> = [

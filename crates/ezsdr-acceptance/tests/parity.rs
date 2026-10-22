@@ -68,12 +68,10 @@ fn eq(value: Scalar) -> Constraint {
     Constraint::Eq { value }
 }
 
-/// The selector of a layout, with `keys: "channel"` (RM-38) and the shared values UHD's
-/// `args` beside (design 33 D5).
+/// The selector's shared layout values (design 33 D5).
 fn selector(rx: &[&str], tx: &[&str]) -> BTreeMap<Ident, Value> {
     let list = |elements: &[&str]| Value::List(elements.iter().map(|e| Scalar::from(*e)).collect());
     BTreeMap::from([
-        (Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
         (Ident::parse("rx").unwrap(), list(rx)),
         (Ident::parse("tx").unwrap(), list(tx)),
     ])

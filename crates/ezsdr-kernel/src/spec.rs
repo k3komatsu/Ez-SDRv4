@@ -658,9 +658,8 @@ pub struct SubResourceReq {
 /// What a Spec requires of one resource, and nothing about how it is met.
 ///
 /// Direction-asymmetric requests are expressed as distinct keys under the
-/// Vocabulary's prefix — `radio.rx.channels`, `radio.tx.channels` — not as a single
-/// count. The Kernel does not know that `rx` means anything; the flattening is what
-/// keeps it generic while still expressing the asymmetry re-review R1 required.
+/// Vocabulary's prefix — `radio.rx.s0.sample_rate_hz`, `radio.tx.s0.sample_rate_hz` —
+/// not as one shared value. The Kernel does not know that `rx` means anything.
 ///
 /// Rule: SB-12, decision B2.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]

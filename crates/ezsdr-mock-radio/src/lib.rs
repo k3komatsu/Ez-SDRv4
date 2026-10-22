@@ -36,9 +36,6 @@ pub use profile::{Profile, ProfileKind};
 /// The reason a lost device gives for everything it cancels or refuses (MR-20).
 const DEVICE_LOST: &str = "MR-20: device lost";
 
-/// The selector key that picks the layout builder's channel and stream keys (MR-38).
-const KEYS: &str = "keys";
-
 fn module_ref() -> ModuleRef {
     ModuleRef {
         id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"),
@@ -88,7 +85,7 @@ pub struct MockRadio {
     events: Option<std::sync::Arc<dyn EventSink>>,
     root: Option<ClockDomainId>,
     /// The instance's streams' timelines, one line per stream, keyed by `(direction, k)`
-    /// (RM-26, RM-34); a stream's line is absent until `start` and `arm` book it.
+    /// (RM-25, RM-34); a stream's line is absent until `start` and `arm` book it.
     lines: timeline::Lines,
     /// The instance's receive streams; `k` is a stream's number (RM-29, MR-10).
     rx: Vec<RxStream>,
@@ -358,10 +355,7 @@ impl MockRadio {
         if binding.feed.is_some() {
             return Err(reject("Provider binding cannot carry a feed"));
         }
-        // The selector is validated by the shared Vocabulary rule; MockRadio always uses
-        // the layout description whether `keys` is absent or `channel`.
-        ezsdr_radio::channel_keys(&binding.selector).map_err(|why| reject(&why))?;
-        let allowed: Vec<&str> = ["id", "block_len_jitter", "rx_test_pattern", "arm_after", KEYS]
+        let allowed: Vec<&str> = ["id", "block_len_jitter", "rx_test_pattern", "arm_after"]
             .into_iter()
             .chain(x3xx::SELECTOR_KEYS.into_iter().filter(|_| kind == ProfileKind::X3xx))
             .chain(["rx", "tx"])
@@ -485,9 +479,6 @@ impl MockRadio {
         ezsdr_radio::addressed(
             &self.instance.id,
             node,
-            true,
-            self.rx.first().map(|stream| &stream.node),
-            self.tx.first().map(|stream| &stream.node),
             |direction| match direction {
                 Direction::Rx => self.rx.len(),
                 Direction::Tx => self.tx.len(),
@@ -722,7 +713,7 @@ impl MockRadio {
     /// with `seq`.
     fn rx_runs(&self, k: usize, f: i64, seq: u64) -> Result<bool, ModuleError> {
         Ok(match (self.rx[k].running.as_ref(), self.lines.line(Self::rx_key(k))) {
-            (Some(rx), Some(line)) => f >= rx.origin && line.made(rx.origin, rx.config(), f, seq).map_err(rm26)?.is_some_and(|segment| segment.cut.is_none()),
+            (Some(rx), Some(line)) => f >= rx.origin && line.made(rx.origin, rx.config(), f, seq).map_err(rm25)?.is_some_and(|segment| segment.cut.is_none()),
             _ => false,
         })
     }
@@ -1216,7 +1207,7 @@ impl MockRadio {
     fn rx_settle(&mut self, k: usize, t: i64) -> Result<(), ModuleError> {
         let Some((origin, config, by, ended)) = self.rx[k].running.as_ref().map(|rx| (rx.origin, rx.config(), rx.by, rx.ended)) else { return Ok(()) };
         let Some(line) = self.lines.line(Self::rx_key(k)) else { return Ok(()) };
-        match line.made(origin, config, t, u64::MAX).map_err(rm26)? {
+        match line.made(origin, config, t, u64::MAX).map_err(rm25)? {
             None => {
                 self.end_layout_segment(Direction::Rx, k, origin, by, t);
                 self.rx[k].running = None;
@@ -1271,23 +1262,23 @@ impl MockRadio {
         Ok(())
     }
 
-    /// Books a receive command or fault on receive stream `k`'s timeline (RM-26); returns
+    /// Books a receive command or fault on receive stream `k`'s timeline (RM-25); returns
     /// its effective instant, or the item's own when the stream has no line yet (a change
     /// before `start`).
     fn book_rx(&mut self, k: usize, item: Item) -> Result<i64, ModuleError> {
         if self.lines.line(Self::rx_key(k)).is_none() {
             return Ok(item.e);
         }
-        self.lines.book(Self::rx_key(k), item).map_err(rm26)
+        self.lines.book(Self::rx_key(k), item).map_err(rm25)
     }
 
-    /// Books a transmit command on transmit stream `k`'s timeline (RM-26); nothing when the
+    /// Books a transmit command on transmit stream `k`'s timeline (RM-25); nothing when the
     /// stream has no line (no transmit clock).
     fn book_tx(&mut self, k: usize, item: Item) -> Result<(), ModuleError> {
         if self.lines.line(Self::tx_key(k)).is_none() {
             return Ok(());
         }
-        self.lines.book(Self::tx_key(k), item).map_err(rm26)?;
+        self.lines.book(Self::tx_key(k), item).map_err(rm25)?;
         Ok(())
     }
 
@@ -1829,7 +1820,7 @@ impl MockRadio {
         candidate.insert(key.clone(), applied.clone());
         let move_change = matches!(&cold, Some(ColdChange::Move { .. }));
         if !move_change { self.next_order = self.next_order.saturating_add(1); }
-        // RM-25, RM-26, RM-27: a `cold` change is planned on its stream's line when booked,
+        // RM-25, RM-27: a `cold` change is planned on its stream's line when booked,
         // with the set and rate the configuration leaves in effect at `e`; a transmit one
         // registers its clock and ends its predecessor now (VH-2).
         let mut tx = Vec::new();
@@ -2119,8 +2110,8 @@ impl MockRadio {
 
 }
 
-fn rm26(error: ezsdr_kernel::time::TimeError) -> ModuleError {
-    ModuleError::rejected(format!("RM-26: {error}"))
+fn rm25(error: ezsdr_kernel::time::TimeError) -> ModuleError {
+    ModuleError::rejected(format!("RM-25: {error}"))
 }
 
 /// The integer `configuration` holds for `name`, if it holds one.
@@ -2416,7 +2407,7 @@ impl Provider for MockRadio {
                 let line = self.line(Direction::Rx, k, target, &self.config)?;
                 self.lines.insert(Self::rx_key(k), line);
                 let seq = self.arrival();
-                self.lines.book(Self::rx_key(k), Item { e: target, seq, ready: target, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop }).map_err(rm26)?;
+                self.lines.book(Self::rx_key(k), Item { e: target, seq, ready: target, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop }).map_err(rm25)?;
                 continue;
             }
             let line = self.line(Direction::Rx, k, target, &self.config)?;

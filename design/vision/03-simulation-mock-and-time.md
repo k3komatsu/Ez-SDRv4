@@ -68,7 +68,7 @@ A software radio that accepts everything is the OpenAirInterface `rfsimulator` p
 
 The Radio Model requires every Provider to publish its timing values as capabilities next to its PerformanceEnvelope (§34).
 
-The Radio Model Vocabulary defines coercion rules; supported grids, such as the values in `radio.rx.sample_rate_hz` and `radio.tx.sample_rate_hz`, are declared as capabilities. A Provider also exposes its command lead through the generic `ProviderInstance.min_command_lead`. The Kernel uses that field for Action admission and the pre-start `RejectAtPlan` check; it does not read `radio.timing.*` by name (MA-10; RS-19, KC-19).
+The Radio Model Vocabulary defines coercion rules; supported grids, such as the values in `radio.rx.s0.sample_rate_hz` and `radio.tx.s0.sample_rate_hz`, are declared as capabilities. A Provider also exposes its command lead through the generic `ProviderInstance.min_command_lead`. The Kernel uses that field for Action admission and the pre-start `RejectAtPlan` check; it does not read `radio.timing.*` by name (MA-10; RS-19, KC-19).
 
 and the following are rules, not options:
 

@@ -1,4 +1,4 @@
-//! Shared helpers for MockRadio's layout-key fixtures.
+//! Shared helpers for MockRadio's layout fixtures.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -12,7 +12,6 @@ pub fn x3xx_selector<R: AsRef<str>, T: AsRef<str>>(rx: &[R], tx: &[T]) -> BTreeM
     let tx_list = Value::List(tx.iter().map(|element| Scalar::from(element.as_ref())).collect());
     let mut selector = layout_selector("mock", list(rx), tx_list);
     selector.remove(&Ident::parse("id").unwrap());
-    selector.insert(Ident::parse("keys").unwrap(), Value::from("channel"));
     selector
 }
 
@@ -36,7 +35,6 @@ pub fn mock_x3xx_selector<R: AsRef<str>, T: AsRef<str>>(id: &str, rx: &[R], tx: 
 pub fn ideal_selector(id: &str, rx: i64, tx: i64) -> BTreeMap<Ident, Value> {
     BTreeMap::from([
         (Ident::parse("id").unwrap(), Value::from(id)),
-        (Ident::parse("keys").unwrap(), Value::from("channel")),
         (Ident::parse("rx").unwrap(), Value::from(rx)),
         (Ident::parse("tx").unwrap(), Value::from(tx)),
     ])
@@ -45,7 +43,6 @@ pub fn ideal_selector(id: &str, rx: i64, tx: i64) -> BTreeMap<Ident, Value> {
 /// Adds the layout selector and default channel counts to an acceptance binding selector.
 pub fn binding_selector(profile: &str, mut selector: JsonValue) -> JsonValue {
     let object = selector.as_object_mut().expect("a binding selector is an object");
-    object.entry("keys").or_insert(json!("channel"));
     if profile == "x3xx" {
         object.entry("rx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));
         object.entry("tx").or_insert(json!(["0:A:ubx:0", "0:B:ubx:0"]));

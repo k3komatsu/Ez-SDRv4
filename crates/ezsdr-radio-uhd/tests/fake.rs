@@ -653,7 +653,7 @@ impl Direct {
         Direct::build(config, constraints, links, json!({}))
     }
 
-    /// With selector keys beside `args` (UR-5).
+    /// With selector values beside `args` (UR-5).
     fn build(config: FakeConfig, constraints: &[(&str, Scalar)], links: Vec<AttachedPort>, selector: Json) -> Direct {
         Direct::build_with(config, constraints, links, selector, BTreeMap::new())
     }
@@ -4293,40 +4293,10 @@ fn ur_25_an_enable_at_a_timed_update_s_instant_applies_it() {
 // ------------------------------------------------ Phase 8 stage 1b-4c: the layout's keys
 
 #[test]
-fn ur_05_the_keys_value_picks_one_key_set() {
-    // UR-5, RM-38: absent `keys` and `keys: "channel"` both use the layout (RM-29).
-    let absent = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), fake(FakeConfig { serial: "ur05-absent".to_owned(), ..FakeConfig::default() })).unwrap();
-    let explicit = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), fake(FakeConfig { serial: "ur05-channel".to_owned(), ..FakeConfig::default() })).unwrap();
-    let five = [
-        ("radio.rx.c0.frequency_hz", Scalar::try_from(1e9).unwrap()),
-        ("radio.rx.c0.gain_db", Scalar::from(0)),
-        ("radio.rx.c0.antenna", Scalar::from("RX2")),
-        ("radio.rx.c0.stream", Scalar::from(0)),
-        ("radio.rx.s0.sample_rate_hz", Scalar::try_from(1e6).unwrap()),
-    ];
-    for radio in [&absent, &explicit] {
-        let report = radio.coerce(&request(&five)).unwrap();
-        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
-        assert_eq!(report.applied.len(), 5);
-    }
-    // Both trees have stream nodes and one receive port per channel (RM-29).
-    let ids = |radio: &UhdRadio| radio.instance().tree.children.iter().map(|child| child.id.path().to_owned()).collect::<Vec<_>>();
-    assert_eq!(ids(&absent), ["usrp/rx/s0", "usrp/rx/s1", "usrp/tx/s0", "usrp/tx/s1"]);
-    assert_eq!(ids(&explicit), ids(&absent));
-    let ports = |radio: &UhdRadio| radio.instance().tree.ports.iter().map(|port| port.name.as_str().to_owned()).collect::<Vec<_>>();
-    assert_eq!(ports(&absent), ["rx0", "rx1"]);
-    assert_eq!(ports(&explicit), ports(&absent));
-}
-
-#[test]
-fn ur_05_every_other_keys_value_is_refused() {
-    // UR-5, RM-38: only the string `channel` selects the layout keys; another value, and a
-    // value that is not a string, is refused with MockRadio's wording under `UR-5:`.
-    for value in [json!("layout"), json!("Channel"), json!("channel "), json!(""), json!(1), json!(true), json!(["channel"])] {
-        let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": value.clone() }), Some(x3xx())), fake(FakeConfig::default())).err().unwrap();
-        assert_eq!(error.kind, ModuleErrorKind::Rejected, "{value}");
-        assert_eq!(error.message, "UR-5: selector `keys` must be the string `channel`", "{value}");
-    }
+fn ur_05_keys_is_an_unknown_selector_key() {
+    let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), fake(FakeConfig::default())).err().unwrap();
+    assert_eq!(error.kind, ModuleErrorKind::Rejected);
+    assert_eq!(error.message, "UR-5: unsupported selector key `keys`");
 }
 
 /// The two directions' `set_subdev_spec` calls of a binding, in order (UR-5, H2).
@@ -4339,7 +4309,7 @@ fn ur_05_the_layout_builds_the_subdev_spec() {
     // UR-5, H2: a layout with elements sets each direction's subdev spec from them, in
     // logical order, before its channel map is read; the device's channels are that spec's.
     let device = fake(FakeConfig { front_ends: vec!["UBX", "BasicRX"], serial: "ur05-spec-a".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel",
+    let selector = json!({ "args": ARGS,
         "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] });
     let radio = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     let specs = spec_calls(&device);
@@ -4352,7 +4322,7 @@ fn ur_05_the_layout_builds_the_subdev_spec() {
     assert_eq!(section_of(radio.instance(), "device")["rx_channels"], 3, "the manifest's channels are the spec's, read after it");
     // The transmit side: an LFTX in slot B, its front end's number in the name (H5).
     let device = fake(FakeConfig { front_ends: vec!["UBX", "LFTX"], serial: "ur05-spec-b".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:lf_tx:0"] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:lf_tx:0"] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     let specs = spec_calls(&device);
     assert!(specs.contains(&"set_subdev_spec rx A:0".to_owned()), "{specs:?}");
@@ -4365,7 +4335,7 @@ fn ur_05_the_layout_s_order_is_the_device_s_channel_order() {
     // UR-5, H1: the spec's order is the channel order, so a layout that is not UHD's
     // default order (slot A first) maps channel 0 to slot B (RM-28).
     let device = fake(FakeConfig { front_ends: vec!["OBX", "UBX"], serial: "ur05-order".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:ubx:0", "0:A:obx:0"], "tx": ["0:A:obx:0"] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:B:ubx:0", "0:A:obx:0"], "tx": ["0:A:obx:0"] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0 A:0".to_owned()), "{:?}", device.calls());
     assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "UBX RX");
@@ -4376,17 +4346,12 @@ fn ur_05_the_layout_s_order_is_the_device_s_channel_order() {
 fn ur_05_a_direction_without_elements_sets_no_spec() {
     // UR-5, H7: a direction with no element is not set — an empty spec is one the fake, and
     // UHD's RFNoC path, would take as something else — and it keeps the device's own map.
-    for keys in [true, false] {
-        let device = fake(FakeConfig { serial: format!("ur05-empty-{keys}"), ..FakeConfig::default() });
-        let mut selector = json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": [] });
-        if keys {
-            selector["keys"] = json!("channel");
-        }
-        let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
-        assert!(!device.calls().iter().any(|call| call.starts_with("set_subdev_spec tx")), "{:?}", device.calls());
-        assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Tx), 2, "keys: {keys}: the map is the device's own");
-        assert_eq!(spec_calls(&device), ["set_subdev_spec rx A:0"], "keys: {keys}");
-    }
+    let device = fake(FakeConfig { serial: "ur05-empty".to_owned(), ..FakeConfig::default() });
+    let selector = json!({ "args": ARGS, "rx": ["0:A:ubx:0"], "tx": [] });
+    let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+    assert!(!device.calls().iter().any(|call| call.starts_with("set_subdev_spec tx")), "{:?}", device.calls());
+    assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Tx), 2, "the map is the device's own");
+    assert_eq!(spec_calls(&device), ["set_subdev_spec rx A:0"]);
 }
 
 #[test]
@@ -4476,7 +4441,7 @@ fn ur_05_the_spec_is_set_before_the_channel_map_is_read() {
     // check reads the mapping the spec made, and `describe` — the Manifest's channel
     // counts — is read after it.
     let device = Arc::new(Recording::new(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-order-log".to_owned(), ..FakeConfig::default() }));
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:1"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:A:basic_rx:1"], "tx": [] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     let log = device.log();
     let position = |entry: &str| log.iter().position(|line| line == entry).unwrap_or_else(|| panic!("{entry} missing in {log:?}"));
@@ -4493,7 +4458,7 @@ fn ur_05_a_layout_naming_front_end_one_is_set_before_the_front_ends_are_checked(
     // `(1)` the device's channel 0 comes first: reading the map before the spec would see
     // `BasicRX (0)` and refuse a layout the device can serve.
     let device = fake(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-fe-one".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:1"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:A:basic_rx:1"], "tx": [] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx A:1".to_owned()), "{:?}", device.calls());
     assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
@@ -4506,7 +4471,7 @@ fn ur_05_the_front_end_check_reads_the_device_after_the_subdev_spec() {
     // channel 0 by default, and a layout naming slot B with a UBX is accepted only because
     // the spec was set first (the read-before-spec order refuses it).
     let device = fake(FakeConfig { front_ends: vec!["CBX-120", "UBX"], serial: "ur05-check-order".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:ubx:0"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:B:ubx:0"], "tx": [] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0".to_owned()), "{:?}", device.calls());
     assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
@@ -4519,7 +4484,7 @@ fn ur_05_a_board_that_differs_from_the_layout_is_refused() {
     // answers is not the layout's board; the refusal names the direction and channel and
     // both names, after the spec (the spec's call is in the device's log).
     let device = fake(FakeConfig { front_ends: vec!["UBX", "UBX"], serial: "ur05-board-rx".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:basic_rx:0"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:B:basic_rx:0"], "tx": [] });
     let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).err().unwrap();
     assert_eq!(error.kind, ModuleErrorKind::Rejected);
     assert!(error.message.starts_with("UR-5:"), "{}", error.message);
@@ -4528,7 +4493,7 @@ fn ur_05_a_board_that_differs_from_the_layout_is_refused() {
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:0".to_owned()), "the refusal is after the spec: {:?}", device.calls());
     assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Rx), 1);
     let device = fake(FakeConfig { front_ends: vec!["UBX", "UBX"], serial: "ur05-board-tx".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": [], "tx": ["0:B:basic_tx:0"] });
+    let selector = json!({ "args": ARGS,  "rx": [], "tx": ["0:B:basic_tx:0"] });
     let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).err().unwrap();
     assert!(error.message.starts_with("UR-5:") && error.message.contains("tx channel 0") && error.message.contains("UBX TX") && error.message.contains("basic_tx"), "{}", error.message);
     assert_eq!(device.channels(ezsdr_radio_uhd::Dir::Tx), 1);
@@ -4583,7 +4548,7 @@ fn ur_05_a_basic_front_end_s_number_is_checked() {
     // faithful fake always agrees, so a wrapper answers `(0)` for every claimed number — a
     // front end whose getter disagrees with its setter — and the check refuses it.
     let device = fake(FakeConfig { front_ends: vec!["BasicRX", "BasicRX"], serial: "ur05-fe-faithful".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:basic_rx:1"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:B:basic_rx:1"], "tx": [] });
     let _ = UhdRadio::from_binding(&binding(selector.clone(), Some(x3xx())), device.clone()).unwrap();
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx B:1".to_owned()), "{:?}", device.calls());
     assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "BasicRX (1)");
@@ -4600,13 +4565,13 @@ fn ur_05_a_subdev_spec_the_device_refuses_is_refused_with_uhd_s_text() {
     // failure, with its text; a swallowed failure would leave the default map, whose name
     // matches the layout, and be accepted.
     let device = fake(FakeConfig { front_ends: vec!["UBX"], serial: "ur05-spec-fail-rx".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:B:ubx:0"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:B:ubx:0"], "tx": [] });
     let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device).err().unwrap();
     assert_eq!(error.kind, ModuleErrorKind::Rejected);
     assert!(error.message.starts_with("UR-5:"), "{}", error.message);
     assert!(error.message.contains("uhd_usrp_set_rx_subdev_spec: UHD error 41: LookupError: Could not find radio on mboard 0 that matches subdev B:0"), "{}", error.message);
     let device = fake(FakeConfig { front_ends: vec!["UBX"], serial: "ur05-spec-fail-tx".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": [], "tx": ["0:B:ubx:0"] });
+    let selector = json!({ "args": ARGS,  "rx": [], "tx": ["0:B:ubx:0"] });
     let error = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device).err().unwrap();
     assert!(error.message.contains("uhd_usrp_set_tx_subdev_spec: UHD error 41: LookupError: Could not find radio on mboard 0 that matches subdev B:0"), "{}", error.message);
 }
@@ -4616,7 +4581,7 @@ fn ur_05_each_channel_is_checked_at_its_own_device_channel() {
     // UR-5, H1, H5: each element is checked at its own device channel: a BasicRX with its
     // two front ends answers `(1)` at channel 0 and `(0)` at channel 1 when the spec says so.
     let device = fake(FakeConfig { front_ends: vec!["BasicRX"], serial: "ur05-each-channel".to_owned(), ..FakeConfig::default() });
-    let selector = json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:1", "0:A:basic_rx:0"], "tx": [] });
+    let selector = json!({ "args": ARGS,  "rx": ["0:A:basic_rx:1", "0:A:basic_rx:0"], "tx": [] });
     let _ = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
     assert!(spec_calls(&device).contains(&"set_subdev_spec rx A:1 A:0".to_owned()), "{:?}", device.calls());
     assert_eq!(device.front_end(ezsdr_radio_uhd::Dir::Rx, 0).unwrap(), "BasicRX (1)");
@@ -5001,12 +4966,12 @@ fn ur_13_arm_takes_the_rate_set_in_any_order() {
 
 /// The selector of a two-channel-UBX layout, both directions (RM-28).
 fn layout_selector() -> Json {
-    json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] })
+    json!({  "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] })
 }
 
 /// One UBX and one BasicRX board: three receive channels, two streams, and two RX links.
 fn mixed_selector() -> Json {
-    json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] })
+    json!({  "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] })
 }
 
 fn fake_mixed() -> FakeConfig {
@@ -5091,7 +5056,7 @@ fn ur_13_a_layout_s_transmit_stream_zero_opens_its_channel_list() {
             ("radio.tx.c1.antenna", Scalar::from("TX/RX")),
         ],
         Vec::new(),
-        json!({ "keys": "channel", "rx": [], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }),
+        json!({  "rx": [], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }),
     );
     assert_eq!(calls(&direct.device, "tx_open"), ["tx_open 0 [1]"]);
     assert!(calls(&direct.device, "apply tx").contains(&"apply tx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX at=-".to_owned()), "{:?}", direct.device.calls());
@@ -5177,7 +5142,7 @@ fn ur_12_a_layout_a_rate_the_device_does_not_apply_is_refused() {
         serial: "ur12-layout-wrong-rate".to_owned(),
         ..FakeConfig::default()
     });
-    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
     let constraints = [
         ("radio.rx.c0.stream", Scalar::from(-1)),
         ("radio.rx.c1.stream", Scalar::from(0)),
@@ -5197,7 +5162,7 @@ fn ur_12_a_layout_an_antenna_read_back_that_differs_is_refused() {
         serial: "ur12-layout-antenna".to_owned(),
         ..FakeConfig::default()
     });
-    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
     let constraints = [
         ("radio.rx.c0.stream", Scalar::from(-1)),
         ("radio.rx.c1.stream", Scalar::from(0)),
@@ -5392,7 +5357,7 @@ fn ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel() {
             ("radio.tx.c0.stream", Scalar::from(0)),
         ],
         vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
-        json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] }),
+        json!({  "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] }),
     );
     let now = direct.now();
     // The timed update first: the switch's configuration carries the values due by its origin.
@@ -5443,7 +5408,7 @@ fn ur_25_a_layout_rate_change_of_a_channel_less_stream_only_takes_its_value() {
         FakeConfig { front_ends: vec!["UBX", "BasicRX"], serial: "ur25-layout-empty".to_owned(), ..FakeConfig::default() },
         &[("radio.rx.c1.stream", Scalar::from(0))],
         vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
-        json!({ "keys": "channel", "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] }),
+        json!({  "rx": ["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], "tx": ["0:A:ubx:0"] }),
     );
     direct.settle(Wall::from_millis(30));
     let before = direct.device.calls().len();
@@ -5476,7 +5441,7 @@ fn ur_25_a_layout_transmit_rate_change_configures_the_new_segment() {
             ("radio.tx.c1.frequency_hz", Scalar::try_from(25e6).unwrap()),
         ],
         Vec::new(),
-        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:basic_tx:0"] }),
+        json!({  "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:basic_tx:0"] }),
     );
     direct.settle(Wall::from_millis(30));
     direct.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(direct.now() + ms(100)));
@@ -5506,7 +5471,7 @@ fn ur_25_a_layout_cold_change_is_floored_at_every_earlier_cold_change_of_the_ins
         FakeConfig::default(),
         &[("radio.tx.c0.stream", Scalar::from(0))],
         vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
-        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:B:ubx:0"] }),
+        json!({  "rx": ["0:A:ubx:0"], "tx": ["0:B:ubx:0"] }),
     );
     let now = direct.now();
     direct.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(now + ms(50)));
@@ -6404,7 +6369,7 @@ fn ur_25_a_layout_instance_s_full_duplex_rule_is_judged_at_runtime() {
         FakeConfig::default(),
         &[("radio.tx.c0.stream", Scalar::from(0))],
         vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
-        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }),
+        json!({  "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }),
     );
     direct.settle(Wall::from_millis(30));
     let before = direct.device.calls().len();
@@ -6425,7 +6390,7 @@ fn ur_25_a_layout_instance_s_full_duplex_rule_is_judged_at_runtime() {
     assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c0.antenna")), "{timing}");
     // `prepare` refuses the same settings with the same reason (UR-12).
     let device = fake(FakeConfig { serial: "ur25-rm31-prepare".to_owned(), ..FakeConfig::default() });
-    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
     let constraints = [("radio.tx.c0.stream", Scalar::from(0)), ("radio.rx.c0.antenna", Scalar::from("TX/RX"))];
     let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
     assert_eq!(error.kind, ModuleErrorKind::Rejected);
@@ -6458,7 +6423,7 @@ fn ur_25_a_layout_instance_s_throughput_rule_is_judged_at_runtime() {
     let timing = &section_of(&instance, "timing");
     assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c1.stream")), "{timing}");
     let device = fake(FakeConfig { serial: "ur25-rm32-prepare".to_owned(), ..FakeConfig::default() });
-    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
     let constraints = [("radio.rx.s0.sample_rate_hz", Scalar::try_from(20e6).unwrap()), ("radio.rx.c1.stream", Scalar::from(0))];
     let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
     assert_eq!(error.message, format!("UR-12: {reason}"));
@@ -6485,7 +6450,7 @@ fn ur_30_the_device_section_names_the_subdev_spec() {
     assert_eq!(device["subdev_spec"]["rx"], "A:0");
     assert!(device["subdev_spec"]["tx"].is_null(), "{device}");
     let radio = UhdRadio::from_binding(
-        &binding(json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:ubx:0"], "tx": [] }), Some(x3xx())),
+        &binding(json!({ "args": ARGS,  "rx": ["0:A:ubx:0"], "tx": [] }), Some(x3xx())),
         fake(FakeConfig { serial: "ur30-spec-d".to_owned(), ..FakeConfig::default() }),
     ).unwrap();
     let device = device_section(&radio);
@@ -6497,7 +6462,7 @@ fn ur_30_the_device_section_names_the_subdev_spec() {
 fn ur_30_the_device_section_records_the_serial() {
     // UR-30: the serial is the record that lets an operator tell two devices apart (H4).
     let device = fake(FakeConfig { serial: "F00BA2".to_owned(), ..FakeConfig::default() });
-    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel" }), Some(x3xx())), device.clone()).unwrap();
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
     assert_eq!(section_of(radio.instance(), "device")["serial"], "F00BA2");
     assert_eq!(calls(&device, "serial"), ["serial"], "one read: {:?}", device.calls());
 }
@@ -6549,7 +6514,7 @@ fn ur_30_the_device_section_records_the_rate_check() {
     assert_eq!(section(&manifest, "device")["rates_checked"], json!({ "rx": true, "tx": false }), "failure: {}", failure(&manifest));
     // A Session with no receive link: the receive streamer is never opened, so nothing is
     // compared.
-    let mut doc = profile(&dir, json!({ "keys": "channel" }), json!({}), true);
+    let mut doc = profile(&dir, json!({}), json!({}), true);
     doc["placements"]["links"][0]["from"]["port"] = json!("rx0");
     doc["bindings"]["rec"].as_object_mut().unwrap().remove("feed");
     doc.as_object_mut().unwrap().remove("placements");
@@ -6620,7 +6585,7 @@ fn ur_25_a_layout_cold_change_of_a_linkless_receive_side_is_floored_at_t0() {
 #[test]
 fn ur_19_a_layout_receive_report_names_its_stream() {
     // UR-20, major 6: a receive report event comes from the stream's own node — with
-    // `keys: "channel"` that is `<id>/rx/s0` — and reaches the collector.
+    // `<id>/rx/s0` — and reaches the collector.
     let mut direct = Direct::build(
         FakeConfig { faults: vec![FakeFault::Overflow(Wall::from_millis(40))], ..FakeConfig::default() },
         &[],
@@ -6809,7 +6774,7 @@ fn ur_25_a_floor_raised_layout_join_is_judged_at_its_instant() {
         FakeConfig::default(),
         &[],
         vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)],
-        json!({ "keys": "channel", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }),
+        json!({  "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }),
     );
     direct.settle(Wall::from_millis(30));
     let now = direct.now();
@@ -7048,7 +7013,7 @@ fn ur_05_a_repeated_front_end_is_still_refused() {
     // front end)` pair twice is refused, naming the position and the repeated pair.
     let device = fake(FakeConfig::default());
     for rx in [vec!["0:A:ubx:0", "0:A:ubx:0"], vec!["0:A:ubx:0", "0:B:ubx:0", "0:A:ubx:0"]] {
-        let error = match UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel", "rx": rx, "tx": [] }), Some(x3xx())), device.clone()) {
+        let error = match UhdRadio::from_binding(&binding(json!({ "args": ARGS,  "rx": rx, "tx": [] }), Some(x3xx())), device.clone()) {
             Ok(_) => panic!("the repeated pair was accepted: {rx:?}"),
             Err(error) => error,
         };
@@ -7057,7 +7022,7 @@ fn ur_05_a_repeated_front_end_is_still_refused() {
     }
     // A Basic/LF board's two front ends are two pairs: accepted.
     let device = fake(FakeConfig { front_ends: vec!["BasicRX"], ..FakeConfig::default() });
-    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "keys": "channel", "rx": ["0:A:basic_rx:0", "0:A:basic_rx:1"], "tx": [] }), Some(x3xx())), device.clone()).unwrap();
+    let radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS,  "rx": ["0:A:basic_rx:0", "0:A:basic_rx:1"], "tx": [] }), Some(x3xx())), device.clone()).unwrap();
     drop(radio);
     assert_eq!(calls(&device, "set_subdev_spec rx A:0 A:1").len(), 1, "{:?}", device.calls());
 }

@@ -1288,7 +1288,7 @@ mod tests {
         frozen
     }
 
-    /// The layout's key set (RM-27): two receive front ends, one transmit, `keys: "channel"`.
+    /// The layout (RM-27): two receive front ends, one transmit.
     fn layout_description() -> ezsdr_radio::channels::Description {
         let selector = BTreeMap::from([
             (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
@@ -1318,7 +1318,6 @@ mod tests {
     fn ur_34_a_from_none_join_yields_to_an_earlier_unprocessed_segment() {
         use crate::device::FakeConfig;
         let selector = BTreeMap::from([
-            (ezsdr_kernel::spec::Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
             (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:basic_rx:0"), Scalar::from("0:B:basic_rx:1")])),
             (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
         ]);
@@ -2633,7 +2632,7 @@ mod tests {
 
     #[test]
     fn ur_17_a_stream_s_prune_leaves_the_other_stream_alone() {
-        // UR-17, RM-26, RM-34 (design 33 D15): pruning one stream's ended segment folds that
+        // UR-17, RM-25, RM-34 (design 33 D15): pruning one stream's ended segment folds that
         // stream's items and configurations and nothing of the instance's other stream: the
         // transmit stream keeps its item and its configuration, and its command can still be
         // refused.

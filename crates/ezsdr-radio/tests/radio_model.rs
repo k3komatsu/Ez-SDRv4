@@ -15,7 +15,7 @@ use ezsdr_radio::payloads::{
     CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload,
     TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
 };
-use ezsdr_radio::{RfEnvelopeCheck, keys};
+use ezsdr_radio::RfEnvelopeCheck;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value as JsonValue, json};
 
@@ -57,13 +57,23 @@ fn base_rf_envelope() -> JsonValue {
     })
 }
 
-fn tx_values(channels: i64, frequency_hz: f64, gain_db: f64) -> Vec<(&'static str, Value)> {
-    vec![
-        (keys::TX_CHANNELS, Value::from(channels)),
-        (keys::TX_FREQUENCY_HZ, Value::num(frequency_hz).unwrap()),
-        (keys::TX_GAIN_DB, Value::num(gain_db).unwrap()),
-        (keys::TX_ANTENNA, Value::from("TX/RX".to_owned())),
+fn tx_values(channels: usize, frequency_hz: f64, gain_db: f64) -> Vec<(&'static str, Value)> {
+    let mut values = Vec::new();
+    for (stream, frequency, gain, antenna) in [
+        ("radio.tx.c0.stream", "radio.tx.c0.frequency_hz", "radio.tx.c0.gain_db", "radio.tx.c0.antenna"),
+        ("radio.tx.c1.stream", "radio.tx.c1.frequency_hz", "radio.tx.c1.gain_db", "radio.tx.c1.antenna"),
     ]
+    .into_iter()
+    .take(channels)
+    {
+        values.extend([
+            (stream, Value::from(0_i64)),
+            (frequency, Value::num(frequency_hz).unwrap()),
+            (gain, Value::num(gain_db).unwrap()),
+            (antenna, Value::from("TX/RX".to_owned())),
+        ]);
+    }
+    values
 }
 
 fn value_json(value: &Option<Value>) -> JsonValue {
@@ -111,7 +121,7 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 50);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 32);
     assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(
         checks
@@ -138,24 +148,8 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
     let str_ = ValueKind::Str;
     let bool_ = ValueKind::Bool;
     let expected = [
-        ("radio.rx.channels", int, false, reject, cold),
-        ("radio.tx.channels", int, false, reject, cold),
-        ("radio.rx.sample_rate_hz", num, true, reject, cold),
-        ("radio.tx.sample_rate_hz", num, true, reject, cold),
-        ("radio.rx.frequency_hz", num, true, reject, timed),
-        ("radio.tx.frequency_hz", num, true, reject, timed),
-        ("radio.rx.gain_db", num, true, warn, timed),
-        ("radio.tx.gain_db", num, true, warn, timed),
-        ("radio.rx.antenna", str_, false, reject, none),
-        ("radio.tx.antenna", str_, false, reject, none),
-        ("radio.rx.frequency_step_hz", num, false, reject, none),
-        ("radio.tx.frequency_step_hz", num, false, reject, none),
-        ("radio.rx.gain_step_db", num, false, reject, none),
-        ("radio.tx.gain_step_db", num, false, reject, none),
-        ("radio.rx.coherent", bool_, false, reject, none),
         ("radio.full_duplex", bool_, false, reject, none),
         ("radio.hardware_time", bool_, false, reject, none),
-        ("radio.phase_behavior_on_retune", str_, false, reject, none),
         ("radio.tx.repeat_max_samples", int, false, reject, none),
         ("radio.tx.repeat_align_samples", int, false, reject, none),
         ("radio.rx.block_len", int, false, reject, none),
@@ -168,8 +162,6 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
         ("radio.perf.wire_bytes_per_sample", int, false, reject, none),
-        ("radio.tx.path_delay_samples", int, false, reject, none),
-        ("radio.rx.path_delay_samples", int, false, reject, none),
         ("radio.rx.c.frequency_hz", num, true, reject, timed),
         ("radio.rx.c.gain_db", num, true, warn, timed),
         ("radio.rx.c.antenna", str_, false, reject, cold),
@@ -200,22 +192,6 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         assert_eq!(declaration.coercion_default, coercion_default);
         assert_eq!(declaration.update_class, update_class);
     }
-    assert_eq!(keys::CONFIGURATION.len(), 10);
-    assert_eq!(
-        keys::CONFIGURATION,
-        [
-            "radio.rx.channels",
-            "radio.tx.channels",
-            "radio.rx.sample_rate_hz",
-            "radio.tx.sample_rate_hz",
-            "radio.rx.frequency_hz",
-            "radio.tx.frequency_hz",
-            "radio.rx.gain_db",
-            "radio.tx.gain_db",
-            "radio.rx.antenna",
-            "radio.tx.antenna",
-        ]
-    );
 }
 
 #[test]
@@ -288,19 +264,19 @@ fn rm_19_rf_envelope_cases() {
     let out_of_band = radio_configuration(&tx_values(1, 2_600_000_000.0, 10.0));
     let violations = run_check(base_rf_envelope(), &out_of_band, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_FREQUENCY_HZ);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
     assert_eq!(value_json(&violations[0].requested), json!(2_600_000_000.0));
     assert!(violations[0].reason.starts_with("RM-19: radio: "));
 
     let high_gain = radio_configuration(&tx_values(1, 2_450_000_000.0, 25.0));
     let violations = run_check(base_rf_envelope(), &high_gain, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_GAIN_DB);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.gain_db");
 
     let two_channels = radio_configuration(&tx_values(2, 2_450_000_000.0, 10.0));
     let violations = run_check(base_rf_envelope(), &two_channels, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_CHANNELS);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c1.stream");
 
     let mut globally_disabled_envelope = base_rf_envelope();
     globally_disabled_envelope["tx_enabled"] = json!(false);
@@ -311,7 +287,7 @@ fn rm_19_rf_envelope_cases() {
         CheckStage::Validate,
     );
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_CHANNELS);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.stream");
 
     let mut short_channel_envelope = base_rf_envelope();
     short_channel_envelope["tx_enabled"] = json!([true]);
@@ -322,22 +298,31 @@ fn rm_19_rf_envelope_cases() {
         CheckStage::Validate,
     );
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_CHANNELS);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c1.stream");
 
     let mut bad_tx_antenna = tx_values(1, 2_450_000_000.0, 10.0);
     bad_tx_antenna[3].1 = Value::from("J1".to_owned());
     let bad_tx_antenna = radio_configuration(&bad_tx_antenna);
     let violations = run_check(base_rf_envelope(), &bad_tx_antenna, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_ANTENNA);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.antenna");
 
-    let disabled_tx = radio_configuration(&tx_values(0, 2_600_000_000.0, 25.0));
+    let disabled_tx = radio_configuration(&[
+        ("radio.tx.c0.stream", Value::from(-1_i64)),
+        ("radio.tx.c0.frequency_hz", Value::num(2_600_000_000.0).unwrap()),
+        ("radio.tx.c0.gain_db", Value::num(25.0).unwrap()),
+        ("radio.tx.c0.antenna", Value::from("J1")),
+    ]);
+    assert!(!disabled_tx.values().next().unwrap().is_empty(), "this unstreamed channel has settings to skip");
     assert!(run_check(base_rf_envelope(), &disabled_tx, &empty, CheckStage::Validate).is_empty());
 
-    let bad_rx_antenna = radio_configuration(&[(keys::RX_ANTENNA, Value::from("J1".to_owned()))]);
+    let bad_rx_antenna = radio_configuration(&[
+        ("radio.rx.c0.stream", Value::from(0_i64)),
+        ("radio.rx.c0.antenna", Value::from("J1".to_owned())),
+    ]);
     let violations = run_check(base_rf_envelope(), &bad_rx_antenna, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::RX_ANTENNA);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.rx.c0.antenna");
 
     let fragments = BTreeMap::from([
         (
@@ -355,7 +340,7 @@ fn rm_19_rf_envelope_cases() {
     ]);
     let violations = run_check(base_rf_envelope(), &fragments, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_FREQUENCY_HZ);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
     assert!(violations[0].reason.starts_with("RM-19: bad_radio: "));
 }
 
@@ -378,10 +363,10 @@ fn rm_19_a_malformed_section_is_one_violation() {
 #[test]
 fn rm_19_the_proposed_value_is_judged() {
     let effective = radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0));
-    let proposed = radio_configuration(&[(keys::TX_FREQUENCY_HZ, Value::num(2_600_000_000.0).unwrap())]);
+    let proposed = radio_configuration(&[("radio.tx.c0.frequency_hz", Value::num(2_600_000_000.0).unwrap())]);
     let violations = run_check(base_rf_envelope(), &effective, &proposed, CheckStage::Runtime);
     assert_eq!(violations.len(), 1);
-    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), keys::TX_FREQUENCY_HZ);
+    assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.frequency_hz");
     assert_eq!(value_json(&violations[0].requested), json!(2_600_000_000.0));
 }
 
@@ -480,10 +465,10 @@ fn rm_22_payloads_round_trip() {
     );
     assert_payload_round_trip(
         CommandQueueFullPayload {
-            key: Key::parse(keys::TX_FREQUENCY_HZ).unwrap(),
+            key: Key::parse("radio.tx.c0.frequency_hz").unwrap(),
             depth: 8,
         },
-        json!({"key": keys::TX_FREQUENCY_HZ, "depth": 8}),
+        json!({"key": "radio.tx.c0.frequency_hz", "depth": 8}),
     );
     assert_payload_round_trip(
         CommandRejectedPayload {

@@ -41,42 +41,10 @@ pub const START_RX: &str = "start_rx";
 
 /// Radio Model keys declared by RM-4.
 pub mod keys {
-    /// Receive channel count (RM-4).
-    pub const RX_CHANNELS: &str = "radio.rx.channels";
-    /// Transmit channel count (RM-4).
-    pub const TX_CHANNELS: &str = "radio.tx.channels";
-    /// Receive sample rate in samples per second (RM-4).
-    pub const RX_SAMPLE_RATE_HZ: &str = "radio.rx.sample_rate_hz";
-    /// Transmit sample rate in samples per second (RM-4).
-    pub const TX_SAMPLE_RATE_HZ: &str = "radio.tx.sample_rate_hz";
-    /// Receive RF centre frequency in hertz (RM-4).
-    pub const RX_FREQUENCY_HZ: &str = "radio.rx.frequency_hz";
-    /// Transmit RF centre frequency in hertz (RM-4).
-    pub const TX_FREQUENCY_HZ: &str = "radio.tx.frequency_hz";
-    /// Receive gain in decibels (RM-4).
-    pub const RX_GAIN_DB: &str = "radio.rx.gain_db";
-    /// Transmit gain in decibels (RM-4).
-    pub const TX_GAIN_DB: &str = "radio.tx.gain_db";
-    /// Receive antenna port name (RM-4).
-    pub const RX_ANTENNA: &str = "radio.rx.antenna";
-    /// Transmit antenna port name (RM-4).
-    pub const TX_ANTENNA: &str = "radio.tx.antenna";
-    /// Receive frequency tuning step in hertz (RM-4).
-    pub const RX_FREQUENCY_STEP_HZ: &str = "radio.rx.frequency_step_hz";
-    /// Transmit frequency tuning step in hertz (RM-4).
-    pub const TX_FREQUENCY_STEP_HZ: &str = "radio.tx.frequency_step_hz";
-    /// Receive gain step in decibels (RM-4).
-    pub const RX_GAIN_STEP_DB: &str = "radio.rx.gain_step_db";
-    /// Transmit gain step in decibels (RM-4).
-    pub const TX_GAIN_STEP_DB: &str = "radio.tx.gain_step_db";
-    /// Whether receive channels form a coherent group (RM-4).
-    pub const RX_COHERENT: &str = "radio.rx.coherent";
     /// Whether transmit and receive can run simultaneously (RM-4).
     pub const FULL_DUPLEX: &str = "radio.full_duplex";
     /// Whether timed commands execute on device time (RM-4).
     pub const HARDWARE_TIME: &str = "radio.hardware_time";
-    /// Phase behaviour after an untimed retune (RM-4).
-    pub const PHASE_BEHAVIOR_ON_RETUNE: &str = "radio.phase_behavior_on_retune";
     /// Maximum samples in a repeated waveform (RM-4).
     pub const TX_REPEAT_MAX_SAMPLES: &str = "radio.tx.repeat_max_samples";
     /// Required sample-count alignment for repeated waveforms (RM-4).
@@ -102,23 +70,6 @@ pub mod keys {
     pub const TX_BYTES_PER_S: &str = "radio.perf.tx_bytes_per_s";
     /// Wire-format bytes per complex sample (RM-4).
     pub const WIRE_BYTES_PER_SAMPLE: &str = "radio.perf.wire_bytes_per_sample";
-    /// Transmit path delay, in transmit samples, from a sample's timestamp to the antenna (RM-23).
-    pub const TX_PATH_DELAY_SAMPLES: &str = "radio.tx.path_delay_samples";
-    /// Receive path delay, in receive samples, from the antenna to a sample's timestamp (RM-23).
-    pub const RX_PATH_DELAY_SAMPLES: &str = "radio.rx.path_delay_samples";
-    /// The ten configuration keys in RM-5 order (RM-5).
-    pub const CONFIGURATION: [&str; 10] = [
-        RX_CHANNELS,
-        TX_CHANNELS,
-        RX_SAMPLE_RATE_HZ,
-        TX_SAMPLE_RATE_HZ,
-        RX_FREQUENCY_HZ,
-        TX_FREQUENCY_HZ,
-        RX_GAIN_DB,
-        TX_GAIN_DB,
-        RX_ANTENNA,
-        TX_ANTENNA,
-    ];
     /// The segment a channel key numbers: `c` followed by the channel number (RM-27).
     pub const CHANNEL: &str = "c";
     /// The segment a stream key numbers: `s` followed by the stream number (RM-27).
@@ -236,24 +187,8 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
     use ValueKind::{Bool, Int, Num, Str};
 
     let mut declarations = vec![
-        key_decl(keys::RX_CHANNELS, Int, false, Reject, Some(Cold)),
-        key_decl(keys::TX_CHANNELS, Int, false, Reject, Some(Cold)),
-        key_decl(keys::RX_SAMPLE_RATE_HZ, Num, true, Reject, Some(Cold)),
-        key_decl(keys::TX_SAMPLE_RATE_HZ, Num, true, Reject, Some(Cold)),
-        key_decl(keys::RX_FREQUENCY_HZ, Num, true, Reject, Some(HardwareTimed)),
-        key_decl(keys::TX_FREQUENCY_HZ, Num, true, Reject, Some(HardwareTimed)),
-        key_decl(keys::RX_GAIN_DB, Num, true, Warn, Some(HardwareTimed)),
-        key_decl(keys::TX_GAIN_DB, Num, true, Warn, Some(HardwareTimed)),
-        key_decl(keys::RX_ANTENNA, Str, false, Reject, None),
-        key_decl(keys::TX_ANTENNA, Str, false, Reject, None),
-        key_decl(keys::RX_FREQUENCY_STEP_HZ, Num, false, Reject, None),
-        key_decl(keys::TX_FREQUENCY_STEP_HZ, Num, false, Reject, None),
-        key_decl(keys::RX_GAIN_STEP_DB, Num, false, Reject, None),
-        key_decl(keys::TX_GAIN_STEP_DB, Num, false, Reject, None),
-        key_decl(keys::RX_COHERENT, Bool, false, Reject, None),
         key_decl(keys::FULL_DUPLEX, Bool, false, Reject, None),
         key_decl(keys::HARDWARE_TIME, Bool, false, Reject, None),
-        key_decl(keys::PHASE_BEHAVIOR_ON_RETUNE, Str, false, Reject, None),
         key_decl(keys::TX_REPEAT_MAX_SAMPLES, Int, false, Reject, None),
         key_decl(keys::TX_REPEAT_ALIGN_SAMPLES, Int, false, Reject, None),
         key_decl(keys::RX_BLOCK_LEN, Int, false, Reject, None),
@@ -266,8 +201,6 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
-        key_decl(keys::TX_PATH_DELAY_SAMPLES, Int, false, Reject, None),
-        key_decl(keys::RX_PATH_DELAY_SAMPLES, Int, false, Reject, None),
     ];
     for direction in ["rx", "tx"] {
         let declaration = |word: &str, leaf: &str| format!("radio.{direction}.{word}.{leaf}");
@@ -442,128 +375,7 @@ impl AdmissionCheck for RfEnvelopeCheck {
             if let Some(updates) = proposed.get(&fragment) {
                 configuration.extend(updates.clone());
             }
-            if configuration
-                .keys()
-                .any(|key| matches!(concrete(key), Some(Concrete::Channel { .. })))
-            {
-                check_numbered_configuration(&configuration, &envelope, &fragment, self, &mut violations);
-                continue;
-            }
-            let tx_channels = number(&configuration, keys::TX_CHANNELS, &fragment, self, &mut violations)
-                .unwrap_or(0.0) as i64;
-            if tx_channels > 0 {
-                if let Some(frequency) = number(
-                    &configuration,
-                    keys::TX_FREQUENCY_HZ,
-                    &fragment,
-                    self,
-                    &mut violations,
-                ) {
-                    if !envelope
-                        .allowed_bands
-                        .iter()
-                        .any(|band| band.lo_hz <= frequency && frequency <= band.hi_hz)
-                    {
-                        push_fragment_violation(
-                            &mut violations,
-                            self,
-                            &fragment,
-                            keys::TX_FREQUENCY_HZ,
-                            &configuration,
-                            format!("{frequency} Hz is in no allowed band"),
-                        );
-                    }
-                }
-                if let Some(gain) = number(
-                    &configuration,
-                    keys::TX_GAIN_DB,
-                    &fragment,
-                    self,
-                    &mut violations,
-                ) {
-                    if envelope.max_gain_db.is_some_and(|maximum| gain > maximum) {
-                        let maximum = envelope.max_gain_db.unwrap_or_default();
-                        push_fragment_violation(
-                            &mut violations,
-                            self,
-                            &fragment,
-                            keys::TX_GAIN_DB,
-                            &configuration,
-                            format!("gain {gain} dB exceeds {maximum}"),
-                        );
-                    }
-                }
-                let disabled_channel = match &envelope.tx_enabled {
-                    Some(TxEnabled::All(false)) => Some(None),
-                    Some(TxEnabled::PerChannel(enabled)) => {
-                        let count = tx_channels as usize;
-                        enabled
-                            .iter()
-                            .take(count)
-                            .position(|is_enabled| !is_enabled)
-                            .or_else(|| (enabled.len() < count).then_some(enabled.len()))
-                            .map(Some)
-                    }
-                    _ => None,
-                };
-                if let Some(channel) = disabled_channel {
-                    push_fragment_violation(
-                        &mut violations,
-                        self,
-                        &fragment,
-                        keys::TX_CHANNELS,
-                        &configuration,
-                        channel.map_or_else(
-                            || "transmission is disabled".to_owned(),
-                            |index| format!("channel {index} is not enabled"),
-                        ),
-                    );
-                }
-                if let Some(antenna) = string(
-                    &configuration,
-                    keys::TX_ANTENNA,
-                    &fragment,
-                    self,
-                    &mut violations,
-                ) {
-                    if envelope
-                        .antenna_ports
-                        .as_ref()
-                        .is_some_and(|ports| !ports.iter().any(|port| port == antenna))
-                    {
-                        push_fragment_violation(
-                            &mut violations,
-                            self,
-                            &fragment,
-                            keys::TX_ANTENNA,
-                            &configuration,
-                            format!("antenna {antenna} is not allowed"),
-                        );
-                    }
-                }
-            }
-            if let Some(antenna) = string(
-                &configuration,
-                keys::RX_ANTENNA,
-                &fragment,
-                self,
-                &mut violations,
-            ) {
-                if envelope
-                    .antenna_ports
-                    .as_ref()
-                    .is_some_and(|ports| !ports.iter().any(|port| port == antenna))
-                {
-                    push_fragment_violation(
-                        &mut violations,
-                        self,
-                        &fragment,
-                        keys::RX_ANTENNA,
-                        &configuration,
-                        format!("antenna {antenna} is not allowed"),
-                    );
-                }
-            }
+            check_numbered_configuration(&configuration, &envelope, &fragment, self, &mut violations);
         }
         violations
     }
@@ -651,9 +463,7 @@ pub fn stream_target(
 }
 
 /// What an Action's resolved node names (KC-23, RM-12, RM-29): the instance's own node, one
-/// of its streams, or something else. The current keys give a stream the node `<device>/rx`
-/// or `<device>/tx`; a layout description gives it `<device>/rx/s<k>` and `<device>/tx/s<k>`
-/// (RM-29, RM-34).
+/// of its layout streams, or something else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Addressed {
     /// The instance's own node, `<device>`.
@@ -669,51 +479,25 @@ pub enum Addressed {
     Other,
 }
 
-/// RM-12, RM-29: what the resolved node `node` of an Action names for the instance
-/// `device` — its own node, one of its streams, or another node. `layout` says which key
-/// set the instance presents, `rx` and `tx` are the current keys' stream nodes, and
-/// `streams` is how many streams a direction has, so that a number the instance does not
-/// have is another node. The one place MockRadio and the UHD Module read a destination.
+/// RM-12, RM-29: what the resolved node `node` of an Action names for `device` — its own
+/// node, one of its streams, or another node. `streams` is how many streams a direction has,
+/// so that a number the instance does not have is another node.
 pub fn addressed(
     device: &ezsdr_kernel::id::ResourceId,
     node: Option<&ezsdr_kernel::id::ResourceId>,
-    layout: bool,
-    rx: Option<&ezsdr_kernel::id::ResourceId>,
-    tx: Option<&ezsdr_kernel::id::ResourceId>,
     streams: impl Fn(Direction) -> usize,
 ) -> Addressed {
     let Some(node) = node else { return Addressed::Other };
     if node == device {
         return Addressed::Instance;
     }
-    if layout {
-        if let Some((direction, number)) = stream_target(device, node) {
-            let k = number as usize;
-            if k < streams(direction) {
-                return Addressed::Stream { direction, k };
-            }
+    if let Some((direction, number)) = stream_target(device, node) {
+        let k = number as usize;
+        if k < streams(direction) {
+            return Addressed::Stream { direction, k };
         }
-        return Addressed::Other;
-    }
-    if Some(node) == rx {
-        return Addressed::Stream { direction: Direction::Rx, k: 0 };
-    }
-    if Some(node) == tx {
-        return Addressed::Stream { direction: Direction::Tx, k: 0 };
     }
     Addressed::Other
-}
-
-/// RM-38 (design 33 D5) and UR-5: whether a binding's selector picks the layout builder's
-/// channel keys — `keys` present and the string `channel` — or keeps the current keys
-/// (absent); another value, or one that is not a string, is refused. The one place
-/// MockRadio and the UHD Module read the selector's `keys`.
-pub fn channel_keys(selector: &BTreeMap<Ident, Value>) -> Result<bool, String> {
-    match selector.get(&Ident::parse("keys").expect("a selector key")) {
-        None => Ok(false),
-        Some(Value::Scalar(Scalar::Str(value))) if value == "channel" => Ok(true),
-        _ => Err("selector `keys` must be the string `channel`".to_owned()),
-    }
 }
 
 /// RM-33's per-channel judgement of a configuration that holds RM-27 channel keys.
@@ -904,74 +688,6 @@ fn text(scalar: &Scalar) -> Option<&str> {
         Scalar::Str(value) => Some(value),
         _ => None,
     }
-}
-
-fn number(
-    configuration: &BTreeMap<Key, Value>,
-    name: &str,
-    fragment: &Ident,
-    check: &RfEnvelopeCheck,
-    violations: &mut Vec<Violation>,
-) -> Option<f64> {
-    let key = Key::parse(name).expect("a declared Radio Model key is valid");
-    match configuration.get(&key) {
-        None => None,
-        Some(Value::Scalar(Scalar::Int(value))) => Some(*value as f64),
-        Some(Value::Scalar(Scalar::Num(value))) => Some(value.get()),
-        Some(_) => {
-            push_fragment_violation(
-                violations,
-                check,
-                fragment,
-                name,
-                configuration,
-                format!("{name} is not a number"),
-            );
-            None
-        }
-    }
-}
-
-fn string<'a>(
-    configuration: &'a BTreeMap<Key, Value>,
-    name: &str,
-    fragment: &Ident,
-    check: &RfEnvelopeCheck,
-    violations: &mut Vec<Violation>,
-) -> Option<&'a str> {
-    let key = Key::parse(name).expect("a declared Radio Model key is valid");
-    match configuration.get(&key) {
-        None => None,
-        Some(Value::Scalar(Scalar::Str(value))) => Some(value),
-        Some(_) => {
-            push_fragment_violation(
-                violations,
-                check,
-                fragment,
-                name,
-                configuration,
-                format!("{name} is not a string"),
-            );
-            None
-        }
-    }
-}
-
-fn push_fragment_violation(
-    violations: &mut Vec<Violation>,
-    check: &RfEnvelopeCheck,
-    fragment: &Ident,
-    key_name: &str,
-    configuration: &BTreeMap<Key, Value>,
-    detail: String,
-) {
-    let key = Key::parse(key_name).expect("a declared Radio Model key is valid");
-    violations.push(Violation {
-        check: check.section().clone(),
-        requested: configuration.get(&key).cloned(),
-        key: Some(key),
-        reason: format!("RM-19: {fragment}: {detail}"),
-    });
 }
 
 /// Timing values recorded in a radio Provider's Manifest (RM-20).

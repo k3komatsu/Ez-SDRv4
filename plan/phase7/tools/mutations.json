@@ -343,35 +343,25 @@
   "old2": "        Ok(handle) => *slot = Some(handle),",
   "new2": "        Ok(handle) => {\n            shared.wake_pending.store(generation, Ordering::Release);\n            *slot = Some(handle)\n        }"
  },
- {
-  "id": "V01",
-  "name": "RM-8's tie goes to the higher grid value",
-  "file": "crates/ezsdr-radio/src/device.rs",
-  "old": "let rounded = if r > 0.5 { f + 1.0 } else { f };",
-  "new": "let rounded = if r >= 0.5 { f + 1.0 } else { f };",
+  {
+   "id": "V01",
+   "name": "RM-8's tie goes to the higher grid value",
+   "file": "crates/ezsdr-radio/src/device.rs",
+   "old": "let rounded = if r > 0.5 { f + 1.0 } else { f };",
+   "new": "let rounded = if r >= 0.5 { f + 1.0 } else { f };",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_radio",
+   "filter": "mr_06_coerce_cases"
+  },
+  {
+   "id": "V03",
+   "name": "the rate capability built as a Range for Values",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "        Grid::Values(values) => CapabilityValue::AnyOf {\n            values: values.iter().rev().map(|rate| num(*rate)).collect(),\n        },",
+   "new": "        Grid::Values(_values) => CapabilityValue::Range { min: num(grid.min()), max: num(grid.max()) },",
   "crate": "ezsdr-radio",
-  "test_bin": "device",
-  "filter": "rm_26_coerce_cases"
- },
- {
-  "id": "V02",
-  "name": "RM-7's check skips tx",
-  "file": "crates/ezsdr-radio/src/device.rs",
-  "old": "            (\"tx\", self.performance.tx_bytes_per_s),\n",
-  "new": "",
-  "crate": "ezsdr-radio",
-  "test_bin": "device",
-  "filter": "rm_26_coerce_cases"
- },
- {
-  "id": "V03",
-  "name": "the rate capability built as a Range for Values",
-  "file": "crates/ezsdr-radio/src/device.rs",
-  "old": "                Grid::Values(values) => CapabilityValue::AnyOf {\n                    values: values.iter().rev().map(|rate| num(*rate)).collect(),\n                },\n",
-  "new": "",
-  "crate": "ezsdr-radio",
-  "test_bin": "device",
-  "filter": "rm_26_the_description_builds_the_tree"
+   "test_bin": "channels",
+   "filter": "rm_29_the_layout_description_builds_the_stream_tree"
  },
  {
   "id": "V04",

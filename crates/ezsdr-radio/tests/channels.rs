@@ -346,6 +346,7 @@ fn rm_29_the_layout_description_builds_the_stream_tree() {
         .children
         .iter()
         .all(|child| child.capabilities.is_empty() && child.ports.is_empty() && !child.shareable));
+    assert!(tree.children.iter().all(|child| child.memory_domains.is_empty()));
     assert_eq!(tree.memory_domains, [domain]);
     // No channel node and no timekeeper node (RM-29).
     assert!(!tree.children.iter().any(|child| child.id.path() == "dev/rx/c0"));
@@ -512,6 +513,8 @@ fn rm_30_coerce_cases() {
     // A number the layout has no channel or stream for is refused by name.
     let report = coerce(&[("radio.rx.c3.frequency_hz", eq_num(10_000_000.0))]);
     assert_eq!(rejection(&report, "radio.rx.c3.frequency_hz").reason, "RM-4: no such channel c3");
+    let report = coerce(&[("radio.tx.c2.frequency_hz", eq_num(2_400_000_000.0))]);
+    assert_eq!(rejection(&report, "radio.tx.c2.frequency_hz").reason, "RM-4: no such channel c2");
     let report = coerce(&[("radio.tx.s3.sample_rate_hz", eq_num(1_000_000.0))]);
     assert_eq!(rejection(&report, "radio.tx.s3.sample_rate_hz").reason, "RM-4: no such stream s3");
 
@@ -548,6 +551,28 @@ fn rm_30_coerce_cases() {
     assert_eq!(report.coercions.len(), 1, "{:?}", report.coercions);
     assert_eq!(report.coercions[0].key, key("radio.rx.s0.sample_rate_hz"));
     assert_ne!(report.coercions[0].applied, Value::from(num(200_000_000.0 / 257.0)));
+
+    // 19.5 Msps is nearest to 20 Msps on the X3xx DDC grid.
+    let report = coerce(&[("radio.rx.s0.sample_rate_hz", eq_num(19_500_000.0))]);
+    assert_eq!(value_of(&report, "radio.rx.s0.sample_rate_hz"), Value::from(num(20_000_000.0)));
+    assert_eq!(report.coercions.len(), 1, "{:?}", report.coercions);
+    assert_eq!(report.coercions[0].key, key("radio.rx.s0.sample_rate_hz"));
+    assert_eq!(report.coercions[0].reason, "RM-8: nearest grid value");
+
+    // An off-grid gain rounds up when the requested value is nearer the upper step.
+    let report = coerce(&[("radio.tx.c0.gain_db", eq_num(31.3))]);
+    assert_eq!(value_of(&report, "radio.tx.c0.gain_db"), Value::from(num(31.5)));
+    assert_eq!(report.coercions.len(), 1, "{:?}", report.coercions);
+    assert_eq!(report.coercions[0].key, key("radio.tx.c0.gain_db"));
+
+    // A Set skips unsupported antennas and selects the first available member.
+    let report = coerce(&[(
+        "radio.rx.c0.antenna",
+        Constraint::Set { values: vec![Scalar::from("LNA".to_owned()), Scalar::from("TX/RX".to_owned())] },
+    )]);
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert_eq!(value_of(&report, "radio.rx.c0.antenna"), Value::from("TX/RX"));
+    assert!(report.coercions.is_empty());
 
     // Membership: an integer in -1…=channel count − 1, and a BasicRX antenna's names.
     let report = coerce(&[("radio.rx.c2.stream", eq_int(-1))]);
@@ -964,16 +989,6 @@ fn rm_33_rm_19_per_channel_cases() {
     assert_eq!(violation_keys(&violations), ["radio.rx.c1.antenna"], "{violations:?}");
     rx[3].1 = Value::from(-1_i64);
     assert!(check(&rx, envelope.clone()).is_empty());
-
-    // The current builder's own keys keep RM-19's judgement.
-    let old = vec![
-        (keys::TX_CHANNELS.to_owned(), Value::from(1_i64)),
-        (keys::TX_FREQUENCY_HZ.to_owned(), Value::from(num(2_600_000_000.0))),
-        (keys::TX_GAIN_DB.to_owned(), Value::from(num(10.0))),
-        (keys::TX_ANTENNA.to_owned(), Value::from("TX/RX")),
-    ];
-    let violations = check(&old, envelope);
-    assert_eq!(violation_keys(&violations), [keys::TX_FREQUENCY_HZ]);
 
     // A channel value of another kind is its own violation.
     let violations = check(

@@ -212,7 +212,7 @@ impl UhdRadio {
         }
         let allowed: Vec<&str> = x3xx::SELECTOR_KEYS
             .into_iter()
-            .chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock", "keys"])
+            .chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"])
             .collect();
         if let Some(name) = binding.selector.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(rejected(format!("UR-5: unsupported selector key `{name}`")));
@@ -247,8 +247,6 @@ impl UhdRadio {
             Some(Value::Scalar(Scalar::Int(n))) if (1..=65_536).contains(n) => *n as u32,
             Some(_) => return Err(rejected("UR-5: selector `block_len` must be an Int in 1..=65536")),
         };
-        // RM-38: `keys` is accepted for now, but every accepted binding uses the layout.
-        ezsdr_radio::channel_keys(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
         let layout = channels::from_selector(&binding.selector).map_err(|why| rejected(format!("UR-5: {why}")))?;
         // UR-5, design 33 D5: the serial is the device's identity and the first device
         // call; a live instance already bound to it is refused before anything is written
@@ -424,7 +422,7 @@ impl Provider for UhdRadio {
         &self.instance
     }
 
-    /// RM-26's coercion over the profile: pure, no device call (UR-11, MA-11).
+    /// RM-29's coercion over the profile: pure, no device call (UR-11, MA-11).
     fn coerce(&self, request: &Requested) -> Result<CoerceReport, ModuleError> {
         self.description.coerce(&self.instance.id, request)
     }
@@ -885,7 +883,6 @@ mod tests {
     fn two_rx_description() -> channels::Description {
         use ezsdr_kernel::spec::{Ident, Scalar, Value};
         let selector = BTreeMap::from([
-            (Ident::parse("keys").unwrap(), Value::from("channel".to_owned())),
             (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
             (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
         ]);
@@ -948,7 +945,7 @@ mod tests {
         let binding: Binding = serde_json::from_value(json!({
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
-            "selector": { "args": "type=fake-rig", "keys": "channel", "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0"] }
+            "selector": { "args": "type=fake-rig",  "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0"] }
         })).unwrap();
         let inner = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let (mark, marked) = mpsc::channel();

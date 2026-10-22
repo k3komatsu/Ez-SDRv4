@@ -22,7 +22,7 @@ pub(crate) trait DescriptionExt {
 
 impl DescriptionExt for Description {
     fn addressed(&self, core: &Core, node: Option<&ResourceId>) -> ezsdr_radio::Addressed {
-        ezsdr_radio::addressed(&core.id, node, true, None, None, |direction| self.stream_count(Dir::from(direction)))
+        ezsdr_radio::addressed(&core.id, node, |direction| self.stream_count(Dir::from(direction)))
     }
 
     fn channel_count(&self, dir: Dir) -> usize {

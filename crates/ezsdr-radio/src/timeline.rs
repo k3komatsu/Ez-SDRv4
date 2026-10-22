@@ -192,7 +192,7 @@ impl Segment {
 /// a transmit clock runs on through.
 type Planned = (Vec<Segment>, Vec<Omitted>, Option<i64>);
 
-/// One stream's commands and faults, and their plan, as a Provider books them (RM-26).
+/// One stream's commands and faults, and their plan, as a Provider books them (RM-25).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Line {
     /// The stream's initial state and its Provider's terms.
@@ -479,7 +479,7 @@ impl Lines {
         self.lines.iter().find(|(key, _)| *key == stream).map(|(_, line)| line)
     }
 
-    /// RM-26: books `item` on `stream`'s line, with RM-34's releases kept afterwards.
+    /// RM-25: books `item` on `stream`'s line, with RM-34's releases kept afterwards.
     pub fn book(&mut self, stream: StreamKey, item: Item) -> Result<i64, TimeError> {
         let mut next = self.clone();
         let e = next.line_mut(stream).book(item)?;
@@ -504,7 +504,7 @@ impl Lines {
         Ok(true)
     }
 
-    /// RM-26: prunes every line's items before `before`, and with them a move whose two items
+    /// RM-25: prunes every line's items before `before`, and with them a move whose two items
     /// the pruning folds into the state its lines are planned from: no later booking can
     /// change the source's cut then, and the plan stays as it was. RM-34: the source's cut of
     /// a move so folded away stays as the destination stream's release floor, the greatest of
@@ -519,7 +519,7 @@ impl Lines {
         *self = next;
     }
 
-    /// RM-26: requests a prune of `stream`'s line before `before`; it does not request a prune
+    /// RM-25: requests a prune of `stream`'s line before `before`; it does not request a prune
     /// of another stream. RM-34: an item of a move stays on both lines until both effective
     /// prune boundaries pass its instant, preserving later release changes and refusal.
     pub fn prune_stream(&mut self, stream: StreamKey, before: i64) {

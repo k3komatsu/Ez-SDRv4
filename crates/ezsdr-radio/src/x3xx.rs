@@ -2,14 +2,12 @@
 //! build, and the flat selector layout both parse (design 33 D5). One place, so the two
 //! Providers cannot drift apart (documentation audit D3).
 
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use ezsdr_kernel::module_api::{ProfileRef, Version};
-use ezsdr_kernel::spec::{Ident, Scalar, Value};
 
-use crate::device::{DeviceDescription, Grid};
-use crate::{keys, PerformanceEnvelope, TimingEnvelope};
+use crate::device::Grid;
+use crate::{PerformanceEnvelope, TimingEnvelope};
 
 /// The one profile name both Providers declare (design 33 D5).
 pub const PROFILE: &str = "x3xx";
@@ -52,7 +50,7 @@ pub fn is_decimation(n: u64) -> bool {
 }
 
 /// The rate grid of a `master_clock_hz` X3xx, ascending by rate, as a `Values` grid of
-/// `DeviceDescription` is — that is `master_clock_hz / N` for the decimations `N` from
+/// `channels::Description` is — that is `master_clock_hz / N` for the decimations `N` from
 /// 2040 down to 1. The `AnyOf` capability MR-4 builds from it is the reverse (ascending
 /// `N`).
 pub fn rates(master_clock_hz: u64) -> Vec<f64> {
@@ -159,14 +157,7 @@ impl Board {
         (vec!["RX2".to_owned(), "TX/RX".to_owned()], vec!["TX/RX".to_owned()])
     }
 
-    /// Whether the board's channels keep a known phase relation, `radio.{rx,tx}.coherent`
-    /// (RM-9): the UBX and the OBX do after a timed tune, a CBX aligns its channels in
-    /// samples but not in phase (design 33 D13).
-    pub fn coherent(self) -> bool {
-        !matches!(self, Board::Cbx)
-    }
-
-    /// `radio.phase_behavior_on_retune` (RM-9, design 33 D13).
+    /// `radio.{rx,tx}.c<n>.phase_behavior_on_retune` (RM-9, design 33 D13).
     pub fn phase_behavior_on_retune(self) -> &'static str {
         match self {
             // UHD's timed LO phase synchronisation is the UBX's and the OBX's only
@@ -398,62 +389,6 @@ impl Image {
     }
 }
 
-/// One logical channel's front end: `"<timekeeper>:<slot>:<board>:<frontend>"` (design 33
-/// D5).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Element {
-    /// The timekeeper it belongs to; 0 in this stage.
-    pub timekeeper: u32,
-    /// Its slot.
-    pub slot: Slot,
-    /// Its daughterboard's kind.
-    pub board: Board,
-    /// UHD's front end number on that board; 0 in this stage.
-    pub frontend: u32,
-}
-
-/// The layout and the other shared selector values one device's binding declares (design
-/// 33 D5).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Selection {
-    /// The master clock; the only accepted value is [`MASTER_CLOCK_HZ`].
-    pub master_clock_hz: u64,
-    /// The FPGA image; checked, used by nothing yet.
-    pub image: Image,
-    /// The number of 10 GbE links; checked, used by nothing yet.
-    pub links: u8,
-    /// The speed of one link, 10 or 1 GbE: what the transport's bytes per second are.
-    pub link_gbps: u8,
-    /// The one daughterboard kind the layout names (design 33 D5).
-    pub board: Board,
-    /// The receive channels, in order; the position is the logical channel number.
-    pub rx: Vec<Element>,
-    /// The transmit channels, in order.
-    pub tx: Vec<Element>,
-}
-
-impl Selection {
-    /// A selection of `board`'s front ends in `rx` and `tx` slot order, with 200 MHz, the
-    /// HG image, one link and 10 GbE: what a test builds without a selector.
-    pub fn of(board: Board, rx: &[Slot], tx: &[Slot]) -> Selection {
-        let elements = |slots: &[Slot]| {
-            slots
-                .iter()
-                .map(|slot| Element { timekeeper: 0, slot: *slot, board, frontend: 0 })
-                .collect()
-        };
-        Selection {
-            master_clock_hz: MASTER_CLOCK_HZ,
-            image: Image::Hg,
-            links: 1,
-            link_gbps: 10,
-            board,
-            rx: elements(rx),
-            tx: elements(tx),
-        }
-    }
-}
-
 /// The TimingEnvelope every `x3xx` description declares (RM-6, RM-20).
 pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
     TimingEnvelope {
@@ -489,98 +424,9 @@ pub struct ProviderTerms {
     pub repeat_align_samples: u64,
 }
 
-/// Reads the shared selector keys of `selector` and checks the layout (design 33 D5).
-/// The reason is returned without a rule prefix; a Provider prefixes its own.
-pub fn from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Selection, String> {
-    let get = |name: &str| selector.get(&Ident::parse(name).expect("a selector key"));
-    let master_clock_hz = match get("master_clock_hz") {
-        None => MASTER_CLOCK_HZ,
-        Some(Value::List(values)) => match values.as_slice() {
-            [Scalar::Int(other)] if *other == MASTER_CLOCK_HZ as i64 => MASTER_CLOCK_HZ,
-            [Scalar::Int(other)] => {
-                return Err(format!(
-                    "the layout's master clock must be {MASTER_CLOCK_HZ} Hz, not {other}"
-                ))
-            }
-            _ => {
-                return Err(format!(
-                    "the layout's `master_clock_hz` must be the one-element list [{MASTER_CLOCK_HZ}]"
-                ))
-            }
-        },
-        Some(_) => {
-            return Err("the layout's `master_clock_hz` must be a list of integers".to_owned())
-        }
-    };
-    let image = match get("image") {
-        None => Image::Hg,
-        Some(Value::List(values)) => match values.as_slice() {
-            [Scalar::Str(name)] => Image::parse(name)
-                .ok_or_else(|| format!("`{name}` is not an FPGA image; `hg` or `xg`"))?,
-            _ => return Err("the layout's `image` must be the one-element list [`hg`|`xg`]".to_owned()),
-        },
-        Some(_) => return Err("the layout's `image` must be a list of strings".to_owned()),
-    };
-    let number = |name: &str, allowed: &[i64], default: i64| -> Result<i64, String> {
-        match get(name) {
-            None => Ok(default),
-            Some(Value::List(values)) => match values.as_slice() {
-                [Scalar::Int(value)] if allowed.contains(value) => Ok(*value),
-                [Scalar::Int(value)] => {
-                    Err(format!("the layout's `{name}` must be one of {allowed:?}, not {value}"))
-                }
-                _ => Err(format!("the layout's `{name}` must be a one-element list of integers")),
-            },
-            Some(_) => Err(format!("the layout's `{name}` must be a list of integers")),
-        }
-    };
-    let links = number("links", &[1, 2], 1)? as u8;
-    let link_gbps = number("link_gbps", &[1, 10], 10)? as u8;
-
-    let list = |name: &str| -> Result<Vec<Element>, String> {
-        let values = match get(name) {
-            None => return Err(format!("the `x3xx` selector needs `{name}`, its channel layout")),
-            Some(Value::List(values)) => values,
-            Some(_) => return Err(format!("the layout's `{name}` must be a list of strings")),
-        };
-        values
-            .iter()
-            .map(|value| match value {
-                Scalar::Str(raw) => element(raw),
-                _ => Err(format!("the layout's `{name}` must hold strings")),
-            })
-            .collect()
-    };
-    let rx = list("rx")?;
-    let tx = list("tx")?;
-
-    if rx.is_empty() && tx.is_empty() {
-        return Err("the layout names no front end".to_owned());
-    }
-    let board = rx.first().or_else(|| tx.first()).expect("a nonempty layout").board;
-    if let Some(other) = rx.iter().chain(&tx).find(|element| element.board != board) {
-        return Err(format!(
-            "the layout names the boards `{}` and `{}`; one device carries one kind",
-            board.name(),
-            other.board.name()
-        ));
-    }
-    for (direction, elements) in [("rx", &rx), ("tx", &tx)] {
-        // RM-28, design 33 D5: the layout follows any order (a non-prefix one too — the
-        // order is the channel order), but no `(slot, front end)` pair twice, which is
-        // the same judgement `channels::check_layout` reads (one place).
-        let mut seen: Vec<(Slot, u32)> = Vec::new();
-        for (position, element) in elements.iter().enumerate() {
-            check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?;
-            seen.push((element.slot, element.frontend));
-        }
-    }
-    Ok(Selection { master_clock_hz, image, links, link_gbps, board, rx, tx })
-}
-
 /// RM-28 (design 33 D5): no `(slot, front end)` pair named twice in one direction's
 /// layout; the one place the judgement and its wording live, read by
-/// [`from_selector`] and `channels::check_layout`.
+/// `channels::check_layout`.
 pub(crate) fn check_repeat(direction: &str, position: usize, slot: Slot, frontend: u32, name: &str, seen: &[(Slot, u32)]) -> Result<(), String> {
     if seen.contains(&(slot, frontend)) {
         return Err(format!(
@@ -588,81 +434,4 @@ pub(crate) fn check_repeat(direction: &str, position: usize, slot: Slot, fronten
         ));
     }
     Ok(())
-}
-
-/// Parses one `"<timekeeper>:<slot>:<board>:<frontend>"` element (design 33 D5).
-fn element(raw: &str) -> Result<Element, String> {
-    let fields: Vec<&str> = raw.split(':').collect();
-    let Ok([timekeeper, slot, board, frontend]) = <[&str; 4]>::try_from(fields.as_slice()) else {
-        return Err(format!(
-            "the layout element `{raw}` is not `<timekeeper>:<slot>:<board>:<frontend>`"
-        ));
-    };
-    let timekeeper: u32 = timekeeper
-        .parse()
-        .map_err(|_| format!("the layout element `{raw}` has no timekeeper number"))?;
-    if timekeeper != 0 {
-        return Err(format!(
-            "the layout element `{raw}` names timekeeper {timekeeper}; this stage has one device, 0"
-        ));
-    }
-    let slot = Slot::parse(slot)
-        .ok_or_else(|| format!("the layout element `{raw}` names slot `{slot}`, not A or B"))?;
-    let board = Board::parse(board).ok_or_else(|| {
-        format!("the layout element `{raw}` names the board `{board}`, which this stage does not describe")
-    })?;
-    let frontend: u32 = frontend
-        .parse()
-        .map_err(|_| format!("the layout element `{raw}` has no front end number"))?;
-    if frontend != 0 {
-        return Err(format!(
-            "the layout element `{raw}` names front end {frontend}; this stage has 0"
-        ));
-    }
-    Ok(Element { timekeeper, slot, board, frontend })
-}
-
-/// The `DeviceDescription` of a `x3xx` motherboard with `selection`'s front ends (RM-26,
-/// design 33 D5). `block_len` is the Provider's, and `terms` are the Module's own values.
-pub fn description(selection: &Selection, block_len: u32, terms: &ProviderTerms) -> DeviceDescription {
-    let board = selection.board;
-    let mut defaults = DeviceDescription::x310_defaults();
-    for name in [keys::RX_FREQUENCY_HZ, keys::TX_FREQUENCY_HZ] {
-        let value = Scalar::try_from(board.default_frequency_hz()).expect("a finite default");
-        defaults.insert(
-            ezsdr_kernel::spec::Key::parse(name).expect("a radio key"),
-            Value::from(value),
-        );
-    }
-    // RM-5's default receive channel count is one; a layout with no receive front end
-    // requests none, so the Mock opens no receive stream on it (design 33 D5).
-    let rx_default = i64::from(!selection.rx.is_empty());
-    defaults.insert(
-        ezsdr_kernel::spec::Key::parse(keys::RX_CHANNELS).expect("a radio key"),
-        Value::from(rx_default),
-    );
-    let (rx_antennas, tx_antennas) = board.antennas();
-    DeviceDescription {
-        profile: profile_ref(),
-        rates: Grid::Values(rates(selection.master_clock_hz)),
-        whole_hertz_rates: false,
-        frequency: board.frequency(),
-        gain: board.gain(),
-        rx_max_channels: selection.rx.len() as i64,
-        tx_max_channels: selection.tx.len() as i64,
-        rx_antennas,
-        tx_antennas,
-        coherent: board.coherent(),
-        full_duplex: true,
-        hardware_time: true,
-        phase_behavior_on_retune: board.phase_behavior_on_retune().to_owned(),
-        repeat_max_samples: terms.repeat_max_samples,
-        repeat_align_samples: terms.repeat_align_samples,
-        block_len,
-        tx_path_delay_samples: TX_PATH_DELAY,
-        rx_path_delay_samples: RX_PATH_DELAY,
-        timing: timing(terms),
-        performance: performance(selection.link_gbps),
-        defaults,
-    }
 }

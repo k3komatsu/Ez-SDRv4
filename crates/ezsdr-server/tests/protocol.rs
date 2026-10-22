@@ -717,7 +717,6 @@ fn uhd_profile(dir: &Path) -> serde_json::Value {
                 "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
                 "selector": {
                     "args": "addr=192.0.2.1",
-                    "keys": "channel",
                     "rx": ["0:A:ubx:0", "0:B:ubx:0"],
                     "tx": ["0:A:ubx:0", "0:B:ubx:0"]
                 }

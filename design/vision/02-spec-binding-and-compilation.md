@@ -16,17 +16,23 @@ Example:
 ```json
 {
   "version": 1,
-  "requirements": { "vocabularies": [{ "id": "radio", "major": 1 }] },
+  "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }] },
   "resources": {
     "radio": {
       "kind": "radio.device",
       "requires": {
-        "radio.rx.channels":    { "kind": "min", "value": 2 },
-        "radio.rx.coherent":    { "kind": "eq",  "value": true },
-        "radio.tx.channels":    { "kind": "min", "value": 2 },
+        "radio.rx.c0.stream":   { "kind": "eq",  "value": 0 },
+        "radio.rx.c1.stream":   { "kind": "eq",  "value": 0 },
+        "radio.rx.c2.stream":   { "kind": "eq",  "value": 0 },
+        "radio.rx.c3.stream":   { "kind": "eq",  "value": 0 },
+        "radio.rx.c0.phase_behavior_on_retune": { "kind": "eq", "value": "random_unless_timed_tune" },
+        "radio.rx.c1.phase_behavior_on_retune": { "kind": "eq", "value": "random_unless_timed_tune" },
+        "radio.rx.c2.phase_behavior_on_retune": { "kind": "eq", "value": "random_unless_timed_tune" },
+        "radio.rx.c3.phase_behavior_on_retune": { "kind": "eq", "value": "random_unless_timed_tune" },
+        "radio.tx.c0.stream":   { "kind": "eq",  "value": 0 },
         "radio.full_duplex":    { "kind": "eq",  "value": true },
-        "radio.rx.sample_rate_hz": { "kind": "eq",  "value": 20000000 },
-        "radio.tx.sample_rate_hz": { "kind": "eq",  "value": 20000000 },
+        "radio.rx.s0.sample_rate_hz": { "kind": "eq", "value": 20000000 },
+        "radio.tx.s0.sample_rate_hz": { "kind": "eq", "value": 20000000 },
         "radio.hardware_time":  { "kind": "eq",  "value": true }
       }
     }
@@ -34,7 +40,7 @@ Example:
 }
 ```
 
-The keys under `requires` are defined by the Radio Model (Vocabulary), not by the Kernel; the `radio.*` names above stand in for the ones the Radio Model will define. The Kernel matcher is generic: it compares constraints with declared capabilities and asks the Provider whether a value can be coerced.
+The keys under `requires` are defined by the Radio Model (Vocabulary), not by the Kernel. Four receive channels belong to stream 0, each with an explicit retune-phase requirement; a single channel count cannot express that layout. The example expresses a coherent sensing-array intent, not just sample alignment: with `random_unless_timed_tune`, coherence holds only for a segment after the Run successfully timed-tunes every channel, and the Provider records the attained basis and validity in its Manifest. The Spec's per-channel capability constraints express the requirement but cannot assert that a particular Run achieved coherence. The Kernel matcher is generic: it compares constraints with declared capabilities and asks the Provider whether a value can be coerced.
 
 ## Resources are composite
 
@@ -51,7 +57,7 @@ Provider instance
     └── sensors             temperature, lock status, ...
 ```
 
-A Spec states requirements per resource under Vocabulary-owned keys, one key per direction (`radio.rx.channels`, `radio.tx.channels`, `radio.rx.coherent`): a sensing array needs four coherent RX channels and one TX channel, and a single `channels` count cannot say so. The generic matcher compares them with the declared capabilities of the node the binding chose, asking the Provider's `coerce` only whether a value can be coerced. A Spec resource binds to exactly one Provider instance, and a node to at most one resource unless its Provider declares it shareable, so coherence is declared by the instance that owns the channels and never assembled across instances (§25). A resource's `needs` are resolved by the Kernel to a sub-resource of a bound instance, possibly another one, which is how a peripheral reaches a radio's GPIO bank with no Module dependency (§39). Fragments are armed in dependency order from each instance's `arm_after` and the `ezsdr.arm_order` section, so the device that sources PPS is armed first — a v3 start-up failure mode.
+A Spec states requirements per resource under Vocabulary-owned layout keys: `radio.rx.c<n>.stream` assigns logical channels to streams, while `radio.rx.s<k>.sample_rate_hz` and `radio.tx.s<k>.sample_rate_hz` state direction-specific rates. A four-channel sensing array can state each channel's membership and retune-phase behavior; a single count cannot. The generic matcher compares these requirements with the declared capabilities of the node the binding chose, asking the Provider's `coerce` only whether a value can be coerced. A Spec resource binds to exactly one Provider instance, and a node to at most one resource unless its Provider declares it shareable, so coherence is declared by the instance that owns the channels and never assembled across instances (§25). A resource's `needs` are resolved by the Kernel to a sub-resource of a bound instance, possibly another one, which is how a peripheral reaches a radio's GPIO bank with no Module dependency (§39). Fragments are armed in dependency order from each instance's `arm_after` and the `ezsdr.arm_order` section, so the device that sources PPS is armed first — a v3 start-up failure mode.
 
 Normative: [design/03-spec-and-binding.md](../03-spec-and-binding.md), rules SB-2, SB-6…SB-8, SB-12, SB-33…SB-36, SB-39.
 

@@ -1,11 +1,8 @@
 //! The description built from a layout of mixed daughterboards, one channel and
 //! stream key per logical channel (RM-27…RM-32, design 33 D1…D9).
 //!
-//! This is the second builder, beside RM-26's [`crate::device::DeviceDescription`]:
-//! the current builder reads one board kind and one stream per direction, and this one
-//! reads the selector's layout — `"<timekeeper>:<slot>:<board>:<frontend>"` per logical
-//! channel — and exposes each channel's configuration under its own numbered key. A
-//! Provider instance uses one builder's configuration keys, never both (RM-27).
+//! It reads the selector's layout — `"<timekeeper>:<slot>:<board>:<frontend>"` per logical
+//! channel — and exposes each channel's configuration under its own numbered key (RM-27).
 
 use std::collections::BTreeMap;
 
@@ -573,7 +570,7 @@ impl Description {
     ) -> Result<CoerceReport, ModuleError> {
         if request.resource != *device {
             return Err(ModuleError::rejected(format!(
-                "RM-26: the request names {}, not this device",
+                "RM-30: the request names {}, not this device",
                 request.resource
             )));
         }

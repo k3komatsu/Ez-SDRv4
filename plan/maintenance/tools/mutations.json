@@ -876,7 +876,7 @@
  },
  {
   "id": "J57",
-  "name": "RM-26: a booking whose plan cannot be represented stays in the line",
+  "name": "RM-25: a booking whose plan cannot be represented stays in the line",
   "file": "crates/ezsdr-radio/src/timeline.rs",
   "old": "                self.items.pop();\n",
   "new": "",
@@ -2894,25 +2894,25 @@
   "test_bin": "module_api",
   "filter": "ma_39_resource_endpoint_domain_sets_use_one_rule"
  },
- {
-  "id": "J270",
-  "name": "the radio tree ignores the memory domain passed by its caller (MA-10)",
-  "file": "crates/ezsdr-radio/src/device.rs",
-  "old": "            memory_domains: vec![memory_domain],",
-  "new": "            memory_domains: vec![MemoryDomainId::local(0)],",
-  "crate": "ezsdr-radio",
-  "test_bin": "device",
-  "filter": "rm_26_the_description_builds_the_tree"
- },
- {
-  "id": "J271",
-  "name": "portless radio stream children inherit the device memory domain (MA-10)",
-  "file": "crates/ezsdr-radio/src/device.rs",
-  "old": "            memory_domains: Vec::new(),",
-  "new": "            memory_domains: vec![memory_domain],",
-  "crate": "ezsdr-radio",
-  "test_bin": "device",
-  "filter": "rm_26_the_description_builds_the_tree"
+  {
+   "id": "J270",
+   "name": "the radio tree ignores the memory domain passed by its caller (MA-10)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "            memory_domains: vec![memory_domain],",
+   "new": "            memory_domains: vec![MemoryDomainId::local(0)],",
+   "crate": "ezsdr-radio",
+   "test_bin": "channels",
+   "filter": "rm_29_the_layout_description_builds_the_stream_tree"
+  },
+  {
+   "id": "J271",
+   "name": "portless radio stream children inherit the device memory domain (MA-10)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "            memory_domains: Vec::new(),",
+   "new": "            memory_domains: vec![memory_domain],",
+   "crate": "ezsdr-radio",
+   "test_bin": "channels",
+   "filter": "rm_29_the_layout_description_builds_the_stream_tree"
  },
  {
   "id": "J272",
@@ -3826,15 +3826,15 @@
   "test_bin": "lib",
   "filter": "sc_25_the_underflow_event_carries_its_own_instant"
  },
- {
-  "id": "P01",
+  {
+   "id": "P01",
   "name": "the decimation set gains a fourth halfband (design 33 D5)",
   "file": "crates/ezsdr-radio/src/x3xx.rs",
   "old": "        for h in 0..=3u32 {",
   "new": "        for h in 0..=4u32 {",
   "crate": "ezsdr-radio",
   "test_bin": "device",
-  "filter": "rm_26_the_decimation_set_is_the_ddc_s"
+   "filter": "x3xx_the_decimation_set_is_the_ddc_s"
  },
  {
   "id": "P02",
@@ -3844,7 +3844,7 @@
   "new": "            for c in 1..=256u64 {",
   "crate": "ezsdr-radio",
   "test_bin": "device",
-  "filter": "rm_26_the_decimation_set_is_the_ddc_s"
+   "filter": "x3xx_the_decimation_set_is_the_ddc_s"
  },
  {
   "id": "P03",
@@ -3856,67 +3856,67 @@
   "new2": "            for c in 2..=255u64 {",
   "crate": "ezsdr-radio",
   "test_bin": "device",
-  "filter": "rm_26_the_decimation_set_is_the_ddc_s"
+   "filter": "x3xx_the_decimation_set_is_the_ddc_s"
  },
- {
-  "id": "P04",
-  "name": "the layout accepts a timekeeper other than 0 (design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "    if timekeeper != 0 {",
-  "new": "    if false {",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
- },
- {
-  "id": "P05",
-  "name": "the layout accepts two board kinds in one device (design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "    if let Some(other) = rx.iter().chain(&tx).find(|element| element.board != board) {",
-  "new": "    if let Some(other) = rx.iter().chain(&tx).find(|_element| false) {",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
- },
- {
-  "id": "P06",
-  "name": "the layout accepts a slot other than A or B (design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "    let slot = Slot::parse(slot)\n        .ok_or_else(|| format!(\"the layout element `{raw}` names slot `{slot}`, not A or B\"))?;",
-  "new": "    let slot = Slot::parse(slot).unwrap_or(Slot::A);",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
- },
- {
-  "id": "P07",
-  "name": "the layout accepts a front end other than 0 (design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "    if frontend != 0 {",
-  "new": "    if false {",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
- },
- {
-  "id": "P08",
-  "name": "the layout's positions are not checked against UHD's default order, so a direction may name slot B alone (design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "            check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?;",
-  "new": "            let _ = (direction, position, element.slot, element.frontend, element.board.name(), &seen);",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
- },
- {
-  "id": "P09",
-  "name": "only a direction's first position is checked, so a later element may repeat its slot (design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "            check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?;",
-  "new": "            if position == 0 { check_repeat(direction, position, element.slot, element.frontend, element.board.name(), &seen)?; }",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_layout_parser_checks_the_shared_selector"
+  {
+   "id": "P04",
+   "name": "the layout accepts a timekeeper other than 0 (design 33 D5)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "    if timekeeper != 0 {",
+   "new": "    if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_28_the_layout_analysis_cases"
+  },
+  {
+   "id": "P05",
+   "name": "a slot accepts two board kinds (design 33 D5)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "                if other != element.front_end {",
+   "new": "                if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_28_the_layout_analysis_cases"
+  },
+  {
+   "id": "P06",
+   "name": "the layout accepts a slot other than A or B (design 33 D5)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "    let slot = Slot::parse(slot).ok_or_else(|| {\n        format!(\"the layout's `{direction}` element at position {position} `{raw}` names slot `{slot}`, not A or B\")\n    })?;",
+   "new": "    let slot = Slot::parse(slot).unwrap_or(Slot::A);",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_28_the_layout_analysis_cases"
+  },
+  {
+   "id": "P07",
+   "name": "the layout accepts a front end other than 0 (design 33 D5)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "    if !front_end.frontends().contains(&frontend) {",
+   "new": "    if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_28_the_layout_analysis_cases"
+  },
+  {
+   "id": "P08",
+   "name": "a duplicate front end is accepted (design 33 D5)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "            x3xx::check_repeat(direction, position, element.slot, element.frontend, element.front_end.name(), &seen)?;",
+   "new": "            let _ = (direction, position, element.slot, element.frontend, element.front_end.name(), &seen);",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_28_the_layout_analysis_cases"
+  },
+  {
+   "id": "P09",
+   "name": "only a direction's first position is checked, so a later element may repeat its slot (design 33 D5)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "            x3xx::check_repeat(direction, position, element.slot, element.frontend, element.front_end.name(), &seen)?;",
+   "new": "            if position == 0 { x3xx::check_repeat(direction, position, element.slot, element.frontend, element.front_end.name(), &seen)?; }",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_28_the_layout_analysis_cases"
  },
  {
   "id": "P11",
@@ -3938,12 +3938,12 @@
   "test_bin": "fake",
   "filter": "ur_12_every_advertised_rate_is_accepted"
  },
- {
-  "id": "P15",
-  "name": "the Mock's configuration starts from RM-5's 1 GHz defaults, not from the description's (the CBX's 2.45 GHz default)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        let mut config = self.profile.defaults().clone();",
-  "new": "        let mut config = ezsdr_radio::device::DeviceDescription::x310_defaults();",
+  {
+   "id": "P15",
+   "name": "the CBX's channel default frequency is replaced by 1 GHz (RM-30)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "                    Value::from(num(channel.default_frequency_hz)),",
+   "new": "                    Value::from(num(1_000_000_000.0)),",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_03_a_cbx_layer_starts_at_its_board_s_default_frequency"
@@ -3958,25 +3958,25 @@
   "test_bin": "mock_radio",
   "filter": "mr_02_from_binding_refusals"
  },
- {
-  "id": "P17",
-  "name": "the receive channel default does not follow the layout, so an `rx`-less layer opens one (RM-5, design 33 D5)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "    let rx_default = i64::from(!selection.rx.is_empty());",
-  "new": "    let rx_default = 1;",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_description_is_the_one_profile_both_providers_name"
- },
- {
-  "id": "P18",
-  "name": "every board is coherent, so a CBX may claim `radio.rx.coherent` (RM-9, design 33 D13)",
-  "file": "crates/ezsdr-radio/src/x3xx.rs",
-  "old": "        coherent: board.coherent(),",
-  "new": "        coherent: true,",
-   "crate": "ezsdr-radio",
-   "test_bin": "device",
-   "filter": "rm_26_the_description_is_the_one_profile_both_providers_name"
+  {
+   "id": "P17",
+   "name": "a layout with no receive front end is refused even when transmit exists (RM-28)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "    if rx.is_empty() && tx.is_empty() {",
+   "new": "    if rx.is_empty() || tx.is_empty() {",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "x3xx",
+   "filter": "d3_a_layout_without_receive_channels_requests_none_on_both_providers"
+  },
+  {
+   "id": "P18",
+   "name": "a CBX is given timed phase synchronization (RM-9, design 33 D13)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "            phase_behavior_on_retune: front_end.phase_behavior_on_retune().to_owned(),",
+   "new": "            phase_behavior_on_retune: \"random_unless_timed_tune\".to_owned(),",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "x3xx",
+   "filter": "d3_a_cbx_layout_is_not_coherent_on_either_provider"
  },
  {
   "id": "P19",
@@ -4394,16 +4394,6 @@
   "file": "crates/ezsdr-radio/src/lib.rs",
   "old": "    if envelope\n        .antenna_ports\n        .as_ref()\n        .is_some_and(|ports| !ports.iter().any(|port| port == antenna))\n    {",
   "new": "    if !is_rx\n        && envelope\n            .antenna_ports\n            .as_ref()\n            .is_some_and(|ports| !ports.iter().any(|port| port == antenna))\n    {",
-  "crate": "ezsdr-radio",
-  "test_bin": "channels",
-  "filter": "rm_33_rm_19_per_channel_cases"
- },
- {
-  "id": "P62",
-  "name": "RM-33: every configuration is judged by the channel keys, so RM-19's old cases are skipped",
-  "file": "crates/ezsdr-radio/src/lib.rs",
-  "old": "            if configuration\n                .keys()\n                .any(|key| matches!(concrete(key), Some(Concrete::Channel { .. })))\n            {",
-  "new": "            if true {",
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_33_rm_19_per_channel_cases"
@@ -4999,16 +4989,6 @@
   "filter": "rm_34_a_move_waits_the_greatest_end_not_the_last_one_read"
  },
  {
-  "id": "P122",
-  "name": "the `keys` selector accepts any value, so a current-key instance can be asked for the layout keys",
-  "file": "crates/ezsdr-radio/src/lib.rs",
-  "old": "        Some(Value::Scalar(Scalar::Str(value))) if value == \"channel\" => Ok(true),",
-  "new": "        Some(_) => Ok(true),",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_layout",
-  "filter": "mr_38_a_layout_instance_uses_one_key_set"
- },
- {
   "id": "P124",
   "name": "a layout description declares one receive port named `rx` for every stream",
   "file": "crates/ezsdr-radio/src/channels.rs",
@@ -5138,16 +5118,16 @@
   "test_bin": "mock_layout",
   "filter": "mr_38_the_tree_and_capabilities_are_the_layout_s"
  },
- {
-  "id": "P138",
-  "name": "a channel number the layout does not have is coerced against its first channel",
+  {
+   "id": "P138",
+   "name": "a channel number the layout does not have is coerced against its first channel",
   "file": "crates/ezsdr-radio/src/channels.rs",
   "old": "        let Some(channel) = channels.get(number as usize) else {",
-  "new": "        let Some(channel) = channels.get(number as usize).or(channels.first()) else {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_layout",
-  "filter": "mr_38_a_layout_instance_uses_one_key_set"
- },
+   "new": "        let Some(channel) = channels.get(number as usize).or(channels.first()) else {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_radio",
+   "filter": "mr_06_coerce_cases"
+  },
  {
   "id": "P139",
   "name": "a layout instance's effective holds no requested channel key",
@@ -5609,17 +5589,27 @@
    "filter": "mr_34_a_layout_receive_move_is_an_untimed_tune_of_the_moved_channel"
   },
   {
-   "id": "P191",
-   "name": "the untimed tunes of one origin take the streams in reverse number order (MR-30, MR-34)",
+    "id": "P191",
+    "name": "the untimed tunes of one origin take the streams in reverse number order (MR-30, MR-34)",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
    "old": "    (u64::from(direction == Direction::Tx) << 32) + k as u64 + 1",
    "new": "    (u64::from(direction == Direction::Tx) << 32) + (1 << 31) - k as u64",
    "crate": "ezsdr-mock-radio",
-   "test_bin": "mock_layout",
-   "filter": "mr_34_a_layout_transmit_move_is_an_untimed_tune_of_the_moved_channel"
+    "test_bin": "mock_layout",
+    "filter": "mr_34_a_layout_transmit_move_is_an_untimed_tune_of_the_moved_channel"
   },
   {
-   "id": "P193",
+    "id": "P192",
+    "name": "untimed tune order at one origin is TX before RX (MR-30, MR-34)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "    (u64::from(direction == Direction::Tx) << 32) + k as u64 + 1",
+    "new": "    (u64::from(direction == Direction::Rx) << 32) + k as u64 + 1",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_30_untimed_receive_tune_precedes_transmit_at_one_origin"
+  },
+  {
+    "id": "P193",
    "name": "a transmit clock cut at its own origin takes the untimed tunes of its channels (MR-34)",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
    "old": "        if segment.by.is_none() || (direction == Direction::Tx && segment.cut == Some(0)) { return; }",
@@ -6452,23 +6442,13 @@
   },
   {
    "id": "P281",
-   "name": "the selector refuses `keys`, so a layout binding is a current-key one (UR-5, RM-38)",
+   "name": "the selector accepts the removed `keys` mode (UR-5, RM-38)",
    "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\", \"keys\"])",
-   "new": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\"])",
+   "old": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\"])",
+   "new": "            .chain([\"args\", \"id\", \"clock_source\", \"time_source\", \"block_len\", \"reopen_on_unlock\", \"keys\"])",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_05_the_keys_value_picks_one_key_set"
-  },
-  {
-   "id": "P283",
-   "name": "the `keys` refusal stops naming the value it wants (UR-5, RM-38)",
-   "file": "crates/ezsdr-radio/src/lib.rs",
-   "old": "        _ => Err(\"selector `keys` must be the string `channel`\".to_owned()),",
-   "new": "        _ => Err(\"selector `keys` must be a string\".to_owned()),",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_05_every_other_keys_value_is_refused"
+   "filter": "ur_05_keys_is_an_unknown_selector_key"
   },
   {
    "id": "P284",
@@ -8559,10 +8539,10 @@
   },
   {
     "id": "P333",
-    "name": "`prepare` filters by an obsolete key set instead of the layout description (UR-12, RM-30)",
+    "name": "`prepare` drops every layout configuration key from its effective configuration (UR-12, RM-30)",
     "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
     "old": "            if channels::is_configuration(&key) {",
-    "new": "            if ezsdr_radio::keys::CONFIGURATION.contains(&key.as_str()) {",
+    "new": "            if false {",
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_the_two_providers_prepare_one_layout_alike"
@@ -8836,5 +8816,35 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "ur_34_a_move_into_an_empty_stream_opens_it_after_the_source_s_release"
+  },
+  {
+    "id": "P549",
+    "name": "RM-8: the closest X3xx rate grid value is not selected",
+    "file": "crates/ezsdr-radio/src/device.rs",
+    "old": "            Grid::Values(values) => values.iter().copied().min_by(|a, b| {",
+    "new": "            Grid::Values(values) => values.iter().copied().max_by(|a, b| {",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_30_coerce_cases"
+  },
+  {
+    "id": "P550",
+    "name": "RM-8: an off-grid gain is rounded down instead of to its nearest step",
+    "file": "crates/ezsdr-radio/src/device.rs",
+    "old": "                let rounded = if r > 0.5 { f + 1.0 } else { f };",
+    "new": "                let rounded = f;",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_30_coerce_cases"
+  },
+  {
+    "id": "P551",
+    "name": "RM-8: antenna Set stops at an unavailable first member",
+    "file": "crates/ezsdr-radio/src/device.rs",
+    "old": "        Constraint::Set { values } => values\n            .iter()\n            .find_map(|value| match value {\n                Scalar::Str(value) if known(value) => Some(Value::from(value.as_str())),\n                _ => None,\n            })",
+    "new": "        Constraint::Set { values } => values\n            .iter()\n            .take(1)\n            .find_map(|value| match value {\n                Scalar::Str(value) if known(value) => Some(Value::from(value.as_str())),\n                _ => None,\n            })",
+    "crate": "ezsdr-radio",
+    "test_bin": "channels",
+    "filter": "rm_30_coerce_cases"
   }
 ]

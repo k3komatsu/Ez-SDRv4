@@ -602,7 +602,7 @@ fn sb_02_unknown_key_prefix_refused() {
             resource(
                 "test.device",
                 &[(
-                    "radio.rx.channels",
+                    "radio.rx.s0.sample_rate_hz",
                     Constraint::Eq {
                         value: Scalar::from(2),
                     },

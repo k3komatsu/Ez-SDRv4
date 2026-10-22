@@ -172,7 +172,7 @@ SpecError        UnsupportedVersion { found, supported } | UnknownField { path }
   *Test:* `sb_10_version_one_validates`, `sb_47_version_two_refused_by_name`; `version`'s presence by `ov_22_schema_freeze` (`required` in `experiment_spec.v1.json`; the schema's `minimum: 0` does not carry the rule's "positive"); none named for `version: 0` or an absent `version`'s envelope refusal.
 - **SB-11** `requirements.vocabularies` lists the Vocabulary majors this Spec's keys belong to. It is the only content of `requirements`; the per-resource requirements live in `resources[].requires`.
   *Test:* `sb_11_the_declared_vocabulary_major_is_checked`.
-- **SB-12** A `ResourceReq` states `kind` and `requires` and nothing about how the requirement is met. Direction-asymmetric requests are expressed as distinct keys under the Vocabulary's prefix — `radio.rx.channels`, `radio.tx.channels`, `radio.rx.coherent` — not as a single count. The Kernel does not know that `rx` means anything.
+- **SB-12** A `ResourceReq` states `kind` and `requires` and nothing about how the requirement is met. Direction-asymmetric radio requests use distinct layout keys under the Vocabulary's prefix — `radio.rx.s0.sample_rate_hz` and `radio.tx.s0.sample_rate_hz` — not a shared count. The Kernel does not know that `rx` means anything.
   *Test:* the `ResourceReq` shape, which has no direction field, pinned by `ov_22_schema_freeze` (`experiment_spec.v1.json`).
 - **SB-13** A Spec that contains a `placements`, `placement`, `environment`, `executor`, `memory_domain` or `island` field at any depth outside `extensions` and any `schema` is refused with `PlacementInSpec` or `EnvironmentInSpec`, naming the path.
   *Test:* `sb_13_placement_in_spec_refused` (`placement` and `memory_domain`, then `executor` and `placements` inside a scheduled Action's object, each refused with its own path), `sb_13_environment_in_spec_refused`, `sb_13_an_opaque_parameter_schema_is_not_a_placement`.
@@ -356,7 +356,7 @@ SpecError        UnsupportedVersion { found, supported } | UnknownField { path }
 | `sb_14_compute_expression_refused` | a value `"!COMPUTE(A - B)"` and a `CONSTANTS` map | the `CONSTANTS` map refused as an unknown field; the string value parses as a scalar and `validate` refuses it as `KeyShape` (SB-6) | SB-14, SB-4, SB-9, SB-6 |
 | `sb_13_placement_in_spec_refused` | `graph.placement`; `resources.radio.memory_domain`; a scheduled Action's object carrying `executor`, then `placements` | `PlacementInSpec` naming each path | SB-13 |
 | `sb_13_environment_in_spec_refused` | an `environment` key inside a Spec resource | `EnvironmentInSpec` | SB-13 |
-| `sb_02_unknown_key_prefix_refused` | `requires: { radio.rx.channels: … }` with no radio Vocabulary declared | `UnknownKeyPrefix` | SB-2 |
+| `sb_02_unknown_key_prefix_refused` | `requires: { radio.rx.s0.sample_rate_hz: … }` with no radio Vocabulary declared | `UnknownKeyPrefix` | SB-2 |
 | `sb_06_constraint_match_table` | the five value-carrying constraints against `One`, `Range` and `AnyOf`, and `Present` against `One` | the table of SB-6 exactly | SB-6 |
 | `sb_06_key_shape_mismatch` | an integer constraint on a boolean key | `KeyShape` | SB-6 |
 | `sb_07_coercible_key_consults_provider` | `test.grid` requested at 19.5, the double snapping to 20 | `coerce` is called once; the preview shows the coercion | SB-7, SB-44 |

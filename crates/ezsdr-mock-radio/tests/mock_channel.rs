@@ -765,6 +765,66 @@ fn cbx_phases(seed: u64, device: &str) -> CbxPhases {
 }
 
 #[test]
+fn mr_30_untimed_receive_tune_precedes_transmit_at_one_origin() {
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+
+    let seed = 13;
+    let t0 = 2_000_000_000;
+    let switch = t0 + 100_000_000;
+    let cbx = Value::List(vec![Scalar::from("0:A:cbx:0")]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let selector = [("rx", cbx.clone()), ("tx", cbx)];
+    let world = World::new(json!({
+        "sim.seed": seed,
+        "sim.channel": { "couplings": [
+            { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }
+        ] }
+    }));
+    let mut radio = prepare(&world, Options { profile: "x3xx", constraints: &constraints, selector: &selector, ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    step(&world, &mut [&mut radio], t0);
+    for (name, value, at) in [
+        ("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), switch),
+        ("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), switch + 5_000_000),
+    ] {
+        radio.push(Action::UpdateParameter {
+            target: tgt("mock"),
+            key: key(name),
+            value,
+            class: Cold,
+            at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, at))),
+        });
+    }
+    step(&world, &mut [&mut radio], switch - 1);
+    step(&world, &mut [&mut radio], switch + 80_000_000);
+    assert!(radio.section("rejected").as_array().unwrap().is_empty(), "{:?}", radio.section("rejected"));
+    let clocks = world.clocks.sample_clock_records();
+    let origin = |stream: &str| clocks.iter().rev().find(|clock| clock.stream == rid(stream)).unwrap().origin.ticks_in(ROOT).unwrap();
+    let (rx_origin, tx_origin) = (origin("mock/rx/s0"), origin("mock/tx/s0"));
+    assert_eq!(rx_origin, tx_origin, "both segment origins are the same; applied={:?}; segments={:?}", radio.section("applied"), radio.section("segments"));
+
+    radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0), (0.5, 0.0)]), 100_000, true));
+    step(&world, &mut [&mut radio], rx_origin + 30_000_000);
+    step(&world, &mut [&mut radio], rx_origin + 52_000_001);
+    let received = radio.received(0);
+    assert!(received.iter().any(|(_, re, im)| *re != 0.0 || *im != 0.0), "no loopback samples: received={}, applied={:?}, rejected={:?}, segments={:?}", received.len(), radio.section("applied"), radio.section("rejected"), radio.section("segments"));
+    let sample = received.into_iter().find(|(index, _, _)| *index == 100_050).expect("the loopback sample is present");
+    let mut retune = SimRng::new(seed, "mock/lo/retune");
+    let phase = |rng: &mut SimRng| 2.0 * std::f64::consts::PI * ((rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64);
+    let (rx_phase, tx_phase) = (phase(&mut retune), phase(&mut retune));
+    assert!((rx_phase - tx_phase).abs() > 1e-3, "the two draws distinguish RX-first from TX-first");
+    let expected = (0.5 * (tx_phase - rx_phase).cos(), 0.5 * (tx_phase - rx_phase).sin());
+    assert!(
+        (f64::from(sample.1) - expected.0).abs() < 1e-6 && (f64::from(sample.2) - expected.1).abs() < 1e-6,
+        "the shared retune RNG draws RX before TX: {sample:?} vs {expected:?}"
+    );
+}
+
+#[test]
 fn mr_34_a_random_phase_is_redrawn_by_every_tune() {
     // A CBX's phase value is `random`: every applied frequency update gives each channel of
     // that direction a fresh phase from the device's retune stream, from its effective

@@ -1,4 +1,4 @@
-//! RM-26: `ezsdr_radio::timeline`, RM-16, RM-21 and RM-25 computed once (spec 22, VH-7),
+//! RM-25: `ezsdr_radio::timeline`, RM-16, RM-21 and RM-25 computed once (spec 22, VH-7),
 //! and its invariants over VH-8's generated sequences.
 
 mod generator;
@@ -397,7 +397,7 @@ fn rm_26_pruning_folds_a_cold_change_floored_at_an_earlier_one() {
     }
 }
 
-/// RM-26: a booking whose plan cannot be represented leaves the line as it was.
+/// RM-25: a booking whose plan cannot be represented leaves the line as it was.
 #[test]
 fn rm_26_a_refused_booking_leaves_the_line() {
     let mut line = Line::new(stream(Direction::Rx, 1));
