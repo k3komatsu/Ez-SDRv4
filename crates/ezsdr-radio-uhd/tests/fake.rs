@@ -4000,7 +4000,7 @@ struct Gated {
     open: std::sync::Condvar,
     entered: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     arrivals: Mutex<std::sync::mpsc::Receiver<&'static str>>,
-    /// The stream whose calls are held, when only one is (`None`: every stream).
+    /// The receive stream whose calls are held, when only one is (`None`: every stream).
     only: Option<usize>,
     /// Where each Provider thread that makes a gated call reports its end (S13, S14).
     ends: Mutex<Option<std::sync::mpsc::Sender<String>>>,
@@ -4032,7 +4032,7 @@ impl Gated {
     /// The device the test observes the calls on.
     fn inner(&self) -> Arc<FakeDevice> { self.inner.clone() }
 
-    /// A `Gated` that holds only stream `k`'s calls (S14).
+    /// A `Gated` that holds only receive stream `k`'s calls (S14).
     fn only(config: FakeConfig, k: usize) -> Gated {
         Gated { only: Some(k), ..Gated::new(config) }
     }
@@ -4056,10 +4056,10 @@ impl Gated {
         self.open.notify_all();
     }
 
-    /// Waits until one held call of each of `names` has begun.
+    /// Waits until one held call whose name starts with each of `names` has begun.
     fn entered(&self, names: &[&str]) {
-        let mut seen = Vec::new();
-        while !names.iter().all(|name| seen.contains(name)) {
+        let mut seen: Vec<&'static str> = Vec::new();
+        while !names.iter().all(|name| seen.iter().any(|seen| seen.starts_with(name))) {
             let arrivals = self.arrivals.lock().unwrap();
             let name = arrivals.recv_timeout(Wall::from_secs(10)).unwrap_or_else(|_| panic!("no held call arrived: {seen:?}"));
             drop(arrivals);
@@ -4067,10 +4067,10 @@ impl Gated {
         }
     }
 
-    /// Waits until `wanted` held calls of each name have begun (S13).
+    /// Waits until `wanted` held calls whose names start with each prefix have begun (S13).
     fn entered_n(&self, wanted: &[(&str, usize)]) {
         let mut seen: Vec<&'static str> = Vec::new();
-        while wanted.iter().any(|(name, n)| seen.iter().filter(|seen| *seen == name).count() < *n) {
+        while wanted.iter().any(|(name, n)| seen.iter().filter(|seen| seen.starts_with(name)).count() < *n) {
             let arrivals = self.arrivals.lock().unwrap();
             let name = arrivals.recv_timeout(Wall::from_secs(20)).unwrap_or_else(|_| panic!("no held call arrived: {seen:?}"));
             drop(arrivals);
@@ -4091,7 +4091,7 @@ impl Gated {
 
     fn hold_call(&self, stream: usize, name: &'static str) {
         self.watch_end();
-        if self.only.is_some_and(|only| only != stream) {
+        if self.only.is_some_and(|only| only != stream || name.starts_with("tx_")) {
             return;
         }
         let mut held = self.held.lock().unwrap();
@@ -4143,7 +4143,12 @@ impl Device for Gated {
         self.hold_call(s, "tx_send");
         self.inner.tx_send(s, b, at, sob, eob, t)
     }
-    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
+    fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> {
+        // Held too: a burst a loaded host let underflow is not resumed (UR-22), but its
+        // thread still reads reports every turn, so a test can still catch it in a call (#68).
+        self.hold_call(s, "tx_async");
+        self.inner.tx_async(s, t)
+    }
     fn rx_close(&self, s: usize) { self.inner.rx_close(s) }
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
@@ -4163,7 +4168,7 @@ fn ur_26_the_sending_threads_join_before_the_receiving_ones() {
     assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(40));
     device.hold();
-    device.entered(&["rx_recv", "tx_send"]);
+    device.entered(&["rx_recv", "tx_"]);
     let runner = device.clone();
     let manifest = bounded("the transmit join order", Wall::from_secs(30), move || run.finish());
     device.release();
@@ -7410,7 +7415,7 @@ fn ur_26_every_stream_s_threads_are_joined_in_order() {
     impl Drop for Release<'_> { fn drop(&mut self) { self.0.release(); } }
     gated.hold();
     let release = Release(&gated);
-    gated.entered_n(&[("rx_recv", 2), ("tx_send", 2)]);
+    gated.entered_n(&[("rx_recv", 2), ("tx_", 2)]);
     direct.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
     drop(release);
     ended(&ends, &["uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"]);

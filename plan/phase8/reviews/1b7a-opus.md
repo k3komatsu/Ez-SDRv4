@@ -45,7 +45,7 @@
 - 最初のローカルの gate は 7 件と Python 1 件が落ちた．別の利用者の解析 job が 16 コアを埋めていた（load 15.5）．負荷が下がってから流し直して全部通った．
 - P245 は全リストの中で filter のテスト `ur_26_every_stream_s_threads_are_joined_in_order` が変異の前に落ちた（BASELINE FAILED）．単独で流し直して killed．このテストは HEAD でも揺れる（下）．
 
-**持ち越し（1b-7a の外）**：`ur_26_every_stream_s_threads_are_joined_in_order` は負荷が無くても落ちる．12 回中の失敗は `8cd89e4`（1b-6a の前）で 2，`2af9afd`（1b-6a）で 1，`437d2d9`（1b-6b，この段階の HEAD）で 6．落ちる回は TX の 2 本の repeat burst の片方が FakeDevice の上で underflow し（`UR-22: the device burst underflowed; burst not resumed`，`the transmit timeline expired`），UR-22 のとおり再開しないので，テストが待つ 2 本目の `tx_send` が来ない．1b-6b で TX のスレッドの 1 回り（`pass`）が遅くなった疑いがある（INFERRED）．1b-7b の前に調べる．
+**1b-7a の外で見つけた揺れ（#68，2026-10-23 に直した）**：`ur_26_every_stream_s_threads_are_joined_in_order` は host に負荷があると落ちる．落ちる回は TX の 2 本の repeat burst の片方が FakeDevice（実時間）で underflow し（`UR-22: the device burst underflowed; burst not resumed`），UR-22 のとおり再開しないので，テストが待つ 2 本目の `tx_send` が来ない．最初は 3 つのコミットを順に流して 1b-6b だけが多く落ちたように見えたが，流した間の機械の負荷の変化だった．3 つのテスト用バイナリを同じ負荷の下で交互に流すと差は無い（負荷なし 6/6，16 コアの busy loop で 2/8，どのコミットも同じ）．本体は UR-22 のとおり．`Gated` は `tx_async` も止め，join の順のテスト 2 本は TX のどれかの呼び出しで止まるのを待つようにした（負荷の下で 3 本とも 8/8，`Gated::only` は受信の stream だけを止める）．Sol のコードレビューは PASS（指摘なし），mutation の P245・P442・P467 は killed．`mech:wall-clock-test-oracle` の 2 件目．Gated でない fake のテスト 3 本（`ur_21_a_descheduled_…`，`ur_23_a_continuation_whose_held_sample_…`，`ur_23_a_continuation_s_first_send_…`）も負荷で落ちることがあり，残る．
 
 ## 5. 数（AGENTS.md §9 の 8）
 
@@ -55,6 +55,6 @@
 | セルフレビュー（DeepSeek，2 回） | P1 0 | P2・P3（採った 9，退けた 2） | テストの観測と文．機構なし |
 | Opus | 0 | 2 | 文の重複，同じ事実の引数 2 つ．機構なし |
 | Sol（コード） | 0 | 1 | テストの順序の観測．機構なし |
-| gate | 0 | — | 既存の揺れ 1（上の持ち越し．機構は未分類） |
+| gate | 0 | — | 既存の揺れ 1（#68，`mech:wall-clock-test-oracle`．§4） |
 
 計画を先に書く手順（AGENTS.md §9 の 2・3）は，1b-6a・1b-6b と同じく計画レビューで major を拾い（2），コードレビューでは major 0 だった．`mech:radio-rule-implemented-twice` の報告の規則のうち，held burst の取り消しはこれで 1 か所になった．残りは 1b-7b（D2：`RX_OVERFLOW`）．
