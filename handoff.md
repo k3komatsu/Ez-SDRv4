@@ -17,7 +17,7 @@
 ## 2. 次にすること
 
 1. **実機**：2026-10-20 に BP0 と BP5 を 2 台で済ませた（[bench-results.md](plan/phase8/bench-results.md)：Phase 7 の hardware テスト 29 本が #1＋OBX・#2＋UBX とも通り，悪くなった数値は無い）．今つながっているのは #1＋OBX．組み換えは owner に頼む（2026-10-20 夜は翌朝まで不可）．
-2. **Phase 8 の次の段階：#51 の設計メモ**（送信 Stop で held burst を捨てるときの報告：「イベントの報告規則も 1 か所で実装するか」，`mech:radio-rule-implemented-twice`．D2・A2 も同じ所，§3）．設計メモ [35](plan/phase8/35-uhd-stream-state.md)（UHD Module の stream ごとの状態を `Streams` の遷移の関数だけが変える，`stream-lifecycle-scattered` への答え）は 1b-6a（R1：holder と読み）・1b-6b（R2：owner の段階）で完了（[reviews/1b6b-opus.md](plan/phase8/reviews/1b6b-opus.md)）．device の記録と loss はメモの範囲外．P472 は決定的な unit test に移り，負荷で揺れる観測は無くなった．1b-5（今の key を消す切り替え）は 1b-5a〜1b-5c-2 で完了（[00-overview](plan/phase8/00-overview.md) §8）．**実装役とセルフレビューは `opencode/deepseek-v4.1-flash-free#max`，同時に 1 本だけ**（owner 2026-10-22．上限に当たったら走っていた本数を記録して owner に伝え，勝手にモデルを変えない）．指示書には「orchestrator のファイルは読むだけ，見張りのプロセスは止めない，到達できる系列のテストを代わりなしで消さない，differential の操作を縮めない，消した名前を `new` に持つ行と消したテストを `filter` に持つ行を grep する」を入れる．
+2. **Phase 8 の次の段階：1b-7a（設計メモ [36](plan/phase8/36-radio-report-rules.md) の決定 1・2：#51）**．held burst を外の出来事で取り消したときの報告を `ezsdr_radio` の理由の enum で 1 か所に決め（`Stop`・`Provider::stop`・loss は記録だけ，cold change は `COMMAND_REJECTED`），両 Provider の bool 引数を置き換え，parity test で固める．その次が 1b-7b（決定 4・5：D2．`RX_OVERFLOW` の `restart_gap_ns` を削除し，report の後の block ごとに 1 個）．両段階とも risky（テスト計画を先に）．メモの決定は owner 2026-10-22，Sol のレビュー 2 回を入れた．設計メモ [35](plan/phase8/35-uhd-stream-state.md)（UHD Module の stream ごとの状態を `Streams` の遷移の関数だけが変える，`stream-lifecycle-scattered` への答え）は 1b-6a（R1：holder と読み）・1b-6b（R2：owner の段階）で完了（[reviews/1b6b-opus.md](plan/phase8/reviews/1b6b-opus.md)）．device の記録と loss はメモの範囲外．P472 は決定的な unit test に移り，負荷で揺れる観測は無くなった．1b-5（今の key を消す切り替え）は 1b-5a〜1b-5c-2 で完了（[00-overview](plan/phase8/00-overview.md) §8）．**実装役とセルフレビューは `opencode/deepseek-v4.1-flash-free#max`，同時に 1 本だけ**（owner 2026-10-22．上限に当たったら走っていた本数を記録して owner に伝え，勝手にモデルを変えない）．指示書には「orchestrator のファイルは読むだけ，見張りのプロセスは止めない，到達できる系列のテストを代わりなしで消さない，differential の操作を縮めない，消した名前を `new` に持つ行と消したテストを `filter` に持つ行を grep する」を入れる．
    - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．
    - 1b-4e-2 の実機（2026-10-21，[bench-results](plan/phase8/bench-results.md)）：閉じた streamer の front end を別の stream で開くのは受信・送信とも VERIFIED．**持ったまま 2 本目を開くと，UHD は拒否するが持っている streamer の edge を壊し，プロセスが abort する**．FakeDevice は同じ日から，その open を拒否したうえで fake の drop でテストを失敗させる（UR-33，`take_abort`）．
@@ -29,7 +29,7 @@
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
    - **その後**：
-     - 2（#51・D2（設計メモの後），#62 と D9 の DDC/DUC の release の規則，#59，A2 のテスト）．
+     - 2（#62 と D9 の DDC/DUC の release の規則，#59，A2 のテストのうち 1b-7 が触らないもの）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
    - **セルフレビュー**：checklist は 4 項目，`timeout 2400`，mutation を流さないと明記する（1b-4d-1a では判定が出ず，1b-4d-1b でこうしたら出た）．OpenCode2・Claude Code・Codex には ponytail が入っている．
