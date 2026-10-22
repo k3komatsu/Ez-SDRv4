@@ -188,7 +188,7 @@ impl Tx {
                     self.later.push(held);
                 }
             }
-            TxCmd::Stop => self.stop_now("UR-26: cancelled by Stop", true),
+            TxCmd::Stop => self.stop_now("UR-26: cancelled by Stop", ezsdr_radio::CancelReason::Stop),
             TxCmd::Shutdown => unreachable!("handled by run"),
         }
     }
@@ -249,7 +249,8 @@ impl Tx {
                 self.later.push(held);
             } else {
                 self.forget(&held);
-                self.core.command_rejected(None, "tx_burst", "UR-25: its transmit clock was never started");
+                let reason = "UR-25: its transmit clock was never started";
+                self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::ColdChange);
             }
         }
     }
@@ -682,17 +683,21 @@ impl Tx {
         self.held.insert(held.k, held);
     }
 
+    fn report_cancelled_burst(&self, reason: &str, cancel_reason: ezsdr_radio::CancelReason) {
+        if ezsdr_radio::cancellation_reports(cancel_reason) {
+            self.core.command_rejected(None, "tx_burst", reason);
+        } else {
+            self.core.reject_note(json!({ "kind": "tx_burst", "reason": reason }));
+        }
+    }
+
     /// Ends the open burst and cancels every held one (UR-23, UR-26).
-    fn stop_now(&mut self, reason: &str, emit: bool) {
+    fn stop_now(&mut self, reason: &str, cancel_reason: ezsdr_radio::CancelReason) {
         self.end_open(true);
         let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();
         for held in held {
             self.forget(&held);
-            if emit {
-                self.core.command_rejected(None, "tx_burst", reason);
-            } else {
-                self.core.reject_note(json!({ "kind": "tx_burst", "reason": reason }));
-            }
+            self.report_cancelled_burst(reason, cancel_reason);
         }
     }
 
@@ -707,7 +712,8 @@ impl Tx {
         self.read_reports_before_close();
         for (_, held) in std::mem::take(&mut self.held) {
             self.forget(&held);
-            self.core.command_rejected(None, "tx_burst", "cancelled by a cold change");
+            let reason = "cancelled by a cold change";
+            self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::ColdChange);
         }
         let passed = self.clock.take().map(|_| self.plan.get(self.at).and_then(|planned| planned.segment.by));
         if passed.is_some() {
@@ -868,8 +874,8 @@ impl Tx {
         }
     }
 
-    fn shutdown(mut self) {
-        self.stop_now("UR-26: cancelled by Provider::stop", false);
+    fn shutdown(&mut self) {
+        self.stop_now("UR-26: cancelled by Provider::stop", ezsdr_radio::CancelReason::ProviderStop);
         // 100 ms of the device's host clock for the last BURST_ACK (UR-26; plan 30 §4.3: it
         // waits for the device's acknowledgement, so it is measured in clock time). A loss —
         // found by a read here or recorded by another thread — ends the window: `reports` no
@@ -1017,7 +1023,7 @@ mod tests {
         assert!(!calls.iter().any(|call| call == "tx_open 1 [0, 1]"), "the interrupted destination did not open: {calls:?}");
         assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"] == "UR-26: cancelled by Stop"), "{:?}", lock(&core.rec).rejected);
         assert_eq!(lock(&core.streams).holder(to), Holder::Free);
-        assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+        assert!(!events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
             .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
     }
 
@@ -1390,7 +1396,7 @@ mod tests {
             assert!(tx.held.contains_key(&100_000), "future bursts retain their reservations");
             let sent = device.calls();
             assert!(!tx.step());
-            tx.stop_now("test stop", false);
+            tx.stop_now("test stop", ezsdr_radio::CancelReason::Stop);
             assert_eq!(device.calls(), sent, "no payload or second EOB after abandonment");
             assert_eq!(lock(&core.rec).bursts[0]["end"], "stop");
             assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|e| e.kind == EventKind::parse(ezsdr_radio::kinds::TX_UNDERFLOW).unwrap()));
@@ -1478,7 +1484,7 @@ mod tests {
         assert!(tx.open.is_none());
         for _ in 0..20 { assert!(!tx.step()); }
         let stop = device.time_now().unwrap();
-        tx.stop_now("test stop", false);
+        tx.stop_now("test stop", ezsdr_radio::CancelReason::Stop);
         std::thread::sleep(std::time::Duration::from_millis(20));
         tx.reports(std::time::Duration::ZERO);
         let rec = lock(&core.rec);
@@ -2038,7 +2044,7 @@ mod tests {
     fn ur_28_a_shutdown_after_a_from_none_open_names_no_burst_of_the_replaced_queue() {
         // UR-28, UR-36 (S3, shutdown): the shutdown's read of the acknowledgement window is
         // correlated against the replacing streamer, as the owner's poll is.
-        let (_core, feed, events, tx, _) = replaced_queue();
+        let (_core, feed, events, mut tx, _) = replaced_queue();
         feed.give(TxReport { code: TxCode::TimeError, tick: None, channel: 0 });
         tx.shutdown();
         assert!(time_errors(&events).is_empty(), "the shutdown consumed the replaced burst");
@@ -2695,7 +2701,7 @@ mod tests {
         // the shutdown's ACK window still reads the reports.
         let (core, spy) = spy_rig();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         let claim = lock(&core.streams).claim_from_none(stream_key(Dir::Tx, 0)).expect("the stream is free");
         std::mem::forget(claim);
         tx.shutdown();
@@ -2778,7 +2784,7 @@ mod tests {
 
         let read = spy.stop_before("tx_async");
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         let shutdown_thread = std::thread::spawn(move || tx.shutdown());
         read.wait();
         assert_eq!(lock(&core.streams).holder(stream), Holder::FromNone);
@@ -2814,7 +2820,7 @@ mod tests {
 
         let read = spy.stop_before("tx_async");
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         let shutdown_thread = std::thread::spawn(move || tx.shutdown());
         read.wait();
         assert!(lock(&core.streams).reading(stream), "the shutdown's read is in flight");
@@ -2828,5 +2834,114 @@ mod tests {
         control_thread.join().expect("the control thread");
         assert_eq!(lock(&core.streams).holder(stream), Holder::Free);
         assert!(!lock(&core.streams).reading(stream));
+    }
+
+    #[test]
+    fn ur_26_stop_cancels_current_and_future_bursts_record_only() {
+        let (core, device, _, events) = super::super::test_support::rig();
+        let current = core.register(Dir::Tx, 200, 0).unwrap();
+        let future = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
+        tx.held.insert(20, held(&current, 20, 1, LatePolicy::DropAndFlag));
+        tx.later.push(held(&future, 30, 1, LatePolicy::DropAndFlag));
+        lock(&core.held).extend([(current.domain, 20), (future.domain, 30)]);
+
+        tx.stop_now("UR-26: cancelled by Stop", ezsdr_radio::CancelReason::Stop);
+
+        assert!(tx.held.is_empty() && tx.later.is_empty());
+        assert!(!lock(&core.held).contains(&(current.domain, 20)));
+        assert!(!lock(&core.held).contains(&(future.domain, 30)));
+        let rejected = lock(&core.rec).rejected.clone();
+        assert_eq!(rejected.len(), 2, "{rejected:?}");
+        assert!(rejected.iter().all(|row| row["reason"] == "UR-26: cancelled by Stop"), "{rejected:?}");
+        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+        assert!(!events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+            .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
+    }
+
+    #[test]
+    fn ur_23_a_cold_switch_cancels_a_current_burst_and_releases_its_reservation() {
+        let (core, device, _, events) = super::super::test_support::rig();
+        let current = core.register(Dir::Tx, 200, 0).unwrap();
+        let next = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
+        tx.held.insert(20, held(&current, 20, 1, LatePolicy::DropAndFlag));
+        lock(&core.held).insert((current.domain, 20));
+        let mut switching = switch(&core, core.ticks(50_000_000), Some(next), 1, Settings::default());
+        switching.to.as_mut().unwrap().refused = true;
+        tx.switch = Some(switching);
+
+        tx.do_switch();
+
+        assert!(tx.held.is_empty());
+        assert!(!lock(&core.held).contains(&(current.domain, 20)));
+        let rejected = lock(&core.rec).rejected.clone();
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0]["reason"], "cancelled by a cold change");
+        assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+            .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
+        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+    }
+
+    #[test]
+    fn ur_25_a_skipped_future_clock_cancellation_releases_its_reservation() {
+        let (core, device, _, events) = super::super::test_support::rig();
+        let current = core.register(Dir::Tx, 200, 0).unwrap();
+        let skipped = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
+        tx.later.push(held(&skipped, 30, 1, LatePolicy::DropAndFlag));
+        lock(&core.held).insert((skipped.domain, 30));
+        let mut switching = switch(&core, core.ticks(50_000_000), Some(skipped), 1, Settings::default());
+        switching.to.as_mut().unwrap().segment.cut = Some(0);
+        {
+            let stream = stream_key(Dir::Tx, 0);
+            let mut streams = lock(&core.streams);
+            let mut line = streams.lines.line(stream).unwrap().clone();
+            line.plan[0].cut = Some(0);
+            streams.lines.insert(stream, line);
+        }
+        tx.switch = Some(switching);
+
+        tx.do_switch();
+
+        assert!(tx.later.is_empty());
+        assert!(!lock(&core.held).contains(&(skipped.domain, 30)));
+        let rejected = lock(&core.rec).rejected.clone();
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock was never started");
+        let rejected_events: Vec<_> = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+        assert_eq!(rejected_events.len(), 1, "{rejected_events:?}");
+        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+    }
+
+    #[test]
+    fn ur_26_shutdown_after_loss_cancels_held_bursts_record_only() {
+        let (core, device, _, events) = super::super::test_support::rig();
+        let current = core.register(Dir::Tx, 200, 0).unwrap();
+        let future = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
+        tx.held.insert(20, held(&current, 20, 1, LatePolicy::DropAndFlag));
+        tx.later.push(held(&future, 30, 1, LatePolicy::DropAndFlag));
+        lock(&core.held).extend([(current.domain, 20), (future.domain, 30)]);
+        core.device_lost("fake loss before the burst start");
+
+        tx.shutdown();
+
+        assert!(tx.held.is_empty());
+        assert!(tx.later.is_empty());
+        assert!(!lock(&core.held).contains(&(current.domain, 20)));
+        assert!(!lock(&core.held).contains(&(future.domain, 30)));
+        let rejected = lock(&core.rec).rejected.clone();
+        assert_eq!(rejected.len(), 2, "{rejected:?}");
+        assert!(rejected.iter().all(|row| row["reason"] == "UR-26: cancelled by Provider::stop"), "{rejected:?}");
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert!(events.iter().any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST));
+        assert!(!events.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
+        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
     }
 }

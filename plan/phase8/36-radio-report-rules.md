@@ -121,5 +121,5 @@ Sol 6.1（2026-10-22）：修正して採用．major 3，minor 3．すべて採�
 
 ## 8. 実装
 
-- 1b-7a：（次．#51，決定 1・2）．
-- 1b-7b：1b-7a の後．
+- 1b-7a：完了（2026-10-23）．決定 1・2 は `ezsdr_radio::CancelReason` と `cancellation_reports`．UHD の loss は shutdown を通るので `ProviderStop` を渡す（どちらも記録だけ）．記録は [reviews/1b7a-opus.md](reviews/1b7a-opus.md)．
+- 1b-7b：次（決定 4・5，D2）．

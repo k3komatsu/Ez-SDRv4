@@ -121,6 +121,24 @@ pub mod kinds {
     pub const COMMAND_REJECTED: &str = "radio.COMMAND_REJECTED";
 }
 
+/// Why a Provider cancelled an accepted held transmit burst (RM-16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelReason {
+    /// A stream or device `Stop` cancelled the burst.
+    Stop,
+    /// `Provider::stop` cancelled the burst.
+    ProviderStop,
+    /// Device loss cancelled the burst.
+    Loss,
+    /// A `cold` change cancelled the burst on its old transmit clock.
+    ColdChange,
+}
+
+/// Whether cancelling a held burst for `reason` emits `radio.COMMAND_REJECTED` (RM-16).
+pub const fn cancellation_reports(reason: CancelReason) -> bool {
+    matches!(reason, CancelReason::ColdChange)
+}
+
 static RADIO_NAMESPACE: OnceLock<Namespace> = OnceLock::new();
 static RF_ENVELOPE_NAMESPACE: OnceLock<Namespace> = OnceLock::new();
 const CHECK_STAGES: &[CheckStage] = &[
@@ -969,4 +987,21 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
         ("alignment_error_payload", of::<AlignmentErrorPayload>()),
         ("clock_lost_payload", of::<ClockLostPayload>()),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CancelReason, cancellation_reports};
+
+    #[test]
+    fn cancellation_reports_only_cold_change() {
+        for (reason, reports) in [
+            (CancelReason::Stop, false),
+            (CancelReason::ProviderStop, false),
+            (CancelReason::Loss, false),
+            (CancelReason::ColdChange, true),
+        ] {
+            assert_eq!(cancellation_reports(reason), reports, "{reason:?}");
+        }
+    }
 }

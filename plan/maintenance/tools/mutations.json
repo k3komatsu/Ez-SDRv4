@@ -129,15 +129,15 @@
   "test_bin": "mock_radio",
   "filter": "mr_20_an_action_after_the_losing_step_is_refused"
  },
- {
-  "id": "F27",
-  "name": "the loss leaves the transmit side running",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            self.stop_tx(k, now, reason, false)?;",
-  "new": "            if reason != DEVICE_LOST { self.stop_tx(k, now, reason, false)?; }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_20_a_lost_device_transmits_nothing_after_the_loss"
+  {
+    "id": "F27",
+    "name": "the loss leaves the transmit side running",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "            self.stop_tx(k, now, reason, cancel_reason)?;",
+    "new": "            if cancel_reason != ezsdr_radio::CancelReason::Loss { self.stop_tx(k, now, reason, cancel_reason)?; }",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_20_a_lost_device_transmits_nothing_after_the_loss"
  },
  {
   "id": "F28",
@@ -154,7 +154,7 @@
   "name": "the loss's stop leaves the receive stream open",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "            self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?;\n",
-  "new": "            if !lost { self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?; }\n",
+  "new": "            if cancel_reason != ezsdr_radio::CancelReason::Loss { self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?; }\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_loss_ends_its_receive_stream_at_its_instant"
@@ -8936,5 +8936,125 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_25_a_transmit_read_sets_idle_pending_or_active"
+  },
+  {
+    "id": "P561",
+    "name": "RM-16: Stop cancellation incorrectly emits COMMAND_REJECTED",
+    "file": "crates/ezsdr-radio/src/lib.rs",
+    "old": "matches!(reason, CancelReason::ColdChange)",
+    "new": "matches!(reason, CancelReason::Stop | CancelReason::ColdChange)",
+    "crate": "ezsdr-radio",
+    "test_bin": "lib",
+    "filter": "cancellation_reports_only_cold_change"
+  },
+  {
+    "id": "P562",
+    "name": "RM-16: cold-change cancellation fails to emit COMMAND_REJECTED",
+    "file": "crates/ezsdr-radio/src/lib.rs",
+    "old": "matches!(reason, CancelReason::ColdChange)",
+    "new": "matches!(reason, CancelReason::Stop)",
+    "crate": "ezsdr-radio",
+    "test_bin": "lib",
+    "filter": "cancellation_reports_only_cold_change"
+  },
+  {
+    "id": "P563",
+    "name": "Mock TX Stop uses the cold-change report policy",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.stop_tx(k, now, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::Stop)?;",
+    "new": "self.stop_tx(k, now, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::ColdChange)?;",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_tx_stream_stop_cancels_held_bursts"
+  },
+  {
+    "id": "P564",
+    "name": "Mock future-clock Stop uses the cold-change report policy",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.cancel_later(k, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::Stop)?;",
+    "new": "self.cancel_later(k, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::ColdChange)?;",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_tx_stop_cancels_a_burst_on_a_future_clock"
+  },
+  {
+    "id": "P565",
+    "name": "Mock Provider::stop uses the cold-change report policy",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.stop_at(mode, now, \"MR-25: cancelled by stop\", seq, ezsdr_radio::CancelReason::ProviderStop)",
+    "new": "self.stop_at(mode, now, \"MR-25: cancelled by stop\", seq, ezsdr_radio::CancelReason::ColdChange)",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_provider_stop_cancels_held_bursts"
+  },
+  {
+    "id": "P566",
+    "name": "Mock loss uses the cold-change report policy",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::Loss)?;",
+    "new": "self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::ColdChange)?;",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_loss_cancels_held_bursts_without_rejection"
+  },
+  {
+    "id": "P567",
+    "name": "Mock cold change stops the current clock with Stop policy",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.stop_tx(k, tick, \"MR-18: cancelled by a cold change\", ezsdr_radio::CancelReason::ColdChange)?;",
+    "new": "self.stop_tx(k, tick, \"MR-18: cancelled by a cold change\", ezsdr_radio::CancelReason::Stop)?;",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_cold_change_cancels_held_bursts"
+  },
+  {
+    "id": "P568",
+    "name": "Mock skipped future clock uses Stop report policy",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.record_cancelled_burst(\"MR-18: cancelled by a cold change\", now, ezsdr_radio::CancelReason::ColdChange)?;",
+    "new": "self.record_cancelled_burst(\"MR-18: cancelled by a cold change\", now, ezsdr_radio::CancelReason::Stop)?;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "lib",
+    "filter": "a_cold_change_skipping_a_future_clock_releases_its_reservation"
+  },
+  {
+    "id": "P569",
+    "name": "UHD TX Stop uses the cold-change report policy",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::Stop),",
+    "new": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::ColdChange),",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_tx_stream_stop_cancels_held_bursts"
+  },
+  {
+    "id": "P570",
+    "name": "UHD Provider::stop uses the cold-change report policy",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);",
+    "new": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ColdChange);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_26_shutdown_after_loss_cancels_held_bursts_record_only"
+  },
+  {
+    "id": "P571",
+    "name": "UHD current-clock cold change uses Stop report policy",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let reason = \"cancelled by a cold change\";\n            self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::ColdChange);",
+    "new": "let reason = \"cancelled by a cold change\";\n            self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::Stop);",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_cold_change_cancels_held_bursts"
+  },
+  {
+    "id": "P572",
+    "name": "UHD skipped future clock uses Stop report policy",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let reason = \"UR-25: its transmit clock was never started\";\n                self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::ColdChange);",
+    "new": "let reason = \"UR-25: its transmit clock was never started\";\n                self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::Stop);",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_cold_change_cancels_a_burst_on_a_skipped_future_clock"
   }
 ]

@@ -1109,7 +1109,16 @@ impl MockRadio {
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) { rows.push(row); }
     }
 
-    fn stop_tx(&mut self, k: usize, now: i64, reason: &str, emit_command_rejected: bool) -> Result<(), ModuleError> {
+    fn record_cancelled_burst(&mut self, reason: &str, now: i64, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
+        if ezsdr_radio::cancellation_reports(cancel_reason) {
+            self.reject_action_at(None, "tx_burst", reason, now)
+        } else {
+            self.record_rejected_action("tx_burst", reason, now);
+            Ok(())
+        }
+    }
+
+    fn stop_tx(&mut self, k: usize, now: i64, reason: &str, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
         if let Some((ratio, origin)) = self.tx_now(k).map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin)) {
             if let Some(cut) = time::k_at_or_after(origin, ratio, now) {
                 self.transmit_until_cut(k, now, cut)?;
@@ -1121,15 +1130,13 @@ impl MockRadio {
         if let Some(record) = tracked { self.record_burst(record); }
         self.tx[k].device.close();
         if open_burst_without_record {
-            if emit_command_rejected { self.reject_action_at(None, "tx_burst", reason, now)?; }
-            else { self.record_rejected_action("tx_burst", reason, now); }
+            self.record_cancelled_burst(reason, now, cancel_reason)?;
         }
         self.tx[k].open = None;
         let held: Vec<i64> = self.tx[k].held.keys().copied().collect();
         for start in held {
             self.tx[k].held.remove(&start);
-            if emit_command_rejected { self.reject_action_at(None, "tx_burst", reason, now)?; }
-            else { self.record_rejected_action("tx_burst", reason, now); }
+            self.record_cancelled_burst(reason, now, cancel_reason)?;
         }
         Ok(())
     }
@@ -1137,12 +1144,12 @@ impl MockRadio {
     /// MR-25's `stop` at `now`, its cancellations recorded with `reason`; a loss runs its
     /// `abort` body at the loss's instant with `DEVICE_LOST` (MR-20), as an item received
     /// with the faults (RM-25). Every stream of the instance is stopped.
-    fn stop_at(&mut self, mode: StopMode, now: i64, reason: &str, seq: u64, lost: bool) -> Result<(), ModuleError> {
+    fn stop_at(&mut self, mode: StopMode, now: i64, reason: &str, seq: u64, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
         for k in 0..self.tx.len() {
-            self.stop_tx(k, now, reason, false)?;
+            self.stop_tx(k, now, reason, cancel_reason)?;
         }
         for k in 0..self.tx.len() {
-            self.cancel_later(k, reason, false)?;
+            self.cancel_later(k, reason, cancel_reason)?;
         }
         for _ in std::mem::take(&mut self.updates) {
             self.record_rejected_action("update_parameter", reason, now);
@@ -1151,7 +1158,7 @@ impl MockRadio {
         if let Some(handle) = self.wakeup.take() { if let Some(time) = &self.time { time.cancel(handle); } }
         // RM-16: under `abort` the receive cut is the first sample not yet delivered; a loss
         // cuts at its instant, having delivered the block in progress (MR-20).
-        let abort = mode == StopMode::Abort && !lost;
+        let abort = mode == StopMode::Abort && cancel_reason != ezsdr_radio::CancelReason::Loss;
         let delivered: Vec<Option<i64>> = self.rx.iter()
             .map(|stream| stream.running.as_ref().filter(|_| abort).map(|rx| rx.next))
             .collect();
@@ -1344,7 +1351,7 @@ impl MockRadio {
                 self.tx[k].held.insert(held.start, held);
             } else if index < passed {
                 self.forget_later(k, index, held.start);
-                self.reject_action_at(None, "tx_burst", "MR-18: cancelled by a cold change", now)?;
+                self.record_cancelled_burst("MR-18: cancelled by a cold change", now, ezsdr_radio::CancelReason::ColdChange)?;
             } else {
                 self.tx[k].later.push((index, held));
             }
@@ -1354,11 +1361,11 @@ impl MockRadio {
 
     /// Cancels the bursts booked on transmit stream `k`'s clocks not yet current (RM-16,
     /// MR-25).
-    fn cancel_later(&mut self, k: usize, reason: &str, emit: bool) -> Result<(), ModuleError> {
+    fn cancel_later(&mut self, k: usize, reason: &str, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
         let now = self.root.zip(self.time.as_ref()).and_then(|(root, time)| time.now(root).and_then(|t| t.ticks_in(root)).ok()).unwrap_or(0);
         for (index, held) in std::mem::take(&mut self.tx[k].later) {
             self.forget_later(k, index, held.start);
-            if emit { self.reject_action_at(None, "tx_burst", reason, now)?; } else { self.record_rejected_action("tx_burst", reason, now); }
+            self.record_cancelled_burst(reason, now, cancel_reason)?;
         }
         Ok(())
     }
@@ -1455,8 +1462,8 @@ impl MockRadio {
                 };
                 for (direction, k) in streams {
                     if direction == Direction::Tx {
-                        self.stop_tx(k, now, "MR-25: cancelled by stop", false)?;
-                        self.cancel_later(k, "MR-25: cancelled by stop", false)?;
+                        self.stop_tx(k, now, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop)?;
+                        self.cancel_later(k, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop)?;
                     } else {
                         let seq = self.arrival();
                         self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop })?;
@@ -1935,7 +1942,7 @@ impl MockRadio {
         self.record_update(&update.key, &update.value, tick);
         self.apply_layout_channel_update(&update.key, &update.value, tick);
         for (k, to, passed) in update.tx {
-            self.stop_tx(k, tick, "MR-18: cancelled by a cold change", true)?;
+            self.stop_tx(k, tick, "MR-18: cancelled by a cold change", ezsdr_radio::CancelReason::ColdChange)?;
             self.tx_switch(k, to, passed)?;
         }
         Ok(())
@@ -2065,7 +2072,7 @@ impl MockRadio {
                         self.record_fault(index, 0);
                         self.device_lost_reported = true;
                         let seq = self.faults[index].order;
-                        self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, true)?;
+                        self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::Loss)?;
                         return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: DEVICE_LOST.to_owned(), detail: serde_json::Value::Null });
                     }
                 },
@@ -2467,7 +2474,7 @@ impl Provider for MockRadio {
             return Ok(());
         }
         let seq = self.arrival();
-        self.stop_at(mode, now, "MR-25: cancelled by stop", seq, false)
+        self.stop_at(mode, now, "MR-25: cancelled by stop", seq, ezsdr_radio::CancelReason::ProviderStop)
     }
 
     fn cleanup(&mut self) {
@@ -2519,5 +2526,115 @@ impl Provider for MockRadio {
         }
         progressed |= self.advance(u)?;
         Ok(StepOutcome { progressed })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    fn held(start: i64) -> HeldBurst {
+        HeldBurst { start, len: 1, repeat: false, open: BurstOpen::default(), order: start as u64 }
+    }
+
+    fn radio_with_reservations() -> (MockRadio, std::sync::Arc<channel::TxShared>, std::sync::Arc<ezsdr_kernel::event::EventCollector>) {
+        let binding = Binding {
+            module: module_ref(),
+            selector: BTreeMap::from([
+                (Ident::parse("id").unwrap(), Value::from("radio")),
+                (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
+                (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
+            ]),
+            profile: Some(x3xx::profile_ref()),
+            feed: None,
+        };
+        let mut radio = MockRadio::from_binding(&binding).unwrap();
+        let root = ClockDomainId::local(80);
+        let source_root = ResourceId::parse("radio").unwrap();
+        let clocks = std::sync::Arc::new(ClockRegistry::new());
+        clocks.register(ezsdr_kernel::time::ClockDomain::root(
+            root,
+            Rational::new(200_000_000, 1).unwrap(),
+            ezsdr_kernel::time::EpochRef::Arbitrary { set_by: "cancellation-test".to_owned() },
+        )).unwrap();
+        let stream = ResourceId::parse("radio/tx/s0").unwrap();
+        let mut tx_clocks = Vec::new();
+        let mut segments = BTreeMap::new();
+        for index in 0..3 {
+            let origin = index as i64 * 1_000;
+            let by = (index > 0).then_some(index as u64);
+            let handle = clocks.declare_sample_clock(stream.clone(), root, Rational::new(200, 1).unwrap()).unwrap();
+            let domain = clocks.register_sample_clock(&handle, origin).unwrap();
+            tx_clocks.push(TxClock { handle, domain, origin, by, ended: false });
+            if index < 2 {
+                let start = if index == 1 { 30 } else { 20 };
+                segments.insert((origin, by, 0, index as u32 + 1, start), channel::Segment {
+                    origin,
+                    ratio: Rational::new(200, 1).unwrap(),
+                    start,
+                    len: 1,
+                    repeat: false,
+                    channels: 1,
+                    channel_numbers: vec![0],
+                    samples: vec![0.0f32, 0.0].into(),
+                    end: None,
+                });
+            }
+        }
+        let shared = channel::TxShared::new(channel::TxPlan { segments, channel_models: Vec::new() });
+        let (mut registry, mut admission, mut kinds) = (
+            ezsdr_kernel::module_api::ModuleRegistry::new(),
+            ezsdr_kernel::binding::AdmissionCheckRegistry::new(),
+            ezsdr_kernel::policy::EventKindRegistry::with_kernel_kinds(),
+        );
+        ezsdr_radio::register(&mut registry, &mut admission, &mut kinds).unwrap();
+        let event_kinds = kinds.kinds();
+        let source = EventSource::Node { node: source_root.clone() };
+        let pairs: Vec<_> = event_kinds.iter().cloned().map(|kind| (source.clone(), kind)).collect();
+        let events = std::sync::Arc::new(ezsdr_kernel::event::EventCollector::new(&pairs, &event_kinds, 4096, &ezsdr_kernel::policy::Policy::default()));
+        radio.root = Some(root);
+        radio.source_root = Some(source_root);
+        radio.clocks = Some(clocks);
+        radio.events = Some(events.clone());
+        radio.tx[0].clock = Some(tx_clocks[0].handle.clone());
+        radio.tx[0].clocks = tx_clocks;
+        radio.tx[0].cur = Some(0);
+        radio.tx[0].tracker = Some(BurstTracker::new(radio.tx[0].clocks[0].domain));
+        radio.tx[0].plan = Some(shared.clone());
+        radio.tx[0].held.insert(20, held(20));
+        radio.tx[0].later.push((1, held(30)));
+        (radio, shared, events)
+    }
+
+    #[test]
+    fn cancelled_held_and_later_bursts_release_the_shared_reservations() {
+        let (mut radio, shared, events) = radio_with_reservations();
+        radio.stop_tx(0, 0, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop).unwrap();
+        radio.cancel_later(0, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop).unwrap();
+        assert!(radio.tx[0].held.is_empty());
+        assert!(radio.tx[0].later.is_empty());
+        assert!(shared.plan().segments.is_empty());
+        let rows = radio.instance.sections[&section("rejected")].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|row| row["reason"] == "MR-25: cancelled by stop"), "{rows:?}");
+        assert!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
+    }
+
+    #[test]
+    fn a_cold_change_skipping_a_future_clock_releases_its_reservation() {
+        let (mut radio, shared, events) = radio_with_reservations();
+        radio.tx[0].held.clear();
+        radio.tx[0].later.clear();
+        radio.tx[0].later.push((1, held(30)));
+        radio.tx_switch(0, Some(2), 2).unwrap();
+        assert!(radio.tx[0].later.is_empty());
+        assert!(shared.plan().segments.keys().all(|(_, _, stream, generation, _)| *stream != 0 || *generation != 2));
+        let rows = radio.instance.sections[&section("rejected")].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["reason"], "MR-18: cancelled by a cold change");
+        let rejected: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0].payload["reason"], "MR-18: cancelled by a cold change");
     }
 }

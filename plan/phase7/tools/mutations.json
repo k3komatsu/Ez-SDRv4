@@ -957,8 +957,8 @@
   "id": "R07",
   "name": "a cold transmit switch emits no COMMAND_REJECTED for the cancelled bursts (L11)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "self.core.command_rejected(None, \"tx_burst\", \"cancelled by a cold change\");",
-  "new": "self.core.reject_note(json!({ \"reason\": \"cancelled by a cold change\" }));",
+  "old": "if ezsdr_radio::cancellation_reports(cancel_reason) {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
+  "new": "if false {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_cold_transmit_change_cancels_the_held_bursts"

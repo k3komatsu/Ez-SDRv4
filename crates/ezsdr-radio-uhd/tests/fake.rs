@@ -1900,14 +1900,19 @@ fn ur_25_a_rate_change_admits_a_burst_on_the_new_clock() {
 
 #[test]
 fn ur_25_a_cold_transmit_change_cancels_the_held_bursts() {
-    // UR-25: bursts held on the old clock are refused with COMMAND_REJECTED (Review L, L11).
+    // UR-23: a cold change still reports each held burst it cancels on the old clock.
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "send", Some(ms(300)), &tone(100));
     assert!(admitted(&run.submit(set("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
     wait(&mut run, ms(150));
     let manifest = run.finish();
-    let reasons = rejection_reasons(&events_of(&manifest, "radio.COMMAND_REJECTED"));
-    assert!(reasons.iter().any(|r| r.as_str() == "cancelled by a cold change"), "{reasons:?}");
+    let events: Vec<_> = events_of(&manifest, "radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["kind"] == "tx_burst").collect();
+    let rejected: Vec<_> = section(&manifest, "rejected").as_array().unwrap().iter().filter(|row| row["kind"] == "tx_burst").collect();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].payload["reason"], "cancelled by a cold change");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["reason"], "cancelled by a cold change");
+    assert!(bursts(&manifest).is_empty(), "the cancelled waveform was not sent");
 }
 
 
@@ -6251,23 +6256,32 @@ fn ur_26_a_device_stop_stops_every_layout_stream() {
         layout_selector(),
         inputs,
     );
-    direct.settle(Wall::from_millis(30));
+    direct.until("the transmit streamer opens", |direct| !calls(&direct.device, "tx_open").is_empty());
     // A burst well ahead of the device lead: it is held, not sent.
     let record = direct.clocks.sample_clock_records().into_iter().find(|record| record.stream.path() == "usrp/tx/s0").unwrap();
-    let k = (direct.now() + ms(30) - record.origin.ticks_in(record.root).unwrap()) / record.root_ticks_per_tick.num() as i64;
+    let start = direct.now() + ms(100);
+    let k = (start - record.origin.ticks_in(record.root).unwrap() + record.root_ticks_per_tick.num() as i64 - 1) / record.root_ticks_per_tick.num() as i64;
     direct.burst_at("usrp/tx/s0", &waveform, false, TimePoint::new(record.domain, k));
-    direct.settle(Wall::from_millis(5));
-    assert!(!direct.of("radio.COMMAND_REJECTED").is_empty() || true, "the burst is booked");
+    direct.push(Action::SetTimer { target: resource("usrp"), at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(direct.root, direct.now())), token: 101 });
+    direct.until("the held burst booking barrier", |direct| direct.of("radio.COMMAND_REJECTED").iter().any(|event| event.payload["kind"] == "set_timer"));
     direct.stop_at("usrp");
-    direct.settle(Wall::from_millis(80));
+    direct.push(Action::SetTimer { target: resource("usrp"), at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(direct.root, direct.now())), token: 102 });
+    direct.until("the device Stop booking barrier", |direct| direct.of("radio.COMMAND_REJECTED").iter().filter(|event| event.payload["kind"] == "set_timer").count() >= 2);
+    direct.until("the cancelled burst's target passes", |direct| direct.now() > start + ms(20));
     let cancelled: Vec<String> = rejection_reasons(&direct.of("radio.COMMAND_REJECTED")).into_iter().filter(|reason| reason.contains("cancelled by Stop")).collect();
-    assert_eq!(cancelled.len(), 1, "the held burst is cancelled: {:?} {:?}", cancelled, direct.device.calls());
+    assert!(cancelled.is_empty(), "Stop does not report held-burst cancellation: {cancelled:?}");
+    let command_events: Vec<_> = direct.of("radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["kind"] == "tx_burst").collect();
+    assert!(command_events.is_empty(), "no cancellation event: {command_events:?}");
     let log = direct.device.calls();
+    assert!(!log.iter().any(|call| call.starts_with("tx_send ")), "the cancelled burst never reached the device: {log:?}");
     assert!(log.iter().any(|call| call == "rx_stop 0 now"), "the receive stream ends: {log:?}");
     let records = direct.clocks.sample_clock_records();
     let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
     assert!(rx[0].ended_at.is_some(), "{records:?}");
-    let _ = direct.finish();
+    let instance = direct.finish();
+    let rejected: Vec<_> = instance.sections[&Namespace::parse("ezsdr.radio.uhd.rejected").unwrap()].as_array().unwrap().iter().filter(|row| row["kind"] == "tx_burst").collect();
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["reason"], "UR-26: cancelled by Stop");
 }
 
 #[test]

@@ -204,6 +204,16 @@ impl MockRig {
     /// With one link on each named receive port (RM-29: `rx0`, `rx1`, …), so that every
     /// stream a comparison runs has its own.
     fn with_ports(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str]) -> MockRig {
+        Self::with_run(selector, constraints, ports, BTreeMap::new(), BTreeMap::new())
+    }
+
+    fn with_run(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        ports: &[&str],
+        inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+        environment: BTreeMap<ezsdr_kernel::spec::Namespace, serde_json::Value>,
+    ) -> MockRig {
         let mut mock = MockRadio::from_binding(&mock_binding(selector)).unwrap();
         mock = mock.with_medium(ezsdr_sim::channel::Medium::new());
         let clocks = Arc::new(ClockRegistry::new());
@@ -224,8 +234,8 @@ impl MockRig {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("radio") }, time.clone(), clocks.clone(), events.clone(), actions.clone(), Arc::new(Accepting));
             ctx.run = RunId::from_string("vh8-mock".to_owned());
             ctx.class = ExecutionClass::Simulation;
-            ctx.environment = Arc::new(BTreeMap::new());
-            ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+            ctx.environment = Arc::new(environment);
+            ctx.inputs = Arc::new(inputs);
             ctx.links = links;
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
@@ -247,6 +257,10 @@ impl MockRig {
 
     fn push(&self, action: Action) {
         self.actions.actions.lock().unwrap().push_back(action);
+    }
+
+    fn stop_at(&self, node: &str) {
+        self.push(Action::Stop { target: Some(Target::Resource { resource: Ident::parse("radio").unwrap(), path: node.to_owned() }) });
     }
 
     fn update(&self, name: &str, value: Value, class: ezsdr_kernel::module_api::UpdateClass, at: Option<i64>) {
@@ -290,11 +304,15 @@ impl MockRig {
         self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
     }
 
-    /// `stop` and `cleanup`, as the Manifest's sections are written (MR-27).
-    fn finish(mut self) -> ProviderInstance {
+    fn finish_in_place(&mut self) -> ProviderInstance {
         self.mock.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
         self.mock.cleanup();
         self.mock.instance().clone()
+    }
+
+    /// `stop` and `cleanup`, as the Manifest's sections are written (MR-27).
+    fn finish(mut self) -> ProviderInstance {
+        self.finish_in_place()
     }
 }
 
@@ -311,6 +329,7 @@ struct UhdRig {
     actions: Arc<Queue>,
     effective: BTreeMap<Key, Value>,
     events: Arc<EventCollector>,
+    seen_events: Mutex<Vec<ezsdr_kernel::event::Event>>,
     _authority: DeviceAuthority,
 }
 
@@ -321,6 +340,16 @@ impl UhdRig {
 
     /// With one link on each named receive port, as `MockRig::with_ports` (RM-29).
     fn with_ports(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], config: FakeConfig, ports: &[&str]) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
+        Self::with_run(selector, constraints, config, ports, BTreeMap::new())
+    }
+
+    fn with_run(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        config: FakeConfig,
+        ports: &[&str],
+        inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    ) -> Result<UhdRig, ezsdr_kernel::module_api::ModuleError> {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, ..config }));
         let clocks = Arc::new(ClockRegistry::new());
         let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "type=fake").unwrap();
@@ -336,14 +365,14 @@ impl UhdRig {
             ctx.run = RunId::from_string("vh8-uhd".to_owned());
             ctx.class = ExecutionClass::HardwareInLoop;
             ctx.environment = Arc::new(BTreeMap::new());
-            ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
+            ctx.inputs = Arc::new(inputs);
             ctx.links = ports.iter().map(|port| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))).collect();
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
         let mut radio = UhdRadio::from_binding(&uhd_binding(selector), device.clone())?;
         let prepared = radio.prepare(&fragment(ezsdr_radio_uhd::module_ref(), constraints), ctx)?;
-        Ok(UhdRig { radio, device, clocks, time, root, actions: queue, effective: prepared.effective, events, _authority: authority })
+        Ok(UhdRig { radio, device, clocks, time, root, actions: queue, effective: prepared.effective, events, seen_events: Mutex::new(Vec::new()), _authority: authority })
     }
 
     /// An update at the instance's node (KC-23), at `tick` on the root.
@@ -355,6 +384,14 @@ impl UhdRig {
             class,
             at: at.map(|tick| ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(self.root, tick))),
         });
+    }
+
+    fn push(&self, action: Action) {
+        self.actions.actions.lock().unwrap().push_back(action);
+    }
+
+    fn stop_at(&self, node: &str) {
+        self.push(Action::Stop { target: Some(Target::Resource { resource: Ident::parse("radio").unwrap(), path: node.to_owned() }) });
     }
 
     fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
@@ -404,14 +441,36 @@ impl UhdRig {
     }
 
     fn events(&self) -> Vec<ezsdr_kernel::event::Event> {
-        self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+        let mut seen = self.seen_events.lock().unwrap();
+        seen.extend(self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)));
+        std::mem::take(&mut *seen)
+    }
+
+    fn wait_for_event(&self, what: &str, reached: impl Fn(&ezsdr_kernel::event::Event) -> bool) {
+        self.wait_for_events(what, 1, reached);
+    }
+
+    fn wait_for_events(&self, what: &str, count: usize, reached: impl Fn(&ezsdr_kernel::event::Event) -> bool) {
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        loop {
+            let mut seen = self.seen_events.lock().unwrap();
+            seen.extend(self.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)));
+            if seen.iter().filter(|event| reached(event)).count() >= count { return; }
+            drop(seen);
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {:?}", self.device.calls());
+            self.device.host().sleep(Wall::from_millis(1));
+        }
+    }
+
+    fn finish_in_place(&mut self) -> ProviderInstance {
+        self.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
+        self.radio.cleanup();
+        self.radio.instance().clone()
     }
 
     /// The Provider's sections as `cleanup` writes them (UR-30).
     fn finish(mut self) -> ProviderInstance {
-        self.radio.stop(ezsdr_kernel::module_api::StopMode::Orderly).unwrap();
-        self.radio.cleanup();
-        self.radio.instance().clone()
+        self.finish_in_place()
     }
 }
 
@@ -1066,6 +1125,146 @@ fn tx_two() -> Vec<(&'static str, Constraint)> {
     ]
 }
 
+fn cancellation_waveform() -> (ezsdr_kernel::manifest::ArtifactRef, BTreeMap<ContentHash, Arc<[u8]>>) {
+    let mut bytes = Vec::new();
+    for sample in [[0.25f32, 0.0f32], [0.5f32, 0.0f32]] {
+        bytes.extend_from_slice(&sample[0].to_le_bytes());
+        bytes.extend_from_slice(&sample[1].to_le_bytes());
+    }
+    let hash = ContentHash::of_bytes(&bytes);
+    let waveform = ezsdr_kernel::manifest::ArtifactRef {
+        id: Ident::parse("waveform").unwrap(),
+        kind: Namespace::parse("ezsdr.input").unwrap(),
+        uri: format!("mem:{hash}"),
+        hash: hash.clone(),
+        size_bytes: bytes.len() as u64,
+        partial: false,
+        marks: Vec::new(),
+        continuity: Vec::new(),
+    };
+    (waveform, BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]))
+}
+
+fn tx_sample_time(clocks: &ClockRegistry, stream: usize, segment: usize, root_tick: i64) -> TimePoint {
+    let node = format!("radio/tx/s{stream}");
+    let mut records: Vec<_> = clocks.sample_clock_records().into_iter().filter(|record| record.stream.path() == node).collect();
+    records.sort_by_key(|record| record.origin.ticks_in(record.root).unwrap());
+    let record = &records[segment];
+    let origin = record.origin.ticks_in(record.root).unwrap();
+    let ratio = record.root_ticks_per_tick;
+    let delta = i128::from(root_tick - origin).max(0);
+    let sample = (delta * i128::from(ratio.den()) + i128::from(ratio.num()) - 1) / i128::from(ratio.num());
+    TimePoint::new(record.domain, i64::try_from(sample).unwrap())
+}
+
+fn tx_burst_action(node: &str, waveform: &ezsdr_kernel::manifest::ArtifactRef, at: TimePoint) -> Action {
+    Action::TxBurst {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: node.to_owned() },
+        waveform: waveform.clone(),
+        repeat: false,
+        at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
+        requested_at: None,
+        late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn timer_barrier(root: ClockDomainId, at: i64, token: u64) -> Action {
+    Action::SetTimer {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: String::new() },
+        at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(root, at)),
+        token,
+    }
+}
+
+struct CancellationPair {
+    mock: MockRig,
+    uhd: UhdRig,
+    waveform: ezsdr_kernel::manifest::ArtifactRef,
+    t0: i64,
+    uhd_t0: i64,
+    uhd_barriers: std::cell::Cell<usize>,
+}
+
+impl CancellationPair {
+    fn new(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        ports: &[&str],
+        fake: FakeConfig,
+        environment: BTreeMap<Namespace, serde_json::Value>,
+    ) -> CancellationPair {
+        let (waveform, inputs) = cancellation_waveform();
+        let t0 = ms(2_001);
+        let mut mock = MockRig::with_run(selector.clone(), constraints, ports, inputs.clone(), environment);
+        mock.arm_start(t0);
+        let mut uhd = UhdRig::with_run(selector, constraints, fake, ports, inputs).unwrap();
+        uhd.arm().unwrap();
+        let now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
+        let uhd_t0 = now + ms(2_001);
+        uhd.start(uhd_t0).unwrap();
+        uhd.wait_until(uhd_t0 + ms(5));
+        uhd.settle(Wall::from_millis(1));
+        mock.step(t0 + ms(5));
+        CancellationPair { mock, uhd, waveform, t0, uhd_t0, uhd_barriers: std::cell::Cell::new(0) }
+    }
+
+    fn burst(&self, node: &str, stream: usize, segment: usize, relative_ms: i64) -> Action {
+        tx_burst_action(node, &self.waveform, tx_sample_time(&self.mock.clocks, stream, segment, self.t0 + ms(relative_ms)))
+    }
+
+    fn uhd_burst(&self, node: &str, stream: usize, segment: usize, relative_ms: i64) -> Action {
+        tx_burst_action(node, &self.waveform, tx_sample_time(&self.uhd.clocks, stream, segment, self.uhd_t0 + ms(relative_ms)))
+    }
+
+    fn mock_barrier(&self, token: u64) {
+        self.mock.push(timer_barrier(self.mock.root, self.t0 + ms(10), token));
+    }
+
+    fn uhd_barrier(&self, token: u64) {
+        self.uhd.push(timer_barrier(self.uhd.root, self.uhd_t0 + ms(10), token));
+        // Each barrier's own refusal: an earlier barrier's event must not satisfy a later one.
+        self.uhd_barriers.set(self.uhd_barriers.get() + 1);
+        self.uhd.wait_for_events("Action booking barrier", self.uhd_barriers.get(), |event| {
+            event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "set_timer"
+        });
+    }
+
+    fn cold_change(&self, stream: usize, rate: f64, relative_ms: i64) {
+        use ezsdr_kernel::module_api::UpdateClass::Cold;
+        self.mock.update(&format!("radio.tx.s{stream}.sample_rate_hz"), Value::num(rate).unwrap(), Cold, Some(self.t0 + ms(relative_ms)));
+        self.uhd.update(&format!("radio.tx.s{stream}.sample_rate_hz"), Value::num(rate).unwrap(), Cold, Some(self.uhd_t0 + ms(relative_ms)));
+    }
+}
+
+fn manifest_rows(instance: &ProviderInstance, namespace: &str) -> Vec<serde_json::Value> {
+    instance.sections[&Namespace::parse(namespace).unwrap()].as_array().unwrap().clone()
+}
+
+fn tx_rejected_rows(instance: &ProviderInstance, namespace: &str) -> Vec<serde_json::Value> {
+    manifest_rows(instance, namespace).into_iter().filter(|row| row["kind"] == "tx_burst").collect()
+}
+
+fn mock_tx_blocks(instance: &ProviderInstance) -> u64 {
+    instance.sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()]
+        ["tx_blocks"].as_u64().unwrap()
+}
+
+fn tx_cancel_events(events: &[ezsdr_kernel::event::Event]) -> Vec<&ezsdr_kernel::event::Event> {
+    events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "tx_burst").collect()
+}
+
+fn assert_mock_barriers(events: &[ezsdr_kernel::event::Event], expected: usize) {
+    let barriers = events.iter().filter(|event| {
+        event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "set_timer"
+    }).count();
+    assert_eq!(barriers, expected, "the Mock processed each queued-action barrier");
+}
+
+fn tx_send_calls(device: &FakeDevice, stream: usize) -> Vec<String> {
+    device.calls().into_iter().filter(|call| call.starts_with(&format!("tx_send {stream} "))).collect()
+}
+
 #[test]
 fn vh_8_two_streams_each_prepare_alike() {
     // Design 33 §6: with two receive and two transmit streams, one channel in each,
@@ -1375,4 +1574,408 @@ fn vh_8_a_move_into_an_empty_stream_leaves_the_same_first_segment_and_update() {
     let uhd_updates = updates(uhd_applied, uhd_t0);
     assert_eq!(mock_updates, uhd_updates, "the applied logical move row");
     assert_eq!(mock_updates, [("radio.rx.c1.stream".to_owned(), json!(2), ms(100))]);
+}
+
+#[test]
+fn vh_8_tx_stream_stop_cancels_held_bursts() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    for relative in [100, 120] {
+        pair.mock.push(pair.burst("tx/s0", 0, 0, relative));
+        pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, relative));
+    }
+    pair.mock.stop_at("tx/s0");
+    pair.mock_barrier(101);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.stop_at("tx/s0");
+    pair.uhd_barrier(101);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let uhd_sends = tx_send_calls(&pair.uhd.device, 0);
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 2, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 2, "{uhd_rejected:?}");
+    assert!(mock_rejected.iter().all(|row| row["reason"] == "MR-25: cancelled by stop"), "{mock_rejected:?}");
+    assert!(uhd_rejected.iter().all(|row| row["reason"] == "UR-26: cancelled by Stop"), "{uhd_rejected:?}");
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert!(uhd_sends.is_empty(), "{uhd_sends:?}");
+}
+
+#[test]
+fn vh_8_device_stop_cancels_held_bursts() {
+    let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mut constraints = rx_two();
+    constraints.extend(tx_two());
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0", "rx1"], FakeConfig::default(), BTreeMap::new());
+    for stream in 0..2 {
+        let node = format!("tx/s{stream}");
+        for relative in [100, 120] {
+            pair.mock.push(pair.burst(&node, stream, 0, relative));
+            pair.uhd.push(pair.uhd_burst(&node, stream, 0, relative));
+        }
+    }
+    pair.mock.stop_at("");
+    pair.mock_barrier(102);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.stop_at("");
+    pair.uhd_barrier(102);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 4, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 4, "{uhd_rejected:?}");
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert!(tx_send_calls(&pair.uhd.device, 0).is_empty());
+    assert!(tx_send_calls(&pair.uhd.device, 1).is_empty());
+}
+
+#[test]
+fn vh_8_provider_stop_cancels_held_bursts() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    for relative in [100, 120] {
+        pair.mock.push(pair.burst("tx/s0", 0, 0, relative));
+        pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, relative));
+    }
+    pair.mock_barrier(103);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd_barrier(103);
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 2, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 2, "{uhd_rejected:?}");
+    assert!(mock_rejected.iter().all(|row| row["reason"] == "MR-25: cancelled by stop"), "{mock_rejected:?}");
+    assert!(uhd_rejected.iter().all(|row| row["reason"] == "UR-26: cancelled by Provider::stop"), "{uhd_rejected:?}");
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert!(tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_cold_change_cancels_held_bursts() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    for relative in [110, 120] {
+        pair.mock.push(pair.burst("tx/s0", 0, 0, relative));
+        pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, relative));
+    }
+    pair.cold_change(0, 2e6, 50);
+    pair.mock_barrier(104);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd_barrier(104);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    pair.uhd.wait_for_events("both cold-change cancellations", 2, |event| {
+        event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "tx_burst"
+    });
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    let mock_cancelled = tx_cancel_events(&mock_events);
+    let uhd_cancelled = tx_cancel_events(&uhd_events);
+    assert_eq!(mock_rejected.len(), 2, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 2, "{uhd_rejected:?}");
+    assert_eq!(mock_cancelled.len(), 2, "{mock_cancelled:?}");
+    assert_eq!(uhd_cancelled.len(), 2, "{uhd_cancelled:?}");
+    assert!(mock_rejected.iter().all(|row| row["reason"] == "MR-18: cancelled by a cold change"), "{mock_rejected:?}");
+    assert!(uhd_rejected.iter().all(|row| row["reason"] == "cancelled by a cold change"), "{uhd_rejected:?}");
+    assert!(mock_cancelled.iter().all(|event| event.payload["reason"] == "MR-18: cancelled by a cold change"), "{mock_cancelled:?}");
+    assert!(uhd_cancelled.iter().all(|event| event.payload["reason"] == "cancelled by a cold change"), "{uhd_cancelled:?}");
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert!(tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_loss_cancels_held_bursts_without_rejection() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let environment = BTreeMap::from([(
+        Namespace::parse("sim.faults").unwrap(),
+        json!([{ "at_ns": 50_000_000, "fault": "device_lost", "target": "radio" }]),
+    )]);
+    let fake = FakeConfig {
+        faults: vec![ezsdr_radio_uhd::FakeFault::Lost(Wall::from_millis(2_051))],
+        ..FakeConfig::default()
+    };
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], fake, environment);
+    pair.mock.push(pair.burst("tx/s0", 0, 0, 100));
+    pair.mock_barrier(105);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, 100));
+    pair.uhd_barrier(105);
+    pair.mock.time.advance_to(TimePoint::new(pair.mock.root, pair.t0 + ms(60))).unwrap();
+    let error = pair.mock.mock.step(TimePoint::new(pair.mock.root, pair.t0 + ms(60))).unwrap_err();
+    assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.uhd.wait_for_event("FakeDevice loss", |event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST);
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 1, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 1, "{uhd_rejected:?}");
+    assert_eq!(mock_rejected[0]["reason"], "MR-20: device lost");
+    assert_eq!(uhd_rejected[0]["reason"], "UR-26: cancelled by Provider::stop");
+    assert_mock_barriers(&mock_events, 1);
+    assert!(mock_events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED || event.payload["kind"] != "tx_burst"));
+    assert!(uhd_events.iter().any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST));
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_cold_change_cancels_a_burst_on_a_skipped_future_clock() {
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    pair.mock.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(pair.t0 + ms(50)));
+    pair.mock_barrier(106);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(pair.uhd_t0 + ms(50)));
+    pair.uhd_barrier(106);
+    pair.mock.push(pair.burst("tx/s0", 0, 1, 150));
+    pair.uhd.push(pair.uhd_burst("tx/s0", 0, 1, 150));
+    pair.mock.update("radio.tx.s0.sample_rate_hz", Value::num(4e6).unwrap(), Cold, Some(pair.t0 + ms(80)));
+    pair.mock_barrier(107);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.update("radio.tx.s0.sample_rate_hz", Value::num(4e6).unwrap(), Cold, Some(pair.uhd_t0 + ms(80)));
+    pair.uhd_barrier(107);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    pair.uhd.wait_for_event("skipped-clock cancellation", |event| {
+        event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["reason"] == "UR-25: its transmit clock was never started"
+    });
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    let mock_cancelled = tx_cancel_events(&mock_events);
+    let uhd_cancelled = tx_cancel_events(&uhd_events);
+    assert_eq!(mock_rejected.len(), 1, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 1, "{uhd_rejected:?}");
+    assert_eq!(mock_cancelled.len(), 1, "{mock_cancelled:?}");
+    assert_eq!(uhd_cancelled.len(), 1, "{uhd_cancelled:?}");
+    assert_eq!(mock_rejected[0]["reason"], "MR-18: cancelled by a cold change");
+    assert_eq!(uhd_rejected[0]["reason"], "UR-25: its transmit clock was never started");
+    assert_eq!(uhd_cancelled[0].payload["reason"], "UR-25: its transmit clock was never started");
+    assert_mock_barriers(&mock_events, 2);
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_tx_stop_cancels_a_burst_on_a_future_clock() {
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    pair.mock.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(pair.t0 + ms(50)));
+    pair.mock_barrier(108);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.update("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(pair.uhd_t0 + ms(50)));
+    pair.uhd_barrier(108);
+    pair.mock.push(pair.burst("tx/s0", 0, 1, 150));
+    pair.mock.stop_at("tx/s0");
+    pair.mock_barrier(109);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.push(pair.uhd_burst("tx/s0", 0, 1, 150));
+    pair.uhd.stop_at("tx/s0");
+    pair.uhd_barrier(109);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 1, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 1, "{uhd_rejected:?}");
+    assert_eq!(mock_rejected[0]["reason"], "MR-25: cancelled by stop");
+    assert_eq!(uhd_rejected[0]["reason"], "UR-26: cancelled by Stop");
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 2);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").is_empty());
+    assert!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").is_empty());
+    assert_eq!(mock_tx_blocks(&mock), 0);
+    assert!(tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_rx_stop_does_not_cancel_held_tx() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    pair.mock.push(pair.burst("tx/s0", 0, 0, 100));
+    pair.mock.stop_at("rx/s0");
+    pair.mock_barrier(110);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, 100));
+    pair.uhd.stop_at("rx/s0");
+    pair.uhd_barrier(110);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    assert!(tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected").is_empty());
+    assert!(tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected").is_empty());
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert!(mock_events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED || event.payload["kind"] != "stop"));
+    assert!(uhd_events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED || event.payload["kind"] != "stop"));
+    let mock_rx = pair.mock.records().into_iter().find(|row| row.0 == "radio/rx/s0").unwrap();
+    assert!(mock_rx.3.is_some(), "the receive Stop ended its clock: {mock_rx:?}");
+    assert!(pair.uhd.device.calls().iter().any(|call| call == "rx_stop 0 now"), "the receive Stop reached FakeDevice");
+    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 1);
+    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 1);
+    assert!(mock_tx_blocks(&mock) > 0);
+    assert!(!tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_tx_stop_allows_a_later_burst() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    pair.mock.push(pair.burst("tx/s0", 0, 0, 100));
+    pair.mock.stop_at("tx/s0");
+    pair.mock.push(pair.burst("tx/s0", 0, 0, 150));
+    pair.mock_barrier(111);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, 100));
+    pair.uhd.stop_at("tx/s0");
+    pair.uhd.push(pair.uhd_burst("tx/s0", 0, 0, 150));
+    pair.uhd_barrier(111);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 1, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 1, "{uhd_rejected:?}");
+    assert_eq!(mock_rejected[0]["reason"], "MR-25: cancelled by stop");
+    assert_eq!(uhd_rejected[0]["reason"], "UR-26: cancelled by Stop");
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 1);
+    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 1);
+    assert!(mock_tx_blocks(&mock) > 0);
+    assert!(!tx_send_calls(&pair.uhd.device, 0).is_empty());
+}
+
+#[test]
+fn vh_8_tx_stream_stop_leaves_the_other_stream_held() {
+    let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mut constraints = rx_two();
+    constraints.extend(tx_two());
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0", "rx1"], FakeConfig::default(), BTreeMap::new());
+    for (stream, relative) in [(0, 100), (1, 120)] {
+        let node = format!("tx/s{stream}");
+        pair.mock.push(pair.burst(&node, stream, 0, relative));
+        pair.uhd.push(pair.uhd_burst(&node, stream, 0, relative));
+    }
+    pair.mock.stop_at("tx/s1");
+    pair.mock_barrier(112);
+    pair.mock.step(pair.t0 + ms(20));
+    pair.uhd.stop_at("tx/s1");
+    pair.uhd_barrier(112);
+    pair.mock.step(pair.t0 + ms(200));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
+    let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
+    assert_eq!(mock_rejected.len(), 1, "{mock_rejected:?}");
+    assert_eq!(uhd_rejected.len(), 1, "{uhd_rejected:?}");
+    assert_eq!(mock_rejected[0]["reason"], "MR-25: cancelled by stop");
+    assert_eq!(uhd_rejected[0]["reason"], "UR-26: cancelled by Stop");
+    assert!(tx_cancel_events(&mock_events).is_empty());
+    assert_mock_barriers(&mock_events, 1);
+    assert!(tx_cancel_events(&uhd_events).is_empty());
+    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 1);
+    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 1);
+    assert!(mock_tx_blocks(&mock) > 0);
+    assert!(!tx_send_calls(&pair.uhd.device, 0).is_empty(), "stream 0's future burst is sent");
+    assert!(tx_send_calls(&pair.uhd.device, 1).is_empty(), "stream 1's held burst is cancelled");
 }
