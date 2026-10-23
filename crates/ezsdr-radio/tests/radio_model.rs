@@ -433,9 +433,8 @@ fn rm_22_payloads_round_trip() {
         RxOverflowPayload {
             cause: RxOverflowCause::Overrun,
             lost: 3,
-            restart_gap_ns: 50,
         },
-        json!({"cause": "overrun", "lost": 3, "restart_gap_ns": 50}),
+        json!({"cause": "overrun", "lost": 3}),
     );
     assert_payload_round_trip(
         TimeErrorPayload {
@@ -518,26 +517,25 @@ fn rm_22_late_at_device_is_snake_case() {
 
 #[test]
 fn rm_24_the_hot_form_round_trips() {
-    let overrun = RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 };
+    let overrun = RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 };
     // Pinned byte for byte: this layout is the contract a hardware Provider meets.
-    assert_eq!(
-        overrun.to_hot(),
-        [0, 0x50, 0xc3, 0, 0, 0, 0, 0, 0, 0x80, 0xf0, 0xfa, 0x02, 0, 0, 0, 0]
-    );
+    assert_eq!(overrun.to_hot(), [0, 0x50, 0xc3, 0, 0, 0, 0, 0, 0]);
     for payload in [
         overrun,
-        RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: u64::MAX, restart_gap_ns: i64::MIN },
-        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 0, restart_gap_ns: -1 },
+        RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: u64::MAX },
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 0 },
     ] {
         let bytes = payload.to_hot();
-        assert_eq!(bytes.len(), 17);
+        assert_eq!(bytes.len(), 9);
         assert_eq!(RxOverflowPayload::from_hot(&bytes), Ok(payload));
     }
     let bytes = overrun.to_hot();
-    assert!(RxOverflowPayload::from_hot(&bytes[..16]).unwrap_err().starts_with("RM-24"));
-    let mut long = bytes.to_vec();
-    long.push(0);
-    assert!(RxOverflowPayload::from_hot(&long).unwrap_err().starts_with("RM-24"));
+    assert!(RxOverflowPayload::from_hot(&bytes[..8]).unwrap_err().starts_with("RM-24"));
+    for length in [10, 17] {
+        let mut long = bytes.to_vec();
+        long.resize(length, 0);
+        assert!(RxOverflowPayload::from_hot(&long).unwrap_err().starts_with("RM-24"));
+    }
     let mut bad_cause = bytes;
     bad_cause[0] = 2;
     assert!(RxOverflowPayload::from_hot(&bad_cause).unwrap_err().starts_with("RM-24"));
@@ -545,7 +543,7 @@ fn rm_24_the_hot_form_round_trips() {
 
 #[test]
 fn rm_24_a_delivered_payload_reads_in_either_form() {
-    let payload = RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 2_000, restart_gap_ns: 0 };
+    let payload = RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 2_000 };
     // The control path's object (RM-11) and the Kernel drain's byte array (RS-34).
     assert_eq!(RxOverflowPayload::from_payload(&serde_json::to_value(payload).unwrap()), Ok(payload));
     let drained = JsonValue::Array(payload.to_hot().iter().map(|byte| json!(byte)).collect());
@@ -558,4 +556,22 @@ fn rm_24_a_delivered_payload_reads_in_either_form() {
     not_a_byte[3] = json!(256);
     assert!(RxOverflowPayload::from_payload(&not_a_byte).unwrap_err().starts_with("RM-24"));
     assert!(RxOverflowPayload::from_payload(&json!("overrun")).unwrap_err().starts_with("RM-24"));
+    assert!(RxOverflowPayload::from_payload(&json!({"cause": "overrun", "lost": 3, "restart_gap_ns": 50})).unwrap_err().starts_with("RM-24"));
+}
+
+#[test]
+fn rm_17_reported_losses_make_one_payload_for_the_block_jump() {
+    use ezsdr_radio::payloads::rx_overflow_payload;
+
+    assert_eq!(rx_overflow_payload(&[], Some(5)), None);
+    assert_eq!(rx_overflow_payload(&[RxOverflowCause::Overrun], None), None);
+    assert_eq!(rx_overflow_payload(&[RxOverflowCause::Sequence], Some(5)), Some(RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 5 }));
+    assert_eq!(
+        rx_overflow_payload(&[RxOverflowCause::Sequence, RxOverflowCause::Overrun, RxOverflowCause::Overrun], Some(12)),
+        Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),
+    );
+    assert_eq!(
+        rx_overflow_payload(&[RxOverflowCause::Overrun, RxOverflowCause::Sequence], Some(12)),
+        Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),
+    );
 }

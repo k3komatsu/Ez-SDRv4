@@ -123,7 +123,7 @@ instance-wide capabilities
 
   | Kind | Payload |
   |---|---|
-  | `radio.RX_OVERFLOW` | `{ "cause": "overrun" \| "sequence", "lost": int, "restart_gap_ns": int }` (`restart_gap_ns` 0 for `sequence`); on the hot path, RM-24's bytes |
+  | `radio.RX_OVERFLOW` | `{ "cause": "overrun" \| "sequence", "lost": int }`; on the hot path, RM-24's bytes |
   | `radio.TIME_ERROR` | `{ "cause": "late" \| "unclosed_burst", "outcome": "send_asap" \| "drop" \| "plan_violation" \| "refused" \| "late_at_device", "late_by_ns": int, "target": TimePoint }` |
   | `radio.LATE_COMMAND` | `{ "key": string \| null, "requested": TimePoint, "applied": TimePoint }` |
   | `radio.COMMAND_QUEUE_FULL` | `{ "key": string, "depth": int }` |
@@ -172,10 +172,12 @@ instance-wide capabilities
 
 ### Receive faults
 
-- **RM-17** An **overrun** at `f` loses every receive sample in `[f, f + radio.timing.overflow_restart_gap_ns)`. The block in progress ends at `k_f`, the first sample at or after `f`, and is delivered if it holds a sample. The next block begins at the first sample at or after `f + gap`; if a sample was lost it carries `GAP_BEFORE | RESTARTED` and `lost` equal to its whole time jump, any loss already pending included (SC-18). `radio.RX_OVERFLOW { cause: overrun, lost, restart_gap_ns }`, timed `TimePoint(<receive SampleClock>, k_f)`, is emitted with the block that carries the loss and never otherwise; an overrun the Provider causes by dropping a block its link refused is emitted when it drops it (SC-20a).
-  *Producer obligation (Vision §23, §58 #6). Test:* `mr_20a_the_overflow_comes_with_the_block_that_carries_it`, `mr_19_backpressure_is_an_overrun`.
-- **RM-18** A **sequence error** at `f` loses `radio.rx.block_len` samples from `k_f`; the next block carries `GAP_BEFORE | SEQ_DISCONTINUITY`, not `RESTARTED`, with `lost` its time jump, and `radio.RX_OVERFLOW { cause: sequence, lost, restart_gap_ns: 0 }` is emitted as RM-17 says.
-  *Producer obligation; the block shape by `mr_22_sequence_error_shape` and Vision §58's `v58_06_sequence_error_is_seq_discontinuity`, the UHD side by `ur_19_reports_before_one_block_keep_each_kind` (lost only); none named for the emitted `radio.RX_OVERFLOW { cause: sequence, restart_gap_ns: 0 }`'s cause and restart_gap_ns.*
+- **RM-17** An **overrun** at `f` loses every receive sample in `[f, f + radio.timing.overflow_restart_gap_ns)`. The block in progress ends at `k_f`, the first sample at or after `f`, and is delivered if it holds a sample. The next block begins at the first sample at or after `f + gap`; if a sample was lost it carries `GAP_BEFORE | RESTARTED` and `lost` equal to its whole time jump, any loss already pending included (SC-18). For a block with a jump, the reports since the preceding block produce at most one `radio.RX_OVERFLOW`, with `lost` the block's whole jump less any loss an earlier event already reported (the dropped-block overrun below), `cause: overrun` if any report was an overrun and otherwise `cause: sequence`, timed at the first sample of that loss in the receive `SampleClock`. A block without a jump consumes its pending reports without an event; a report with no following block produces no event. A jump with no report produces no event. An overrun the Provider causes by dropping a block its link refused is emitted when it drops it, outside this rule (SC-20a).
+  *Producer obligation (Vision §23, §58 #6).*
+  *Test:* `rm_17_reported_losses_make_one_payload_for_the_block_jump`, `mr_20a_the_overflow_comes_with_the_block_that_carries_it`, `mr_19_backpressure_is_an_overrun`, `vh_8_a_reported_overrun_matches_the_block_jump`, `vh_8_reports_before_one_block_make_one_overrun_summary`, `vh_8_repeated_overruns_before_one_block_make_one_summary`, `vh_8_a_report_without_a_following_block_emits_no_overflow`, `ur_17_a_missed_start_and_overrun_share_the_block_summary` and `ur_18_a_report_on_a_gapless_block_is_consumed_without_an_event`.
+- **RM-18** A **sequence error** at `f` loses `radio.rx.block_len` samples from `k_f`; the next block carries `GAP_BEFORE | SEQ_DISCONTINUITY`, not `RESTARTED`, with `lost` its time jump. A sequence report contributes `cause: sequence` under RM-17 unless an overrun report precedes the block.
+  *Producer obligation.*
+  *Test:* `mr_22_sequence_error_shape`, `v58_06_sequence_error_is_seq_discontinuity`, `vh_8_a_reported_sequence_error_matches_the_block_jump` and `vh_8_reports_before_one_block_make_one_overrun_summary`.
 
 ### The RF safety envelope
 
@@ -205,7 +207,7 @@ instance-wide capabilities
 - **RM-22** The payloads of RM-11 are these Rust types in `ezsdr_radio::payloads`, each `#[derive(Serialize, Deserialize, JsonSchema)]` with `#[serde(deny_unknown_fields)]`, and a radio Provider builds a control-path event's `payload` as `serde_json::to_value(&the payload)` (a hot-path `RX_OVERFLOW` carries RM-24's bytes instead):
 
   ```rust
-  pub struct RxOverflowPayload     { pub cause: RxOverflowCause, pub lost: u64, pub restart_gap_ns: i64 }
+  pub struct RxOverflowPayload     { pub cause: RxOverflowCause, pub lost: u64 }
   pub enum   RxOverflowCause       { Overrun, Sequence }                          // snake_case
   pub struct TimeErrorPayload      { pub cause: TimeErrorCause, pub outcome: TimeErrorOutcome, pub late_by_ns: i64, pub target: TimePoint }
   pub enum   TimeErrorCause        { Late, UnclosedBurst }                         // snake_case
@@ -236,7 +238,7 @@ instance-wide capabilities
 
 ### Hot-path forms
 
-- **RM-24** `radio.RX_OVERFLOW` has a hot-path form of 17 bytes, little-endian: byte 0 the cause (`0` overrun, `1` sequence), bytes 1–8 `lost` as u64, bytes 9–16 `restart_gap_ns` as i64. `RxOverflowPayload::to_hot(&self) -> [u8; 17]` writes it. `RxOverflowPayload::from_hot(bytes: &[u8]) -> Result<RxOverflowPayload, String>` reads it and refuses another length or a cause byte other than 0 or 1. `RxOverflowPayload::from_payload(payload: &serde_json::Value) -> Result<RxOverflowPayload, String>` reads a delivered event's payload in either form — RM-11's object, from the control path, or the array of byte values the Kernel's drain makes of a hot-path record (RS-34) — and refuses anything else, so one call reads a Manifest whose Mock emitted the object and one whose Mock emitted the bytes. `RxOverflowHotPayload`, the array as a Manifest holds it, has the committed schema `schemas/radio/rx_overflow_hot_payload.v1.json` (PO-7), so a reader that validates payloads has a schema for both forms. The Kernel does not decode it (RS-32a, withdrawn).
+- **RM-24** `radio.RX_OVERFLOW` has a hot-path form of 9 bytes, little-endian: byte 0 the cause (`0` overrun, `1` sequence), bytes 1–8 `lost` as u64. `RxOverflowPayload::to_hot(&self) -> [u8; 9]` writes it. `RxOverflowPayload::from_hot(bytes: &[u8]) -> Result<RxOverflowPayload, String>` reads it and refuses another length or a cause byte other than 0 or 1. `RxOverflowPayload::from_payload(payload: &serde_json::Value) -> Result<RxOverflowPayload, String>` reads a delivered event's payload in either form — RM-11's `{ cause, lost }` object or the array of byte values the Kernel's drain makes of a hot-path record (RS-34) — and refuses anything else, including the former object with `restart_gap_ns` and the former 17-byte array. `RxOverflowHotPayload`, the array as a Manifest holds it, has the committed schema `schemas/radio/rx_overflow_hot_payload.v1.json` (PO-7), so a reader that validates payloads has a schema for both forms. The Kernel does not decode it (RS-32a, withdrawn).
   *Ceilings: a drain delivers the ring's bodies before the control path's (RS-34), so the Manifest's `delivered` list is ordered by path, then by emission, and when two kinds of one drain both stop the Run the hot one is the recorded cause; a hot body the full ring drops is counted and reported in `EVENTS_DROPPED` but marks no artifact, since `mark_artifact` acts on delivered bodies (RS-30).*
   *Test:* `rm_24_the_hot_form_round_trips` and `rm_24_a_delivered_payload_reads_in_either_form`.
 
@@ -354,8 +356,9 @@ In `crates/ezsdr-radio/tests/radio_model.rs`.
 | `rm_20_schema_freeze` | regenerate `RfEnvelope`, `RadioEnvelope`, the eight RM-22 payloads and RM-24's hot form | byte-equal to `schemas/radio/*.v1.json` (eleven files); no other file there | RM-20, RM-22, RM-24, PO-7 |
 | `rm_22_payloads_round_trip` | one value of each RM-22 type | `to_value` gives exactly RM-11's members with snake_case enum strings; `from_value` gives the value back; an extra member is refused | RM-22, RM-11 |
 | `rm_22_late_at_device_is_snake_case` | `TimeErrorOutcome::LateAtDevice` | serialises as `"late_at_device"` | RM-22, RM-11 |
-| `rm_24_the_hot_form_round_trips` | an overrun of 50 000 samples and 50 ms; a sequence error with `lost` `u64::MAX` and `restart_gap_ns` `i64::MIN`, and a second overrun with `lost` 0 and `restart_gap_ns` −1; a 16- and an 18-byte slice; a cause byte of 2 | the first's 17 bytes pinned byte for byte; `from_hot(to_hot(p)) == p`; three refusals naming RM-24 | RM-24 |
-| `rm_24_a_delivered_payload_reads_in_either_form` | `to_value(p)`; `p.to_hot()` as a JSON array of integers; that array with a 256; a string | `p` twice; two refusals | RM-24, RM-11 |
+| `rm_17_reported_losses_make_one_payload_for_the_block_jump` | no reports with a jump; reports without a jump; sequence reports; mixed and repeated reports with a block jump | no payload for no report or no jump; one payload whose `lost` is the whole jump and whose cause is overrun if present, otherwise sequence | RM-17 |
+| `rm_24_the_hot_form_round_trips` | an overrun with `lost` 50 000; a sequence error with `lost` `u64::MAX`; an overrun with `lost` 0; 8-, 10- and 17-byte slices; a cause byte of 2 | the first's 9 bytes pinned byte for byte; `from_hot(to_hot(p)) == p`; four refusals naming RM-24 | RM-24 |
+| `rm_24_a_delivered_payload_reads_in_either_form` | the `{ cause, lost }` object; `p.to_hot()` as a JSON array of integers; that array with a 256; the former object with `restart_gap_ns`; a string | `p` in object and array form; three refusals | RM-24, RM-11 |
 
 In `crates/ezsdr-radio/tests/channels.rs`:
 
@@ -466,3 +469,4 @@ A transmit port and link-fed transmission (Phase 10). DDC/DUC and decimation cap
 | 2026-10-20 | RM-34 | A per-stream prune retains both items and their move record until both lines pass the move instant, then folds its source release into the destination floor | [Phase 8 design 33](../plan/phase8/33-channels-and-streams.md) §5 stage 1b-4e-2 |
 | 2026-10-22 | RM-8, RM-25, §6 | RM-8's frequency and gain grids use numbered channel keys; RM-25 states the general pruning boundary, state fold and unchanged-plan contract with its retained test. | [note 23](../plan/maintenance/23-one-line-per-stream.md), [Phase 8 design 33](../plan/phase8/33-channels-and-streams.md) D12–D13, §5 stage 1b-5c-2 fix 1 |
 | 2026-10-22 | RM-16 | An admitted held transmit burst cancelled before its start by Stop, Provider::stop, loss or a cold change is recorded; only a cold-change cancellation emits COMMAND_REJECTED. Versions are unchanged. | [Phase 8 report rules](../plan/phase8/36-radio-report-rules.md) decision 1, Phase 8 stage 1b-7a |
+| 2026-10-23 | RM-11, RM-17, RM-18, RM-22, RM-24 | `RX_OVERFLOW` is `{ cause, lost }` with a 9-byte hot form; one shared Radio Model rule summarizes each report-bearing block's whole jump, with overrun priority, while gapless reports and back-pressure keep their specified paths. | [Phase 8 report rules](../plan/phase8/36-radio-report-rules.md) decisions 4–5, Phase 8 stage 1b-7b |

@@ -776,12 +776,10 @@ pub mod payloads {
         pub cause: RxOverflowCause,
         /// Number of lost samples (RM-22).
         pub lost: u64,
-        /// Restart gap in nanoseconds, or zero for a sequence error (RM-22).
-        pub restart_gap_ns: i64,
     }
 
     /// The length of [`RxOverflowPayload`]'s hot-path form (RM-24).
-    pub const RX_OVERFLOW_HOT_BYTES: usize = 17;
+    pub const RX_OVERFLOW_HOT_BYTES: usize = 9;
 
     /// `RX_OVERFLOW`'s payload as a Manifest holds it when a Provider emitted it on the
     /// hot path: the Kernel's drain turns the record's bytes into this array (RS-34).
@@ -793,9 +791,8 @@ pub mod payloads {
 
     impl RxOverflowPayload {
         /// The hot-path form: the cause byte (0 overrun, 1 sequence), then `lost` as a
-        /// little-endian u64 and `restart_gap_ns` as a little-endian i64 (RM-24). The
-        /// Vocabulary owns this layout; the Kernel only queues the bytes (RS-32a,
-        /// withdrawn).
+        /// little-endian u64 (RM-24). The Vocabulary owns this layout; the Kernel only queues
+        /// the bytes (RS-32a, withdrawn).
         pub fn to_hot(&self) -> [u8; RX_OVERFLOW_HOT_BYTES] {
             let mut out = [0; RX_OVERFLOW_HOT_BYTES];
             out[0] = match self.cause {
@@ -803,7 +800,6 @@ pub mod payloads {
                 RxOverflowCause::Sequence => 1,
             };
             out[1..9].copy_from_slice(&self.lost.to_le_bytes());
-            out[9..17].copy_from_slice(&self.restart_gap_ns.to_le_bytes());
             out
         }
 
@@ -818,8 +814,7 @@ pub mod payloads {
                 other => return Err(format!("RM-24: {other} is not a cause")),
             };
             let lost = u64::from_le_bytes(bytes[1..9].try_into().expect("eight bytes"));
-            let restart_gap_ns = i64::from_le_bytes(bytes[9..17].try_into().expect("eight bytes"));
-            Ok(RxOverflowPayload { cause, lost, restart_gap_ns })
+            Ok(RxOverflowPayload { cause, lost })
         }
 
         /// Reads a delivered event's payload in either form: RM-11's object from the
@@ -840,6 +835,20 @@ pub mod payloads {
                 _ => Err("RM-24: a payload is an object or an array of bytes".to_owned()),
             }
         }
+    }
+
+    /// The single `RX_OVERFLOW` for a block carrying one or more reported losses, `lost` the
+    /// part of its jump no earlier event reported (RM-17).
+    pub fn rx_overflow_payload(reports: &[RxOverflowCause], lost: Option<u64>) -> Option<RxOverflowPayload> {
+        let lost = lost?;
+        let cause = if reports.contains(&RxOverflowCause::Overrun) {
+            RxOverflowCause::Overrun
+        } else if reports.contains(&RxOverflowCause::Sequence) {
+            RxOverflowCause::Sequence
+        } else {
+            return None;
+        };
+        Some(RxOverflowPayload { cause, lost })
     }
 
     /// Why a radio burst reported a time error (RM-22).

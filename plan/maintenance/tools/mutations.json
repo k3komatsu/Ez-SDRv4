@@ -54,7 +54,7 @@
   "name": "a receive fault emits its RX_OVERFLOW at once, not with the block that carries its loss",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "        self.faults[index].applied = true;\n        self.record_fault(index, lost as u64);\n",
-  "new": "        let domain = self.rx_register(k)?;\n        for (kf, payload) in self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default() { self.emit_overflow(k, payload, TimePoint::new(domain, kf))?; }\n        self.faults[index].applied = true;\n        self.record_fault(index, lost as u64);\n",
+   "new": "        let domain = self.rx_register(k)?;\n        if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&[cause], Some(lost as u64)) { self.emit_overflow(k, payload, TimePoint::new(domain, kf))?; }\n        self.faults[index].applied = true;\n        self.record_fault(index, lost as u64);\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20a_the_overflow_comes_with_the_block_that_carries_it"
@@ -64,7 +64,7 @@
   "name": "a stream that ends before the block carrying a loss still emits its RX_OVERFLOW",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "        self.rx_settle(k, t)?;\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
-  "new": "        self.rx_settle(k, t)?;\n        if let Some(domain) = self.rx[k].running.as_ref().and_then(|rx| rx.domain) { for (kf, payload) in self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default() { self.emit_overflow(k, payload, TimePoint::new(domain, kf))?; } }\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
+   "new": "        self.rx_settle(k, t)?;\n        if let Some(domain) = self.rx[k].running.as_ref().and_then(|rx| rx.domain) {\n            let reports = self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.reports)).unwrap_or_default();\n            for (kf, cause, _) in reports { self.emit_overflow(k, ezsdr_radio::payloads::RxOverflowPayload { cause, lost: 0 }, TimePoint::new(domain, kf))?; }\n        }\n        if self.rx[k].running.as_ref().is_some_and(|rx| rx.ended) { self.rx[k].running = None; }\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_fault_at_a_loss_s_instant_removes_nothing"
@@ -372,6 +372,46 @@
   "old": "        self._rate = Fraction(connected[\"root_rate\"][\"num\"], connected[\"root_rate\"][\"den\"])",
   "new": "        self._rate = connected[\"root_rate\"][\"num\"] / connected[\"root_rate\"][\"den\"]",
   "python": "test_easy_api.DurationRequests.test_ea_16_a_rational_root_rate_is_read_exactly"
+ },
+ {
+  "id": "F43",
+  "name": "MockRadio emits one RX_OVERFLOW per report, not per block",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&causes, reported) {\n            let at = reports.iter().map(|(kf, _, _)| *kf).min().expect(\"a reported loss\");\n            self.emit_overflow(k, payload, TimePoint::new(domain, at))?;\n        }\n",
+  "new": "        for (at, cause, _) in reports {\n            let payload = ezsdr_radio::payloads::RxOverflowPayload { cause, lost: lost.unwrap_or(0) };\n            self.emit_overflow(k, payload, TimePoint::new(domain, at))?;\n        }\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_overrun_shape"
+ },
+ {
+  "id": "F44",
+  "name": "MockRadio carries old reports into the next block",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let reports = self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.reports)).unwrap_or_default();",
+  "new": "        let reports = self.rx[k].running.as_ref().map(|rx| rx.reports.clone()).unwrap_or_default();",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_overrun_shape"
+ },
+ {
+  "id": "F45",
+  "name": "MockRadio defers a back-pressure event to the shared report path",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                self.emit_rx_overflow(k, domain, next, next_sample - next)?;",
+  "new": "                if let Some(rx) = self.rx[k].running.as_mut() { rx.reports.push((next, ezsdr_radio::payloads::RxOverflowCause::Overrun, (next_sample - next) as u64)); }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_fault_overflow_and_repeated_backpressure_are_counted_once"
+ },
+ {
+  "id": "F46",
+  "name": "MockRadio's summary counts again the loss back-pressure already reported",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let reported: Option<u64> = lost.map(|_| reports.iter().map(|(_, _, lost)| lost).sum());",
+  "new": "        let reported: Option<u64> = lost;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_21_overrun_shape"
  },
  {
   "id": "G03",

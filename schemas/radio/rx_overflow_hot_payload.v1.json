@@ -7,8 +7,8 @@
     "minimum": 0,
     "type": "integer"
   },
-  "maxItems": 17,
-  "minItems": 17,
+  "maxItems": 9,
+  "minItems": 9,
   "title": "RxOverflowHotPayload",
   "type": "array"
 }

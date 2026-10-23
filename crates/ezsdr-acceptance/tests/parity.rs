@@ -23,7 +23,7 @@ use std::time::Duration as Wall;
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, Violation};
 use ezsdr_kernel::event::{
-    Action, ActionId, EventCollector, EventSource, Target,
+    Action, ActionId, Event, EventCollector, EventSource, Target,
 };
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
@@ -35,12 +35,13 @@ use ezsdr_kernel::module_api::{
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Scalar, Value};
-use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
+use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockRef, DataLink, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{
     ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, TimePoint,
 };
 use ezsdr_mock_radio::MockRadio;
-use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, UhdRadio};
+use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
+use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, UhdRadio};
 use serde_json::json;
 
 const ROOT_HZ: i64 = 200_000_000;
@@ -159,6 +160,10 @@ impl MemLink {
     fn new() -> MemLink {
         MemLink { queue: Mutex::new(VecDeque::new()) }
     }
+
+    fn take_blocks(&self) -> Vec<BlockRef> {
+        self.queue.lock().unwrap().drain(..).collect()
+    }
 }
 
 impl DataLink for MemLink {
@@ -194,6 +199,7 @@ struct MockRig {
     actions: Arc<Queue>,
     effective: BTreeMap<Key, Value>,
     events: Arc<EventCollector>,
+    rx_links: Vec<Arc<MemLink>>,
 }
 
 impl MockRig {
@@ -229,7 +235,8 @@ impl MockRig {
         let event_kinds = kinds.kinds();
         let pairs: Vec<_> = sources.into_iter().flat_map(|source| event_kinds.iter().cloned().map(move |kind| (source.clone(), kind))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &event_kinds, 4096, &Policy::default()));
-        let links = ports.iter().map(|port| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))).collect();
+        let rx_links: Vec<_> = ports.iter().map(|_| Arc::new(MemLink::new())).collect();
+        let links = ports.iter().zip(&rx_links).map(|(port, link)| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone()))).collect();
         let ctx = {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("radio") }, time.clone(), clocks.clone(), events.clone(), actions.clone(), Arc::new(Accepting));
             ctx.run = RunId::from_string("vh8-mock".to_owned());
@@ -241,7 +248,7 @@ impl MockRig {
             ctx
         };
         let prepared = mock.prepare(&fragment(ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }, constraints), ctx).unwrap();
-        MockRig { mock, clocks, time, root, actions, effective: prepared.effective, events }
+        MockRig { mock, clocks, time, root, actions, effective: prepared.effective, events, rx_links }
     }
 
     /// `arm` and `start` at `t0`, both in root ticks.
@@ -330,6 +337,7 @@ struct UhdRig {
     effective: BTreeMap<Key, Value>,
     events: Arc<EventCollector>,
     seen_events: Mutex<Vec<ezsdr_kernel::event::Event>>,
+    rx_links: Vec<Arc<MemLink>>,
     _authority: DeviceAuthority,
 }
 
@@ -360,19 +368,20 @@ impl UhdRig {
         let pairs: Vec<_> = ["radio", "radio/rx/s0", "radio/tx/s0", "radio/rx/s1", "radio/tx/s1"].iter().flat_map(|source| kinds.kinds().into_iter().map(move |kind| (EventSource::Node { node: rid(source) }, kind))).collect();
         let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
         let queue = Arc::new(Queue { actions: Mutex::new(VecDeque::new()), given: AtomicU64::new(0) });
+        let rx_links: Vec<_> = ports.iter().map(|_| Arc::new(MemLink::new())).collect();
         let ctx = {
             let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("radio") }, time.clone(), clocks.clone(), events.clone(), queue.clone(), Arc::new(Accepting));
             ctx.run = RunId::from_string("vh8-uhd".to_owned());
             ctx.class = ExecutionClass::HardwareInLoop;
             ctx.environment = Arc::new(BTreeMap::new());
             ctx.inputs = Arc::new(inputs);
-            ctx.links = ports.iter().map(|port| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(Arc::new(MemLink::new())))).collect();
+            ctx.links = ports.iter().zip(&rx_links).map(|(port, link)| AttachedPort::new(Ident::parse("radio").unwrap(), Ident::parse(port).unwrap(), Endpoint::StreamOut(link.clone()))).collect();
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
         let mut radio = UhdRadio::from_binding(&uhd_binding(selector), device.clone())?;
         let prepared = radio.prepare(&fragment(ezsdr_radio_uhd::module_ref(), constraints), ctx)?;
-        Ok(UhdRig { radio, device, clocks, time, root, actions: queue, effective: prepared.effective, events, seen_events: Mutex::new(Vec::new()), _authority: authority })
+        Ok(UhdRig { radio, device, clocks, time, root, actions: queue, effective: prepared.effective, events, seen_events: Mutex::new(Vec::new()), rx_links, _authority: authority })
     }
 
     /// An update at the instance's node (KC-23), at `tick` on the root.
@@ -1102,6 +1111,154 @@ impl Started {
         self.uhd.settle(Wall::from_millis(20));
         (self.mock.finish(), self.uhd.finish())
     }
+}
+
+fn rx_fault_pair(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>) -> Started {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1e6).unwrap()))];
+    let environment = BTreeMap::from([(
+        Namespace::parse("sim.faults").unwrap(),
+        serde_json::Value::Array(faults.iter().map(|(fault, at_ms)| json!({
+            "at_ns": at_ms * 1_000_000,
+            "fault": fault,
+            "target": "radio",
+        })).collect()),
+    )]);
+    let t0 = ms(2_001);
+    let mut mock = MockRig::with_run(selector.clone(), &constraints, &["rx0"], BTreeMap::new(), environment);
+    mock.arm_start(t0);
+    let mut uhd = UhdRig::with_ports(selector, &constraints, FakeConfig { faults: fake_faults, ..FakeConfig::default() }, &["rx0"]).unwrap();
+    uhd.arm().unwrap();
+    let now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
+    let uhd_t0 = ezsdr_radio::timeline::lattice(now, Rational::new(200, 1).unwrap()).unwrap() + ms(2_001);
+    uhd.start(uhd_t0).unwrap();
+    uhd.wait_until(uhd_t0 + ms(5));
+    uhd.settle(Wall::from_millis(5));
+    mock.step(t0 + ms(5));
+    Started { mock, uhd, t0, uhd_t0 }
+}
+
+fn assert_rx_overflow_output(events: Vec<Event>, blocks: Vec<BlockRef>, cause: RxOverflowCause, flags: BlockFlags) -> (i64, u64) {
+    let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(overflows.len(), 1, "{events:?}");
+    let payload = RxOverflowPayload::from_payload(&overflows[0].payload).unwrap();
+    assert_eq!(payload.cause, cause);
+    assert_eq!(overflows[0].payload.as_array().map(Vec::len), Some(9), "{}", overflows[0].payload);
+    let gaps: Vec<_> = blocks.iter().filter(|block| block.header().lost.is_some()).collect();
+    assert_eq!(gaps.len(), 1, "one reported jump block: {:?}", blocks.iter().map(|block| block.header().lost).collect::<Vec<_>>());
+    let header = gaps[0].header();
+    assert_eq!(header.flags, flags);
+    let lost = header.lost.unwrap();
+    assert_eq!(payload.lost, lost);
+    let first = header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap();
+    let event_at = overflows[0].time.ticks_in(overflows[0].time.domain()).unwrap();
+    assert_eq!(event_at, first - lost as i64, "the event names the first lost sample");
+    let event_lost: u64 = overflows.iter().map(|event| RxOverflowPayload::from_payload(&event.payload).unwrap().lost).sum();
+    let block_lost: u64 = gaps.iter().map(|block| block.header().lost.unwrap()).sum();
+    assert_eq!(event_lost, block_lost, "T12: a nonempty event set accounts for each reported block jump");
+    (event_at, lost)
+}
+
+fn assert_fault_rows(pair: &Started, expected_lost: &[u64]) {
+    let rows = &pair.mock.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()];
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), expected_lost.len(), "{rows:?}");
+    assert_eq!(rows.iter().map(|row| (row["applied"].as_bool().unwrap(), row["lost"].as_u64().unwrap())).collect::<Vec<_>>(),
+        expected_lost.iter().map(|lost| (true, *lost)).collect::<Vec<_>>());
+}
+
+fn compare_rx_overflow(faults: &[(&str, i64)], fake_faults: Vec<FakeFault>, until_ms: i64, cause: RxOverflowCause, flags: BlockFlags, row_lost: &[u64], waits_for_gap: bool) {
+    let mut pair = rx_fault_pair(faults, fake_faults);
+    if waits_for_gap {
+        assert_eq!(pair.mock.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "the Mock waits for the block");
+        assert_eq!(pair.uhd.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0, "UHD waits for the block");
+    }
+    pair.mock.step(pair.t0 + ms(until_ms));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(until_ms));
+    pair.uhd.settle(Wall::from_millis(20));
+    let mock = assert_rx_overflow_output(pair.mock.events(), pair.mock.rx_links[0].take_blocks(), cause, flags);
+    let uhd = assert_rx_overflow_output(pair.uhd.events(), pair.uhd.rx_links[0].take_blocks(), cause, flags);
+    assert_eq!(mock, uhd, "the Providers agree in sample-index time and lost samples");
+    assert_fault_rows(&pair, row_lost);
+    pair.mock.finish();
+    pair.uhd.finish();
+}
+
+#[test]
+fn vh_8_a_reported_overrun_matches_the_block_jump() {
+    compare_rx_overflow(
+        &[("rx_overflow", 0)],
+        vec![FakeFault::Overflow(Wall::ZERO)],
+        60,
+        RxOverflowCause::Overrun,
+        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED,
+        &[50_000],
+        true,
+    );
+}
+
+#[test]
+fn vh_8_a_reported_sequence_error_matches_the_block_jump() {
+    compare_rx_overflow(
+        &[("rx_sequence_error", 0)],
+        vec![FakeFault::SequenceError(Wall::ZERO)],
+        10,
+        RxOverflowCause::Sequence,
+        BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY,
+        &[2_000],
+        false,
+    );
+}
+
+#[test]
+fn vh_8_reports_before_one_block_make_one_overrun_summary() {
+    compare_rx_overflow(
+        &[("rx_overflow", 0), ("rx_sequence_error", 50)],
+        vec![FakeFault::Overflow(Wall::ZERO), FakeFault::SequenceError(Wall::ZERO)],
+        60,
+        RxOverflowCause::Overrun,
+        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
+        &[50_000, 2_000],
+        true,
+    );
+}
+
+#[test]
+fn vh_8_repeated_overruns_before_one_block_make_one_summary() {
+    compare_rx_overflow(
+        &[("rx_overflow", 0), ("rx_overflow", 50)],
+        vec![FakeFault::Overflow(Wall::ZERO), FakeFault::Overflow(Wall::ZERO)],
+        110,
+        RxOverflowCause::Overrun,
+        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED,
+        &[50_000, 50_000],
+        true,
+    );
+}
+
+#[test]
+fn vh_8_a_report_without_a_following_block_emits_no_overflow() {
+    let mut pair = rx_fault_pair(&[("rx_overflow", 0)], vec![FakeFault::Overflow(Wall::ZERO)]);
+    pair.mock.stop_at("rx/s0");
+    pair.uhd.stop_at("rx/s0");
+    pair.mock.step(pair.t0 + ms(10));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(10));
+    for _ in 0..1_000 {
+        if pair.uhd.actions.queued() == 0 { break; }
+        pair.uhd.settle(Wall::from_millis(1));
+    }
+    assert_eq!(pair.uhd.actions.queued(), 0, "the stop Action was taken");
+    pair.uhd.settle(Wall::from_millis(2));
+    assert_eq!(pair.mock.rx_links[0].take_blocks().len(), 0);
+    assert_eq!(pair.uhd.rx_links[0].take_blocks().len(), 0);
+    assert_eq!(pair.mock.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
+    assert_eq!(pair.uhd.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).count(), 0);
+    assert_fault_rows(&pair, &[50_000]);
+    let mock = pair.mock.finish();
+    let uhd = pair.uhd.finish();
+    assert_eq!(uhd.sections[&Namespace::parse("ezsdr.radio.uhd.stats").unwrap()]["rx_overflows"], 1,
+        "the UHD report was received before stop despite no block carrying it");
+    assert_eq!(mock.sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()][0]["applied"], true);
 }
 
 /// The constraints of two receive streams, one channel each: c0 in stream 0 at 2 Msps, c1

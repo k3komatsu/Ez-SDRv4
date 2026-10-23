@@ -83,8 +83,8 @@
   "id": "D09",
   "name": "MR-37 the injected overflow on the control path",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            self.emit_overflow(k, payload, TimePoint::new(domain, kf))?;\n",
-  "new": "            self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(domain, kf))?;\n",
+   "old": "            self.emit_overflow(k, payload, TimePoint::new(domain, at))?;\n",
+   "new": "            self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(domain, at))?;\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_37_the_overflow_travels_the_hot_path"
@@ -93,8 +93,8 @@
   "id": "D10",
   "name": "MR-37 the back-pressure overrun on the control path",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.emit_overflow(k, payload, TimePoint::new(domain, at))",
-  "new": "        self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::to_value(payload).unwrap(), TimePoint::new(domain, at))",
+   "old": "    fn emit_rx_overflow(&mut self, k: usize, domain: ClockDomainId, at: i64, lost: i64) -> Result<(), ModuleError> {\n        let payload = ezsdr_radio::payloads::RxOverflowPayload {\n            cause: ezsdr_radio::payloads::RxOverflowCause::Overrun,\n            lost: lost.max(0) as u64,\n        };\n        self.emit_overflow(k, payload, TimePoint::new(domain, at))\n    }",
+   "new": "    fn emit_rx_overflow(&mut self, k: usize, domain: ClockDomainId, at: i64, lost: i64) -> Result<(), ModuleError> {\n        self.emit_event(\"rx\", ezsdr_radio::kinds::RX_OVERFLOW, Severity::Warning, serde_json::json!({\"cause\": \"overrun\", \"lost\": lost.max(0) as u64}), TimePoint::new(domain, at))\n    }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_19_backpressure_is_an_overrun"
@@ -338,5 +338,45 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_19_backpressure_is_an_overrun"
+ },
+ {
+  "id": "D35",
+  "name": "RM-17 chooses the last reported cause",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        let cause = if reports.contains(&RxOverflowCause::Overrun) {",
+  "new": "        let cause = if reports.last() == Some(&RxOverflowCause::Overrun) {",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"
+ },
+ {
+  "id": "D36",
+  "name": "RM-17 reports zero instead of the block jump",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        Some(RxOverflowPayload { cause, lost })",
+  "new": "        Some(RxOverflowPayload { cause, lost: 0 })",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"
+ },
+ {
+  "id": "D37",
+  "name": "RM-17 makes an event without an RX_OVERFLOW report",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        } else {\n            return None;\n        };\n        Some(RxOverflowPayload { cause, lost })",
+  "new": "        } else {\n            RxOverflowCause::Sequence\n        };\n        Some(RxOverflowPayload { cause, lost })",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"
+ },
+ {
+  "id": "D38",
+  "name": "RM-17 treats a gapless block as a zero-loss jump",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "        let lost = lost?;",
+  "new": "        let lost = lost.unwrap_or(0);",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_17_reported_losses_make_one_payload_for_the_block_jump"
  }
 ]

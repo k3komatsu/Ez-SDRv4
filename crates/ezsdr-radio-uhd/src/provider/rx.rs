@@ -15,7 +15,7 @@ use ezsdr_kernel::module_api::StopMode;
 use ezsdr_kernel::stream::{BlockFlags, BlockHeader, ChannelMask, Direction, PublishOutcome, SampleBlock};
 use ezsdr_kernel::time::{Rational, SampleClockHandle, TimePoint};
 use ezsdr_radio::kinds;
-use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload};
+use ezsdr_radio::payloads::{AlignmentErrorPayload, LateCommandPayload, RxOverflowCause};
 use ezsdr_radio::timeline::{Channels, Config, StreamKey};
 use serde_json::json;
 
@@ -554,19 +554,20 @@ impl Rx {
             stream.expected = k + len;
             let at = TimePoint::new(clock.domain, expected);
             let lost_n = lost.unwrap_or(0);
+            let reports: Vec<_> = pending.iter().filter_map(|pending| match pending {
+                Pending::Overrun => Some(RxOverflowCause::Overrun),
+                Pending::Sequence => Some(RxOverflowCause::Sequence),
+                Pending::Alignment | Pending::MissedStart => None,
+            }).collect();
+            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {
+                // UR-20: one hot-path event for the block's whole reported loss.
+                if let Err(error) = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()) {
+                    self.core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
+                }
+            }
             for pending in pending {
                 match pending {
-                    Pending::Overrun | Pending::Sequence => {
-                        let payload = RxOverflowPayload {
-                            cause: if pending == Pending::Overrun { RxOverflowCause::Overrun } else { RxOverflowCause::Sequence },
-                            lost: lost_n,
-                            restart_gap_ns: if pending == Pending::Overrun { self.core.ns(lost_n as i64 * clock.n) } else { 0 },
-                        };
-                        // UR-20: the hot path, with RM-24's bytes.
-                        if let Err(error) = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()) {
-                            self.core.reject_note(json!({ "event_not_emitted": kinds::RX_OVERFLOW, "error": error.to_string() }));
-                        }
-                    }
+                    Pending::Overrun | Pending::Sequence => {}
                     Pending::Alignment => {
                         let payload = serde_json::to_value(AlignmentErrorPayload { lost: lost_n }).expect("a payload");
                         self.core.emit_at(&self.core.stream_node(Dir::Rx, self.k), kinds::ALIGNMENT_ERROR, Severity::Error, payload, at);
@@ -662,6 +663,7 @@ mod tests {
     use crate::device::Device;
     use ezsdr_kernel::module_api::Link;
     use ezsdr_kernel::stream::BackPressure;
+    use ezsdr_radio::payloads::RxOverflowPayload;
     use ezsdr_radio::timeline::{Item, Kind, Line, Segment, NO_RELEASE};
     use std::collections::BTreeMap;
     use super::super::core::Phase;
@@ -862,25 +864,23 @@ mod tests {
             .collect();
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].source, ezsdr_kernel::event::EventSource::Node { node: ezsdr_kernel::id::ResourceId::parse("usrp/rx/s1").unwrap() });
-        assert_eq!(got[0].payload.as_array().map(Vec::len), Some(17), "RM-24's bytes: {}", got[0].payload);
-        assert_eq!(RxOverflowPayload::from_payload(&got[0].payload).unwrap().lost, 2);
+        assert_eq!(got[0].time, TimePoint::new(clock.domain, 0));
+        assert_eq!(got[0].payload.as_array().map(Vec::len), Some(9), "RM-24's bytes: {}", got[0].payload);
+        assert_eq!(RxOverflowPayload::from_payload(&got[0].payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 2 });
     }
 
     #[test]
     fn ur_19_reports_before_one_block_keep_each_kind() {
-        // Reports of different kinds before the next block: that block carries each one's flag,
-        // on every channel, and each one's event is emitted with its time jump; a repeated kind
-        // is one event; a jump no report announced is a sequence discontinuity with no event
-        // (UR-17…UR-19). RX_OVERFLOW goes by the hot path (UR-20), so only the set is compared.
-        let alignment = (kinds::ALIGNMENT_ERROR, BlockFlags::ALIGNMENT);
-        let sequence = (kinds::RX_OVERFLOW, BlockFlags::SEQ_DISCONTINUITY);
-        let overrun = (kinds::RX_OVERFLOW, BlockFlags::RESTARTED);
-        for (reports, expected) in [
-            (Vec::new(), Vec::new()),
-            (vec![RxRecv::Alignment], vec![alignment]),
-            (vec![RxRecv::Overflow { out_of_sequence: true }], vec![sequence]),
-            (vec![RxRecv::Alignment, RxRecv::Overflow { out_of_sequence: true }, RxRecv::Alignment], vec![alignment, sequence]),
-            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Alignment], vec![overrun, alignment]),
+        // A reported block gets one summary event; flags still retain every distinct report.
+        for (reports, flags, cause, alignment) in [
+            (Vec::new(), BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, None, false),
+            (vec![RxRecv::Alignment], BlockFlags::GAP_BEFORE | BlockFlags::ALIGNMENT, None, true),
+            (vec![RxRecv::Overflow { out_of_sequence: true }], BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Sequence), false),
+            (vec![RxRecv::Alignment, RxRecv::Overflow { out_of_sequence: true }, RxRecv::Alignment], BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT, Some(RxOverflowCause::Sequence), true),
+            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Alignment], BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::ALIGNMENT, Some(RxOverflowCause::Overrun), true),
+            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Overflow { out_of_sequence: true }], BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Overrun), false),
+            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Overflow { out_of_sequence: false }], BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(RxOverflowCause::Overrun), false),
+            (vec![RxRecv::Overflow { out_of_sequence: true }, RxRecv::Overflow { out_of_sequence: true }], BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Sequence), false),
         ] {
             let link = link();
             let (core, _, _, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
@@ -890,8 +890,6 @@ mod tests {
             }
             rx.receive(RxRecv::Samples { first_tick: clock.instant(2), samples: vec![vec![[0.0, 0.0]; 2]; 2] });
             let block = link.receive().expect("the block after the reports").0;
-            let unannounced = if expected.is_empty() { BlockFlags::SEQ_DISCONTINUITY } else { BlockFlags::NONE };
-            let flags = expected.iter().fold(BlockFlags::GAP_BEFORE | unannounced, |flags, (_, flag)| flags | *flag);
             assert_eq!((block.header().flags, block.header().lost), (flags, Some(2)));
             assert_eq!(block.header().valid, ezsdr_kernel::stream::ChannelMask::full(2), "a whole-stream gap");
             let got: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
@@ -899,21 +897,78 @@ mod tests {
                 .collect();
             for event in &got {
                 assert_eq!(event.source, ezsdr_kernel::event::EventSource::Node { node: core.rx_id.clone() });
-                let lost = match event.kind.as_str() {
-                    kinds::RX_OVERFLOW => {
-                        assert!(event.payload.is_array(), "the hot path's bytes: {}", event.payload);
-                        RxOverflowPayload::from_payload(&event.payload).unwrap().lost
-                    }
-                    _ => event.payload["lost"].as_u64().unwrap(),
-                };
-                assert_eq!(lost, 2);
             }
-            let mut got: Vec<_> = got.iter().map(|e| e.kind.as_str()).collect();
-            got.sort();
-            let mut expected: Vec<_> = expected.iter().map(|(kind, _)| *kind).collect();
-            expected.sort();
-            assert_eq!(got, expected);
+            let overflow: Vec<_> = got.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+            assert_eq!(overflow.len(), if cause.is_some() { 1 } else { 0 }, "{got:?}");
+            if let Some(cause) = cause {
+                assert_eq!(overflow[0].time, TimePoint::new(clock.domain, 0));
+                assert_eq!(overflow[0].payload.as_array().map(Vec::len), Some(9), "{}", overflow[0].payload);
+                assert_eq!(RxOverflowPayload::from_payload(&overflow[0].payload).unwrap(), RxOverflowPayload { cause, lost: 2 });
+            }
+            let alignments: Vec<_> = got.iter().filter(|event| event.kind.as_str() == kinds::ALIGNMENT_ERROR).collect();
+            assert_eq!(alignments.len(), if alignment { 1 } else { 0 }, "{got:?}");
+            if alignment { assert_eq!(alignments[0].payload["lost"], 2); }
         }
+    }
+
+    #[test]
+    fn ur_17_a_missed_start_without_another_report_is_not_an_overflow() {
+        let link = link();
+        let (core, _, _, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(RxRecv::LateCommand);
+        let restart = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").unwrap()["at"].as_i64().unwrap();
+        let lost = ((restart - clock.origin) / clock.n) as u64;
+        rx.receive(samples(restart, 2));
+        let block = link.receive().expect("the restarted samples arrived").0;
+        assert!(lost > 0);
+        assert_eq!(block.header().flags, BlockFlags::GAP_BEFORE);
+        assert_eq!(block.header().lost, Some(lost));
+        let events = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(events.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).count(), 1);
+        assert_eq!(events.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).count(), 0);
+    }
+
+    #[test]
+    fn ur_17_a_missed_start_and_overrun_share_the_block_summary() {
+        let link = link();
+        let (core, _, _, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(RxRecv::LateCommand);
+        let restart = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").unwrap()["at"].as_i64().unwrap();
+        let missed = ((restart - clock.origin) / clock.n) as u64;
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        let first = restart + core.ticks(50_000_000);
+        rx.receive(samples(first, 2));
+
+        let block = link.receive().expect("the samples after both gaps arrived").0;
+        assert_eq!(block.header().flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED);
+        assert_eq!(block.header().lost, Some(missed + 50_000));
+        let events = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert_eq!(events.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).count(), 1);
+        let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        assert_eq!(overflows.len(), 1, "{events:?}");
+        assert_eq!(overflows[0].time, TimePoint::new(clock.domain, 0));
+        assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), RxOverflowPayload {
+            cause: RxOverflowCause::Overrun,
+            lost: block.header().lost.unwrap(),
+        });
+    }
+
+    #[test]
+    fn ur_18_a_report_on_a_gapless_block_is_consumed_without_an_event() {
+        let link = link();
+        let (core, _, _, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 1);
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        rx.receive(samples(clock.instant(0), 2));
+        let no_gap = link.receive().expect("the gapless block arrived").0;
+        assert_eq!((no_gap.header().flags, no_gap.header().lost), (BlockFlags::NONE, None));
+        rx.receive(samples(clock.instant(4), 2));
+        let jump = link.receive().expect("the later unreported jump arrived").0;
+        assert_eq!((jump.header().flags, jump.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(2)));
+        assert_eq!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+            .iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).count(), 0);
     }
 
     #[test]

@@ -198,7 +198,7 @@ fn v58_06_injected_overflow_is_a_uhd_overflow() {
     let event = manifest.events.delivered.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
     assert_eq!(
         RxOverflowPayload::from_payload(&event.payload).unwrap(),
-        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 }
     );
 }
 

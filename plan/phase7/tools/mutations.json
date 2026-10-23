@@ -714,6 +714,36 @@
   "filter": "ur_19_reports_before_one_block_keep_each_kind"
  },
  {
+  "id": "U47",
+  "name": "UHD emits one RX_OVERFLOW per report, not per block",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {",
+  "new": "            if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {\n                for _ in &reports { let _ = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()); }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_19_reports_before_one_block_keep_each_kind"
+ },
+ {
+  "id": "U48",
+  "name": "uhd-rx carries reports past a gapless block",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "            let pending = std::mem::take(&mut stream.pending);",
+  "new": "            let pending = stream.pending.clone();",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_18_a_report_on_a_gapless_block_is_consumed_without_an_event"
+ },
+ {
+  "id": "U49",
+  "name": "uhd-rx maps a missed start to a sequence report",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                Pending::Alignment | Pending::MissedStart => None,",
+  "new": "                Pending::Alignment => None,\n                Pending::MissedStart => Some(RxOverflowCause::Sequence),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_missed_start_without_another_report_is_not_an_overflow"
+ },
+ {
   "id": "U27",
   "name": "the reference not monitored",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",

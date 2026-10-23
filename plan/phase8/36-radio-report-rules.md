@@ -122,4 +122,4 @@ Sol 6.1（2026-10-22）：修正して採用．major 3，minor 3．すべて採�
 ## 8. 実装
 
 - 1b-7a：完了（2026-10-23）．決定 1・2 は `ezsdr_radio::CancelReason` と `cancellation_reports`．UHD の loss は shutdown を通るので `ProviderStop` を渡す（どちらも記録だけ）．記録は [reviews/1b7a-opus.md](reviews/1b7a-opus.md)．
-- 1b-7b：次（決定 4・5，D2）．
+- 1b-7b：完了（2026-10-23）．決定 4・5 は `ezsdr_radio::payloads::rx_overflow_payload`．`lost` は block の飛びのうち先の event が報告していない分：MockRadio の back-pressure の後の fault は，T20 のとおり報告済みの損失を数えない（実装は一度 2 重に数え，Opus と Sol が拾った）．記録は [reviews/1b7b-opus.md](reviews/1b7b-opus.md)．

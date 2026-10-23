@@ -137,8 +137,8 @@ struct Rx {
     planned: Option<i64>,
     flags: BlockFlags,
     lost: Option<u64>,
-    /// Each loss's `RX_OVERFLOW`, at `k_f`, for the block that carries it (RM-17, MR-37).
-    overflows: Vec<(i64, ezsdr_radio::payloads::RxOverflowPayload)>,
+    /// Each fault report's first lost sample, cause and loss, for the block that carries them (RM-17, MR-37).
+    reports: Vec<(i64, ezsdr_radio::payloads::RxOverflowCause, u64)>,
     /// Its SampleClock has ended.
     ended: bool,
 }
@@ -612,7 +612,7 @@ impl MockRadio {
                     rx.flags = rx.flags | BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
                     rx.lost = Some(lost_total);
                 }
-                self.emit_rx_overflow(k, domain, next, next_sample - next, self.profile.timing().overflow_restart_gap_ns)?;
+                self.emit_rx_overflow(k, domain, next, next_sample - next)?;
             } else if let Some(rx) = self.rx[k].running.as_mut() {
                 rx.next = stop;
                 rx.planned = None;
@@ -692,19 +692,21 @@ impl MockRadio {
         for link in &self.rx[k].links {
             if link.publish(block.clone()) == PublishOutcome::Full { full = true; }
         }
-        // RM-17, MR-37: each loss's RX_OVERFLOW comes with the block that carries it.
-        let overflows = self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.overflows)).unwrap_or_default();
-        for (kf, payload) in overflows {
-            self.emit_overflow(k, payload, TimePoint::new(domain, kf))?;
+        // RM-17, MR-37: one event for the block's reported loss; MR-19 reported its own drops already.
+        let reports = self.rx[k].running.as_mut().map(|rx| std::mem::take(&mut rx.reports)).unwrap_or_default();
+        let causes: Vec<_> = reports.iter().map(|(_, cause, _)| *cause).collect();
+        let reported: Option<u64> = lost.map(|_| reports.iter().map(|(_, _, lost)| lost).sum());
+        if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&causes, reported) {
+            let at = reports.iter().map(|(kf, _, _)| *kf).min().expect("a reported loss");
+            self.emit_overflow(k, payload, TimePoint::new(domain, at))?;
         }
         Ok(full)
     }
 
-    fn emit_rx_overflow(&mut self, k: usize, domain: ClockDomainId, at: i64, lost: i64, gap_ns: i64) -> Result<(), ModuleError> {
+    fn emit_rx_overflow(&mut self, k: usize, domain: ClockDomainId, at: i64, lost: i64) -> Result<(), ModuleError> {
         let payload = ezsdr_radio::payloads::RxOverflowPayload {
             cause: ezsdr_radio::payloads::RxOverflowCause::Overrun,
             lost: lost.max(0) as u64,
-            restart_gap_ns: gap_ns,
         };
         self.emit_overflow(k, payload, TimePoint::new(domain, at))
     }
@@ -743,15 +745,15 @@ impl MockRadio {
         };
         let (origin, ratio, next) = (rx.origin, rx.ratio, rx.next);
         let kf = time::k_at_or_after(origin, ratio, f).unwrap_or(next).max(next);
-        let (kg, cause, gap_ns) = match self.faults[index].entry.fault {
+        let (kg, cause) = match self.faults[index].entry.fault {
             FaultKind::RxOverflow => {
                 let gap_ns = self.profile.timing().overflow_restart_gap_ns;
                 let gap = time::ns_to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), gap_ns)
                     .map_err(|error| self.reject(format!("MR-21: {error}")))?;
                 let target = f.checked_add(gap).ok_or_else(|| self.reject("MR-21: restart time overflow"))?;
-                (time::k_at_or_after(origin, ratio, target).unwrap_or(kf).max(kf), ezsdr_radio::payloads::RxOverflowCause::Overrun, gap_ns)
+                (time::k_at_or_after(origin, ratio, target).unwrap_or(kf).max(kf), ezsdr_radio::payloads::RxOverflowCause::Overrun)
             }
-            FaultKind::RxSequenceError => (kf.saturating_add(i64::from(self.profile.block_len())), ezsdr_radio::payloads::RxOverflowCause::Sequence, 0),
+            FaultKind::RxSequenceError => (kf.saturating_add(i64::from(self.profile.block_len())), ezsdr_radio::payloads::RxOverflowCause::Sequence),
             FaultKind::DeviceLost => unreachable!("a loss ends the device (MR-20)"),
         };
         let lost = kg - kf;
@@ -764,7 +766,7 @@ impl MockRadio {
                     ezsdr_radio::payloads::RxOverflowCause::Sequence => BlockFlags::SEQ_DISCONTINUITY,
                 };
                 rx.lost = Some(rx.lost.unwrap_or(0).saturating_add(lost as u64));
-                rx.overflows.push((kf, ezsdr_radio::payloads::RxOverflowPayload { cause, lost: lost as u64, restart_gap_ns: gap_ns }));
+                rx.reports.push((kf, cause, lost as u64));
             }
         }
         self.faults[index].applied = true;
@@ -1262,7 +1264,7 @@ impl MockRadio {
             }
         };
         let channels = segment.config.channels;
-        self.rx[k].running = Some(Rx { handle, domain: None, origin: segment.origin, ratio: segment.config.ratio, channels, by: segment.by, next: 0, planned: None, flags: BlockFlags::NONE, lost: None, overflows: Vec::new(), ended: false });
+        self.rx[k].running = Some(Rx { handle, domain: None, origin: segment.origin, ratio: segment.config.ratio, channels, by: segment.by, next: 0, planned: None, flags: BlockFlags::NONE, lost: None, reports: Vec::new(), ended: false });
         self.rx[k].pool = Some(HostPool::new(self.profile.block_len() as usize * 2 * channels.count() as usize * 8));
         self.rx[k].from = segment.origin.saturating_add(1);
         self.record_layout_segment(Direction::Rx, k, segment.origin, segment.by, channels);

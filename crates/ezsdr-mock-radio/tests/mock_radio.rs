@@ -1317,7 +1317,7 @@ fn mr_19_backpressure_is_an_overrun() {
     assert!(overflows[0].payload.is_array(), "{}", overflows[0].payload);
     assert_eq!(
         RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(),
-        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 }
     );
 
     let mut fractional = Harness::new_with_options(
@@ -1340,6 +1340,31 @@ fn mr_19_backpressure_is_an_overrun() {
     let restarted = fractional.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 52_001);
     assert_eq!(restarted.header().lost, Some(50_001));
+}
+
+#[test]
+fn mr_19_a_fault_overflow_and_repeated_backpressure_are_counted_once() {
+    let env = [("sim.faults", serde_json::json!([{ "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" }]))];
+    let mut harness = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::Block, 1)));
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.step(2_001_999_001).unwrap();
+    assert_eq!(harness.link.as_ref().unwrap().queued(), 1);
+    assert!(rx_overflows(&harness).is_empty(), "the fault waits for its restarted block");
+
+    harness.step(2_053_999_001).unwrap();
+    harness.step(2_103_999_001).unwrap();
+    let events: Vec<_> = rx_overflows(&harness).into_iter().map(|(time, payload)| {
+        (time.ticks_in(time.domain()).unwrap(), payload.cause, payload.lost)
+    }).collect();
+    assert_eq!(events, [
+        (1_000, RxOverflowCause::Overrun, 50_000),
+        (51_000, RxOverflowCause::Overrun, 50_000),
+        (101_000, RxOverflowCause::Overrun, 50_000),
+    ]);
+    assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
+
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert!(rx_overflows(&harness).is_empty(), "stop before the next block emits nothing");
 }
 
 #[test]
@@ -1620,11 +1645,12 @@ fn mr_20a_the_overflow_comes_with_the_block_that_carries_it() {
     let rx_domain = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/rx/s0")).unwrap().domain;
     assert_eq!(
         rx_overflows(&harness),
-        [(TimePoint::new(rx_domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 })]
+        [(TimePoint::new(rx_domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 })]
     );
     assert_eq!(fault_rows(&harness, "rx_overflow"), [(serde_json::json!(true), serde_json::json!(50_000))]);
     let headers = received(&harness);
     assert_eq!((headers[0].first_sample_time.ticks_in(headers[0].first_sample_time.domain()).unwrap(), headers[0].lost), (51_000, Some(50_000)));
+    assert_eq!(headers[0].flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED);
     assert!(headers[1..].iter().all(|header| header.lost.is_none()));
 }
 
@@ -1810,6 +1836,8 @@ fn mr_21_overrun_shape() {
     assert_eq!(restarted.lost, Some(50_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
     assert!(!restarted.flags.contains(BlockFlags::SEQ_DISCONTINUITY));
+    let domain = restarted.first_sample_time.domain();
+    assert_eq!(rx_overflows(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 })]);
     let previous = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 0).unwrap();
     assert_eq!(restarted.first_sample_time.ticks_in(restarted.first_sample_time.domain()).unwrap() - (previous.first_sample_time.ticks_in(previous.first_sample_time.domain()).unwrap() + i64::from(previous.len)), 50_000);
 
@@ -1825,15 +1853,51 @@ fn mr_21_overrun_shape() {
     let restarted = headers.iter().find(|header| header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() == 60_000).unwrap();
     assert_eq!(restarted.lost, Some(59_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED));
-    // One block carries both losses; each fault settles its own share with it (MR-20a).
+    // One block carries both reports and their whole time jump (MR-20a).
     let overflows: Vec<_> = overlap.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
         .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW)
-        .map(|event| (event.time.ticks_in(event.time.domain()).unwrap(), RxOverflowPayload::from_payload(&event.payload).unwrap().lost))
+        .map(|event| {
+            let payload = RxOverflowPayload::from_payload(&event.payload).unwrap();
+            (event.time.ticks_in(event.time.domain()).unwrap(), payload.cause, payload.lost)
+        })
         .collect();
-    assert_eq!(overflows, [(1_000, 50_000), (51_000, 9_000)]);
+    assert_eq!(overflows, [(1_000, RxOverflowCause::Overrun, 59_000)]);
     let faults = overlap.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.faults").unwrap()].clone();
     let rows: Vec<_> = faults.as_array().unwrap().iter().map(|row| (row["applied"].clone(), row["lost"].clone())).collect();
     assert_eq!(rows, [(serde_json::json!(true), serde_json::json!(50_000)), (serde_json::json!(true), serde_json::json!(9_000))]);
+
+    let env = [("sim.faults", serde_json::json!([
+        { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+        { "at_ns": 60_000_000, "fault": "rx_sequence_error", "target": "radio" }
+    ]))];
+    let mut later = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::DropOldest, 8)));
+    later.arm_start(2_000_000_000).unwrap();
+    later.step(2_067_000_000).unwrap();
+    let events = rx_overflows(&later);
+    assert_eq!(events.iter().map(|(at, payload)| (at.ticks_in(at.domain()).unwrap(), payload.cause, payload.lost)).collect::<Vec<_>>(), [
+        (1_000, RxOverflowCause::Overrun, 50_000),
+        (60_000, RxOverflowCause::Sequence, 2_000),
+    ]);
+
+    let env = [("sim.faults", serde_json::json!([
+        { "at_ns": 1_000_000, "fault": "rx_overflow", "target": "radio" },
+        { "at_ns": 102_000_000, "fault": "rx_overflow", "target": "radio" }
+    ]))];
+    let mut blocked = Harness::new("x3xx", &[], &[], &env, Some((BackPressure::Block, 1)));
+    blocked.arm_start(2_000_000_000).unwrap();
+    for tick in [2_001_999_001, 2_053_999_001, 2_103_999_001, 2_154_999_001] { blocked.step(tick).unwrap(); }
+    let events = rx_overflows(&blocked);
+    assert_eq!(events.iter().map(|(at, payload)| (at.ticks_in(at.domain()).unwrap(), payload.cause, payload.lost)).collect::<Vec<_>>(), [
+        (1_000, RxOverflowCause::Overrun, 50_000),
+        (51_000, RxOverflowCause::Overrun, 50_000),
+        (101_000, RxOverflowCause::Overrun, 50_000),
+        (151_000, RxOverflowCause::Overrun, 1_000),
+        (152_000, RxOverflowCause::Overrun, 50_000),
+    ]);
+    assert_eq!(fault_rows(&blocked, "rx_overflow"), [
+        (serde_json::json!(true), serde_json::json!(50_000)),
+        (serde_json::json!(true), serde_json::json!(1_000)),
+    ]);
 
     // The row is what the overrun injected, `k_g − k_f`, written when it fires and never
     // revised: a cut booked for 20 ms, before `k_g`, leaves it 50 000 (VH-5).
@@ -1918,6 +1982,8 @@ fn mr_22_sequence_error_shape() {
     assert_eq!(restarted.lost, Some(2_000));
     assert!(restarted.flags.contains(BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY));
     assert!(!restarted.flags.contains(BlockFlags::RESTARTED));
+    let domain = restarted.first_sample_time.domain();
+    assert_eq!(rx_overflows(&harness), [(TimePoint::new(domain, 1_000), RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 2_000 })]);
 }
 
 #[test]
@@ -2129,9 +2195,10 @@ fn mr_37_the_overflow_travels_the_hot_path() {
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].severity, ezsdr_kernel::event::Severity::Warning, "RM-10's severity");
     assert_eq!(delivered[0].source, node_src("mock/rx/s0"));
+    assert_eq!(delivered[0].payload.as_array().map(Vec::len), Some(9), "RM-24's bytes: {}", delivered[0].payload);
     assert_eq!(
         RxOverflowPayload::from_payload(&delivered[0].payload).unwrap(),
-        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000, restart_gap_ns: 50_000_000 }
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 }
     );
     let dropped: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::EVENTS_DROPPED).collect();
     assert_eq!(dropped.len(), 1);
