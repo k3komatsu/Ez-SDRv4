@@ -648,7 +648,7 @@
     "old": "        if pending + 1 > depth {",
     "new": "        if false && pending + 1 > depth {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_24_hardware_timed_updates"
  },
  {
@@ -658,7 +658,7 @@
   "old": "        let e = requested.map_or(floor, |requested| requested.max(floor));",
   "new": "        let e = requested.map_or(floor, |requested| requested);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_24_hardware_timed_updates"
  },
  {
@@ -850,7 +850,7 @@
   "old": "            if e - now > window {\n                break;\n            }\n",
   "new": "            let _ = window;\n",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_24_a_far_future_update_does_not_delay_a_nearer_one"
  },
  {
@@ -1130,7 +1130,7 @@
   "old": "self.core.device.rx_recv(self.k, self.recv_len(), self.recv_timeout())",
   "new": "self.core.device.rx_recv(self.k, self.recv_len(), RECV_TIMEOUT)",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
  },
  {
@@ -1140,7 +1140,7 @@
   "old": "                    if !stream.stopped {\n                        self.last_stop = stop_at_cut(&self.core, self.k, cut).or(self.last_stop);\n                    }\n                    self.finish();",
   "new": "                    let _ = cut;\n                    self.finish();",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
  },
  {
@@ -1280,7 +1280,7 @@
   "old": "        let samples = if eob && samples.first().is_none_or(|s| s.is_empty()) { &padded[..] } else { samples };",
   "new": "        let samples = if false { &padded[..] } else { samples };",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_33_an_empty_end_of_burst_is_one_zero_sample"
  },
  {
@@ -1412,7 +1412,7 @@
   "old": "let due = streamer.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now));",
   "new": "let due = streamer.reports.front().is_some();",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played"
  },
  {

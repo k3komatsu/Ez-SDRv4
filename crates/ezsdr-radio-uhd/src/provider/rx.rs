@@ -1453,6 +1453,54 @@ mod tests {
     }
 
     #[test]
+    fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
+        // UR-25 (design note 37): a stream silent before its cut is stopped at the cut and its
+        // successor begun before its origin. The receive wait is bounded by the cut and its
+        // quiet span, not by the 100 ms timeout that would carry the switch past e2. On the
+        // controlled clock: the last block and the cut are fixed instants.
+        let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (mut rx, clock) = rx(&core, 1);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        // Segment A ends at e1 = 10 ms; segment B, the switch, starts a receive start lead later.
+        plan(&core, &[(0, Some(10_000), None), (ms(60), None, Some(1))]);
+        rx.poll();
+        rx.receive(samples(clock.instant(0), 5_000));
+        // Silent from 5 ms: at the cut, the wait is no longer than to the cut plus its span.
+        time.advance_to(core.at(ms(10))).unwrap();
+        rx.poll();
+        assert!(rx.stream.is_some(), "the stream runs up to its cut");
+        // `recv_timeout` is cut + quiet span - now: a 2 000-sample block at 1 MS/s and the 3 ms
+        // allowance are 5 ms, so from the 10 ms cut it is 5 ms, not the 100 ms default that
+        // would carry the switch past e2 = 60 ms.
+        assert_eq!(rx.recv_timeout(), Wall::from_millis(5), "the wait ends at the cut plus its span");
+        // The stream went quiet more than its span ago: the receive call's own wait is the
+        // bounded one, and its timeout finds the stream past cut + span. A longer wait here
+        // only strengthens the quiet check, and the wait's own value is what is asserted.
+        rx.last_samples = rx.host.now();
+        rx.host.sleep(Wall::from_millis(6));
+        time.advance_to(core.at(ms(15))).unwrap();
+        // Past the cut plus its span the wait floors at 1 ms (UHD truncates the timeout to
+        // whole milliseconds), and the receive call is given exactly that.
+        assert_eq!(rx.recv_timeout(), Wall::from_millis(1), "the wait floors at 1 ms");
+        rx.turn();
+        assert_eq!(device.min_recv_timeout(), Wall::from_millis(1), "the receive call was given the bounded wait: {:?}", device.min_recv_timeout());
+        assert!(rx.stream.is_none(), "a stream silent past its cut is ended");
+        let applied = lock(&core.rec).applied.clone();
+        let stops: Vec<_> = applied.iter().filter(|r| r["key"] == "rx_stop").collect();
+        assert_eq!(stops.len(), 1, "the silent stream's stop is recorded: {applied:?}");
+        assert_eq!(stops[0]["at"]["ticks"].as_i64(), Some(ms(10)), "{:?}", stops[0]);
+        assert_eq!(clocks(&core), [(0, Some(clock.instant(10_000)))], "its clock ends at the cut");
+        // The successor begins before its origin, its timed start at that origin. Its
+        // acceptance by the device is not this property's: the owner's switch is.
+        assert!(rx.begin(), "the switch begins");
+        let timing = lock(&core.rec).timing.clone();
+        let switch = timing.iter().find(|r| r["what"] == "rx_segment").unwrap_or_else(|| panic!("no switch: {timing:?}"));
+        assert_eq!(switch["origin"].as_i64(), Some(ms(60)), "{switch}");
+        assert_eq!(switch["at"].as_i64(), Some(ms(15)), "{switch}");
+        assert!(device.calls().iter().any(|c| *c == format!("rx_start 0 {}", ms(60))), "{:?}", device.calls());
+    }
+
+    #[test]
     fn ur_25_a_second_change_follows_the_first() {
         // RM-25 (spec 22, VH-2): a second change before the first's origin replaces the
         // first's segment, which has no sample, so no clock: uhd-rx registers a clock at its

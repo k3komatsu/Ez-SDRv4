@@ -51,10 +51,11 @@ wedged thread (`FakeFault::TxBlocks`). `ur_21_late_policies_on_the_device_lead` 
 on the manual clock and asserts the booking's verdicts only; the repeat's re-decision at
 uhd-tx's first hand-over — a real interval — is pinned deterministically by the unit test
 `ur_21_first_dispatch_rechecks_all_late_policies` (plan 30 stage A). The tests a loaded host
-could fail went the same way (plan 30 D2). The fake's raw receive cases — a timed stop, a
-stopped stream's tail and its whole timeout, a request cut short by a stop — are unit tests
-in `src/device.rs` whose setup, receives and stops all run as participants of the fake's
-clock. `ur_07_no_device_read_follows_the_authority_s_drop` asserts only that no device read
+could fail went the same way (plan 30 D2). The fake's raw cases — a timed stop, a stopped
+stream's tail and its whole timeout, a request cut short by a stop, and the transmit and report
+cases (timed starts, an empty end-of-burst, an underflow and its recovery, and per-stream
+reports) — are unit tests in `src/device.rs` whose setup and device calls all run as
+participants of the fake's clock. `ur_07_no_device_read_follows_the_authority_s_drop` asserts only that no device read
 follows the Authority's drop, with no 50 ms bound: the drop's promptness is pinned by
 `ur_07_dropping_the_authority_ends_uhd_clock_while_the_manual_clock_is_stopped` in
 `src/authority.rs`. No short wall interval decides a functional property: where one needs the

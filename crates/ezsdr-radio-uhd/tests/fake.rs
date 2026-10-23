@@ -1617,64 +1617,6 @@ fn ur_24_an_untimed_retune_is_on_time_after_its_delivery() {
     assert_eq!(late_commands(&run.finish()), 0);
 }
 
-#[test]
-fn ur_24_hardware_timed_updates() {
-    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
-    let mut direct = Direct::new(FakeConfig { command_queue: 64, ..FakeConfig::default() }, &[("radio.tx.c0.stream", Scalar::from(0))]);
-    let now = direct.now();
-    // 1 ms ahead is inside the 2 ms device lead: late (UC-6 as KG-8 amends it).
-    direct.update("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(now + ms(1)));
-    direct.update("radio.tx.c0.gain_db", Value::num(3.0).unwrap(), HardwareTimed, Some(now + ms(40)));
-    direct.settle(Wall::from_millis(80));
-    let late = direct.of("radio.LATE_COMMAND");
-    assert_eq!(late.len(), 1, "{late:?}");
-    assert_eq!(late[0].payload["key"], "radio.rx.c0.frequency_hz");
-    let applied = direct.device.calls();
-    let tx = applied.iter().find(|c| c.starts_with("apply tx 0 rate=- freq=- gain=3")).unwrap();
-    assert!(tx.contains(&format!("at={}", now + ms(40))), "{tx}");
-    // The late one is applied where LATE_COMMAND says, a device lead after its receipt.
-    let rx = applied.iter().find(|c| c.starts_with("apply rx 0") && c.contains("at=") && !c.contains("at=-")).unwrap();
-    let at: i64 = rx.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
-    assert_eq!(Some(at), late[0].payload["applied"]["ticks"].as_i64(), "{rx}");
-    assert!(at >= now + ms(2), "{rx}");
-    // 17 pending: the 17th is refused (UR-24's depth 16).
-    let far = direct.now() + ms(5_000);
-    for i in 0..17 {
-        direct.update("radio.rx.c0.gain_db", Value::num(f64::from(i % 30)).unwrap(), HardwareTimed, Some(far + i64::from(i)));
-    }
-    direct.settle(Wall::from_millis(30));
-    let full = direct.of("radio.COMMAND_QUEUE_FULL");
-    assert_eq!(full.len(), 1, "{full:?}");
-    assert_eq!(full[0].payload, json!({ "key": "radio.rx.c0.gain_db", "depth": 16 }));
-    let _ = direct.finish();
-}
-
-#[test]
-fn ur_24_a_far_future_update_does_not_delay_a_nearer_one() {
-    // The far one reaches uhd-control first; the device's queue is in order (the fake
-    // keeps it so), so handing it over at receipt would hold the near one behind it.
-    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
-    let mut direct = Direct::new(FakeConfig::default(), &[]);
-    let now = direct.now();
-    direct.update("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(now + ms(500)));
-    direct.update("radio.rx.c0.frequency_hz", Value::num(2.2e9).unwrap(), HardwareTimed, Some(now + ms(20)));
-    direct.settle(Wall::from_millis(80));
-    let applied: Vec<(i64, i64)> = direct
-        .device
-        .calls()
-        .iter()
-        .filter(|c| c.starts_with("apply rx 0 rate=- freq=") && !c.contains("at=-"))
-        .map(|c| {
-            let at: i64 = c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
-            let effective: i64 = c.split("effective=").nth(1).unwrap().parse().unwrap();
-            (at, effective)
-        })
-        .collect();
-    assert_eq!(applied, vec![(now + ms(20), now + ms(20))], "only the near one released, at its instant");
-    assert!(direct.of("radio.LATE_COMMAND").is_empty());
-    let _ = direct.finish();
-}
-
 // `ur_24_the_device_queue_order_is_the_effective_order` is a unit test in
 // `src/provider/control.rs`, on the controlled clock: its case, a command earlier than one
 // already released, was left to host timing here, which the manual clock no longer provides.
@@ -1753,44 +1695,6 @@ fn ur_24_stop_cancels_held_commands() {
 
 
 #[test]
-fn ur_25_a_stream_silent_before_e1_switches_before_e2() {
-    // design-notes §11 F2: a stream that stops yielding before e₁ is ended within a block
-    // of e₁, not at uhd-rx's next 100 ms receive timeout, so that the timed start at e₂
-    // is on time. The fake falls silent 130 ms before e₁: 100 ms timeouts would come about
-    // 30 ms before the cut and 70 ms after it, past e₂ (the cut, one receive call, the
-    // allowance and the start lead: about 55 ms).
-    use ezsdr_kernel::module_api::UpdateClass::Cold;
-    // Direct starts its Run ~2 s after the fake's time zero (the start-up lead).
-    let silent = ms(2_300);
-    let mut direct = Direct::with_links(
-        FakeConfig { faults: vec![FakeFault::Silence(Wall::from_millis(2_300))], ..FakeConfig::default() },
-        &[],
-        vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)],
-    );
-    assert!(direct.now() < silent - ms(150), "the Run started late: {}", direct.now());
-    direct.update("radio.rx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(silent + ms(130)));
-    let until = silent + ms(300) - direct.now();
-    direct.settle(Wall::from_nanos((until * 5) as u64));
-    let late = direct.of("radio.LATE_COMMAND");
-    let direct_calls = direct.device.calls();
-    // The bounded wait never goes under 1 ms (UHD truncates the timeout to whole ms).
-    assert!(direct.device.min_recv_timeout() >= Wall::from_millis(1), "{:?}", direct.device.min_recv_timeout());
-    let instance = direct.finish();
-    let timing = &section_of(&instance, "timing");
-    let switch = timing.as_array().unwrap().iter().find(|r| r["what"] == "rx_segment").cloned().unwrap_or_else(|| panic!("no switch: {timing}"));
-    let e2 = switch["origin"].as_i64().unwrap();
-    assert!(switch["at"].as_i64().unwrap() < e2, "switched after e₂: {switch}");
-    // Stopped untimed and recorded, before the new stream's start.
-    let calls = direct_calls;
-    let stop = calls.iter().position(|c| c == "rx_stop 0 now").unwrap_or_else(|| panic!("{calls:?}"));
-    let start = calls.iter().position(|c| *c == format!("rx_start 0 {e2}")).unwrap_or_else(|| panic!("{calls:?}"));
-    assert!(stop < start, "{calls:?}");
-    let applied = &section_of(&instance, "applied");
-    assert!(applied.as_array().unwrap().iter().any(|r| r["key"] == "rx_stop"), "{applied}");
-    assert!(late.is_empty(), "{late:?}");
-}
-
-#[test]
 fn ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time() {
     for _ in 0..5 {
         let (mut run, device, _dir) = tx_session(FakeConfig::default());
@@ -1804,25 +1708,6 @@ fn ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time() {
         let sent = calls.iter().position(|c| c.starts_with("tx_send") && c.contains("sob=true")).unwrap();
         assert!(configured < sent);
     }
-}
-
-#[test]
-fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
-    // RM-25: a stream enabled from 0 channels starts at or after its effective instant.
-    use ezsdr_kernel::module_api::UpdateClass::Cold;
-    let mut direct = Direct::with_links(FakeConfig::default(), &[("radio.rx.c0.stream", Scalar::from(-1))], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
-    let at = direct.now() + ms(300);
-    direct.update("radio.rx.c0.stream", Value::from(0), Cold, Some(at));
-    direct.settle(Wall::from_millis(30));
-    // The timed start is issued once configured; the clock is registered at the first block.
-    let start = direct.device.calls().into_iter().rev().find(|c| c.starts_with("rx_start ")).unwrap_or_else(|| panic!("{:?}", direct.device.calls()));
-    let origin: i64 = start["rx_start 0 ".len()..].parse().unwrap();
-    assert!(origin >= at && origin < at + 200, "origin {origin}, asked {at}");
-    direct.settle(Wall::from_millis(400));
-    let records: Vec<_> = direct.clocks.sample_clock_records().into_iter().filter(|r| r.stream == ResourceId::parse("usrp/rx/s0").unwrap()).collect();
-    assert_eq!(records.iter().map(|r| r.origin.ticks_in(r.root).unwrap()).collect::<Vec<_>>(), [origin], "{records:?}");
-    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
-    let _ = direct.finish();
 }
 
 #[test]
@@ -2287,47 +2172,6 @@ fn ur_31_fidelity_follows_the_device() {
 // ---------------------------------------------------------------- the fake (UR-33)
 
 #[test]
-fn ur_33_the_fake_device_loops_back_what_it_transmits() {
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.rx_open(0, &[0]).unwrap();
-    device.tx_open(0, &[0]).unwrap();
-    let start = device.time_now().unwrap() + ms(20);
-    let wave: Vec<[f32; 2]> = (0..500).map(|i| [i as f32 / 1_000.0, 0.5]).collect();
-    device.tx_send(0, &[&wave], Some(start), true, true, Wall::from_secs(1)).unwrap();
-    device.rx_start(0, start).unwrap();
-    let mut got = Vec::new();
-    while got.len() < 500 {
-        if let ezsdr_radio_uhd::RxRecv::Samples { samples, first_tick } = device.rx_recv(0, 100, Wall::from_millis(100)) {
-            assert_eq!(first_tick, start + got.len() as i64 * 200);
-            got.extend(samples[0].clone());
-        }
-    }
-    assert_eq!(got, wave);
-}
-
-#[test]
-fn ur_33_scripted_faults_fire() {
-    let device = fake(FakeConfig {
-        faults: vec![FakeFault::Overflow(Wall::from_millis(20)), FakeFault::TxReport(Wall::from_millis(5), TxCode::Underflow), FakeFault::Lost(Wall::from_millis(200))],
-        ..FakeConfig::default()
-    });
-    device.set_time_zero(false).unwrap();
-    device.rx_open(0, &[0]).unwrap();
-    device.rx_start(0, device.time_now().unwrap() + ms(1)).unwrap();
-    // Reports are per streamer (UR-33): the scripted report needs an open transmit stream.
-    device.tx_open(0, &[0]).unwrap();
-    let mut saw_overflow = false;
-    while !saw_overflow {
-        saw_overflow = matches!(device.rx_recv(0, 1_000, Wall::from_millis(100)), ezsdr_radio_uhd::RxRecv::Overflow { out_of_sequence: false });
-    }
-    device.host().sleep(Wall::from_millis(10));
-    assert_eq!(device.tx_async(0, Wall::ZERO).unwrap().map(|r| r.code), Some(TxCode::Underflow));
-    device.host().sleep(Wall::from_millis(200));
-    assert!(device.time_now().unwrap_err().lost);
-}
-
-#[test]
 fn ur_33_no_document_selects_the_fake_device() {
     for args in ["fake", "type=fake"] {
         assert!(ezsdr_radio_uhd::open(args).is_err(), "{args}");
@@ -2421,109 +2265,6 @@ fn ur_33_a_subdev_spec_uhd_would_refuse_is_refused() {
 }
 
 #[test]
-fn ur_33_two_receive_streamers_keep_their_own_channels() {
-    // UR-33: each receive stream has its own channel list, start, stop and packets, and the
-    // loopback returns transmit channel `c` on receive channel `c`. Stopping one stream ends
-    // only its own: the other goes on delivering samples produced after the stop's instant,
-    // and the stopped one delivers nothing of its own past its tail — a stop that took the
-    // other stream (P216) can pass neither check, whatever the host's load.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.tx_open(0, &[0, 1]).unwrap();
-    device.rx_open(0, &[0]).unwrap();
-    device.rx_open(1, &[1]).unwrap();
-    let start = device.time_now().unwrap() + ms(20);
-    let a: Vec<[f32; 2]> = (0..600).map(|i| [i as f32 / 100.0, 0.25]).collect();
-    let b: Vec<[f32; 2]> = (1..=600).map(|i| [-i as f32 / 100.0, -0.25]).collect();
-    device.tx_send(0, &[&a, &b], Some(start), true, true, Wall::from_secs(1)).unwrap();
-    device.rx_start(0, start).unwrap();
-    device.rx_start(1, start).unwrap();
-    let read = |stream: usize, n: usize| {
-        let mut got: Vec<[f32; 2]> = Vec::new();
-        let mut timeouts = 0;
-        while got.len() < n && timeouts < 3 {
-            match device.rx_recv(stream, 100, Wall::from_millis(100)) {
-                ezsdr_radio_uhd::RxRecv::Samples { samples, .. } => {
-                    timeouts = 0;
-                    assert_eq!(samples.len(), 1, "stream {stream} carries one channel");
-                    got.extend(samples[0].clone());
-                }
-                ezsdr_radio_uhd::RxRecv::Timeout => timeouts += 1,
-                other => panic!("{other:?}"),
-            }
-        }
-        got
-    };
-    assert_eq!(read(0, 300), a[..300], "stream 0 returns its own channel's signal");
-    assert_eq!(read(1, 300), b[..300], "stream 1 returns its own channel's signal");
-    // Each streamer carries its own stop: stopping stream 1 leaves stream 0 running.
-    device.rx_stop(1, None).unwrap();
-    // The instant is read after the stop, so it is at or past the stop the device took: a
-    // stop that took stream 0 (P216) delivers no sample at or after that instant, ever.
-    let stopped = device.time_now().unwrap();
-    assert_eq!(read(0, 300), a[300..600], "the other stream keeps running");
-    // Stream 0 goes on, well past the stop's instant, delivering samples produced after it.
-    let past = stopped + ms(1);
-    let mut reached = stopped;
-    let mut blocks = 0usize;
-    while reached < past && blocks < 2_000 {
-        blocks += 1;
-        match device.rx_recv(0, 100, Wall::from_millis(100)) {
-            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => reached = first_tick + samples[0].len() as i64 * 200,
-            ezsdr_radio_uhd::RxRecv::Overflow { .. } => {}
-            other => panic!("stream 0 after the stop: {other:?}"),
-        }
-    }
-    assert!(reached >= past, "stream 0 must keep delivering past the stop's instant {stopped}: reached {reached}");
-    // Stream 1's tail holds only samples produced before its stop; once delivered, its calls
-    // time out. A stop that took stream 0 instead leaves stream 1 streaming, and no call of
-    // its would ever time out, however far the reader falls behind.
-    let mut timed_out = false;
-    let mut calls = 0usize;
-    while calls < 2_000 && !timed_out {
-        calls += 1;
-        match device.rx_recv(1, 100, Wall::from_millis(2)) {
-            ezsdr_radio_uhd::RxRecv::Samples { first_tick, .. } => {
-                assert!(first_tick < stopped, "stream 1 delivered a sample produced after its stop at {stopped}: tick {first_tick}");
-            }
-            ezsdr_radio_uhd::RxRecv::Overflow { .. } => {}
-            ezsdr_radio_uhd::RxRecv::Timeout => timed_out = true,
-            other => panic!("stream 1 after its stop: {other:?}"),
-        }
-    }
-    assert!(timed_out, "a stopped stream's calls time out once its tail is delivered");
-}
-
-#[test]
-fn ur_33_two_transmit_streamers_keep_their_own_reports() {
-    // UR-33: UHD's asynchronous reports are per streamer (`uhd_tx_streamer_recv_async_msg`):
-    // a burst's acknowledgement reaches only the stream that sent it.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.tx_open(0, &[0]).unwrap();
-    device.tx_open(1, &[1]).unwrap();
-    let wave = vec![[0.1f32, 0.0]; 100];
-    let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-    device.tx_send(0, &[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
-    let mut reports = Vec::new();
-    while device.time_now().unwrap() <= t0 + 100 * 200 {
-        reports.extend(device.tx_async(0, Wall::from_millis(1)).unwrap());
-    }
-    reports.extend(std::iter::from_fn(|| device.tx_async(0, Wall::ZERO).unwrap()));
-    assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::BurstAck], "the sending stream's own report");
-    assert!(device.tx_async(1, Wall::ZERO).unwrap().is_none(), "the other stream has none");
-    let t1 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-    device.tx_send(1, &[&wave], Some(t1), true, true, Wall::from_secs(1)).unwrap();
-    let mut reports = Vec::new();
-    while device.time_now().unwrap() <= t1 + 100 * 200 {
-        reports.extend(device.tx_async(1, Wall::from_millis(1)).unwrap());
-    }
-    reports.extend(std::iter::from_fn(|| device.tx_async(1, Wall::ZERO).unwrap()));
-    assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::BurstAck], "the second stream's own report");
-    assert!(device.tx_async(0, Wall::ZERO).unwrap().is_none());
-}
-
-#[test]
 fn ur_33_a_transmit_send_keeps_the_streamer_s_channel_count() {
     // UR-33: as `UhdDevice` refuses them before the C call (UR-3), a send carries one buffer
     // per channel of its streamer and none shorter than the first.
@@ -2583,32 +2324,6 @@ fn ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop() {
 }
 
 #[test]
-fn ur_33_an_empty_channel_list_is_channel_zero() {
-    // UR-33: UHD reads an empty channel list as channel 0 (`sanitize_stream_args`), and
-    // `UhdDevice` sends it as channel 0, so a streamer opened with none is channel 0's —
-    // one receive vector, one channel of transmit buffers — and holds channel 0 like any
-    // other streamer.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.rx_open(0, &[]).unwrap();
-    device.rx_start(0, device.time_now().unwrap() + ms(1)).unwrap();
-    match device.rx_recv(0, 100, Wall::from_millis(100)) {
-        ezsdr_radio_uhd::RxRecv::Samples { samples, .. } => assert_eq!(samples.len(), 1, "the streamer's one channel is channel 0"),
-        other => panic!("{other:?}"),
-    }
-    let error = device.rx_open(1, &[]).expect_err("channel 0 is stream 0's").message;
-    assert!(error.contains("Attempting to reconnect output port!"), "{error}");
-    assert!(device.take_abort().is_some());
-    let device = fake(FakeConfig::default());
-    device.tx_open(0, &[]).unwrap();
-    let wave = vec![[0.1f32, 0.0]; 8];
-    assert_eq!(device.tx_send(0, &[&wave], None, false, false, Wall::from_secs(1)).unwrap(), 8, "one buffer is its channel 0's");
-    let error = device.tx_open(1, &[]).expect_err("channel 0 is stream 0's").message;
-    assert!(error.contains("Attempting to reconnect input port!"), "{error}");
-    assert!(device.take_abort().is_some());
-}
-
-#[test]
 fn ur_33_setting_a_spec_disconnects_that_direction_s_streamers() {
     // UR-33: UHD's `set_*_subdev_spec` rebuilds the direction's channel map and disconnects
     // its chains; the other direction's streamers stay. Each direction for itself.
@@ -2626,35 +2341,6 @@ fn ur_33_setting_a_spec_disconnects_that_direction_s_streamers() {
     device.set_subdev_spec(ezsdr_radio_uhd::Dir::Tx, "A:0").unwrap();
     assert!(device.tx_send(0, &[&out], None, false, false, Wall::from_millis(1)).is_err(), "the transmit streamer went with its map");
     assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Timeout), "the receive streamer stays: its call waits, not fails");
-}
-
-#[test]
-fn ur_33_a_timed_command_follows_its_front_end_across_a_spec() {
-    // UR-33: a timed command's destination is the front end (the radio block) it was booked
-    // on: a spec change that keeps that front end applies it to its new channel, one that
-    // drops it applies nothing — never another front end, and never out of range.
-    let dir = ezsdr_radio_uhd::Dir::Rx;
-    let set = |freq: f64| ezsdr_radio_uhd::Settings { freq: Some(freq), ..ezsdr_radio_uhd::Settings::default() };
-    let settle = |device: &FakeDevice| {
-        // Past the queued command's instant, a no-op timed change settles the queue first.
-        device.host().sleep(Wall::from_millis(10));
-        device.apply(dir, 0, &ezsdr_radio_uhd::Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
-    };
-    // Dropped: slot B's command outlives the spec "A:0" and touches nothing.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.apply(dir, 1, &set(2e9), Some(device.time_now().unwrap() + ms(5))).unwrap();
-    device.set_subdev_spec(dir, "A:0").unwrap();
-    settle(&device);
-    assert_eq!(device.apply(dir, 0, &ezsdr_radio_uhd::Settings::default(), None).unwrap().freq, 1e9, "the dropped front end's command touched channel 0");
-    // Moved: the command for slot B applies to B's channel after the spec reorders it.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.apply(dir, 1, &set(2e9), Some(device.time_now().unwrap() + ms(5))).unwrap();
-    device.set_subdev_spec(dir, "B:0 A:0").unwrap();
-    settle(&device);
-    assert_eq!(device.apply(dir, 0, &ezsdr_radio_uhd::Settings::default(), None).unwrap().freq, 2e9, "the command followed its front end to channel 0");
-    assert_eq!(device.apply(dir, 1, &ezsdr_radio_uhd::Settings::default(), None).unwrap().freq, 1e9, "and left the channel it was booked with");
 }
 
 #[test]
@@ -2688,56 +2374,6 @@ fn ur_33_the_serial_is_the_config_s() {
     let (a, b) = (fake(FakeConfig::default()), fake(FakeConfig::default()));
     assert_ne!(a.serial().unwrap(), b.serial().unwrap());
     assert_eq!(fake(FakeConfig { serial: "F00BA2".to_owned(), ..FakeConfig::default() }).serial().unwrap(), "F00BA2");
-}
-
-#[test]
-fn ur_33_the_antenna_is_read_back_after_an_untimed_change() {
-    // UR-33, design 33 D16: `Applied.antenna` is what the device reports back after a
-    // change that named one, and a timed change, which is not read back, names none.
-    let dir = ezsdr_radio_uhd::Dir::Rx;
-    let device = fake(FakeConfig::default());
-    let set = |name: &str| ezsdr_radio_uhd::Settings { antenna: Some(name.to_owned()), ..ezsdr_radio_uhd::Settings::default() };
-    assert_eq!(device.apply(dir, 0, &set("TX/RX"), None).unwrap().antenna.as_deref(), Some("TX/RX"));
-    assert_eq!(device.apply(dir, 0, &ezsdr_radio_uhd::Settings::default(), None).unwrap().antenna, None, "a change that names none");
-    let at = device.time_now().unwrap() + ms(5);
-    assert_eq!(device.apply(dir, 0, &set("RX2"), Some(at)).unwrap().antenna, None, "a timed change is not read back");
-}
-
-#[test]
-fn ur_33_the_fake_device_keeps_the_devices_queues() {
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.tx_open(0, &[0]).unwrap();
-    let wave = vec![[0.1f32, 0.0]; 100];
-    let now = device.time_now().unwrap();
-    device.tx_send(0, &[&wave], Some(now + ms(10)), true, false, Wall::from_secs(1)).unwrap();
-    // A timed start before the queued samples' end is late and dropped.
-    device.tx_send(0, &[&wave], Some(now + ms(10) + 1), true, true, Wall::from_secs(1)).unwrap();
-    let mut codes = Vec::new();
-    while let Some(report) = device.tx_async(0, Wall::ZERO).unwrap() {
-        codes.push(report.code);
-    }
-    assert!(codes.contains(&TxCode::TimeError), "{codes:?}");
-    // In-order commands: one before a queued one takes effect after it.
-    let settings = ezsdr_radio_uhd::Settings { freq: Some(2e9), ..Default::default() };
-    device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &settings, Some(now + ms(100))).unwrap();
-    device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &settings, Some(now + ms(50))).unwrap();
-    let last = device.calls().into_iter().rev().find(|c| c.starts_with("apply rx")).unwrap();
-    assert!(last.ends_with(&format!("effective={}", now + ms(100))), "{last}");
-    // 17 commands not yet in effect: the 17th blocks.
-    let full = fake(FakeConfig::default());
-    full.set_time_zero(false).unwrap();
-    for i in 0..16 {
-        full.apply(ezsdr_radio_uhd::Dir::Rx, 0, &settings, Some(ms(5_000) + i)).unwrap();
-    }
-    let (sent, done) = std::sync::mpsc::channel();
-    let blocked = full.clone();
-    std::thread::spawn(move || {
-        let _ = blocked.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings::default(), Some(ms(5_100)));
-        let _ = sent.send(());
-    });
-    assert!(done.recv_timeout(Wall::from_millis(200)).is_err(), "the 17th apply blocks");
-    let _ = Mutex::new(());
 }
 
 #[test]
@@ -2882,119 +2518,17 @@ fn back_to_back_sees_a_slip_in_a_cabled_repeat() {
 }
 
 // ---------------------------------------------------------------- Review N
-// The fake's ways of being as strict as the X300 (UR-33), each pinned on the device itself
-// (Review N, T2), and the bench link the receive tests of B1 and B2 use. The raw receive
-// cases — a timed stop, a stopped stream's tail and its whole timeout, a request cut short by
-// a stop — are unit tests in `src/device.rs`, where every thread of a scenario is a
-// participant of the fake's clock (plan 30 D2).
+// The fake's ways of being as strict as the X300 (UR-33) and the bench link the receive tests
+// of B1 and B2 use. The raw cases — a timed stop, a stopped stream's tail and its whole timeout,
+// a request cut short by a stop, and the transmit and report cases (timed starts, an empty
+// end-of-burst, an underflow and its recovery, and per-stream reports) — are unit tests in
+// `src/device.rs`, where every thread of a scenario is a participant of the fake's clock
+// (plan 30 D2).
 
 /// The receive link as the bench measured it (INFERRED from its stops: 2–4 ms), with the
 /// X300's 1 996-sample packets.
 fn bench_link(latency_ms: u64) -> FakeConfig {
     FakeConfig { rx_latency: Wall::from_millis(latency_ms), rx_packet: Some(1_996), ..FakeConfig::default() }
-}
-
-/// The device's transmit reports until its time passes `tick` (a burst's acknowledgement
-/// comes once its end has played, and a later report behind it).
-fn reports_until(device: &FakeDevice, tick: i64) -> Vec<ezsdr_radio_uhd::TxReport> {
-    let mut reports = Vec::new();
-    while device.time_now().unwrap() <= tick + 200_000 {
-        reports.extend(device.tx_async(0, Wall::from_millis(1)).unwrap());
-    }
-    reports.extend(std::iter::from_fn(|| device.tx_async(0, Wall::ZERO).unwrap()));
-    reports
-}
-
-#[test]
-fn ur_33_an_empty_end_of_burst_is_one_zero_sample() {
-    // UHD sends an empty end-of-burst as one zero sample (`tx_streamer_impl.hpp:266–276`):
-    // the burst ends a sample later, and a timed start one sample after its data is late
-    // (`hw_b8_raw_empty_eob_gap`: 4 of 4), while after end-of-burst on the data it is not.
-    for (empty, late) in [(true, true), (false, false)] {
-        let device = fake(FakeConfig::default());
-        device.set_time_zero(false).unwrap();
-        device.tx_open(0, &[0]).unwrap();
-        let wave = vec![[0.1f32, 0.0]; 100];
-        let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-        device.tx_send(0, &[&wave], Some(t0), true, !empty, Wall::from_secs(1)).unwrap();
-        if empty {
-            device.tx_send(0, &[&[][..]], None, false, true, Wall::from_secs(1)).unwrap();
-        }
-        device.tx_send(0, &[&wave], Some(t0 + 101 * 200), true, true, Wall::from_secs(1)).unwrap();
-        let codes: Vec<_> = reports_until(&device, t0 + 201 * 200).into_iter().map(|r| r.code).collect();
-        assert_eq!(codes.contains(&TxCode::TimeError), late, "empty end-of-burst {empty}: {codes:?}");
-    }
-}
-
-#[test]
-fn ur_33_a_timed_start_at_the_previous_burst_s_end_is_late() {
-    // design-notes §11 F3 (`hw_b8_raw_burst_gap`): at gap 0 the second burst is late and
-    // dropped, at one sample it is played. The late report's tick is at or after its time.
-    for (gap, late) in [(0i64, true), (1, false)] {
-        let device = fake(FakeConfig::default());
-        device.set_time_zero(false).unwrap();
-        device.tx_open(0, &[0]).unwrap();
-        let wave = vec![[0.1f32, 0.0]; 100];
-        let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-        device.tx_send(0, &[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
-        let t1 = t0 + (100 + gap) * 200;
-        device.tx_send(0, &[&wave], Some(t1), true, true, Wall::from_secs(1)).unwrap();
-        let reports = reports_until(&device, t1 + 100 * 200);
-        let error = reports.iter().find(|r| r.code == TxCode::TimeError);
-        assert_eq!(error.is_some(), late, "gap {gap}: {reports:?}");
-        if let Some(error) = error {
-            assert!(error.tick.unwrap() >= t1, "{error:?}");
-        }
-    }
-}
-
-#[test]
-fn ur_33_a_burst_that_runs_dry_underflows() {
-    // The X300 reports an underflow when an open burst runs out of samples before its
-    // end-of-burst.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.tx_open(0, &[0]).unwrap();
-    let wave = vec![[0.1f32, 0.0]; 1_000];
-    let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
-    device.tx_send(0, &[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
-    device.host().sleep(Wall::from_millis(30));
-    let mut codes = Vec::new();
-    while let Some(report) = device.tx_async(0, Wall::ZERO).unwrap() {
-        codes.push(report.code);
-    }
-    assert!(codes.contains(&TxCode::Underflow), "{codes:?}");
-}
-
-#[test]
-fn ur_33_a_burst_resumed_after_an_underflow_plays_late() {
-    // UHD 4.10's `radio_tx_core.v`: a burst that runs dry between packets goes idle
-    // (`:359–370`), its next untimed packet plays at once (`:341`, `:347`), and a timed one
-    // whose time has passed is late (`:348–355`). So the rest of the burst is late by the
-    // gap, and a timed start at its scheduled end + 1 sample, before its actual end, is
-    // late. The ticks are the fake's. A host stall only widens the gap.
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.tx_open(0, &[0]).unwrap();
-    let wave = vec![[0.1f32, 0.0]; 1_000];
-    let rest = vec![[0.2f32, 0.0]; 20_000];
-    let t0 = (device.time_now().unwrap() / 200 + 100_000) * 200;
-    let dry = t0 + 1_000 * 200;
-    device.tx_send(0, &[&wave], Some(t0), true, false, Wall::from_secs(1)).unwrap();
-    while device.time_now().unwrap() < dry + ms(5) {
-        device.host().sleep(Wall::from_millis(1));
-    }
-    device.tx_send(0, &[&rest], None, false, true, Wall::from_secs(1)).unwrap();
-    let resumed = device.time_now().unwrap();
-    let scheduled_end = dry + 20_000 * 200;
-    let b = scheduled_end + 200;
-    device.tx_send(0, &[&wave], Some(b), true, true, Wall::from_secs(1)).unwrap();
-    let reports = reports_until(&device, resumed + ms(60));
-    let codes: Vec<_> = reports.iter().map(|r| r.code).collect();
-    assert_eq!(codes, [TxCode::Underflow, TxCode::BurstAck, TxCode::TimeError], "{reports:?}");
-    assert_eq!(reports[0].tick, Some(dry), "it ran dry at the end of what it had");
-    assert!(reports[1].tick.unwrap() >= scheduled_end + ms(5), "the rest played late: {reports:?}");
-    assert!(reports[2].tick.unwrap() >= b, "{reports:?}");
 }
 
 /// Captures across `changes` `cold` receive rate changes in one Session on `config`,
@@ -3305,23 +2839,6 @@ fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
         assert!(sent[took + 1..].iter().all(Option::is_none), "nth {nth}: {sends:?}");
         assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "nth {nth}: {sends:?}");
     }
-}
-
-#[test]
-fn ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played() {
-    // The device sends BURST_ACK when a burst's end plays, so a later burst's report waits
-    // behind it (Review Q, TG-Q1).
-    let device = fake(FakeConfig::default());
-    device.set_time_zero(false).unwrap();
-    device.tx_open(0, &[0]).unwrap();
-    let wave = vec![[0.1f32, 0.0]; 100];
-    let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-    device.tx_send(0, &[&wave], Some(t0), true, true, Wall::from_secs(1)).unwrap();
-    device.tx_send(0, &[&wave], Some(t0 + 100 * 200), true, true, Wall::from_secs(1)).unwrap();
-    assert!(device.tx_async(0, Wall::ZERO).unwrap().is_none(), "an acknowledgement before the burst played");
-    let codes: Vec<_> = reports_until(&device, t0 + 100 * 200).into_iter().map(|r| r.code).collect();
-    assert_eq!(codes.first(), Some(&TxCode::BurstAck), "{codes:?}");
-    assert!(codes.contains(&TxCode::TimeError), "the second burst's report behind the first's: {codes:?}");
 }
 
 
@@ -4101,37 +3618,6 @@ fn ur_25_an_enable_from_no_stream_configures_once() {
     assert_eq!(calls.iter().filter(|c| c.starts_with("apply tx 0 rate=1000000")).count(), 1, "{calls:?}");
     assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
     assert!(!bursts(&manifest).is_empty(), "{:?}", calls);
-}
-
-#[test]
-fn ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch() {
-    // UC-2, RM-25 (design 33 D15): a timed update at a `cold` change's own instant is in the
-    // configuration its switch applies, whatever the arrival order, and is released at its
-    // own instant; neither floors the other.
-    use ezsdr_kernel::module_api::UpdateClass::{Cold, HardwareTimed};
-    for timed_first in [true, false] {
-        let case = format!("timed first: {timed_first}");
-        let mut direct = Direct::with_links(FakeConfig::default(), &[], vec![attached(ezsdr_kernel::stream::BackPressure::DropOldest)]);
-        let at = direct.now() + ms(300);
-        if timed_first {
-            direct.update("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
-        }
-        direct.update("radio.rx.s0.sample_rate_hz", Value::num(2e6).unwrap(), Cold, Some(at));
-        if !timed_first {
-            direct.update("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), HardwareTimed, Some(at));
-        }
-        // Past the change's instant, its switch and the release window of the timed update.
-        direct.settle(Wall::from_millis(500));
-        let calls = direct.device.calls().clone();
-        let switched = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("rate=2000000") && c.contains("freq=2100000000") && c.ends_with("at=-")).count();
-        assert_eq!(switched, 1, "{case}: the switch's configuration: {calls:?}");
-        let timed = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("freq=2100000000") && c.contains(&format!("at={at} effective="))).count();
-        assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
-        assert!(direct.of("radio.LATE_COMMAND").is_empty(), "{case}");
-        let instance = direct.finish();
-        let applied = &section_of(&instance, "applied");
-        assert_eq!(applied.as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.c0.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == at).count(), 1, "{case}: {applied}");
-    }
 }
 
 #[test]

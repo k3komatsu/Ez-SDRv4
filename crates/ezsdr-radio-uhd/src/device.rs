@@ -2005,4 +2005,447 @@ mod tests {
         device.rx_open(0, &[0]).unwrap();
         assert_eq!(device.rx_packet_samples(0), 1_996, "the open streamer's packet size");
     }
+
+    // The fake's transmit and report strictness (UR-33; Review N, T2, and Reviews O–R), each
+    // scenario on a participant of the fake's clock (M1): the device's time moves only while it
+    // waits on it, so no verdict depends on when the test thread runs (plan 30 D2; design note
+    // 37). These were integration tests in `tests/fake.rs`, whose plain test threads a loaded
+    // host delayed.
+
+    /// The device's transmit reports until its time passes `tick` (a burst's acknowledgement
+    /// comes once its end has played, and a later report behind it).
+    fn reports_until(device: &FakeDevice, tick: i64) -> Vec<TxReport> {
+        let mut reports = Vec::new();
+        while device.time_now().unwrap() <= tick + ms(1) {
+            reports.extend(device.tx_async(0, Duration::from_millis(1)).unwrap());
+        }
+        reports.extend(std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()));
+        reports
+    }
+
+    #[test]
+    fn ur_33_the_fake_device_loops_back_what_it_transmits() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let start = device.time_now().unwrap() + ms(20);
+            let wave: Vec<Iq> = (0..500).map(|i| [i as f32 / 1_000.0, 0.5]).collect();
+            device.tx_send(0, &[&wave], Some(start), true, true, Duration::from_secs(1)).unwrap();
+            device.rx_start(0, start).unwrap();
+            let mut got = Vec::new();
+            while got.len() < 500 {
+                if let RxRecv::Samples { samples, first_tick } = device.rx_recv(0, 100, Duration::from_millis(100)) {
+                    assert_eq!(first_tick, start + got.len() as i64 * 200);
+                    got.extend(samples[0].clone());
+                }
+            }
+            assert_eq!(got, wave);
+        });
+    }
+
+    #[test]
+    fn ur_33_scripted_faults_fire() {
+        let device = manual(FakeConfig {
+            faults: vec![FakeFault::Overflow(Duration::from_millis(20)), FakeFault::TxReport(Duration::from_millis(5), TxCode::Underflow), FakeFault::Lost(Duration::from_millis(200))],
+            ..FakeConfig::default()
+        });
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            device.rx_start(0, device.time_now().unwrap() + ms(1)).unwrap();
+            // Reports are per streamer (UR-33): the scripted report needs an open transmit stream.
+            device.tx_open(0, &[0]).unwrap();
+            let mut saw_overflow = false;
+            while !saw_overflow {
+                saw_overflow = matches!(device.rx_recv(0, 1_000, Duration::from_millis(100)), RxRecv::Overflow { out_of_sequence: false });
+            }
+            device.host().sleep(Duration::from_millis(10));
+            assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().map(|r| r.code), Some(TxCode::Underflow));
+            device.host().sleep(Duration::from_millis(200));
+            assert!(device.time_now().unwrap_err().lost);
+        });
+    }
+
+    #[test]
+    fn ur_33_two_receive_streamers_keep_their_own_channels() {
+        // UR-33: each receive stream has its own channel list, start, stop and packets, and the
+        // loopback returns transmit channel `c` on receive channel `c`. Stopping one stream ends
+        // only its own: the other goes on delivering samples produced after the stop's instant,
+        // and the stopped one delivers nothing of its own past its tail — a stop that took the
+        // other stream (P216) can pass neither check.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0, 1]).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            device.rx_open(1, &[1]).unwrap();
+            let start = device.time_now().unwrap() + ms(20);
+            let a: Vec<Iq> = (0..600).map(|i| [i as f32 / 100.0, 0.25]).collect();
+            let b: Vec<Iq> = (1..=600).map(|i| [-i as f32 / 100.0, -0.25]).collect();
+            device.tx_send(0, &[&a, &b], Some(start), true, true, Duration::from_secs(1)).unwrap();
+            device.rx_start(0, start).unwrap();
+            device.rx_start(1, start).unwrap();
+            let read = |stream: usize, n: usize| {
+                let mut got: Vec<Iq> = Vec::new();
+                let mut timeouts = 0;
+                while got.len() < n && timeouts < 3 {
+                    match device.rx_recv(stream, 100, Duration::from_millis(100)) {
+                        RxRecv::Samples { samples, .. } => {
+                            timeouts = 0;
+                            assert_eq!(samples.len(), 1, "stream {stream} carries one channel");
+                            got.extend(samples[0].clone());
+                        }
+                        RxRecv::Timeout => timeouts += 1,
+                        other => panic!("{other:?}"),
+                    }
+                }
+                got
+            };
+            assert_eq!(read(0, 300), a[..300], "stream 0 returns its own channel's signal");
+            assert_eq!(read(1, 300), b[..300], "stream 1 returns its own channel's signal");
+            // Each streamer carries its own stop: stopping stream 1 leaves stream 0 running.
+            device.rx_stop(1, None).unwrap();
+            // The instant is read after the stop, so it is at or past the stop the device took: a
+            // stop that took stream 0 (P216) delivers no sample at or after that instant, ever.
+            let stopped = device.time_now().unwrap();
+            assert_eq!(read(0, 300), a[300..600], "the other stream keeps running");
+            // Stream 0 goes on, well past the stop's instant, delivering samples produced after it.
+            let past = stopped + ms(1);
+            let mut reached = stopped;
+            let mut blocks = 0usize;
+            while reached < past && blocks < 2_000 {
+                blocks += 1;
+                match device.rx_recv(0, 100, Duration::from_millis(100)) {
+                    RxRecv::Samples { first_tick, samples } => reached = first_tick + samples[0].len() as i64 * 200,
+                    RxRecv::Overflow { .. } => {}
+                    other => panic!("stream 0 after the stop: {other:?}"),
+                }
+            }
+            assert!(reached >= past, "stream 0 must keep delivering past the stop's instant {stopped}: reached {reached}");
+            // Stream 1's tail holds only samples produced before its stop; once delivered, its calls
+            // time out. A stop that took stream 0 instead leaves stream 1 streaming, and no call of
+            // its would ever time out, however far the reader falls behind.
+            let mut timed_out = false;
+            let mut calls = 0usize;
+            while calls < 2_000 && !timed_out {
+                calls += 1;
+                match device.rx_recv(1, 100, Duration::from_millis(2)) {
+                    RxRecv::Samples { first_tick, samples } => {
+                        let last = first_tick + (samples[0].len() as i64 - 1) * 200;
+                        assert!(last < stopped, "stream 1 delivered a sample at or after its stop at {stopped}: tick {last}");
+                    }
+                    RxRecv::Overflow { .. } => {}
+                    RxRecv::Timeout => timed_out = true,
+                    other => panic!("stream 1 after its stop: {other:?}"),
+                }
+            }
+            assert!(timed_out, "a stopped stream's calls time out once its tail is delivered");
+        });
+    }
+
+    #[test]
+    fn ur_33_two_transmit_streamers_keep_their_own_reports() {
+        // UR-33: UHD's asynchronous reports are per streamer (`uhd_tx_streamer_recv_async_msg`):
+        // a burst's acknowledgement reaches only the stream that sent it.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            device.tx_open(1, &[1]).unwrap();
+            let wave = vec![[0.1f32, 0.0]; 100];
+            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            device.tx_send(0, &[&wave], Some(t0), true, true, Duration::from_secs(1)).unwrap();
+            let mut reports = Vec::new();
+            while device.time_now().unwrap() <= t0 + 100 * 200 {
+                reports.extend(device.tx_async(0, Duration::from_millis(1)).unwrap());
+            }
+            reports.extend(std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::BurstAck], "the sending stream's own report");
+            assert!(device.tx_async(1, Duration::ZERO).unwrap().is_none(), "the other stream has none");
+            let t1 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            device.tx_send(1, &[&wave], Some(t1), true, true, Duration::from_secs(1)).unwrap();
+            let mut reports = Vec::new();
+            while device.time_now().unwrap() <= t1 + 100 * 200 {
+                reports.extend(device.tx_async(1, Duration::from_millis(1)).unwrap());
+            }
+            reports.extend(std::iter::from_fn(|| device.tx_async(1, Duration::ZERO).unwrap()));
+            assert_eq!(reports.iter().map(|r| r.code).collect::<Vec<_>>(), [TxCode::BurstAck], "the second stream's own report");
+            assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn ur_33_an_empty_channel_list_is_channel_zero() {
+        // UR-33: UHD reads an empty channel list as channel 0 (`sanitize_stream_args`), and
+        // `UhdDevice` sends it as channel 0, so a streamer opened with none is channel 0's —
+        // one receive vector, one channel of transmit buffers — and holds channel 0 like any
+        // other streamer.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.rx_open(0, &[]).unwrap();
+            device.rx_start(0, device.time_now().unwrap() + ms(1)).unwrap();
+            match device.rx_recv(0, 100, Duration::from_millis(100)) {
+                RxRecv::Samples { samples, .. } => assert_eq!(samples.len(), 1, "the streamer's one channel is channel 0"),
+                other => panic!("{other:?}"),
+            }
+            let error = device.rx_open(1, &[]).expect_err("channel 0 is stream 0's").message;
+            assert!(error.contains("Attempting to reconnect output port!"), "{error}");
+            assert!(device.take_abort().is_some());
+            // The empty list took channel 0: channel 1 is still free, channel 0 is not.
+            device.rx_open(2, &[1]).expect("channel 1 is free");
+            let error = device.rx_open(3, &[0]).expect_err("channel 0 is stream 0's").message;
+            assert!(error.contains("Attempting to reconnect output port!"), "{error}");
+            assert!(device.take_abort().is_some());
+        });
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.tx_open(0, &[]).unwrap();
+            let wave = vec![[0.1f32, 0.0]; 8];
+            assert_eq!(device.tx_send(0, &[&wave], None, false, false, Duration::from_secs(1)).unwrap(), 8, "one buffer is its channel 0's");
+            let error = device.tx_open(1, &[]).expect_err("channel 0 is stream 0's").message;
+            assert!(error.contains("Attempting to reconnect input port!"), "{error}");
+            assert!(device.take_abort().is_some());
+            // The empty list took channel 0: channel 1 is still free, channel 0 is not.
+            device.tx_open(2, &[1]).expect("channel 1 is free");
+            let error = device.tx_open(3, &[0]).expect_err("channel 0 is stream 0's").message;
+            assert!(error.contains("Attempting to reconnect input port!"), "{error}");
+            assert!(device.take_abort().is_some());
+        });
+    }
+
+    #[test]
+    fn ur_33_a_timed_command_follows_its_front_end_across_a_spec() {
+        // UR-33: a timed command's destination is the front end (the radio block) it was booked
+        // on: a spec change that keeps that front end applies it to its new channel, one that
+        // drops it applies nothing — never another front end, and never out of range.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let dir = Dir::Rx;
+            let set = |freq: f64| Settings { freq: Some(freq), ..Settings::default() };
+            // Dropped: slot B's command outlives the spec "A:0" and touches nothing.
+            device.set_time_zero(false).unwrap();
+            device.apply(dir, 1, &set(2e9), Some(device.time_now().unwrap() + ms(5))).unwrap();
+            device.set_subdev_spec(dir, "A:0").unwrap();
+            // Past the queued command's instant, a no-op timed change settles the queue first.
+            device.host().sleep(Duration::from_millis(10));
+            device.apply(dir, 0, &Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
+            assert_eq!(device.apply(dir, 0, &Settings::default(), None).unwrap().freq, 1e9, "the dropped front end's command touched channel 0");
+        });
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let dir = Dir::Rx;
+            let set = |freq: f64| Settings { freq: Some(freq), ..Settings::default() };
+            // Moved: the command for slot B applies to B's channel after the spec reorders it.
+            device.set_time_zero(false).unwrap();
+            device.apply(dir, 1, &set(2e9), Some(device.time_now().unwrap() + ms(5))).unwrap();
+            device.set_subdev_spec(dir, "B:0 A:0").unwrap();
+            device.host().sleep(Duration::from_millis(10));
+            device.apply(dir, 0, &Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
+            assert_eq!(device.apply(dir, 0, &Settings::default(), None).unwrap().freq, 2e9, "the command followed its front end to channel 0");
+            assert_eq!(device.apply(dir, 1, &Settings::default(), None).unwrap().freq, 1e9, "and left the channel it was booked with");
+        });
+    }
+
+    #[test]
+    fn ur_33_the_antenna_is_read_back_after_an_untimed_change() {
+        // UR-33, design 33 D16: `Applied.antenna` is what the device reports back after a
+        // change that named one, and a timed change, which is not read back, names none.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            let dir = Dir::Rx;
+            let set = |name: &str| Settings { antenna: Some(name.to_owned()), ..Settings::default() };
+            assert_eq!(device.apply(dir, 0, &set("TX/RX"), None).unwrap().antenna.as_deref(), Some("TX/RX"));
+            assert_eq!(device.apply(dir, 0, &Settings::default(), None).unwrap().antenna, None, "a change that names none");
+            let at = device.time_now().unwrap() + ms(5);
+            assert_eq!(device.apply(dir, 0, &set("RX2"), Some(at)).unwrap().antenna, None, "a timed change is not read back");
+        });
+    }
+
+    #[test]
+    fn ur_33_the_fake_device_keeps_the_devices_queues() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = vec![[0.1f32, 0.0]; 100];
+            let now = device.time_now().unwrap();
+            device.tx_send(0, &[&wave], Some(now + ms(10)), true, false, Duration::from_secs(1)).unwrap();
+            // A timed start before the queued samples' end is late and dropped.
+            device.tx_send(0, &[&wave], Some(now + ms(10) + 1), true, true, Duration::from_secs(1)).unwrap();
+            let mut codes = Vec::new();
+            while let Some(report) = device.tx_async(0, Duration::ZERO).unwrap() {
+                codes.push(report.code);
+            }
+            assert!(codes.contains(&TxCode::TimeError), "{codes:?}");
+            // In-order commands: one before a queued one takes effect after it.
+            let settings = Settings { freq: Some(2e9), ..Settings::default() };
+            device.apply(Dir::Rx, 0, &settings, Some(now + ms(100))).unwrap();
+            device.apply(Dir::Rx, 0, &settings, Some(now + ms(50))).unwrap();
+            let last = device.calls().into_iter().rev().find(|c| c.starts_with("apply rx")).unwrap();
+            assert!(last.ends_with(&format!("effective={}", now + ms(100))), "{last}");
+        });
+        // 17 commands not yet in effect: the 17th waits for the queue to make room, which only
+        // the device's own time can do. The call's device time before and after is the evidence,
+        // not a wall window: the participant holds the clock while it waits on plain channels, so
+        // the call is made at zero with the 16 commands still due at 20 ms and later, and it can
+        // return only once the clock reached the first one.
+        let full = manual(FakeConfig::default());
+        let worker = participant(&full, |full| {
+            full.set_time_zero(false).unwrap();
+            let settings = Settings { freq: Some(2e9), ..Settings::default() };
+            for i in 0..16 {
+                full.apply(Dir::Rx, 0, &settings, Some(ms(20) + i)).unwrap();
+            }
+            let (started, came) = channel();
+            let (finished, done) = channel();
+            let blocked = full.clone();
+            let worker = full.host().spawn("blocked apply", move || {
+                let _ = started.send(blocked.time_now().unwrap());
+                let _ = blocked.apply(Dir::Rx, 0, &Settings::default(), Some(ms(100)));
+                let _ = finished.send(blocked.time_now().unwrap());
+            }).unwrap();
+            assert_eq!(came.recv_timeout(Duration::from_secs(1)).expect("the 17th apply is made"), 0, "the queue is full at the device's zero");
+            // The clock runs only while every participant waits: this one waits past the first
+            // command's instant, so the blocked call's retries reach it.
+            full.host().sleep(Duration::from_millis(200));
+            let after = done.recv_timeout(Duration::from_secs(1)).expect("the 17th apply returns once the queue has room");
+            assert!(after >= ms(20), "the 17th apply waited for the first command: it returned at {after}");
+            let calls = full.calls();
+            let applies: Vec<_> = calls.iter().filter(|c| c.starts_with("apply rx")).collect();
+            assert_eq!(applies.len(), 17, "{calls:?}");
+            assert!(applies[16].ends_with(&format!("at={} effective={}", ms(100), ms(100))), "{}", applies[16]);
+            worker
+        });
+        // The participant has given the clock back: the queued commands come due and the
+        // blocked call returns, so its thread is collected.
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn ur_33_an_empty_end_of_burst_is_one_zero_sample() {
+        // UHD sends an empty end-of-burst as one zero sample (`tx_streamer_impl.hpp:266–276`):
+        // the burst ends a sample later, and a timed start one sample after its data is late
+        // (`hw_b8_raw_empty_eob_gap`: 4 of 4), while after end-of-burst on the data it is not.
+        for (empty, late) in [(true, true), (false, false)] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                device.set_time_zero(false).unwrap();
+                device.tx_open(0, &[0]).unwrap();
+                let wave = vec![[0.1f32, 0.0]; 100];
+                let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+                device.tx_send(0, &[&wave], Some(t0), true, !empty, Duration::from_secs(1)).unwrap();
+                if empty {
+                    device.tx_send(0, &[&[][..]], None, false, true, Duration::from_secs(1)).unwrap();
+                }
+                device.tx_send(0, &[&wave], Some(t0 + 101 * 200), true, true, Duration::from_secs(1)).unwrap();
+                let codes: Vec<_> = reports_until(&device, t0 + 201 * 200).into_iter().map(|r| r.code).collect();
+                assert_eq!(codes.contains(&TxCode::TimeError), late, "empty end-of-burst {empty}: {codes:?}");
+                let seen = device.transmitted(t0, 102);
+                assert_eq!(seen[99], Some(wave[99]), "the burst's last sample: {seen:?}");
+                assert_eq!(seen[100], if empty { Some([0.0, 0.0]) } else { None }, "the empty end-of-burst's one zero sample: {seen:?}");
+                assert_eq!(seen[101], if late { None } else { Some(wave[0]) }, "the burst one sample later: {seen:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_a_timed_start_at_the_previous_burst_s_end_is_late() {
+        // design-notes §11 F3 (`hw_b8_raw_burst_gap`): at gap 0 the second burst is late and
+        // dropped, at one sample it is played. The late report's tick is at or after its time.
+        for (gap, late) in [(0i64, true), (1, false)] {
+            let device = manual(FakeConfig::default());
+            participant(&device, move |device| {
+                device.set_time_zero(false).unwrap();
+                device.tx_open(0, &[0]).unwrap();
+                let wave = vec![[0.1f32, 0.0]; 100];
+                let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+                device.tx_send(0, &[&wave], Some(t0), true, true, Duration::from_secs(1)).unwrap();
+                let t1 = t0 + (100 + gap) * 200;
+                device.tx_send(0, &[&wave], Some(t1), true, true, Duration::from_secs(1)).unwrap();
+                let reports = reports_until(&device, t1 + 100 * 200);
+                let error = reports.iter().find(|r| r.code == TxCode::TimeError);
+                assert_eq!(error.is_some(), late, "gap {gap}: {reports:?}");
+                if let Some(error) = error {
+                    assert!(error.tick.unwrap() >= t1, "{error:?}");
+                }
+                let seen = device.transmitted(t1, 1);
+                assert_eq!(seen[0], if late { None } else { Some(wave[0]) }, "the burst at the previous end, gap {gap}: {seen:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn ur_33_a_burst_that_runs_dry_underflows() {
+        // The X300 reports an underflow when an open burst runs out of samples before its
+        // end-of-burst.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = vec![[0.1f32, 0.0]; 1_000];
+            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.tx_send(0, &[&wave], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+            device.host().sleep(Duration::from_millis(30));
+            let mut codes = Vec::new();
+            while let Some(report) = device.tx_async(0, Duration::ZERO).unwrap() {
+                codes.push(report.code);
+            }
+            assert!(codes.contains(&TxCode::Underflow), "{codes:?}");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_burst_resumed_after_an_underflow_plays_late() {
+        // UHD 4.10's `radio_tx_core.v`: a burst that runs dry between packets goes idle
+        // (`:359–370`), its next untimed packet plays at once (`:341`, `:347`), and a timed one
+        // whose time has passed is late (`:348–355`). So the rest of the burst is late by the
+        // gap, and a timed start at its scheduled end + 1 sample, before its actual end, is
+        // late. The ticks are the fake's. A host stall only widens the gap.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = vec![[0.1f32, 0.0]; 1_000];
+            let rest = vec![[0.2f32, 0.0]; 20_000];
+            let t0 = (device.time_now().unwrap() / 200 + 100_000) * 200;
+            let dry = t0 + 1_000 * 200;
+            device.tx_send(0, &[&wave], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+            while device.time_now().unwrap() < dry + ms(5) {
+                device.host().sleep(Duration::from_millis(1));
+            }
+            device.tx_send(0, &[&rest], None, false, true, Duration::from_secs(1)).unwrap();
+            let resumed = device.time_now().unwrap();
+            let scheduled_end = dry + 20_000 * 200;
+            let b = scheduled_end + 200;
+            device.tx_send(0, &[&wave], Some(b), true, true, Duration::from_secs(1)).unwrap();
+            let reports = reports_until(&device, resumed + ms(60));
+            let codes: Vec<_> = reports.iter().map(|r| r.code).collect();
+            assert_eq!(codes, [TxCode::Underflow, TxCode::BurstAck, TxCode::TimeError], "{reports:?}");
+            assert_eq!(reports[0].tick, Some(dry), "it ran dry at the end of what it had");
+            assert!(reports[1].tick.unwrap() >= scheduled_end + ms(5), "the rest played late: {reports:?}");
+            assert!(reports[2].tick.unwrap() >= b, "{reports:?}");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played() {
+        // The device sends BURST_ACK when a burst's end plays, so a later burst's report waits
+        // behind it (Review Q, TG-Q1).
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = vec![[0.1f32, 0.0]; 100];
+            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            device.tx_send(0, &[&wave], Some(t0), true, true, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&wave], Some(t0 + 100 * 200), true, true, Duration::from_secs(1)).unwrap();
+            assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "an acknowledgement before the burst played");
+            let codes: Vec<_> = reports_until(&device, t0 + 100 * 200).into_iter().map(|r| r.code).collect();
+            assert_eq!(codes.first(), Some(&TxCode::BurstAck), "{codes:?}");
+            assert!(codes.contains(&TxCode::TimeError), "the second burst's report behind the first's: {codes:?}");
+        });
+    }
 }

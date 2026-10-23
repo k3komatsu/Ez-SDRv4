@@ -2396,6 +2396,158 @@ mod tests {
     }
 
     #[test]
+    fn ur_24_hardware_timed_updates() {
+        // UR-24, UC-6 (design note 37): the device lead, a late update's applied instant, the
+        // command queue's depth and both directions. Booked on the controlled clock, so the
+        // 1 ms and 40 ms instants are fixed whatever the test thread does.
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        device.rx_open(0, &[0]).unwrap();
+        device.tx_open(0, &[0]).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let us = |n: i64| core.ticks(n * 1_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
+        let rx_freq = key("radio.rx.c0.frequency_hz");
+        let tx_gain = key("radio.tx.c0.gain_db");
+        // The receipt at 100 ms: 1 ms ahead is inside the 2 ms device lead, 40 ms is not.
+        time.advance_to(core.at(us(100_000))).unwrap();
+        control.book_timed(ActionId(1), rx_freq.clone(), Value::num(2.1e9).unwrap(), at(101_000));
+        control.book_timed(ActionId(2), tx_gain.clone(), Value::num(3.0).unwrap(), at(140_000));
+        time.advance_to(core.at(us(101_500))).unwrap();
+        control.release();
+        time.advance_to(core.at(us(138_000))).unwrap();
+        control.release();
+        // The late one is applied where LATE_COMMAND says, a device lead after its receipt.
+        let late = events_of(&events, kinds::LATE_COMMAND);
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!(late[0].payload["key"], "radio.rx.c0.frequency_hz");
+        let applied = device.calls();
+        let rx = applied.iter().find(|c| c.starts_with("apply rx 0") && c.contains("freq=2100000000") && !c.ends_with("at=-")).unwrap_or_else(|| panic!("{applied:?}"));
+        let applied_at: i64 = rx.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+        assert_eq!(Some(applied_at), late[0].payload["applied"]["ticks"].as_i64(), "{rx}");
+        assert_eq!(applied_at, us(102_000), "the late one's applied instant: {rx}");
+        let tx = applied.iter().find(|c| c.starts_with("apply tx 0") && c.contains("gain=3")).unwrap_or_else(|| panic!("{applied:?}"));
+        assert!(tx.contains(&format!("at={} ", us(140_000))), "{tx}");
+        // 17 pending at +5 s: the 17th is refused (UR-24's depth 16).
+        time.advance_to(core.at(us(141_000))).unwrap();
+        for i in 0..17 {
+            control.book_timed(ActionId(3), tx_gain.clone(), Value::num(4.0).unwrap(), at(5_000_000 + i));
+        }
+        let full = events_of(&events, kinds::COMMAND_QUEUE_FULL);
+        assert_eq!(full.len(), 1, "{full:?}");
+        assert_eq!(full[0].payload, json!({ "key": "radio.tx.c0.gain_db", "depth": 16 }));
+        assert_eq!(control.held.len(), 16);
+    }
+
+    #[test]
+    fn ur_24_a_far_future_update_does_not_delay_a_nearer_one() {
+        // UR-24, UC-2 (design note 37): a far-future timed update does not delay a nearer one
+        // on the device's in-order queue. On the controlled clock, the near instant cannot pass
+        // while the test thread is descheduled.
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        device.rx_open(0, &[0]).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        let freq = key("radio.rx.c0.frequency_hz");
+        let released = |device: &crate::device::FakeDevice| -> Vec<(i64, i64)> {
+            device.calls().iter()
+                .filter(|c| c.starts_with("apply rx 0 rate=- freq=") && !c.contains("at=-"))
+                .map(|c| {
+                    let at: i64 = c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+                    let effective: i64 = c.split("effective=").nth(1).unwrap().parse().unwrap();
+                    (at, effective)
+                })
+                .collect()
+        };
+        control.book_timed(ActionId(1), freq.clone(), Value::num(2.1e9).unwrap(), at(500));
+        control.book_timed(ActionId(2), freq.clone(), Value::num(2.2e9).unwrap(), at(20));
+        // The near one's release window: only it is handed over, at its instant.
+        time.advance_to(core.at(ms(17))).unwrap();
+        control.release();
+        assert_eq!(released(&device), vec![(ms(20), ms(20))], "the near one alone, at its instant: {:?}", device.calls());
+        assert_eq!(control.held.len(), 1, "the far one is still held");
+        // Past the far one's window it is released too, at its own instant.
+        time.advance_to(core.at(ms(497))).unwrap();
+        control.release();
+        assert_eq!(released(&device), vec![(ms(20), ms(20)), (ms(500), ms(500))], "{:?}", device.calls());
+        assert!(control.held.is_empty());
+        assert!(events_of(&events, kinds::LATE_COMMAND).is_empty());
+    }
+
+    #[test]
+    fn ur_25_rx_channels_from_zero_starts_at_its_instant() {
+        // RM-25 (design note 37): a stream enabled from 0 channels starts at or after its
+        // effective instant. On the controlled clock, the device stands still at 0, so the
+        // 300 ms start cannot have passed.
+        let (core, device, time) = manual_rig();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        channels_from_none(&mut control, &core, 2, 300, 1);
+        // The timed start is issued by the owner once the enable is configured.
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the enable's segment");
+        let calls = device.calls();
+        let start = calls.iter().rev().find(|c| c.starts_with("rx_start ")).unwrap_or_else(|| panic!("{calls:?}"));
+        let origin: i64 = start["rx_start 0 ".len()..].parse().unwrap_or_else(|_| panic!("{start}"));
+        assert!(origin >= ms(300) && origin < ms(300) + 200, "origin {origin}, asked {}", ms(300));
+        assert!(origin > device.time_now().unwrap(), "the start is ahead of the device's own clock: {start}");
+        // The segment's clock is declared at the begin; its registration at the first block and
+        // that block's origin are pinned by `ur_25_a_second_change_follows_the_first` in
+        // `src/provider/rx.rs`.
+        let declared: Vec<_> = core.clocks.declared_sample_clocks().into_iter().filter(|h| h.stream() == &ResourceId::parse("usrp/rx/s0").unwrap()).collect();
+        assert_eq!(declared.len(), 1, "the segment's stream declares its clock: {declared:?}");
+        assert_eq!(declared[0].root_ticks_per_tick(), Rational::new(200, 1).unwrap(), "at the segment's rate");
+        assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
+    }
+
+    #[test]
+    fn ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch() {
+        // UC-2, RM-25 (design note 37): a timed update at a `cold` change's own instant is in
+        // the configuration its switch applies, whatever the arrival order, and is released at
+        // its own instant; neither floors the other. On the controlled clock.
+        for timed_first in [true, false] {
+            let case = format!("timed first: {timed_first}");
+            let (core, device, time, events) = manual_rig_events();
+            let _frozen = hold(&core, &time, &device);
+            device.rx_open(0, &[0]).unwrap();
+            let (mut control, _tx) = control(&core, &[Dir::Rx]);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let rate = key("radio.rx.s0.sample_rate_hz");
+            let freq = key("radio.rx.c0.frequency_hz");
+            if timed_first {
+                control.book_timed(ActionId(1), freq.clone(), Value::num(2.1e9).unwrap(), at(300));
+            }
+            control.book_cold(ActionId(2), rate.clone(), Value::num(2e6).unwrap(), at(300));
+            if !timed_first {
+                control.book_timed(ActionId(3), freq.clone(), Value::num(2.1e9).unwrap(), at(300));
+            }
+            // The switch's configuration is the projection at its origin, the timed update in it.
+            let plan = plan_of(&core, Dir::Rx);
+            assert_eq!(plan.len(), 2, "{case}: {:?}", plan.iter().map(|p| p.segment.origin).collect::<Vec<_>>());
+            plan[1].configure(&core, Dir::Rx).expect("the switch configures");
+            let calls = device.calls();
+            let switched = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("rate=2000000") && c.contains("freq=2100000000") && c.ends_with("at=-")).count();
+            assert_eq!(switched, 1, "{case}: the switch's configuration: {calls:?}");
+            assert!(lock(&core.rec).rejected.is_empty(), "{case}");
+            // The timed release at its own instant.
+            time.advance_to(core.at(ms(298))).unwrap();
+            control.release();
+            let calls = device.calls();
+            let timed = calls.iter().filter(|c| c.starts_with("apply rx 0") && c.contains("freq=2100000000") && c.contains(&format!("at={} effective=", ms(300)))).count();
+            assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
+            assert!(events_of(&events, kinds::LATE_COMMAND).is_empty(), "{case}");
+            let rec = lock(&core.rec);
+            let rows: Vec<_> = rec.applied.iter().filter(|r| r["key"] == "radio.rx.c0.frequency_hz" && r["issued"] == true && r["at"]["ticks"] == ms(300)).collect();
+            assert_eq!(rows.len(), 1, "{case}: {:?}", rec.applied);
+        }
+    }
+
+    #[test]
     fn ur_24_a_late_update_halted_before_it_can_act_has_no_channel() {
         // #64, UR-24: an update late behind a released one acts at that one's instant; a refusal
         // between its own instant and then leaves it no channel, so it is recorded, not issued.

@@ -75,7 +75,8 @@
 ## 7. 実装
 
 - 37a：完了（2026-10-23）．規則，`ur_23` の 5 本と `ur_21_a_descheduled_…`，fake の 18 系列，`uhd_61_02`，`ea_17_…`．負荷の下で `fake` 3 回とも失敗 0．記録は [reviews/37a-opus.md](reviews/37a-opus.md)．
-- 37b：次．raw device の 13 本（`src/device.rs` の `manual`・`participant` へ），実時間の時計の `Direct` 系 6 系列（[reviews/37a-table.md](reviews/37a-table.md) の B-2・B-3）．
+- 37b：完了（2026-10-23）．raw device の 13 本を `src/device.rs` の `manual`・`participant` へ，`Direct` 系の 5 本を `control.rs`・`rx.rs` の制御された時計の unit test へ（[reviews/37a-table.md](reviews/37a-table.md) の B-2・B-3）．`Direct` は表の書いた実時間ではなく手動の時計の上で動くが，試験のスレッドが参加者でないので同じ扱いになる．記録は [reviews/37b-opus.md](reviews/37b-opus.md)．
+- 37c：次．§3 の掃除が終わっていない．37a の表は `Direct` 系を 6 系列しか挙げなかったが，`fake.rs` には `direct.now()` が 89 か所，`time_now()` が 16 か所ある．試験のスレッドが時刻を読む所を grep で全部挙げ，一つずつ (1)〜(4) に分けるか，遅れに依らない理由を書く．負荷の下で落ちた `ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration`（`ready - e` が 80 ms より 1 tick 短い）の原因もここで確かめる．Python の `test_v54_sleep_is_run_time`（10 s の仮想時間を実時間 10 s 未満で求める．phase6 の P04 の filter）も同じ型で，37b の gate では変異なしで落ちた．#69 は 37c の後に閉じる．
 
 ## 6. レビュー
 

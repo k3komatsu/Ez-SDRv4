@@ -5765,7 +5765,7 @@
    "old": "                if let Some((start, (ratio, samples))) = st.tx_samples.get(&chan).and_then(|map| map.range(..=source).next_back()) {",
    "new": "                if let Some((start, (ratio, samples))) = st.tx_samples.get(&0).and_then(|map| map.range(..=source).next_back()) {",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
   },
   {
@@ -5775,7 +5775,7 @@
    "old": "                let streamer = st.tx.get_mut(&stream).expect(\"checked\");",
    "new": "                let streamer = st.tx.get_mut(&0).expect(\"checked\");",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_two_transmit_streamers_keep_their_own_reports"
   },
   {
@@ -5795,7 +5795,7 @@
    "old": "        let antenna = s.antenna.as_ref().map(|_| channel.antenna.clone());",
    "new": "        let antenna = None;",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_the_antenna_is_read_back_after_an_untimed_change"
   },
   {
@@ -5855,7 +5855,7 @@
    "old": "                    return Ok(Applied { rate: c.rate, freq: c.freq, gain: c.gain, antenna: None });",
    "new": "                    return Ok(Applied { rate: c.rate, freq: c.freq, gain: c.gain, antenna: Some(c.antenna.clone()) });",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_the_antenna_is_read_back_after_an_untimed_change"
   },
   {
@@ -5865,7 +5865,7 @@
    "old": "        let channels = st.rx[&stream].channels.clone();",
    "new": "        let channels = st.rx[&0].channels.clone();",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
   },
   {
@@ -5875,7 +5875,7 @@
    "old": "            None => {\n                let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n            }",
    "new": "            None => {\n                let streamer = st.rx.get_mut(&0).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n            }",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
   },
   {
@@ -5885,7 +5885,7 @@
    "old": "        let Some(streamer) = st.rx.get_mut(&stream) else {\n            return Err(DeviceError::failed(format!(\"fake: receive stream {stream} is not open\")));\n        };",
    "new": "        let Some(streamer) = st.rx.get_mut(&0) else {\n            return Err(DeviceError::failed(format!(\"fake: receive stream {stream} is not open\")));\n        };",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
   },
   {
@@ -5895,7 +5895,7 @@
    "old": "            let Some(streamer) = tx.get_mut(&stream) else {\n                return Err(DeviceError::failed(format!(\"fake: transmit stream {stream} is not open\")));\n            };",
    "new": "            let Some(streamer) = tx.get_mut(&0) else {\n                return Err(DeviceError::failed(format!(\"fake: transmit stream {stream} is not open\")));\n            };",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_two_transmit_streamers_keep_their_own_reports"
   },
   {
@@ -6025,7 +6025,7 @@
    "old": "        // UHD reads an empty channel list as channel 0 (`sanitize_stream_args`, UR-33), and\n        // `UhdDevice` sends it as channel 0: the streamer the fake opens is the device's.\n        let channels: &[usize] = if channels.is_empty() { &[0] } else { channels };",
    "new": "        let channels: &[usize] = channels;",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_an_empty_channel_list_is_channel_zero"
   },
   {
@@ -6035,7 +6035,7 @@
    "old": "        // As on the receive side: an empty channel list is channel 0 (UR-33).\n        let channels: &[usize] = if channels.is_empty() { &[0] } else { channels };",
    "new": "        let channels: &[usize] = channels;",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_an_empty_channel_list_is_channel_zero"
   },
   {
@@ -6047,7 +6047,7 @@
    "old2": "            let Some(chan) = st.spec[dir as usize].iter().position(|entry| *entry == dest) else { continue };",
    "new2": "            let chan = dest.0;",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_33_a_timed_command_follows_its_front_end_across_a_spec"
   },
   {
@@ -6347,7 +6347,7 @@
    "old": "                let mut settings = self.settings_on(core, &updates, dir, k, segment.origin, chan as usize);",
    "new": "                let mut settings = self.settings_on(core, &updates, dir, k, i64::MIN, chan as usize);",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch"
   },
   {
