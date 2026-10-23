@@ -628,7 +628,7 @@
   "old": "        if let Some(&k) = self.held.keys().next() {",
   "new": "        if let Some(&k) = self.held.keys().next_back() {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_bursts_go_out_in_target_order"
  },
  {
@@ -638,7 +638,7 @@
   "old": "            if clock.instant(next) - now >= window {\n                return false;\n            }\n",
   "new": "",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_stop_ends_the_burst_within_the_in_flight_window"
  },
   {
@@ -840,7 +840,7 @@
   "old": "TimePoint::new(clock.domain, next - lead_k),",
   "new": "TimePoint::new(clock.domain, clock.at_or_after(self.core.now()) + 0 * lead_k),",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
@@ -920,7 +920,7 @@
   "old": "        if h < next {\n            let lead_k",
   "new": "        if false {\n            let lead_k",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
@@ -930,7 +930,7 @@
   "old": "    now.max(origin.saturating_sub(lead))",
   "new": "    now.min(origin.saturating_sub(lead))",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_21_a_burst_before_its_clock_s_origin_is_late"
  },
  {
@@ -980,7 +980,7 @@
   "old": "        let device_sob = first && !continuing;",
   "new": "        let device_sob = first;",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
@@ -1160,7 +1160,7 @@
   "old": "            self.end_open(false);\n            self.continues_at = Some(held.k);",
   "new": "            self.end_open(true);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
@@ -1200,7 +1200,7 @@
   "old": "        let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
   "new": "        let hold = false;",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
  },
  {
@@ -1220,7 +1220,7 @@
   "old": "        let device_open = self.open.as_ref().map_or(continuing.is_some(), |open| !open.first || continuing == Some(open.held.k));",
   "new": "        let device_open = self.open.as_ref().is_some_and(|open| !open.first || continuing == Some(open.held.k));",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it"
  },
  {
@@ -1270,7 +1270,7 @@
   "old": "            if let Some(tail) = self.tail.take() {",
   "new": "            if let Some(tail) = self.tail.take().filter(|_| false) {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
  },
  {
@@ -1312,7 +1312,7 @@
   "old": "        if continuing {\n            if let Some(tail) = self.tail.take() {\n                // The burst before's held sample, ahead of this one, no end-of-burst between;\n                // without it this one would play a sample early, so its failure abandons this\n                // burst, the device burst ended (Review Q, NB-Q2).\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT) {\n                    Ok(1) => {}\n                    Ok(_) => {\n                        self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: a send did not complete within 1 s\" }));\n                        return self.abandon(true);\n                    }\n                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true);\n                    }\n                }\n            }\n        }\n        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(self.k, &sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };",
   "new": "        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();\n        let result = if sending > 0 { self.core.device.tx_send(self.k, &sent, at, device_sob, device_eob, SEND_TIMEOUT) } else { Ok(0) };\n        if continuing {\n            if let Some(tail) = self.tail.take() {\n                // The burst before's held sample, ahead of this one, no end-of-burst between;\n                // without it this one would play a sample early, so its failure abandons this\n                // burst, the device burst ended (Review Q, NB-Q2).\n                let tail: Vec<&[Iq]> = tail.iter().map(Vec::as_slice).collect();\n                match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT) {\n                    Ok(1) => {}\n                    Ok(_) => {\n                        self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": \"UR-22: a send did not complete within 1 s\" }));\n                        return self.abandon(true);\n                    }\n                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true);\n                    }\n                }\n            }\n        }",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
  },
  {
@@ -1372,7 +1372,7 @@
   "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(true);",
   "new": "                return self.abandon(true);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
  },
  {
@@ -1382,7 +1382,7 @@
   "old": "if device_sob && sent > 0 {",
   "new": "if false && device_sob && sent > 0 {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
  },
  {
@@ -1392,7 +1392,7 @@
   "old": "match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT) {",
   "new": "match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT).map(|_| 1) {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
  },
  {
@@ -1402,7 +1402,7 @@
   "old": "let was_open = !first || continuing;",
   "new": "let was_open = !first;",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst"
  },
  {
@@ -1422,7 +1422,7 @@
   "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true);\n                    }",
   "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                    }",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
  },
  {
@@ -1432,7 +1432,7 @@
   "old": "return if fail { Err(DeviceError::failed(\"fake: the send failed after half its samples\")) } else { Ok(0) };",
   "new": "return if false { Err(DeviceError::failed(\"fake: the send failed after half its samples\")) } else { Ok(0) };",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
  },
  {
@@ -1514,6 +1514,16 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_failing_reference_sensor_alone_is_not_a_lost_device"
+ },
+ {
+  "id": "B41",
+  "name": "a device burst closed with an empty end-of-burst at a Kernel burst's end, one padded sample past it (Review O, O-B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let buffers: Vec<&[Iq]> = match &tail {\n            Some(tail) => tail.iter().map(Vec::as_slice).collect(),\n            None => vec![&empty; self.channels.count().max(1) as usize],\n        };",
+  "new": "        let _ = tail;\n        let buffers: Vec<&[Iq]> = vec![&empty; self.channels.count().max(1) as usize];",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_a_burst_one_sample_after_a_burst_is_played"
  },
  {
   "id": "C04",

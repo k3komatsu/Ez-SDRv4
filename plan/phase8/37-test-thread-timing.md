@@ -72,6 +72,11 @@
 2. §3 の推奨（窓の要るテストを `tx.rs` の unit test に移し，`ur_21` は `send_asap_and_flag`，同じ形のテストを掃除する）．
 3. 段階を risky としないこと（テスト計画と Sol の計画レビューを省き，コードレビューだけ Sol に頼む）．
 
+## 7. 実装
+
+- 37a：完了（2026-10-23）．規則，`ur_23` の 5 本と `ur_21_a_descheduled_…`，fake の 18 系列，`uhd_61_02`，`ea_17_…`．負荷の下で `fake` 3 回とも失敗 0．記録は [reviews/37a-opus.md](reviews/37a-opus.md)．
+- 37b：次．raw device の 13 本（`src/device.rs` の `manual`・`participant` へ），実時間の時計の `Direct` 系 6 系列（[reviews/37a-table.md](reviews/37a-table.md) の B-2・B-3）．
+
 ## 6. レビュー
 
 Sol 6.1（2026-10-23）：FAIL，major 3・minor 1．方針（手動の時計を残し，試験のスレッドがいつ動くかに依る判定をなくす，`hold()` は要らない）は支持された．指摘はすべて採用した．

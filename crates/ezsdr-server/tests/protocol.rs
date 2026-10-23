@@ -1096,8 +1096,12 @@ fn ea_17_a_capture_ahead_starts_at_its_instant() {
     let artifact = capture_at(&mut server, 1_000, at);
     let (manifest, _) = finish(&mut server);
     let first = first_on_root(&manifest, &artifact);
-    let n = manifest.clocks.sample_clocks.iter().find(|r| r.domain == artifact.continuity[0].domain).unwrap().root_ticks_per_tick.num() as i64;
-    assert!(first >= at.ticks_in(at.domain()).unwrap() && first < at.ticks_in(at.domain()).unwrap() + n, "the first sample at {first}, asked {}", at.ticks_in(at.domain()).unwrap());
+    // A test thread delayed between the instant and the request makes the capture start
+    // later; it never starts before it, and it holds its 1 000 samples. The exact start is
+    // pinned on a Spec by `uhd_59_receive_capture_starts_at_the_requested_index`.
+    assert!(first >= at.ticks_in(at.domain()).unwrap(), "the first sample at {first}, asked {}", at.ticks_in(at.domain()).unwrap());
+    let map = &artifact.continuity[0];
+    assert_eq!(map.end.ticks_in(map.end.domain()).unwrap() - map.first.ticks_in(map.first.domain()).unwrap(), 1_000, "the map names the samples it holds");
 }
 
 #[test]

@@ -24,6 +24,16 @@ cannot move the device's time past a deadline, and the smoke set no longer prove
 the Provider catches up with real time: that is Phase 8's bench work. The fake's clock
 and the hardware envelope are still not slowed or relaxed to make a test pass.
 
+No test's verdict may depend on when the test thread runs. The device's time moves while
+every Provider thread is idle (M3, M5), so a test thread that reads a time or observes
+state before its next operation or assertion can be descheduled while the device's time
+advances. Such a sequence is one of: (1) book it in the Spec, before the Run starts;
+(2) assert something that holds whatever the clock did, never a read time as the verdict's
+basis; (3) where the delay cannot change the verdict, book a burst that may be moved with
+the `send_asap_and_flag` policy (`start_repeat`); or (4) where the timing window is the
+property itself, pin it in a controlled-clock unit test. Booking "well ahead" only lowers
+the chance and is not (2).
+
 The clock rules are pinned by the unit tests in `src/host.rs` (one per rule M1–M7 and
 §4.7, each with a wall-clock bound), and the Authority's manual-clock behaviour by the
 tests in `src/authority.rs` (the first anchor exact, a read wider than 1 ms discarded, a

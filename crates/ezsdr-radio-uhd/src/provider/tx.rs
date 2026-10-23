@@ -905,6 +905,7 @@ mod tests {
 
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::time::Duration as Wall;
 
     use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind};
     use ezsdr_kernel::hash::ContentHash;
@@ -1762,6 +1763,122 @@ mod tests {
         assert!(tx.held.contains_key(&42_000));
         assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|e| e.payload["outcome"] == "refused"));
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+    }
+
+    /// uhd-control on the transmit stream it begins at 1 MS/s from tick 0: the booking site
+    /// whose on-time verdict a test reads beside uhd-tx's hand-over.
+    fn booking_control(core: &Arc<Core>) -> (Control, std::sync::mpsc::Receiver<TxCmd>) {
+        let (to_tx, handed) = std::sync::mpsc::channel();
+        let mut start = super::super::control::Start {
+            t0: 0,
+            rx: vec![None; core.description.stream_count(Dir::Rx)],
+            tx: vec![None; core.description.stream_count(Dir::Tx)],
+        };
+        start.tx[0] = Some((core.register(Dir::Tx, 200, 0).unwrap(), Channels::first(1)));
+        (Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.description.defaults(), false, start), handed)
+    }
+
+    #[test]
+    fn ur_21_a_burst_inside_the_in_flight_window_is_late() {
+        // RM-15 as VE-2 amends it, at the receipt site and at uhd-tx's first hand-over: a
+        // burst 5 ms ahead is beyond the 2 ms device lead, so the booking hands it over
+        // unchanged; once the open burst's next unhanded sample has passed that start, the
+        // hand-over decides it again — moved under `send_asap`, dropped under `drop_and_flag`.
+        // On the controlled clock: a delayed test thread moves the receipt, and then the
+        // booking itself produces the same two verdicts (the fake's test could not tell them
+        // apart).
+        let a_samples: Vec<[f32; 2]> = vec![[0.25, 0.0]; 30_000];
+        let b_samples: Vec<[f32; 2]> = vec![[-0.5, 0.25]; 1_000];
+        let bytes = |samples: &[[f32; 2]]| {
+            let mut out = Vec::with_capacity(samples.len() * 8);
+            for sample in samples {
+                out.extend_from_slice(&sample[0].to_le_bytes());
+                out.extend_from_slice(&sample[1].to_le_bytes());
+            }
+            out
+        };
+        let (a_bytes, b_bytes) = (bytes(&a_samples), bytes(&b_samples));
+        let (a_hash, b_hash) = (ContentHash::of_bytes(&a_bytes), ContentHash::of_bytes(&b_bytes));
+        let input = |name: &str, bytes: &[u8]| ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse(name).unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{}", ContentHash::of_bytes(bytes)),
+            bytes,
+        );
+        let (a_wave, b_wave) = (input("waveform", &a_bytes), input("waveform2", &b_bytes));
+        for (policy, outcome) in [(LatePolicy::SendAsapAndFlag, "send_asap"), (LatePolicy::DropAndFlag, "drop")] {
+            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let device = Arc::new(FakeDevice::new(config));
+            let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, BTreeMap::from([
+                (a_hash.clone(), Arc::<[u8]>::from(a_bytes.clone())),
+                (b_hash.clone(), Arc::<[u8]>::from(b_bytes.clone())),
+            ]));
+            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            device_at(&core, &time, &device, 0);
+            device.tx_open(0, &[0]).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            let (mut control, handed) = booking_control(&core);
+            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            std::mem::forget(_to_tx);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+            let target = super::super::test_support::target_of(&core.tx_id);
+            let mut book = |id: u64, k: i64, repeat: bool, wave: &ezsdr_kernel::manifest::ArtifactRef| {
+                control.book(Dispatched::new(ActionId(id), Action::TxBurst {
+                    target: target.clone(),
+                    waveform: wave.clone(),
+                    repeat,
+                    at: AbsoluteDeadline::new(TimePoint::new(clock.domain, k)),
+                    requested_at: None,
+                    late_policy: policy,
+                    metadata: BTreeMap::new(),
+                }, Some(core.tx_id.clone())));
+            };
+            let none = |events: &Arc<EventCollector>| events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+            // A at 29 ms booked at 20 ms: 9 ms ahead, so the booking is on time.
+            device_at(&core, &time, &device, core.ticks(20_000_000));
+            book(1, 29_000, false, &a_wave);
+            let TxCmd::Burst(a) = handed.try_recv().expect("A handed over") else { panic!("not a burst") };
+            assert_eq!(a.k, 29_000, "{policy:?}: the booking moved A, so the receipt was late");
+            assert!(none(&events).is_empty(), "{policy:?}: the booking emitted a verdict");
+            tx.command(TxCmd::Burst(a));
+            // A is handed over to 39 ms: one 2 000-sample buffer at each of five steps.
+            for at in [20_i64, 23, 25, 27, 29] {
+                device_at(&core, &time, &device, core.ticks(at * 1_000_000));
+                assert!(tx.step(), "{policy:?}: no hand-over at {at} ms");
+            }
+            assert_eq!(tx.open.as_ref().expect("A is open").next, 39_000, "{policy:?}: A's first unhanded sample");
+            // B, 5 ms ahead at 29 ms: on time at the receipt (3 ms left after the device lead).
+            book(2, 34_000, true, &b_wave);
+            let TxCmd::Burst(b) = handed.try_recv().expect("B handed over") else { panic!("not a burst") };
+            assert_eq!(b.k, 34_000, "{policy:?}: the booking moved B, so 5 ms ahead was not on time at receipt");
+            assert!(none(&events).is_empty(), "{policy:?}: the booking emitted a verdict");
+            let calls = device.calls().len();
+            tx.command(TxCmd::Burst(b));
+            assert!(tx.step(), "{policy:?}: uhd-tx did not take B at its hand-over");
+            let verdicts: Vec<_> = none(&events).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+            assert_eq!(verdicts.len(), 1, "{policy:?}: {verdicts:?}");
+            assert_eq!(verdicts[0].payload["outcome"], outcome, "{policy:?}: {verdicts:?}");
+            assert_eq!(verdicts[0].payload["target"]["ticks"], 34_000, "{policy:?}: {verdicts:?}");
+            assert_eq!(device.calls().len(), calls, "{policy:?}: the hand-over's decision called the device: {:?}", device.calls());
+            if policy == LatePolicy::SendAsapAndFlag {
+                assert!(tx.open.is_none() && tx.continues_at == Some(39_000), "{policy:?}: A is not kept for the continuation");
+                assert!(tx.held.contains_key(&39_000) && !tx.held.contains_key(&34_000), "{policy:?}: {:?}", tx.held.keys().collect::<Vec<_>>());
+                let reserved: Vec<_> = lock(&core.held).iter().copied().collect();
+                assert!(reserved.contains(&(clock.domain, 39_000)) && !reserved.contains(&(clock.domain, 34_000)), "{policy:?}: {reserved:?}");
+                device_at(&core, &time, &device, core.ticks(30_000_000));
+                assert!(tx.step(), "{policy:?}: B is not handed over at the sample A ended at");
+                assert_eq!(device.transmitted(clock.instant(39_000), 1_000), b_samples.iter().copied().map(Some).collect::<Vec<_>>(),
+                    "{policy:?}: B does not play where uhd-tx had not handed A over: {:?}", device.calls());
+                assert_eq!(sends(&device).last(), Some(&(1_000, false, false)), "{policy:?}: B did not continue A's device burst: {:?}", sends(&device));
+                assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "TimeError" && row["code"] != "Underflow"),
+                    "{policy:?}: {:?}", lock(&core.rec).device_async);
+            } else {
+                assert!(tx.open.as_ref().is_some_and(|open| open.held.k == 29_000), "{policy:?}: A is not still open");
+                assert!(tx.held.is_empty(), "{policy:?}: {:?}", tx.held.keys().collect::<Vec<_>>());
+                assert!(!lock(&core.held).contains(&(clock.domain, 34_000)), "{policy:?}: the dropped burst kept its reservation");
+            }
+        }
     }
 
     #[test]
@@ -2916,6 +3033,303 @@ mod tests {
             .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
         assert_eq!(rejected_events.len(), 1, "{rejected_events:?}");
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
+    }
+
+    // ------------------------------------------ bursts continued across a burst's end (UR-23)
+
+    /// A-0: `manual_rig` with the device's clock held still (M3), A's burst at 40 000 with
+    /// 30 000 samples driven 15 steps, so that its last sample is held back and
+    /// `continues_at` is 70 000 (design note 37, T1–T5).
+    fn at_a_held_tail(faults: Vec<crate::device::FakeFault>)
+        -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, crate::provider::test_support::Frozen) {
+        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults, ..FakeConfig::default() };
+        let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
+        let frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        device.tx_open(0, &[0]).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(_to_tx);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        lock(&core.held).insert((clock.domain, 40_000));
+        tx.command(TxCmd::Burst(held(&clock, 40_000, 30_000, LatePolicy::DropAndFlag)));
+        for k in (31..=59).step_by(2) {
+            device_at(&core, &time, &device, core.ticks(k * 1_000_000));
+            assert!(tx.step(), "A is not dispatched at {k} ms");
+        }
+        assert!(tx.open.is_none() && tx.continues_at == Some(70_000) && tx.tail.as_ref().is_some_and(|tail| tail[0].len() == 1),
+            "A's last sample is not the held tail: {:?}", device.calls());
+        (core, device, time, tx, frozen)
+    }
+
+    /// A burst that continues A's device burst at `k`: `len` samples of a waveform unlike
+    /// `held`'s uniform one, so that a continuation's order shows in the values.
+    fn continuation(clock: &Clock, k: i64, len: usize) -> Held {
+        let samples: Vec<[f32; 2]> = (0..len).map(|i| [-0.25 - i as f32 / 4_000.0, 0.125]).collect();
+        let mut burst = held(clock, k, len, LatePolicy::DropAndFlag);
+        burst.samples = Arc::new(vec![samples]);
+        burst
+    }
+
+    /// Each `tx_send` the fake saw: `n`, start-of-burst, end-of-burst.
+    fn sends(device: &FakeDevice) -> Vec<(usize, bool, bool)> {
+        device.calls().iter().filter(|call| call.starts_with("tx_send ")).map(|call| {
+            let field = |key: &str| call.split_whitespace().find_map(|word| word.strip_prefix(key));
+            (field("n=").unwrap().parse().unwrap(), field("sob=") == Some("true"), field("eob=") == Some("true"))
+        }).collect()
+    }
+
+    #[test]
+    fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
+        // T1: B booked at A's end after A's last buffer went out (inside the in-flight
+        // window) is played, continuing A's device burst: A's held last sample ahead of B's
+        // first, one device burst of 31 000 samples, no end-of-burst between.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let clock = tx.clock.expect("a transmit clock");
+        let b = continuation(&clock, 70_000, 1_000);
+        let second = b.samples[0].clone();
+        lock(&core.held).insert((clock.domain, 70_000));
+        tx.command(TxCmd::Burst(b));
+        device_at(&core, &time, &device, core.ticks(62_000_000));
+        assert!(tx.step(), "A's held sample is not taken ahead of B");
+        device_at(&core, &time, &device, core.ticks(69_000_000));
+        assert!(tx.step(), "B's held sample is not ended");
+        assert!(tx.open.is_none() && tx.continues_at.is_none() && tx.tail.is_none());
+        let whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).chain(second.iter().copied().map(Some)).collect();
+        assert_eq!(device.transmitted(clock.instant(40_000), 31_000), whole, "{:?}", device.calls());
+        let sends = sends(&device);
+        assert_eq!(sends.iter().filter(|(_, sob, _)| *sob).count(), 1, "{sends:?}");
+        assert_eq!(sends.iter().filter(|(_, _, eob)| *eob).count(), 1, "{sends:?}");
+        assert_eq!(sends.iter().map(|(n, _, _)| n).sum::<usize>(), 31_000, "{sends:?}");
+        assert_eq!(device.unended_bursts(), 0, "{sends:?}");
+        assert!(lock(&core.rec).rejected.iter().all(|row| !row["reason"].as_str().unwrap_or("").starts_with("UR-21")
+            && !row["reason"].as_str().unwrap_or("").starts_with("UR-22")), "{:?}", lock(&core.rec).rejected);
+        tx.reports(Wall::ZERO);
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "TimeError" && row["code"] != "Underflow"),
+            "{:?}", lock(&core.rec).device_async);
+    }
+
+    #[test]
+    fn ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it() {
+        // T2: a `Stop` while the device burst waits for a continuation ends it with one
+        // end-of-burst, A's held last sample, before it runs dry.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let clock = tx.clock.expect("a transmit clock");
+        device_at(&core, &time, &device, core.ticks(63_000_000));
+        tx.stop_now("test stop", ezsdr_radio::CancelReason::Stop);
+        let mut whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).collect();
+        whole.push(None);
+        assert_eq!(device.transmitted(clock.instant(40_000), 30_001), whole, "{:?}", device.calls());
+        let sends = sends(&device);
+        // A's held last sample is the end-of-burst's own buffer: an empty end-of-burst would
+        // play its zero sample where A ended (70 000), not after it.
+        assert_eq!(sends.last(), Some(&(1, false, true)), "{sends:?}");
+        assert_eq!(sends.iter().filter(|(_, _, eob)| *eob).count(), 1, "{sends:?}");
+        assert!(tx.open.is_none() && tx.continues_at.is_none() && tx.tail.is_none());
+        assert_eq!(device.unended_bursts(), 0, "{sends:?}");
+        tx.reports(Wall::ZERO);
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "Underflow"), "{:?}", lock(&core.rec).device_async);
+    }
+
+    #[test]
+    fn ur_23_a_stop_ends_the_burst_within_the_in_flight_window() {
+        // UR-23, RM-16: uhd-tx keeps at most the in-flight window of samples ahead of `now`,
+        // so a burst stopped at `s` ends no later than `s` plus that window (plus the buffer
+        // whose start was still inside it). On the controlled clock: the fake's Session test
+        // reads the Kernel's receipt instant, which a delayed test thread moves with the end.
+        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        device.tx_open(0, &[0]).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(_to_tx);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        lock(&core.held).insert((clock.domain, 20_000));
+        tx.command(TxCmd::Burst(held(&clock, 20_000, 30_000, LatePolicy::DropAndFlag)));
+        // First hand-over at 12 ms: A's start 9 ms ahead, one 2 000-sample buffer sent, its
+        // end exactly one window after this instant.
+        device_at(&core, &time, &device, core.ticks(12_000_000));
+        for _ in 0..8 {
+            tx.step();
+        }
+        let open = tx.open.as_ref().expect("A is open");
+        assert_eq!(open.next, 22_000, "the hand-over went past the in-flight window: {:?}", device.calls());
+        tx.stop_now("test stop", ezsdr_radio::CancelReason::Stop);
+        assert!(tx.open.is_none() && tx.continues_at.is_none() && tx.tail.is_none());
+        let window = core.ticks(crate::profile::IN_FLIGHT_WINDOW_NS);
+        let stop = core.now();
+        let record = lock(&core.rec).bursts.last().cloned().expect("A's record");
+        assert_eq!(record["end"], "stop", "{record}");
+        let target = record["target"]["ticks"].as_i64().expect("the record's target");
+        let end = clock.instant(target + record["samples"].as_i64().expect("the record's samples"));
+        assert!(end <= stop + window, "the record ends {} ms after the stop", (end - stop) / core.ticks(1_000_000));
+        // The device's own end is the record's plus the empty end-of-burst's one zero sample
+        // (UR-23's bench record); its acknowledgement is due once that instant has played.
+        device_at(&core, &time, &device, end + clock.n);
+        tx.reports(Wall::ZERO);
+        let ack = lock(&core.rec).device_async.iter().find(|row| row["code"] == "BurstAck").expect("the end-of-burst's acknowledgement")["tick"].as_i64().unwrap();
+        assert_eq!(ack, end + clock.n, "{:?}", lock(&core.rec).device_async);
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "TimeError" && row["code"] != "Underflow"), "{:?}", lock(&core.rec).device_async);
+    }
+
+    #[test]
+    fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
+        // T3: A's device burst ends at c, with no padded sample at c + 1, so a burst booked
+        // at c + 1 is played: the device's samples are A, a gap at c, then B.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let clock = tx.clock.expect("a transmit clock");
+        let b = continuation(&clock, 70_001, 1_000);
+        let second = b.samples[0].clone();
+        lock(&core.held).insert((clock.domain, 70_001));
+        tx.command(TxCmd::Burst(b));
+        device_at(&core, &time, &device, core.ticks(62_000_000));
+        assert!(tx.step(), "A's device burst is not ended at c");
+        assert!(tx.step(), "B is not dispatched at c + 1");
+        device_at(&core, &time, &device, core.ticks(69_000_000) + 20_000);
+        assert!(tx.step(), "B's held sample is not ended");
+        assert!(tx.open.is_none() && tx.continues_at.is_none() && tx.tail.is_none());
+        let mut whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).collect();
+        whole.push(None);
+        whole.extend(second.iter().copied().map(Some));
+        assert_eq!(device.transmitted(clock.instant(40_000), 31_001), whole, "{:?}", device.calls());
+        let sends = sends(&device);
+        assert_eq!(sends.iter().filter(|(_, sob, _)| *sob).count(), 2, "{sends:?}");
+        assert_eq!(sends.iter().filter(|(_, _, eob)| *eob).count(), 2, "{sends:?}");
+        assert_eq!(device.unended_bursts(), 0, "{sends:?}");
+        tx.reports(Wall::ZERO);
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "TimeError" && row["code"] != "Underflow"),
+            "{:?}", lock(&core.rec).device_async);
+    }
+
+    #[test]
+    fn ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned() {
+        // T4: A's held sample's send ahead of B takes nothing, or fails: B is abandoned, and
+        // the device burst ended with an empty end-of-burst after A's 29 999 samples.
+        for (fault, reason) in [(crate::device::FakeFault::StalledSend(15), "UR-22: a send did not complete"),
+            (crate::device::FakeFault::FailSend(15), "fake: the send failed")] {
+            let what = format!("{fault:?}");
+            let (core, device, time, mut tx, _frozen) = at_a_held_tail(vec![fault]);
+            let clock = tx.clock.expect("a transmit clock");
+            lock(&core.held).insert((clock.domain, 70_000));
+            tx.command(TxCmd::Burst(continuation(&clock, 70_000, 1_000)));
+            device_at(&core, &time, &device, core.ticks(62_000_000));
+            assert!(tx.step(), "{what}: the held sample's send was not entered");
+            let sent = device.transmitted(clock.instant(40_000), 30_001);
+            let whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).collect();
+            assert_eq!(sent[..29_999], whole[..29_999], "{what}: {:?}", device.calls());
+            assert_eq!(sent[29_999], Some([0.0, 0.0]), "{what}: B played in A's last sample's place: {:?}", device.calls());
+            assert_eq!(sent[30_000], None, "{what}: {:?}", device.calls());
+            let sends = sends(&device);
+            assert_eq!(sends.iter().filter(|(_, _, eob)| *eob).count(), 1, "{what}: {sends:?}");
+            assert_eq!(device.unended_bursts(), 0, "{what}: {sends:?}");
+            assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap_or("").contains(reason)),
+                "{what}: {:?} {sends:?}", lock(&core.rec).rejected);
+            assert!(device.calls().iter().any(|call| call.contains("stalled") || call.contains("failed")), "{what}: the case was not reached: {:?}", device.calls());
+        }
+    }
+
+    #[test]
+    fn ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst() {
+        // T5: B continues A's device burst; B's first payload send takes nothing. The device
+        // burst is still open and ends with an empty end-of-burst after A's last sample.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(vec![crate::device::FakeFault::StalledSend(16)]);
+        let clock = tx.clock.expect("a transmit clock");
+        lock(&core.held).insert((clock.domain, 70_000));
+        tx.command(TxCmd::Burst(continuation(&clock, 70_000, 1_000)));
+        device_at(&core, &time, &device, core.ticks(62_000_000));
+        assert!(tx.step(), "B's first send was not entered");
+        assert!(device.calls().iter().any(|call| call.contains("stalled")), "the case was not reached: {:?}", device.calls());
+        let sent = device.transmitted(clock.instant(40_000), 30_002);
+        let whole: Vec<Option<[f32; 2]>> = (0..30_000).map(|_| Some([0.25, 0.0])).collect();
+        assert_eq!(sent[..30_000], whole[..], "{:?}", device.calls());
+        assert_eq!(sent[30_000], Some([0.0, 0.0]), "{:?}", device.calls());
+        assert_eq!(sent[30_001], None, "{:?}", device.calls());
+        let sends = sends(&device);
+        assert_eq!(sends.iter().filter(|(_, _, eob)| *eob).count(), 1, "{sends:?}");
+        assert_eq!(device.unended_bursts(), 0, "{sends:?}");
+        tx.reports(Wall::ZERO);
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "Underflow"), "{:?}", lock(&core.rec).device_async);
+        assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap_or("").contains("UR-22")), "{:?}", lock(&core.rec).rejected);
+    }
+
+    #[test]
+    fn ur_23_bursts_go_out_in_target_order() {
+        // RM-15: held bursts go out in target order, whatever order they were booked in. The
+        // Spec sorts its entries by instant, so its two bursts arrive in target order; the
+        // reverse booking is pinned here, on the controlled clock.
+        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        device.tx_open(0, &[0]).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(_to_tx);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        // 200 ms first, then 100 ms: the later booking has the nearer target.
+        for k in [200_000, 100_000] {
+            lock(&core.held).insert((clock.domain, k));
+            tx.command(TxCmd::Burst(held(&clock, k, 2_000, LatePolicy::DropAndFlag)));
+        }
+        device_at(&core, &time, &device, core.ticks(91_000_000));
+        assert!(tx.step(), "the nearer burst is not dispatched");
+        let sends = sends(&device);
+        assert_eq!(sends.len(), 1, "{sends:?}");
+        assert!(sends[0].0 == 1_999 && sends[0].1 && !sends[0].2, "the nearer burst did not go first: {sends:?}");
+        assert!(device.calls().iter().any(|call| call.contains("at=20000000 sob=true")), "the 100 ms burst's timed start: {:?}", device.calls());
+        assert!(tx.held.contains_key(&200_000), "the farther burst is still held");
+    }
+
+    #[test]
+    fn ur_22_a_first_send_cut_short_keeps_the_reports_paired() {
+        // Review Q, TG-Q1: a burst whose first send came up short, or failed after taking
+        // some (NB-Q1), is still counted for its report, so the late report of the burst
+        // after it names that burst. B starts where A's device burst ended — 499 samples
+        // taken, then the empty end-of-burst's zero sample — booked once A was abandoned:
+        // the device drops it (T1's rig, with the booking between the two).
+        for fault in [crate::device::FakeFault::ShortSend(0), crate::device::FakeFault::FailSend(0)] {
+            let what = format!("{fault:?}");
+            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults: vec![fault], ..FakeConfig::default() };
+            let (core, device, time, events) = crate::provider::test_support::rig_with(config, Vec::new());
+            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            device_at(&core, &time, &device, 0);
+            device.tx_open(0, &[0]).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            let clock = core.register(Dir::Tx, 200, 0).unwrap();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            std::mem::forget(_to_tx);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+            let a: Vec<[f32; 2]> = (0..1_000).map(|i| [0.25 + i as f32 / 4_000.0, -0.125]).collect();
+            let mut burst = held(&clock, 40_000, 1_000, LatePolicy::DropAndFlag);
+            burst.samples = Arc::new(vec![a.clone()]);
+            lock(&core.held).insert((clock.domain, 40_000));
+            tx.command(TxCmd::Burst(burst));
+            device_at(&core, &time, &device, core.ticks(31_000_000));
+            assert!(tx.step(), "{what}: A's first send");
+            assert!(tx.open.is_none(), "{what}: A was not abandoned: {:?}", device.calls());
+            let sent = device.transmitted(clock.instant(40_000), 501);
+            assert_eq!(sent[..499], a[..499].iter().copied().map(Some).collect::<Vec<_>>(), "{what}: {:?}", device.calls());
+            assert_eq!(sent[499], Some([0.0, 0.0]), "{what}: after what A took: {:?}", device.calls());
+            assert_eq!(sent[500], None, "{what}: {:?}", device.calls());
+            // Booked after A was abandoned, at its device end: the device drops it as late.
+            lock(&core.held).insert((clock.domain, 40_500));
+            tx.command(TxCmd::Burst(continuation(&clock, 40_500, 1_000)));
+            assert!(tx.step(), "{what}: B's timed send");
+            device_at(&core, &time, &device, core.ticks(70_000_000));
+            tx.reports(Wall::ZERO);
+            let late: Vec<_> = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+                .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+            assert_eq!(late.len(), 1, "{what}: {:?}", lock(&core.rec).device_async);
+            assert_eq!(late[0].payload["outcome"], "late_at_device", "{what}: {late:?}");
+            assert_eq!(late[0].payload["target"]["ticks"], 40_500, "{what}: the report names B: {late:?}");
+            assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap_or("").contains("fake: the send failed")
+                || row["reason"].as_str().unwrap_or("").contains("UR-22: a send did not complete")), "{what}: {:?}", lock(&core.rec).rejected);
+        }
     }
 
     #[test]

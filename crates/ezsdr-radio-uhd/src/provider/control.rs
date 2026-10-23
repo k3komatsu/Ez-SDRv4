@@ -1968,6 +1968,94 @@ mod tests {
     }
 
     #[test]
+    fn ur_21_a_burst_before_start_up_is_refused() {
+        // UR-21: a start before the device's start-up — the arm's synchronisation end — is
+        // refused at booking. On the controlled clock: the session path read the target from
+        // a time the test thread's own delay could pass, and the refusal then came from the
+        // late policy instead.
+        let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        core.start_up.store(core.ticks(1_000_000_000), std::sync::atomic::Ordering::Release);
+        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        // 20 ms ahead: past the device lead, so the late policy is not what refuses it, and
+        // before the start-up.
+        let target = TimePoint::new(clock.domain, 20_000);
+        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
+            target: super::super::test_support::target_of(&core.tx_id),
+            waveform,
+            repeat: false,
+            at: AbsoluteDeadline::new(target),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(core.tx_id.clone())));
+        let rejected = lock(&core.rec).rejected.clone();
+        assert!(rejected.iter().any(|row| row["reason"].as_str().unwrap_or("").starts_with("UR-21: the burst begins before the device's start-up")), "{rejected:?}");
+        assert!(to_tx.try_recv().is_err(), "a refused burst was handed to uhd-tx");
+        // The refusal reaches the caller as `COMMAND_REJECTED`, naming the Action it answers.
+        let event = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .find(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).expect("COMMAND_REJECTED");
+        assert_eq!(event.payload["reason"], "UR-21: the burst begins before the device's start-up", "{event:?}");
+        assert_eq!(event.payload["action"], 1, "{event:?}");
+    }
+
+    #[test]
+    fn ur_21_a_burst_before_its_clock_s_origin_is_late() {
+        // RM-14, RM-15, KC-21a: a start before a new transmit clock's origin is decided at
+        // the device lead before that origin (`timeline::decided_at`), so a late policy moves
+        // it onto the origin rather than refusing it for want of a clock. On the controlled
+        // clock: a Spec cannot reserve this — its offsets resolve to the clock declared at
+        // prepare, and a target on a later clock's domain is refused as another clock's.
+        let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0), (1.0, 0.0)];
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        // Booked now: the new clock's origin is its start lead after the old segment's cut,
+        // 50 ms at 1 MS/s to 2 MS/s (100 root ticks per sample).
+        control.book_cold(ActionId(1), key("radio.tx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), None);
+        let plan = plan_of(&core, Dir::Tx);
+        assert_eq!(plan.len(), 2, "the change's segment is planned");
+        let clock = plan[1].clock.expect("the change's clock");
+        assert_eq!(plan[1].segment.origin, core.ticks(50_000_000), "the new clock's origin");
+        // 5 ms before that origin: more than the 2 ms device lead away, so the booking is late
+        // and the moved start is the origin (10 000 samples at 2 MS/s).
+        let target = TimePoint::new(clock.domain, -10_000);
+        control.book(Dispatched::new(ActionId(2), Action::TxBurst {
+            target: super::super::test_support::target_of(&core.tx_id),
+            waveform,
+            repeat: false,
+            at: AbsoluteDeadline::new(target),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(core.tx_id.clone())));
+        let verdict = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
+        assert_eq!(verdict.payload["outcome"], "send_asap", "{verdict:?}");
+        assert_eq!(verdict.payload["target"], serde_json::to_value(target).unwrap(), "{verdict:?}");
+        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
+        assert_eq!(held.k, 0, "the moved start is not the new clock's origin");
+        assert_eq!(clock.instant(held.k), plan[1].segment.origin);
+        assert_eq!(lock(&core.held).iter().copied().collect::<Vec<_>>(), vec![(clock.domain, 0)], "the origin is reserved before the hand-over");
+    }
+
+    #[test]
     fn ur_30_the_recorded_plan_has_no_refused_segment() {
         // UR-30, RM-25: a refusal the owner booked is in the one plan `Provider::stop` records,
         // which has no segment for it.

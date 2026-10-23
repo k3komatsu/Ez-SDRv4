@@ -18,7 +18,7 @@ use ezsdr_kernel::coordinator::{RunHandle, RunHandleError, start_spec_run};
 use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
-use ezsdr_kernel::manifest::Manifest;
+use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::module_api::{
     ActionReceiver, ActionSubmitter, Authority, AttachedPort, Endpoint, ExecutionClass, Link,
     ModuleErrorKind, ModuleRegistry, PrepareContext, Provider, Role,
@@ -1294,6 +1294,14 @@ fn tx_session_on(device: Arc<dyn Device>) -> (RunHandle, TempDir) {
     (run, dir)
 }
 
+/// A Spec Run advanced to `ticks` after T0, then finished. The Run's clock is the device's,
+/// which may already be past a `now()`-relative horizon before T0 (plan 30 §4.4).
+fn finish_spec(mut run: RunHandle, ticks: i64) -> Manifest {
+    let t0 = run.start_instant().expect("a Spec Run starts");
+    let _ = run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ticks));
+    run.finish()
+}
+
 /// The transmit sample `lead` root ticks from now, on the running transmit clock.
 fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
@@ -1309,6 +1317,24 @@ fn send_at(run: &mut RunHandle, verb_name: &str, at: Option<TimePoint>, samples:
 fn send(run: &mut RunHandle, verb_name: &str, lead: Option<i64>, samples: &[(f32, f32)]) -> ezsdr_kernel::session::LogEntry {
     let at = lead.map(|lead| tx_at(run, lead));
     send_at(run, verb_name, at, samples)
+}
+
+/// A waveform's content hash, for the inputs map of a Spec that names it twice.
+fn hash_of(bytes: &[u8]) -> ContentHash {
+    ContentHash::of_bytes(bytes)
+}
+
+/// A second Spec input under its own name, for a Spec whose schedule names two waveforms
+/// (KC-9).
+fn second_waveform(samples: &[(f32, f32)]) -> (Vec<u8>, ArtifactRef) {
+    let (bytes, _) = waveform_of(samples);
+    let reference = ezsdr_kernel::manifest::ingest_input(
+        Ident::parse("waveform2").unwrap(),
+        Namespace::parse("ezsdr.input").unwrap(),
+        format!("mem:{}", ContentHash::of_bytes(&bytes)),
+        &bytes,
+    );
+    (bytes, reference)
 }
 
 fn time_errors(manifest: &Manifest) -> Vec<TimeErrorPayload> {
@@ -1338,33 +1364,43 @@ fn ur_21_txburst_refusals() {
     let _ = run.submit(verb("send", resource("radio/tx/s0"), None, &[]), Some(&odd)).unwrap();
     // A non-finite component.
     let _ = send(&mut run, "send", Some(ms(20)), &[(f32::NAN, 0.0)]);
-    // A start equal to a held burst's.
-    let at = tx_at(&run, ms(500));
-    let _ = send_at(&mut run, "send", Some(at), &tone(10));
-    let _ = send_at(&mut run, "send", Some(at), &tone(10));
     wait(&mut run, ms(20));
     let manifest = run.finish();
     let reasons = rejections(&manifest);
-    for want in ["UR-21: the waveform size", "UR-21: a waveform sample is not finite", "UR-21: a held burst already has this start"] {
+    for want in ["UR-21: the waveform size", "UR-21: a waveform sample is not finite"] {
         assert!(reasons.iter().any(|r| r.starts_with(want)), "{want}: {reasons:?}");
     }
     let rejected = events_of(&manifest, "radio.COMMAND_REJECTED");
-    assert!(rejected.len() >= 3);
+    assert_eq!(rejected.len(), 2, "{rejected:?}");
     // MA-14: a burst refused at receipt names the Action it answers.
+    assert!(rejected.iter().all(|e| e.payload["action"].is_u64()), "{rejected:?}");
+
+    // A start equal to a held burst's: two bursts at one fixed offset, both booked before
+    // the Run starts, so that the test thread's own delay cannot move the second (rules
+    // (1) and (2); the receipt-time booking is what decides).
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (bytes, waveform) = waveform_of(&tone(10));
+    let hash = waveform.hash.clone();
+    let target = serde_json::to_value(resource("radio/tx/s0")).unwrap();
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
+            "waveform": waveform.clone(), "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target,
+            "waveform": waveform, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } }
+    ]);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device, BTreeMap::from([(hash, bytes)]));
+    let t0 = run.start_instant().expect("a Spec Run starts");
+    let _ = run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(20)));
+    let manifest = run.finish();
+    let reasons = rejections(&manifest);
+    assert!(reasons.iter().any(|r| r.starts_with("UR-21: a held burst already has this start")), "{reasons:?}");
+    let rejected = events_of(&manifest, "radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
     assert!(rejected.iter().all(|e| e.payload["action"].is_u64()), "{rejected:?}");
 }
 
-#[test]
-fn ur_21_a_burst_before_start_up_is_refused() {
-    let dir = TempDir::new();
-    let mut run = session(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()));
-    assert!(admitted(&run.submit(set("radio.tx.c0.stream", Value::from(0)), None).unwrap()));
-    // On the new clock, after its origin, the start lead after the change (RM-25), and
-    // before the device's start-up.
-    let _ = send(&mut run, "send", Some(ms(60)), &tone(10));
-    let manifest = run.finish();
-    assert!(rejections(&manifest).iter().any(|r| r.starts_with("UR-21: the burst begins before the device's start-up")), "{:?}", rejections(&manifest));
-}
 
 #[test]
 fn ur_21_late_policies_on_the_device_lead() {
@@ -1373,28 +1409,41 @@ fn ur_21_late_policies_on_the_device_lead() {
     // (`send_asap_and_flag`) is moved, both at the receipt site (`control.rs`'s `book_burst`
     // applies the 2 ms device lead). Whether the moved repeat is moved *again* at uhd-tx's
     // first hand-over depends on real time passing between the booking and the hand-over
-    // (see the unit test below), which the manual clock does not promise — on a busy
-    // Provider it is frozen away, so the verdict can be absent. That re-decision is pinned
-    // deterministically by `ur_21_first_dispatch_rechecks_all_late_policies` (the re-spelled
-    // row U15) and is not asserted here.
+    // (pinned on the controlled clock in `src/provider/tx.rs`), which the manual clock does
+    // not promise — on a busy Provider it is frozen away, so the verdict can be absent. That
+    // re-decision is not asserted here.
     let (mut run, _device, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "send", Some(ms(1)), &tone(10));
-    let _ = send(&mut run, "start_repeat", Some(ms(1) / 2), &tone(10));
+    let second_at = tx_at(&run, ms(1) / 2);
+    let entry = send_at(&mut run, "start_repeat", Some(second_at), &tone(10));
+    assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(50));
     let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
     wait(&mut run, ms(20));
-    // On time with a margin that survives the test binary's parallel load (Review M,
-    // P1-B); the device lead's own boundary is the bench's to measure (B8).
-    let _ = send(&mut run, "send", Some(ms(20)), &tone(10));
+    // A reservation whose delay cannot change the verdict is `send_asap_and_flag`: a delayed
+    // booking moves it and says so, instead of dropping it (rule (3)). Its on-time start is
+    // the case above; the device lead's own boundary is the bench's to measure (B8).
+    let third_at = tx_at(&run, ms(20));
+    let entry = send_at(&mut run, "start_repeat", Some(third_at), &tone(10));
+    assert!(admitted(&entry), "{entry:?}");
     wait(&mut run, ms(60));
     let manifest = run.finish();
     let errors = time_errors(&manifest);
     let outcomes: Vec<_> = errors.iter().map(|p| p.outcome).collect();
     // The booking's own verdicts: Drop for the 1 ms burst, SendAsap for the moved repeat.
     assert_eq!(&outcomes[..2], [TimeErrorOutcome::Drop, TimeErrorOutcome::SendAsap], "{errors:#?}");
-    // Only the repeat's optional hand-over re-decision may follow, and the 20 ms burst is on
-    // time: `send` is `drop_and_flag`, so a late third burst would show here as a `Drop`.
-    assert!(outcomes[2..].iter().all(|o| *o == TimeErrorOutcome::SendAsap), "{errors:#?}");
+    // Only moved repeats may follow, each naming its own request: the second is moved again
+    // at uhd-tx's hand-over, and a delayed booking of the third moves it (rule (3)); neither
+    // is a `Drop`.
+    assert!(errors[2..].iter().all(|p| p.outcome == TimeErrorOutcome::SendAsap && (p.target == second_at || p.target == third_at)),
+        "{errors:#?}");
+    // The third was booked and played: the burst is on the device with the request kept when
+    // the booking moved it, at or after the request.
+    let records = bursts(&manifest);
+    assert_eq!(records.len(), 2, "{records:?}");
+    let third = &records[1];
+    assert!(third.target.ticks_in(third.target.domain()).unwrap() >= third_at.ticks_in(third_at.domain()).unwrap(), "{third:?} requested {third_at:?}");
+    assert!(third.requested_target.is_none() || third.requested_target == Some(third_at), "{third:?} requested {third_at:?}");
 }
 
 #[test]
@@ -1408,42 +1457,6 @@ fn ur_21_an_untimed_send_is_on_time_after_its_delivery() {
     let manifest = run.finish();
     assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
     assert_eq!(bursts(&manifest).len(), 20);
-}
-
-#[test]
-fn ur_21_a_burst_inside_the_in_flight_window_is_late() {
-    for _ in 0..3 {
-        let (mut run, device, _dir) = tx_session(FakeConfig::default());
-        let _ = send(&mut run, "start_repeat", Some(ms(20)), &tone(1_000));
-        wait(&mut run, ms(60));
-        let _ = send(&mut run, "start_repeat", Some(ms(5)), &tone(100));
-        wait(&mut run, ms(30));
-        let _ = send(&mut run, "send", Some(ms(5)), &tone(100));
-        wait(&mut run, ms(30));
-        let manifest = run.finish();
-        let outcomes: Vec<_> = time_errors(&manifest).iter().map(|p| p.outcome).collect();
-        assert_eq!(outcomes, [TimeErrorOutcome::SendAsap, TimeErrorOutcome::Drop], "{outcomes:?}");
-        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
-        assert_eq!(device.unended_bursts(), 0, "a burst started inside one without end-of-burst: {:?}", device.calls());
-    }
-}
-
-#[test]
-fn ur_21_a_burst_before_its_clock_s_origin_is_late() {
-    // An explicit `at` 5 ms ahead lies before the new transmit clock's origin, a start lead
-    // after the cold change (RM-14, RM-15).
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    assert!(admitted(&run.submit(set("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
-    let entry = send(&mut run, "start_repeat", Some(ms(5)), &tone(200));
-    assert!(admitted(&entry), "{entry:?}");
-    wait(&mut run, ms(300));
-    let manifest = run.finish();
-    let errors = time_errors(&manifest);
-    assert_eq!(errors.iter().map(|p| p.outcome).collect::<Vec<_>>(), [TimeErrorOutcome::SendAsap]);
-    let e2 = tx_clock_origin(&manifest, 1);
-    let record = &bursts(&manifest)[0];
-    assert_eq!(record.target.ticks_in(record.target.domain()).unwrap(), 0, "moved to the new clock's origin {e2}");
-    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
 }
 
 #[test]
@@ -1492,10 +1505,12 @@ fn ur_22_repeat_is_continuous_across_the_wrap() {
 
 #[test]
 fn ur_22_a_single_burst_ends_with_end_of_burst() {
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    let _ = send(&mut run, "send", Some(ms(20)), &tone(3_000));
-    wait(&mut run, ms(60));
-    let manifest = run.finish();
+    // Booked in the Spec, before the Run starts (rule (1)): a burst at 20 ms.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (bytes, waveform) = waveform_of(&tone(3_000));
+    let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, false, "drop_and_flag", 20_000);
+    let manifest = finish_spec(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)])), ms(60));
     require_stream_timing(&manifest, "single burst", true);
     let sends = calls(&device, "tx_send");
     assert!(sends.last().is_some_and(|s| s.ends_with("eob=true")), "{sends:?}");
@@ -1521,14 +1536,27 @@ fn timing_precondition_failure_reports_evidence_and_still_fails() {
 
 #[test]
 fn ur_23_a_burst_ends_at_the_next_bursts_start() {
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    let _ = send(&mut run, "start_repeat", Some(ms(10)), &tone(1_000));
-    wait(&mut run, ms(40));
-    let _ = send(&mut run, "send", Some(ms(20)), &tone(500));
-    wait(&mut run, ms(60));
-    let manifest = run.finish();
+    // Both bursts are booked in the Spec, before the Run starts (rule (1)): a repeat at
+    // 10 ms, cut by a burst at 20 ms.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (one, a) = waveform_of(&tone(1_000));
+    let (two, b) = second_waveform(&tone(500));
+    let (ha, hb) = (a.hash.clone(), b.hash.clone());
+    let target = serde_json::to_value(resource("radio/tx/s0")).unwrap();
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
+            "waveform": a, "repeat": true, "late_policy": "send_asap_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 20_000 }, "action": { "kind": "tx_burst", "target": target,
+            "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } }
+    ]);
+    let manifest = finish_spec(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(ha, one), (hb, two)])), ms(60));
     let records = bursts(&manifest);
     assert_eq!(records.len(), 2, "{records:?}");
+    // The repeat ends at the second's start with end-of-burst, not as a stopped burst: the
+    // block that ends it carries END_OF_BURST (`ends_at_held`, SC-24/SC-28).
+    assert_eq!(records[0].end, BurstEnd::Eob, "{records:?}");
     assert_eq!(records[0].target.ticks_in(records[0].target.domain()).unwrap() + records[0].samples as i64, records[1].target.ticks_in(records[1].target.domain()).unwrap());
     assert!(records[1].late_by.is_none());
     assert!(time_errors(&manifest).is_empty());
@@ -1541,32 +1569,34 @@ fn ur_23_a_burst_ends_at_the_next_bursts_start() {
     assert_eq!(device.unended_bursts(), 0, "a burst started inside one without end-of-burst: {:?}", device.calls());
 }
 
-#[test]
-fn ur_23_bursts_go_out_in_target_order() {
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    let _ = send(&mut run, "send", Some(ms(80)), &tone(100));
-    let _ = send(&mut run, "send", Some(ms(40)), &tone(100));
-    wait(&mut run, ms(120));
-    let _ = run.finish();
-    let starts: Vec<i64> = calls(&device, "tx_send").iter().filter(|c| c.contains("sob=true")).map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap()).collect();
-    assert_eq!(starts.len(), 2);
-    assert!(starts[0] < starts[1], "{starts:?}");
-}
 
 #[test]
 fn ur_23_a_stop_ends_the_burst_within_the_in_flight_window() {
-    let (mut run, _, _dir) = tx_session(FakeConfig::default());
+    // The bound itself — the record's end no later than the stop plus the in-flight window —
+    // is pinned on the controlled clock in `src/provider/tx.rs`: here a delayed test thread
+    // moves the receipt, and the record's end with it, so no upper bound read from this side
+    // stays true (rule (4)). What this side still asserts does not depend on the gap.
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
     let _ = send(&mut run, "start_repeat", Some(ms(10)), &tone(1_000));
     wait(&mut run, ms(60));
-    let stop_at = run.now().ticks_in(run.now().domain()).unwrap();
-    let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+    // The Stop's own receipt instant, as the Run logs it (RS-15), not a time read before the
+    // submission: a delayed test thread moves the receipt and the record's end together.
+    let stopped = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
+    let stop_at = stopped.time.ticks_in(stopped.time.domain()).unwrap();
     wait(&mut run, ms(40));
     let manifest = run.finish();
     let record = &bursts(&manifest)[0];
     assert_eq!(record.end, BurstEnd::Stop);
     let origin = tx_clock_origin(&manifest, 0);
     let end = origin + (record.target.ticks_in(record.target.domain()).unwrap() + record.samples as i64) * 200;
-    assert!(end <= stop_at + ms(10) + ms(20), "ends {} ms after the stop", (end - stop_at) / ms(1));
+    // The stop recalls nothing already handed over (RM-16): its ledger instant is a lower
+    // bound whichever way the test thread was delayed.
+    assert!(end >= stop_at, "the record ends {} ms before the stop", (stop_at - end) / ms(1));
+    // The device burst is closed with an end-of-burst after the stop, and nothing runs dry.
+    let sends = calls(&device, "tx_send");
+    assert_eq!(sends.iter().filter(|call| call.ends_with("eob=true")).count(), 1, "{sends:?}");
+    assert_eq!(device.unended_bursts(), 0, "a burst started inside one without end-of-burst: {:?}", device.calls());
+    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "Underflow"), "{:?}", device.calls());
 }
 
 // ---------------------------------------------------------------- updates (UR-24…UR-26)
@@ -1900,12 +1930,21 @@ fn ur_25_a_rate_change_admits_a_burst_on_the_new_clock() {
 
 #[test]
 fn ur_25_a_cold_transmit_change_cancels_the_held_bursts() {
-    // UR-23: a cold change still reports each held burst it cancels on the old clock.
-    let (mut run, _, _dir) = tx_session(FakeConfig::default());
-    let _ = send(&mut run, "send", Some(ms(300)), &tone(100));
-    assert!(admitted(&run.submit(set("radio.tx.s0.sample_rate_hz", Value::num(2e6).unwrap()), None).unwrap()));
-    wait(&mut run, ms(150));
-    let manifest = run.finish();
+    // UR-23: a cold change still reports each held burst it cancels on the old clock. Both
+    // at one fixed offset, the burst first, so that both are booked before the Run starts and
+    // in that order (rule (1)): the change cuts the old clock at the burst's own start.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (bytes, waveform) = waveform_of(&tone(100));
+    let target = serde_json::to_value(resource("radio/tx/s0")).unwrap();
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 300_000 }, "action": { "kind": "tx_burst", "target": target,
+            "waveform": waveform, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 300_000 }, "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
+            "key": "radio.tx.s0.sample_rate_hz", "value": 2e6 } }
+    ]);
+    let manifest = finish_spec(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(hash_of(&bytes), bytes)])), ms(400));
     let events: Vec<_> = events_of(&manifest, "radio.COMMAND_REJECTED").into_iter().filter(|event| event.payload["kind"] == "tx_burst").collect();
     let rejected: Vec<_> = section(&manifest, "rejected").as_array().unwrap().iter().filter(|row| row["kind"] == "tx_burst").collect();
     assert_eq!(events.len(), 1, "{events:?}");
@@ -2102,14 +2141,16 @@ fn ur_28_a_failed_report_read_is_not_an_empty_one() {
 fn ur_28_the_device_reports_a_late_burst() {
     // uhd-tx hands the start of burst over in time by its clock; the fake sees it 20 ms
     // later, past its time, and reports TimeError (VE-3's late_at_device).
-    let (mut run, _, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::SlowSend(Wall::from_millis(20))], ..FakeConfig::default() });
-    let at = tx_at(&run, ms(8));
-    let _ = send_at(&mut run, "send", Some(at), &tone(100));
+    let (mut run, _device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::SlowSend(Wall::from_millis(20))], ..FakeConfig::default() });
+    // A reservation whose delay cannot change the verdict is `send_asap_and_flag` (rule
+    // (3)): a booking the test thread's delay made late is moved, not dropped.
+    let _ = send(&mut run, "start_repeat", Some(ms(8)), &tone(100));
     wait(&mut run, ms(100));
     let manifest = run.finish();
     let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
     assert_eq!(late.len(), 1, "{:?}", time_errors(&manifest));
-    assert_eq!(late[0].target, at);
+    let record = &bursts(&manifest)[0];
+    assert_eq!(late[0].target, record.target, "the late report names the moved start");
     assert!(late[0].late_by_ns > 0);
 }
 
@@ -3036,77 +3077,18 @@ fn ur_25_a_slow_link_at_a_low_rate_delivers_the_old_clock_to_e1() {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
-#[test]
-fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
-    // Review N, B3: a burst booked at the end of one whose last buffer already went out
-    // (5–10 ms before its end: inside the in-flight window, outside the 5 ms lead) is
-    // played, not dropped by the device at the tick the first ended.
-    let mut played = 0;
-    for _ in 0..3 {
-        let (mut run, device, _dir) = tx_session(FakeConfig::default());
-        wait(&mut run, ms(1));
-        let a = tx_at(&run, ms(40));
-        let _ = send_at(&mut run, "send", Some(a), &tone(30_000));
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
-            wait(&mut run, ms(1) / 4);
-        }
-        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000);
-        let second: Vec<(f32, f32)> = (0..1_000).map(|i| (-0.25 - i as f32 / 4_000.0, 0.125)).collect();
-        let entry = send_at(&mut run, "send", Some(b), &second);
-        wait(&mut run, ms(40));
-        let manifest = run.finish();
-        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"), "{:?}", calls(&device, "tx_send"));
-        assert_eq!(device.unended_bursts(), 0, "{:?}", calls(&device, "tx_send"));
-        if admitted(&entry) && time_errors(&manifest).is_empty() && bursts(&manifest).len() == 2 {
-            played += 1;
-            // Every sample handed over once: the first's held last sample too (Review O).
-            let handed: usize = calls(&device, "tx_send").iter().map(|c| c.split("n=").nth(1).unwrap().split(' ').next().unwrap().parse::<usize>().unwrap()).sum();
-            assert_eq!(handed, 31_000, "{:?}", calls(&device, "tx_send"));
-            // And in order: the first's held last sample ahead of the second's first, the
-            // two waveforms end to end on the device (Review P, TG-1).
-            let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
-            let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().chain(&second).map(|&(i, q)| Some([i, q])).collect();
-            assert!(device.transmitted(a_root, 31_000) == whole, "{:?}", calls(&device, "tx_send"));
-        }
-    }
-    assert!(played > 0, "the case was never reached");
-}
 
-#[test]
-fn ur_23_a_stop_while_the_device_burst_waits_for_a_continuation_ends_it() {
-    // Review N, T3: a burst whose device burst is held open for a burst that may be
-    // booked at its end, then `Stop`: one end-of-burst closes it, before it runs dry.
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    // `now()` is the Run's last instant: refresh it, and leave room for the submission.
-    wait(&mut run, ms(1));
-    let a = tx_at(&run, ms(40));
-    let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
-    assert!(admitted(&entry), "{entry:?}");
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
-    while run.now().ticks_in(clock.root).unwrap() < a_end - ms(7) {
-        wait(&mut run, ms(1) / 4);
-    }
-    let _ = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
-    wait(&mut run, ms(40));
-    let manifest = run.finish();
-    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
-    let sends = calls(&device, "tx_send");
-    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
-    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "Underflow"), "{sends:?}");
-    assert_eq!(device.unended_bursts(), 0);
-}
 
 #[test]
 fn ur_23_a_burst_alone_is_ended_before_it_runs_dry() {
     // Review N, B3's deferral: with no burst booked at its end, the device burst is
-    // closed a device lead before its end, not left to underflow.
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    let _ = send(&mut run, "send", Some(ms(20)), &tone(5_000));
-    wait(&mut run, ms(80));
-    let manifest = run.finish();
+    // closed a device lead before its end, not left to underflow. Booked in the Spec
+    // (rule (1)).
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (bytes, waveform) = waveform_of(&tone(5_000));
+    let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, false, "drop_and_flag", 20_000);
+    let manifest = finish_spec(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)])), ms(80));
     let codes: Vec<_> = section(&manifest, "async").as_array().unwrap().iter().map(|r| r["code"].as_str().unwrap().to_owned()).collect();
     assert!(codes.contains(&"BurstAck".to_owned()) && !codes.contains(&"Underflow".to_owned()), "{codes:?} {:?}", calls(&device, "tx_send"));
 }
@@ -3144,72 +3126,42 @@ fn ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device() {
 #[test]
 fn ur_23_a_burst_one_sample_after_a_burst_is_played() {
     // Review O, O-B1 (`hw_b8_raw_empty_eob_gap`): the device burst of a burst ending at c
-    // must end at c, not a padded sample later, so that a burst at c + 1 is played —
-    // booked before the first's last buffer went out, and after. What uhd-tx hands the
-    // device is checked first: a slow host cannot fail it, though it can keep uhd-tx from
-    // holding a last sample back, the path where an empty end-of-burst would show. Then what
-    // the device did with it, which needs the host to keep up. A trial in which a burst was
-    // dropped at booking (booked within the 2 ms device lead) did not set the case up and
-    // is run again, three trials at most; an underflow or a late report at the device
-    // fails it.
-    for late_booking in [false, true] {
-        let mut not_booked = Vec::new();
-        loop {
-            let (mut run, device, _dir) = tx_session(FakeConfig::default());
-            wait(&mut run, ms(1));
-            let a = tx_at(&run, ms(40));
-            let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
-            assert!(admitted(&entry), "{entry:?}");
-            let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-            let n = clock.root_ticks_per_tick.num() as i64;
-            let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * n;
-            let a_end = a_root + 30_000 * n;
-            if late_booking {
-                while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
-                    wait(&mut run, ms(1) / 4);
-                }
-            }
-            let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_001);
-            let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
-            assert!(admitted(&entry), "{entry:?}");
-            wait(&mut run, ms(80));
-            // A host that fell behind may not have handed B over yet: `finish` would cancel it.
-            // The watch is the device's own clock (plan 30 §4.5).
-            let horizon = device.host().now() + Wall::from_secs(2);
-            while tx_sends(&device).iter().filter(|s| s.eob).count() < 2 && device.host().now() < horizon {
-                wait(&mut run, ms(1));
-            }
-            let manifest = run.finish();
-            let dropped: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::Drop).collect();
-            if !dropped.is_empty() {
-                not_booked.push(dropped);
-                assert!(not_booked.len() < 3, "booked late {late_booking}: dropped at booking in every trial: {not_booked:?}");
-                continue;
-            }
-            // Each device burst is its Kernel burst's samples and no more: an empty
-            // end-of-burst would add a zero sample, ending A at c + 1, B's start.
-            let sends = tx_sends(&device);
-            let device_bursts: Vec<&[Sent]> = sends.split_inclusive(|s| s.eob).collect();
-            assert_eq!(device_bursts.len(), 2, "booked late {late_booking}: {sends:?}");
-            for (burst, at, len) in [(device_bursts[0], a_root, 30_000), (device_bursts[1], a_end + n, 1_000)] {
-                assert!(burst[0].sob && burst[0].at == Some(at), "booked late {late_booking}: {sends:?}");
-                assert!(burst[1..].iter().all(|s| !s.sob && s.at.is_none()), "booked late {late_booking}: {sends:?}");
-                assert_eq!(burst.iter().map(|s| s.n).sum::<usize>(), len, "booked late {late_booking}: {sends:?}");
-            }
-            assert_eq!(device.unended_bursts(), 0);
-            // The device's reports, each at its tick from A's end: an underflow a sample before
-            // A's or B's end (-0.001 ms, +1.000 ms) is a held last sample sent too late, one
-            // earlier the host not keeping the burst fed.
-            let reports: Vec<String> = section(&manifest, "async").as_array().unwrap().iter().map(|r| {
-                let at = r["tick"].as_i64().map_or("-".to_owned(), |t| format!("{:+.3} ms", (t - a_end) as f64 / ms(1) as f64));
-                format!("{} {at}", r["code"].as_str().unwrap())
-            }).collect();
-            assert!(!reports.iter().any(|r| r.starts_with("TimeError") || r.starts_with("Underflow")), "booked late {late_booking}: {reports:?} {sends:?}");
-            assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
-            assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
-            break;
-        }
+    // must end at c, not a padded sample later, so that a burst at c + 1 is played. Both are
+    // booked in the Spec, before the Run starts (rule (4); the booking window is a unit test,
+    // `ur_23_a_burst_one_sample_after_a_burst_is_played` in `src/provider/tx.rs`). A's
+    // device burst is 30 000 samples and B's 1 000, each with its own start.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (one, a) = waveform_of(&tone(30_000));
+    let (two, b) = second_waveform(&vec![(-0.25f32, 0.125); 1_000]);
+    let (ha, hb) = (a.hash.clone(), b.hash.clone());
+    let target = serde_json::to_value(resource("radio/tx/s0")).unwrap();
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
+            "waveform": a, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 40_001 }, "action": { "kind": "tx_burst", "target": target,
+            "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } }
+    ]);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(ha, one), (hb, two)]));
+    let t0 = run.start_instant().expect("a Spec Run starts");
+    let root = t0.ticks_in(t0.domain()).unwrap();
+    let _ = run.advance_to(TimePoint::new(t0.domain(), root + ms(100)));
+    let manifest = run.finish();
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+    // Each device burst is its Kernel burst's samples and no more: an empty end-of-burst
+    // would add a zero sample, ending A at c + 1, B's start.
+    let sends = tx_sends(&device);
+    let device_bursts: Vec<&[Sent]> = sends.split_inclusive(|s| s.eob).collect();
+    assert_eq!(device_bursts.len(), 2, "{sends:?}");
+    for (burst, at, len) in [(device_bursts[0], root + ms(10), 30_000), (device_bursts[1], root + ms(40) + 200, 1_000)] {
+        assert!(burst[0].sob && burst[0].at == Some(at), "{sends:?}");
+        assert!(burst[1..].iter().all(|s| !s.sob && s.at.is_none()), "{sends:?}");
+        assert_eq!(burst.iter().map(|s| s.n).sum::<usize>(), len, "{sends:?}");
     }
+    assert_eq!(device.unended_bursts(), 0);
+    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"), "{sends:?}");
+    assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
 }
 
 /// A `tx_send` the fake saw, as its calls record it: `n` counts an empty end-of-burst's
@@ -3309,14 +3261,15 @@ fn ur_23_two_bursts_back_to_back_loop_back_whole() {
 fn ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time() {
     // A one-sample burst's only buffer carries its start and time spec, so it is not held
     // back: it is played at its time, not untimed at the deadline (Review P, NB-3, TG-2).
-    let (mut run, device, _dir) = tx_session(FakeConfig::default());
-    wait(&mut run, ms(1));
-    let a = tx_at(&run, ms(40));
-    let entry = send_at(&mut run, "send", Some(a), &[(0.5, -0.25)]);
-    assert!(admitted(&entry), "{entry:?}");
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
-    wait(&mut run, ms(60));
+    // Booked in the Spec at 40 ms, before the Run starts (rule (1)).
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (bytes, waveform) = waveform_of(&[(0.5, -0.25)]);
+    let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, false, "drop_and_flag", 40_000);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let t0 = run.start_instant().expect("a Spec Run starts");
+    let a_root = t0.ticks_in(t0.domain()).unwrap() + ms(40);
+    let _ = run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(60)));
     let manifest = run.finish();
     assert_eq!(device.transmitted(a_root, 1), vec![Some([0.5, -0.25])], "{:?}", calls(&device, "tx_send"));
     assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
@@ -3332,15 +3285,16 @@ fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
     let cases = [(FakeFault::ShortSend(0), 1_000usize), (FakeFault::ShortSend(1), 3_000), (FakeFault::FailSend(0), 1_000)];
     for (fault, len) in cases {
         let nth = format!("{fault:?}");
-        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
-        wait(&mut run, ms(1));
-        let a = tx_at(&run, ms(40));
+        // Booked in the Spec at 40 ms, before the Run starts (rule (1)).
+        let dir = TempDir::new();
+        let device = fake(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
         let wave = tone(len);
-        let entry = send_at(&mut run, "send", Some(a), &wave);
-        assert!(admitted(&entry), "{entry:?}");
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
-        wait(&mut run, ms(60));
+        let (bytes, waveform) = waveform_of(&wave);
+        let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, false, "drop_and_flag", 40_000);
+        let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        let t0 = run.start_instant().expect("a Spec Run starts");
+        let a_root = t0.ticks_in(t0.domain()).unwrap() + ms(40);
+        let _ = run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(60)));
         let manifest = run.finish();
         let sends = calls(&device, "tx_send");
         assert!(rejections(&manifest).iter().any(|r| r.contains("UR-22: a send did not complete") || r.contains("fake: the send failed")), "{nth}: {:?} {sends:?}", rejections(&manifest));
@@ -3370,100 +3324,8 @@ fn ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played() {
     assert!(codes.contains(&TxCode::TimeError), "the second burst's report behind the first's: {codes:?}");
 }
 
-#[test]
-fn ur_22_a_first_send_cut_short_keeps_the_reports_paired() {
-    // Review Q, TG-Q1: a burst whose first send came up short, or failed after taking half
-    // (NB-Q1), is still counted for its report, so the late report of the burst after it
-    // names that burst. B starts where A's device burst ended (499 samples taken, then the
-    // empty end-of-burst's zero sample), booked once A was abandoned: the device drops it.
-    for fault in [FakeFault::ShortSend(0), FakeFault::FailSend(0)] {
-        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
-        wait(&mut run, ms(1));
-        let a = tx_at(&run, ms(40));
-        let entry = send_at(&mut run, "send", Some(a), &tone(1_000));
-        assert!(admitted(&entry), "{entry:?}");
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks_in(clock.root).unwrap() < a_root - ms(8) {
-            wait(&mut run, ms(1) / 4);
-        }
-        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 500);
-        let entry = send_at(&mut run, "send", Some(b), &tone(1_000));
-        assert!(admitted(&entry), "{entry:?}");
-        wait(&mut run, ms(60));
-        let manifest = run.finish();
-        let late: Vec<_> = time_errors(&manifest).into_iter().filter(|p| p.outcome == TimeErrorOutcome::LateAtDevice).collect();
-        assert_eq!(late.len(), 1, "{:?} {:?}", time_errors(&manifest), calls(&device, "tx_send"));
-        assert_eq!(late[0].target, b);
-    }
-}
 
-#[test]
-fn ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned() {
-    // Review Q, NB-Q2: the send of A's held sample ahead of B, B continuing A's device
-    // burst, takes nothing or fails (Review R, TG-R1). B would play a sample early: it is
-    // abandoned, and the device burst ended with an empty end-of-burst after A's 29 999
-    // samples taken.
-    let cases = [(FakeFault::StalledSend(15), "UR-22: a send did not complete"), (FakeFault::FailSend(15), "fake: the send failed")];
-    for (fault, reason) in cases {
-        let what = format!("{fault:?}");
-        let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![fault], ..FakeConfig::default() });
-        wait(&mut run, ms(1));
-        let a = tx_at(&run, ms(40));
-        let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
-        assert!(admitted(&entry), "{entry:?}");
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-        let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
-        let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
-        while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
-            wait(&mut run, ms(1) / 4);
-        }
-        let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000)), &[(-0.5, 0.5); 1_000]);
-        assert!(admitted(&entry), "{entry:?}");
-        wait(&mut run, ms(40));
-        let manifest = run.finish();
-        let sends = calls(&device, "tx_send");
-        assert!(sends.iter().any(|c| c.contains("stalled") || c.contains("failed")), "{what}: the case was not reached: {sends:?}");
-        let sent = device.transmitted(a_root, 30_001);
-        let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().map(|&(i, q)| Some([i, q])).collect();
-        assert!(sent[..29_999] == whole[..29_999], "{sends:?}");
-        assert_eq!(sent[29_999], Some([0.0, 0.0]), "B played in A's last sample's place: {sends:?}");
-        assert_eq!(sent[30_000], None, "{sends:?}");
-        assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
-        assert!(rejections(&manifest).iter().any(|r| r.contains(reason)), "{what}: {:?} {sends:?}", rejections(&manifest));
-    }
-}
 
-#[test]
-fn ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst() {
-    // Review Q, TG-Q2: B continues A's device burst (booked after A's last buffer went out,
-    // A's held sample sent ahead of B); B's first send takes nothing: the device burst is
-    // still open, and is ended with an empty end-of-burst after A's last sample.
-    let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::StalledSend(16)], ..FakeConfig::default() });
-    wait(&mut run, ms(1));
-    let a = tx_at(&run, ms(40));
-    let entry = send_at(&mut run, "send", Some(a), &tone(30_000));
-    assert!(admitted(&entry), "{entry:?}");
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap() && r.ended_at.is_none()).unwrap();
-    let a_root = clock.origin.ticks_in(clock.root).unwrap() + a.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64;
-    let a_end = a_root + 30_000 * clock.root_ticks_per_tick.num() as i64;
-    while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
-        wait(&mut run, ms(1) / 4);
-    }
-    let entry = send_at(&mut run, "send", Some(TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_000)), &tone(1_000));
-    assert!(admitted(&entry), "{entry:?}");
-    wait(&mut run, ms(40));
-    let manifest = run.finish();
-    let sends = calls(&device, "tx_send");
-    assert!(sends.iter().any(|c| c.contains("stalled")), "the case was not reached: {sends:?}");
-    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
-    assert_eq!(device.unended_bursts(), 0, "{sends:?}");
-    let sent = device.transmitted(a_root, 30_002);
-    let whole: Vec<Option<[f32; 2]>> = tone(30_000).iter().map(|&(i, q)| Some([i, q])).collect();
-    assert!(sent[..30_000] == whole[..], "{sends:?}");
-    assert_eq!(sent[30_000], Some([0.0, 0.0]), "{sends:?}");
-    assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "Underflow"), "{sends:?}");
-}
 
 /// A `FakeDevice` that records the thread its last handle is dropped on and the reads
 /// after a flag, and can make `uhd-clock`'s reads slow (Review Q's D-1 probe).
@@ -3747,7 +3609,9 @@ fn ur_21_a_descheduled_timed_send_is_on_time_on_the_manual_clock_and_late_on_the
         let entered = device.arm(Deschedule::TxSend(0, Wall::from_millis(200)));
         let (mut run, _dir) = tx_session_on(device.clone());
         let at = tx_at(&run, ms(30));
-        let entry = send_at(&mut run, "send", Some(at), &tone(10_000));
+        // `send_asap_and_flag`, so that the test thread's own delay moves the booking
+        // instead of dropping it; the deschedule is entered either way (rule (3)).
+        let entry = send_at(&mut run, "start_repeat", Some(at), &tone(10_000));
         assert!(admitted(&entry), "{mode:?}: {entry:?}");
         entered.recv_timeout(Wall::from_secs(5)).unwrap_or_else(|_| panic!("{mode:?}: uhd-tx was not descheduled inside tx_send"));
         let what = format!("{mode:?}: the descheduled send's Run");
@@ -3796,7 +3660,9 @@ fn ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock() {
 fn ur_33_a_shutdown_with_a_report_read_that_fails_at_once_still_joins_uhd_tx() {
     let (mut run, _device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxAsyncFails(Wall::ZERO, false)], ..FakeConfig::default() });
     let at = tx_at(&run, ms(20));
-    let entry = send_at(&mut run, "send", Some(at), &tone(30_000));
+    // `send_asap_and_flag`: a delayed booking is moved, not dropped (rule (3)); the shutdown
+    // path under test does not depend on the burst, only on not losing it to the delay.
+    let entry = send_at(&mut run, "start_repeat", Some(at), &tone(30_000));
     assert!(admitted(&entry), "{entry:?}");
     let begun = Instant::now();
     let manifest = bounded("the transmit shutdown", Wall::from_secs(30), move || {

@@ -237,7 +237,13 @@ fn uhd_61_02_capture_starts_at_the_requested_sample_index() {
     wait_capture(&mut run, from);
     let manifest = run.finish();
     let map = &capture_artifact(&manifest).continuity[0];
-    assert_eq!((map.first.ticks_in(map.first.domain()).unwrap(), map.end.ticks_in(map.end.domain()).unwrap()), (index, index + 100));
+    let (first, end) = (map.first.ticks_in(map.first.domain()).unwrap(), map.end.ticks_in(map.end.domain()).unwrap());
+    // A test thread delayed between the index and the request makes the capture start
+    // later; what holds either way is that it starts no earlier than asked and holds its
+    // 100 samples. The exact start is pinned on a Spec by
+    // `uhd_59_receive_capture_starts_at_the_requested_index`.
+    assert!(first >= index, "the first sample at {first}, asked {index}");
+    assert_eq!(end - first, 100, "the map names the samples it holds");
 }
 
 #[test]
