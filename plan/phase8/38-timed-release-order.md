@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 |---|---|
 | 段階 | Phase 8 段階 2（[00-overview](00-overview.md) の P4 (1)，設計 [33](33-channels-and-streams.md) の「timed command の queue」） |
-| 決まっていること | Mock は 1 列の queue で順番どおりの実行を模擬する（設計 33，P4，owner 2026-10-16）．release window は profile の値ではなく，Mock は UHD Module から見た振る舞いとして真似る（P3 (6)）．ここで決めるのは，その仕方 |
+| 決まっていること | Mock は 1 列の queue で順番どおりの実行を模擬する（設計 33，P4，owner 2026-10-16）．ここで決めるのは，その仕方．release window の置き場は D1（P3 (6) を改める）で決めた |
 | 機構 | `mech:radio-rule-implemented-twice`（三振を超えている．AGENTS.md §6）．規則は 2 か所に書かず，語彙の 1 か所に置く（設計メモ 36 と同じ形） |
 | risky | はい：queue と期限の順序を変え，Mock と実機の境を変える（AGENTS.md §9） |
 | 範囲の外 | 設計 33 の D9 の規則（packet の流れていない DDC/DUC には timed command を渡さない）．§5 |
@@ -26,9 +26,9 @@
 
 **揺れる「実際に渡したか」に判定を頼らない．** 渡す時刻は UHD Module の都合（poll，同期的な装置の呼び出し，channel 待ち，装置の拒否）で必ず揺れ，Mock はそれを持たない．判定は予約の履歴と instant だけで決まる形にする．
 
-**D1：release window は語彙の値にする．** `ezsdr_radio` に release window を 1 つ置き（今の 3 ms，INFERRED），UHD Module はその値を使い，自分の定数を消す．profile の値にはしない（P3 (6) のまま．schema・fixture・P2 の記録は変わらない）．
+**D1（owner 2026-10-24 決定）：release window は profile の timing の値にする．** `radio.timing.release_window_ns`：x3xx の profile は 3 ms（INFERRED，段階 4 で bench の測定から決め直す），ideal など release を模擬しない profile は 0．MockRadio は profile の値を使い，UHD Module は profile から読んで自分の定数を消す．floor の規則は語彙の関数で，window を引数に取る．UHD 以外の SDR の Module は，その装置の profile に自分の値を書く（command を持たずにすぐ渡すか，順番どおりの queue が無ければ 0 で，今の MockRadio と同じく各 update は自分の instant で効く）．release window は Module と装置の組の値で，MockRadio は UHD Module の crate に依存できない（AGENTS.md §3）ので，中立に受け取れる所は profile だけである．受理済みの P3 (6) を，この値について改める（in-flight window は Module の内部の定数のまま）．schema の再生成と x3xx・ideal の profile と fixture を直す（version は上げない）．
 
-**D2：floor と行の書き方を語彙の規則にする．**
+**D2（owner 2026-10-24 決定）：floor と行の書き方を語彙の規則にする．**
 1. **floor**：timed update を受け取った時点 `r` での floor は，max（`r + device lead`，それより前に予約された timed update のうち `e ≤ r + window` のものの `e`）．渡したか，channel を待っているか，装置が拒否したかは問わない．頼まれた instant が floor より前なら `LATE_COMMAND { requested, applied: floor }`，`e` は floor．`ezsdr_radio::timeline` の 1 つの関数にし（`layout_instant` の隣），両 Module が呼ぶ．判定の順は late，満杯（UHD の今の順）．
 2. **枠**：深さは，予約されて `e` がまだ来ていない timed update の数．装置が拒否したものも `e` まで枠を占める（UHD は今，拒否した時点で空ける．Mock は `e` まで持つ）．floor と同じく予約の履歴だけで決まる．
 3. **行**：`applied` の行は，両 Module とも command が instant を迎えた時点で書く（UHD は渡した時点に書くのをやめ，`released_at` が記録に入る所で書く）．`no channel` の行も今どおり instant に書く．装置が渡すのを拒否した command は，今どおり行を書かない．
@@ -43,7 +43,8 @@ UHD Module の release（いつ，どの channel に渡すか，channel 待ち�
 
 - **floor の関数だけを共有し，「渡した」を今の状態から計算する**（1 版目）：渡した後の cold change・停止・喪失と poll のずれで揃わない（Sol 1 回目）．
 - **timed command の台帳を共有し，境目（`e − window`）ちょうどに渡す**（2 版目）：uhd-control は予約の途中で同期的に装置を呼ぶので境目を守れず，channel 待ちと装置の拒否の状態も要り，型が大きくなる（Sol 2 回目）．
-- **release window を profile の timing の値にする**：受理済みの P3 (6) を変え，schema と fixture に広がる．
+- **release window を `ezsdr_radio` の値にする**（前の推奨）：語彙はどの radio Provider も使うので，UHD Module の実装の都合がほかの SDR に及ぶ（owner）．
+- **`ezsdr_radio::x3xx`（X3xx の description）に置く**：MockRadio が profile の名前から族の定数を引く暗黙の対応ができ，profile に書くより見えにくい．
 - **MockRadio に UHD と同じ定数と規則を書く**：規則と値が 2 か所になる（機構の 10 件目）．
 - **Ceiling として記録し，`timed` を比べないままにする**：P4 で採らないと決めた．
 
@@ -72,7 +73,7 @@ device lead を 2 ms，window を 3 ms とする．各系列は MockRadio と UH
 
 ## 4b. 変わる spec とテスト
 
-- spec 18：UR-24（行は instant に書く，深さは予約から `e` まで，floor の規則は語彙の関数），UR-26（`Provider::stop` は `S` の前に効いたものを確定し，後のものは持っているものも渡したものも同じに記録），UR-30 の記録の説明．release window の定数を語彙の値に．
+- spec 18：UR-24（行は instant に書く，深さは予約から `e` まで，floor の規則は語彙の関数），UR-26（`Provider::stop` は `S` の前に効いたものを確定し，後のものは持っているものも渡したものも同じに記録），UR-30 の記録の説明．release window は profile の値（§3 の Module の定数から外す）．
 - spec 09：MR-18（floor の規則は語彙の関数，判定の順は late，満杯），MR-25（終わりの `S`）．spec 07（語彙）に floor の関数と release window．
 - UHD Module のテスト：release の直後に `issued` の行を見るもの（`control.rs` の `ur_24_a_release_without_a_live_channel_reaches_the_pending_segment` `:1686-1695`，`:1751`，`:1809`，`:3809` ほか）は，装置の呼び出しの順と read-back の確かめを残し，行の確かめだけを `e` の後へ移す．
 - harness：`release_window_matters` を消し，`Record` に `LATE_COMMAND` の中身と正規化した `applied` の行を足す．
@@ -82,9 +83,15 @@ device lead を 2 ms，window を 3 ms とする．各系列は MockRadio と UH
 
 D9（packet の流れていない DDC/DUC には timed command を渡さず，次の開始の前に untimed に適用する．release 後の cut の扱い）は，UHD Module の release の条件と，渡さずに設定に持つ処理を変える．この推奨は release を変えず，floor と行と終わりの記録だけを決めるので，D9 の変更を妨げない（floor は渡したかを問わないので，D9 が渡さなくした command も同じに数える）．ただし UHD Module の中の「渡した」の記録（`released`，`released_at`）は消さない：D9 の release 後の cut の判定に要る．D9 は別の段階で決める．D9 が終わるまで，Phase 8 の parity（DDC/DUC の queue の安全）は閉じない．
 
-## 6. 未決（owner）
+## 6. 決定（owner 2026-10-24，すべて推奨どおり）
 
-D1・D2 と，この段階を risky とすること．
+1. D1（D1 は最初の推奨の「`ezsdr_radio` の値」を owner が退け，改めた推奨の「profile の timing の値」で決めた）．
+2. D2．
+3. この段階を risky とする（指示書の系列の表 → 実装役のテスト計画 → Sol の計画レビュー → 実装）．
+
+## 8. 実装
+
+- 38a：次．
 
 ## 7. レビュー
 
