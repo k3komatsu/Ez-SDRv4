@@ -71,13 +71,15 @@
 1. §2 の結論（設計は残し，判定は試験のスレッドの遅れに依らないという規則を足す）．
 2. §3 の推奨（窓の要るテストを `tx.rs` の unit test に移し，`ur_21` は `send_asap_and_flag`，同じ形のテストを掃除する）．
 3. 段階を risky としないこと（テスト計画と Sol の計画レビューを省き，コードレビューだけ Sol に頼む）．
+4. （owner 2026-10-24）`Direct::start` の 2 s 先の開始を規則の唯一の例外として tests/README.md に書く（§7 の残り (a)）．
+5. （owner 2026-10-24）Python の `test_v54_sleep_is_run_time` を時刻の差と §58 の 2 の性能の 2 本に分ける（§7 の残り (b)）．
 
 ## 7. 実装
 
 - 37a：完了（2026-10-23）．規則，`ur_23` の 5 本と `ur_21_a_descheduled_…`，fake の 18 系列，`uhd_61_02`，`ea_17_…`．負荷の下で `fake` 3 回とも失敗 0．記録は [reviews/37a-opus.md](reviews/37a-opus.md)．
 - 37b：完了（2026-10-23）．raw device の 13 本を `src/device.rs` の `manual`・`participant` へ，`Direct` 系の 5 本を `control.rs`・`rx.rs` の制御された時計の unit test へ（[reviews/37a-table.md](reviews/37a-table.md) の B-2・B-3）．`Direct` は表の書いた実時間ではなく手動の時計の上で動くが，試験のスレッドが参加者でないので同じ扱いになる．記録は [reviews/37b-opus.md](reviews/37b-opus.md)．
 - 37c：完了（2026-10-24）．試験のスレッドが時刻を読む所を grep で全部挙げ（164＋216 か所），関数ごとの表（[reviews/37c-table.md](reviews/37c-table.md)）にして Sol が確かめ，場面そのものが遅れで変わる系列を制御された時計の unit test へ（owner を実際に走らせ，参加者を登録してから時計を放す），残りを Spec の予約と時刻が動いても成り立つ assert にした．`ur_25_a_receive_enable_…` の 1 tick と `rehearsal_b5_overflow` の揺れもここで直した．記録は [reviews/37c-opus.md](reviews/37c-opus.md)．
-- 残り：94・95（stream 1 の `rx_start` が後で失敗する device は `tests/fake.rs` の `OnceFails` にしか無く，`FakeConfig` に fault を足すことになる）と Python の `test_v54_sleep_is_run_time`（§58 の 2 の性能の上限）．owner の判断の後に直し，#69 を閉じる．
+- 残り（owner 2026-10-24，2 つとも推奨どおり）：(a) 94・95 の窓は `Direct::start` が開始を 2 s 先に予約する所だけで，この窓は `Direct` を使う約 71 本に共通する．tests/README.md の規則に，この開始だけを例外として書いた（統合テストは時計を止められない，§4）．`FakeConfig` に fault を足して 94・95 だけ移す案は，同じ窓が残りに残るので採らない．(b) Python の `test_v54_sleep_is_run_time` は Run の時刻の差（決定的，phase6 の P04 の filter）だけを見る形にし，§58 の 2 は受信 stream を止めた Session の `test_v58_02_virtual_time_runs_faster_than_the_wall_clock`（実時間 0.0 s，上限 10 s）に分けた．
 
 ## 6. レビュー
 

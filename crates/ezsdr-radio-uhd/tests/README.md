@@ -32,7 +32,9 @@ advances. Such a sequence is one of: (1) book it in the Spec, before the Run sta
 basis; (3) where the delay cannot change the verdict, book a burst that may be moved with
 the `send_asap_and_flag` policy (`start_repeat`); or (4) where the timing window is the
 property itself, pin it in a controlled-clock unit test. Booking "well ahead" only lowers
-the chance and is not (2).
+the chance and is not (2). The one exception is the `Direct` rig's start in `fake.rs`,
+booked 2 s ahead: an integration test cannot hold the clock (design note 37 §4), and the
+rig's tests have no window beyond it.
 
 The clock rules are pinned by the unit tests in `src/host.rs` (one per rule M1–M7 and
 §4.7, each with a wall-clock bound), and the Authority's manual-clock behaviour by the

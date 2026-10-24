@@ -331,3 +331,29 @@ grep リストに加え、対象 Rust ファイルで次を検索し、helper �
 **実行確認：** 指定のreview target・`timeout 300`でUHD lib **322 passed、0 failed**。
 
 未実施：意図的遅延の再現、負荷試験、mutation、実機。報告書の遅延注入実測は独立には再確認していません。ファイル変更なし。
+
+## 6 回目：owner の 2 つの判断の実装（PASS）
+
+判定：PASS
+
+修正を要する指摘はありません。
+
+1. **Direct の例外は正確で限定的**
+   - `crates/ezsdr-radio-uhd/tests/README.md:35-37` は開始予約だけを例外にしています。
+   - 表94・95の実装（`crates/ezsdr-radio-uhd/tests/fake.rs:6623-6638`、`:6652-6663`）は開始後に短い窓を狙わず、停止・喪失・cleanup の記録を検証します。ほかの Direct テストも抜き取り確認し、追加の窓は見つかりませんでした。
+   - 対象2本の実行も成功。修正不要です。
+
+2. **新しい性能テストは壁時計への追従を検出する**
+   - `python/tests/test_easy_api.py:303-314` は `sleep(10.0)` 全体を測定します。
+   - サーバーは処理時点の Run 時刻に指定期間を加えます（`crates/ezsdr-server/src/lib.rs:439-463`）。正しく壁時計に追従する Authority なら約10秒以上必要となり、上限判定を満たしません。これはコードからの **INFERRED**（壁時計追従版での実験は未実施）です。
+   - 現行版では10秒分の進行を約0.00011秒で確認しました。
+
+3. **RX停止後に継続的な処理は残らない**
+   - Stop は受信 timeline を停止状態にし（`crates/ezsdr-radio/src/timeline.rs:905-907`）、不要な wakeup を取り消します（`crates/ezsdr-mock-radio/src/lib.rs:796-850`）。
+   - 既定 profile にはRXリンクが1本だけあり、試験はTX burst・capture要求・faultを追加しません（`crates/ezsdr-server/src/catalogue.rs:183-222`）。停止後に10秒分の受信処理を回し続ける構成ではありません。修正不要です。
+
+4. **P04の検出力とPython 3.9互換性は維持**
+   - P04（`plan/phase6/tools/mutations.json:295-300`）では10秒が10,000,000 ticksになります。残したassert（`python/tests/test_easy_api.py:301`）の期待値10,000,000,000とは一致しません。実際のkillは未実行のため **INFERRED** です。
+   - 対象Pythonテスト2本は **Python 3.14.4／3.9とも成功**しました。
+
+未実施：mutation、負荷試験、全スイート。開始予約の2秒を超える遅延による失敗可能性は、明記された例外として残ります。ファイル変更はありません。

@@ -296,11 +296,21 @@ class EasyApi(unittest.TestCase):
     def test_v54_sleep_is_run_time(self) -> None:
         with self.connect() as sdr:
             before = sdr.now
+            sdr.sleep(10.0)
+            after = sdr.now
+        self.assertEqual(after["ticks"] - before["ticks"], 10_000_000_000, "10 s on the Simulation Engine's nanosecond root")
+
+    def test_v58_02_virtual_time_runs_faster_than_the_wall_clock(self) -> None:
+        # §58 #2 on a scene with nothing to compute: with the receive stream stopped, a
+        # free-running Authority crosses 10 s at once and a wall-paced one takes 10 s.
+        with self.connect() as sdr:
+            sdr.rx.stop()
+            before = sdr.now
             began = time.monotonic()
             sdr.sleep(10.0)
             elapsed = time.monotonic() - began
             after = sdr.now
-        self.assertEqual(after["ticks"] - before["ticks"], 10_000_000_000, "10 s on the Simulation Engine's nanosecond root")
+        self.assertEqual(after["ticks"] - before["ticks"], 10_000_000_000)
         self.assertLess(elapsed, 10.0, "virtual time runs faster than the wall clock (§58 #2)")
 
     # -- Vision §58 #3, #1 and #10
