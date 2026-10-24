@@ -841,6 +841,7 @@ fn hw_b8_raw_timed_retune() {
 }
 
 // ---------------------------------------------------------------- design note 39: DDC/DUC timed commands
+// The probes of plan/phase8/39-dsp-timed-commands.md §3; run as plan/phase7/bench.md says.
 
 /// `raw`, as the concrete device: the probes also set the DDC/DUC shift alone (`tune_dsp`).
 fn raw_uhd() -> Arc<ezsdr_radio_uhd::UhdDevice> {
@@ -897,7 +898,7 @@ fn flush_tx(device: &dyn Device) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "needs a USRP: see plan/phase8/39-dsp-timed-commands.md"]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p1_ddc_entries_wait_for_samples() {
     // F2: timed DDC shifts given while nothing streams, then an untimed shift; when the
     // stream starts, which shift does the loopback tone show, from which sample? Three
@@ -939,7 +940,7 @@ fn hw_d9_p1_ddc_entries_wait_for_samples() {
 }
 
 #[test]
-#[ignore = "needs a USRP: see plan/phase8/39-dsp-timed-commands.md"]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p2_duc_entry_after_its_samples() {
     // F3: a timed DUC shift at e, 20 ms into a 60 ms burst, given before the burst is sent
     // and given 3 ms before e after the samples covering e were sent: where does the
@@ -986,7 +987,7 @@ fn hw_d9_p2_duc_entry_after_its_samples() {
 }
 
 #[test]
-#[ignore = "needs a USRP: see plan/phase8/39-dsp-timed-commands.md"]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p3_duc_entries_between_bursts() {
     // F4: a timed DUC shift in the gap between two bursts, then a timed shift in the next
     // gap followed at once by an untimed one: which shift does each burst carry?
