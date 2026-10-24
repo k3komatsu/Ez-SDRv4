@@ -88,7 +88,9 @@ mod ffi {
         pub time_spec_frac_secs: f64,
     }
 
+    pub const UHD_TUNE_REQUEST_POLICY_NONE: c_int = 78;
     pub const UHD_TUNE_REQUEST_POLICY_AUTO: c_int = 65;
+    pub const UHD_TUNE_REQUEST_POLICY_MANUAL: c_int = 77;
 
     /// `uhd/types/tune_request.h`: 48 bytes on LP64.
     #[repr(C)]
@@ -510,6 +512,43 @@ impl UhdDevice {
             args: empty.as_ptr() as *mut c_char,
             channel_list: channels.as_mut_ptr(),
             n_channels: channels.len() as c_int,
+        }
+    }
+
+    /// Design note 39's bench probes only: sets the DDC's (receive) or DUC's (transmit) shift
+    /// on `chan` to `dsp_hz`, leaving the LO alone (`rf_freq_policy` NONE), at `at` or now;
+    /// returns the shift UHD reports.
+    pub fn tune_dsp(&self, dir: Dir, chan: usize, dsp_hz: f64, at: Option<i64>) -> Result<f64, DeviceError> {
+        let empty = cstring("")?;
+        let _control = lock(&self.control);
+        // SAFETY: every pointer passed outlives its call; the command time is set and
+        // cleared under the control mutex, as `apply` does.
+        unsafe {
+            if let Some(at) = at {
+                let (full, frac) = to_time_spec(at, self.mcr);
+                self.check_usrp("uhd_usrp_set_command_time", uhd_usrp_set_command_time(self.usrp, full, frac, 0), false)?;
+            }
+            let mut request = uhd_tune_request_t {
+                target_freq: 0.0,
+                rf_freq_policy: UHD_TUNE_REQUEST_POLICY_NONE,
+                rf_freq: 0.0,
+                dsp_freq_policy: UHD_TUNE_REQUEST_POLICY_MANUAL,
+                dsp_freq: dsp_hz,
+                args: empty.as_ptr() as *mut c_char,
+            };
+            let mut result = uhd_tune_result_t::default();
+            let tuned = match dir {
+                Dir::Rx => self.check_usrp("uhd_usrp_set_rx_freq", uhd_usrp_set_rx_freq(self.usrp, &mut request, chan, &mut result), false),
+                Dir::Tx => self.check_usrp("uhd_usrp_set_tx_freq", uhd_usrp_set_tx_freq(self.usrp, &mut request, chan, &mut result), false),
+            };
+            let cleared = if at.is_some() {
+                self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false)
+            } else {
+                Ok(())
+            };
+            tuned?;
+            cleared?;
+            Ok(result.actual_dsp_freq)
         }
     }
 

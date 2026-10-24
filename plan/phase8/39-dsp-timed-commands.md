@@ -34,9 +34,11 @@ uhd-control は，channel が stream に入っていて stream が halt して�
 **先に実機で F2〜F4 を確かめてから，規則を決める．** 1 の事実は資料とソースで足りるが，F2〜F4 の振る舞い（残った設定がいつ当たるか，DUC が sample をいつ処理するか）は FPGA の中の順序で決まり，ソースを読むだけでは言い切れない．いまつながっている X300 #1＋OBX のループバックで，壊さずに確かめられる．
 
 **probe**（`tests/hardware.rs` に `hw_d9_*` を足す．どれも 8 個以下で，FIFO をあふれさせない）：
-- **P1（F2）**：受信を止めた channel に，過去と未来の timed の周波数を 3 個渡す → untimed で別の周波数を設定 → 受信を始め，tone の位置が最初の何 sample でどの周波数か．
-- **P2（F3）**：1 本の長い burst の途中（e は開始の 20 ms 後）に timed の TX の周波数．release を 3 ms 前と 15 ms 前の 2 通りで，ループバックで切り替わりの sample の位置を測る．
-- **P3（F4）**：burst の間に timed の TX の周波数，次の burst の最初の sample の周波数．その後に untimed の TX の周波数を設定して次の burst．
+- **P1（F2）**：受信していない channel に timed の DDC の shift を 3 個（20・40・60 kHz）渡す → untimed で 0 に戻す（その instant の前と後の 2 通り）→ 受信を始め，tone の周波数が最初の何 sample でどの shift か．
+- **P2（F3）**：60 ms の burst の途中（e は開始の 20 ms 後）に timed の DUC の shift（50 kHz）．burst を送る前に渡す場合と，e を含む前半を送った後で e の 3 ms 前に渡す場合の 2 通り．ループバックで tone が動く位置を e から測る．
+- **P3（F4）**：burst の間に timed の DUC の shift（50 kHz），次の burst の周波数．次の間に timed の shift（80 kHz）の直後に untimed の 0，その次の burst の周波数（残った timed が untimed を上書きするか）．
+
+probe は `crates/ezsdr-radio-uhd/tests/hardware.rs` の `hw_d9_p1_ddc_entries_wait_for_samples`，`hw_d9_p2_duc_entry_after_its_samples`，`hw_d9_p3_duc_entries_between_bursts`（2026-10-24 に書いた．`--features uhd` の clippy は通る．実機ではまだ流していない）．DDC/DUC の shift だけを変える `UhdDevice::tune_dsp`（`rf_freq_policy = NONE`，`dsp_freq_policy = MANUAL`）を使う．流し方は handoff §6 の docker の形で `<test>` に各名前．どれも結果を出力するだけで assert しない（bench-results に記録する）．
 
 **規則の見込み**（probe の結果で決め直す）：
 1. gain は今のまま．

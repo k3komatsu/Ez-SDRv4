@@ -840,6 +840,189 @@ fn hw_b8_raw_timed_retune() {
     }
 }
 
+// ---------------------------------------------------------------- design note 39: DDC/DUC timed commands
+
+/// `raw`, as the concrete device: the probes also set the DDC/DUC shift alone (`tune_dsp`).
+fn raw_uhd() -> Arc<ezsdr_radio_uhd::UhdDevice> {
+    let device = Arc::new(ezsdr_radio_uhd::UhdDevice::open(&args()).expect("the USRP opens"));
+    device.set_sources("internal", "internal").unwrap();
+    device.set_time_zero(false).unwrap();
+    std::thread::sleep(Wall::from_millis(100));
+    device
+}
+
+/// A 100 kHz tone at 1 Msps, amplitude 0.4.
+fn tone_1msps(n: usize) -> Vec<ezsdr_radio_uhd::Iq> {
+    (0..n).map(|i| {
+        let phase = 2.0 * std::f64::consts::PI * 100e3 * (i as f64 / 1e6);
+        [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32]
+    }).collect()
+}
+
+/// The received tone's frequency over windows of 25 samples at 1 Msps, as `hw_b8_raw_timed_retune`.
+fn tone_freqs(samples: &[(i64, ezsdr_radio_uhd::Iq)]) -> Vec<(i64, f64)> {
+    samples.chunks_exact(25).map(|w| {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for pair in w.windows(2) {
+            let (a, b) = (pair[0].1, pair[1].1);
+            re += f64::from(b[0] * a[0] + b[1] * a[1]);
+            im += f64::from(b[1] * a[0] - b[0] * a[1]);
+        }
+        (w[0].0, im.atan2(re) / (2.0 * std::f64::consts::PI) * 1e6)
+    }).collect()
+}
+
+/// The median window frequency in `[from, to)`.
+fn median_freq(freqs: &[(i64, f64)], from: i64, to: i64) -> Option<f64> {
+    let mut f: Vec<f64> = freqs.iter().filter(|(t, _)| *t >= from && *t < to).map(|(_, f)| *f).collect();
+    f.sort_by(f64::total_cmp);
+    f.get(f.len() / 2).copied()
+}
+
+/// One sample's frequency from the phase step to the next, for the first `n` samples from `from`.
+fn first_steps(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, n: usize) -> Vec<String> {
+    samples.windows(2).filter(|w| w[0].0 >= from).take(n).map(|w| {
+        let (a, b) = (w[0].1, w[1].1);
+        let step = f64::from(b[1] * a[0] - b[0] * a[1]).atan2(f64::from(b[0] * a[0] + b[1] * a[1]));
+        format!("{:.0}", step / (2.0 * std::f64::consts::PI) * 1e6)
+    }).collect()
+}
+
+fn flush_tx(device: &dyn Device) -> Vec<String> {
+    let mut reports = Vec::new();
+    while let Some(report) = device.tx_async(0, Wall::from_millis(10)).unwrap() {
+        reports.push(format!("{:?}", report.code));
+    }
+    reports
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase8/39-dsp-timed-commands.md"]
+fn hw_d9_p1_ddc_entries_wait_for_samples() {
+    // F2: timed DDC shifts given while nothing streams, then an untimed shift; when the
+    // stream starts, which shift does the loopback tone show, from which sample? Three
+    // entries at most, far below the 32 the FPGA holds.
+    let device = raw_uhd();
+    raw_rx(&*device, 1e6, 1e9);
+    raw_tx(&*device, 1e6, 1e9);
+    let tone = tone_1msps(40_000);
+    for (case, untimed_after) in [("untimed before the entries' instants", false), ("untimed after the entries' instants", true)] {
+        device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
+        device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+        let now = device.time_now().unwrap();
+        let given: Vec<f64> = [20e3, 40e3, 60e3].iter().enumerate()
+            .map(|(i, hz)| device.tune_dsp(Dir::Rx, 0, *hz, Some(now + (50 + i as i64) * TICKS_PER_MS)).unwrap())
+            .collect();
+        if untimed_after {
+            while device.time_now().unwrap() < now + 60 * TICKS_PER_MS {
+                std::thread::sleep(Wall::from_millis(1));
+            }
+        }
+        let untimed = device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
+        let start = (device.time_now().unwrap().max(now + 60 * TICKS_PER_MS) / 200 + 100_000) * 200;
+        device.rx_start(0, start).unwrap();
+        device.tx_send(0, &[&tone], Some(start), true, true, Wall::from_millis(500)).unwrap();
+        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 30 * TICKS_PER_MS));
+        device.rx_stop(0, None).unwrap();
+        let _ = drain(&*device);
+        let reports = flush_tx(&*device);
+        let freqs = tone_freqs(&got.samples);
+        println!(
+            "D9 P1 {case}: timed shifts given {given:?}, untimed {untimed}; tone first windows {:?}; median 5–30 ms {:?} Hz; first samples' steps {:?}; tx {reports:?}; other {:?}",
+            freqs.iter().take(4).map(|(t, f)| format!("{:+.0} µs {f:.0}", (t - start) as f64 / 200.0)).collect::<Vec<_>>(),
+            median_freq(&freqs, start + 5 * TICKS_PER_MS, start + 30 * TICKS_PER_MS),
+            first_steps(&got.samples, start, 8),
+            got.other,
+        );
+    }
+    device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase8/39-dsp-timed-commands.md"]
+fn hw_d9_p2_duc_entry_after_its_samples() {
+    // F3: a timed DUC shift at e, 20 ms into a 60 ms burst, given before the burst is sent
+    // and given 3 ms before e after the samples covering e were sent: where does the
+    // loopback tone move?
+    let device = raw_uhd();
+    raw_rx(&*device, 1e6, 1e9);
+    raw_tx(&*device, 1e6, 1e9);
+    assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 - 50e3 + 100e3)));
+    let tone = tone_1msps(60_000);
+    for case in ["given before the burst", "given 3 ms before e, after its samples"] {
+        device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
+        device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+        let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
+        let e = start + 20 * TICKS_PER_MS;
+        device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
+        let (head, tail) = tone.split_at(25_000);
+        let mut log = Vec::new();
+        if case.starts_with("given before") {
+            log.push(format!("dsp {} at {}", device.tune_dsp(Dir::Tx, 0, 50e3, Some(e)).unwrap(), device.time_now().unwrap()));
+        }
+        let sent = device.tx_send(0, &[head], Some(start), true, false, Wall::from_secs(2)).unwrap();
+        log.push(format!("head {sent} sent by {}", device.time_now().unwrap()));
+        if !case.starts_with("given before") {
+            while device.time_now().unwrap() < e - 3 * TICKS_PER_MS {
+                std::thread::sleep(Wall::from_micros(200));
+            }
+            log.push(format!("dsp {} at {}", device.tune_dsp(Dir::Tx, 0, 50e3, Some(e)).unwrap(), device.time_now().unwrap()));
+        }
+        let sent = device.tx_send(0, &[tail], None, false, true, Wall::from_secs(2)).unwrap();
+        log.push(format!("tail {sent} sent by {}", device.time_now().unwrap()));
+        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= start + 60 * TICKS_PER_MS));
+        device.rx_stop(0, None).unwrap();
+        let _ = drain(&*device);
+        let reports = flush_tx(&*device);
+        let freqs = tone_freqs(&got.samples);
+        let moves = freqs.iter().find(|(t, f)| *t >= start + TICKS_PER_MS && (f - 100e3).abs() > 10e3).map(|(t, _)| (t - e) as f64 / 200.0);
+        println!(
+            "D9 P2 {case}: e = start + 20 ms; the tone leaves 100 kHz at {moves:?} µs from e; median before e {:?}, after e + 5 ms {:?} Hz; {log:?}; tx {reports:?}",
+            median_freq(&freqs, start + TICKS_PER_MS, e),
+            median_freq(&freqs, e + 5 * TICKS_PER_MS, start + 60 * TICKS_PER_MS),
+        );
+    }
+    device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase8/39-dsp-timed-commands.md"]
+fn hw_d9_p3_duc_entries_between_bursts() {
+    // F4: a timed DUC shift in the gap between two bursts, then a timed shift in the next
+    // gap followed at once by an untimed one: which shift does each burst carry?
+    let device = raw_uhd();
+    raw_rx(&*device, 1e6, 1e9);
+    raw_tx(&*device, 1e6, 1e9);
+    assert!(SAFE_TX_HZ.contains(&(1e9 + 80e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 - 80e3 + 100e3)));
+    device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
+    device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+    let burst = tone_1msps(10_000);
+    let s1 = (device.time_now().unwrap() / 200 + 150_000) * 200;
+    let at = |ms: i64| s1 + ms * TICKS_PER_MS;
+    device.rx_start(0, at(-5)).unwrap();
+    let mut log = vec![format!("gap 1: dsp {}", device.tune_dsp(Dir::Tx, 0, 50e3, Some(at(20))).unwrap())];
+    device.tx_send(0, &[&burst], Some(at(0)), true, true, Wall::from_secs(1)).unwrap();
+    device.tx_send(0, &[&burst], Some(at(30)), true, true, Wall::from_secs(1)).unwrap();
+    log.push(format!("gap 2 at {}: timed dsp {}", device.time_now().unwrap(), device.tune_dsp(Dir::Tx, 0, 80e3, Some(at(50))).unwrap()));
+    log.push(format!("then untimed dsp {}", device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap()));
+    device.tx_send(0, &[&burst], Some(at(60)), true, true, Wall::from_secs(1)).unwrap();
+    let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= at(75)));
+    device.rx_stop(0, None).unwrap();
+    let _ = drain(&*device);
+    let reports = flush_tx(&*device);
+    let freqs = tone_freqs(&got.samples);
+    for (name, from) in [("burst 1 (0 ms)", 0), ("burst 2 (30 ms, after a timed +50 kHz at 20 ms)", 30), ("burst 3 (60 ms, after a timed +80 kHz at 50 ms then an untimed 0)", 60)] {
+        println!(
+            "D9 P3 {name}: first window {:?} Hz, median {:?} Hz, first samples' steps {:?}",
+            freqs.iter().find(|(t, _)| *t >= at(from)).map(|(_, f)| f.round()),
+            median_freq(&freqs, at(from) + TICKS_PER_MS, at(from + 10)),
+            first_steps(&got.samples, at(from), 6),
+        );
+    }
+    println!("D9 P3: {log:?}; tx {reports:?}; other {:?}", got.other);
+    device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+}
+
 // ---------------------------------------------------------------- beyond bench.md: rates, delay, endurance
 
 #[test]
