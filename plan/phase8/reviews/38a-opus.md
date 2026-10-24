@@ -50,7 +50,7 @@ mutation：直す前の tree で全リスト 1316/1318（sim02・sim03 が空い
 - `at=None` の fallback は `max` に吸収される同値の変異で，1b の試験は結果だけを固定する．
 - `targets` は常に 1 channel を返すので，「最後の channel の `h`」の複数 channel の場合は試験も mutation も無い．
 - 「`S` までに渡した」は呼び出しを始めた時刻で決める．装置が受理した本当の時刻は INFERRED（装置は返さない）．
-- #62 を閉じる comment は owner の確認の後．
+- #62 は 2026-10-24 に閉じた（owner の確認の後）．
 
 ## 6. 数（AGENTS.md §9 の 8）
 
