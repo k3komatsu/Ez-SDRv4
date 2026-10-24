@@ -75,13 +75,16 @@ fn se_03_faults_reader() {
     let input = json!([
         {"at_ns": 0, "fault": "rx_overflow", "target": "radio"},
         {"at_ns": 5, "fault": "rx_sequence_error", "target": "radio"},
-        {"at_ns": 10, "fault": "device_lost", "target": "radio"}
+        {"at_ns": 10, "fault": "device_lost", "target": "radio"},
+        {"at_ns": 20, "fault": "cold_change_refused", "target": "radio"}
     ]);
     let entries = ezsdr_sim::faults(&section("sim.faults", input)).unwrap();
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 4);
     assert_eq!(entries[0].fault, FaultKind::RxOverflow);
     assert_eq!(entries[1].fault, FaultKind::RxSequenceError);
     assert_eq!(entries[2].fault, FaultKind::DeviceLost);
+    assert_eq!(entries[3].fault, FaultKind::ColdChangeRefused);
+    assert_eq!(entries[3].at_ns, 20);
     assert_eq!(entries[0].target, Ident::parse("radio").unwrap());
     assert_eq!(entries[0].at_ns, 0);
 

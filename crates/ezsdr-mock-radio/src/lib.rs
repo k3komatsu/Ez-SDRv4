@@ -35,6 +35,12 @@ pub use profile::{Profile, ProfileKind};
 
 /// The reason a lost device gives for everything it cancels or refuses (MR-20).
 const DEVICE_LOST: &str = "MR-20: device lost";
+/// The reason a `cold_change_refused` fault gives the change it refuses (MR-20).
+const REFUSED_CHANGE: &str = "MR-18: the cold change was refused";
+/// The reason a refused `cold` change gives the bursts booked on the clock it started (MR-18).
+const REFUSED_BURST: &str = "MR-18: cancelled by a refused cold change";
+/// The reason a transmit burst receives while a refusal halts its stream (MR-25).
+const HALTED_STREAM: &str = "MR-25: the stream is halted by a refused change";
 
 fn module_ref() -> ModuleRef {
     ModuleRef {
@@ -268,6 +274,15 @@ struct ScheduledFault {
     order: u64,
 }
 
+impl ScheduledFault {
+    /// MR-20: whether the fault fires in the step's ordered loop at its instant, cutting the
+    /// block in progress and waking the step. A `cold_change_refused` fault has no instant of
+    /// its own: it refuses the change it names when that change applies (MR-18).
+    fn fires(&self) -> bool {
+        !self.resolved && self.entry.fault != FaultKind::ColdChangeRefused
+    }
+}
+
 struct HeldBurst {
     start: i64,
     len: i64,
@@ -293,6 +308,9 @@ struct PendingUpdate {
     /// Transmit streams switched by this cold change: stream, new clock, and the number of
     /// clocks their plans held when it was booked (RM-25, MR-18, RM-34).
     tx: Vec<(usize, Option<usize>, usize)>,
+    /// The lines this `cold` change names — the streams whose plan can hold the segment it
+    /// begins (MR-18, MR-20); none for an update that starts no segment.
+    cold: Vec<(Direction, usize)>,
 }
 
 enum ColdChange {
@@ -585,7 +603,7 @@ impl MockRadio {
                 break;
             }
             // Every fault cuts the block in progress at its instant (MR-20).
-            let fault = self.faults.iter().filter(|fault| !fault.resolved).map(|fault| fault.tick).min();
+            let fault = self.faults.iter().filter(|fault| fault.fires()).map(|fault| fault.tick).min();
             let fault_cut = fault.map(|tick| time::k_at_or_after(origin, ratio, tick)
                 .ok_or_else(|| self.reject("MR-12: receive cut overflow"))).transpose()?;
             if fault_cut.is_some_and(|fault_cut| fault_cut <= next) { break; }
@@ -755,6 +773,7 @@ impl MockRadio {
             }
             FaultKind::RxSequenceError => (kf.saturating_add(i64::from(self.profile.block_len())), ezsdr_radio::payloads::RxOverflowCause::Sequence),
             FaultKind::DeviceLost => unreachable!("a loss ends the device (MR-20)"),
+            FaultKind::ColdChangeRefused => unreachable!("a refused cold change fires on its change (MR-20)"),
         };
         let lost = kg - kf;
         if let Some(rx) = self.rx[k].running.as_mut() {
@@ -800,7 +819,7 @@ impl MockRadio {
         let mut wake = |tick: i64| next = Some(next.map_or(tick, |next| next.min(tick)));
         for (tick, _) in self.updates.keys() { wake(*tick); }
         if self.started {
-            self.faults.iter().filter(|fault| !fault.resolved).for_each(|fault| wake(fault.tick));
+            self.faults.iter().filter(|fault| fault.fires()).for_each(|fault| wake(fault.tick));
             for k in 0..self.rx.len() {
                 if let Some(segment) = self.rx_next_segment(k) { wake(segment.origin); }
             }
@@ -808,7 +827,7 @@ impl MockRadio {
         for k in 0..self.rx.len() {
             let cut = self.rx_cut(k);
             if self.rx[k].running.as_ref().is_some_and(|rx| cut.is_none_or(|cut| rx.next < cut)) {
-                let fault = self.faults.iter().filter(|fault| !fault.resolved).map(|fault| fault.tick).min();
+                let fault = self.faults.iter().filter(|fault| fault.fires()).map(|fault| fault.tick).min();
                 let rx = self.rx[k].running.as_ref().expect("a receive stream");
                 let fault_cut = fault.and_then(|tick| time::k_at_or_after(rx.origin, rx.ratio, tick));
                 if fault_cut.is_none_or(|fault_cut| fault_cut > rx.next) { self.plan_rx_block(k); }
@@ -1518,6 +1537,10 @@ impl MockRadio {
         let metadata_empty = metadata.is_empty();
         let root = self.root.expect("prepared root");
         let tx_id = self.tx[k].node.clone();
+        // MR-25: a stream a refused change has halted plays no burst at or after the cut of the
+        // clock the refusal cut, until its next `cold` change or `start_rx`; a clock a later
+        // `cold` change in the plan starts is taken, as UR-21's `book_burst` takes it.
+        let halted = self.lines.line(Self::tx_key(k)).is_some_and(|line| line.halted(now));
         // The burst's clock: the stream's current one, or one a booked change starts
         // (KC-21a, RM-25).
         let clock = self.tx[k].clocks.iter().position(|clock| clock.domain == at.time_point.domain())
@@ -1602,6 +1625,14 @@ impl MockRadio {
                 self.record_rejected_action("tx_burst", "MR-17: the planned burst arrived late", now);
                 return Ok(());
             }
+        }
+        // MR-25: a burst whose start is at or after the cut of the halted stream's clock plays
+        // nothing; the clock the refused change started is ended at its origin, which the lookup
+        // above refuses.
+        let cut = self.lines.line(Self::tx_key(k)).and_then(|line| line.plan.get(index)).and_then(|segment| segment.cut);
+        if halted && cut.is_some_and(|cut| start >= cut) {
+            self.reject_action_at(Some(id), "tx_burst", HALTED_STREAM, now)?;
+            return Ok(());
         }
         let start_v = time::v_of(origin, ratio, start).ok_or_else(|| ModuleError::rejected("MR-16: burst time overflow"))?;
         let refusal = if start_v < self.sync_end.unwrap_or(i64::MIN) {
@@ -1835,6 +1866,12 @@ impl MockRadio {
         let applied = report.applied.get(&key).cloned().unwrap_or(value);
         candidate.insert(key.clone(), applied.clone());
         let move_change = matches!(&cold, Some(ColdChange::Move { .. }));
+        // MR-18, MR-20: the lines this change names, whose plan holds the segment it begins.
+        let cold_lines = match &cold {
+            Some(ColdChange::Streams(streams)) => streams.clone(),
+            Some(ColdChange::Move { direction, from, to, .. }) => vec![(*direction, *from), (*direction, *to)],
+            None => Vec::new(),
+        };
         if !move_change { self.next_order = self.next_order.saturating_add(1); }
         // RM-25, RM-27: a `cold` change is planned on its stream's line when booked,
         // with the set and rate the configuration leaves in effect at `e`; a transmit one
@@ -1892,7 +1929,7 @@ impl MockRadio {
             None => {}
         }
         if move_change { self.next_order = self.next_order.saturating_add(1); }
-        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx });
+        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx, cold: cold_lines });
         Ok(())
     }
 
@@ -1944,15 +1981,70 @@ impl MockRadio {
     }
 
     /// MR-18: at `e` the value applies and is recorded; a transmit `cold` change ends the old
-    /// clock's bursts at its cut and makes its own clock current.
+    /// clock's bursts at its cut and makes its own clock current. MR-20: a `cold` change the
+    /// instance's `cold_change_refused` fault names is refused at `e` instead — the value stays
+    /// the configuration of record, the stream halts, and a transmit clock the change booked
+    /// ends at its origin with the bursts on it cancelled.
     fn apply_update(&mut self, tick: i64, effective: i64, order: u64) -> Result<(), ModuleError> {
         let Some(update) = self.updates.remove(&(effective, order)) else { return Ok(()); };
+        let refused = self.refusal(effective, order, &update.cold);
         self.config.insert(update.key.clone(), update.value.clone());
         self.record_update(&update.key, &update.value, tick);
         self.apply_layout_channel_update(&update.key, &update.value, tick);
+        if let Some((index, line)) = refused {
+            self.lines.refuse(stream_key(line.0, line.1), order).map_err(rm25)?;
+            for (direction, k) in &update.cold { self.forget_refused_segment(*direction, *k, order); }
+            self.faults[index].applied = true;
+            self.faults[index].resolved = true;
+            self.record_fault(index, 0);
+            self.reject_action_at(None, "update_parameter", REFUSED_CHANGE, tick)?;
+        }
         for (k, to, passed) in update.tx {
             self.stop_tx(k, tick, "MR-18: cancelled by a cold change", ezsdr_radio::CancelReason::ColdChange)?;
-            self.tx_switch(k, to, passed)?;
+            match refused {
+                None => self.tx_switch(k, to, passed)?,
+                Some(_) => {
+                    if let Some(index) = to { self.cancel_booked(k, index, REFUSED_BURST, tick)?; }
+                    self.tx_reconcile(k)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// MR-27: drops the row of a receive segment the refused change began at its own instant. A
+    /// receive segment cut with no sample has no segment of the plan (RM-25) and no row either.
+    fn forget_refused_segment(&mut self, direction: Direction, k: usize, seq: u64) {
+        if direction != Direction::Rx { return; }
+        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
+            rows.retain(|row| !(row["direction"] == "rx" && row["stream"].as_u64() == Some(k as u64) && row["sequence"].as_u64() == Some(seq)));
+        }
+    }
+
+    /// MR-20: the `cold_change_refused` fault that refuses the change received with `seq` at
+    /// `e`, and the line whose plan starts the segment it begins — the fault's instant at or
+    /// before `e`, and the first change in `(e, seq)` order whose segment the plan holds. A
+    /// change the plan gives no segment — one to a stopped or a linkless stream, or one a
+    /// later booking has already cut away — is no candidate, and the fault keeps waiting.
+    fn refusal(&self, e: i64, seq: u64, lines: &[(Direction, usize)]) -> Option<(usize, (Direction, usize))> {
+        let index = self.faults.iter().position(|fault| !fault.resolved && fault.entry.fault == FaultKind::ColdChangeRefused && fault.tick <= e)?;
+        let line = lines.iter().copied().find(|(direction, k)| {
+            self.lines.line(stream_key(*direction, *k)).is_some_and(|line| line.plan.iter().any(|segment| segment.by == Some(seq)))
+        })?;
+        Some((index, line))
+    }
+
+    /// MR-18: withdraws the bursts held on transmit stream `k`'s clock `index` — the clock the
+    /// refused change booked — recording each as cancelled and leaving the other clocks'.
+    fn cancel_booked(&mut self, k: usize, index: usize, reason: &str, now: i64) -> Result<(), ModuleError> {
+        let kept = std::mem::take(&mut self.tx[k].later);
+        for (later, held) in kept {
+            if later == index {
+                self.forget_later(k, later, held.start);
+                self.record_cancelled_burst(reason, now, ezsdr_radio::CancelReason::ColdChange)?;
+            } else {
+                self.tx[k].later.push((later, held));
+            }
         }
         Ok(())
     }
@@ -2013,7 +2105,7 @@ impl MockRadio {
         loop {
             let mut candidates: Vec<(i64, u8, u64, WorkKind)> = Vec::new();
             if self.started {
-                candidates.extend(self.faults.iter().enumerate().filter(|(_, fault)| !fault.resolved)
+                candidates.extend(self.faults.iter().enumerate().filter(|(_, fault)| fault.fires())
                     .map(|(index, fault)| (fault.tick, 1, fault.order, WorkKind::Fault { index })));
                 for k in 0..self.rx.len() {
                     if let Some(segment) = self.rx_next_segment(k) {
@@ -2084,6 +2176,7 @@ impl MockRadio {
                         self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::Loss)?;
                         return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: DEVICE_LOST.to_owned(), detail: serde_json::Value::Null });
                     }
+                    FaultKind::ColdChangeRefused => unreachable!("a refused cold change is no fault of the step's loop (MR-20)"),
                 },
                 WorkKind::HeldBurst { stream, start } => {
                     if let Some(held) = self.tx[stream].held.remove(&start) {

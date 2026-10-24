@@ -2509,3 +2509,474 @@ fn mr_18_a_layout_rejects_an_out_of_range_stream_before_booking_a_move() {
     assert!(harness.applied().is_empty());
     assert!(harness.clocks_of("mock/rx/s0").is_empty() && harness.clocks_of("mock/rx/s1").is_empty());
 }
+
+fn cold_change_refused_at(at_ns: i64) -> serde_json::Value {
+    serde_json::json!({ "at_ns": at_ns, "fault": "cold_change_refused", "target": "radio" })
+}
+
+const REFUSED_CHANGE: &str = "MR-18: the cold change was refused";
+const REFUSED_BURST: &str = "MR-18: cancelled by a refused cold change";
+const HALTED_STREAM: &str = "MR-25: the stream is halted by a refused change";
+
+/// A repeated burst on `domain`, so that it is still open at the change that cuts it (RM-15).
+fn loop_burst(target: &str, domain: ClockDomainId, sample: i64, samples: usize) -> Action {
+    Action::TxBurst {
+        target: tgt(target),
+        waveform: waveform(samples, 1),
+        repeat: true,
+        at: AbsoluteDeadline::new(TimePoint::new(domain, sample)),
+        requested_at: None,
+        late_policy: LatePolicy::SendAsapAndFlag,
+        metadata: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn mr_20_a_start_rx_resumes_a_refused_stream() {
+    // MR-21, MR-25: `start_rx` is the other item that starts a halted stream. The `ideal`
+    // profile has no lead, so the segment begins at the start's instant, from the refused
+    // value's channel set and rate (#64).
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"] });
+    harness.arm_start(0).unwrap();
+    harness.step(1_000_000).unwrap();
+    let e = 3_000_000;
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+    harness.step(e).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the change was not refused");
+    harness.push(start_rx("mock/rx/s0", Some(e + 10_000_000)));
+    harness.step(e + 10_000_000).unwrap();
+    harness.step(e + 20_000_000).unwrap();
+    let clocks = harness.clocks_of("mock/rx/s0");
+    assert_eq!(clocks.len(), 2, "{clocks:?}");
+    assert_eq!(clocks[0].ended_at, Some(TimePoint::new(ROOT, e)));
+    assert_eq!(clocks[1].origin, TimePoint::new(ROOT, e + 10_000_000));
+    assert_eq!(clocks[1].root_ticks_per_tick, Rational::new(500, 1).unwrap());
+    let segments = harness.section("segments");
+    let begun = segments.last().expect("the restarted segment");
+    assert_eq!(begun["channels"], serde_json::json!([0, 1]), "{begun}");
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the start was refused too");
+    assert_eq!(harness.applied_of("radio.rx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e)]);
+    assert_eq!(harness.section("faults")[0]["applied"], true);
+    let first = harness.headers("rx0").into_iter().find(|header| header.first_sample_time.domain() == clocks[1].domain).expect("a block on the restarted clock");
+    assert_eq!(first.first_sample_time.ticks_in(first.first_sample_time.domain()).unwrap(), 0);
+    assert!(!first.flags.contains(BlockFlags::GAP_BEFORE));
+}
+
+#[test]
+fn mr_20_a_hardware_timed_update_in_a_refused_halt_is_recorded() {
+    // MR-18's no-channel rule on the Mock (UR-24's on the UHD Module): while the stream is
+    // halted a `hardware_timed` update is neither refused nor lost: it is recorded at its own
+    // instant and applies when the stream starts again. The Mock's row has no `note` (RM-27).
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap()))];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] });
+    harness.arm_start(T0).unwrap();
+    harness.step(T0 + 1_000_000).unwrap();
+    harness.step(T0 + 2_000_000).unwrap();
+    let e = T0 + 3_000_000;
+    let h = e + 10_000_000;
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+    harness.push(update("radio.rx.c0.gain_db", Value::num(6.0).unwrap(), UpdateClass::HardwareTimed, Some(h)));
+    harness.step(e).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the change was not refused");
+    harness.step(h).unwrap();
+    assert_eq!(harness.applied_of("radio.rx.c0.gain_db"), [(serde_json::json!(6.0), h)]);
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the halted stream refused the timed update");
+    let kinds: Vec<String> = harness.events().into_iter().map(|event| event.kind.as_str().to_owned())
+        .filter(|kind| kind == ezsdr_radio::kinds::COMMAND_REJECTED || kind == ezsdr_radio::kinds::LATE_COMMAND).collect();
+    assert_eq!(kinds, [ezsdr_radio::kinds::COMMAND_REJECTED], "the only event is the refusal's");
+    assert_eq!(harness.clocks_of("mock/rx/s0").len(), 1, "the halt left a clock behind");
+}
+
+#[test]
+fn mr_20_a_refused_transmit_change_ends_its_clock_and_cancels_its_bursts() {
+    // MR-18, MR-25 (UR-25's shape): a refused transmit change ends the bursts on the old clock
+    // at the cut, closes the open one with its record, ends the clock it started at its origin
+    // and cancels the bursts booked on it. The halt plays on neither clock the refusal ended.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &[] });
+    harness.arm_start(T0).unwrap();
+    let e = T0 + 100_000_000;
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+    harness.step(0).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 2, "the booked change registered no clock: {clocks:?}");
+    let refused = clocks[1].domain;
+    // A repeated burst open at the change, and one held on the clock the change starts.
+    harness.push(loop_burst("mock/tx/s0", clocks[0].domain, 2_050_000, 1_000));
+    harness.push(burst("mock/tx/s0", refused, 100, 100));
+    harness.step(0).unwrap();
+    harness.step(2_060_000_000).unwrap();
+    assert!(harness.section("bursts").is_empty(), "the open burst ended before the refusal");
+    harness.step(e).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks[0].ended_at, Some(TimePoint::new(ROOT, e)));
+    // RM-25: the refused change's clock begins after the cut and the start lead, and ends at its
+    // own origin, since no later change cut it first.
+    assert_eq!(clocks[1].origin, TimePoint::new(ROOT, 2_150_000_000));
+    assert_eq!(clocks[1].ended_at, Some(TimePoint::new(ROOT, 2_150_000_000)));
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned(), REFUSED_BURST.to_owned()]);
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+    assert_eq!(bursts.len(), 1, "{bursts:?}");
+    assert_eq!((bursts[0].blocks, bursts[0].samples, bursts[0].end), (50, 50_000, ezsdr_kernel::stream::BurstEnd::Stop));
+    assert_eq!(bursts[0].target, TimePoint::new(clocks[0].domain, 2_050_000));
+    let mut kinds: Vec<(String, serde_json::Value)> = harness.events().into_iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED)
+        .map(|event| (event.payload["kind"].as_str().unwrap_or_default().to_owned(), event.payload["action"].clone())).collect();
+    kinds.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(kinds, [("tx_burst".to_owned(), serde_json::Value::Null), ("update_parameter".to_owned(), serde_json::Value::Null)]);
+    // The halt: a burst at or after the old clock's cut, or one the late policy moved past it,
+    // plays on neither; the clock the refused change started is cut at its origin and is no clock
+    // MR-16 takes.
+    harness.push(burst("mock/tx/s0", clocks[0].domain, 2_200_000, 100));
+    harness.push(burst("mock/tx/s0", refused, 0, 100));
+    harness.push(burst("mock/tx/s0", clocks[0].domain, 2_099_000, 100));
+    harness.step(e).unwrap();
+    assert_eq!(harness.rejected()[2..], [HALTED_STREAM.to_owned(), "MR-16: target, clock, waveform size, channel count or metadata is invalid".to_owned(), HALTED_STREAM.to_owned()]);
+    // The next `cold` change starts the stream again, and a burst on its clock plays; the
+    // refused clock's domain still takes none.
+    let later = e + 100_000_000;
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(4_000_000.0).unwrap(), UpdateClass::Cold, Some(later)));
+    harness.step(e).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 3, "{clocks:?}");
+    harness.push(burst("mock/tx/s0", clocks[1].domain, 0, 100));
+    harness.push(burst("mock/tx/s0", clocks[2].domain, 16_000, 100));
+    harness.step(later).unwrap();
+    harness.step(later + 10_000_000).unwrap();
+    assert_eq!(harness.rejected().last(), Some(&"MR-16: target, clock, waveform size, channel count or metadata is invalid".to_owned()), "{:?}", harness.rejected());
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+    assert_eq!(bursts.len(), 2, "{bursts:?}");
+    assert_eq!((bursts[1].target, bursts[1].samples, bursts[1].end), (TimePoint::new(clocks[2].domain, 16_000), 100, ezsdr_kernel::stream::BurstEnd::Eob));
+}
+
+#[test]
+fn mr_20_a_burst_on_a_clock_booked_after_a_refusal_plays() {
+    // MR-20, MR-25 (UR-21's shape, #59): the halt refuses the clock the refusal ended, not one a
+    // later `cold` change in the plan starts; a burst booked on that clock before its instant is
+    // held and plays when the change applies.
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let env = [
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+        ("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)])),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 100]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]),
+        selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let (ea, eb) = (T0 + 100_000_000, T0 + 300_000_000);
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(ea)));
+    harness.step(0).unwrap();
+    assert_eq!(harness.clocks_of("mock/tx/s0").len(), 2, "the refused change registered no clock");
+    harness.step(ea).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the change was not refused");
+    // B is booked for a later instant: its clock is registered, and the stream is still halted.
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(4_000_000.0).unwrap(), UpdateClass::Cold, Some(eb)));
+    harness.step(eb - 10_000_000).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 3, "{clocks:?}");
+    assert!(harness.section("bursts").is_empty(), "a burst played in the halt");
+    // A burst on B's clock, received before B's instant: the halt takes it (UR-21's `book_burst`).
+    harness.push(burst_with_waveform("mock/tx/s0", clocks[2].domain, 16_000, waveform));
+    harness.step(eb - 10_000_000).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the halt refused B's burst: {:?}", harness.rejected());
+    // The blocks published so far are silence; the burst's are the ones after them.
+    harness.blocks("rx0");
+    // B applies at `eb`; its clock starts 50 ms later and plays the held burst.
+    harness.step(eb).unwrap();
+    harness.step(eb + 100_000_000).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+    assert_eq!(bursts.len(), 1, "B's clock played no burst: {bursts:?}");
+    assert_eq!((bursts[0].target, bursts[0].blocks, bursts[0].samples, bursts[0].end), (TimePoint::new(clocks[2].domain, 16_000), 1, 100, ezsdr_kernel::stream::BurstEnd::Eob));
+    let stats = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.stats").unwrap()];
+    assert_eq!(stats["tx_blocks"], serde_json::json!(1), "the burst transmitted no block");
+    // The samples took the medium: nothing else is coupled, so the nonzero receive sample is the
+    // burst's.
+    let heard = harness.blocks("rx0");
+    assert!(heard.iter().any(|block| (0..block.header().len as usize).any(|sample| block_sample(block, 0, sample) != (0.0, 0.0))), "the burst did not reach the channel");
+}
+
+#[test]
+fn mr_20_only_the_refused_clock_s_bursts_are_cancelled() {
+    // MR-18 (UR-25's shape, #59): with two changes booked, the refusal of the first cancels the
+    // bursts on the clock it started alone. A clock a later change had already cut keeps that
+    // cut (RM-25: only the events after the refused instant are recomputed), and the later
+    // change's own clock keeps its origin and plays its burst.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &[] });
+    harness.arm_start(T0).unwrap();
+    let (ea, eb) = (T0 + 100_000_000, T0 + 200_000_000);
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(ea)));
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(4_000_000.0).unwrap(), UpdateClass::Cold, Some(eb)));
+    harness.step(0).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 3, "{clocks:?}");
+    assert_eq!((clocks[1].origin, clocks[1].ended_at), (TimePoint::new(ROOT, 2_150_000_000), Some(TimePoint::new(ROOT, eb))));
+    assert_eq!(clocks[2].origin, TimePoint::new(ROOT, 2_250_000_000));
+    harness.push(burst("mock/tx/s0", clocks[1].domain, 100, 100));
+    harness.push(burst("mock/tx/s0", clocks[2].domain, 100, 100));
+    harness.step(0).unwrap();
+    // The scene: both bursts are booked on the clocks they name, nothing refused yet.
+    assert!(harness.rejected().is_empty(), "a burst was refused before the change: {:?}", harness.rejected());
+    harness.step(ea).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned(), REFUSED_BURST.to_owned()], "a burst on another clock was cancelled");
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks[1].ended_at, Some(TimePoint::new(ROOT, eb)), "the later change's cut of the refused clock moved");
+    assert_eq!(clocks[2].origin, TimePoint::new(ROOT, 2_250_000_000), "the later change's clock moved");
+    let segments = harness.section("segments");
+    let tx: Vec<&serde_json::Value> = segments.iter().filter(|row| row["direction"] == "tx").collect();
+    assert!(tx.iter().any(|row| row["origin"]["ticks"] == serde_json::json!(2_150_000_000_i64) && row["ended_at"]["ticks"] == serde_json::json!(eb)), "{segments:?}");
+    assert!(tx.iter().any(|row| row["origin"]["ticks"] == serde_json::json!(2_250_000_000_i64) && row["ended_at"].is_null()), "{segments:?}");
+    harness.step(eb).unwrap();
+    harness.step(2_250_100_000).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+    assert_eq!(bursts.len(), 1, "the later change's burst did not play: {bursts:?}");
+    assert_eq!((bursts[0].target, bursts[0].samples, bursts[0].end), (TimePoint::new(clocks[2].domain, 100), 100, ezsdr_kernel::stream::BurstEnd::Eob));
+    assert_eq!(harness.rejected().len(), 2);
+}
+
+#[test]
+fn mr_20_a_refused_transmit_burst_leaves_the_channel_silent() {
+    // MR-32 (spec 11, CH-4): the bursts of a refused change never reach the medium. The control
+    // burst before the refusal does, so the silence afterwards is the cancellation's.
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let env = [
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+        ("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)])),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 100]);
+    let mut harness = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]),
+        selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    harness.arm_start(T0).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 1, "{clocks:?}");
+    harness.push(burst_with_waveform("mock/tx/s0", clocks[0].domain, 2_000_000, waveform.clone()));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_000_000).unwrap();
+    let control = harness.blocks("rx0");
+    assert!(control.iter().any(|block| (0..block.header().len as usize).any(|sample| block_sample(block, 0, sample) != (0.0, 0.0))), "the coupling delivered nothing");
+    let e = T0 + 100_000_000;
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+    harness.step(T0 + 2_000_000).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 2, "the booked change registered no clock: {clocks:?}");
+    harness.push(burst_with_waveform("mock/tx/s0", clocks[1].domain, 16_000, waveform));
+    harness.step(T0 + 2_000_000).unwrap();
+    harness.step(e).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned(), REFUSED_BURST.to_owned()], "the change or its burst was not refused");
+    harness.blocks("rx0");
+    harness.step(e + 100_000_000).unwrap();
+    let after = harness.blocks("rx0");
+    assert!(!after.is_empty(), "the receive stream stopped publishing");
+    assert!(
+        after.iter().all(|block| (0..block.header().len as usize).all(|sample| block_sample(block, 0, sample) == (0.0, 0.0))),
+        "the refused burst radiated",
+    );
+}
+
+#[test]
+fn mr_20_a_refused_move_halts_both_lines() {
+    // MR-34, MR-20: a move refused at its instant halts both lines, as RM-34's `refuse_move`
+    // does; the destination starts again on its own `start_rx`, from the refused move's set.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(0)))];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"] });
+    harness.arm_start(T0).unwrap();
+    harness.step(T0 + 2_000_000).unwrap();
+    assert_eq!((harness.clocks_of("mock/rx/s0").len(), harness.clocks_of("mock/rx/s1").len()), (1, 0), "the scene is not the one the move starts from");
+    let e = T0 + 10_000_000;
+    harness.push(update("radio.rx.c1.stream", Value::from(1), UpdateClass::Cold, Some(e)));
+    harness.step(T0 + 2_000_000).unwrap();
+    harness.step(e).unwrap();
+    harness.step(e + 100_000_000).unwrap();
+    let s0 = harness.clocks_of("mock/rx/s0");
+    assert_eq!(s0.len(), 1, "{s0:?}");
+    assert_eq!(s0[0].ended_at, Some(TimePoint::new(ROOT, e)));
+    assert!(harness.clocks_of("mock/rx/s1").is_empty(), "the destination ran");
+    assert!(harness.blocks("rx1").is_empty(), "the destination published");
+    let segments = harness.section("segments");
+    assert!(segments.iter().all(|row| row["stream"] == 0), "a segment of the destination: {segments:?}");
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(harness.applied_of("radio.rx.c1.stream"), [(serde_json::json!(1), e)]);
+    assert_eq!(harness.section("faults")[0]["applied"], true);
+    // The destination begins on `start_rx`, with the channel the refused move left it.
+    let started = e + 110_000_000;
+    harness.push(start_rx("mock/rx/s1", Some(started)));
+    harness.step(started).unwrap();
+    harness.step(started + 60_000_000).unwrap();
+    let s1 = harness.clocks_of("mock/rx/s1");
+    assert_eq!(s1.len(), 1, "{s1:?}");
+    assert_eq!(s1[0].origin, TimePoint::new(ROOT, started + 50_000_000));
+    let begun = harness.section("segments").into_iter().find(|row| row["stream"] == 1).expect("the destination's segment");
+    assert_eq!(begun["channels"], serde_json::json!([1]), "{begun}");
+    let first = harness.headers("rx1").into_iter().next().expect("the destination published");
+    assert_eq!(first.first_sample_time.ticks_in(first.first_sample_time.domain()).unwrap(), 0);
+    assert!(!first.flags.contains(BlockFlags::GAP_BEFORE));
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the start was refused");
+}
+
+#[test]
+fn mr_20_two_changes_at_one_instant_refuse_the_first_booked() {
+    // MR-20: at one instant the fault's candidate is the first booked change (`seq`), not the
+    // lowest stream number: the booking order decides.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1)))];
+    let changes = [("radio.rx.s0.sample_rate_hz", 2_000_000.0), ("radio.rx.s1.sample_rate_hz", 4_000_000.0)];
+    for first in [0, 1] {
+        let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"] });
+        harness.arm_start(0).unwrap();
+        let e = 10_000_000;
+        for index in [first, 1 - first] {
+            harness.push(update(changes[index].0, Value::num(changes[index].1).unwrap(), UpdateClass::Cold, Some(e)));
+        }
+        harness.step(2_000_000).unwrap();
+        // The scene: both streams run on one clock each, and both changes are still pending.
+        assert_eq!((harness.clocks_of("mock/rx/s0").len(), harness.clocks_of("mock/rx/s1").len()), (1, 1), "first booked {first}");
+        assert!(harness.applied_of("radio.rx.s0.sample_rate_hz").is_empty() && harness.applied_of("radio.rx.s1.sample_rate_hz").is_empty());
+        harness.step(e).unwrap();
+        harness.step(e + 10_000_000).unwrap();
+        for (index, (name, rate)) in changes.iter().enumerate() {
+            let path = if index == 0 { "mock/rx/s0" } else { "mock/rx/s1" };
+            let clocks = harness.clocks_of(path);
+            if index == first {
+                assert_eq!(clocks.len(), 1, "the second change was refused instead: {clocks:?}");
+                assert_eq!(clocks[0].ended_at, Some(TimePoint::new(ROOT, e)));
+            } else {
+                assert_eq!(clocks.len(), 2, "{path} was not refused: {clocks:?}");
+                assert_eq!(clocks[1].origin, TimePoint::new(ROOT, e));
+                assert_eq!(clocks[1].root_ticks_per_tick, Rational::new((1e9 / rate) as u64, 1).unwrap());
+            }
+            assert_eq!(harness.applied_of(name), [(serde_json::json!(rate), e)], "{name}");
+        }
+        assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "first booked {first}");
+        assert_eq!(harness.section("faults")[0]["applied"], true);
+    }
+}
+
+#[test]
+fn mr_20_a_cold_change_to_a_linkless_stream_is_no_candidate() {
+    // MR-20, MR-39: a linkless receive stream's line is stopped at T0, so its `cold` change
+    // starts no segment and the plan gives it nothing to refuse. The fault waits for a stream
+    // that runs.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+        ("radio.rx.s1.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] });
+    harness.arm_start(T0).unwrap();
+    let (e1, e2) = (T0 + 3_000_000, T0 + 10_000_000);
+    harness.push(update("radio.rx.s1.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e1)));
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e2)));
+    harness.step(T0 + 500_000).unwrap();
+    harness.step(e1).unwrap();
+    assert!(harness.rejected().is_empty(), "the linkless stream's change was refused: {:?}", harness.rejected());
+    harness.step(e2).unwrap();
+    harness.step(e2 + 60_000_000).unwrap();
+    let s0 = harness.clocks_of("mock/rx/s0");
+    assert_eq!(s0.len(), 1, "the running stream's change was not refused: {s0:?}");
+    assert_eq!(s0[0].ended_at, Some(TimePoint::new(ROOT, e2)));
+    assert!(harness.clocks_of("mock/rx/s1").is_empty());
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(harness.applied_of("radio.rx.s1.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e1)]);
+    assert_eq!(harness.applied_of("radio.rx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e2)]);
+    assert_eq!(harness.section("faults")[0]["applied"], true);
+}
+
+#[test]
+fn mr_20_the_fault_follows_the_effective_instant_not_the_origin() {
+    // MR-20: the candidate is the first change by its effective instant and arrival order. Here
+    // the transmit change's segment begins earlier (its lead is 50 ms, a receive segment also
+    // waits its call and allowance), yet the receive change is the one refused.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] });
+    harness.arm_start(T0).unwrap();
+    let (e_rx, e_tx) = (T0 + 5_000_000, T0 + 6_000_000);
+    harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e_rx)));
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e_tx)));
+    harness.step(0).unwrap();
+    // The scene: both changes are booked — the transmit one's clock is registered at booking.
+    assert_eq!(harness.clocks_of("mock/tx/s0").len(), 2, "the transmit change was not booked");
+    assert!(harness.applied_of("radio.rx.s0.sample_rate_hz").is_empty());
+    harness.step(e_rx).unwrap();
+    harness.step(e_tx).unwrap();
+    harness.step(e_tx + 60_000_000).unwrap();
+    let rx = harness.clocks_of("mock/rx/s0");
+    assert_eq!(rx.len(), 1, "the receive change was not the one refused: {rx:?}");
+    assert_eq!(rx[0].ended_at, Some(TimePoint::new(ROOT, e_rx)));
+    let tx = harness.clocks_of("mock/tx/s0");
+    assert_eq!(tx.len(), 2, "the transmit change was refused instead: {tx:?}");
+    // The transmit segment's origin, 50 ms after its change, is earlier than the receive
+    // change's would have been (60 ms after, behind the call and allowance).
+    assert_eq!(tx[1].origin, TimePoint::new(ROOT, e_tx + 50_000_000));
+    assert_eq!(tx[1].ended_at, None);
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(harness.applied_of("radio.rx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e_rx)]);
+    assert_eq!(harness.applied_of("radio.tx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e_tx)]);
+}
+
+#[test]
+fn mr_20_a_transmit_change_with_no_sample_is_a_candidate() {
+    // MR-20: a transmit clock's segment that a later booking cut at its own origin is still in
+    // the plan, so the change that began it is a candidate; the later change then applies.
+    let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &[] });
+    harness.arm_start(T0).unwrap();
+    let e = T0 + 10_000_000;
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+    harness.push(update("radio.tx.s0.sample_rate_hz", Value::num(4_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+    harness.step(0).unwrap();
+    // The scene: both changes are booked, each with its clock.
+    let booked = harness.clocks_of("mock/tx/s0");
+    assert_eq!(booked.len(), 3, "{booked:?}");
+    assert!(harness.applied_of("radio.tx.s0.sample_rate_hz").is_empty());
+    harness.step(e).unwrap();
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 3, "{clocks:?}");
+    assert_eq!(clocks[0].ended_at, Some(TimePoint::new(ROOT, e)));
+    assert_eq!((clocks[1].origin, clocks[1].ended_at), (TimePoint::new(ROOT, e + 50_000_000), Some(TimePoint::new(ROOT, e + 50_000_000))));
+    // The later change's segment waits the refused clock's cut at its own origin plus the start
+    // lead: T0 + 10 ms + 50 ms + 50 ms.
+    assert_eq!((clocks[2].origin, clocks[2].ended_at), (TimePoint::new(ROOT, e + 100_000_000), None));
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "the later change was refused instead");
+    harness.push(burst("mock/tx/s0", clocks[2].domain, 16_000, 100));
+    harness.step(e).unwrap();
+    harness.step(e + 110_000_000).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+    assert_eq!(bursts.len(), 1, "{bursts:?}");
+    assert_eq!((bursts[0].target, bursts[0].samples), (TimePoint::new(clocks[2].domain, 16_000), 100));
+}

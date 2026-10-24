@@ -29,7 +29,7 @@
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
    - **その後**：
-     - 2（D9 の DDC/DUC の release の規則，#59，A2 のテストのうち 1b-7 が触らないもの．#62 は 38a で済み）．
+     - 2（D9 の DDC/DUC の release の規則〈設計メモ [39](plan/phase8/39-dsp-timed-commands.md)：実機の probe `hw_d9_p1`〜`p3` を X300 #1＋OBX で流してから規則を決める．owner が大学にいる日〉，A2 のテストのうち 1b-7 が触らないもの．#62 は 38a，#59 は 2026-10-25 に済み〈[reviews/59-opus](plan/phase8/reviews/59-opus.md)〉）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
    - **セルフレビュー**：checklist は 4 項目，`timeout 2400`，mutation を流さないと明記する（1b-4d-1a では判定が出ず，1b-4d-1b でこうしたら出た）．OpenCode2・Claude Code・Codex には ponytail が入っている．
@@ -44,7 +44,7 @@
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
 | #67 | 遠い origin の timed start が queue されたまま `Provider::stop` が来ると uhd-rx が join の 1 s を越えて detach され，streamer が漏れる（HEAD から） | #56 の bench の後 |
-| #59 | MockRadio に「cold change の read-back 拒否」の fault がない | Phase 8 段階2（P4） |
+| #59 | MockRadio に「cold change の read-back 拒否」の fault がない．2026-10-25 に `cold_change_refused` で直した（[reviews/59-opus](plan/phase8/reviews/59-opus.md)）．閉じる comment は owner の確認待ち | owner |
 | #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
 | #56 | X310 で start の e₁〜e₂ 間の Stop と Stop の処理遅れを測る | Phase 8 の bench |
 | H1〜H5 | H1：開始が遅れた複数 packet の burst．H2：burst 途中の Underflow（再開時刻，ずれ）．H3：TX の `max_num_samps`．H4：負荷下の uhd-tx・uhd-control の起床遅延．H5：保持した最後のサンプルの 2 ms 期限 | Phase 8 の bench |

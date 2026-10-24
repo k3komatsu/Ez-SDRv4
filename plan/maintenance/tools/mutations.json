@@ -83,8 +83,8 @@
   "id": "F22",
   "name": "device_lost is no receive cut",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            // Every fault cuts the block in progress at its instant (MR-20).\n            let fault = self.faults.iter().filter(|fault| !fault.resolved).map(|fault| fault.tick).min();",
-  "new": "            // Every fault cuts the block in progress at its instant (MR-20).\n            let fault = self.faults.iter().filter(|fault| !fault.resolved && fault.entry.fault != FaultKind::DeviceLost).map(|fault| fault.tick).min();",
+  "old": "            // Every fault cuts the block in progress at its instant (MR-20).\n            let fault = self.faults.iter().filter(|fault| fault.fires()).map(|fault| fault.tick).min();",
+  "new": "            // Every fault cuts the block in progress at its instant (MR-20).\n            let fault = self.faults.iter().filter(|fault| fault.fires() && fault.entry.fault != FaultKind::DeviceLost).map(|fault| fault.tick).min();",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_20_a_lost_device_delivers_every_sample_before_the_loss"
@@ -9251,8 +9251,8 @@
   "id": "P589",
   "name": "the Mock records a command when it books it (MR-18, design 38 D2 (3))",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx });\n",
-  "new": "        self.record_update(&key, &applied, tick);\n        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx });\n",
+  "old": "        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx, cold: cold_lines });\n",
+  "new": "        self.record_update(&key, &applied, tick);\n        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx, cold: cold_lines });\n",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_18_the_row_is_written_at_its_instant"
@@ -9386,5 +9386,195 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_command_given_after_the_stop_s_instant_is_cancelled_at_it"
+ },
+ {
+  "id": "P604",
+  "name": "a cold_change_refused fault refuses a change received before its own instant (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let index = self.faults.iter().position(|fault| !fault.resolved && fault.entry.fault == FaultKind::ColdChangeRefused && fault.tick <= e)?;",
+  "new": "        let index = self.faults.iter().position(|fault| !fault.resolved && fault.entry.fault == FaultKind::ColdChangeRefused)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_change_before_the_fault_is_no_candidate"
+ },
+ {
+  "id": "P605",
+  "name": "any booked line is a candidate, not only one whose plan holds the change's segment (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.lines.line(stream_key(*direction, *k)).is_some_and(|line| line.plan.iter().any(|segment| segment.by == Some(seq)))",
+  "new": "            self.lines.line(stream_key(*direction, *k)).is_some()",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_cold_change_to_a_linkless_stream_is_no_candidate"
+ },
+ {
+  "id": "P606",
+  "name": "a change whose segment the plan no longer holds is a candidate because its line's plan is not empty (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.lines.line(stream_key(*direction, *k)).is_some_and(|line| line.plan.iter().any(|segment| segment.by == Some(seq)))",
+  "new": "            self.lines.line(stream_key(*direction, *k)).is_some_and(|line| !line.plan.is_empty())",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_change_the_plan_drops_is_no_candidate"
+ },
+ {
+  "id": "P607",
+  "name": "the cold_change_refused fault is never spent, so it refuses every later change (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.faults[index].applied = true;\n            self.faults[index].resolved = true;",
+  "new": "            self.faults[index].applied = true;\n            self.faults[index].applied = true;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_only_the_first_cold_change_is_refused"
+ },
+ {
+  "id": "P608",
+  "name": "a refused change is not booked as refused, so the stream does not halt (MR-20, RM-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.lines.refuse(stream_key(line.0, line.1), order).map_err(rm25)?;",
+  "new": "            let _ = line;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_the_next_cold_change_resumes_a_refused_stream"
+ },
+ {
+  "id": "P609",
+  "name": "a refusal emits no radio.COMMAND_REJECTED (MR-20, RM-22)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.reject_action_at(None, \"update_parameter\", REFUSED_CHANGE, tick)?;",
+  "new": "            self.record_rejected_action(\"update_parameter\", REFUSED_CHANGE, tick);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_cold_change_refused_fault_halts_the_stream"
+ },
+ {
+  "id": "P610",
+  "name": "a refused change's value is not recorded in applied (MR-18, MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.record_update(&update.key, &update.value, tick);",
+  "new": "        if refused.is_none() { self.record_update(&update.key, &update.value, tick); }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_cold_change_refused_fault_halts_the_stream"
+ },
+ {
+  "id": "P611",
+  "name": "a refused transmit change adopts its clock instead of ending it at its origin (MR-20, RM-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                    if let Some(index) = to { self.cancel_booked(k, index, REFUSED_BURST, tick)?; }\n                    self.tx_reconcile(k)?;",
+  "new": "                    if let Some(index) = to { self.cancel_booked(k, index, REFUSED_BURST, tick)?; }\n                    self.tx_switch(k, to, passed)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_refused_transmit_change_ends_its_clock_and_cancels_its_bursts"
+ },
+ {
+  "id": "P612",
+  "name": "a refusal cancels the bursts of every clock at or after the refused one (MR-18, MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            if later == index {",
+  "new": "            if later >= index {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_only_the_refused_clock_s_bursts_are_cancelled"
+ },
+ {
+  "id": "P613",
+  "name": "a halted stream refuses every transmit burst (MR-25, MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        if halted && cut.is_some_and(|cut| start >= cut) {",
+  "new": "        if halted {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_burst_on_a_clock_booked_after_a_refusal_plays"
+ },
+ {
+  "id": "P614",
+  "name": "a Run that ends first does not record the waiting cold_change_refused fault (MR-20, MR-27)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            if !self.faults[index].resolved {\n                self.faults[index].resolved = true;",
+  "new": "            if !self.faults[index].resolved && self.faults[index].entry.fault != FaultKind::ColdChangeRefused {\n                self.faults[index].resolved = true;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_fault_after_every_change_refuses_nothing"
+ },
+ {
+  "id": "P615",
+  "name": "a waiting cold_change_refused fault cuts the receive block at its instant (MR-20; spec 22, VH-5)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            // Every fault cuts the block in progress at its instant (MR-20).\n            let fault = self.faults.iter().filter(|fault| fault.fires()).map(|fault| fault.tick).min();",
+  "new": "            // Every fault cuts the block in progress at its instant (MR-20).\n            let fault = self.faults.iter().filter(|fault| !fault.resolved && fault.entry.fault != FaultKind::DeviceLost).map(|fault| fault.tick).min();",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_fault_after_every_change_refuses_nothing"
+ },
+ {
+  "id": "P616",
+  "name": "a cold_change_refused fault fires at its own instant in the step's loop (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        !self.resolved && self.entry.fault != FaultKind::ColdChangeRefused",
+  "new": "        !self.resolved",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_cold_change_refused_fault_halts_the_stream"
+ },
+ {
+  "id": "P617",
+  "name": "the fault's kind is spelled cold_change_refuse (SE-3)",
+  "file": "crates/ezsdr-sim/src/lib.rs",
+  "old": "    /// Refuse a `cold` change the device does not apply (SE-4, RM-25).\n    ColdChangeRefused,",
+  "new": "    /// Refuse a `cold` change the device does not apply (SE-4, RM-25).\n    #[serde(rename = \"cold_change_refuse\")]\n    ColdChangeRefused,",
+  "crate": "ezsdr-sim",
+  "test_bin": "sim_vocabulary",
+  "filter": "se_03_faults_reader"
+ },
+ {
+  "id": "P618",
+  "name": "a change at the fault's own instant is no candidate (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "fault.entry.fault == FaultKind::ColdChangeRefused && fault.tick <= e)?;",
+  "new": "fault.entry.fault == FaultKind::ColdChangeRefused && fault.tick < e)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_cold_change_refused_fault_acts_on_both_profiles"
+ },
+ {
+  "id": "P619",
+  "name": "a refused transmit change takes the normal path: it adopts its clock and keeps the bursts (MR-20, RM-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                    if let Some(index) = to { self.cancel_booked(k, index, REFUSED_BURST, tick)?; }\n                    self.tx_reconcile(k)?;",
+  "new": "                    self.tx_switch(k, to, passed)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_only_the_refused_clock_s_bursts_are_cancelled"
+ },
+ {
+  "id": "P620",
+  "name": "a segment a later booking cut with no sample is no candidate (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            self.lines.line(stream_key(*direction, *k)).is_some_and(|line| line.plan.iter().any(|segment| segment.by == Some(seq)))",
+  "new": "            self.lines.line(stream_key(*direction, *k)).is_some_and(|line| line.plan.iter().any(|segment| segment.by == Some(seq) && segment.cut.is_none_or(|cut| cut > 0)))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_transmit_change_with_no_sample_is_a_candidate"
+ },
+ {
+  "id": "P621",
+  "name": "the Manifest keeps a row for the receive segment a refused change began (MR-27, MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            rows.retain(|row| !(row[\"direction\"] == \"rx\" && row[\"stream\"].as_u64() == Some(k as u64) && row[\"sequence\"].as_u64() == Some(seq)));",
+  "new": "            rows.retain(|_| true);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_a_cold_change_refused_fault_acts_on_both_profiles"
+ },
+ {
+  "id": "P622",
+  "name": "the halt takes a burst at or after the cut of the clock the refusal cut (MR-25, MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        if halted && cut.is_some_and(|cut| start >= cut) {",
+  "new": "        if halted && false {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_refused_transmit_change_ends_its_clock_and_cancels_its_bursts"
  }
 ]

@@ -89,7 +89,7 @@ This replaces spec 21's stopped state and VG-1's separate sentence. It costs KJ-
 - **Record only what has happened.** A receive clock is registered when its segment begins and ended when its cut is made. A transmit clock is registered, and its predecessor ended, at booking, so a burst admitted next can target it (KC-21a). No cut falls before a planned origin. MR-16's *Ceiling* goes: a Spec can now target a transmit clock that a scheduled change creates.
 - **A planned event that fails at its instant.** This covers the UHD Module's UR-12 read-back refusal, a loss, and `Provider::stop`.
   - Cuts already made and clocks already ended stand. The event is removed, and only the events after its instant are recomputed. A later event the new plan refuses is refused then.
-  - A refused change, or a refused start (`start_rx` or an enable whose configuration the device does not apply), **halts** the stream until its next `cold` change or `start_rx`. On receive there is no segment. On transmit, the clock registered for it ends at its origin, its held bursts are cancelled, and bursts are refused until the next change.
+  - A refused change, or a refused start (`start_rx` or an enable whose configuration the device does not apply), **halts** the stream until its next `cold` change or `start_rx`. On receive there is no segment. On transmit, the clock registered for it ends at its origin — or at the cut a change booked earlier has already made of it —, its held bursts are cancelled, and a burst on it, or on the old clock past its cut, is refused; one on the clock of a change booked later plays when that change takes effect.
   - A loss or `Provider::stop` ends everything after it.
 - **A change that arrives after a later one.** A `cold` change never takes effect before a `cold` change of the same stream that arrived earlier: its effective instant is floored at that change's, and ties go by arrival. It is then applied late, as UC-2 applies a timed update late. This holds on both directions, so the rule does not depend on direction, although only transmit needs it: a booked transmit clock's end is already recorded and cannot move (E8). Added after step 1's review (owner, 2026-10-07).
 - **Empty clocks.** "No clock without a sample" holds for receive clocks only. A transmit clock can end at its origin, by one rule on both Providers.
@@ -235,13 +235,14 @@ UC-3 restarts a function only if it was running, and the Vocabulary places the e
 | #56 | **Open, narrowed.** The FakeDevice case is deterministic (VH-6). The bench measures the queued start, the start lead, the ready term and the `Stop` handling lag |
 | #57 | **Closed**: no cut before an origin, in one function |
 | #58 | **Closed** by VH-4's single start path, which carries the stop guard |
+| #59 | **Closed.** MockRadio refuses a `cold` change through the `cold_change_refused` fault (spec 08 SE-3, spec 09 MR-20), so both Providers walk VH-2's halt |
 
 ## Follow-ups
 
 1. #51.
 2. Phase 8 measures `start_lead_ns` and the ready term. If the enable and the restart differ, a second lead can return.
 3. [#60](https://github.com/k3komatsu/Ez-SDRv4/issues/60): a FakeDevice on manual time with an idle handshake (VH-8). **Done 2026-10-13** ([plan 30](30-fakedevice-manual-time.md) §15).
-4. [#59](https://github.com/k3komatsu/Ez-SDRv4/issues/59): a fault kind for a device read-back refusal, as a device fault class like an overrun.
+4. [#59](https://github.com/k3komatsu/Ez-SDRv4/issues/59): a fault kind for a device read-back refusal, as a device fault class like an overrun. **Done 2026-10-24** ([spec 08](../../design/08-simulation.md) SE-3·SE-4, [spec 09](../../design/09-mock-radio.md) MR-20).
 5. MockRadio's enable from 0 channels is earlier than the UHD Module's by the UHD Module's configuration time. This dates from spec 20's VF-6, and goes with #49.
 6. VH-8's third layer for transmit: a deterministic driver of uhd-tx, with a scripted transmit device and a burst oracle (step 3's record).
 

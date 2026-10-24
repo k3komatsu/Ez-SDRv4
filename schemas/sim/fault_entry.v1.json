@@ -17,6 +17,11 @@
           "const": "device_lost",
           "description": "Lose the device (SE-3).",
           "type": "string"
+        },
+        {
+          "const": "cold_change_refused",
+          "description": "Refuse a `cold` change the device does not apply (SE-4, RM-25).",
+          "type": "string"
         }
       ]
     },
