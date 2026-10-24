@@ -60,6 +60,15 @@ fn tx_action(domain: ClockDomainId, target: i64, samples: usize, repeat: bool, l
     }
 }
 
+fn start_rx(target: &str, at: Option<i64>) -> Action {
+    Action::Command {
+        target: tgt(target),
+        verb: Ident::parse("start_rx").unwrap(),
+        params: BTreeMap::new(),
+        at: at.map(|tick| AbsoluteDeadline::new(TimePoint::new(ROOT, tick))),
+    }
+}
+
 fn update_action(name: &str, value: Value, class: UpdateClass, at: Option<TimePoint>) -> Action {
     Action::UpdateParameter {
         target: tgt("mock"),
@@ -1044,6 +1053,30 @@ fn mr_17_late_policy_outcomes() {
 }
 
 #[test]
+fn rm_14_the_recorded_requested_target_is_the_requested_at() {
+    // RM-14 (SC-23a): `requested_target` is what the caller asked for — SC-23a's
+    // `requested_at` when admission already advanced the target — and not the `at` the burst
+    // starts at: an on-time burst at its `at`, and one `SendAsap` moves onto the device lead.
+    for (at, target) in [(2_030_000, 2_030_000), (2_000_000, 2_012_000)] {
+        let mut harness = tx_harness("x3xx");
+        harness.arm_start(2_000_000_000).unwrap();
+        let domain = tx_domain(&harness);
+        harness.step(2_010_000_000).unwrap();
+        let requested = TimePoint::new(domain, at - 10_000);
+        let mut action = tx_action(domain, at, 1_000, false, LatePolicy::SendAsapAndFlag);
+        let Action::TxBurst { requested_at, .. } = &mut action else { unreachable!("tx_action's action") };
+        *requested_at = Some(AbsoluteDeadline::new(requested));
+        harness.actions.push(action);
+        harness.step(2_010_000_000).unwrap();
+        harness.step(2_031_000_000).unwrap();
+        let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
+            harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()][0].clone()).unwrap();
+        assert_eq!(record.target, TimePoint::new(domain, target), "at {at}: the start the burst took");
+        assert_eq!(record.requested_target, Some(requested), "at {at}: the requested target is the `requested_at`");
+    }
+}
+
+#[test]
 fn mr_18_hardware_timed_updates() {
     let mut harness = Harness::new("x3xx", &[], &[], &[], None);
     harness.arm_start(2_000_000_000).unwrap();
@@ -1345,6 +1378,34 @@ fn mr_19_backpressure_is_an_overrun() {
     let restarted = fractional.link.as_ref().unwrap().receive().unwrap().0;
     assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 52_001);
     assert_eq!(restarted.header().lost, Some(50_001));
+}
+
+#[test]
+fn mr_19_a_zero_gap_still_loses_the_dropped_block() {
+    // MR-19: `k_g = max(b, a + gap)` — a restart gap of 0 (`ideal`) still begins at the
+    // dropped block's end `b`, so the whole dropped block is lost and the next block jumps
+    // its length; `a + gap` alone would begin it at the dropped block's own start.
+    let mut harness = Harness::new("ideal", &[], &[], &[], Some((BackPressure::Block, 1)));
+    harness.arm_start(0).unwrap();
+    // Block 0 [0, 2 000) fills the one-slot link; block 1 [2 000, 4 000) finds it Full.
+    harness.step(1_999_001).unwrap();
+    harness.step(3_999_001).unwrap();
+    let first = harness.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!(first.header().first_sample_time.ticks_in(first.header().first_sample_time.domain()).unwrap(), 0);
+    // The block at `b` = 4 000, carrying the whole dropped block as its loss.
+    harness.step(5_999_001).unwrap();
+    let restarted = harness.link.as_ref().unwrap().receive().unwrap().0;
+    assert_eq!(restarted.header().first_sample_time.ticks_in(restarted.header().first_sample_time.domain()).unwrap(), 4_000);
+    assert!(restarted.header().flags.contains(BlockFlags::GAP_BEFORE));
+    assert!(restarted.header().flags.contains(BlockFlags::RESTARTED));
+    assert_eq!(restarted.header().lost, Some(2_000));
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+    let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).collect();
+    assert_eq!(overflows.len(), 1);
+    assert_eq!(
+        RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(),
+        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 2_000 }
+    );
 }
 
 #[test]
@@ -1973,6 +2034,60 @@ fn mr_29_start_rx_is_the_one_command() {
     assert_eq!(clocks, [(0, Some(1_000_000)), (3_000_000, None)]);
     let first_new = received(&h).into_iter().find(|header| header.first_sample_time.domain() != h.clocks.sample_clock_records()[0].domain).unwrap();
     assert_eq!((first_new.first_sample_time.ticks_in(first_new.first_sample_time.domain()).unwrap(), first_new.flags), (0, BlockFlags::NONE));
+}
+
+#[test]
+fn mr_29_start_rx_takes_effect_at_its_at() {
+    // MR-29: a `start_rx` whose `at` is after its receipt restarts the stream there, not at
+    // the receipt: the new clock's origin is `at`'s lattice instant, and it is never late.
+    let mut h = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    h.arm_start(0).unwrap();
+    h.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    h.step(1_000_000).unwrap();
+    // Handled at 2 ms, asking for 12 ms.
+    h.actions.push(start_rx("mock/rx/s0", Some(12_000_000)));
+    h.step(2_000_000).unwrap();
+    h.step(13_999_001).unwrap();
+    let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
+    assert_eq!(clocks, [(0, Some(1_000_000)), (12_000_000, None)]);
+    let late = h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
+    assert_eq!(late, 0);
+}
+
+#[test]
+fn mr_29_a_receive_link_never_begins_before_t0() {
+    // MR-29: `start_rx` never begins a stream with a receive link before T0, whatever its `at`
+    // or its receipt: the new segment, and so its clock, begins at T0.
+    let mut h = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    h.arm_start(10_000_000).unwrap();
+    // A `Stop` and a `start_rx` asking for T0 − 1 ms both reach the Mock before T0.
+    h.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    h.step(8_000_000).unwrap();
+    h.actions.push(start_rx("mock/rx/s0", Some(9_000_000)));
+    h.step(8_500_000).unwrap();
+    h.step(14_000_000).unwrap();
+    let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
+    assert_eq!(clocks, [(10_000_000, None)], "the restarted stream's clock begins at T0");
+    let blocks = received(&h);
+    let first = blocks.first().expect("the restarted stream published no block");
+    assert_eq!(first.first_sample_time.ticks_in(first.first_sample_time.domain()).unwrap(), 0);
+}
+
+#[test]
+fn mr_29_start_rx_is_never_late() {
+    // MR-29: a `start_rx` whose `at` has passed is not late — no `LATE_COMMAND` — and the
+    // stream restarts at the receipt, not at the past `at` nor a lead after it.
+    let mut h = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
+    h.arm_start(0).unwrap();
+    h.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
+    h.step(1_000_000).unwrap();
+    h.actions.push(start_rx("mock/rx/s0", Some(1_000_000)));
+    h.step(3_000_000).unwrap();
+    h.step(9_000_000).unwrap();
+    let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
+    assert_eq!(clocks, [(0, Some(1_000_000)), (3_000_000, None)], "the restart is at the receipt, not at the past `at`");
+    let late = h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
+    assert_eq!(late, 0, "a `start_rx` is never late");
 }
 
 #[test]

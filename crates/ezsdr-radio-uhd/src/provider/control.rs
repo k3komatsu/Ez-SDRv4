@@ -2129,6 +2129,54 @@ mod tests {
     }
 
     #[test]
+    fn rm_14_the_handed_burst_keeps_its_requested_at() {
+        // RM-14 (SC-23a): `BurstOpen.requested_target` is SC-23a's `requested_at` when
+        // admission already advanced the target — for a burst on time at its `at` and for one
+        // `SendAsap` moves —, never the `at` the burst starts at.
+        let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let (core, _device, time, _events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
+        // On time at 20 ms, asked for at 5 ms.
+        let requested = TimePoint::new(clock.domain, 5_000);
+        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
+            target: super::super::test_support::target_of(&core.tx_id),
+            waveform: waveform.clone(),
+            repeat: false,
+            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 20_000)),
+            requested_at: Some(AbsoluteDeadline::new(requested)),
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(core.tx_id.clone())));
+        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
+        assert_eq!(held.k, 20_000, "an on-time burst starts at its `at`");
+        assert_eq!(held.open.requested_target, Some(requested), "the on-time burst's requested target is the `requested_at`");
+        // Late: its `at` is behind the booking, asked for at 2 ms; `SendAsap` moves the start.
+        let requested = TimePoint::new(clock.domain, 2_000);
+        control.book(Dispatched::new(ActionId(2), Action::TxBurst {
+            target: super::super::test_support::target_of(&core.tx_id),
+            waveform,
+            repeat: false,
+            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
+            requested_at: Some(AbsoluteDeadline::new(requested)),
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(core.tx_id.clone())));
+        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the moved burst to uhd-tx") else { panic!("not a burst") };
+        assert_eq!(held.k, 12_000, "the moved start is the device lead past the booking");
+        assert_eq!(held.open.requested_target, Some(requested), "the moved burst's requested target is its `requested_at`, not its moved start");
+    }
+
+    #[test]
     fn ur_21_a_burst_before_start_up_is_refused() {
         // UR-21: a start before the device's start-up — the arm's synchronisation end — is
         // refused at booking. On the controlled clock: the session path read the target from

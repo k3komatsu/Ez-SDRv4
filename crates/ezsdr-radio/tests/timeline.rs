@@ -1499,3 +1499,19 @@ fn rm_25_the_timed_instant_is_floored_at_every_booked_command_inside_the_window(
         );
     }
 }
+
+#[test]
+fn mr_29_a_receive_link_floors_a_command_at_its_t0() {
+    // MR-29 (RM-25): a `start_rx` takes effect at its `at`, or at its receipt when that is
+    // later, and a receive link never before T0. Both here lie before T0; a transmit link
+    // has no such floor.
+    let t0 = 10 * MS;
+    let receive = Line::new(Stream { origin: t0, ..stream(Direction::Rx, 1) });
+    assert_eq!(ezsdr_radio::timeline::command_instant(Some(&receive), Some(t0 - 2 * MS), t0 - 3 * MS, 0, false), (t0, false));
+    let transmit = Line::new(Stream { origin: t0, ..stream(Direction::Tx, 1) });
+    assert_eq!(
+        ezsdr_radio::timeline::command_instant(Some(&transmit), Some(t0 - 2 * MS), t0 - 3 * MS, 0, false),
+        (t0 - 2 * MS, false),
+        "a transmit link takes `max(at, now)`",
+    );
+}

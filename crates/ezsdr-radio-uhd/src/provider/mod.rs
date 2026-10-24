@@ -803,6 +803,32 @@ mod tests {
     }
 
     #[test]
+    fn ur_13_arm_radiates_nothing() {
+        // UR-13 (MA-13): `arm` opens the transmit streamer and radiates nothing — no first
+        // buffer, no start of burst and no empty end of burst; the device's own log holds the
+        // open alone.
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        })).unwrap();
+        let (core, device, _time, _events) = test_support::rig();
+        let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
+        radio.prepared = Some(Prepared {
+            core,
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: Vec::new(),
+            tx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }],
+        });
+        radio.arm().expect("arm");
+        let calls = device.calls();
+        assert!(!calls.iter().any(|call| call.starts_with("tx_send")), "arm radiated: {calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the transmit streamer's open: {calls:?}");
+    }
+
+    #[test]
     fn ur_25_a_refused_check_at_arm_leaves_the_set_unknown() {
         // UR-25 (S20): `arm` opens the receive streamer and the direction's rate comparison
         // refuses; the record holds no set and no configuration, so the owner opens the

@@ -9576,5 +9576,127 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_20_a_refused_transmit_change_ends_its_clock_and_cancels_its_bursts"
+ },
+ {
+  "id": "T34",
+  "name": "RM-11: CLOCK_LOST is emitted from a stream node, not the device node",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                    self.core.emit(&self.core.id, kinds::CLOCK_LOST, Severity::Fatal, payload);",
+  "new": "                    self.core.emit(&self.core.stream_node(Dir::Rx, 0), kinds::CLOCK_LOST, Severity::Fatal, payload);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_27_a_lost_reference_is_clock_lost"
+ },
+ {
+  "id": "T35",
+  "name": "RM-14: MockRadio records `at`, not SC-23a's `requested_at`, as the requested target",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let mut requested = requested_at.map(|deadline| deadline.time_point);",
+  "new": "        let mut requested = Some(at.time_point);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "rm_14_the_recorded_requested_target_is_the_requested_at"
+ },
+ {
+  "id": "T36",
+  "name": "RM-14: the UHD Module records `at`, not SC-23a's `requested_at`, as the requested target",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let mut requested = requested_at.map(|d| d.time_point);",
+  "new": "        let mut requested = Some(at.time_point);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_14_the_handed_burst_keeps_its_requested_at"
+ },
+ {
+  "id": "T37",
+  "name": "MR-19: a back-pressure restart begins `a + gap` instead of the dropped block's end",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let next_sample = stop.max(after_gap);",
+  "new": "                let next_sample = next.saturating_add(gap_samples);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_19_a_zero_gap_still_loses_the_dropped_block"
+ },
+ {
+  "id": "T38",
+  "name": "MR-29: a command takes effect at its receipt, ignoring a later `at`",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let base = asked.max(now).max(floor);",
+  "new": "    let base = now.max(floor);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_29_start_rx_takes_effect_at_its_at"
+ },
+ {
+  "id": "T39",
+  "name": "MR-29: a receive command takes the caller's instant, ignoring its link's T0 floor",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let base = asked.max(now).max(floor);",
+  "new": "    let base = asked.max(now);",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "mr_29_a_receive_link_floors_a_command_at_its_t0"
+ },
+ {
+  "id": "T40",
+  "name": "MR-29: a past `at` restarts at the `at`, and the segment is booked ready then",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let base = asked.max(now).max(floor);",
+  "new": "    let base = asked.max(floor);",
+  "old2": "        earliest = earliest.max(ready + lead);",
+  "new2": "        earliest = earliest.max(i128::from(item.e) + lead);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_29_start_rx_is_never_late"
+ },
+ {
+  "id": "T41",
+  "name": "MR-29: a `start_rx` whose `at` has passed is reported late",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let (e, _) = timeline::command_instant(self.lines.line(Self::rx_key(k)), requested, now, seq, false);",
+  "new": "                let (e, late) = timeline::command_instant(self.lines.line(Self::rx_key(k)), requested, now, seq, false);\n                if late {\n                    self.emit_event(\"\", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, serde_json::Value::Null, TimePoint::new(self.root.expect(\"prepared root\"), e))?;\n                }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_29_start_rx_is_never_late"
+ },
+ {
+  "id": "T42",
+  "name": "UR-13: `arm` sends an empty buffer when it opens the transmit streamer",
+  "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+  "old": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;",
+  "new": "            core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;\n            let _ = core.device.tx_send(stream.k, &[&[]], None, true, true, Wall::from_millis(1));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_13_arm_radiates_nothing"
+ },
+ {
+  "id": "T43",
+  "name": "UR-17: a block's bytes take the sample index as the channel",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                        write_cf32(buffer, n, c, i, sample[0], sample[1]);",
+  "new": "                        write_cf32(buffer, n, i, c, sample[0], sample[1]);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_block_s_channels_are_planar_cf32"
+ },
+ {
+  "id": "T44",
+  "name": "UR-17: a missed start's lead is measured from the segment's origin, not the decision's `now`",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))), stream.config.ratio) {",
+  "new": "                let restart = match ezsdr_radio::timeline::lattice(stream.start.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))), stream.config.ratio) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_the_missed_start_lead_is_measured_from_the_decision_s_now"
+ },
+ {
+  "id": "T45",
+  "name": "UR-17: a block's bytes write every sample index at 0",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "                        write_cf32(buffer, n, c, i, sample[0], sample[1]);",
+  "new": "                        write_cf32(buffer, n, c, 0, sample[0], sample[1]);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_17_a_block_s_channels_are_planar_cf32"
  }
 ]

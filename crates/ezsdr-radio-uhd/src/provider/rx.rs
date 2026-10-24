@@ -1065,6 +1065,55 @@ mod tests {
     }
 
     #[test]
+    fn ur_17_a_block_s_channels_are_planar_cf32() {
+        // UR-17, SC-4: a block's bytes are the planar cf32 of its channels — channel `c`'s
+        // samples at `[c · len, (c + 1) · len)`. Every sample carries its own value, so a
+        // channel/index swap, a frozen index or a reversed order inside a channel moves one.
+        let value = |channel: usize, index: usize| {
+            let v = 10.0 * channel as f32 + index as f32 + 1.0;
+            [v, -v]
+        };
+        let link = link();
+        let (core, _, _, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
+        let (mut rx, clock) = rx(&core, 2);
+        rx.receive(RxRecv::Samples {
+            first_tick: clock.origin,
+            samples: (0..2).map(|channel| (0..3).map(|index| value(channel, index)).collect()).collect(),
+        });
+        let block = link.receive().expect("the block").0;
+        let bytes = block.host_bytes().expect("a host block");
+        assert_eq!((block.header().len, block.header().channels), (3, 2));
+        for channel in 0..2 {
+            for index in 0..3 {
+                let [re, im] = value(channel, index);
+                assert_eq!(ezsdr_hostmem::read_cf32(bytes, 3, channel, index), (re, im), "channel {channel}, sample {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn ur_17_the_missed_start_lead_is_measured_from_the_decision_s_now() {
+        // UR-17: a missed start restarts at the first lattice instant at or after the instant
+        // the late start is decided at plus `radio.timing.rx_start_lead_ns` — measured from
+        // the decision's `now`, not from the origin the start missed.
+        let link = link();
+        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link]);
+        let (mut rx, clock) = rx(&core, 1);
+        time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
+        rx.receive(RxRecv::LateCommand);
+        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx));
+        let expected = ezsdr_radio::timeline::lattice(core.ticks(40_000_000) + lead, Rational::new(clock.n as u64, 1).unwrap()).unwrap();
+        assert!(expected > clock.origin + lead, "the lead was measured from the origin, not the decision");
+        let row = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").expect("the restart row").clone();
+        assert_eq!(row["at"].as_i64(), Some(expected), "{row}");
+        let late: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 1, "{late:?}");
+        let payload: LateCommandPayload = serde_json::from_value(late[0].payload.clone()).unwrap();
+        assert_eq!(payload.applied.ticks_in(core.root).unwrap(), expected, "{payload:?}");
+    }
+
+    #[test]
     fn rehearsal_b5_overflow() {
         // UR-19, UR-20, RM-17 (the B5 overflow, design note 37): a stalled reader's overrun is
         // one report, and the block the device resumes with carries what the stall lost —

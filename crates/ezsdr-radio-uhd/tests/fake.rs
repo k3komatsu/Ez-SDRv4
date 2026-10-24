@@ -1977,6 +1977,7 @@ fn ur_27_a_lost_reference_is_clock_lost() {
     let manifest = run.finish();
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind("radio.CLOCK_LOST") } });
     assert_eq!(events_of(&manifest, "radio.CLOCK_LOST")[0].payload, json!({ "reference": "frequency" }));
+    assert_eq!(events_of(&manifest, "radio.CLOCK_LOST")[0].source, usrp(), "RM-11's source is the device node");
 }
 
 #[test]
