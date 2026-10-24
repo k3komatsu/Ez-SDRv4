@@ -12,7 +12,7 @@
 - **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
 - **Phase 8 段階1a，1b-1，1b-2a，1b-2b，1b-3a，1b-3b，1b-3c，1b-4a，1b-4b，1b-4c，1b-4d-1a，1b-4d-1b，1b-4d-1c は完了**（2026-10-17〜20）：1a は X3xx の description を `ezsdr_radio::x3xx` に1か所（profile `x3xx` 0.1.0，rate の格子，CBX の `random`，方向別の start lead），1b-1 は `KeyDecl` の番号の付く segment（SB-2a），1b-2a は `radio` 語彙の channel・stream の key と layout の builder（`ezsdr_radio::channels`，spec 07 RM-27〜RM-33），1b-2b は timeline の channel の集合と D3 の移動（`timeline::Lines`，RM-34）と D14，1b-3a は MockRadio の内部を stream ごとの状態と `Lines` に組み直し（挙動は不変），1b-3b は MockRadio が selector の `keys: "channel"` で新しい key を使う，1b-3c はその instance に channel の移動（RM-34）と SimulationChannel の論理 channel 番号・channel ごとの gain/frequency/phase を足した（始まった segment は全 channel の untimed tune，MR-34），1b-4a は UHD Module の device 境界を stream の番号・subdev spec・rate の集合・serial・antenna の read-back に広げた（`UhdRadio` の挙動は不変），1b-4b は `UhdRadio` の内部を stream ごとの状態・`timeline::Lines`・stream の列に組み直した（挙動は不変），1b-4c は UHD Module の `keys: "channel"` のモード（方向ごとに stream 0）と open のときの検査（subdev spec，front end，serial，rate の集合）を入れた，1b-4d-1a は stream ごとに device が実際に持つもの（集合，configure の `(seq, 版)`，streamer の世代）を 1 つの記録にし，owner の写しを消した，1b-4d-1b は stream の device を呼ぶ担当（from-none の間は uhd-control の `busy`，uhd-tx の report の読みの `reading` を from-none が待つ）と loss・stop の出口を入れた，1b-4d-1c は timed command の効く時刻を booking で確定して `e` の順に device へ出し，channel の無い間の更新も pending の segment に届けて，configuration の版を消した．記録は [計画](plan/phase8/00-overview.md) §8．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
-- open issue は3件：#56，#59，#67（§3）．
+- open issue は2件：#56，#67（§3）．
 
 ## 2. 次にすること
 
@@ -44,7 +44,6 @@
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
 | #67 | 遠い origin の timed start が queue されたまま `Provider::stop` が来ると uhd-rx が join の 1 s を越えて detach され，streamer が漏れる（HEAD から） | #56 の bench の後 |
-| #59 | MockRadio に「cold change の read-back 拒否」の fault がない．2026-10-25 に `cold_change_refused` で直した（[reviews/59-opus](plan/phase8/reviews/59-opus.md)）．閉じる comment は owner の確認待ち | owner |
 | #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
 | #56 | X310 で start の e₁〜e₂ 間の Stop と Stop の処理遅れを測る | Phase 8 の bench |
 | H1〜H5 | H1：開始が遅れた複数 packet の burst．H2：burst 途中の Underflow（再開時刻，ずれ）．H3：TX の `max_num_samps`．H4：負荷下の uhd-tx・uhd-control の起床遅延．H5：保持した最後のサンプルの 2 ms 期限 | Phase 8 の bench |
