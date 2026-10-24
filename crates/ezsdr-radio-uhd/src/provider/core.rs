@@ -119,6 +119,9 @@ pub(crate) struct Streams {
     pub ended: bool,
     /// `Provider::stop`'s instant and mode, once it has begun (UR-26).
     pub stop: Option<(i64, StopMode)>,
+    /// The instant of the device's loss, once a thread found it (UR-29): the end's `S` when
+    /// the loss comes first (design 38 D2 (4)).
+    pub lost_at: Option<i64>,
     /// Counts the changes of the plans, for uhd-tx to read its own again.
     pub version: u64,
 }
@@ -140,6 +143,7 @@ impl Streams {
             seq: 0,
             ended: false,
             stop: None,
+            lost_at: None,
             version: 0,
         }
     }
@@ -549,6 +553,18 @@ impl Streams {
             for k in 0..self.count(dir) {
                 self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } });
             }
+        }
+    }
+
+    /// UR-26, design 38 D2 (4): `S`, the instant the Run's end was booked at, and whether a
+    /// loss was its cause — the stop's or the loss's, whichever came first; a loss at the same
+    /// instant counts as first, as MockRadio's order does.
+    pub fn ended_at(&self) -> Option<(i64, bool)> {
+        match (self.stop.map(|(at, _)| at), self.lost_at) {
+            (Some(stop), Some(lost)) if lost <= stop => Some((lost, true)),
+            (Some(stop), _) => Some((stop, false)),
+            (None, Some(lost)) => Some((lost, true)),
+            (None, None) => None,
         }
     }
 
@@ -984,12 +1000,15 @@ impl Core {
         if self.lost.load(Ordering::Acquire) {
             return;
         }
-        streams.end(self, self.now(), false, true);
+        // D2 (4): the loss's own instant, read once, is the end's `S`.
+        let at = self.now();
+        streams.lost_at = streams.lost_at.or(Some(at));
+        streams.end(self, at, false, true);
         self.lost.store(true, Ordering::Release);
         drop(streams);
         // Before anything can free it: a lost device is never freed (F4).
         self.device.mark_lost();
-        self.timing(json!({ "what": "device_lost", "message": message, "at": self.now() }));
+        self.timing(json!({ "what": "device_lost", "message": message, "at": at }));
         self.emit(
             &self.id,
             EventKind::DEVICE_LOST,

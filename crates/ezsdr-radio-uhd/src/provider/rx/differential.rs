@@ -95,7 +95,7 @@ fn terms(block: i64) -> Terms {
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
     let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
-    Terms { t0: T0, root_hz: 200_000_000, timed_lead: 0, stream }
+    Terms { t0: T0, root_hz: 200_000_000, timed_lead: 0, release_window: 0, stream }
 }
 
 fn rate_of(config: Config) -> f64 {

@@ -395,6 +395,7 @@ pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
         min_timed_command_lead_ns: terms.min_timed_command_lead_ns,
         startup_latency_ns: 2_000_000_000,
         command_queue_depth: 16,
+        release_window_ns: 3_000_000,
         overflow_restart_gap_ns: 50_000_000,
         rx_start_lead_ns: 50_000_000,
         tx_start_lead_ns: 50_000_000,

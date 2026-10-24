@@ -12,8 +12,6 @@ pub const DEVICE_LEAD_NS: i64 = 2_000_000;
 pub const DELIVERY_ALLOWANCE_NS: i64 = 3_000_000;
 /// The most samples handed to the device ahead of its time (UR-23, INFERRED; B8).
 pub const IN_FLIGHT_WINDOW_NS: i64 = 10_000_000;
-/// How far ahead a held timed command is released to the device (UR-24).
-pub const RELEASE_WINDOW_NS: i64 = 3_000_000;
 /// The default samples per receive block (UR-5, UR-9).
 pub const DEFAULT_BLOCK_LEN: u32 = 2_000;
 

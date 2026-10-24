@@ -17,7 +17,7 @@
 ## 2. 次にすること
 
 1. **実機**：2026-10-20 に BP0 と BP5 を 2 台で済ませた（[bench-results.md](plan/phase8/bench-results.md)：Phase 7 の hardware テスト 29 本が #1＋OBX・#2＋UBX とも通り，悪くなった数値は無い）．今つながっているのは #1＋OBX．組み換えは owner に頼む（2026-10-20 夜は翌朝まで不可）．
-2. **設計メモ [37](plan/phase8/37-test-thread-timing.md)（#69）は完了**（2026-10-24）．試験のスレッドが時刻を読む所はすべて表にして直し（[reviews/37c-opus](plan/phase8/reviews/37c-opus.md)），`Direct` の rig の 2 s 先の開始を規則の唯一の例外とし，Python の `test_v54_sleep_is_run_time` を時刻の差と §58 の 2 の 2 本に分けた（owner 2026-10-24）．#69 は 2026-10-24 に閉じた．次は §3 の項目（#62/D9，#59，A2 ほか）．設計メモ 36 は 1b-7a（#51）・1b-7b（D2：`RX_OVERFLOW` は `{ cause, lost }`，block ごとに 0 個か 1 個）で完了し，報告の規則は `ezsdr_radio` の 1 か所になった（[00-overview](plan/phase8/00-overview.md) §8）．Gated の揺れは #68 で直した．**実装役は free の DeepSeek `opencode/deepseek-v4.1-flash-free#max`（一度に 1 本），セルフレビューは `openai/gpt-6-luna#max`（`--agent plan`）**（owner 2026-10-23：1b-7b までの Luna 実装・DeepSeek レビューを入れ替えた．free が上限に当たったら走っていた本数を記録して owner に伝え，Go に勝手に切り替えない．37a は free が 15:34 に上限に当たり，owner の指示で Go の `opencode-go/deepseek-v4.1-flash#max` で実装した．Luna のセルフレビューは OpenAI の 5 時間枠を使うので，Sol と同時に走らせない）．指示書には「orchestrator のファイルは読むだけ，見張りのプロセスは止めない，到達できる系列のテストを代わりなしで消さない，differential の操作を縮めない，消した名前を `new` に持つ行と消したテストを `filter` に持つ行を grep する，実時間に頼るテストを足さない」を入れる．
+2. **設計メモ [37](plan/phase8/37-test-thread-timing.md)（#69）は完了**（2026-10-24）．試験のスレッドが時刻を読む所はすべて表にして直し（[reviews/37c-opus](plan/phase8/reviews/37c-opus.md)），`Direct` の rig の 2 s 先の開始を規則の唯一の例外とし，Python の `test_v54_sleep_is_run_time` を時刻の差と §58 の 2 の 2 本に分けた（owner 2026-10-24）．#69 は 2026-10-24 に閉じた．**設計メモ [38](plan/phase8/38-timed-release-order.md)（#62）の 38a は完了**（2026-10-24）：timed command の floor・枠・行・終わりを語彙の `timed_instant` と D2 の規則にし，release window を profile の値にした．VH-8 の harness は `timed` を全系列で比べる（[reviews/38a-opus](plan/phase8/reviews/38a-opus.md)）．#62 を閉じるのは owner の確認の後．次は §3 の項目（D9，#59，A2 ほか）．設計メモ 36 は 1b-7a（#51）・1b-7b（D2：`RX_OVERFLOW` は `{ cause, lost }`，block ごとに 0 個か 1 個）で完了し，報告の規則は `ezsdr_radio` の 1 か所になった（[00-overview](plan/phase8/00-overview.md) §8）．Gated の揺れは #68 で直した．**実装役は free の DeepSeek `opencode/deepseek-v4.1-flash-free#max`（一度に 1 本），セルフレビューは `openai/gpt-6-luna#max`（`--agent plan`）**（owner 2026-10-23：1b-7b までの Luna 実装・DeepSeek レビューを入れ替えた．free が上限に当たったら走っていた本数を記録して owner に伝え，Go に勝手に切り替えない．37a は free が 15:34 に上限に当たり，owner の指示で Go の `opencode-go/deepseek-v4.1-flash#max` で実装した．Luna のセルフレビューは OpenAI の 5 時間枠を使うので，Sol と同時に走らせない）．指示書には「orchestrator のファイルは読むだけ，見張りのプロセスは止めない，到達できる系列のテストを代わりなしで消さない，differential の操作を縮めない，消した名前を `new` に持つ行と消したテストを `filter` に持つ行を grep する，実時間に頼るテストを足さない」を入れる．
    - **#67**：遠い origin の timed start が queue されたまま `Provider::stop` が来ると，uhd-rx は join の 1 s で detach され，cleanup は `close_streams` を呼ばない（1b-4d-2 の Sol の計画レビュー．#56 の bench を待つ）．
    - bench 行き：idle の DDC/DUC の timed frequency と fake の FIFO（1b-4d-1c），2 本の rx streamer と block ごとの queue（1b-4d-2）．
    - 1b-4e-2 の実機（2026-10-21，[bench-results](plan/phase8/bench-results.md)）：閉じた streamer の front end を別の stream で開くのは受信・送信とも VERIFIED．**持ったまま 2 本目を開くと，UHD は拒否するが持っている streamer の edge を壊し，プロセスが abort する**．FakeDevice は同じ日から，その open を拒否したうえで fake の drop でテストを失敗させる（UR-33，`take_abort`）．
@@ -29,7 +29,7 @@
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
    - **その後**：
-     - 2（#62 と D9 の DDC/DUC の release の規則，#59，A2 のテストのうち 1b-7 が触らないもの）．
+     - 2（D9 の DDC/DUC の release の規則，#59，A2 のテストのうち 1b-7 が触らないもの．#62 は 38a で済み）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
    - **セルフレビュー**：checklist は 4 項目，`timeout 2400`，mutation を流さないと明記する（1b-4d-1a では判定が出ず，1b-4d-1b でこうしたら出た）．OpenCode2・Claude Code・Codex には ponytail が入っている．
@@ -37,14 +37,14 @@
    - **8**：1台．Phase 7 と同じ X300（X310 の代わりで可）＋OBX 1枚のループバック（TX/RX → 30 dB 以上の減衰器 → RX2），10 GbE の Linux PC．外部 10 MHz/PPS 不要．X300 は 2026-10-01 から未接続なので，つなぎ直して `uhd_usrp_probe` で確認する（§6）．
    - **8b**：USRP 2台（2台目は X310/X300 なら同じ driver と profile．USRP2 は不要〈owner〉），10 MHz/PPS の分配器（OctoClock など．X3xx の背面から配れるかは未確認），2台の時刻差を測る RF 配線（1つの信号を分配して両方の RX へ，減衰器付き．推測）．2台目の 10 GbE は usrp-lnx03 の X710 の空きポート（§6.2）が使える．
    - **8c**：8 と同じ1台．FPGA image に Replay・DDC/DUC（・FFT）の block があるかを `uhd_usrp_probe` の block 一覧で確認．
-4. **その後の順番**（owner 2026-10-10，Vision §67，[28-forward-audit.md](plan/maintenance/28-forward-audit.md) 判断7）：8 → 8b（複数台：1 instance・1 root，判断1．`Session.aligned(at)`・`next_pps(k)`・`EpochRef::Pps` は実装済み，U12 は 8b）→ 8c（RFNoC：Replay，DDC/DUC．device FFT は FPGA image に block があるときだけ．UHD の RFNoC API は C++ のみなので UHD Module に薄い C++ 層が要る）→ 10（Processor/Reactor の実行エンジン，最小の PDU 経路）→ 全規則の確認 → 凍結レビュー → **v4.0 凍結** → 11+（Packet/PDU + TUN/TAP＝旧 Phase 9，WASM，GPU…）．
+4. **その後の順番**（owner 2026-10-10，Vision §67，[28-forward-audit.md](plan/maintenance/28-forward-audit.md) 判断7）：8 → 8b（複数台：1 instance・1 root，判断1．`Session.aligned(at)`・`next_pps(k)`・`EpochRef::Pps` は実装済み，U12 は 8b）→ 8c（RFNoC：Replay，DDC/DUC．device FFT は FPGA image に block があるときだけ．UHD の RFNoC API は C++ のみなので UHD Module に薄い C++ 層が要る）→ **Radio Model と UHD Module の汎用性の点検**（owner 2026-10-24．設計メモ：A 別の SDR 系〈HackRF One・Pro，bladeRF 2.0．v3 の `v3/source/device/hackrf.d` が証拠〉，B X4xx・N3xx〈UHD 4.10 のソースを読むだけ〉．その後 HackRF One → bladeRF 2.0 の Module．Phase 8 の後・凍結前．紙の作業は段階 2 の合間に先にしてよい）→ 10（Processor/Reactor の実行エンジン，最小の PDU 経路）→ 全規則の確認 → 凍結レビュー → **v4.0 凍結** → 11+（Packet/PDU + TUN/TAP＝旧 Phase 9，WASM，GPU…）．
 
 ## 3. 未解決と owner の判断待ち（一覧はここだけ）
 
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
 | #67 | 遠い origin の timed start が queue されたまま `Provider::stop` が来ると uhd-rx が join の 1 s を越えて detach され，streamer が漏れる（HEAD から） | #56 の bench の後 |
-| #62 | MockRadio が UHD の device queue の順番どおりの release を模擬しない（Mock が実機より緩い）．VH-8 harness は `timed` の25系列を除外中 | Phase 8 段階2（P4） |
+| #62 | MockRadio が UHD の device queue の順番どおりの release を模擬しない．設計メモ 38 の 38a で直した（2026-10-24．VH-8 harness は `timed` を全系列で比べる）．閉じる comment は owner の確認待ち | owner |
 | #59 | MockRadio に「cold change の read-back 拒否」の fault がない | Phase 8 段階2（P4） |
 | #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
 | #56 | X310 で start の e₁〜e₂ 間の Stop と Stop の処理遅れを測る | Phase 8 の bench |

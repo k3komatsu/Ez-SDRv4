@@ -91,7 +91,14 @@ D9（packet の流れていない DDC/DUC には timed command を渡さず，�
 
 ## 8. 実装
 
-- 38a：次．
+- **38a：完了（2026-10-24）**．D1・D2 のすべて．語彙の `ezsdr_radio::timeline::timed_instant` を両 Module が呼び，`radio.timing.release_window_ns`（x3xx 3 ms，ideal 0）を profile から読む．UHD Module は `RELEASE_WINDOW_NS` を消し，予約の台帳（`booked`）で floor と枠を決め，行を instant に書き，終わりを `settle` が `S` で確定する．release の条件は変えず，`released`／`released_at` は残した．harness は `release_window_matters` を消し，`timed`・`LATE_COMMAND` の中身・正規化した `applied` を全系列で比べる（Ceiling の command の行だけを系列から決めて外す）．記録：[reviews/38a-opus.md](reviews/38a-opus.md)．
+- **38a で決めた D2 の細部**（orchestrator の裁定．spec に書いた）：
+  1. 枠は受け取り `r` で `e > r` のものを数える（instant を迎えたものは数えない．D2 (2) の字面）．MockRadio も step が飛び越えた update を数えない．
+  2. 喪失のために装置へ渡せなかった command は，持っていたものと同じに終わりで確定する（issued にはならない）．
+  3. 装置が拒否した command は，終わりでも行を書かない（`COMMAND_REJECTED` で記録済み）．枠は `e` まで．
+  4. 「`S` までに渡した」：その command の装置の呼び出し（channel が複数なら最後の channel）を始める直前に読んだ装置の時刻 `h` が，停止なら `h ≤ S`，喪失なら `h < S`（RM-16）．`S` をまたぐ呼び出しは始めた時刻で決める．装置は受理の時刻を返さないので，本当の受理の時刻は INFERRED．
+  5. 終わりが予約された後の release は行を書かず，`settle` に任せる．
+  6. 停止と喪失が同じ tick で，停止の確定の後に喪失が見つかった場合は，先に確定した停止のまま（`S` は終わりを見つけた thread の読み．巻き戻さない）．
 
 ## 7. レビュー
 
@@ -102,3 +109,4 @@ D9（packet の流れていない DDC/DUC には timed command を渡さず，�
 | Sol 3 回目（3 版目） | FAIL，major 2・minor 2：floor の方針は妥当．拒否の後の枠，停止・喪失の時刻と instant の間，系列 4 の channel と実際に効く時刻，変わる spec とテスト．枠を予約から `e` まで数え，終わりを `S` 基準にし，拒否の系列を UHD だけに分け，§4b を足した |
 | Sol 4 回目 | FAIL，major 2：`S` の前に `e` を迎えても渡していない command（channel 待ちの後ろ，poll の間の喪失），`e = S` の喪失の順．終わりの確定を結果ごとに分け，同じ時刻の順を MockRadio の今の順に合わせ，poll の端を Ceiling にした |
 | Sol 5 回目 | FAIL，major 1・minor 1：前回の 2 件は解消．Ceiling の「1 ms 以内」は実運用で保証されない，harness の除外の範囲が曖昧．Ceiling を実運用の形で定義し，手動の時計の harness で起こる条件と外す範囲（その command の行だけ）を分けた（文の修正なので 6 回目は頼まず owner の判断へ） |
+| 38a | テスト計画（Sol FAIL，major 7）→ 実装 → コード（Sol FAIL，major 2）→ 直し 2 回（major 2 → 0）→ Sol PASS．[reviews/38a-opus.md](reviews/38a-opus.md) |

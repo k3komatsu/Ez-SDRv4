@@ -402,6 +402,20 @@ pub fn layout_instant(at: Option<i64>, now: i64, start: Option<i64>, earlier: im
     (e, asked < now || e > asked)
 }
 
+/// RM-21 (design 38 D2): when a `hardware_timed` update received at `now` with the requested
+/// instant `at` takes effect, and whether that is later than `at` asked (which emits
+/// `radio.LATE_COMMAND`): `at` or, when it is absent, the floor; never before the floor, which
+/// is `now + lead` or the instant of a timed update booked earlier inside the release
+/// `window`, whichever is later — whether that update was given, waits for a channel or the
+/// device refused it. `earlier` is those booked instants. The one place both Providers compute
+/// this floor.
+pub fn timed_instant(at: Option<i64>, now: i64, lead: i64, window: i64, earlier: impl IntoIterator<Item = i64>) -> (i64, bool) {
+    let horizon = now.saturating_add(window);
+    let floor = earlier.into_iter().filter(|e| *e <= horizon).fold(now.saturating_add(lead), |floor, e| floor.max(e));
+    let asked = at.unwrap_or(floor);
+    (asked.max(floor), at.is_some_and(|at| at < floor))
+}
+
 /// RM-34: why a move cannot be booked; every variant leaves every line as it was.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MoveError {

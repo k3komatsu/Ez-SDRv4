@@ -491,6 +491,8 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), one(Scalar::from(5_000_000)));
     assert_eq!(capability("radio.timing.startup_latency_ns"), one(Scalar::from(2_000_000_000)));
     assert_eq!(capability("radio.timing.command_queue_depth"), one(Scalar::from(16)));
+    // Design 38 D1: the release window is the profile's value, x3xx's 3 ms.
+    assert_eq!(capability("radio.timing.release_window_ns"), one(Scalar::from(3_000_000)));
     assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
     assert_eq!(capability("radio.tx.repeat_align_samples"), one(Scalar::from(1)));
     assert_eq!(capability("radio.rx.block_len"), one(Scalar::from(2_000)));
@@ -499,6 +501,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     let envelope = &section_of(instance, "envelope");
     assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
+    assert_eq!(envelope["timing"]["release_window_ns"], 3_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 100_000_000);
     assert_eq!(section_of(instance, "device")["fake"], true);
 }

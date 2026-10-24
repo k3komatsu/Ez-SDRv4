@@ -133,6 +133,9 @@ pub struct Terms {
     /// The lead a `hardware_timed` update without `at` takes, and a late one is moved to,
     /// in root ticks (MR-18, UR-24).
     pub timed_lead: i64,
+    /// How far ahead of its instant a `hardware_timed` update booked earlier floors a later
+    /// one, in root ticks (RM-21, design 38 D2 (1)).
+    pub release_window: i64,
     /// The stream and its Provider's terms.
     pub stream: Stream,
 }
@@ -158,14 +161,16 @@ impl Sequence {
     /// Every operation and fault, sorted by effective instant and arrival. A `cold` update
     /// takes effect at `at`, or at its receipt when absent or past, and never before a `cold`
     /// update of its stream received earlier (VH-2); a `hardware_timed` one at `at`, or at
-    /// its receipt plus the lead when absent or earlier (MR-18, UR-24, UR-25); a `Stop` and a
-    /// `start_rx` at their receipt.
+    /// its receipt plus the lead when absent or earlier, and never before one booked earlier
+    /// inside the release window (RM-21, design 38 D2 (1)); a `Stop` and a `start_rx` at
+    /// their receipt.
     pub fn schedule(&self, terms: &Terms) -> Vec<Entry> {
         let mut entries: Vec<Entry> = self.faults.iter().enumerate().map(|(index, (at, _))| {
             let e = terms.t0 + terms.ticks(*at);
             Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
         }).collect();
         let mut floor = [i64::MIN; 2];
+        let mut timed: Vec<i64> = Vec::new();
         for (index, (round, op)) in self.ops().enumerate() {
             let receipt = terms.t0 + terms.ticks(round);
             let at = |at_ns: &Option<i64>| at_ns.map(|ns| terms.t0 + terms.ticks(ns));
@@ -176,7 +181,11 @@ impl Sequence {
                     *floor = at(at_ns).unwrap_or(receipt).max(receipt).max(*floor);
                     *floor
                 }
-                Op::Timed { at_ns, .. } => at(at_ns).unwrap_or(i64::MIN).max(receipt + terms.timed_lead),
+                Op::Timed { at_ns, .. } => {
+                    let (e, _) = ezsdr_radio::timeline::timed_instant(at(at_ns), receipt, terms.timed_lead, terms.release_window, timed.iter().copied());
+                    timed.push(e);
+                    e
+                }
             };
             entries.push(Entry { e, seq: (self.faults.len() + index) as u64, receipt, event: Event::Op(index) });
         }

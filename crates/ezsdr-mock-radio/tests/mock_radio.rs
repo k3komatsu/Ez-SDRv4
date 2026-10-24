@@ -479,11 +479,15 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         } else {
             (0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8)
         };
+        // The release window is the profile's: x3xx emulates the UHD Module's, ideal none
+        // (design 38 D1).
+        let window = if x3xx { 3_000_000 } else { 0 };
         // Each direction's own start lead (RM-25; design 33 D5).
         let start_lead = if x3xx { 50_000_000 } else { 0 };
         assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Scalar::from(lead)));
         assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Scalar::from(startup)));
         assert_eq!(capabilities[&key("radio.timing.command_queue_depth")], one(Scalar::from(depth)));
+        assert_eq!(capabilities[&key("radio.timing.release_window_ns")], one(Scalar::from(window)));
         assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Scalar::from(gap)));
         assert!(!capabilities.contains_key(&key("radio.timing.stop_tail_ns")) && !capabilities.contains_key(&key("radio.timing.restart_lead_ns")));
         assert_eq!(capabilities[&key("radio.timing.rx_start_lead_ns")], one(Scalar::from(start_lead)));
@@ -508,6 +512,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], lead);
         assert_eq!(envelope["timing"]["startup_latency_ns"], startup);
         assert_eq!(envelope["timing"]["command_queue_depth"], depth);
+        assert_eq!(envelope["timing"]["release_window_ns"], window);
         assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], gap);
         assert!(envelope["timing"].get("stop_tail_ns").is_none() && envelope["timing"].get("restart_lead_ns").is_none());
         assert_eq!(envelope["timing"]["rx_start_lead_ns"], start_lead);
@@ -1065,7 +1070,7 @@ fn mr_18_hardware_timed_updates() {
     for i in 0..16 {
         full.actions.push(update_action("radio.rx.c0.frequency_hz", Value::num(2.0e9 + i as f64).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 10_000_000_000 + i))));
     }
-    full.actions.push(update_action("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 0))));
+    full.actions.push(update_action("radio.rx.c0.frequency_hz", Value::num(2.1e9).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 9_000_000))));
     full.step(0).unwrap();
     let events = full.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count(), 1);
@@ -2337,4 +2342,394 @@ fn mr_18_a_disable_that_arrives_after_a_later_change_follows_it() {
     let late = h.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
         .into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND).count();
     assert_eq!(late, 1);
+}
+
+// ---------------------------------------------------------------- design 38: the timed floor
+
+/// An `x3xx` Mock armed and started at `T0`, its instance-wide state alone.
+const T0: i64 = 2_000_000_000;
+
+fn timed_harness(profile: &str, env: &[(&str, serde_json::Value)]) -> Harness {
+    let mut harness = Harness::new(profile, &[], &[], env, None);
+    harness.arm_start(if profile == "x3xx" { T0 } else { 0 }).unwrap();
+    harness
+}
+
+/// The applied rows of one key as `(value, at)`, in application order (MR-27).
+fn applied_of_key(harness: &Harness, name: &str) -> Vec<(f64, i64)> {
+    harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.applied").unwrap()].as_array().unwrap().iter()
+        .filter(|row| row["key"] == serde_json::json!(name))
+        .map(|row| (row["value"].as_f64().unwrap(), row["at"]["ticks"].as_i64().unwrap()))
+        .collect()
+}
+
+/// The `LATE_COMMAND`s since the last drain as `(key, requested, applied)`.
+fn late_commands(harness: &Harness) -> Vec<(Option<String>, i64, i64)> {
+    harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND)
+        .map(|event| (event.payload["key"].as_str().map(str::to_owned), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap()))
+        .collect()
+}
+
+fn queue_full_events(harness: &Harness) -> usize {
+    harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count()
+}
+
+#[test]
+fn mr_18_a_timed_update_behind_one_inside_the_window_is_late() {
+    // RM-21, design 38 D2 (1): a command booked at 7 ms with its instant at 9.5 ms is floored
+    // at the one booked at 0 ms for 10 ms — 10 ≤ 7 + the 3 ms release window — and is late.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 9_500_000))));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    assert_eq!(late_commands(&harness), [(Some(gain.to_owned()), T0 + 9_500_000, T0 + 10_000_000)]);
+    assert_eq!(applied_of_key(&harness, gain), [(1.0, T0 + 10_000_000), (2.0, T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_18_the_ideal_profile_has_no_release_window() {
+    // Design 38 D1: the ideal profile's release window is 0, so no earlier booking floors this
+    // one: it keeps 9.5 ms and is not late.
+    let mut harness = timed_harness("ideal", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 10_000_000))));
+    harness.step(0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, 9_500_000))));
+    harness.step(7_000_000).unwrap();
+    harness.step(10_000_000).unwrap();
+    assert!(late_commands(&harness).is_empty());
+    assert_eq!(applied_of_key(&harness, gain), [(2.0, 9_500_000), (1.0, 10_000_000)]);
+}
+
+#[test]
+fn mr_18_the_window_edge_excludes_one_tick() {
+    // RM-21: the window includes an earlier instant at exactly `now + window` and excludes one
+    // tick beyond it, so a receipt one tick before 7 ms leaves the 9.5 ms command alone.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 9_500_000))));
+    harness.step(T0 + 6_999_999).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    assert!(late_commands(&harness).is_empty());
+    assert_eq!(applied_of_key(&harness, gain), [(2.0, T0 + 9_500_000), (1.0, T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_18_a_timed_update_beyond_the_window_keeps_its_instant() {
+    // RM-21: a command due past the window is not floored by the one inside it.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 11_000_000))));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 11_000_000).unwrap();
+    assert!(late_commands(&harness).is_empty());
+    assert_eq!(applied_of_key(&harness, gain), [(1.0, T0 + 10_000_000), (2.0, T0 + 11_000_000)]);
+}
+
+#[test]
+fn mr_18_a_timed_update_behind_one_waiting_for_a_channel_is_late() {
+    // RM-21: the floor counts a command the Mock records no channel for: c1 is in no stream,
+    // and its 10 ms booking still floors c0's 9.5 ms one at 7 ms.
+    let mut harness = timed_harness("x3xx", &[]);
+    let (held, live) = ("radio.rx.c1.gain_db", "radio.rx.c0.gain_db");
+    harness.actions.push(update_action(held, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(live, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 9_500_000))));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    assert_eq!(late_commands(&harness), [(Some(live.to_owned()), T0 + 9_500_000, T0 + 10_000_000)]);
+    assert_eq!(applied_of_key(&harness, held), [(1.0, T0 + 10_000_000)]);
+    assert_eq!(applied_of_key(&harness, live), [(2.0, T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_18_a_channel_leaving_after_the_booking_does_not_move_the_floor() {
+    // RM-21, design 38 D2 (1): the floor is the booking's history, not the channels live at the
+    // receipt: c0 leaving every stream at 7.2 ms does not free the 10 ms booking's floor.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(TimePoint::new(ROOT, T0 + 7_200_000))));
+    harness.step(T0 + 7_200_000).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 9_500_000))));
+    harness.step(T0 + 7_300_000).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    assert_eq!(late_commands(&harness), [(Some(gain.to_owned()), T0 + 9_500_000, T0 + 10_000_000)]);
+    assert_eq!(applied_of_key(&harness, gain), [(1.0, T0 + 10_000_000), (2.0, T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_18_a_stop_leaves_each_update_its_row_at_its_instant() {
+    // RM-16, MR-25, design 38 D2 (4): an Action's `Stop` cancels no update; each records at its
+    // own instant.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 12_000_000))));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(tgt("mock")) });
+    harness.step(T0 + 8_000_000).unwrap();
+    harness.step(T0 + 12_000_000).unwrap();
+    assert!(rejected_rows(&harness).is_empty(), "{:?}", rejected_rows(&harness));
+    assert_eq!(applied_of_key(&harness, gain), [(1.0, T0 + 10_000_000), (2.0, T0 + 12_000_000)]);
+}
+
+#[test]
+fn mr_25_a_stop_records_a_later_update_as_cancelled_at_the_stop() {
+    // MR-25, design 38 D2 (4): `Provider::stop` cancels every update not yet in effect, at its
+    // own instant, whether it was written to a device or not.
+    let mut harness = timed_harness("x3xx", &[]);
+    harness.step(T0 + 8_000_000).unwrap();
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.actions.push(update_action("radio.tx.c0.gain_db", Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 12_000_000))));
+    harness.step(T0 + 8_000_000).unwrap();
+    harness.auth.advance_to(TimePoint::new(ROOT, T0 + 8_000_000)).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(applied_of_key(&harness, "radio.rx.c0.gain_db"), []);
+    assert_eq!(rejected_rows(&harness), [
+        ("update_parameter".to_owned(), "MR-25: cancelled by stop".to_owned(), T0 + 8_000_000),
+        ("update_parameter".to_owned(), "MR-25: cancelled by stop".to_owned(), T0 + 8_000_000),
+    ]);
+}
+
+#[test]
+fn mr_20_a_loss_records_a_later_update_as_cancelled_at_the_loss() {
+    // MR-20, design 38 D2 (4), S6: the loss at 8 ms cancels both updates at 8 ms — not at the
+    // 10.6 ms step that handles it — with the loss's reason.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(8_000_000)]))];
+    let mut harness = timed_harness("x3xx", &env);
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.actions.push(update_action("radio.tx.c0.gain_db", Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 12_000_000))));
+    harness.step(T0).unwrap();
+    assert!(harness.step(T0 + 10_600_000).unwrap_err().kind == ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+    assert_eq!(rejected_rows(&harness), [
+        ("update_parameter".to_owned(), LOST.to_owned(), T0 + 8_000_000),
+        ("update_parameter".to_owned(), LOST.to_owned(), T0 + 8_000_000),
+    ]);
+}
+
+#[test]
+fn mr_18_an_update_applied_before_a_stop_keeps_its_row() {
+    // Design 38 D2 (4): a stop after an instant leaves that instant's row.
+    let mut harness = timed_harness("x3xx", &[]);
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    harness.step(T0 + 12_000_000).unwrap();
+    harness.auth.advance_to(TimePoint::new(ROOT, T0 + 12_000_000)).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(applied_of_key(&harness, "radio.rx.c0.gain_db"), [(1.0, T0 + 10_000_000)]);
+    assert!(rejected_rows(&harness).is_empty());
+}
+
+#[test]
+fn mr_18_a_loss_after_the_last_pass_keeps_a_row_due_before_it() {
+    // Design 38 D2 (4), series 9b: the loss at 10.2 ms settles an update due at 10 ms as applied,
+    // the step that handles it at 10.6 ms notwithstanding.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(10_200_000)]))];
+    let mut harness = timed_harness("x3xx", &env);
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 9_600_000).unwrap();
+    assert!(harness.step(T0 + 10_600_000).is_err());
+    assert_eq!(applied_of_key(&harness, "radio.rx.c0.gain_db"), [(1.0, T0 + 10_000_000)]);
+    assert!(rejected_rows(&harness).is_empty());
+}
+
+#[test]
+fn mr_18_an_update_due_at_the_stop_instant_applies_and_at_the_loss_instant_does_not() {
+    // Design 38 D2 (4), series 9c: at one instant a stop settles first (the update applies) and
+    // a loss first (the update is cancelled).
+    let mut stopped = timed_harness("x3xx", &[]);
+    stopped.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    stopped.step(T0 + 7_000_000).unwrap();
+    // The clock alone moves to 10 ms: `stop` itself settles what is due there.
+    stopped.auth.advance_to(TimePoint::new(ROOT, T0 + 10_000_000)).unwrap();
+    stopped.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(applied_of_key(&stopped, "radio.rx.c0.gain_db"), [(1.0, T0 + 10_000_000)]);
+    assert!(rejected_rows(&stopped).is_empty());
+
+    let env = [("sim.faults", serde_json::json!([device_lost_at(10_000_000)]))];
+    let mut lost = timed_harness("x3xx", &env);
+    lost.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    lost.step(T0 + 7_000_000).unwrap();
+    assert!(lost.step(T0 + 10_000_000).is_err());
+    assert_eq!(applied_of_key(&lost, "radio.rx.c0.gain_db"), []);
+    assert_eq!(rejected_rows(&lost), [("update_parameter".to_owned(), LOST.to_owned(), T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_18_two_updates_at_one_instant_keep_the_booking_order() {
+    // RM-21, design 38 D2 (3): updates at one instant apply and record in delivery order.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    assert_eq!(applied_of_key(&harness, gain), [(1.0, T0 + 10_000_000), (2.0, T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_18_a_late_command_at_a_full_queue_reports_late_first() {
+    // RM-21, design 38 D2 (1), (2), series 11: the late judgement precedes the queue's; a
+    // command that takes effect frees its slot.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    for i in 0..16 {
+        harness.actions.push(update_action(gain, Value::num(1.0 + i as f64).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + (5 + 4 * i) * 1_000_000))));
+    }
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 1_000_000))));
+    harness.step(T0).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+    let kinds: Vec<&str> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND || event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).map(|event| event.kind.as_str()).collect();
+    assert_eq!(kinds, [ezsdr_radio::kinds::LATE_COMMAND, ezsdr_radio::kinds::COMMAND_QUEUE_FULL], "the order or the events: {kinds:?}, rejected {:?}", rejected_rows(&harness));
+    assert_eq!(events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).unwrap().payload["depth"], 16);
+    assert_eq!(applied_of_key(&harness, gain).len(), 0, "the refused command was booked");
+    // The 5 ms command applies; its slot is free for one more, due later than any other.
+    harness.step(T0 + 5_000_000).unwrap();
+    assert_eq!(applied_of_key(&harness, gain).len(), 1);
+    harness.actions.push(update_action(gain, Value::num(20.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 30_000_000))));
+    harness.step(T0 + 5_000_000).unwrap();
+    assert_eq!(queue_full_events(&harness), 0, "the freed slot was not counted");
+    harness.step(T0 + 30_000_000).unwrap();
+    assert!(applied_of_key(&harness, gain).iter().any(|(value, at)| *value == 20.0 && *at == T0 + 30_000_000));
+}
+
+#[test]
+fn mr_18_a_command_due_before_the_receipt_takes_no_slot() {
+    // Design 38 D2 (2), S4, series 11b: at a receipt of 20 ms the sixteen commands booked for
+    // 1…16 ms have all met their instant in the history, so they take no slot, though `step`
+    // has not applied them yet.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    for i in 1..=16 {
+        harness.actions.push(update_action(gain, Value::num(i as f64).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + (i + 1) * 1_000_000))));
+    }
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(17.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 22_000_000))));
+    harness.step(T0 + 20_000_000).unwrap();
+    assert_eq!(queue_full_events(&harness), 0, "the met instants were counted");
+    harness.step(T0 + 22_000_000).unwrap();
+    assert_eq!(applied_of_key(&harness, gain).len(), 17);
+}
+
+#[test]
+fn mr_18_a_command_due_at_its_receipt_takes_no_slot() {
+    // Design 38 D2 (2), S4, series 11c: at a receipt equal to the earliest instant, that command
+    // has met its instant and takes no slot — whether a step applied it first or not; one tick
+    // earlier it still does, and the queue is full.
+    let booked = |advanced: bool, receipt: i64| -> usize {
+        let mut harness = timed_harness("x3xx", &[]);
+        let gain = "radio.rx.c0.gain_db";
+        for i in 1..=16 {
+            harness.actions.push(update_action(gain, Value::num(i as f64).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + (i + 1) * 1_000_000))));
+        }
+        harness.step(T0).unwrap();
+        if advanced {
+            harness.step(T0 + 2_000_000).unwrap();
+        }
+        harness.actions.push(update_action(gain, Value::num(17.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 30_000_000))));
+        harness.step(T0 + receipt).unwrap();
+        queue_full_events(&harness)
+    };
+    assert_eq!((booked(false, 2_000_000), booked(true, 2_000_000)), (0, 0), "an instant met at the receipt took a slot");
+    assert_eq!(booked(false, 1_999_999), 1, "a command one tick short of its instant took no slot");
+}
+
+#[test]
+fn mr_18_the_row_is_written_at_its_instant() {
+    // Design 38 D2 (3): a booked update has no row before its instant.
+    let mut harness = timed_harness("x3xx", &[]);
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.step(T0 + 9_999_999).unwrap();
+    assert_eq!(applied_of_key(&harness, "radio.rx.c0.gain_db"), []);
+    harness.step(T0 + 10_000_000).unwrap();
+    assert_eq!(applied_of_key(&harness, "radio.rx.c0.gain_db"), [(1.0, T0 + 10_000_000)]);
+}
+
+#[test]
+fn mr_25_a_loss_then_a_stop_keeps_the_loss_s_instant_and_its_rows() {
+    // Design 38 D2 (4), S6: the first end's instant and rows stand; a `stop` after the loss adds
+    // nothing, and a second notification of the loss adds nothing either.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(8_000_000)]))];
+    let mut harness = timed_harness("x3xx", &env);
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    assert!(harness.step(T0 + 10_600_000).is_err());
+    let rows = rejected_rows(&harness);
+    harness.auth.advance_to(TimePoint::new(ROOT, T0 + 10_600_000)).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    assert_eq!(rejected_rows(&harness), rows, "the stop recorded the loss again");
+    assert_eq!(rejected_rows(&harness), [("update_parameter".to_owned(), LOST.to_owned(), T0 + 8_000_000)]);
+    // The loss is the end's own: recorded once, applied once, and the stop adds nothing.
+    assert_eq!(fault_rows(&harness, "device_lost"), [(serde_json::json!(true), serde_json::json!(0))]);
+    harness.step(T0 + 12_000_000).unwrap();
+    assert_eq!(rejected_rows(&harness), rows, "the second notification recorded the loss again");
+}
+
+#[test]
+fn mr_25_a_stop_then_a_loss_keeps_the_stop_s_instant_and_its_rows() {
+    // Design 38 D2 (4), S6: with the stop first, the loss's later notification brings no new row
+    // and moves no instant.
+    let env = [("sim.faults", serde_json::json!([device_lost_at(10_200_000)]))];
+    let mut harness = timed_harness("x3xx", &env);
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 12_000_000))));
+    harness.step(T0 + 8_000_000).unwrap();
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 13_000_000))));
+    harness.step(T0 + 8_000_000).unwrap();
+    harness.auth.advance_to(TimePoint::new(ROOT, T0 + 8_000_000)).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    // The stop resolves the loss still ahead: recorded unapplied, so it cannot fire later.
+    assert_eq!(fault_rows(&harness, "device_lost"), [(serde_json::json!(false), serde_json::json!(0))]);
+    let rows = rejected_rows(&harness);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|(_, reason, at)| reason == "MR-25: cancelled by stop" && *at == T0 + 8_000_000), "{rows:?}");
+    harness.step(T0 + 10_600_000).unwrap();
+    assert_eq!(rejected_rows(&harness), rows, "the loss after the stop recorded rows again");
+    assert_eq!(fault_rows(&harness, "device_lost"), [(serde_json::json!(false), serde_json::json!(0))], "the resolved loss fired");
+}
+
+#[test]
+fn mr_18_a_cold_change_does_not_floor_a_timed_update() {
+    // RM-21, design 38 D2 (1): the floor's history is the timed bookings', not the `cold` changes':
+    // a `cold` change booked first for 3 ms does not move a timed update due at 2 ms, nor make it
+    // late.
+    let mut harness = timed_harness("x3xx", &[]);
+    harness.actions.push(update_action("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(TimePoint::new(ROOT, T0 + 3_000_000))));
+    harness.actions.push(update_action("radio.rx.c0.gain_db", Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 2_000_000))));
+    harness.actions.push(update_action("radio.tx.c0.gain_db", Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, None));
+    harness.step(T0).unwrap();
+    harness.step(T0 + 3_000_000).unwrap();
+    assert!(late_commands(&harness).is_empty(), "a cold change floored a timed update: {:?}", applied_of_key(&harness, "radio.rx.c0.gain_db"));
+    assert_eq!(applied_of_key(&harness, "radio.rx.c0.gain_db"), [(1.0, T0 + 2_000_000)]);
+    assert_eq!(applied_of_key(&harness, "radio.tx.c0.gain_db"), [(2.0, T0 + 2_000_000)]);
+}
+
+#[test]
+fn mr_18_an_omitted_deadline_takes_the_floor() {
+    // RM-21, design 38 D2 (1), series 1b: an omitted `at` takes the floor, not `now + lead`: the
+    // 10 ms booking at T0 floors the omitted one received at 7 ms there.
+    let mut harness = timed_harness("x3xx", &[]);
+    let gain = "radio.rx.c0.gain_db";
+    harness.actions.push(update_action(gain, Value::num(1.0).unwrap(), UpdateClass::HardwareTimed, Some(TimePoint::new(ROOT, T0 + 10_000_000))));
+    harness.step(T0).unwrap();
+    harness.actions.push(update_action(gain, Value::num(2.0).unwrap(), UpdateClass::HardwareTimed, None));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 10_000_000).unwrap();
+    assert!(late_commands(&harness).is_empty(), "an omitted deadline is not late");
+    assert_eq!(applied_of_key(&harness, gain), [(1.0, T0 + 10_000_000), (2.0, T0 + 10_000_000)]);
 }

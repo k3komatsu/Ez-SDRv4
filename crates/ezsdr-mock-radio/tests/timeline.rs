@@ -168,6 +168,7 @@ fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
         Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
     }).collect();
     let mut floor = i64::MIN;
+    let mut timed: Vec<i64> = Vec::new();
     for (index, (round, op)) in sequence.ops().enumerate() {
         let receipt = terms.t0 + terms.ticks(round);
         let at = |at_ns: &Option<i64>| at_ns.map(|ns| terms.t0 + terms.ticks(ns));
@@ -177,7 +178,11 @@ fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
                 floor = at(at_ns).unwrap_or(receipt).max(receipt).max(floor);
                 floor
             }
-            LayoutOp::Timed { at_ns, .. } => at(at_ns).unwrap_or(i64::MIN).max(receipt + terms.timed_lead),
+            LayoutOp::Timed { at_ns, .. } => {
+                let (e, _) = ezsdr_radio::timeline::timed_instant(at(at_ns), receipt, terms.timed_lead, terms.release_window, timed.iter().copied());
+                timed.push(e);
+                e
+            }
         };
         entries.push(Entry { e, seq: (sequence.faults.len() + index) as u64, receipt, event: Event::Op(index) });
     }
@@ -240,11 +245,11 @@ impl Record {
 /// A profile's timeline terms; `x3xx` with VH-4's ready term (one receive call of
 /// 2 000 samples, 3 ms) and the timed lead of MR-3.
 fn terms(profile: &str, direction: Direction, channels: Channels) -> Terms {
-    let (lead, call, allowance, timed_lead) = if profile == "ideal" { (0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 2 * MS) };
+    let (lead, call, allowance, timed_lead, release_window) = if profile == "ideal" { (0, 0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 2 * MS, 3 * MS) };
     // The transmit clock starts at `arm`, at 0 (RM-25); the receive clock at T0.
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels, ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
-    Terms { t0: T0, root_hz: 1_000_000_000, timed_lead, stream: Stream { direction, origin, config, lead, call, allowance } }
+    Terms { t0: T0, root_hz: 1_000_000_000, timed_lead, release_window, stream: Stream { direction, origin, config, lead, call, allowance } }
 }
 
 fn line_key(direction: Direction, stream: u32) -> StreamKey { (direction, stream) }

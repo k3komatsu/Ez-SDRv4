@@ -65,6 +65,11 @@
           "format": "int64",
           "type": "integer"
         },
+        "release_window_ns": {
+          "description": "How far ahead of its instant a timed command is handed to the device (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
         "rx_start_lead_ns": {
           "description": "From a receive stream's previous cut, and from the instant its Provider is ready for\nit, to a new segment's first sample (RM-20, RM-25).",
           "format": "int64",
@@ -85,6 +90,7 @@
         "min_timed_command_lead_ns",
         "startup_latency_ns",
         "command_queue_depth",
+        "release_window_ns",
         "overflow_restart_gap_ns",
         "rx_start_lead_ns",
         "tx_start_lead_ns"

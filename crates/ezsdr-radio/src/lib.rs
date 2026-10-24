@@ -57,6 +57,8 @@ pub mod keys {
     pub const STARTUP_LATENCY_NS: &str = "radio.timing.startup_latency_ns";
     /// Device timed-command queue depth (RM-4).
     pub const COMMAND_QUEUE_DEPTH: &str = "radio.timing.command_queue_depth";
+    /// How far ahead of its instant a timed command is handed to the device (RM-4, RM-21).
+    pub const RELEASE_WINDOW_NS: &str = "radio.timing.release_window_ns";
     /// Receive restart gap after overrun in nanoseconds (RM-4).
     pub const OVERFLOW_RESTART_GAP_NS: &str = "radio.timing.overflow_restart_gap_ns";
     /// Lead from a receive stream's previous cut, and from the instant its Provider is ready
@@ -213,6 +215,7 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::MIN_TIMED_COMMAND_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::STARTUP_LATENCY_NS, Int, false, Reject, None),
         key_decl(keys::COMMAND_QUEUE_DEPTH, Int, false, Reject, None),
+        key_decl(keys::RELEASE_WINDOW_NS, Int, false, Reject, None),
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
         key_decl(keys::RX_START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::TX_START_LEAD_NS, Int, false, Reject, None),
@@ -718,6 +721,8 @@ pub struct TimingEnvelope {
     pub startup_latency_ns: i64,
     /// Timed-command queue capacity (RM-20).
     pub command_queue_depth: i64,
+    /// How far ahead of its instant a timed command is handed to the device (RM-20).
+    pub release_window_ns: i64,
     /// Receive restart gap after overrun (RM-20).
     pub overflow_restart_gap_ns: i64,
     /// From a receive stream's previous cut, and from the instant its Provider is ready for

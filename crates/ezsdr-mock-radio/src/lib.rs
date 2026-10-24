@@ -1775,20 +1775,27 @@ impl MockRadio {
         }).expect("late command payload");
         let order = self.next_order;
         let tick = if expected == UpdateClass::HardwareTimed {
-            let lead = time::ns_to_v(clocks, root, self.profile.timing().min_timed_command_lead_ns).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
-            let earliest = now.checked_add(lead).ok_or_else(|| ModuleError::rejected("MR-18: timed command instant overflow"))?;
-            let requested = requested_tick.unwrap_or(earliest);
-            let depth = self.profile.timing().command_queue_depth as usize;
-            if self.updates.values().filter(|update| update.class == UpdateClass::HardwareTimed).count() >= depth {
+            // RM-21 (design 38 D2 (1), S4): the floor is the device lead or the instant of a
+            // timed update booked earlier inside the release window, whichever is later; the
+            // late judgement precedes the queue's, and the depth counts the bookings whose
+            // instant has not come.
+            let timing = self.profile.timing();
+            let lead = time::ns_to_v(clocks, root, timing.min_timed_command_lead_ns).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+            let window = time::ns_to_v(clocks, root, timing.release_window_ns).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
+            let earlier = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::HardwareTimed).map(|((effective, _), _)| *effective);
+            let (tick, is_late) = timeline::timed_instant(requested_tick, now, lead, window, earlier);
+            if is_late {
+                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), tick), TimePoint::new(root, now))?;
+            }
+            let depth = timing.command_queue_depth as usize;
+            let pending = self.updates.iter().filter(|((effective, _), update)| update.class == UpdateClass::HardwareTimed && *effective > now).count();
+            if pending >= depth {
                 let payload = serde_json::to_value(ezsdr_radio::payloads::CommandQueueFullPayload { key: key.clone(), depth: depth as i64 }).expect("queue full payload");
                 self.emit_event("", ezsdr_radio::kinds::COMMAND_QUEUE_FULL, Severity::Error, payload, TimePoint::new(root, now))?;
                 self.record_rejected_action("update_parameter", "MR-18: hardware-timed command queue is full", now);
                 return Ok(());
             }
-            if requested < earliest {
-                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested, earliest), TimePoint::new(root, now))?;
-            }
-            requested.max(earliest)
+            tick
         } else {
             // RM-25, RM-27: a layout instance's `cold` change never takes effect before a
             // `cold` change the instance received earlier, of whatever direction, stream or

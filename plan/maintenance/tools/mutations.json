@@ -569,7 +569,7 @@
   "name": "VH-6 (spec 22, H11): a device Stop cancels held timed updates",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
    "old": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });\n                    drop(streams);\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
-   "new": "                self.cancel_held(\"Stop\");\n                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });\n                    drop(streams);\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
+   "new": "                self.settle(self.core.now(), \"Stop\", false);\n                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop });\n                    drop(streams);\n                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }\n                }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stop_cancels_no_update"
@@ -818,8 +818,8 @@
   "id": "J47",
   "name": "note 23: the thread that finds the device lost does not book the loss",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "        streams.end(self, self.now(), false, true);\n",
-  "new": "",
+  "old": "        streams.end(self, at, false, true);\n",
+  "new": "\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
@@ -928,8 +928,8 @@
   "id": "J58",
   "name": "note 23 round 2: the device is taken as lost before its loss is booked",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "        streams.end(self, self.now(), false, true);\n        self.lost.store(true, Ordering::Release);\n",
-  "new": "        self.lost.store(true, Ordering::Release);\n        streams.end(self, self.now(), false, true);\n",
+  "old": "        streams.end(self, at, false, true);\n        self.lost.store(true, Ordering::Release);\n",
+  "new": "        self.lost.store(true, Ordering::Release);\n        streams.end(self, at, false, true);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "provider::",
@@ -5262,11 +5262,11 @@
   "id": "P148",
   "name": "a layout instance's `hardware_timed` update is floored at an earlier `cold` change too",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            let requested = requested_tick.unwrap_or(earliest);\n            let depth = self.profile.timing().command_queue_depth as usize;",
-  "new": "            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective).max().unwrap_or(i64::MIN);\n            let requested = requested_tick.unwrap_or(earliest).max(floor);\n            let depth = self.profile.timing().command_queue_depth as usize;",
+  "old": "            let earlier = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::HardwareTimed).map(|((effective, _), _)| *effective);",
+  "new": "            let earlier = self.updates.keys().map(|(effective, _)| *effective);",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_layout",
-  "filter": "mr_18_a_layout_hardware_timed_change_keeps_its_own_instant"
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_cold_change_does_not_floor_a_timed_update"
  },
  {
   "id": "P149",
@@ -6372,10 +6372,10 @@
   },
   {
    "id": "P268",
-   "name": "the device queue's order is the instance's one, across the directions (UC-2, UR-24)",
+   "name": "the floor ignores the release window (UR-24, design 38 D2 (1))",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let floor = self.released.iter().copied().max().map_or(earliest, |latest| latest.max(earliest));",
-   "new": "        let floor = self.released.iter().copied().max().filter(|_| dir == Dir::Tx).map_or(earliest, |latest| latest.max(earliest));",
+   "old": "        let (e, late) = timeline::timed_instant(requested, now, lead, window, self.booked.iter().copied());",
+   "new": "        let (e, late) = timeline::timed_instant(requested, now, lead, 0, self.booked.iter().copied());",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_the_device_queue_is_one_across_the_directions"
@@ -7244,8 +7244,8 @@
    "id": "P414",
    "name": "a release is recorded issued (UR-24, S1, S12)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"issued\": true,",
-   "new": "            \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e),",
+   "old": "            row[\"issued\"] = json!(true);\n",
+   "new": "\n",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_release_without_a_live_channel_reaches_the_pending_segment"
@@ -7264,8 +7264,8 @@
    "id": "P416",
    "name": "a release with no channel at all is not issued (UR-24, S6)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                lock(&self.core.rec).applied.push(json!({ \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"note\": \"no channel\" }));",
-   "new": "                lock(&self.core.rec).applied.push(json!({ \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"note\": \"no channel\", \"issued\": true }));",
+   "old": "        } else {\n            row[\"note\"] = json!(\"no channel\");\n        }",
+   "new": "        } else {\n            row[\"issued\"] = json!(true);\n            row[\"note\"] = json!(\"no channel\");\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_release_without_a_live_channel_or_a_later_segment_applies_nothing"
@@ -7284,8 +7284,8 @@
    "id": "P419",
    "name": "a failed timed release is not recorded as successful",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                drop(updates);\n                self.core.device_failed(None, \"update_parameter\", &error);\n                return false;",
-   "new": "                self.core.device_failed(None, \"update_parameter\", &error);\n                continue;",
+   "old": "                self.core.device_failed(None, \"update_parameter\", &error);\n                // UR-29, design 38 D2 (4): a lost device is not a refusal — the command was\n                // never handed over, so it stays pending for the end's settlement.\n                return if error.lost { Handed::Lost } else { Handed::Refused };",
+   "new": "                self.core.device_failed(None, \"update_parameter\", &error);\n                return Handed::Given(0);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_29_a_failed_released_update_is_a_device_failure"
@@ -7315,8 +7315,8 @@
    "id": "P426",
    "name": "a booking is floored at the last command released (UR-24, S12)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let floor = self.released.iter().copied().max().map_or(earliest, |latest| latest.max(earliest));",
-   "new": "        let floor = earliest;",
+   "old": "        let (e, late) = timeline::timed_instant(requested, now, lead, window, self.booked.iter().copied());",
+   "new": "        let (e, late) = timeline::timed_instant(requested, now, lead, window, std::iter::empty());",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_release_behind_a_released_command_keeps_the_device_queue_order"
@@ -7325,8 +7325,8 @@
    "id": "P427",
    "name": "a command the booking's floor moves is late at its booking (UR-24, S12, S12c)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        if let Some(requested) = requested.filter(|requested| *requested < floor) {\n            self.late_command(Some(key.clone()), requested, e);",
-   "new": "        if let Some(requested) = requested.filter(|_| false) {\n            self.late_command(Some(key.clone()), requested, e);",
+   "old": "        if late {\n            self.late_command(Some(key.clone()), requested.expect(\"a late command names its requested instant\"), e);",
+   "new": "        if false {\n            self.late_command(Some(key.clone()), requested.expect(\"a late command names its requested instant\"), e);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_release_behind_a_released_command_keeps_the_device_queue_order"
@@ -7355,7 +7355,7 @@
    "id": "P432",
    "name": "a command whose instant passed with no channel is the configuration of record (UR-24, S6)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                self.released_at.insert((e, seq), timed);",
+   "old": "                self.released_at.insert((e, seq), Given { timed, live: false, given: false, handed_at: None });",
    "new": "                let _ = timed;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -7365,8 +7365,8 @@
    "id": "P433",
    "name": "a command whose instant passed with no channel settles in instant order with the released ones (UR-24, S19)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                self.released_at.insert((e, seq), timed);",
-   "new": "                self.of_record(timed);",
+   "old": "        for order in self.released_at.range(..=(now, u64::MAX)).map(|(order, _)| *order).collect::<Vec<_>>() {",
+   "new": "        for order in self.released_at.range(..=(now, u64::MAX)).rev().map(|(order, _)| *order).collect::<Vec<_>>() {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_released_command_and_one_without_a_channel_settle_in_instant_order"
@@ -7375,21 +7375,11 @@
    "id": "P434",
    "name": "a release checks for device loss before its channel apply",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            if self.core.is_lost() {\n                return false;\n            }",
-   "new": "            if false {\n                return false;\n            }",
+   "old": "            if self.core.is_lost() {\n                return Handed::Lost;\n            }",
+   "new": "            if false {\n                return Handed::Lost;\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_29_a_loss_published_before_a_release_stops_the_call"
- },
- {
-   "id": "P435",
-   "name": "a release sees a loss another thread published before its next command (UR-29, S9 g)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            if self.core.is_lost() {\n                return;\n            }",
-   "new": "            if false {\n                return;\n            }",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_29_a_loss_after_a_release_s_command_stops_the_one_behind_it"
  },
  {
   "id": "P438",
@@ -8729,10 +8719,10 @@
   },
   {
     "id": "P422",
-    "name": "held timed commands do not count against the queue depth (UR-24, S4)",
+    "name": "a command never given takes no queue slot (UR-24, design 38 D2 (2), S4)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "        let pending = self.held.len() + self.released.len();",
-    "new": "        let pending = self.released.len();",
+    "old": "        let pending = self.booked.iter().filter(|effective| **effective > now).count();",
+    "new": "        let pending = self.released.iter().filter(|effective| **effective > now).count();",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
@@ -9096,5 +9086,305 @@
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_cold_change_cancels_a_burst_on_a_skipped_future_clock"
-  }
+  } ,
+{
+  "id": "P573",
+  "name": "the floor's window excludes an instant one tick past it (RM-21, design 38 D2 (1))",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let floor = earlier.into_iter().filter(|e| *e <= horizon).fold(now.saturating_add(lead), |floor, e| floor.max(e));\n",
+  "new": "    let floor = earlier.into_iter().filter(|e| *e < horizon).fold(now.saturating_add(lead), |floor, e| floor.max(e));\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_25_the_timed_instant_is_floored_at_every_booked_command_inside_the_window"
+ } ,
+{
+  "id": "P574",
+  "name": "the floor ignores the release window (RM-21)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let horizon = now.saturating_add(window);\n",
+  "new": "    let horizon = now;\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_25_the_timed_instant_is_floored_at_every_booked_command_inside_the_window"
+ } ,
+{
+  "id": "P575",
+  "name": "the floor ignores the device lead (RM-21, MR-18)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let floor = earlier.into_iter().filter(|e| *e <= horizon).fold(now.saturating_add(lead), |floor, e| floor.max(e));\n",
+  "new": "    let floor = earlier.into_iter().filter(|e| *e <= horizon).fold(now, |floor, e| floor.max(e));\n",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_25_the_timed_instant_is_floored_at_every_booked_command_inside_the_window"
+ } ,
+{
+  "id": "P576",
+  "name": "the UHD queue counts the commands whose instant has come (UR-24, design 38 D2 (2), S4)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let pending = self.booked.iter().filter(|effective| **effective > now).count();\n",
+  "new": "        let pending = self.booked.len();\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_command_due_at_its_receipt_takes_no_slot"
+ } ,
+{
+  "id": "P577",
+  "name": "the Mock queue counts the commands whose instant has come (MR-18, design 38 D2 (2), S4)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let pending = self.updates.iter().filter(|((effective, _), update)| update.class == UpdateClass::HardwareTimed && *effective > now).count();\n",
+  "new": "            let pending = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::HardwareTimed).count();\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_command_due_at_its_receipt_takes_no_slot"
+ } ,
+{
+  "id": "P578",
+  "name": "the Mock takes the release window from a 3 ms constant, not the profile (MR-3, design 38 D1)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let window = time::ns_to_v(clocks, root, timing.release_window_ns).map_err(|error| ModuleError::rejected(format!(\"MR-18: {error}\")))?;\n",
+  "new": "            let window = time::ns_to_v(clocks, root, 3_000_000).map_err(|error| ModuleError::rejected(format!(\"MR-18: {error}\")))?;\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_the_ideal_profile_has_no_release_window"
+ } ,
+{
+  "id": "P579",
+  "name": "the UHD floor takes a 3 ms constant, not the description (UR-24, design 38 D1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let lead = self.core.ticks(DEVICE_LEAD_NS);\n        let window = self.core.ticks(self.core.description.timing.release_window_ns);\n",
+  "new": "        let lead = self.core.ticks(DEVICE_LEAD_NS);\n        let window = self.core.ticks(3_000_000);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_the_release_window_comes_from_the_description"
+ } ,
+{
+  "id": "P580",
+  "name": "the UHD release records the row when it gives the command (UR-24, design 38 D2 (3))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        drop(updates);\n        Handed::Given(handed_at.expect(\"UR-24: a command is given on a channel\"))\n",
+  "new": "        drop(updates);\n        lock(&self.core.rec).applied.push(json!({ \"key\": timed.key, \"claimed\": timed.value, \"read_back\": null, \"at\": self.core.at(e), \"issued\": true }));\n        Handed::Given(handed_at.expect(\"UR-24: a command is given on a channel\"))\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_the_row_is_written_at_its_instant"
+ } ,
+{
+  "id": "P581",
+  "name": "the UHD fold leaves a command due exactly now out (UR-24, design 38 D2 (3))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        for order in self.released_at.range(..=(now, u64::MAX)).map(|(order, _)| *order).collect::<Vec<_>>() {\n",
+  "new": "        for order in self.released_at.range(..(now, 0)).map(|(order, _)| *order).collect::<Vec<_>>() {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_the_row_is_written_at_its_instant"
+ } ,
+{
+  "id": "P582",
+  "name": "the end's instant is the finish's now, not the stop's or the loss's (UR-26, design 38 D2 (4), S8)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let (at, lost) = lock(&self.core.streams).ended_at().expect(\"UR-26: the end was booked before uhd-control finishes\");\n",
+  "new": "        let (at, lost) = (self.core.now(), false);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stop_settles_by_its_instant_not_by_the_finish"
+ } ,
+{
+  "id": "P583",
+  "name": "a loss settles a command due at its instant (UR-26, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            } else if let Some(Given { timed, live, given, handed_at }) = self.released_at.remove(&order) {\n                let due = if lost { order.0 < at } else { order.0 <= at };\n",
+  "new": "            } else if let Some(Given { timed, live, given, handed_at }) = self.released_at.remove(&order) {\n                let due = order.0 <= at;\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_an_instant_at_the_stop_applies_and_one_at_the_loss_does_not"
+ } ,
+{
+  "id": "P584",
+  "name": "a stop settles a command due at its instant after it (UR-26, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            } else if let Some(Given { timed, live, given, handed_at }) = self.released_at.remove(&order) {\n                let due = if lost { order.0 < at } else { order.0 <= at };\n",
+  "new": "            } else if let Some(Given { timed, live, given, handed_at }) = self.released_at.remove(&order) {\n                let due = if lost { order.0 < at } else { order.0 < at };\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_an_instant_at_the_stop_applies_and_one_at_the_loss_does_not"
+ } ,
+{
+  "id": "P585",
+  "name": "the end settles its rows in reverse instant order (UR-30, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let mut orders: Vec<(i64, u64)> = self.held.keys().chain(self.released_at.keys()).copied().collect();\n        orders.sort_unstable();\n",
+  "new": "        let mut orders: Vec<(i64, u64)> = self.held.keys().chain(self.released_at.keys()).copied().collect();\n        orders.sort_unstable_by(|a, b| b.cmp(a));\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_due_command_behind_a_channel_less_head_is_cancelled_at_the_loss"
+ } ,
+{
+  "id": "P586",
+  "name": "the end forgets the commands given to the device (UR-26, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let mut orders: Vec<(i64, u64)> = self.held.keys().chain(self.released_at.keys()).copied().collect();\n",
+  "new": "        let mut orders: Vec<(i64, u64)> = self.held.keys().copied().collect();\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_provider_stop_records_a_given_and_a_held_update_alike"
+ } ,
+{
+  "id": "P587",
+  "name": "a command the loss stopped from being given is dropped, not settled (UR-24, design 38 D2 (4), S3)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                Handed::Lost => return,\n",
+  "new": "                Handed::Lost => {\n                    self.held.remove(&(e, seq));\n                }\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_command_the_loss_stops_from_being_given_settles_at_the_end"
+ } ,
+{
+  "id": "P588",
+  "name": "the end records a channel-less head as cancelled (UR-24, design 38 D2 (4), S2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let row = if due && chans.is_empty() {\n",
+  "new": "                let row = if due && !chans.is_empty() {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_due_command_behind_a_channel_less_head_is_cancelled_at_the_loss"
+ } ,
+{
+  "id": "P589",
+  "name": "the Mock records a command when it books it (MR-18, design 38 D2 (3))",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx });\n",
+  "new": "        self.record_update(&key, &applied, tick);\n        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx });\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_the_row_is_written_at_its_instant"
+ } ,
+{
+  "id": "P590",
+  "name": "the Mock reports no late command (MR-18, design 38 D2 (1))",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            if is_late {\n                self.emit_event(\"\", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), tick), TimePoint::new(root, now))?;\n",
+  "new": "            if false {\n                self.emit_event(\"\", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), tick), TimePoint::new(root, now))?;\n",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_18_a_timed_update_behind_one_inside_the_window_is_late"
+ } ,
+{
+  "id": "P591",
+  "name": "the Ceiling leaves out a channel-less command (VH-8, design 38 D2 (4), S2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control/differential.rs",
+  "old": "        if !channel_less && stalled && e < loss {\n",
+  "new": "        if stalled && e < loss {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_ceiling_is_decided_from_the_sequence"
+ } ,
+{
+  "id": "P592",
+  "name": "the Ceiling ignores whether a release ran before the loss (VH-8, design 38 D2 (4), S2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control/differential.rs",
+  "old": "        let stalled = blocked.iter().any(|earlier| releases.iter().all(|t| !(*t >= *earlier && *t < loss)));\n",
+  "new": "        let stalled = blocked.iter().any(|_| true);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_ceiling_is_decided_from_the_sequence"
+ } ,
+{
+  "id": "P593",
+  "name": "the end records every held command as cancelled (UR-24, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let due = if lost { order.0 < at } else { order.0 <= at };\n                let (chans, _) = if due",
+  "new": "                let due = false;\n                let (chans, _) = if due",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_a_due_command_behind_a_channel_less_head_is_cancelled_at_the_loss"
+ } ,
+{
+  "id": "P594",
+  "name": "the end records a channel-less head as cancelled, seen by the timeline's layer (UR-24, design 38 D2 (4), S2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let row = if due && chans.is_empty() {\n",
+  "new": "                let row = if due && !chans.is_empty() {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "rm_26_the_timeline_against_uhd_control"
+ } ,
+{
+  "id": "P595",
+  "name": "the UHD release takes a 3 ms constant, not the description (UR-24, design 38 D1, S5)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "        let now = self.core.now();\n        let window = self.core.ticks(self.core.description.timing.release_window_ns);\n",
+  "new": "        let now = self.core.now();\n        let window = self.core.ticks(3_000_000);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_24_the_release_window_comes_from_the_description"
+ } ,
+{
+  "id": "P596",
+  "name": "a loss or a stop published during a release does not stop its rows (UR-29, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            let streams = lock(&self.core.streams);\n            if streams.ended_at().is_some() {\n                return;\n            }\n",
+  "new": "            let streams = lock(&self.core.streams);\n            if streams.ended_at().is_some() {\n            }\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_loss_published_during_a_release_settles_the_channel_less_behind_it"
+ } ,
+{
+  "id": "P598",
+  "name": "a lost timed apply is taken as a refusal, not the end's (UR-29, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                self.core.device_failed(None, \"update_parameter\", &error);\n                // UR-29, design 38 D2 (4): a lost device is not a refusal — the command was\n                // never handed over, so it stays pending for the end's settlement.\n                return if error.lost { Handed::Lost } else { Handed::Refused };",
+  "new": "                self.core.device_failed(None, \"update_parameter\", &error);\n                return Handed::Refused;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_29_a_lost_timed_release_publishes_device_loss"
+ },
+ {
+  "id": "P599",
+  "name": "a command handed after the stop's instant keeps its issued row (UR-26, RM-16's Ceiling)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let handed = handed_at.is_none_or(|h| if lost { h < at } else { h <= at });\n",
+  "new": "                let handed = handed_at.is_none_or(|_| true);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_command_given_after_the_stop_s_instant_is_cancelled_at_it"
+ },
+ {
+  "id": "P600",
+  "name": "the fold sees only a loss, not a stop (UR-26, design 38 D2 (4))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            if streams.ended_at().is_some() {\n",
+  "new": "            if streams.lost_at.is_some() {\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_release_after_the_stop_was_published_leaves_the_row_to_the_end"
+ },
+ {
+  "id": "P601",
+  "name": "a command whose call began at the loss's instant is taken as handed over (UR-26, RM-16's Ceiling)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let handed = handed_at.is_none_or(|h| if lost { h < at } else { h <= at });\n",
+  "new": "                let handed = handed_at.is_none_or(|h| if lost { h <= at } else { h <= at });\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_lost_apply_behind_a_handed_command_settles_both_at_the_loss"
+ },
+ {
+  "id": "P602",
+  "name": "a command handed at the stop's own instant is cancelled (UR-26, RM-16's Ceiling)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "                let handed = handed_at.is_none_or(|h| if lost { h < at } else { h <= at });\n",
+  "new": "                let handed = handed_at.is_none_or(|h| if lost { h < at } else { h < at });\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_stop_between_two_hand_overs_judges_each_at_its_apply"
+ },
+ {
+  "id": "P603",
+  "name": "a command's hand-over is its instant, not the device's time before its call (UR-26, RM-16's Ceiling)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            handed_at = Some(self.core.now());\n",
+  "new": "            handed_at = Some(e);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_26_a_command_given_after_the_stop_s_instant_is_cancelled_at_it"
+ }
 ]

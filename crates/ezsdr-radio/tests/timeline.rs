@@ -112,6 +112,7 @@ fn rm_26_each_stream_takes_its_own_directions_start_lead() {
         min_timed_command_lead_ns: 0,
         startup_latency_ns: 0,
         command_queue_depth: 0,
+        release_window_ns: 0,
         overflow_restart_gap_ns: 0,
         rx_start_lead_ns: 50 * MS,
         tx_start_lead_ns: 20 * MS,
@@ -312,7 +313,7 @@ fn rm_26_generated_sequences_keep_the_timeline_invariants() {
         seen.insert(sequence.class);
         for direction in [Direction::Rx, Direction::Tx] {
             let stream = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..stream(direction, 1) };
-            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, stream };
+            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream };
             let mut items = sequence.items(&terms);
             // Every fifth change or start refused at its instant (VH-2).
             for item in items.iter_mut().filter(|item| item.seq % 5 == 4) {
@@ -338,7 +339,7 @@ fn rm_26_a_pruned_line_plans_as_one_that_keeps_every_item() {
         let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
         for direction in [Direction::Rx, Direction::Tx] {
             let stream = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..stream(direction, 1) };
-            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, stream };
+            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream };
             let mut items = sequence.items(&terms);
             // As a Provider books them: in the order received.
             items.sort_by_key(|item| (item.ready, item.seq));
@@ -1329,7 +1330,7 @@ fn rm_34_generated_moves_keep_both_lines_invariants() {
         let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
         let from = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..rx_stream(&[0, 1], 1_000_000) };
         let to = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..rx_stream(&[2], 2_000_000) };
-        let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, stream: from };
+        let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream: from };
         let items = sequence.items(&terms);
         let mut lines = Lines::new();
         lines.insert(FROM, Line::new(from));
@@ -1466,6 +1467,35 @@ fn rm_25_the_layout_instant_is_floored_at_every_earlier_cold_change() {
             ezsdr_radio::timeline::layout_instant(at, now, start, earlier.iter().copied()),
             (e, late),
             "at={at:?} now={now} start={start:?} earlier={earlier:?}"
+        );
+    }
+}
+
+#[test]
+fn rm_25_the_timed_instant_is_floored_at_every_booked_command_inside_the_window() {
+    // RM-21 (design 38 D2 (1)): the one place a timed update's floor lives. `e` is what it
+    // takes effect at, and `late` whether the requested instant held; `earlier` is the
+    // instants of the timed updates booked before it, whether given, waiting or refused.
+    // window 30: an instant beyond now + 30 is outside it and floors nothing.
+    type Case = (Option<i64>, i64, i64, i64, &'static [i64], i64, bool);
+    let cases: [Case; 11] = [
+        (Some(100), 0, 20, 30, &[], 100, false),
+        (Some(25), 0, 20, 30, &[30], 30, true),
+        (Some(45), 0, 20, 30, &[50], 45, false),
+        (Some(25), 0, 20, 30, &[25], 25, false),
+        (Some(25), 0, 20, 30, &[26], 26, true),
+        (None, 0, 20, 30, &[25], 25, false),
+        (Some(35), 25, 20, 30, &[50], 50, true),
+        (Some(80), 10, 20, 30, &[50], 80, false),
+        (Some(10), 40, 20, 30, &[], 60, true),
+        (Some(5), 10, 0, 0, &[10], 10, true),
+        (Some(10), 10, 0, 0, &[10], 10, false),
+    ];
+    for (at, now, lead, window, earlier, e, late) in cases {
+        assert_eq!(
+            ezsdr_radio::timeline::timed_instant(at, now, lead, window, earlier.iter().copied()),
+            (e, late),
+            "at={at:?} now={now} lead={lead} window={window} earlier={earlier:?}"
         );
     }
 }
