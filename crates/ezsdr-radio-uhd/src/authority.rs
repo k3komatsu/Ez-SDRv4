@@ -847,6 +847,30 @@ mod tests {
     }
 
     #[test]
+    fn ur_07_uhd_clock_re_anchors_follow_a_drifting_device() {
+        // UR-7 (plan 30 §4.5, row U35): `uhd-clock` re-reads the device every 100 ms, so a
+        // device drifting 100 ppm against the host clock is followed to within one period's
+        // drift — 10 µs, 2 000 root ticks — however long it has run; an Authority whose
+        // `uhd-clock` never got past its first nap keeps its first anchor and is 50 µs
+        // (10 000 ticks) behind after 500 ms. The clock is held by a participant for both
+        // reads, so both are of one instant and a delayed test thread moves neither.
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, drift_ppm: 100.0, ..FakeConfig::default() }));
+        let authority = DeviceAuthority::new(device.clone(), Arc::new(ClockRegistry::new()), "internal", "internal", "test").unwrap();
+        let time = authority.time();
+        {
+            let d = device.clone();
+            within("500 ms of the drifting device's clock", move || d.host().sleep(Duration::from_millis(500)));
+        }
+        let (release, holder) = hold_until_released(&device);
+        let count = device.time_now().unwrap();
+        let now = ticks(&*time, authority.root());
+        assert_eq!(device.time_now().unwrap(), count, "the device's clock moved between its read and the Authority's");
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!((now - count).abs() <= 2_500, "{now} ticks against the device's {count}: not the drift of one re-anchor period (100 ppm over 100 ms is 2 000)");
+    }
+
+    #[test]
     fn ur_07_a_host_deadline_reaches_a_waiting_next_wakeup_while_a_participant_is_busy() {
         // A HOST deadline to come, added while the waiter naps on a root entry only, is reached
         // on real time while a participant holds the device's clock — released only after the

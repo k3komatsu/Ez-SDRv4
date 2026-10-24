@@ -830,8 +830,8 @@
   "old": "                match clock.upgrade() {\n                    Some(time) => time.reanchor(),",
   "new": "                match clock.upgrade().filter(|_| false) {\n                    Some(time) => time.reanchor(),",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_07_now_tracks_the_device_while_no_call_runs"
+  "test_bin": "lib",
+  "filter": "ur_07_uhd_clock_re_anchors_follow_a_drifting_device"
  },
  {
   "id": "U36",
@@ -970,7 +970,7 @@
   "old": "            .filter(|(_, timed)| timed.dir == dir)",
   "new": "            .filter(|(_, timed)| false && timed.dir == dir)",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
  },
  {

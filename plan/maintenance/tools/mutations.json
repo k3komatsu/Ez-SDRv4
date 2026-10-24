@@ -186,7 +186,7 @@
   "old": "            ready = self.core.now();\n",
   "new": "            ready = now;\n",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration"
  },
  {
@@ -6237,7 +6237,7 @@
     "old": "        let wants_from_none = !channels.is_empty() && idle && planned && streams.holder(stream) == Holder::Free\n            && streams.held_elsewhere(stream, channels).is_none()\n            && !streams.needed_before(stream, channels, i64::MAX);",
    "new": "        let wants_from_none = false;",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration"
   },
   {
@@ -6247,7 +6247,7 @@
     "old": "        let wants_from_none = !channels.is_empty() && idle && planned && streams.holder(stream) == Holder::Free\n            && streams.held_elsewhere(stream, channels).is_none()\n            && !streams.needed_before(stream, channels, i64::MAX);\n        let mut from_none_claim = if wants_from_none { streams.claim_from_none(stream) } else { None };\n        let from_none = from_none_claim.is_some();",
    "new": "        let wants_from_none = !channels.is_empty();\n        let mut from_none_claim = if wants_from_none { streams.claim_from_none(stream) } else { None };\n        let from_none = wants_from_none;",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
   },
   {
@@ -6677,8 +6677,8 @@
    "old": "            DeviceSet::Open(open) if open == set => {",
    "new": "            DeviceSet::Open(open) if open.count() == set.count() => {",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "ur_25_a_same_size_membership_swap_reopens_the_streamer"
+   "test_bin": "lib",
+   "filter": "ur_25_a_same_size_membership_swap"
   },
   {
    "id": "P327",
@@ -7988,7 +7988,7 @@
    "old": "            if to.segment.cut.is_some_and(|cut| to.segment.instant(cut).is_ok_and(|end| end <= to.segment.origin)) {",
    "new": "            if false {",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock"
   },
   {
@@ -7998,7 +7998,7 @@
    "old": "                planned.segment.origin <= origin && !planned.refused && !state.completed.contains(&identity)\n                    && !planned.segment.cut.is_some_and(|cut| planned.segment.instant(cut).is_ok_and(|end| end <= planned.segment.origin))",
    "new": "                planned.segment.origin <= origin && !planned.refused && !state.completed.contains(&identity)",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock"
   },
   {
@@ -8018,7 +8018,7 @@
    "old": "        if device_eob && device_open && !self.core.is_lost() {\n            self.close_device_burst(tail);",
    "new": "        if device_eob && device_open && !self.core.is_lost() {\n            self.close_device_burst(None);",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_34_a_transmit_move_ends_the_old_burst_and_sends_the_new_burst_on_its_stream"
   },
   {
@@ -8100,7 +8100,7 @@
    "old": "            if Some(held.domain) == domain {\n                self.held.insert(held.k, held);",
    "new": "            if false {\n                self.held.insert(held.k, held);",
    "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
+   "test_bin": "lib",
    "filter": "ur_34_a_transmit_move_carries_a_prebooked_burst_across_the_repeat_cut"
   },
   {
@@ -8374,7 +8374,7 @@
     "old": "                    for timed in self.held.range(..=(e, u64::MAX)).map(|(_, timed)| timed).filter(|timed| timed.dir == dir && timed.chan == chan as usize) {",
     "new": "                    for timed in self.held.range(..(e, 0)).map(|(_, timed)| timed).filter(|timed| timed.dir == dir && timed.chan == chan as usize) {",
     "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
+    "test_bin": "lib",
     "filter": "ur_25_an_enable_at_a_timed_update_s_instant_applies_it"
   },
   {
@@ -8514,7 +8514,7 @@
     "old": "        let earlier = self.colds.keys().map(|(e, _)| *e);",
     "new": "        let earlier = std::iter::empty::<i64>();",
     "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
+    "test_bin": "lib",
     "filter": "ur_25_a_layout_cold_change_is_floored_at_every_earlier_cold_change_of_the_instance"
   },
   {
@@ -8524,7 +8524,7 @@
     "old": "        let (e, late) = timeline::layout_instant(requested, now, start, earlier);",
     "new": "        let (e, late) = (timeline::layout_instant(requested, now, start, earlier).0, false);",
     "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
+    "test_bin": "lib",
     "filter": "ur_25_a_layout_cold_change_is_floored_at_every_earlier_cold_change_of_the_instance"
   },
   {
@@ -8624,7 +8624,7 @@
     "old": "        let start = (dir == Dir::Rx).then_some(self.t0);",
     "new": "            let start = None;",
     "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
+    "test_bin": "lib",
     "filter": "ur_25_a_layout_cold_change_of_a_linkless_receive_side_is_floored_at_t0"
   },
   {

@@ -1241,6 +1241,48 @@ mod tests {
     }
 
     #[test]
+    fn ur_25_a_transmit_refusal_from_no_stream_starts_no_clock() {
+        // UR-25 (design note 37, the 74th row): a transmit enable from no stream whose rate
+        // comparison refuses starts no clock, and its owner moves on at once — the refused
+        // segment's clock ended at its origin —, so an enable booked while that origin is
+        // still ahead is taken from no stream and refused under its own Action, not held
+        // behind it. The refusal is the stored transmit comparison `check_rates` keeps for
+        // every open of the direction; the controlled clock fixes both bookings.
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        assert!(core.check_rates(Dir::Tx, 99).is_err(), "the transmit comparison refuses");
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.tx.c0.stream"), Value::from(-1));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        // The owner, idle and with no clock, reads an empty plan.
+        let (_to_tx, cmds) = channel();
+        let mut tx = super::super::tx::Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
+        assert!(tx.read(None));
+        control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(0), at(200));
+        assert!(device.calls().iter().any(|call| call == "tx_open 0 [0]"), "the enable's open: {:?}", device.calls());
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply")), "a refused enable applies nothing: {:?}", device.calls());
+        // The owner reads the refused segment and skips it at once, before its origin.
+        assert!(tx.read(None));
+        assert!(tx.step(), "the owner's turn");
+        assert!(core.now() < ms(200), "the refused segment's origin is still ahead: {}", core.now());
+        assert!(lock(&core.streams).is_idle(stream_key(Dir::Tx, 0)), "the owner did not move on, or adopted a clock");
+        assert!(timing_of(&core, "tx_switch").is_empty(), "a refused segment was adopted: {:?}", timing_of(&core, "tx_switch"));
+        let before = device.calls().len();
+        // The next enable, its instant floored at the first change's, is taken from no stream
+        // and refused under its own Action before that origin.
+        control.book_cold(ActionId(2), key("radio.tx.c1.stream"), Value::from(0), at(60));
+        assert_eq!(device.calls()[before..].iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the second enable's own open: {:?}", device.calls());
+        let rejected = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(rejected.len(), 2, "{rejected:?} {:?}", device.calls());
+        assert_eq!(rejected.iter().map(|event| event.payload["action"].as_u64()).collect::<Vec<_>>(), [Some(1), Some(2)], "an enable was refused by an owner, not under its Action: {rejected:?}");
+        assert!(rejected.iter().all(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.starts_with("UR-13:"))), "{rejected:?}");
+        assert!(rejected.iter().all(|event| event.time.ticks_in(core.root).unwrap() < ms(200)), "an enable was processed at or after the refused origin: {rejected:?}");
+        assert!(lock(&core.streams).is_idle(stream_key(Dir::Tx, 0)), "a refused enable adopted a clock");
+        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send")), "a refused segment sent: {:?}", device.calls());
+    }
+
+    #[test]
     fn ur_24_a_timed_update_after_a_from_none_configure_is_sent_without_configuring_again() {
         // UR-24 (S11a): an update the enable's segment holds at its origin and the device
         // receives as its own timed command leaves the record holding the segment's command, so
@@ -1312,14 +1354,13 @@ mod tests {
 
     #[test]
     fn ur_34_a_from_none_join_yields_to_an_earlier_unprocessed_segment() {
-        use crate::device::FakeConfig;
         let selector = BTreeMap::from([
             (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:basic_rx:0"), Scalar::from("0:B:basic_rx:1")])),
             (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
         ]);
         let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
         let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
-        let device = Arc::new(crate::device::FakeDevice::new(FakeConfig { front_ends: vec!["UBX", "BasicRX"], ..FakeConfig::default() }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { front_ends: vec!["UBX", "BasicRX"], ..crate::device::FakeConfig::default() }));
         let links = (0..3).map(|_| vec![Arc::new(NoLink) as Arc<dyn DataLink>]).collect();
         let (core, _time, _) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), description);
         let mut values = core.description.defaults();
@@ -2905,8 +2946,7 @@ mod tests {
     /// gated and counted, and `links` gives the receive side a stream.
     fn spy_rig(links: bool) -> (Arc<Core>, Arc<crate::provider::test_support::LockSpy>, Arc<ezsdr_kernel::time::ManualTimeAuthority>) {
         use crate::ClockMode;
-        use crate::device::FakeConfig;
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let links: Vec<Arc<dyn DataLink>> = if links { vec![Arc::new(NoLink)] } else { Vec::new() };
         let (core, time, _) = crate::provider::test_support::rig_on(spy.clone(), links, 2_000);
         (core, spy, time)
@@ -4001,6 +4041,696 @@ mod tests {
         assert_eq!((applies.len(), before_cut, before), (1, Some(0.0), Some(0.0)), "{applies:?}");
         assert!(applies[0].starts_with("apply rx 1"), "the command acted on another channel: {applies:?}");
         assert_eq!(device.read_back(Dir::Rx, 1).gain, Some(3.0));
+    }
+
+    /// The timing rows of `what`, as the booking recorded them.
+    fn timing_of(core: &Core, what: &str) -> Vec<serde_json::Value> {
+        lock(&core.rec).timing.iter().filter(|row| row["what"] == what).cloned().collect()
+    }
+
+    #[test]
+    fn ur_25_a_receive_enable_counts_its_start_lead_from_the_end_of_its_configuration() {
+        // UR-25, RM-25 (spec 20, VF-6; design note 37): the `cold_change` row records the end
+        // of the enable's configuration as `ready`, not the instant the change was booked at,
+        // and the segment's origin is the first lattice instant at or after both `e` and that
+        // end plus the profile's start lead. The controlled clock sets the end itself, inside
+        // the configuration: the return side of the configuration's untimed `apply` holds the
+        // enable, the clock stands at 0 while it runs and moves to 200 ms before the
+        // configuration returns. A `ready` read before or at the booking is 0 then, so the
+        // row's 200 ms can only be the configuration's end.
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, apply_delay: Wall::from_millis(80), ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::provider::test_support::LockSpy::new(config));
+        let (core, time, _events) = crate::provider::test_support::rig_on(device.clone(), vec![Arc::new(NoLink)], 2_000);
+        device.watch(&core);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        // The configuration's own apply: the gate is after the device returned, before the
+        // section reads the clock again — inside the configuration, not before it.
+        let gate = device.stop_after("apply");
+        let core_ = core.clone();
+        let host = device.host();
+        let (done, finished) = channel();
+        let booking = host.spawn("from-none-enable", move || {
+            let mut control = control;
+            lock(&core_.streams).search(booked_stream(Dir::Rx), false);
+            control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core_.at(core_.ticks(100_000_000)))));
+            let _ = done.send(());
+        }).expect("a participant thread");
+        gate.wait();
+        assert_eq!(core.now(), 0, "the configuration had not begun at the clock's start");
+        time.advance_to(core.at(ms(200))).unwrap();
+        gate.release();
+        assert!(finished.recv_timeout(Wall::from_secs(10)).is_ok(), "the enable did not book");
+        booking.join().expect("the enable's thread");
+        let row = timing_of(&core, "cold_change").into_iter().find(|row| row["key"] == "radio.rx.c0.stream").expect("the enable's row");
+        let (e, ready, booked_at) = (row["e"].as_i64().unwrap(), row["ready"].as_i64().unwrap(), row["booked_at"].as_i64().unwrap());
+        assert_eq!(booked_at, 0, "the enable was booked at the clock's start: {row}");
+        // (a) `ready` is the configuration's end, not the booking's instant.
+        assert_eq!(ready, ms(200), "the row does not record the end of the configuration: {row}");
+        // (b) the origin is the first lattice instant at or after both `e` and that end + lead.
+        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx));
+        let planned = plan_of(&core, Dir::Rx);
+        let origin = planned[0].segment.origin;
+        let n = planned[0].segment.config.ratio.num() as i64;
+        assert_eq!(origin, (e.max(ready + lead) + n - 1) / n * n, "the origin is not on the configuration's end: {row}, lead {lead}");
+        assert!(origin > e, "the scene put the configuration's end past `e`: {row}");
+        // The owner starts the segment at that origin, so the device is asked for no earlier one.
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the enable's segment");
+        let calls = device.log();
+        let start = calls.iter().rev().find(|call| call.starts_with("rx_start 0 ")).unwrap_or_else(|| panic!("{calls:?}"));
+        assert_eq!(start["rx_start 0 ".len()..].parse::<i64>().unwrap_or_else(|_| panic!("{start}")), origin, "{start}");
+    }
+
+    #[test]
+    fn ur_25_the_switch_applies_the_configuration_in_effect_at_e2() {
+        // UR-25 (Review K, N-P2-9; design note 37): a retune held for an instant after the
+        // switch's `e₂` is in the configuration the switch applies — its instant is before the
+        // segment's own origin, which the cut and its lead put past `e₂` — and its release is
+        // still its own instant. On the controlled clock.
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        device.rx_open(0, &[0]).unwrap();
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        let freq = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(1), freq.clone(), Value::num(2.1e9).unwrap(), at(320));
+        control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), at(300));
+        let plan = plan_of(&core, Dir::Rx);
+        assert_eq!(plan.len(), 2, "{:?}", plan.iter().map(|p| p.segment.origin).collect::<Vec<_>>());
+        assert!(plan[1].segment.origin > ms(320), "the scene puts the origin past the retune: {:?}", plan[1].segment.origin);
+        // The change is a stream the Run started: uhd-control's own from-none enable configures
+        // nothing at booking (UR-25, VH-4), so the apply below is the switch's alone.
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.ends_with("at=-")), "the change was configured at its booking: {:?}", device.calls());
+        plan[1].configure(&core, Dir::Rx).expect("the switch configures");
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(), 1,
+            "the switch's configuration does not carry the held retune: {calls:?}");
+        // The held retune is still released at its own instant.
+        time.advance_to(core.at(ms(318))).unwrap();
+        control.release();
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(320)))).count(), 1,
+            "the retune was not released at its instant: {calls:?}");
+        assert!(events_of(&events, kinds::LATE_COMMAND).is_empty());
+    }
+
+    #[test]
+    fn ur_25_an_enable_at_a_timed_update_s_instant_applies_it() {
+        // UC-2, UR-25 (design 33 D15; design note 37): an enable from no stream whose `cold`
+        // change is booked after a timed update at the same instant carries that update in the
+        // configuration it applies itself; the change booked first does not, and the release
+        // delivers it. On the controlled clock the order and the instants are fixed.
+        for timed_first in [true, false] {
+            let case = format!("timed first: {timed_first}");
+            let (core, device, time, events) = manual_rig_events();
+            let _frozen = hold(&core, &time, &device);
+            let (mut control, _tx) = control(&core, &[]);
+            control.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let freq = key("radio.rx.c0.frequency_hz");
+            if timed_first {
+                control.book_timed(ActionId(1), freq.clone(), Value::num(2.1e9).unwrap(), at(300));
+            }
+            lock(&core.streams).search(booked_stream(Dir::Rx), false);
+            control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), at(300));
+            if !timed_first {
+                control.book_timed(ActionId(3), freq.clone(), Value::num(2.1e9).unwrap(), at(300));
+            }
+            // The release window of the timed update, and the enable's own configuration.
+            time.advance_to(core.at(ms(298))).unwrap();
+            control.release();
+            let calls = device.calls();
+            let configured = calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.ends_with("at=-")).count();
+            assert_eq!(configured, usize::from(timed_first), "{case}: the enable's configuration: {calls:?}");
+            let timed = calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(300)))).count();
+            assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
+            assert!(events_of(&events, kinds::LATE_COMMAND).is_empty(), "{case}");
+            assert_eq!(rows_of(&core, &freq), vec![(ms(300), true, false)], "{case}: the update's released row");
+        }
+    }
+
+    /// The layout's control with `start`'s receive stream 0 on `channels` and `config`'s own
+    /// values: the two receive channels the tests place and move (RM-27).
+    fn layout_control(core: &Arc<Core>, channels: Channels, config: &[(&str, Value)]) -> Control {
+        let (to_tx, _tx) = channel();
+        let mut values = core.description.defaults();
+        for (name, value) in config {
+            values.insert(key(name), value.clone());
+        }
+        let start = Start { t0: 0, rx: vec![Some((channels, 200))], tx: vec![None] };
+        Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false, start)
+    }
+
+    #[test]
+    fn ur_24_a_channel_keyed_timed_update_acts_on_its_own_channel() {
+        // UR-24, item 7 (design note 37): a numbered channel key's timed update acts on that
+        // channel alone — one command, one channel — and the stream untouched. On the controlled
+        // clock the 1 ms apart instants cannot pass.
+        for only_one in [false, true] {
+            let case = format!("only_one: {only_one}");
+            let (core, device, time, events) = {
+                let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+                crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)])
+            };
+            let _frozen = hold(&core, &time, &device);
+            let channels = if only_one { Channels::first(2).without(0) } else { Channels::first(2) };
+            let mut control = layout_control(&core, channels, &[("radio.rx.c0.stream", Value::from(if only_one { -1 } else { 0 })), ("radio.rx.c1.stream", Value::from(0))]);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let freq = key("radio.rx.c1.frequency_hz");
+            let gain = key("radio.rx.c1.gain_db");
+            control.book_timed(ActionId(1), freq.clone(), Value::num(2.1e9).unwrap(), at(40));
+            control.book_timed(ActionId(2), gain.clone(), Value::num(3.0).unwrap(), at(41));
+            time.advance_to(core.at(ms(39) + core.ticks(500_000))).unwrap();
+            control.release();
+            let log = device.calls();
+            let freq_at = |prefix: &str| log.iter().filter(|call| call.starts_with(prefix) && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(40)))).count();
+            assert_eq!(freq_at("apply rx 1 "), 1, "{case}: {log:?}");
+            assert_eq!(freq_at("apply rx 0 "), 0, "{case}: {log:?}");
+            assert_eq!(log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("gain=3") && !call.contains("at=-")).count(), 1, "{case}: {log:?}");
+            assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 0, "{case}: {log:?}");
+            assert_eq!(events_of(&events, kinds::LATE_COMMAND).len(), 0, "{case}: {log:?}");
+            assert_eq!(lock(&core.streams).line(booked_stream(Dir::Rx)).map_or(0, |line| line.plan.iter().filter(|segment| segment.cut.is_some()).count()), 0, "a timed update cuts nothing");
+            assert_eq!(rows_of(&core, &freq), vec![(ms(40), true, false)], "{case}");
+        }
+    }
+
+    #[test]
+    fn ur_24_a_channel_keyed_command_counts_one_queue_slot() {
+        // UR-24, item 7 (design note 37): each numbered channel key's command is one
+        // device-queue slot, held for its own instant.
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = layout_control(&core, Channels::first(2), &[("radio.rx.c0.stream", Value::from(0)), ("radio.rx.c1.stream", Value::from(0))]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let far = ms(5_000);
+        for i in 0..8 {
+            control.book_timed(ActionId(10 + i), key("radio.rx.c0.gain_db"), Value::num(1.0).unwrap(), Some(AbsoluteDeadline::new(core.at(far + i as i64))));
+            control.book_timed(ActionId(30 + i), key("radio.rx.c1.gain_db"), Value::num(2.0).unwrap(), Some(AbsoluteDeadline::new(core.at(far + 100 + i as i64))));
+        }
+        assert!(events_of(&events, kinds::COMMAND_QUEUE_FULL).is_empty(), "16 channel commands are 16 slots");
+        assert_eq!(control.held.len(), 16);
+        control.book_timed(ActionId(50), key("radio.rx.c1.gain_db"), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(far + 200))));
+        let full = events_of(&events, kinds::COMMAND_QUEUE_FULL);
+        assert_eq!(full.len(), 1, "the 17th is refused");
+        assert_eq!(full[0].payload["depth"], 16, "{:?}", full[0].payload);
+        assert_eq!(control.held.len(), 16, "the refused one is held");
+    }
+
+    #[test]
+    fn ur_25_a_layout_cold_change_is_floored_at_every_earlier_cold_change_of_the_instance() {
+        // RM-25, item 11 (design note 37): a layout instance's `cold` change is floored at every
+        // earlier, still pending `cold` change of the whole instance — across directions — and
+        // its requested instant is the LATE_COMMAND's. On the controlled clock.
+        // One receive channel on slot A and the transmit one on slot B, so that the receive
+        // antenna may be `TX/RX` while the transmit channel is in a stream (RM-31).
+        let selector = BTreeMap::from([
+            (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
+            (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:B:ubx:0")])),
+        ]);
+        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+        let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::device::FakeDevice::new(config));
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), vec![vec![Arc::new(NoLink)]], BTreeMap::new(), description);
+        let _frozen = hold(&core, &time, &device);
+        let (to_tx, _tx) = channel();
+        let mut values = core.description.defaults();
+        values.insert(key("radio.rx.c0.stream"), Value::from(0));
+        values.insert(key("radio.tx.c0.stream"), Value::from(0));
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200))], tx: vec![Some((clock, Channels::first(1)))] };
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false, start);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        control.book_cold(ActionId(1), key("radio.tx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), at(50));
+        control.book_cold(ActionId(2), key("radio.rx.c0.antenna"), Value::from("TX/RX"), at(10));
+        let late = events_of(&events, kinds::LATE_COMMAND);
+        assert_eq!(late.len(), 1, "{late:?} {:?}", device.calls());
+        assert_eq!(late[0].payload["key"], "radio.rx.c0.antenna");
+        assert_eq!(late[0].payload["requested"]["ticks"], ms(10));
+        assert_eq!(late[0].payload["applied"]["ticks"], ms(50));
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
+        let changes = timing_of(&core, "cold_change");
+        assert_eq!(changes.len(), 2, "{changes:?}");
+        assert!(changes.iter().all(|row| row["e"] == ms(50)), "a change was not floored at the pending one: {changes:?}");
+        // Each direction's cut is the floored instant, and the switch's configuration carries
+        // the floored change; the other line's own change is the first sample at it.
+        for dir in [Dir::Rx, Dir::Tx] {
+            let plan = plan_of(&core, dir);
+            let cut = plan[0].segment.cut.expect("the cut");
+            assert_eq!(plan[0].segment.instant(cut).unwrap(), ms(50), "{dir:?}: the cut is not the floored instant");
+            plan[1].configure(&core, dir).expect("the switch configures");
+        }
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("antenna=TX/RX") && call.ends_with("at=-")).count(), 1, "{calls:?}");
+        assert!(calls.iter().any(|call| call.starts_with("apply tx 0 ") && call.contains("rate=2000000") && call.ends_with("at=-")), "{calls:?}");
+    }
+
+    #[test]
+    fn ur_25_a_layout_cold_change_of_a_linkless_receive_side_is_floored_at_t0() {
+        // RM-25 (round 1, P2-4; design note 37): the receive start T0 floors a layout `cold`
+        // change of the receive side even when that side has no link yet and no line of its own,
+        // and a change asked before T0 is late, recorded at T0: both the first and the second,
+        // whose instant the first's recorded one floors. On the controlled clock.
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::device::FakeDevice::new(config));
+        let (core, time, events) = crate::provider::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), layout_description());
+        let _frozen = hold(&core, &time, &device);
+        let (to_tx, _tx) = channel();
+        let t0 = core.ticks(2_000_000_000 + 1_000_000);
+        let start = Start { t0, rx: vec![None], tx: vec![None] };
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.description.defaults(), false, start);
+        control.book_cold(ActionId(1), key("radio.rx.c0.antenna"), Value::from("TX/RX"), None);
+        let late = events_of(&events, kinds::LATE_COMMAND);
+        assert_eq!(late.len(), 1, "{late:?} {:?}", device.calls());
+        assert_eq!(late[0].payload["key"], "radio.rx.c0.antenna");
+        assert_eq!(late[0].payload["applied"]["ticks"], t0, "the floor is T0: {late:?}");
+        assert!(late[0].payload["requested"]["ticks"].as_i64().unwrap() < t0, "{late:?}");
+        control.book_cold(ActionId(2), key("radio.rx.c1.stream"), Value::from(-1), None);
+        let late = events_of(&events, kinds::LATE_COMMAND);
+        assert_eq!(late.len(), 1, "the recorded instant floors the next change: {late:?}");
+        assert_eq!(late[0].payload["applied"]["ticks"], t0, "{late:?}");
+        assert!(timing_of(&core, "cold_change").is_empty(), "a linkless side books no change: {:?}", timing_of(&core, "cold_change"));
+    }
+
+    #[test]
+    fn ur_24_the_layout_destination_follows_the_effective_membership() {
+        // RM-27, UR-24, major 4(b) (design note 37): a numbered channel's timed update is
+        // judged against the membership in effect at its own instant, not the one at its
+        // arrival — whichever of the join and the tune arrived first. On the controlled clock,
+        // the join at 40 ms and the tune at 120 ms cannot move.
+        for join_first in [false, true] {
+            let (core, device, time, events) = manual_rig_events();
+            let _frozen = hold(&core, &time, &device);
+            let mut control = layout_control(&core, Channels::first(1), &[("radio.rx.c0.stream", Value::from(0)), ("radio.rx.c1.stream", Value::from(-1))]);
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+            let freq = key("radio.rx.c1.frequency_hz");
+            let join = |control: &mut Control| control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(0), at(40));
+            let tune = |control: &mut Control| control.book_timed(ActionId(2), freq.clone(), Value::num(2.1e9).unwrap(), at(120));
+            if join_first {
+                join(&mut control);
+                tune(&mut control);
+            } else {
+                tune(&mut control);
+                join(&mut control);
+            }
+            time.advance_to(core.at(ms(118))).unwrap();
+            control.release();
+            let log = device.calls();
+            let applied = log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(120)))).count();
+            assert_eq!(applied, 1, "join_first={join_first}: the tune reaches channel 1 on its new segment: {log:?}");
+            assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "join_first={join_first}: {log:?}");
+            assert_eq!(rows_of(&core, &freq), vec![(ms(120), true, false)], "join_first={join_first}");
+        }
+    }
+
+    /// The layout with two channels each way — and so two streams each way (RM-29).
+    fn both_description() -> ezsdr_radio::channels::Description {
+        let selector = BTreeMap::from([
+            (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+            (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
+        ]);
+        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+        ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms())
+    }
+
+    /// `both_description`'s manual rig, each receive stream with a link.
+    fn both_rig() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>) {
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::device::FakeDevice::new(config));
+        let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>], vec![Arc::new(NoLink)]];
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), both_description());
+        (core, device, time, events)
+    }
+
+    /// The plan of stream `k` of `dir`.
+    fn plan_of_stream(core: &Core, dir: Dir, k: usize) -> Vec<Planned> {
+        lock(&core.streams).planned(stream_key(dir, k))
+    }
+
+    /// A plan as its segments' origin, cut instant, channels and refusal: what a message prints.
+    fn plan_rows(plan: &[Planned]) -> Vec<(i64, Option<i64>, Channels, bool)> {
+        plan.iter().map(|planned| (planned.segment.origin, planned.segment.cut.map(|cut| planned.segment.instant(cut).unwrap()), planned.segment.config.channels, planned.refused)).collect()
+    }
+
+    /// `both_rig`'s control with channel 0 in stream 0 and channel 1 in stream 1 each way.
+    fn both_control(core: &Arc<Core>) -> Control {
+        let (to_tx, _tx) = channel();
+        let mut values = core.description.defaults();
+        for name in ["radio.rx.c0.stream", "radio.tx.c0.stream"] {
+            values.insert(key(name), Value::from(0));
+        }
+        for name in ["radio.rx.c1.stream", "radio.tx.c1.stream"] {
+            values.insert(key(name), Value::from(1));
+        }
+        let rx = vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))];
+        let tx = vec![
+            Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))),
+            Some((core.register_in(Dir::Tx, 1, 200, 0).unwrap(), Channels::first(2).without(0))),
+        ];
+        Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false, Start { t0: 0, rx, tx })
+    }
+
+    #[test]
+    fn ur_25_a_same_size_membership_swap_reopens_the_streamer() {
+        // Item 10 (M1; design note 37): two membership changes at one instant leave the same
+        // *count* — `{0}` becomes `{1}` — so a comparison by count reopens nothing and the
+        // streamer keeps serving device channel 0 as the logical channel 1; the set is what
+        // decides. On the controlled clock the two changes are at one instant, and the new
+        // segment's streamer is opened for its own set.
+        let (core, device, time, events) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut values = core.description.defaults();
+        values.insert(key("radio.rx.c0.stream"), Value::from(0));
+        values.insert(key("radio.rx.c1.stream"), Value::from(-1));
+        let (to_tx, _tx) = channel();
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
+        control.book_cold(ActionId(1), key("radio.rx.c0.stream"), Value::from(-1), at(100));
+        control.book_cold(ActionId(2), key("radio.rx.c1.stream"), Value::from(0), at(100));
+        let plan = plan_of_stream(&core, Dir::Rx, 0);
+        let last = plan.last().expect("the new segment");
+        assert_eq!(last.segment.config.channels, Channels::first(2).without(0), "the new segment is not `{{1}}`: {:?}", last.segment.config.channels);
+        let cut = plan.iter().find(|planned| planned.segment.cut.is_some()).expect("the cut").segment;
+        assert_eq!(cut.instant(cut.cut.unwrap()).unwrap(), ms(100), "{:?}", plan_rows(&plan));
+        assert!(last.segment.origin > ms(100), "the new segment begins after the cut's restart: {:?}", plan_rows(&plan));
+        let changes = timing_of(&core, "cold_change");
+        assert_eq!(changes.len(), 2, "the two changes at one instant: {changes:?}");
+        assert!(changes.iter().all(|row| row["e"] == ms(100)), "a change was booked at another instant: {changes:?}");
+        // The owner's switch opens the new set's streamer, whatever the count says: the record
+        // holds the old set `{0}`, whose count is the new one's. (The owner itself and the
+        // samples of its new segment are `rx.rs`'s and `tx.rs`'s same-size tests.)
+        let stream = stream_key(Dir::Rx, 0);
+        {
+            let mut streams = lock(&core.streams);
+            streams.record_open(stream, Some(Channels::first(1)));
+            streams.record_configured(stream, None);
+        }
+        let new = plan.last().unwrap().clone();
+        assert!(core.owner_configure(Dir::Rx, 0, &new).unwrap(), "the owner begins the new segment");
+        let calls = device.calls();
+        let opened: Vec<&String> = calls.iter().filter(|call| call.starts_with("rx_open 0 ")).collect();
+        assert_eq!(opened, ["rx_open 0 [1]"], "the streamer was not reopened for the new set: {calls:?}");
+        assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.ends_with("at=-")), "the new set's channel is configured: {calls:?}");
+        assert!(calls.iter().all(|call| !call.starts_with("apply rx 0 ") || !call.ends_with("at=-")), "c0 left its stream: {calls:?}");
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{calls:?}");
+        // The transmit sibling: the same one-channel count change `{0}` → `{1}` on its own
+        // streamer, which a count comparison would leave serving device channel 0.
+        let (core, device, time, events) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut values = core.description.defaults();
+        values.insert(key("radio.tx.c0.stream"), Value::from(0));
+        values.insert(key("radio.tx.c1.stream"), Value::from(-1));
+        let (to_tx, _tx) = channel();
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            Start { t0: 0, rx: vec![None, None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(-1), at(100));
+        control.book_cold(ActionId(2), key("radio.tx.c1.stream"), Value::from(0), at(100));
+        let plan = plan_of_stream(&core, Dir::Tx, 0);
+        assert_eq!(plan.last().expect("the new segment").segment.config.channels, Channels::first(2).without(0), "{:?}", plan_rows(&plan));
+        {
+            let mut streams = lock(&core.streams);
+            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
+            streams.record_configured(stream_key(Dir::Tx, 0), None);
+        }
+        assert!(core.owner_configure(Dir::Tx, 0, plan.last().unwrap()).unwrap(), "the owner begins the new transmit segment");
+        let calls = device.calls();
+        let opened: Vec<&String> = calls.iter().filter(|call| call.starts_with("tx_open 0 ")).collect();
+        assert_eq!(opened, ["tx_open 0 [1]"], "the transmit streamer was not reopened for the new set: {calls:?}");
+        assert!(calls.iter().any(|call| call.starts_with("apply tx 1 ") && call.ends_with("at=-")), "the new set's channel is configured: {calls:?}");
+        assert!(calls.iter().all(|call| !call.starts_with("apply tx 0 ") || !call.ends_with("at=-")), "c0 left its stream: {calls:?}");
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{calls:?}");
+    }
+
+    #[test]
+    fn ur_34_a_timed_update_crossing_the_move_reaches_each_streamer_channel_at_its_instant() {
+        // S8/A7 (design note 37): `apply` names device channel 1, not a stream number; compare
+        // issued instants and projection/effective values on either side of the membership move.
+        // On the controlled clock the move at 200 ms, the two updates, and each read-back are
+        // fixed instants.
+        let (core, device, time, events) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut values = core.description.defaults();
+        values.insert(key("radio.rx.c0.stream"), Value::from(0));
+        values.insert(key("radio.rx.c1.stream"), Value::from(0));
+        let (to_tx, _tx) = channel();
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        let freq = key("radio.rx.c1.frequency_hz");
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
+        control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(1), at(200));
+        control.book_timed(ActionId(2), freq.clone(), Value::num(10e6).unwrap(), at(170));
+        control.book_timed(ActionId(3), freq.clone(), Value::num(20e6).unwrap(), at(280));
+        // Before the move: the earlier update is issued at its instant and in force.
+        time.advance_to(core.at(ms(168))).unwrap();
+        control.release();
+        let calls = device.calls();
+        assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=10000000") && call.contains(&format!("at={} effective={}", ms(170), ms(170)))), "{calls:?}");
+        device_at(&core, &time, &device, ms(180));
+        assert_eq!(device.read_back(Dir::Rx, 1).freq, Some(10e6), "the device has applied the earlier update before the move");
+        // The move's destination configures the projected settings, and the earlier value stands.
+        let destination = plan_of_stream(&core, Dir::Rx, 1).into_iter().find(|planned| planned.segment.config.channels.contains(1)).expect("the moved channel's destination segment");
+        destination.configure(&core, Dir::Rx).expect("the destination configures");
+        let calls = device.calls();
+        assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=10000000") && call.ends_with("at=-")), "the destination's projected configuration: {calls:?}");
+        device_at(&core, &time, &device, ms(270));
+        assert_eq!(device.read_back(Dir::Rx, 1).freq, Some(10e6), "the earlier value remains effective before the later update");
+        // The later update at its own instant, and in force after it.
+        time.advance_to(core.at(ms(278))).unwrap();
+        control.release();
+        device_at(&core, &time, &device, ms(300));
+        assert_eq!(device.read_back(Dir::Rx, 1).freq, Some(20e6), "the later timed update is effective");
+        let calls = device.calls();
+        assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=20000000") && call.contains(&format!("at={} effective={}", ms(280), ms(280)))), "{calls:?}");
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{calls:?}");
+        assert!(events_of(&events, kinds::COMMAND_QUEUE_FULL).is_empty(), "{calls:?}");
+        assert_eq!(rows_of(&core, &freq), vec![(ms(170), true, false), (ms(280), true, false)]);
+    }
+
+    #[test]
+    fn ur_34_a_cold_change_before_the_move_s_release_is_floored_at_the_move() {
+        // S10/A7 (design note 37): a `cold` change whose instant precedes a pending move's is
+        // floored at the move's `e`, so the destination's first segment is the move's own and
+        // the change is part of it. On the controlled clock.
+        let (core, device, time, events) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = both_control(&core);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        lock(&core.streams).search(booked_stream(Dir::Rx), true);
+        control.book_cold(ActionId(1), key("radio.rx.c0.stream"), Value::from(1), at(100));
+        control.book_cold(ActionId(2), key("radio.rx.s1.sample_rate_hz"), Value::num(2e6).unwrap(), at(50));
+        let late = events_of(&events, kinds::LATE_COMMAND);
+        assert_eq!(late.len(), 1, "{late:?} {:?}", device.calls());
+        assert_eq!(late[0].payload["key"], "radio.rx.s1.sample_rate_hz");
+        assert_eq!(late[0].payload["requested"]["ticks"], ms(50));
+        assert_eq!(late[0].payload["applied"]["ticks"], ms(100));
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
+        let plan = plan_of_stream(&core, Dir::Rx, 1);
+        assert!(plan.iter().any(|planned| planned.segment.config.channels == Channels::first(2)), "the destination's segment is not `{{0, 1}}`: {:?}", plan_rows(&plan));
+        let running = plan.iter().filter(|planned| planned.segment.cut.is_none()).max_by_key(|planned| planned.segment.origin).expect("the running segment");
+        assert!(running.segment.origin >= ms(100), "the floored segment begins before the move: {:?}", running.segment.origin);
+        assert_eq!(running.segment.config.ratio, Rational::new(100, 1).unwrap(), "the destination's segment is not at the change's rate: {:?}", plan_rows(&plan));
+    }
+
+    #[test]
+    fn ur_34_two_moves_at_one_instant_swap_their_receive_channels_without_deadlock() {
+        // A2 (design note 37): two moves at one instant swap the channels; each line acquires
+        // its new set at that same instant, so no zero-duration segment holding both channels
+        // is ever planned for an owner to start. On the controlled clock both are booked at
+        // `e` and neither wait can be what lets them through.
+        let (core, device, time, events) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = both_control(&core);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        lock(&core.streams).search(stream_key(Dir::Rx, 0), true);
+        lock(&core.streams).search(stream_key(Dir::Rx, 1), true);
+        control.book_cold(ActionId(1), key("radio.rx.c0.stream"), Value::from(1), at(100));
+        control.book_cold(ActionId(2), key("radio.rx.c1.stream"), Value::from(0), at(100));
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
+        let moves = timing_of(&core, "move");
+        assert_eq!(moves.len(), 2, "{moves:?}");
+        assert!(moves.iter().all(|row| row["e"] == ms(100)), "{moves:?}");
+        let both = Channels::first(2);
+        let mut origins = Vec::new();
+        for (k, want) in [(0, Channels::first(2).without(0)), (1, Channels::first(2).without(1))] {
+            let plan = plan_of_stream(&core, Dir::Rx, k);
+            assert_eq!(plan.last().expect("the new segment").segment.config.channels, want, "stream {k}: {:?}", plan_rows(&plan));
+            assert!(plan.iter().all(|planned| planned.segment.config.channels != both), "stream {k} plans a segment holding both channels: {:?}", plan_rows(&plan));
+            let cut = plan.iter().find(|planned| planned.segment.cut.is_some()).expect("the cut").segment;
+            assert_eq!(cut.instant(cut.cut.unwrap()).unwrap(), ms(100), "stream {k}'s cut is not the one instant: {:?}", plan_rows(&plan));
+            origins.push(plan.last().unwrap().segment.origin);
+        }
+        assert!(origins.iter().all(|origin| *origin > ms(100)), "a destination begins before its cut's restart: {origins:?}");
+        // The owners' own exchange — each receives its old segment through the cut, finishes
+        // it, and its begin of the destination closes the old streamer and waits for the
+        // other's — is `ur_34_two_moves_at_one_instant_swap_their_receive_channels_without_deadlock`
+        // in `src/provider/rx.rs`, on the real owner; this test is the plan it carries out.
+    }
+
+    #[test]
+    fn ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock() {
+        // A2/A10 (design note 37): the same exchange on TX. Each line's new set begins at the
+        // one instant, so the union set is never a planned segment an owner could open.
+        let (core, device, time, events) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = both_control(&core);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(1), at(100));
+        control.book_cold(ActionId(2), key("radio.tx.c1.stream"), Value::from(0), at(100));
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
+        let both = Channels::first(2);
+        let mut origins = Vec::new();
+        for (k, want) in [(0, Channels::first(2).without(0)), (1, Channels::first(2).without(1))] {
+            let plan = plan_of_stream(&core, Dir::Tx, k);
+            assert_eq!(plan.last().expect("the new segment").segment.config.channels, want, "stream {k}: {:?}", plan_rows(&plan));
+            // The one zero-length segment the exchange's two moves leave has no samples: no
+            // owner can run it (A2).
+            for planned in plan.iter().filter(|planned| planned.segment.config.channels == both) {
+                let cut = planned.segment.cut.expect("a segment with both channels is cut");
+                assert_eq!(planned.segment.instant(cut).unwrap(), planned.segment.origin, "stream {k} plans a segment holding both channels with samples: {:?}", plan_rows(&plan));
+            }
+            let cut = plan.iter().find(|planned| planned.segment.cut.is_some()).expect("the cut").segment;
+            assert_eq!(cut.instant(cut.cut.unwrap()).unwrap(), ms(100), "stream {k}: {:?}", plan_rows(&plan));
+            origins.push(plan.last().unwrap().segment.origin);
+        }
+        assert!(origins.iter().all(|origin| *origin > ms(100)), "a destination begins before its cut's restart: {origins:?}");
+    }
+
+    #[test]
+    fn ur_34_a_finite_middle_segment_releases_a_channel_along_a_move_chain() {
+        // A2 (design note 37): B's segment has a finite cut at e₂; the channel C takes begins
+        // only there, so B runs between the two instants and releases c1 to C at its own cut.
+        // On the controlled clock the two instants are 150 ms apart. B's delivery through its
+        // cut is `ur_17_a_finite_segment_delivers_through_its_cut` in `src/provider/rx.rs`, and
+        // the wait for it `ur_34_a_waited_open_waits_for_a_finite_unprocessed_move_segment` in
+        // this file.
+        let selector = BTreeMap::from([
+            (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:basic_rx:0"), Scalar::from("0:B:basic_rx:1")])),
+            (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
+        ]);
+        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
+        let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, front_ends: vec!["UBX", "BasicRX"], ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::device::FakeDevice::new(config));
+        let links = (0..3).map(|_| vec![Arc::new(NoLink) as Arc<dyn DataLink>]).collect();
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), description);
+        let _frozen = hold(&core, &time, &device);
+        let (to_tx, _tx) = channel();
+        let mut values = core.description.defaults();
+        values.insert(key("radio.rx.c0.stream"), Value::from(-1));
+        values.insert(key("radio.rx.c1.stream"), Value::from(0));
+        values.insert(key("radio.rx.c2.stream"), Value::from(-1));
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            Start { t0: 0, rx: vec![Some((Channels::first(2).without(0), 200)), None, None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1)))] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        lock(&core.streams).search(stream_key(Dir::Rx, 0), true);
+        control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(1), at(100));
+        control.book_cold(ActionId(2), key("radio.rx.c1.stream"), Value::from(2), at(250));
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
+        let middle = plan_of_stream(&core, Dir::Rx, 1).into_iter().find(|planned| planned.segment.cut.is_some() && planned.segment.config.channels == Channels::first(2).without(0)).expect("B's finite segment");
+        let cut = middle.segment.cut.expect("B's segment is finite");
+        let cut_end = middle.segment.instant(cut).unwrap();
+        assert_eq!(cut_end, ms(250), "B's cut is not e₂");
+        assert!(cut_end > middle.segment.origin, "B's segment holds no samples");
+        assert_eq!(middle.segment.config.channels, Channels::first(2).without(0), "B's segment is not `{{1}}`");
+        let destination = plan_of_stream(&core, Dir::Rx, 2).into_iter().find(|planned| planned.segment.config.channels.contains(1)).expect("C's segment");
+        assert!(destination.segment.origin > cut_end, "C begins before B's cut: {:?}", plan_rows(&plan_of_stream(&core, Dir::Rx, 2)));
+    }
+
+    #[test]
+    fn ur_26_d14_a_layout_instance_names_its_streams() {
+        // RM-12, RM-29, D14 (design note 37): under the layout the instance's node and its
+        // streams' nodes (`<id>/rx/s<k>`) are the targets, and a stream node's `Stop` stops that
+        // stream alone: a transmit burst held ahead of its instant is not cancelled, and the
+        // transmit clock is untouched. The held burst's own play through its instant is
+        // `ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it`'s rig.
+        let samples: Vec<(f32, f32)> = (0..1_000).map(|i| (i as f32 / 1_000.0, 0.0)).collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
+        let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]), layout_description());
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, to_tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let k = (ms(30) - clock.origin) / clock.n;
+        assert!(clock.instant(k) >= ms(30), "the burst is booked ahead of its instant");
+        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
+            target: super::super::test_support::target_of(&ResourceId::parse("usrp/tx/s0").unwrap()),
+            waveform,
+            repeat: false,
+            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, k)),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(ResourceId::parse("usrp/tx/s0").unwrap())));
+        assert!(matches!(to_tx.try_recv(), Ok(TxCmd::Burst(_))), "the burst was not handed to uhd-tx");
+        let held = lock(&core.held).len();
+        assert_eq!(held, 1, "the burst is not held ahead of its instant");
+        control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(super::super::test_support::target_of(&ResourceId::parse("usrp/rx/s0").unwrap())) }, Some(ResourceId::parse("usrp/rx/s0").unwrap())));
+        assert!(to_tx.try_recv().is_err(), "the receive stream's Stop reached uhd-tx");
+        assert_eq!(lock(&core.held).len(), held, "the receive stream's Stop cancelled the transmit burst");
+        assert_eq!(lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| item.kind == Kind::Stop).count()), 0, "the receive Stop was booked on the transmit line");
+        assert_eq!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).map_or(0, |line| line.items.iter().filter(|item| item.kind == Kind::Stop).count()), 1, "the receive stream is not stopped");
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_25_a_floor_raised_layout_join_is_judged_at_its_instant() {
+        // RM-25, RM-31, major 4(a) (design note 37): a join the instance floor raises takes
+        // effect at the raised instant, where the reserved antenna has arrived, and the
+        // run-time judgement is over that instant's configuration; the refusal leaves neither
+        // the value nor the instant in the floor. On the controlled clock the raised instant
+        // is 50 ms and the judge's configuration cannot move.
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
+        let antenna = key("radio.rx.c0.antenna");
+        control.book_cold(ActionId(1), antenna.clone(), Value::from("TX/RX"), at(50));
+        control.book_cold(ActionId(2), key("radio.tx.c0.stream"), Value::from(0), at(10));
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 1, "{refused:?} {:?}", device.calls());
+        let reason = refused[0].payload["reason"].as_str().unwrap().to_owned();
+        assert!(reason.starts_with("RM-31:"), "{reason}");
+        assert!(device.calls().iter().all(|call| !call.starts_with("tx_open")), "no transmit streamer was opened: {:?}", device.calls());
+        assert!(lock(&core.streams).stream(stream_key(Dir::Tx, 0)).clocks.is_empty(), "the refused join started a transmit clock");
+        // The refusal left neither the value nor its instant behind: the antenna change back is
+        // booked at its own instant, and the same join after it is taken.
+        control.book_cold(ActionId(3), antenna.clone(), Value::from("RX2"), at(60));
+        control.book_cold(ActionId(4), key("radio.tx.c0.stream"), Value::from(0), at(120));
+        assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 0, "the later join is taken: {:?}", device.calls());
+        let changes = timing_of(&core, "cold_change");
+        let antennas: Vec<i64> = changes.iter().filter(|row| row["key"] == "radio.rx.c0.antenna").map(|row| row["e"].as_i64().unwrap()).collect();
+        assert_eq!(antennas, [ms(50), ms(60)], "the refused instant is no floor: {changes:?}");
+        assert_eq!(changes.iter().filter(|row| row["key"] == "radio.tx.c0.stream").map(|row| row["e"].as_i64().unwrap()).collect::<Vec<_>>(), [ms(120)], "the later join is not at its own instant: {changes:?}");
+        let plan = plan_of(&core, Dir::Tx);
+        assert!(plan.len() == 1 && plan[0].segment.origin == ms(120), "the later join begins no transmit segment: {:?}", plan_rows(&plan));
+        plan[0].configure(&core, Dir::Tx).expect("the joined segment configures");
+        assert!(device.calls().iter().any(|call| call.starts_with("apply tx 0 rate=") && call.ends_with("at=-")), "{:?}", device.calls());
     }
 
     #[test]

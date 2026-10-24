@@ -3081,6 +3081,371 @@ mod tests {
     }
 
     #[test]
+    fn ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock() {
+        // A2/A10 (design note 37): two transmit moves at one instant leave a segment holding
+        // both channels whose cut is its origin. The owner skips it without a device call —
+        // opening it would hold the reciprocal move's channel — and reads on to its own new
+        // segment. On the controlled clock both moves are booked at `e`.
+        let (core, device, time) = manual_rig();
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
+        let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
+        let mut values = core.description.defaults();
+        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
+        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(1));
+        let (to_tx, _keep) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), Some((c1, Channels::first(2).without(0)))] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        for (id, name, value) in [(1, "radio.tx.c0.stream", 1), (2, "radio.tx.c1.stream", 0)] {
+            control.book(Dispatched::new(ActionId(id), Action::UpdateParameter {
+                target: super::super::test_support::target_of(&core.id),
+                key: crate::provider::core::key(name),
+                value: Value::from(value),
+                class: UpdateClass::Cold,
+                at: Some(AbsoluteDeadline::new(core.at(ms(100)))),
+            }, Some(core.id.clone())));
+        }
+        // Both owners, each with its old streamer open and recorded, read the plan.
+        device.tx_open(0, &[0]).unwrap();
+        device.tx_open(1, &[1]).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
+            streams.record_open(stream_key(Dir::Tx, 1), Some(Channels::first(2).without(0)));
+        }
+        let (_, cmds0) = std::sync::mpsc::channel();
+        let (_, cmds1) = std::sync::mpsc::channel();
+        let mut tx0 = Tx::new(core.clone(), 0, cmds0, Some(c0), Channels::first(1));
+        let mut tx1 = Tx::new(core.clone(), 1, cmds1, Some(c1), Channels::first(2).without(0));
+        assert!(tx0.read(None) && tx1.read(None), "the owners read the plan");
+        // Stream 1 is the one whose plan holds the zero-length union segment.
+        let union = tx1.switch.as_ref().and_then(|switch| switch.to.as_ref()).expect("the zero-length segment");
+        assert_eq!(union.segment.config.channels, Channels::first(2), "the scene's intermediate segment is not the union: {:?}", union.segment.config.channels);
+        let cut = union.segment.cut.expect("the intermediate segment is cut");
+        assert_eq!(union.segment.instant(cut).unwrap(), union.segment.origin, "the scene's intermediate segment holds samples");
+        // The zero-length segment's owner skips it at its cut without a device call and reads
+        // on; then both owners' destination switches run at once, each waiting for the other's
+        // release.
+        device_at(&core, &time, &device, ms(200));
+        let mark = device.calls().len();
+        assert!(tx1.step(), "stream 1's skip of the zero-length segment");
+        assert_eq!(tx1.switch.as_ref().and_then(|switch| switch.to.as_ref()).map(|to| to.segment.config.channels),
+            Some(Channels::first(2).without(1)), "stream 1's owner did not read on to its destination");
+        assert!(device.calls()[mark..].iter().all(|call| !call.starts_with("tx_open") && !call.starts_with("apply")), "the zero-length segment made a device call: {:?}", device.calls());
+        drop(_frozen);
+        let (done0, reached0) = std::sync::mpsc::channel();
+        let (done1, reached1) = std::sync::mpsc::channel();
+        let owners = [std::thread::spawn(move || { let _ = tx0.step(); let _ = done0.send((tx0.clock, tx0.channels)); }),
+            std::thread::spawn(move || { let _ = tx1.step(); let _ = done1.send((tx1.clock, tx1.channels)); })];
+        let (clock0, channels0) = reached0.recv_timeout(Wall::from_secs(10)).expect("stream 0's owner did not reach its destination");
+        let (clock1, channels1) = reached1.recv_timeout(Wall::from_secs(10)).expect("stream 1's owner did not reach its destination");
+        for owner in owners { owner.join().expect("the owner's thread"); }
+        let calls = device.calls();
+        assert!(calls[mark..].iter().all(|call| !call.starts_with("tx_open 0 [0, 1]") && !call.starts_with("tx_open 1 [0, 1]")),
+            "an owner opened the zero-length segment: {calls:?}");
+        assert!(clock0.is_some() && channels0 == Channels::first(2).without(0), "stream 0's owner did not adopt its destination's clock: {clock0:?}, {channels0:?} {calls:?}");
+        assert!(clock1.is_some() && channels1 == Channels::first(2).without(1), "stream 1's owner did not adopt its destination's clock: {clock1:?}, {channels1:?} {calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.as_str() == "tx_open 0 [1]").count(), 1, "stream 0's destination streamer: {calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.as_str() == "tx_open 1 [0]").count(), 1, "stream 1's destination streamer: {calls:?}");
+        // The zero-length segment holds both channels but no samples, so it is no segment the
+        // reciprocal destination waits for (A2).
+        for (k, set) in [(0, Channels::first(2).without(0)), (1, Channels::first(2).without(1))] {
+            let destination = lock(&core.streams).planned(stream_key(Dir::Tx, k)).into_iter().map(|planned| planned.segment.origin).max().expect("a destination segment");
+            assert!(!lock(&core.streams).needed_before(stream_key(Dir::Tx, k), set, destination), "stream {k}'s zero-length segment holds the reciprocal destination back (A2)");
+        }
+        for k in 0..2 {
+            let done = lock(&core.streams).stream(stream_key(Dir::Tx, k)).completed.clone();
+            assert!(done.iter().any(|(origin, _, by)| *origin == 0 && by.is_none()), "stream {k}'s old segment is not completed by its owner: {done:?}");
+        }
+    }
+
+    #[test]
+    fn ur_25_a_same_size_membership_swap_sends_the_new_segment_on_its_own_channel() {
+        // M1 (design note 37): `{0}` becomes `{1}` — the set changes while its count does not
+        // — so only the set can decide to reopen the streamer, and the new segment's samples
+        // go out on device channel 1. The fake loops transmit channel `c` back on receive
+        // channel `c` (UR-33), so a receive streamer on channel 1 reads them back; a streamer
+        // left on channel 0 would record nothing there and the loopback would be its ramp. On
+        // the controlled clock the cut, the destination's clock and its burst are fixed.
+        let (core, device, time) = manual_rig();
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
+        let mut values = core.description.defaults();
+        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
+        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(-1));
+        let (to_tx, _keep) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), None] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        for (id, name, value) in [(1, "radio.tx.c0.stream", -1), (2, "radio.tx.c1.stream", 0)] {
+            control.book(Dispatched::new(ActionId(id), Action::UpdateParameter {
+                target: super::super::test_support::target_of(&core.id),
+                key: crate::provider::core::key(name),
+                value: Value::from(value),
+                class: UpdateClass::Cold,
+                at: Some(AbsoluteDeadline::new(core.at(ms(100)))),
+            }, Some(core.id.clone())));
+        }
+        let plan = lock(&core.streams).planned(stream_key(Dir::Tx, 0));
+        let destination = plan.last().expect("the new segment").clone();
+        assert_eq!(destination.segment.config.channels, Channels::first(2).without(0), "{:?}", plan.iter().map(|planned| planned.segment.config.channels).collect::<Vec<_>>());
+        let destination_clock = destination.clock.expect("the destination's clock is registered at booking");
+        // The streamer the arm opened and the owner: the switch at the cut opens the new set.
+        device.tx_open(0, &[0]).unwrap();
+        lock(&core.streams).record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
+        let (_to_owner, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(_to_owner);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
+        assert!(tx.read(None), "the owner reads the plan");
+        device_at(&core, &time, &device, ms(100));
+        assert!(tx.step(), "the owner switches at the cut");
+        assert!(tx.clock.is_some_and(|clock| clock.domain == destination_clock.domain), "the owner did not adopt the destination's clock: {:?}", device.calls());
+        let calls = device.calls();
+        assert_eq!(calls.iter().filter(|call| call.as_str() == "tx_open 0 [1]").count(), 1, "the streamer is not reopened for the new set: {calls:?}");
+        assert!(calls.iter().any(|call| call.starts_with("apply tx 1 ") && call.ends_with("at=-")), "the new set's channel is not configured: {calls:?}");
+        // The destination's burst, booked before the cut on its clock, and the loopback that
+        // tells device channel 1 from channel 0.
+        let wave: Vec<[f32; 2]> = (0..1_000).map(|i| [-0.25 - i as f32 / 4_000.0, 0.375]).collect();
+        let new_k = ms(5) / 200;
+        lock(&core.held).insert((destination_clock.domain, new_k));
+        tx.command(TxCmd::Burst(one_shot(&destination_clock, new_k, 1, wave.clone())));
+        let burst_at = destination_clock.instant(new_k);
+        device.rx_open(1, &[1]).unwrap();
+        device.rx_start(1, burst_at).unwrap();
+        device_at(&core, &time, &device, destination_clock.origin + ms(3));
+        assert!(tx.step(), "the destination's burst is dispatched: {:?}", device.calls());
+        // The held last sample goes with the end-of-burst once it is a device lead away, and
+        // before the device's own cursor: at or past it the burst would count as starved.
+        device_at(&core, &time, &device, destination_clock.origin + ms(4));
+        let _ = tx.step();
+        assert_eq!(device.unended_bursts(), 0, "{:?}", device.calls());
+        device_at(&core, &time, &device, destination_clock.origin + ms(6));
+        let got = match device.rx_recv(1, 1_000, Wall::from_millis(100)) {
+            crate::device::RxRecv::Samples { samples, .. } => samples,
+            other => panic!("the loopback of the new segment's burst: {other:?}"),
+        };
+        assert_eq!(got[0], wave, "the new segment's samples are not on device channel 1: {:?}", device.calls());
+        assert_eq!(device.transmitted(burst_at, 1_000), vec![None; 1_000], "the old channel sent the new segment's samples: {:?}", device.calls());
+    }
+
+    /// A one-shot burst of `samples` on each of `channels` buffers, booked at sample `k` of
+    /// `clock`.
+    fn one_shot(clock: &super::Clock, k: i64, channels: usize, samples: Vec<[f32; 2]>) -> Held {
+        Held {
+            k,
+            domain: clock.domain,
+            samples: Arc::new(vec![samples; channels.max(1)]),
+            repeat: false,
+            open: BurstOpen { waveform_len: None, late: None, requested_target: None },
+            policy: LatePolicy::DropAndFlag,
+            target: TimePoint::new(clock.domain, k),
+        }
+    }
+
+    #[test]
+    fn ur_34_a_transmit_move_ends_the_old_burst_and_sends_the_new_burst_on_its_stream() {
+        // A7/S5 (design note 37): a move cuts the source's one-shot burst at the move's
+        // instant — the last sample before it is played and the end-of-burst precedes the
+        // release of the old streamer — and a burst booked on the destination's clock before
+        // the cut is played by the destination's own owner after its switch.
+        let (core, device, time) = manual_rig();
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
+        let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
+        let mut values = core.description.defaults();
+        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
+        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(1));
+        let (to_tx, _keep) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), Some((c1, Channels::first(2).without(0)))] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        control.book(Dispatched::new(ActionId(1), Action::UpdateParameter {
+            target: super::super::test_support::target_of(&core.id),
+            key: crate::provider::core::key("radio.tx.c0.stream"),
+            value: Value::from(1),
+            class: UpdateClass::Cold,
+            at: Some(AbsoluteDeadline::new(core.at(ms(30)))),
+        }, Some(core.id.clone())));
+        let s0 = lock(&core.streams).planned(stream_key(Dir::Tx, 0));
+        assert_eq!(s0.len(), 1, "s0 has no channel after the move: {:?}", s0.iter().map(|p| p.segment.origin).collect::<Vec<_>>());
+        assert_eq!(s0[0].segment.instant(s0[0].segment.cut.expect("s0 is cut")).unwrap(), ms(30));
+        let destination = lock(&core.streams).planned(stream_key(Dir::Tx, 1)).into_iter().find(|planned| planned.segment.config.channels == Channels::first(2)).expect("s1's destination segment");
+        let destination_clock = destination.clock.expect("the destination's clock is registered at booking");
+        device.tx_open(0, &[0]).unwrap();
+        device.tx_open(1, &[1]).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
+            streams.record_open(stream_key(Dir::Tx, 1), Some(Channels::first(2).without(0)));
+        }
+        let (_, cmds0) = std::sync::mpsc::channel();
+        let (_, cmds1) = std::sync::mpsc::channel();
+        let mut tx0 = Tx::new(core.clone(), 0, cmds0, Some(c0), Channels::first(1));
+        let mut tx1 = Tx::new(core.clone(), 1, cmds1, Some(c1), Channels::first(2).without(0));
+        assert!(tx0.read(None) && tx1.read(None), "the owners read the plan");
+        // The old one-shot: 10 000 samples from 20 ms, so its end is the move's instant.
+        let old_wave: Vec<[f32; 2]> = (0..10_000).map(|i| [i as f32 / 10_000.0, -0.125]).collect();
+        lock(&core.held).insert((c0.domain, 20_000));
+        tx0.command(TxCmd::Burst(one_shot(&c0, 20_000, 1, old_wave.clone())));
+        // The destination's burst, booked before the cut: 1 000 samples 5 ms into its clock.
+        let new_wave: Vec<[f32; 2]> = (0..1_000).map(|i| [0.75 - i as f32 / 4_000.0, 0.25]).collect();
+        let new_k = ms(5) / 200;
+        lock(&core.held).insert((destination_clock.domain, new_k));
+        tx1.command(TxCmd::Burst(one_shot(&destination_clock, new_k, 2, new_wave.clone())));
+        for k in 17..=29 {
+            device_at(&core, &time, &device, ms(k));
+            let _ = tx0.step();
+        }
+        assert!(device.transmitted(c0.instant(20_100), 1)[0].is_some(), "the old burst did not play: {:?}", device.calls());
+        // At the cut the source's burst ends and the destination's switch waits for its
+        // streamer release, so the two owners' turns run at once — each as a participant of
+        // the device's clock, registered before the test gives the clock back (M1): a delayed
+        // test thread then moves neither turn, and the clock stands at its poll's deadline.
+        device_at(&core, &time, &device, ms(30));
+        let (done, reached) = std::sync::mpsc::channel();
+        let (release_destination, destination_release) = std::sync::mpsc::channel();
+        let destination = device.host().spawn("tx-destination", move || { let _ = tx1.step(); let _ = done.send(tx1); let _ = destination_release.recv(); }).expect("a participant thread");
+        let (source_done, source_reached) = std::sync::mpsc::channel();
+        let source = device.host().spawn("tx-source", move || { let _ = tx0.step(); let _ = tx0.pass(); let _ = source_done.send(tx0.clock.is_none()); }).expect("a participant thread");
+        drop(_frozen);
+        let mut tx1 = reached.recv_timeout(Wall::from_secs(10)).expect("the destination's turn");
+        assert!(tx1.clock.is_some(), "the destination adopted no clock: {:?}", device.calls());
+        assert_eq!(source_reached.recv_timeout(Wall::from_secs(10)), Ok(true), "the source's owner kept its clock: {:?}", device.calls());
+        // The destination is the last turn to finish — it waits for the source's release — and
+        // past its result it stays a participant until the test holds the clock again (M1). The
+        // source must end: a participant busy on the source's result would stop the clock, and
+        // the destination's poll for the release would never end.
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _ = release_destination.send(());
+        destination.join().expect("the destination's thread");
+        source.join().expect("the source's thread");
+        // The destination's own segment begins 50 ms after the cut; its prebooked burst, 5 ms
+        // into that clock, is due 50 ms later still. Every instant now goes forward from where
+        // the switch left it.
+        let mut k = device.time_now().unwrap() + 1;
+        while k <= ms(92) {
+            device_at(&core, &time, &device, k);
+            let _ = tx1.step();
+            k += ms(1);
+        }
+        let calls = device.calls();
+        let close = calls.iter().position(|call| call == "tx_close 0").unwrap_or_else(|| panic!("the source's release: {calls:?}"));
+        let end = calls.iter().rposition(|call| call.starts_with("tx_send 0 ") && call.ends_with("eob=true")).expect("the old burst's end");
+        assert!(end < close, "the old burst's end precedes the source's close: {calls:?}");
+        let last = device.transmitted(ms(30) - 200, 1)[0].expect("the last sample before the cut");
+        assert_eq!(last, old_wave[9_999], "the cut cut the old waveform: {calls:?}");
+        let new_at = destination_clock.instant(new_k + 100);
+        assert_eq!(device.transmitted(new_at, 1)[0], Some(new_wave[100]), "the destination's burst plays its own samples: {calls:?}");
+        assert!(calls.iter().any(|call| call == "tx_open 1 [0, 1]"), "the destination opens both channels: {calls:?}");
+        assert_eq!(device.unended_bursts(), 0, "{calls:?}");
+        assert!(calls.iter().all(|call| !call.contains("Attempting to reconnect")), "{calls:?}");
+        let ended = core.clocks.sample_clock_records().into_iter().find(|record| record.domain == c0.domain).and_then(|record| record.ended_at)
+            .expect("the source's clock ends at the cut");
+        assert_eq!(ended.ticks_in(core.root).unwrap(), ms(30), "the source's clock does not end at the move: {ended:?}");
+    }
+
+    #[test]
+    fn ur_34_a_transmit_move_carries_a_prebooked_burst_across_the_repeat_cut() {
+        // A7 (design note 37): an old repeating burst crosses its waveform wrap and is cut at
+        // the move's instant, while a burst already booked on the destination's clock waits
+        // through the move and its own owner plays it after the switch.
+        let (core, device, time) = manual_rig();
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
+        let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
+        let mut values = core.description.defaults();
+        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
+        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(1));
+        let (to_tx, _keep) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
+            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), Some((c1, Channels::first(2).without(0)))] });
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        // The cut is two and a half waveforms past the repeat's start: the wrap has happened
+        // and the cut falls inside the third.
+        control.book(Dispatched::new(ActionId(1), Action::UpdateParameter {
+            target: super::super::test_support::target_of(&core.id),
+            key: crate::provider::core::key("radio.tx.c0.stream"),
+            value: Value::from(1),
+            class: UpdateClass::Cold,
+            at: Some(AbsoluteDeadline::new(core.at(ms(22) + core.ticks(500_000)))),
+        }, Some(core.id.clone())));
+        let destination = lock(&core.streams).planned(stream_key(Dir::Tx, 1)).into_iter().find(|planned| planned.segment.config.channels == Channels::first(2)).expect("s1's destination segment");
+        let destination_clock = destination.clock.expect("the destination's clock is registered at booking");
+        device.tx_open(0, &[0]).unwrap();
+        device.tx_open(1, &[1]).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
+            streams.record_open(stream_key(Dir::Tx, 1), Some(Channels::first(2).without(0)));
+        }
+        let (_, cmds0) = std::sync::mpsc::channel();
+        let (_, cmds1) = std::sync::mpsc::channel();
+        let mut tx0 = Tx::new(core.clone(), 0, cmds0, Some(c0), Channels::first(1));
+        let mut tx1 = Tx::new(core.clone(), 1, cmds1, Some(c1), Channels::first(2).without(0));
+        assert!(tx0.read(None) && tx1.read(None), "the owners read the plan");
+        let old_wave: Vec<[f32; 2]> = (0..1_000).map(|i| [i as f32 / 1_000.0, -0.5]).collect();
+        let mut old = one_shot(&c0, 20_000, 1, old_wave.clone());
+        old.repeat = true;
+        lock(&core.held).insert((c0.domain, 20_000));
+        tx0.command(TxCmd::Burst(old));
+        let new_wave: Vec<[f32; 2]> = (0..1_000).map(|i| [0.5 + i as f32 / 4_000.0, 0.125]).collect();
+        let new_k = ms(5) / 200;
+        lock(&core.held).insert((destination_clock.domain, new_k));
+        tx1.command(TxCmd::Burst(one_shot(&destination_clock, new_k, 2, new_wave.clone())));
+        for k in 17..=21 {
+            device_at(&core, &time, &device, ms(k));
+            let _ = tx0.step();
+        }
+        // The repeat crossed its wrap: the second waveform's 100th sample is its own.
+        assert_eq!(device.transmitted(c0.instant(21_100), 1)[0], Some(old_wave[100]), "the repeat did not cross its wrap: {:?}", device.calls());
+        device_at(&core, &time, &device, ms(22) + core.ticks(500_000));
+        // The two owners' turns run at once as participants of the device's clock, registered
+        // before the test gives the clock back (M1), as in the one-shot move above.
+        let (done, reached) = std::sync::mpsc::channel();
+        let (release_destination, destination_release) = std::sync::mpsc::channel();
+        let destination = device.host().spawn("tx-destination", move || { let _ = tx1.step(); let _ = done.send(tx1); let _ = destination_release.recv(); }).expect("a participant thread");
+        let (source_done, source_reached) = std::sync::mpsc::channel();
+        let source = device.host().spawn("tx-source", move || { let _ = tx0.step(); let _ = tx0.pass(); let _ = source_done.send(tx0.clock.is_none()); }).expect("a participant thread");
+        drop(_frozen);
+        let mut tx1 = reached.recv_timeout(Wall::from_secs(10)).expect("the destination's turn");
+        assert!(tx1.clock.is_some(), "the destination adopted no clock: {:?}", device.calls());
+        assert_eq!(source_reached.recv_timeout(Wall::from_secs(10)), Ok(true), "the source's owner kept its clock: {:?}", device.calls());
+        // As in the one-shot move above, the destination — the last turn to finish — stays a
+        // participant past its result until the test holds the clock again (M1), so the clock
+        // does not run between the turns and the test's own instants.
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        let _ = release_destination.send(());
+        destination.join().expect("the destination's thread");
+        source.join().expect("the source's thread");
+        // Each instant goes forward from where the switch left it, to the destination's tenth
+        // millisecond.
+        let until = destination_clock.origin + ms(10);
+        let mut k = device.time_now().unwrap() + 1;
+        while k <= until {
+            device_at(&core, &time, &device, k);
+            let _ = tx1.step();
+            k += ms(1);
+        }
+        let calls = device.calls();
+        let close = calls.iter().position(|call| call == "tx_close 0").unwrap_or_else(|| panic!("the source's release: {calls:?}"));
+        let end = calls.iter().rposition(|call| call.starts_with("tx_send 0 ") && call.ends_with("eob=true")).expect("the repeat's end");
+        assert!(end < close, "the repeat's end precedes the source's close: {calls:?}");
+        let last_at = ms(22) + core.ticks(500_000) - 200;
+        assert_eq!(device.transmitted(last_at, 1)[0], Some(old_wave[499]), "the repeat reaches its last sample before the cut: {calls:?}");
+        let new_at = destination_clock.instant(new_k + 100);
+        assert_eq!(device.transmitted(new_at, 1)[0], Some(new_wave[100]), "the burst reserved on the new clock is played by the destination: {calls:?}");
+        let ended = core.clocks.sample_clock_records().into_iter().find(|record| record.domain == c0.domain).and_then(|record| record.ended_at)
+            .expect("the source's clock ends at the cut");
+        assert_eq!(ended.ticks_in(core.root).unwrap(), ms(22) + core.ticks(500_000), "the repeat is not cut at the booked instant: {ended:?}");
+        assert_eq!(device.unended_bursts(), 0, "{calls:?}");
+    }
+
+    #[test]
     fn ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it() {
         // T1: B booked at A's end after A's last buffer went out (inside the in-flight
         // window) is played, continuing A's device burst: A's held last sample ahead of B's
