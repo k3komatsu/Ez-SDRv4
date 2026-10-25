@@ -1,6 +1,6 @@
 # 33 — Radio Model と UHD Module の汎用性の点検
 
-Status: 当てはめと Sol のレビューまで済み．判断1〜3は決定（owner 2026-10-25），判断4は owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
+Status: 当てはめと Sol のレビューまで済み．判断1〜4は決定（owner 2026-10-25）．次は凍結前の amendment（判断1の `untimed`，判断2・3の時刻を持たない装置の設計メモ，判断4の UC-6 の文言）．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
 
 ## 1. 目的と範囲
 
@@ -175,7 +175,7 @@ owner の方針（同日）：「安くて欠落等を適当に扱う装置を�
 
 ### 判断4（K3）：command の格子
 
-**推奨：UC-6 の丸めの例外を「装置が格子でしか適用できないときは，その格子の次の瞬間へ進める」に広げ，radio の amendment で次を決める．**
+**決定（owner 2026-10-25，推奨どおり）：UC-6 の丸めの例外を「装置が格子でしか適用できないときは，その格子の次の瞬間へ進める」に広げ，radio の amendment で次を決める．**
 - 格子の宣言：どの clock に対する格子か，その起点（anchor）と，格子に揃えるときの丸め方．capability（例：`radio.timing.command_grid_ns`）で宣言する．一つの instance に一つの格子で全部の command の道を覆えるとは仮定せず，装置ごとに確かめる．
 - Provider は予約の前に，装置が実際に適用できる command の瞬間を決める．その瞬間を，順序，queue の数え方，構成の射影，適用時刻の記録のすべてに同じく使う（RM-21．今の UHD Provider は丸める前の `e` を使っている）．
 

@@ -43,7 +43,7 @@
 
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
-| 汎用性の点検（判断4） | Radio Model と Kernel が HackRF・bladeRF・N3xx・X4xx を表せるか．決定（owner 2026-10-25）：判断1 instance ごとの宣言と新しい update class `untimed`，判断2 HackRF を受け入れ，時刻を持たない装置の模型は凍結前の設計メモで（故障の時刻は厳密でなくてよい），判断3 bladeRF の Run の中の rate の変更は許し，変更の後の時刻は同じメモの模型で保証の外．どちらの amendment も凍結前．残る候補：command の格子（判断4）．事実集め3本と Sol のレビュー（PASS）まで済み | owner の判断を1件ずつ．[33-radio-generality.md](plan/maintenance/33-radio-generality.md) §6 |
+| 汎用性の点検の続き | 判断1〜4は決定（owner 2026-10-25）：1 instance ごとの宣言と新しい update class `untimed`，2 HackRF を受け入れ，時刻を持たない装置の模型は設計メモで（故障の時刻は厳密でなくてよい），3 bladeRF の Run の中の rate の変更は許し，変更の後の時刻は同じメモの模型で保証の外，4 UC-6 の command の格子を広げる．どれも Kernel に触れ，凍結前に amendment が要る | 凍結前（Phase 10 の前後，順番は owner と決める）．[33-radio-generality.md](plan/maintenance/33-radio-generality.md) §6 |
 | #67 | 遠い origin の timed start が queue されたまま `Provider::stop` が来ると uhd-rx が join の 1 s を越えて detach され，streamer が漏れる（HEAD から） | #56 の bench の後 |
 | #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
 | #56 | X310 で start の e₁〜e₂ 間の Stop と Stop の処理遅れを測る | Phase 8 の bench |
