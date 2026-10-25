@@ -98,7 +98,7 @@ The values of MR-3 come from these sources, each marked in the table:
 ### `prepare`, `arm`, `start`
 
 - **MR-7** `prepare(fragment, ctx)`:
-  1. A second `prepare` on one instance returns `Rejected` ("MR-7: one resource per MockRadio instance", MA-7).
+  1. A second `prepare` on one instance returns `Rejected` ("MR-7: prepare was already called", MA-7).
   2. `ctx.class` other than Simulation returns `Unsupported` (KC-2).
   3. `fragment.content.requested` must parse as a `Requested` naming the device node; its `coerce` report must have no `rejected` entry; otherwise `Rejected`.
   4. The configuration is MR-5's defaults overlaid with the report's `applied` configuration keys.
@@ -488,3 +488,4 @@ A transmit port and `TX_UNDERFLOW` (Phase 10); `ALIGNMENT` injection, with the U
 | 2026-10-25 | MR-17, MR-19, MR-25, MR-29 | Test lines name the A2 tests of the conditions they left under `none named`: `requested_target` and SC-23a's `requested_at` (MR-17, by RM-14's test), a restart gap of 0 still losing the dropped block (MR-19), what `stop(mode)` records of pending commands (MR-25), and `start_rx`'s `at`, a receive link's T0 floor and its never-late instant (MR-29); no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) A2 |
 | 2026-10-25 | MR-29 | a receive link's T0 floor names the timeline's own `mr_29_a_receive_link_floors_a_command_at_its_t0` beside the Provider test; no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) A2, fix round 1 |
 | 2026-10-25 | MR-2, MR-5, MR-6, MR-7, MR-16, MR-17, MR-18, MR-19, MR-27, MR-30, MR-32, MR-34, MR-35, MR-36, MR-38, MR-39, §6 | Test lines narrowed to what their tests assert, tests that pin a condition named, and conditions no test asserts listed under none named (second test-line sweep); no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) |
+| 2026-10-25 | MR-7 | a second `prepare`'s quoted reason is the one the code returns and `mr_07_prepare_cases` pins, "MR-7: prepare was already called"; no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) Second sweep (owner, 2026-10-25) |
