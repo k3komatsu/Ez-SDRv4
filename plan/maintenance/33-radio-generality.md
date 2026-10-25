@@ -1,6 +1,6 @@
 # 33 — Radio Model と UHD Module の汎用性の点検
 
-Status: 当てはめと Sol のレビューまで済み．判断1は決定（owner 2026-10-25），判断2〜4は owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
+Status: 当てはめと Sol のレビューまで済み．判断1・2は決定（owner 2026-10-25），判断3・4は owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
 
 ## 1. 目的と範囲
 
@@ -150,7 +150,11 @@ amendment が決めること（Sol の D1〜D4，D6．決定の向きは変え�
 
 ### 判断2（K2）：時刻を持たない装置（HackRF）を v4.0 で受け入れるか
 
-**推奨：受け入れる．その模型を，凍結前に短い設計メモと amendment で決める．Kernel の変更が要る見込みとして扱う．** メモが決めること（Sol の S3，S4）：
+**決定（owner 2026-10-25）：受け入れる．その模型を，凍結前に短い設計メモと amendment で決める．Kernel の変更が要る見込みとして扱う．**
+
+owner の方針（同日）：「安くて欠落等を適当に扱う装置を実験で使うということは，そんなに厳密にエラー発生時刻を知っている必要がなく，単にちゃんと動けばよい，くらいでいい」．メモはこれに沿い，時刻の分からない故障に正確な時刻や数を求めない軽い模型を選ぶ（例：気づいた時刻で報告し，数や位置は分からないと記す）．時刻の約束を弱める範囲は，時刻を持たないと宣言した装置（`radio.hardware_time: false`）に限り，X3xx などの約束は変えない．
+
+ メモが決めること（Sol の S3，S4）：
 1. 受信の origin と T0 の関係．primary root を何にし，誰が governed にするか（TM-16a・TM-16b）．
 2. untimed の装置で許す schedule と `at`（SB-16．`radio.hardware_time: false` の Provider の規則，G5）．
 3. 欠落を観測できない間に出した sample の扱い．publish してよい範囲を，気づいていない欠落を含まないように区切るか，最初の欠落で止めるか．
