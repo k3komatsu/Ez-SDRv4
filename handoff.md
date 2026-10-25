@@ -43,6 +43,7 @@
 
 | 項目 | 中身 | いつ・どこで |
 |---|---|---|
+| 汎用性の点検（判断1〜4） | Radio Model と Kernel が HackRF・bladeRF・N3xx・X4xx を表せるか．Kernel に関わる候補：時刻指定で変えられない更新（判断1），時刻を持たない装置＝HackRF（判断2），bladeRF の rate（判断3），command の格子（判断4）．事実集め3本と Sol のレビュー（PASS）まで済み | owner の判断を1件ずつ．[33-radio-generality.md](plan/maintenance/33-radio-generality.md) §6 |
 | #67 | 遠い origin の timed start が queue されたまま `Provider::stop` が来ると uhd-rx が join の 1 s を越えて detach され，streamer が漏れる（HEAD から） | #56 の bench の後 |
 | #51 | 送信 Stop で held burst を捨てるとき UHD は `COMMAND_REJECTED` を出し MockRadio は黙る．先に「イベントの報告規則も1か所で実装するか」を決める（`mech:radio-rule-implemented-twice`） | Phase 8 段階2（P4．先に設計メモ） |
 | #56 | X310 で start の e₁〜e₂ 間の Stop と Stop の処理遅れを測る | Phase 8 の bench |
