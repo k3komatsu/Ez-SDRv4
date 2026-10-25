@@ -1,0 +1,3010 @@
+[
+ {
+  "rule": "TM-10",
+  "where": "design/01-time-model.md:151 (Test line)",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/time_model.rs:877-891",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:769-785"
+  ],
+  "fix": "the sample index by `mr_12_block_lengths` (block starts equal the running sample count) and, for the first sample, `tm_13b_first_block_is_tick_zero`"
+ },
+ {
+  "rule": "TM-13b",
+  "where": "design/01-time-model.md:298 (§6 row)",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/time_model.rs:877-913",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:517-530"
+  ],
+  "fix": "the first sample's instant converts to domain tick 0 (a published first block's `ticks` is 0 by `mr_39_each_receive_stream_declares_and_runs_its_own_clock`); the unregistered domain has no conversion"
+ },
+ {
+  "rule": "TM-16b",
+  "where": "design/01-time-model.md:293",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/time_model.rs:1322-1363",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:938-961",
+   "crates/ezsdr-acceptance/tests/v58.rs:107-121"
+  ],
+  "fix": "`now` and `schedule` succeed on the second root; the same schedule fires in the same order on a fresh Authority; the Engine's order from one seed by `mr_30_two_layout_mocks_one_seed_identical_output` and `v58_03_same_seed_same_manifest_projection`"
+ },
+ {
+  "rule": "TM-16c",
+  "where": "design/01-time-model.md:305",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/time_model.rs:1250-1260",
+   "crates/ezsdr-kernel/src/time/authority.rs:457-505"
+  ],
+  "fix": "`a thread calls wait_until(50)`, the main thread advances to 20 then 50 | the call returns Ok (that it blocks until the advance, and wakes every waiter, by `tm_17a_every_waiter_wakes`)"
+ },
+ {
+  "rule": "TM-21",
+  "where": "design/01-time-model.md:189",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/time_model.rs:211-220"
+  ],
+  "fix": "ok: remove it from TM-21's Test line and set the row's rules to `TM-3`"
+ },
+ {
+  "rule": "TM-21",
+  "where": "design/01-time-model.md:310",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/time_model.rs:998-1009",
+   "crates/ezsdr-kernel/tests/time_model.rs:1011-1043"
+  ],
+  "fix": "`the host value is the smaller` (a rescale that rounds a fractional tick up is caught by `tm_21_duration_cmp_survives_awkward_rates`; none named for a rescale that floors)"
+ },
+ {
+  "rule": "TM-2",
+  "where": "design/01-time-model.md:133 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:69-87",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/time/rational.rs:90-110"
+  ],
+  "fix": "`none named for the 128-bit intermediates` — no test has a product, quotient or comparison whose cross-products exceed 64 bits before a reduced result that fits"
+ },
+ {
+  "rule": "TM-3",
+  "where": "design/01-time-model.md:135 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:187-221",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/time/domain.rs:273-297"
+  ],
+  "fix": "`none named for a denominator above 2^31 alone, on a Derived ratio or a Root tick_rate`"
+ },
+ {
+  "rule": "TM-4",
+  "where": "design/01-time-model.md:139 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:92-159",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/time/point.rs:369-387"
+  ],
+  "fix": "`none named for a negative instant's floor` — every named conversion has a non-negative numerator"
+ },
+ {
+  "rule": "TM-5",
+  "where": "design/01-time-model.md:141 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:441-452",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:1380-1403",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/time/relation.rs:216-222"
+  ],
+  "fix": "`none named for ClockRelation::convert refusing a t outside the relation's source`"
+ },
+ {
+  "rule": "TM-7",
+  "where": "design/01-time-model.md:145 (Test line)",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:234-257"
+  ],
+  "fix": "`tm_07_duration_add_checks_domain` (Duration with TimePoint) and `tm_06_cross_domain_cmp_is_error` (two TimePoints)"
+ },
+ {
+  "rule": "TM-12",
+  "where": "design/01-time-model.md:158 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:877-913"
+  ],
+  "fix": "`none named for the producer obligation that a domain named by a block, event, action or record is registered first` — the Kernel's registry refuses only the lookup and conversion of an unregistered domain (tm_13b_first_block_is_tick_zero)"
+ },
+ {
+  "rule": "TM-13e",
+  "where": "design/01-time-model.md:164 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:953-980",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-mock-radio/tests/mock_radio.rs:985-1010",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-mock-radio/tests/mock_radio.rs:1163-1170",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/coordinator.rs:2165-2215"
+  ],
+  "fix": "`none named for the domain being registered before any burst is admitted against it`"
+ },
+ {
+  "rule": "TM-14",
+  "where": "design/01-time-model.md:184",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:441-452",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:490-519",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:1490-1518",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/time/relation.rs:234-248"
+  ],
+  "fix": "`none named for the uncertainty formula's rounding steps` — the extra tick when the rescale has a remainder, the away-from-zero drift-error term, and `drift_ticks`'s rounding"
+ },
+ {
+  "rule": "TM-16c",
+  "where": "design/01-time-model.md:203",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:1263-1273",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/time_model.rs:1376-1380",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-sim-engine/tests/sim_engine.rs:150-190",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/time/authority.rs:215-236"
+  ],
+  "fix": "`none named for advance_to's NotGoverned on a domain the Authority does not govern`"
+ },
+ {
+  "rule": "SC-7",
+  "where": "design/02-stream-contract.md:192 (Test line); 380 (§6 row)",
+  "kind": "wrong_test",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/kernel_surface.rs:630-644",
+   "crates/ezsdr-kernel/tests/stream_contract.rs:263-280",
+   "crates/ezsdr-kernel/tests/stream_contract.rs:468",
+   "crates/ezsdr-kernel/tests/support/mod.rs:47-52"
+  ],
+  "fix": "`sc_07_unsafe_code_remains_forbidden`: the `kernel_surface` gate asserts `#![forbid(unsafe_code)]` remains present, so no handle is dereferenced in the Kernel; none named for a BufferRef's shape or the handle's opacity (the three fields appear only as literals in `sc_08_*` and `sc_10a_*`)"
+ },
+ {
+  "rule": "SC-8",
+  "where": "design/02-stream-contract.md:389 (§6 row); 194 (Test line)",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/stream_contract.rs:475-481",
+   "crates/ezsdr-hostmem/tests/hostmem.rs:32-46"
+  ],
+  "fix": "`new` returns no host bytes; `new_host` returns a slice of the attached length (the attached bytes' content by `hd_02_a_released_slot_is_reused_and_a_held_one_is_not`); the short block is refused by SC-10a"
+ },
+ {
+  "rule": "SC-13",
+  "where": "design/02-stream-contract.md:209 (Test line)",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1217-1229",
+   "crates/ezsdr-sink-capture/src/lib.rs:557-559",
+   "crates/ezsdr-sink-capture/src/lib.rs:668-682",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:1153-1168"
+  ],
+  "fix": "on the UHD Provider, spec 18's `ur_17_a_missed_start_without_another_report_is_not_an_overflow` (the first block carries `GAP_BEFORE` and `lost` equal to the restart index) and `ur_19_reports_before_one_block_keep_each_kind`"
+ },
+ {
+  "rule": "SC-16a",
+  "where": "design/02-stream-contract.md:217",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1217-1229",
+   "crates/ezsdr-sink-capture/src/lib.rs:668-682",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:1153-1168"
+  ],
+  "fix": "the late start, on the UHD Provider, spec 18's `ur_17_a_missed_start_without_another_report_is_not_an_overflow` (the first block carries `GAP_BEFORE`) and `ur_17_a_missed_start_restarts_with_a_gap` (the `LATE_COMMAND` and the capture's first index)"
+ },
+ {
+  "rule": "SC-20a",
+  "where": "design/02-stream-contract.md:426",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/stream_contract.rs:553-576",
+   "crates/ezsdr-kernel/tests/support/mod.rs:178-183"
+  ],
+  "fix": "the block is delivered on the retry; nothing is lost (`drops` 0, both blocks delivered)"
+ },
+ {
+  "rule": "SC-25",
+  "where": "design/02-stream-contract.md:415",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/stream_contract.rs:762-778"
+  ],
+  "fix": "a start then 999 contiguous blocks (1 000 in all), then stop | the 999 `Continued`, then `Ended { Stop }`"
+ },
+ {
+  "rule": "SC-26",
+  "where": "design/02-stream-contract.md:417",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/stream_contract.rs:781-797",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:974-980"
+  ],
+  "fix": "`Started` at the first block (by `mr_16_repeat_is_contiguous_across_wraps`), `Continued` at the next four including the wrap"
+ },
+ {
+  "rule": "SC-4",
+  "where": "design/02-stream-contract.md:181 (Test line); 388 (§6 row)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:142-169",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/contract.rs:224-236"
+  ],
+  "fix": "`sc_04_standard_contracts_fixture`, for cf32 and for sc16 except its `layout`; none named for sc16's `layout` and for `ezsdr.control`"
+ },
+ {
+  "rule": "SC-5",
+  "where": "design/02-stream-contract.md:183 (Test line)",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-mock-radio/tests/mock_radio.rs:445",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-radio/tests/channels.rs:344"
+  ],
+  "fix": "on MockRadio, `mr_03_profile_values_reach_the_capabilities_and_the_envelope_section` (MR-3) for the PerformanceEnvelope, and `mr_02_the_tree_has_the_radio_model_shape` for the Port contract being `ezsdr.stream.cf32`"
+ },
+ {
+  "rule": "SC-8",
+  "where": "design/02-stream-contract.md:194 (Test line; condition at 191)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:465-488",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/stream/block.rs:323-337"
+  ],
+  "fix": "`none named for new_host on a domain that is not host-reachable, which the Kernel cannot refuse`"
+ },
+ {
+  "rule": "SC-12",
+  "where": "design/02-stream-contract.md:207 (Test line)",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-mock-radio/tests/mock_radio.rs:1894-1910",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-sink-capture/tests/sink_capture.rs:1072-1087"
+  ],
+  "fix": "`none named for a producer never filling a gap` — the capture Sink's not filling one is `hd_15_a_capture_is_a_sigmf_recording`"
+ },
+ {
+  "rule": "SC-20b",
+  "where": "design/02-stream-contract.md:232",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:579-615",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-link-host/tests/link_host.rs:182-219",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/stream/link.rs:76-108"
+  ],
+  "fix": "`none named for a dropped block's `ALIGNMENT` flag reaching the carry`"
+ },
+ {
+  "rule": "SC-29",
+  "where": "design/02-stream-contract.md:259",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:916-966",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:969-999",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:740-760",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/stream/burst.rs:347-399"
+  ],
+  "fix": "`none named for requested_target on a burst opened by a time jump` — absent without START_OF_BURST, copied from its BurstOpen with one"
+ },
+ {
+  "rule": "SC-30",
+  "where": "design/02-stream-contract.md:266",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:1195-1210",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/stream/continuity.rs:89-100",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/support/run_doubles.rs:1266-1276"
+  ],
+  "fix": "`none named for a ContinuityMap never being assembled by hand` — its fields are public"
+ },
+ {
+  "rule": "SC-30b",
+  "where": "design/02-stream-contract.md:270",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:1576-1595",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/tests/stream_contract.rs:1853-1990",
+   "/home/komatsu/local_work/Ez-SDRv4/crates/ezsdr-kernel/src/stream/continuity.rs:196"
+  ],
+  "fix": "`none named for a block's own qualifier merging with a different qualifier in the carry` — the union, not either side's flags alone"
+ },
+ {
+  "rule": "SB-8",
+  "where": "design/03-spec-and-binding.md:165",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2344-2365",
+   "crates/ezsdr-kernel/tests/support/doubles.rs:118-146"
+  ],
+  "fix": "the test Vocabulary declares exactly these seven `test.` keys (`test.count`, `test.grid`, `test.flag`, `test.gain`, `test.tx_clock`, `test.list`, `test.item`); the matcher reading no Vocabulary key by name is `satisfies()` taking no key, none named for a radio-word check (`00-overview.md` OV-21)"
+ },
+ {
+  "rule": "SB-22a",
+  "where": "design/03-spec-and-binding.md:378",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3524-3528",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3557-3628"
+  ],
+  "fix": "`DuplicateBindingName` naming the two sets in each case but the first (a resource and an output of one name: the name only); `sink` validates"
+ },
+ {
+  "rule": "SB-22f",
+  "where": "design/03-spec-and-binding.md:383",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6861-6898"
+  ],
+  "fix": "for a Provider, a Sink, an Executor and a riding Authority: the object missing; then naming another version for each and for a dedicated Authority's own slot; none named for a dedicated Authority's missing descriptor; a Sink and an Executor with no memory domain"
+ },
+ {
+  "rule": "SB-25",
+  "where": "design/03-spec-and-binding.md:273",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2523-2534",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2873-2892"
+  ],
+  "fix": "Move the parenthesis: `rs_12_a_session_compiles_through_the_whole_pipeline` (a feed in the plan's `links`); `ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component` (the feed numbered after the graph's one link)"
+ },
+ {
+  "rule": "SB-31",
+  "where": "design/03-spec-and-binding.md:398",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1458-1500",
+   "crates/ezsdr-kernel/tests/run_session.rs:1703-1711"
+  ],
+  "fix": "kept in `profile.environment`, no check run (the Manifest's body by `rs_38_environment_recorded_verbatim`, RS-45)"
+ },
+ {
+  "rule": "SB-34",
+  "where": "design/03-spec-and-binding.md:389",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:985-1007",
+   "crates/ezsdr-kernel/tests/support/doubles.rs:399-425"
+  ],
+  "fix": "two Spec resources on one instance, one of kind `test.device` (the root) and one of kind `test.line` (a sub-resource)"
+ },
+ {
+  "rule": "SB-37",
+  "where": "design/03-spec-and-binding.md:415",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1315-1346"
+  ],
+  "fix": "one Spec validated against a bound `test.count` 2 instance (not admitted), then against a bound `test.count` 8 instance (admitted)"
+ },
+ {
+  "rule": "SB-41",
+  "where": "design/03-spec-and-binding.md:315",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:426-447",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4809-4839"
+  ],
+  "fix": "the plan's fragment order and the report keys by `sb_41_the_reports_follow_plan_order`; the filing (two distinct reports under their fragments) by `sb_41_a_report_is_filed_under_the_fragment_invoked` (`coordinator.rs`)"
+ },
+ {
+  "rule": "SB-1",
+  "where": "design/03-spec-and-binding.md:145",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6196-6208",
+   "crates/ezsdr-kernel/src/id.rs:266"
+  ],
+  "fix": "none named for `ResourceId.path`'s 256-byte cap (the 17-segment case is refused by depth) or for the comparison as bytes; none named for the schemas' missing `pattern`."
+ },
+ {
+  "rule": "SB-5",
+  "where": "design/03-spec-and-binding.md:155",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "schemas/experiment_spec.v1.json:560",
+   "crates/ezsdr-kernel/tests/schema_freeze.rs:17",
+   "crates/ezsdr-kernel/src/spec.rs:455-458"
+  ],
+  "fix": "`sb_05_constraint_values_are_scalars` (Eq, Min, Range, Set and the three CapabilityValue kinds fed a list or map), and `Max`'s value by the type, pinned by `ov_22_schema_freeze`."
+ },
+ {
+  "rule": "SB-13",
+  "where": "design/03-spec-and-binding.md:178",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/spec.rs:1095-1102",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2368-2380",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3426-3438"
+  ],
+  "fix": "none named for a placement field inside `extensions` (accepted)."
+ },
+ {
+  "rule": "SB-16",
+  "where": "design/03-spec-and-binding.md:188",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1056-1066",
+   "crates/ezsdr-kernel/tests/coordinator.rs:665-693"
+  ],
+  "fix": "none named for the round-up when `root_ticks_per_tick`'s denominator exceeds 1."
+ },
+ {
+  "rule": "SB-16",
+  "where": "design/03-spec-and-binding.md:188",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1013-1018",
+   "crates/ezsdr-kernel/tests/coordinator.rs:670-681",
+   "crates/ezsdr-kernel/tests/coordinator.rs:963"
+  ],
+  "fix": "none named for a stream clock outside the resource's matched node being ignored."
+ },
+ {
+  "rule": "SB-22g",
+  "where": "design/03-spec-and-binding.md:219",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6397",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6438-6442"
+  ],
+  "fix": "`sb_22g_feed_is_a_session_sink_binding_s_only`; that feed is the implicit Spec's output by `sb_22c_session_derivation_table`."
+ },
+ {
+  "rule": "SB-24",
+  "where": "design/03-spec-and-binding.md:271",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:748-750",
+   "crates/ezsdr-kernel/src/module_api.rs:1287",
+   "crates/ezsdr-acceptance/src/rig.rs:99-104"
+  ],
+  "fix": "none named for the coordinator making no lifecycle call for the Authority fragment (the `Authority` trait has no lifecycle method; every acceptance rig Run with a dedicated `sim` Authority completes)."
+ },
+ {
+  "rule": "SB-26",
+  "where": "design/03-spec-and-binding.md:276",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1495-1500",
+   "crates/ezsdr-kernel/src/binding.rs:130-134",
+   "crates/ezsdr-kernel/src/binding.rs:155-157"
+  ],
+  "fix": "the reader serving nothing else by `sb_31_unregistered_section_is_informational` (`vendor.thing`, present, is not served); `ezsdr.time` by ... [unchanged]; none named for the list being exactly the four names or for `ezsdr.capture`'s read."
+ },
+ {
+  "rule": "SB-30",
+  "where": "design/03-spec-and-binding.md:287",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/coordinator/admission.rs:292-301",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1819-1855",
+   "crates/ezsdr-kernel/tests/coordinator.rs:5379-5420"
+  ],
+  "fix": "none named for a coerced runtime `proposed` value (a check seeing the applied value, not the requested one), nor for the Manifest record or a Sink-output target's `proposed`."
+ },
+ {
+  "rule": "SB-34",
+  "where": "design/03-spec-and-binding.md:298",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/plan/validation.rs:85-106",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1010-1043",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3110"
+  ],
+  "fix": "none named for a `needs` entry whose every matching node is already bound (the code refuses it with `NoSingleInstance`, not `NodeAlreadyBound`: decide which)."
+ },
+ {
+  "rule": "SB-41",
+  "where": "design/03-spec-and-binding.md:315",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/plan/prepare.rs:91-98",
+   "crates/ezsdr-acceptance/src/rig.rs:99-104"
+  ],
+  "fix": "none named for a dedicated Authority fragment needing no report (every acceptance rig Run binds one and prepares)."
+ },
+ {
+  "rule": "SB-45",
+  "where": "design/03-spec-and-binding.md:326",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:856-881",
+   "crates/ezsdr-kernel/src/plan/coercion.rs:5-17"
+  ],
+  "fix": "none named for a Spec `policies.coercion` entry on a Session (`coercion_policy(Some(..), true, ..)`)."
+ },
+ {
+  "rule": "SB-39",
+  "where": "design/03-spec-and-binding.md:311",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6984",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:7036",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2520"
+  ],
+  "fix": "the derived ExecutionClass by `sb_24_authority_is_named_and_rides_or_stands_alone`."
+ },
+ {
+  "rule": "RS-1a",
+  "where": "design/04-run-and-session.md:109",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:3102-3195",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4473",
+   "crates/ezsdr-kernel/tests/coordinator.rs:3616-3624"
+  ],
+  "fix": "`kc_45_manifest_fields` (spec 06 KC-45: the Manifest's id, kind, parent, Lease and Policy for a Spec Run), `kf_03_a_child_run_is_admitted_logged_run_and_recorded` (a child's `kind()`), `rs_24_both_refused_lease_outcomes_are_logged` (a Session's `action_log`); none named for the RunHandle's Lease and Policy fields themselves (private; seen only through the Manifest)."
+ },
+ {
+  "rule": "RS-2",
+  "where": "design/04-run-and-session.md:339",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:85-118"
+  ],
+  "fix": "`a RunStateMachine on a fake host clock, driven through the forward states`; the expected cell should say `eight recorded states beginning Created and ending CleanedUp, every entry with a non-zero host_utc_nanos`."
+ },
+ {
+  "rule": "RS-3",
+  "where": "design/04-run-and-session.md:340",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:120-183"
+  ],
+  "fix": "`Failed { stage, .. }` each time and `CleanedUp` (the `reason` is not inspected); the input cell should say the state machine is advanced to each stage and then finished, not that a failure is injected."
+ },
+ {
+  "rule": "RS-6",
+  "where": "design/04-run-and-session.md:346",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:261-292"
+  ],
+  "fix": "`run_cleanup` in `Orderly` with three fragment names and the recording double | the distinct steps, adjacent repeats of the per-fragment ones collapsed, are exactly the seven of RS-6, which serialise as `freeze_dispatch` ... `release_and_write_manifest`; every recorded mode is `Orderly`"
+ },
+ {
+  "rule": "RS-6",
+  "where": "design/04-run-and-session.md:348",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:307-323",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2969-2990"
+  ],
+  "fix": "`step 7 is still called; the three failures are in CleanupOutcome.failures`; the Manifest's `termination.cleanup_failures` for a failing Sink stop is spec 06's `kc_41_a_failing_sink_stop_is_a_cleanup_failure`; none named for steps 4 to 6 still running after a failing step."
+ },
+ {
+  "rule": "RS-8",
+  "where": "design/04-run-and-session.md:150",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1559-1566",
+   "crates/ezsdr-kernel/tests/run_session.rs:344-359",
+   "crates/ezsdr-kernel/tests/coordinator.rs:450-482"
+  ],
+  "fix": "`rs_08_reverse_dependency_order` (the arm/release order functions), `rs_08_cleanup_runs_in_reverse_dependency_order` (step 2's stop order) and spec 06's `kc_13_arm_and_start_follow_instance_order_cleanup_reverses_it` (step 4's `cleanup()` order over three Providers); none named for step 3's order over Executors and Sinks."
+ },
+ {
+  "rule": "RS-8a",
+  "where": "design/04-run-and-session.md:370",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:389-409",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2992-3025"
+  ],
+  "fix": "Input `a CleanupOps double that never returns from drain_and_stop_consumers`; expected `the step is abandoned and recorded as a timeout; steps 4 to 7 still run` (a Manifest still written after a wedged step is spec 06's `kc_44_a_wedged_step_does_not_prevent_the_manifest`)."
+ },
+ {
+  "rule": "RS-10",
+  "where": "design/04-run-and-session.md:351",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:362-387",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2835-2871",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2873-2892"
+  ],
+  "fix": "`Orderly` first and `Abort` last (the modes of the steps between are not asserted; the trailing `also` check is on a hand-built fixture); both causes recorded is spec 06's `kc_32_an_abort_during_orderly_escalates_and_is_recorded` and `kc_32_a_module_abort_during_an_orderly_cleanup_escalates_and_is_recorded`."
+ },
+ {
+  "rule": "RS-12",
+  "where": "design/04-run-and-session.md:353",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:1307-1333"
+  ],
+  "fix": "`implicit_spec` with one Provider binding and one fed Sink | an implicit Spec with empty `requires`, one output, and a hash; `connect()` itself is `rs_12_a_session_compiles_through_the_whole_pipeline`'s and `rs_14_a_capture_reaches_the_output_it_names_with_two_sinks_bound`'s."
+ },
+ {
+  "rule": "RS-16",
+  "where": "design/04-run-and-session.md:354",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:1392-1421",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1951-1976"
+  ],
+  "fix": "the `test.limits` check refuses the proposed `test.grid = 40` (`admit` returns `Err`); a `Rejected` entry built from those violations is kept by `SessionLog`; a Session `submit` returning a `Rejected` entry is `rs_17_a_session_change_beyond_a_joint_limit_is_refused`'s (the joint-limit check); none named for the Provider queue staying empty."
+ },
+ {
+  "rule": "RS-20",
+  "where": "design/04-run-and-session.md:377",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:1363-1373"
+  ],
+  "fix": "`SessionLog::check_replay_target` with a different profile hash returns `ReplayDivergence`; none named for re-applying a Session's admitted entries."
+ },
+ {
+  "rule": "RS-28",
+  "where": "design/04-run-and-session.md:385",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:622-663"
+  ],
+  "fix": "the compiled Policy's reaction for each of the five Kernel kinds (`reaction_for`) and for `test.custom` (no event is created)"
+ },
+ {
+  "rule": "RS-28",
+  "where": "design/04-run-and-session.md:385",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:648-662",
+   "crates/ezsdr-kernel/tests/run_session.rs:64-70"
+  ],
+  "fix": "the five radio kinds listed in the test (`RX_OVERFLOW`, `TX_UNDERFLOW`, `TX_DISCONTINUITY`, `TIME_ERROR`, `ALIGNMENT_ERROR`) are not in the Kernel registry; or add `LATE_COMMAND` and `CLOCK_LOST` to the loop (preferred, one line)."
+ },
+ {
+  "rule": "RS-49",
+  "where": "design/04-run-and-session.md:365",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:1455-1521",
+   "crates/ezsdr-kernel/tests/schema_freeze.rs:17-66"
+  ],
+  "fix": "each round-trips through its JSON form (`kind`-tagged); the set has no eighth member (`Action::MEMBERS`); the `action` schema is frozen by `ov_22_schema_freeze`."
+ },
+ {
+  "rule": "RS-52",
+  "where": "design/04-run-and-session.md:374",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/src/session.rs:989-1008"
+  ],
+  "fix": "both compile to class-pending updates (`PendingUpdate` carries no class); the first records no coercion, the second's `coercions` is not read; the class is admission's by `kc_24_component_update_classes_belong_to_the_target`."
+ },
+ {
+  "rule": "RS-5",
+  "where": "design/04-run-and-session.md:117",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:784-810",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1113-1147",
+   "crates/ezsdr-kernel/tests/run_session.rs:85-118",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:216-217"
+  ],
+  "fix": "*Test:* `rs_02_happy_path_transitions` (the eight states, each with a non-zero host UTC time); spec 06's `kc_01_a_validate_failure_records_its_reason` (KC-43; `Created` has no `at`, every later row has one) and `kc_17_a_scheduled_stop_ends_the_run_at_its_instant` (the last transition's `at`, which `termination.at` copies); none named for every transition's `at` being its own runtime instant."
+ },
+ {
+  "rule": "RS-10",
+  "where": "design/04-run-and-session.md:156",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2528-2549",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2467-2494",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2835-2871",
+   "crates/ezsdr-kernel/tests/run_session.rs:362-387"
+  ],
+  "fix": "*Test:* `rs_10_abort_during_orderly_escalates`; spec 06's `kc_32_an_abort_during_orderly_escalates_and_is_recorded` (KC-40; the abort cause in `also`), `kc_32_a_later_failure_is_recorded_in_also` (a later failure) and `kc_32_a_policy_reaction_a_failure_overrode_is_recorded_in_also` (an overridden Policy reaction)."
+ },
+ {
+  "rule": "RS-12",
+  "where": "design/04-run-and-session.md:165",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6397-6460",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2643-2708"
+  ],
+  "fix": "*Test:* `rs_12_a_session_compiles_through_the_whole_pipeline`, `rs_12_a_multi_role_module_is_bound_once_per_role`, `rs_12_session_implicit_spec_hashed`; the Executor per Island executor name by spec 03's `sb_22c_session_derivation_table` (`island_0` is an `Executor` fragment); `connect()` leaving the Run `Running` by `rs_14_a_capture_reaches_the_output_it_names_with_two_sinks_bound`."
+ },
+ {
+  "rule": "RS-14",
+  "where": "design/04-run-and-session.md:171",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/session.rs:461-466",
+   "crates/ezsdr-kernel/src/session.rs:812-833",
+   "crates/ezsdr-kernel/src/session.rs:945-961"
+  ],
+  "fix": "the no-value and no-default rules by `rs_14_the_kernel_supplies_no_vocabulary_value_or_late_policy` (the refusal's reason names RS-14 and `carries no value`; none named for its check being `ezsdr.vocabulary`, which no test reads);"
+ },
+ {
+  "rule": "RS-15",
+  "where": "design/04-run-and-session.md:173",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:1331-1359",
+   "crates/ezsdr-kernel/src/session.rs:117-127",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4494"
+  ],
+  "fix": "*Test:* `rs_15_log_sequence_is_dense` (the sequence numbers and a rejected Action's number), `kc_28_a_malformed_action_takes_no_sequence_number`; none named for an entry's runtime `TimePoint`."
+ },
+ {
+  "rule": "RS-15",
+  "where": "design/04-run-and-session.md:173",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1617-1659",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1661-1686",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2872-2893"
+  ],
+  "fix": "`kc_24_a_module_abort_ends_the_run` (spec 06; the Abort's own `ActionId` from the Run's counter, which `submit` returns); none named for a Module's `Abort` being absent from the action log."
+ },
+ {
+  "rule": "RS-17",
+  "where": "design/04-run-and-session.md:177",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3445-3477",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:7202-7295"
+  ],
+  "fix": "`validate()`'s reporting (it returns the violations instead of failing) by spec 03's `sb_30_a_validate_violation_refuses_the_plan`; none named for reporting every violation it finds (the tests give it one)."
+ },
+ {
+  "rule": "RS-19",
+  "where": "design/04-run-and-session.md:181",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2078-2121",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2124-2162",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2165-2260",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1686-1700"
+  ],
+  "fix": "spec 06's `kc_28_an_untimed_burst_is_not_admitted_before_its_clock_s_origin` (the origin wins over a smaller lead), `kc_28_an_untimed_burst_is_admitted_at_now_plus_lead` and `kc_28_an_untimed_update_verb_to_a_resource_waits_for_the_provider_lead` (the current instant plus the lead); none named for the lead's rounding up when its rescale to the primary root is inexact."
+ },
+ {
+  "rule": "RS-27",
+  "where": "design/04-run-and-session.md:205",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6132-6188",
+   "crates/ezsdr-kernel/tests/module_api.rs:609-640"
+  ],
+  "fix": "*Test:* `rs_27_a_second_declaration_of_one_kind_is_refused`, `rs_28_policy_defaults_table`, `rs_32_another_view_s_event_handle_is_refused`, `rs_32_another_run_s_event_handle_is_refused`; the two-segment grammar of a kind by spec 03's `sb_01_every_name_grammar_is_enforced_at_the_document_boundary` and a kind outside its owner's namespace by spec 05's `ma_35_vocabulary_carries_its_own_content` (refused; the error kind is not asserted)."
+ },
+ {
+  "rule": "RS-32",
+  "where": "design/04-run-and-session.md:217",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:932-955",
+   "crates/ezsdr-kernel/tests/run_session.rs:847-876",
+   "crates/ezsdr-kernel/tests/run_session.rs:994-1056"
+  ],
+  "fix": "*Test:* `rs_32_emit_allocates_nothing`, `rs_32_a_view_refuses_a_source_outside_its_root`, `rs_32_a_view_refuses_another_instance_s_source`, `rs_33_a_view_refuses_kernel_and_unforeseen` (`resolve` refusing `kernel` and `unforeseen`), `rs_32_a_control_event_from_outside_the_root_is_refused`, `rs_32_a_control_event_with_a_non_ascii_key_is_refused`."
+ },
+ {
+  "rule": "RS-35",
+  "where": "design/04-run-and-session.md:222",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/run_session.rs:799-826",
+   "crates/ezsdr-kernel/tests/run_session.rs:714-744",
+   "crates/ezsdr-kernel/tests/run_session.rs:746-797"
+  ],
+  "fix": "*Test:* `rs_35_dropped_counts_are_deltas`, `rs_35_dropped_events_never_enter_the_ring`, `rs_33_counters_exact_under_drop` (the counter equals the delivered bodies plus the drops for the planned kind), `rs_35_the_dropped_events_meta_event_is_itself_counted` (the same for the `EVENTS_DROPPED` kind, when it drops nothing)."
+ },
+ {
+  "rule": "RS-49",
+  "where": "design/04-run-and-session.md:254",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/schema_freeze.rs:17-66",
+   "crates/ezsdr-kernel/src/schema.rs:105-106",
+   "schemas/action.v1.json"
+  ],
+  "fix": "*Test:* `rs_48_action_set_is_closed_and_schematised` (the seven Actions round-trip); the `action` schema by `ov_22_schema_freeze` (`schemas/action.v1.json`)."
+ },
+ {
+  "rule": "RS-49a",
+  "where": "design/04-run-and-session.md:256",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1855-1886",
+   "crates/ezsdr-kernel/tests/coordinator.rs:665-693"
+  ],
+  "fix": "*Test:* `rs_49a_a_scheduled_update_resolves_to_a_class_pending_request`, `rs_49a_a_timed_template_resolves_with_its_deadline`, `sb_49a_an_old_class_carrying_template_or_rule_is_refused`; the template without a time by spec 03's `sb_16_spec_time_resolves_at_arm` and `arm` resolving the `SpecTime` by spec 06's `kc_16_a_spec_time_resolves_on_the_target_stream`."
+ },
+ {
+  "rule": "RS-52",
+  "where": "design/04-run-and-session.md:262",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:5598-5642",
+   "crates/ezsdr-kernel/tests/coordinator.rs:5644-5700",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4915-4945"
+  ],
+  "fix": "*Test:* `kc_24_component_update_classes_belong_to_the_target`, `kc_24_a_module_update_must_state_its_providers_declared_class`, `rs_17_a_set_parameter_compiles_to_a_class_pending_update` and `rs_52_a_scheduled_update_states_no_class`; a Session update taking its class at admission by `sb_02a_a_session_update_reads_a_numbered_declaration_s_class` and `kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id`, a scheduled one by `kc_17_a_scheduled_update_to_a_component_reaches_its_executor`."
+ },
+ {
+  "rule": "RS-44a",
+  "where": "design/04-run-and-session.md:310",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2039-2071",
+   "crates/ezsdr-kernel/src/session.rs:1093-1120"
+  ],
+  "fix": "*Test:* `ke_02_a_module_burst_must_name_a_run_input`, `rs_44a_a_burst_without_a_waveform_is_refused`; a client's waveform ingested before admission and listed in `inputs` by spec 06's `kc_28_a_waveform_is_an_input_before_admission`."
+ },
+ {
+  "rule": "RS-45",
+  "where": "design/04-run-and-session.md:312",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/src/session.rs:1096-1104",
+   "crates/ezsdr-acceptance/tests/reactive.rs:153-186"
+  ],
+  "fix": "*Test:* `rs_45_hash_equal_for_equal_inputs` (a Spec Run and a Session), `kf_03_a_child_run_is_admitted_logged_run_and_recorded`, `kf_03_rs_25a_refusals` (a document that does not parse); an artifact's bytes by `rs_44a_a_burst_without_a_waveform_is_refused` (the hash equals `ContentHash::of_bytes`) and a component's implementation hash by `v58_09_a_reactor_answers_a_ping_with_a_timed_pong` (the Manifest's `components` entry)."
+ },
+ {
+  "rule": "RS-39",
+  "where": "design/04-run-and-session.md:298",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/v58.rs:278-283",
+   "crates/ezsdr-acceptance/tests/v58.rs:561-585"
+  ],
+  "fix": "*Test:* `rs_39_section_namespace_enforced`, `rs_39_a_module_section_with_a_non_ascii_key_is_refused`; an instance whose `ModuleId` is not a `Namespace` by `ka_13_an_invalid_provider_namespace_without_sections_is_not_a_failure` (an instance with no sections is no failure) and, for such an instance handing a section in, by `rs_39_a_section_from_an_instance_whose_id_is_not_a_namespace_is_a_cleanup_failure` (no section in the Manifest and a cleanup failure naming the id — the other branch, a section outside the writer's namespace, is spec 06's `kc_45_a_provider_section_outside_its_namespace_is_a_cleanup_failure`); spec 06's `kc_45_two_instances_writing_one_section_name_both_keep_it`; the transmit burst records and a Provider's envelope in that Module's section by `v58_07_manifest_records_every_input_and_output` (the six MockRadio sections under the Mock's source) and `v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections` (the transmitter's `bursts` holds the SC-28 record, the receiver's none)."
+ },
+ {
+  "rule": "MA-7",
+  "where": "design/05-module-api.md:150",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:882-915",
+   "crates/ezsdr-kernel/tests/coordinator.rs:270-281",
+   "crates/ezsdr-kernel/tests/coordinator.rs:477-484"
+  ],
+  "fix": "`ma_07_lifecycle_order_and_cleanup` (stop before cleanup, cleanup last, idempotence), `ma_07_an_instance_with_two_fragments_is_prepared_twice_and_armed_once` (the single-instance prepare, arm, start, step, stop, cleanup order), spec 06's `kc_13_...` (arm order across instances and the reversed cleanup order); none named for start order across instances."
+ },
+ {
+  "rule": "MA-10",
+  "where": "design/05-module-api.md:387",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:932-958",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:955-983"
+  ],
+  "fix": "ok (name `sb_34_sub_resource_binding` in the row for the bound `ResourceId`; keep ma_10 for the tree walk and each node's own id)"
+ },
+ {
+  "rule": "MA-17",
+  "where": "design/05-module-api.md:183",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:850-879",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3724",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1315-1353"
+  ],
+  "fix": "`ma_12_narrowing_triggers_readmission` (the narrowing predicate), `ma_12_a_widening_effective_is_refused_at_prepare` (prepare refuses a widening `effective`); matching's reading of the bound instance's capabilities (SB-37) by `sb_37_matching_follows_binding`; none named for an instance-level capability appearing in `instance()` (waits for the first Provider with a Peripheral). Fix the §7 row at line 367 the same way."
+ },
+ {
+  "rule": "MA-25",
+  "where": "design/05-module-api.md:386",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:1627-1680",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6670-6697"
+  ],
+  "fix": "`ma_25_sink_role_is_read_from_the_binding` (the registered descriptors' Sink role, a Provider is not a Sink, a `Block` feed is refused by `check_sink_link`, SC-21); the role read from the Module the profile binds to the output by `sb_22e_the_module_holds_the_role`. Apply to the row at line 386 too."
+ },
+ {
+  "rule": "MA-29",
+  "where": "design/05-module-api.md:254",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:427-446",
+   "crates/ezsdr-radio-uhd/src/authority.rs:737-751",
+   "crates/ezsdr-kernel/tests/device_paced.rs:837-850"
+  ],
+  "fix": "the `cancel` sentence's wake-and-return-`None` half by spec 18's `ur_07_cancel_wakes_a_waiting_next_wakeup` (and its unit twin `ur_07_a_manual_cancel_wakes_a_waiting_next_wakeup`) and, in the `WallAuthority` double, `kg_03_a_cancelled_horizon_wakes_the_control_loop`; none named for a cancel that leaves another callback scheduled (the waiter goes on waiting for the earliest instant still scheduled)."
+ },
+ {
+  "rule": "MA-30",
+  "where": "design/05-module-api.md:384",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:1806-1841",
+   "crates/ezsdr-kernel/tests/module_api.rs:1927-1942"
+  ],
+  "fix": "Row: 'stepped in role order (Provider < Executor < Sink), not registration order; the loop quiesces' for `ma_30_stepping_order_and_quiescence`; add that the id order within one role is pinned by `ma_30_a_second_failure_does_not_replace_the_first`. The test's own assert message ('then instance id') should be narrowed too."
+ },
+ {
+  "rule": "MA-41",
+  "where": "design/05-module-api.md:381",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2443-2466",
+   "crates/ezsdr-kernel/src/module_api.rs:213-227"
+  ],
+  "fix": "ok (add `derive(Pacing::Device, RfPath::Simulated) == HardwareInLoop` and the two remaining rejected pairs to the test; until then the row says 'every row of MA-41 except Device with a partly simulated path and two of the four rejected pairs')"
+ },
+ {
+  "rule": "MA-42",
+  "where": "design/05-module-api.md:382",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:2025-2080"
+  ],
+  "fix": "Row input: 'two Fidelity values declaring hardware_quirk and envelope (and one all-`real` value)'; expected: '`Fidelity::weakest` answers envelope per aspect; weakest(&[real]) keeps real'; add 'none named for a Run's Manifest recording the weakest over its bound Providers' (spec 04's RS-41 test if it pins that)."
+ },
+ {
+  "rule": "MA-2",
+  "where": "design/05-module-api.md:136",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/kernel_surface.rs:645",
+   "crates/ezsdr-kernel/tests/kernel_surface.rs:1231-1263",
+   "crates/ezsdr-kernel/tests/module_api.rs:46-59"
+  ],
+  "fix": "Append to the Test line: `; none named for a sixth role trait (ma_06 reads the fixed list ROLE_TRAITS) or for Link and Authority having no lifecycle method (ma_05 only compiles them as Send + Sync trait objects).`"
+ },
+ {
+  "rule": "MA-10",
+  "where": "design/05-module-api.md:162",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3081",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3125",
+   "crates/ezsdr-kernel/src/module_api.rs:578-585",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:447",
+   "schemas/resource.v1.json:242"
+  ],
+  "fix": "Append to the Test line: `; the Kernel enforcing `shareable` by `sb_34_exclusive_node_bound_twice_is_refused` and `sb_34_shareable_node_may_be_bound_twice`; none named for a node document without `shareable` reading `false` (only the frozen `resource` schema, `ov_22_schema_freeze`, omits it from `required`).`"
+ },
+ {
+  "rule": "MA-11",
+  "where": "design/05-module-api.md:164",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:7401-7450",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:4092-4138"
+  ],
+  "fix": "Append to the Test line: `; `coerce` called at a `validate()` whose keys all match directly, and refusing a combination, by `sb_07_coerce_refuses_a_combination`; its one call over the whole request by `sb_07_coerce_is_called_once_with_the_whole_request`.`"
+ },
+ {
+  "rule": "MA-13",
+  "where": "design/05-module-api.md:168",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:806-829",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:722-748",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:2234-2240",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:6618-6640"
+  ],
+  "fix": "Append to the Test line: `; `arm` radiating nothing, on the UHD Provider, by `ur_13_arm_radiates_nothing` (spec 18); `start(at)` beginning at the requested instant by MockRadio's `mr_11_start_cases`; `cleanup` closing the device's streams by spec 18's `ur_15_a_failed_later_start_closes_after_the_owners_joined`; none named for `arm` radiating nothing on MockRadio or for `cleanup` restoring baseline (`mr_26_cleanup_is_idempotent` asserts only that a second `cleanup` and a later `step` do nothing).`"
+ },
+ {
+  "rule": "MA-14a",
+  "where": "design/05-module-api.md:172",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1617-1653",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1660-1680",
+   "crates/ezsdr-kernel/tests/run_session.rs:1495"
+  ],
+  "fix": "Append to the Test line: `; an `Abort` ending the Run and `submit` returning its own real `ActionId` by spec 06's `kc_24_a_module_abort_ends_the_run`; none named for an `Abort` being neither admitted nor logged.`"
+ },
+ {
+  "rule": "MA-18",
+  "where": "design/05-module-api.md:204",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/module_api.rs:1344-1394",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:248-267",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6770-6859"
+  ],
+  "fix": "Append to the Test line: `; the reads of `kind` and `impl_kinds` by `ma_39_island_admission`; `descriptor()` returning the `ExecutorDescriptor` by the native Executor's `nx_01_descriptor_registers` (spec 14).`"
+ },
+ {
+  "rule": "UC-1",
+  "where": "design/05-module-api.md:226",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-sink/tests/sink_vocabulary.rs:293",
+   "crates/ezsdr-sink/tests/sink_vocabulary.rs:506-512",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1080-1100",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1785-1816"
+  ],
+  "fix": "Append to the Test line: `; the carried class by the Sink's `hd_06_capture_reaches_the_sink_as_a_timed_update`; the effective instant being the update's `at`, on MockRadio, by `mr_18_hardware_timed_updates`; none named for an `at` converted into the target's domain, or for the first instant of the class when `at` is absent.`"
+ },
+ {
+  "rule": "MA-29",
+  "where": "design/05-module-api.md:254",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:7024-7038",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:317",
+   "crates/ezsdr-kernel/tests/time_model.rs:1322-1380",
+   "crates/ezsdr-sim-engine/tests/sim_engine.rs:86-91"
+  ],
+  "fix": "Append to the Test line: `; none named for the `governs` set (the primary root, its derived domains, `host.monotonic` and, for a simulation Authority, every root it simulates): no admission check reads it and `sb_24_authority_is_named_and_rides_or_stands_alone` supplies an empty one.`"
+ },
+ {
+  "rule": "MA-30",
+  "where": "design/05-module-api.md:284",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2441-2464",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4158-4200"
+  ],
+  "fix": "Append to the Test line: `, and a failure after a lost device in the same round failing the Run by spec 06's `kc_30_a_panic_after_a_device_lost_in_one_round_fails_the_run``"
+ },
+ {
+  "rule": "MA-34",
+  "where": "design/05-module-api.md:297",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:7723-7806",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:5748-5880",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:7659-7720"
+  ],
+  "fix": "Append to the Test line: `; the refusal at SB-2's five key positions by `sb_02a_the_declaration_s_own_spelling_is_no_key`, and an `ext.` key's unregistered owner at the positions other than a resource's `requires` by `sb_02_the_ext_owner_is_checked_at_every_key_position`.`"
+ },
+ {
+  "rule": "MA-37",
+  "where": "design/05-module-api.md:303",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:5606-5650",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:5881-5925"
+  ],
+  "fix": "Change the clause to: `the parameter-key half by `ma_37_a_component_declares_each_parameter_key_once`, and two components declaring one key by `sb_02_one_key_declared_differently_by_two_components``"
+ },
+ {
+  "rule": "MA-38",
+  "where": "design/05-module-api.md:308",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6343",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6583",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6664-6767",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:6770-6859",
+   "crates/ezsdr-kernel/tests/module_api.rs:1350-1365"
+  ],
+  "fix": "Append to the Test line: `; the `executor` name filling an Executor slot by spec 03's `sb_22b_spec_run_slots` and `sb_22d_exactly_the_slots_are_bound`, its Module holding the Executor role by `sb_22e_the_module_holds_the_role`, and the runtime supplying the instance's `ExecutorDescriptor` by `sb_22f_the_runtime_supplies_each_slot_at_its_version`.`"
+ },
+ {
+  "rule": "MA-39",
+  "where": "design/05-module-api.md:310",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2730",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:2823-2829",
+   "crates/ezsdr-kernel/tests/module_api.rs:1344-1351"
+  ],
+  "fix": "Change the first clause to: `*Test:* `ma_39_island_admission` (a component placed twice and the other admission refusals) and `ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component` (a component placed in no Island); the reachability rule by ...` (rest unchanged)."
+ },
+ {
+  "rule": "MA-41",
+  "where": "design/05-module-api.md:324",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/spec_binding.rs:4843-4880",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:3387-3415",
+   "crates/ezsdr-kernel/src/plan/compile.rs:301-345"
+  ],
+  "fix": "Append to the Test line: `; none named for a `class` string outside the four names (the code refuses it only as a mismatch with the derived class).`"
+ },
+ {
+  "rule": "KC-7",
+  "where": "design/06-kernel-coordinator.md:475",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1074-1110",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1112-1145",
+   "crates/ezsdr-kernel/tests/coordinator.rs:99-104"
+  ],
+  "fix": "Row 475: 'the termination is `Failed { reason }` with a non-empty reason (the `validate` stage by `kc_01_a_validate_failure_still_writes_a_manifest`)'"
+ },
+ {
+  "rule": "KC-22",
+  "where": "design/06-kernel-coordinator.md:498",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:887-909",
+   "crates/ezsdr-kernel/src/run.rs:55"
+  ],
+  "fix": "`Stopped { policy }`, abort (the cause's `event` kind is not read; the delivered `STEP_LIVELOCK` has source `kernel` and payload `{ \"rounds\": STEP_ROUND_CAP }`); or strengthen the test to match `Policy { event }` against STEP_LIVELOCK."
+ },
+ {
+  "rule": "KC-24",
+  "where": "design/06-kernel-coordinator.md:327",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:4351-4375",
+   "crates/ezsdr-kernel/tests/coordinator.rs:3304-3356",
+   "design/06-kernel-coordinator.md:505-511"
+  ],
+  "fix": "ok (… the other cases by §12's `kc_24_*` rows; step 7's `ezsdr.input` refusals by `ke_02_a_module_burst_must_name_a_run_input`; step 10's exclusion of a Module's update from the coercion by `kc_24_a_module_update_is_not_coerced_by_the_kernel`)"
+ },
+ {
+  "rule": "KC-43",
+  "where": "design/06-kernel-coordinator.md:475",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1112-1145",
+   "crates/ezsdr-kernel/tests/coordinator.rs:99-104"
+  ],
+  "fix": "Row 475: 'the termination is `Failed { reason }` with a non-empty reason (the stage is not read here; `kc_01_a_validate_failure_still_writes_a_manifest` asserts `validate`)'"
+ },
+ {
+  "rule": "KC-44",
+  "where": "design/06-kernel-coordinator.md:559",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2992-3024",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:99-105"
+  ],
+  "fix": "`step 2 times out; the Manifest is sealed with a step-7 cleanup failure beginning `KC-44``; none named for that failure's `fragment` (the slot) and `timed_out: false`."
+ },
+ {
+  "rule": "KC-5",
+  "where": "design/06-kernel-coordinator.md:215",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:3590-3654",
+   "crates/ezsdr-kernel/tests/coordinator.rs:3151"
+  ],
+  "fix": "*Test:* `kc_45_manifest_fields`; a Session's log in the Manifest by `rs_24_both_refused_lease_outcomes_are_logged`; the compiled Policy's content in a coordinator-built Manifest beyond `policy.is_some()` none named."
+ },
+ {
+  "rule": "KC-9",
+  "where": "design/06-kernel-coordinator.md:229",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:511-583",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4255-4273",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:482-487"
+  ],
+  "fix": "*Test:* `kc_09_an_input_must_be_supplied_and_match_its_hash`, `ke_01_a_declared_input_is_verified_as_a_scheduled_one_is`; the `\"KC-9: entry <i>: \"` prefix of a schedule entry none named (kc_09 asserts only `\"KC-9: \"`)."
+ },
+ {
+  "rule": "KC-11",
+  "where": "design/06-kernel-coordinator.md:233",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:333-387",
+   "crates/ezsdr-kernel/tests/support/run_doubles.rs:716-773",
+   "crates/ezsdr-sink-capture/src/lib.rs:549",
+   "crates/ezsdr-mock-radio/src/lib.rs:2283"
+  ],
+  "fix": "*Test:* `kc_11_an_island_gets_exactly_its_components`; the profile's `environment` reaching `prepare` by `v58_05_device_lost_aborts_with_full_cleanup` and `v58_06_injected_overflow_is_a_uhd_overflow` (`crates/ezsdr-acceptance/tests/v58.rs`, whose `sim.faults` MockRadio reads there); `host_budget`, the empty components map of a non-Island fragment, the Run id and the class a `PrepareContext` carries none named (the class is only accepted implicitly by MockRadio's `prepare` in the v58 Runs)."
+ },
+ {
+  "rule": "KC-12a",
+  "where": "design/06-kernel-coordinator.md:237",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:1232-1274",
+   "crates/ezsdr-kernel/tests/device_paced.rs:962-978",
+   "crates/ezsdr-kernel/src/coordinator/mod.rs:32",
+   "crates/ezsdr-kernel/src/coordinator/paced.rs:217"
+  ],
+  "fix": "*Test:* `kg_06_a_prepare_that_hangs_fails_the_run_within_its_budget`, `kg_06_an_arm_that_hangs_fails_the_run_within_its_budget`, `kg_06_the_simulation_class_prepares_on_the_callers_thread`; the `<n> ms` in the reason and the exact 5 s `host_budget` none named (the two hang tests bound the entry under 12 s and read the reason to `KC-12a: <prepare | arm> of radio`)."
+ },
+ {
+  "rule": "KC-14",
+  "where": "design/06-kernel-coordinator.md:244",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:586-607",
+   "crates/ezsdr-kernel/tests/coordinator.rs:440-478",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:926",
+   "crates/ezsdr-kernel/tests/run_session.rs:87-100"
+  ],
+  "fix": "*Test:* `kc_14_an_arm_failure_is_failed_arm`; no later instance after an arm failure none named (the test has one instance); the move to `Armed` after a successful arm and `Executor::arm` and `Sink::arm` being called none named (the Provider arm order is `kc_13_arm_and_start_follow_instance_order_cleanup_reverses_it`)."
+ },
+ {
+  "rule": "KC-15",
+  "where": "design/06-kernel-coordinator.md:247",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:1332-1358"
+  ],
+  "fix": "*Test:* `kc_15_t0_is_arm_end_plus_the_lead`, `kg_07_t0_lies_on_every_declared_grid`, `kg_07_with_no_declared_clock_t0_is_not_rounded`, the overflow of `L` or of T0 by `kc_15_an_overflow_of_l_or_of_t0_fails_arm` and, end to end on MockRadio, `kg_07_a_burst_at_t0_plus_n_samples_is_exact` (`crates/ezsdr-acceptance/tests/v58.rs`); `start_lead_ns`'s values and refusals by `ma_41_ezsdr_time_is_a_closed_set`, and the order by `ma_41_an_absent_or_non_string_class_is_refused` (`crates/ezsdr-kernel/tests/spec_binding.rs`)."
+ },
+ {
+  "rule": "KC-16",
+  "where": "design/06-kernel-coordinator.md:249",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:696-725",
+   "crates/ezsdr-kernel/tests/coordinator.rs:727-777",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:993-1072"
+  ],
+  "fix": "*Test:* `kc_16_a_spec_time_resolves_on_the_target_stream`, `kc_16_an_ambiguous_spec_time_is_refused`, `kc_16_off_root_negative_and_overflowing_times_are_refused`; naming the entry's index, other than `entry 0` in the ambiguous case, none named (the off-root, negative and overflow tests assert only a reason substring)."
+ },
+ {
+  "rule": "KC-18",
+  "where": "design/06-kernel-coordinator.md:253",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:610-642",
+   "crates/ezsdr-kernel/tests/device_paced.rs:902-926",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1350-1416"
+  ],
+  "fix": "*Test:* `kc_18_a_start_failure_is_failed_arm`; the dispatch order `(instant, schedule index)` of the admitted Actions at start none named."
+ },
+ {
+  "rule": "KC-21a",
+  "where": "design/06-kernel-coordinator.md:275",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:902-926"
+  ],
+  "fix": "*Test:* `kg_04_a_session_call_returns_after_the_provider_has_finished`, `kg_04_every_action_of_one_call_is_finished` (every Action of one call), `kg_04_the_next_admission_sees_the_state_the_previous_action_made`, `kg_04_a_provider_that_never_finishes_fails_the_run`; its scope by `kg_04_a_simulation_session_does_not_wait`; the discarded Action by `rs_16_an_action_the_freeze_discards_is_undelivered` and, for a Sink's queue, `rs_16_a_sink_action_the_freeze_discards_is_undelivered`."
+ },
+ {
+  "rule": "KC-21a",
+  "where": "design/06-kernel-coordinator.md:275",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:981-1004",
+   "crates/ezsdr-kernel/src/coordinator/paced.rs:198-228"
+  ],
+  "fix": "*Test:* `kg_04_a_session_call_returns_after_the_provider_has_finished`, `kg_04_the_next_admission_sees_the_state_the_previous_action_made`, `kg_04_a_provider_that_never_finishes_fails_the_run`; an end requested during the wait stopping it by `kc_21a_an_end_requested_during_the_wait_ends_it`; its scope by `kg_04_a_simulation_session_does_not_wait`; the discarded Action by `rs_16_an_action_the_freeze_discards_is_undelivered` and, for a Sink's queue, `rs_16_a_sink_action_the_freeze_discards_is_undelivered`; a freeze alone stopping the wait and the 10 ms re-check interval none named (the end-request test bounds the call at 1 s)."
+ },
+ {
+  "rule": "KC-21a",
+  "where": "design/06-kernel-coordinator.md:275",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:1059-1105"
+  ],
+  "fix": "*Test:* `kg_04_a_session_call_returns_after_the_provider_has_finished`, `kg_04_the_next_admission_sees_the_state_the_previous_action_made`, `kg_04_a_provider_that_never_finishes_fails_the_run`; its scope by `kg_04_a_simulation_session_does_not_wait` and, for a Module's own submission (MA-14a), `kc_21a_a_module_s_own_submission_is_not_waited_for`; the discarded Action by `rs_16_an_action_the_freeze_discards_is_undelivered` and, for a Sink's queue, `rs_16_a_sink_action_the_freeze_discards_is_undelivered`."
+ },
+ {
+  "rule": "KC-22",
+  "where": "design/06-kernel-coordinator.md:277",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:893-901",
+   "crates/ezsdr-kernel/tests/module_api.rs:1995-2006"
+  ],
+  "fix": "*Test:* `kc_22_a_same_instant_wakeup_loop_is_step_livelock`, `kc_22_a_downgraded_livelock_still_ends_the_run`; the emitted event's `fatal` severity none named."
+ },
+ {
+  "rule": "KC-23",
+  "where": "design/06-kernel-coordinator.md:279",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1688-1704",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1815-1823",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:1928"
+  ],
+  "fix": "*Test:* `kc_23_a_target_reaches_the_instance_of_its_role`, `kc_23_targets_are_rewritten_through_matched`, `kc_23_an_unknown_target_is_refused`; a `{resource, path}` whose joined sub-path is not a `ResourceId` (the `\"KC-23: <target>: <the ResourceIdError>\"` refusal at admission) none named."
+ },
+ {
+  "rule": "KC-26",
+  "where": "design/06-kernel-coordinator.md:334",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:3304-3346",
+   "crates/ezsdr-kernel/tests/spec_binding.rs:4092-4131",
+   "crates/ezsdr-kernel/tests/coordinator.rs:1957-1977"
+  ],
+  "fix": "*Test:* `kc_26_a_provider_that_applies_nothing_is_refused`, `rs_17_a_session_rate_change_is_coerced_by_its_provider`, `rs_17_a_session_change_beyond_a_joint_limit_is_refused`, `rs_17_a_scheduled_rate_change_under_reject_is_refused`; the single `coerce` call at admission and the `Requested` it is handed (`Eq` of every scalar entry, the proposed key replacing its own) none named (`sb_07_coerce_is_called_once_with_the_whole_request` pins the validate-time call only)."
+ },
+ {
+  "rule": "KC-28",
+  "where": "design/06-kernel-coordinator.md:346",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2299-2314",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1411-1419",
+   "crates/ezsdr-kernel/src/session.rs:1161"
+  ],
+  "fix": "`Release`'s ending the Run `Stopped { client }` and its setting `lease.released` none named (`StopRun` by `kc_28_stop_run_ends_the_session`; `lease.released` is set at cleanup for every Run, so Release's own set cannot be observed)."
+ },
+ {
+  "rule": "KC-28",
+  "where": "design/06-kernel-coordinator.md:356",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/src/session.rs:422-482",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1382-1386",
+   "crates/ezsdr-kernel/tests/coordinator.rs:5787"
+  ],
+  "fix": "a step-3 `session::compile` refusal's `Rejected` entry (`ezsdr.vocabulary` / `ezsdr.artifact`) none named (the `session.rs` unit tests pin the violation, not the entry)."
+ },
+ {
+  "rule": "KC-29",
+  "where": "design/06-kernel-coordinator.md:362",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1037-1062",
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:487",
+   "crates/ezsdr-kernel/src/coordinator/state.rs:274-290"
+  ],
+  "fix": "`advance_to` to an instant in a related domain (converted, an inexact result rounded up) none named."
+ },
+ {
+  "rule": "KC-29",
+  "where": "design/06-kernel-coordinator.md:362",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:1037-1062",
+   "crates/ezsdr-kernel/src/coordinator/stepping.rs:488-492"
+  ],
+  "fix": "`advance_to` with `t` at or before `now` (the immediate `Ok`) none named."
+ },
+ {
+  "rule": "KC-30",
+  "where": "design/06-kernel-coordinator.md:373",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:372",
+   "crates/ezsdr-kernel/tests/device_paced.rs:747",
+   "crates/ezsdr-kernel/tests/support/run_doubles.rs:864-876",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:917",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1216",
+   "crates/ezsdr-kernel/src/coordinator/ending.rs:498"
+  ],
+  "fix": "`DeviceLost` from `arm` or `start` (the stage still fails) and from `stop` (also that step's `CleanupFailure`) none named."
+ },
+ {
+  "rule": "KC-37",
+  "where": "design/06-kernel-coordinator.md:398",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2258-2273",
+   "crates/ezsdr-kernel/tests/coordinator.rs:4601-4624",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1392-1401"
+  ],
+  "fix": "the refused entry's being logged none named (the check and the reason are asserted)."
+ },
+ {
+  "rule": "KC-37a",
+  "where": "design/06-kernel-coordinator.md:401",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:4502-4587",
+   "crates/ezsdr-kernel/src/coordinator/pipeline.rs:1524-1545"
+  ],
+  "fix": "`run_child`'s `Malformed` refusal (a hash that cannot be computed, `SessionLog::check_entry` failing) none named."
+ },
+ {
+  "rule": "KC-39",
+  "where": "design/06-kernel-coordinator.md:413",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:699-724",
+   "crates/ezsdr-kernel/tests/coordinator.rs:390-423"
+  ],
+  "fix": "Add `kg_03_a_step_done_early_is_not_repeated` (an instance acted on at most once per step) and `kc_12_a_prepare_failure_stops_the_loop_and_cleans_up_what_was_prepared` (no action on an instance whose fragments never reached `prepare`) to the Test line."
+ },
+ {
+  "rule": "KC-39",
+  "where": "design/06-kernel-coordinator.md:413",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:2551-2574",
+   "crates/ezsdr-kernel/tests/coordinator.rs:2573"
+  ],
+  "fix": "Add `kc_30_a_next_wakeup_panic_in_the_cleanup_drain_is_recorded` (a `stop` made after the drain escalated gets `Abort`) to the Test line."
+ },
+ {
+  "rule": "KC-45",
+  "where": "design/06-kernel-coordinator.md:427",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:1552-1568"
+  ],
+  "fix": "Add `kc_45_an_authority_whose_relations_panic_records_none_and_says_so` to the Test line beside `kg_11_a_device_paced_run_without_a_utc_relation_says_so`."
+ },
+ {
+  "rule": "KC-45",
+  "where": "design/06-kernel-coordinator.md:427",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:4733-4747"
+  ],
+  "fix": "Add `kf_03_children_are_recorded_in_order` to the Test line."
+ },
+ {
+  "rule": "KC-45",
+  "where": "design/06-kernel-coordinator.md:427",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/coordinator.rs:3152",
+   "crates/ezsdr-kernel/tests/coordinator.rs:440-446",
+   "crates/ezsdr-kernel/src/manifest.rs:232-239"
+  ],
+  "fix": "Reword the rule to `prepare` = `{ reports }`, one per fragment keyed by the fragment invoked (SB-41), and name `sb_41_the_reports_follow_plan_order` for the key; plan order in the Manifest none named (the map does not carry it)."
+ },
+ {
+  "rule": "KC-46",
+  "where": "design/06-kernel-coordinator.md:435",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:1059-1093",
+   "crates/ezsdr-kernel/tests/device_paced.rs:1090-1094",
+   "crates/ezsdr-kernel/src/coordinator/paced.rs:99-130"
+  ],
+  "fix": "Add `kc_21a_a_module_s_own_submission_is_not_waited_for` (the Executor stepped on the data thread); the pass's order (role rank, then instance id) none named."
+ },
+ {
+  "rule": "KC-46b",
+  "where": "design/06-kernel-coordinator.md:441",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-kernel/tests/device_paced.rs:791-834",
+   "crates/ezsdr-kernel/tests/device_paced.rs:815-818"
+  ],
+  "fix": "Add `kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop` (Sinks); stepping Executors on after the stop none named."
+ },
+ {
+  "rule": "RM-4",
+  "where": "design/07-radio-model.md:356",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio/tests/radio_model.rs:150-186",
+   "design/07-radio-model.md:61-77"
+  ],
+  "fix": "say `fifteen RM-4 instance-wide rows and eighteen RM-27 layout rows`"
+ },
+ {
+  "rule": "RM-27",
+  "where": "design/07-radio-model.md:356",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio/tests/radio_model.rs:150-186",
+   "design/07-radio-model.md:356"
+  ],
+  "fix": "exactly the fifteen RM-4 instance-wide rows and eighteen RM-27 layout rows"
+ },
+ {
+  "rule": "RM-27",
+  "where": "design/07-radio-model.md:282",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:595-619",
+   "design/07-radio-model.md:282"
+  ],
+  "fix": "the two key sets' separation by `rm_30_coerce_cases` (RM-4's former unnumbered spellings, `radio.rx.channels` and the like, are no radio keys of a layout description)"
+ },
+ {
+  "rule": "RM-29",
+  "where": "design/07-radio-model.md:375",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:404-414",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:149"
+  ],
+  "fix": "the OBX's frequency range and default, and the CBX's ranges, phase and default (the OBX's phase: `ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz`)"
+ },
+ {
+  "rule": "RM-31",
+  "where": "design/07-radio-model.md:378",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:631-637",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:5294"
+  ],
+  "fix": "one refusal naming the board and channel c0 (that the reason says `transmit channel c0` is asserted on the runtime path by `ur_25_a_layout_instance_s_full_duplex_rule_is_judged_at_runtime`, none named for `coerce`)"
+ },
+ {
+  "rule": "RM-34",
+  "where": "design/07-radio-model.md:393",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio/tests/timeline.rs:602-615",
+   "crates/ezsdr-radio/tests/timeline.rs:502-503"
+  ],
+  "fix": "the move takes effect at 3 s, the later line's start, and is not late; the source's set 0 and the destination's 1 and 2; none named for the new segments' origins at this floor (`rm_34_a_move_is_floored_at_a_cold_change_of_either_line` checks them for a cold-change floor)"
+ },
+ {
+  "rule": "RM-34",
+  "where": "design/07-radio-model.md:416",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio/tests/timeline.rs:1313-1319",
+   "crates/ezsdr-radio/tests/timeline.rs:773-777"
+  ],
+  "fix": "after the prune the folded state, not the Run's, so the booking leaves the destination's plan as it was; none named for the pruned move's record being gone"
+ },
+ {
+  "rule": "RM-34",
+  "where": "design/07-radio-model.md:416",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-radio/tests/timeline.rs:1305-1308",
+   "crates/ezsdr-radio/tests/timeline.rs:477-479"
+  ],
+  "fix": "each line's set at that instant and the destination's own rate (both lines' rates with different values: `rm_34_a_move_books_both_lines_at_one_instant`)"
+ },
+ {
+  "rule": "RM-5",
+  "where": "design/07-radio-model.md:84",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:468-496",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:750-760"
+  ],
+  "fix": "`mr_08_effective_holds_one_channel_and_its_stream_rate`, `mr_38_the_tree_and_capabilities_are_the_layout_s` (the stream rate's applied value and the exact key set of three channels) and `mr_05_a_layout_without_receive_channels_opens_no_receive_stream` (a constrained key's applied value)."
+ },
+ {
+  "rule": "RM-6",
+  "where": "design/07-radio-model.md:90",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:547-555",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:509-515"
+  ],
+  "fix": "`mr_03_profile_values_reach_the_capabilities_and_the_envelope_section`, `ur_09_profile_values_reach_the_capabilities_and_the_envelope_section` and `sb_06_constraint_match_table`; `ProviderInstance.min_command_lead` (`Some` for a positive lead, `None` for 0) by `mr_04_instance` and `ur_10_instance`."
+ },
+ {
+  "rule": "RM-7",
+  "where": "design/07-radio-model.md:93",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:669-674"
+  ],
+  "fix": "`mr_06_coerce_cases`, `mr_18_a_scheduled_pair_is_checked_when_it_applies`; the `prepare` refusal by `mr_07_prepare_cases`."
+ },
+ {
+  "rule": "RM-9",
+  "where": "design/07-radio-model.md:103",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:443-446",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:899-913"
+  ],
+  "fix": "`mr_34_a_random_phase_is_redrawn_by_every_tune`, `d3_a_cbx_layout_is_not_coherent_on_either_provider`; the `deterministic` value by `rm_29_the_ideal_layout_builds_its_tree_and_defaults` and `mr_34_the_deterministic_profile_keeps_every_phase_zero`."
+ },
+ {
+  "rule": "RM-10",
+  "where": "design/07-radio-model.md:122",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio/tests/radio_model.rs:199-228",
+   "crates/ezsdr-acceptance/tests/v58.rs:456"
+  ],
+  "fix": "`rm_10_the_kinds_are_registered_under_radio_with_their_defaults`; none named for MockRadio's four never-emitted kinds and for the UHD Provider's never emitting `radio.TX_DISCONTINUITY`."
+ },
+ {
+  "rule": "RM-11",
+  "where": "design/07-radio-model.md:140",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:461",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:1095-1114",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1217-1231"
+  ],
+  "fix": "Append to the Test line, after the `ur_28_a_layout_transmit_report_names_its_stream` clause: `; none named for the receive stream's node as the source of `LATE_COMMAND` on a missed timed start`."
+ },
+ {
+  "rule": "RM-13",
+  "where": "design/07-radio-model.md:158",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1236-1269"
+  ],
+  "fix": "`mr_16_burst_refusals`, `mr_32_waveform_refusals`, `ur_21_txburst_refusals` and `rm_12_a_stream_node_names_its_direction_and_number`; the channel interleaving and the little-endian byte order by `mr_32_a_two_channel_waveform_is_channel_interleaved`; none named for a waveform refused for not having the `ezsdr.stream.cf32` contract."
+ },
+ {
+  "rule": "RM-21",
+  "where": "design/07-radio-model.md:236",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:2700-2716",
+   "crates/ezsdr-radio-uhd/src/provider/control.rs:5572-5590"
+  ],
+  "fix": "Append to the Test line, after the queue by `mr_18_hardware_timed_updates`: `; the queue's refusal coming after the late judgement by `mr_18_a_late_command_at_a_full_queue_reports_late_first` and `ur_24_a_late_command_at_a_full_queue_reports_late_first``."
+ },
+ {
+  "rule": "RM-16",
+  "where": "design/07-radio-model.md:173",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:3501-3545",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1578-1610"
+  ],
+  "fix": "Append to the Test line: `a stopped burst's end within the in-flight window by `ur_23_a_stop_ends_the_burst_within_the_in_flight_window`; none named for the end being exactly the last sample handed over`."
+ },
+ {
+  "rule": "RM-25",
+  "where": "design/07-radio-model.md:260",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1163-1170"
+  ],
+  "fix": "Append to the Test line: `the first transmit clock at the first lattice instant at or after `arm`, `mr_09_the_transmit_clock_starts_on_its_lattice``."
+ },
+ {
+  "rule": "RM-32",
+  "where": "design/07-radio-model.md:315",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:804",
+   "crates/ezsdr-radio/tests/channels.rs:850",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:842",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:5329-5330"
+  ],
+  "fix": "`rm_32_throughput_cases`; the reason's need and receive direction by `rm_31_rm_32_a_layout_instance_s_violations_are_judged_at_runtime` and `ur_25_a_layout_instance_s_throughput_rule_is_judged_at_runtime`; none named for the reason's limit and for the transmit direction in it."
+ },
+ {
+  "rule": "RM-33",
+  "where": "design/07-radio-model.md:318",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:993-1001",
+   "crates/ezsdr-radio/src/lib.rs:597"
+  ],
+  "fix": "`rm_33_rm_19_per_channel_cases`; none named for a `gain_db` value of another kind and for an `antenna` that is not a string."
+ },
+ {
+  "rule": "RM-33",
+  "where": "design/07-radio-model.md:318",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio/tests/channels.rs:956-991",
+   "crates/ezsdr-radio/src/lib.rs:645"
+  ],
+  "fix": "`rm_33_rm_19_per_channel_cases`; none named for a `gain_db` value of another kind and for an `antenna` that is not a string."
+ },
+ {
+  "rule": "SE-6",
+  "where": "design/08-simulation.md:27",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_vocabulary.rs:151-161",
+   "crates/ezsdr-mock-radio/src/lib.rs:2444",
+   "crates/ezsdr-mock-radio/src/profile.rs:103-107",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:799-823"
+  ],
+  "fix": "MockRadio's receive jitter uses the stream's own node `<device>/rx/s<k>` (spec 09 MR-7, MR-10); the stream name pinned by `mr_12_jitter_draws_belong_to_blocks_after_a_receive_cut` and two streams drawing distinct sequences by `mr_30_two_layout_mocks_one_seed_identical_output` (`mock_layout.rs`); `se_06_splitmix_vectors` checks only the generator"
+ },
+ {
+  "rule": "SE-11",
+  "where": "design/08-simulation.md:81",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-sim-engine/tests/sim_engine.rs:231-272"
+  ],
+  "fix": "returns 10 (both fire in insertion order, each called with `TimePoint(V, 10)`), 30, then `None`; none named for `now == 10` inside a callback"
+ },
+ {
+  "rule": "SE-5",
+  "where": "design/08-simulation.md:26",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_vocabulary.rs:140-144",
+   "crates/ezsdr-sim/src/lib.rs:184-192"
+  ],
+  "fix": "In SE-5's Test line, after `that they run at `validate` only none named`, add: `; none named for one violation per unknown `target` when an entry list holds more than one (`se_05_checks` passes one)`."
+ },
+ {
+  "rule": "SE-6",
+  "where": "design/08-simulation.md:27",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_vocabulary.rs:163-167",
+   "crates/ezsdr-sim/src/lib.rs:224-227",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:814-816",
+   "crates/ezsdr-mock-radio/src/lib.rs:588"
+  ],
+  "fix": "In SE-6's Test line, after the two `SimRng::new` vector sentences, add: `; none named for `below(n)` being `next_u64() % n` (`se_06_splitmix_vectors` asserts only `below(10) < 10` and `below(0) == 0`, and the Mock's jitter oracle calls `below` itself)`."
+ },
+ {
+  "rule": "SE-7",
+  "where": "design/08-simulation.md:28",
+  "kind": "stale_none_named",
+  "decision": "stale",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1334-1380",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:233-240",
+   "crates/ezsdr-mock-radio/src/lib.rs:2305-2306"
+  ],
+  "fix": "In SE-7's Test line replace `; a model reading the rate from the registry none named.` with `; a model reading the rate from the registry by `mr_19_backpressure_is_an_overrun`, whose MockRadio runs on a 1,000,000,001 Hz root and restarts at sample 52,001 with `lost` 50,001 (a hard-coded 1 GHz gives 52,000 and 50,000).`"
+ },
+ {
+  "rule": "SE-8",
+  "where": "design/08-simulation.md:32",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim-engine/tests/sim_engine.rs:51-72",
+   "crates/ezsdr-sim-engine/src/lib.rs:166",
+   "crates/ezsdr-kernel/tests/module_api.rs:128-142"
+  ],
+  "fix": "In SE-8's Test line change `*Checked by `se_08_descriptor_registers`.*` to `*Checked by `se_08_descriptor_registers`; none named for `kernel_api` and `impl_hash`.*`."
+ },
+ {
+  "rule": "SE-10",
+  "where": "design/08-simulation.md:43",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim-engine/tests/sim_engine.rs:158-190",
+   "crates/ezsdr-sim-engine/tests/sim_engine.rs:220-231",
+   "crates/ezsdr-sim-engine/src/lib.rs:47-56"
+  ],
+  "fix": "In SE-10's Test line, extend the closing sentence to: `*Checked by `se_10_time_authority_contract`; `primary_root()` by `se_09_the_virtual_root_is_registered`; `TimeAuthority::pacing()` none named; `schedule` of a `host.monotonic` instant (it fires at the same tick of `V`) none named.*`"
+ },
+ {
+  "rule": "SE-13",
+  "where": "design/08-simulation.md:46",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/governance.rs:198-240",
+   "crates/ezsdr-acceptance/tests/governance.rs:141",
+   "crates/ezsdr-sim-engine/tests/sim_engine.rs:313-339"
+  ],
+  "fix": "In SE-13's Test line write: `*Checked by `se_13_two_engines_fed_the_same_schedule_fire_identically` (the order); no clock read and no `rand::` use by `po_11_no_hashmap_and_no_wall_clock_in_simulation_code`, which scans the crate's source for `SystemTime` and `Instant::now`; none named for the Engine drawing from a `SimRng`.*`"
+ },
+ {
+  "rule": "MR-2",
+  "where": "design/09-mock-radio.md:294",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:319-429",
+   "crates/ezsdr-radio/tests/channels.rs:315-316",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:118-119"
+  ],
+  "fix": "Replace 'each MR-2 refusal' with: 'a wrong module id, an absent or unknown profile, a feed, an `id` of `\"\"` or `a/b`, unknown or wrong-kind `block_len_jitter`, `rx_test_pattern`, `instances`, `arm_after` keys, and the layout refusals of design 33 D5 (element shape, timekeeper, board, slot, front end, repeated pair, mixed boards, empty layout, `master_clock_hz`, X3xx-only keys on `ideal`); none named through `from_binding` for a module version or profile version other than MR-1/MR-3's, a wrong-kind `rx`/`tx`, or an invalid `image`/`links`/`link_gbps` value; the `ideal` count outside 0…64 is pinned at the builder by `rm_28_the_layout_analysis_cases`'."
+ },
+ {
+  "rule": "MR-7",
+  "where": "design/09-mock-radio.md:300",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:649",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:667",
+   "crates/ezsdr-mock-radio/src/lib.rs:2280",
+   "design/09-mock-radio.md:101"
+  ],
+  "fix": "Either change MR-7 step 1's quoted reason to 'MR-7: prepare was already called' (the text lib.rs:2280 returns and the test pins at mock_radio.rs:667), or change code+test to the quoted reason; the Test-line wording 'each refused as MR-7 says' then stands for the second prepare, but narrow it to 'each refused with an `MR-7:` or its own reason' for the other cases."
+ },
+ {
+  "rule": "MR-12",
+  "where": "design/09-mock-radio.md:404",
+  "kind": "wrong_test",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:566-624",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:615-616"
+  ],
+  "fix": "ok: write `RM-12` in place of `MR-12` in the rules column (row at 404)."
+ },
+ {
+  "rule": "MR-12",
+  "where": "design/09-mock-radio.md:400",
+  "kind": "wrong_test",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:698-756"
+  ],
+  "fix": "ok: replace `MR-12` with `RM-12` in the rules column (row at 400)."
+ },
+ {
+  "rule": "MR-13",
+  "where": "design/09-mock-radio.md:413",
+  "kind": "wrong_test",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:1178-1206"
+  ],
+  "fix": "ok: replace `MR-13` with `RM-13` (row at 413)."
+ },
+ {
+  "rule": "MR-16",
+  "where": "design/09-mock-radio.md:404",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:566-600",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:584-585"
+  ],
+  "fix": "ok: 'a burst on the transmit stream's node held and not rejected' (drop 'and recorded'); the recorded burst per stream is pinned by `mr_09_each_transmit_stream_has_its_own_clock_and_line`."
+ },
+ {
+  "rule": "MR-28",
+  "where": "design/09-mock-radio.md:445",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:911-936"
+  ],
+  "fix": "ok, with a pointer: 'a late burst's `TIME_ERROR` (`outcome: drop`) with source `mock/tx/s0`; the receive overflow's source `mock/rx/s0` is pinned by `mr_21_a_fault_cuts_the_lowest_running_receive_stream`'."
+ },
+ {
+  "rule": "MR-30",
+  "where": "design/09-mock-radio.md:197",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/v58.rs:591-612",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1194-1198"
+  ],
+  "fix": "ok: '`kd_01_a_faulted_round_does_not_depend_on_fragment_names` pins the same block and sample counts under either fragment order (one block of 2 000 samples)'."
+ },
+ {
+  "rule": "MR-30",
+  "where": "design/09-mock-radio.md:443",
+  "kind": "wrong_test",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:797-855",
+   "design/09-mock-radio.md:408",
+   "design/09-mock-radio.md:443"
+  ],
+  "fix": "ok: replace `MR-30` with `RM-30` in both rows (443, 408), and add `RM-32` to row 408; fix the test comment's `MR-30` to `RM-30` too."
+ },
+ {
+  "rule": "MR-32",
+  "where": "design/09-mock-radio.md:415",
+  "kind": "wrong_test",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:1209-1248"
+  ],
+  "fix": "remove `MR-32` and replace `MR-35` with `MR-13`: rules column 'MR-18, MR-27, MR-40, MR-13, RM-34'."
+ },
+ {
+  "rule": "MR-34",
+  "where": "design/09-mock-radio.md:437",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:2430-2487"
+  ],
+  "fix": "'`x3xx`, two transmit channels in stream 0 both timed-tuned: two rate changes at one instant; the second clock's origin draws the first two retune phases, channel 0's first, so the first clock took no untimed tune; none named for the first clock's `ended_at` at its own origin'."
+ },
+ {
+  "rule": "MR-5",
+  "where": "design/09-mock-radio.md:86",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/x3xx.rs:59-67",
+   "crates/ezsdr-acceptance/tests/x3xx.rs:93-107",
+   "crates/ezsdr-radio/tests/channels.rs:482-511"
+  ],
+  "fix": "Add to MR-5's Test line: `the `Present` half by `d3_the_two_providers_describe_one_layout_alike` (the Mock's default frequency, UBX/OBX and CBX) and `rm_30_coerce_cases` (every configuration key `Present`: the stream, frequency, gain 0.0, antenna and rate defaults, on the layout description); none named for the Mock's own gain default`."
+ },
+ {
+  "rule": "MR-6",
+  "where": "design/09-mock-radio.md:97",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio/src/channels.rs:572-578",
+   "crates/ezsdr-mock-radio/src/lib.rs:2274-2276",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:133-138"
+  ],
+  "fix": "Add to MR-6's Test line: `none named for a `Requested` whose `resource` is not the device node (step 1)`."
+ },
+ {
+  "rule": "MR-7",
+  "where": "design/09-mock-radio.md:113",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/src/lib.rs:2453",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:284"
+  ],
+  "fix": "Append to MR-7's Test line: `; none named for step 10's empty `warnings``."
+ },
+ {
+  "rule": "MR-16",
+  "where": "design/09-mock-radio.md:309",
+  "kind": "stale_none_named",
+  "decision": "stale",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1272-1289",
+   "design/09-mock-radio.md:357"
+  ],
+  "fix": "Row `mr_16_burst_refusals` (§6): replace `none named for a booked clock's segment or the old clock after a booking` with `a burst on a booked clock whose segment is not yet cut by `mr_18_a_burst_on_a_later_clock_survives_an_earlier_switch`; none named for a booked clock cut only at a sample above 0 or for an `at` on the old clock after a booking`; and add that test to MR-16's Test line."
+ },
+ {
+  "rule": "MR-17",
+  "where": "design/09-mock-radio.md:311",
+  "kind": "stale_none_named",
+  "decision": "stale",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1056-1077",
+   "design/09-mock-radio.md:145"
+  ],
+  "fix": "Row `mr_17_late_policy_outcomes` (§6): replace `none named for `requested_target` and SC-23a's `requested_at`` with ``requested_target` and SC-23a's `requested_at` by `rm_14_the_recorded_requested_target_is_the_requested_at``."
+ },
+ {
+  "rule": "MR-18",
+  "where": "design/09-mock-radio.md:156",
+  "kind": "stale_none_named",
+  "decision": "stale",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:587-599",
+   "crates/ezsdr-mock-radio/src/lib.rs:1783-1790"
+  ],
+  "fix": "Replace `none named for the device-and-class refusals` with `an update to a node that is not the device or a stream, and a key that is not a configuration key, by `mr_12_d14_the_actions_of_a_layout_instance_name_a_stream`; none named for an update whose class differs from its key's`."
+ },
+ {
+  "rule": "MR-19",
+  "where": "design/09-mock-radio.md:159",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1337-1382",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1412-1435",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:1895-1925"
+  ],
+  "fix": "Append to MR-19's Test line: `; none named for the jump block of a dropped block that carried flags or a `lost`, which keeps those flags and adds its `lost` to `k_g − a``."
+ },
+ {
+  "rule": "MR-27",
+  "where": "design/09-mock-radio.md:189",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/v58.rs:561-580",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:508-514"
+  ],
+  "fix": "Append to MR-27's Test line: `; none named for the `segments` section of two instances in one Run`."
+ },
+ {
+  "rule": "MR-32",
+  "where": "design/09-mock-radio.md:207",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:1242",
+   "crates/ezsdr-mock-radio/src/lib.rs:2733",
+   "crates/ezsdr-mock-radio/src/lib.rs:918-923"
+  ],
+  "fix": "Append to MR-32's Test line: `; none named for the segment key's order (clock origin, clock sequence, stream, generation, start) or for `generation` being 1 for the armed clock and one more per `cold` clock`."
+ },
+ {
+  "rule": "MR-32",
+  "where": "design/09-mock-radio.md:207",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/src/lib.rs:1740-1761",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:2110-2125"
+  ],
+  "fix": "Append to MR-32's Test line: `; none named for a block the tracker or the device model refuses cutting only its own burst's segment at that block's first sample`."
+ },
+ {
+  "rule": "MR-35",
+  "where": "design/09-mock-radio.md:217",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1066-1093",
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:519-520",
+   "design/09-mock-radio.md:455"
+  ],
+  "fix": "Append to MR-35's Test line: `; none named for a nonzero receive path delay (both profiles' is 0; section 8 defers it)`."
+ },
+ {
+  "rule": "MR-36",
+  "where": "design/09-mock-radio.md:219",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:949-978"
+  ],
+  "fix": "Replace MR-36's closing `none named for saturation emitting no event.` with `none named for saturation emitting no event or for a multi-channel burst or block, where the count is per channel.`"
+ },
+ {
+  "rule": "MR-38",
+  "where": "design/09-mock-radio.md:224",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_radio.rs:558-614",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:796-855"
+  ],
+  "fix": "MR-38's Test line: `mr_38_keys_is_an_unknown_selector_key`, `mr_38_the_tree_and_capabilities_are_the_layout_s` (the tree, capabilities and RM-30's defaults), `mr_39_each_receive_stream_declares_and_runs_its_own_clock`, `mr_06_coerce_cases` (RM-30's `coerce`) and `rm_31_rm_32_a_layout_instance_s_violations_are_judged_at_runtime` (the instance-wide judgement)."
+ },
+ {
+  "rule": "MR-39",
+  "where": "design/09-mock-radio.md:226",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:758-775",
+   "crates/ezsdr-mock-radio/tests/mock_layout.rs:1343-1370"
+  ],
+  "fix": "Add to MR-39's Test line: `a stream with no channel and a link publishes no block and registers no clock by `mr_7_each_receive_port_takes_its_own_links`, and holds no segment by `mr_40_a_move_to_and_from_a_linkless_receive_stream_never_publishes_there``."
+ },
+ {
+  "rule": "HD-7",
+  "where": "design/10-host-data-path.md:93",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:492-503",
+   "crates/ezsdr-sink-capture/src/lib.rs:43",
+   "crates/ezsdr-sink-capture/src/lib.rs:68"
+  ],
+  "fix": "Add `assert_eq!(sink.module.version, Version::new(1, 2, 0))` to hd_07_descriptor (cheaper than narrowing, the claim is in HD-7's text); otherwise narrow to 'its `SinkDescriptor`'s module id, kind, memory domains, contracts and artifact kinds'."
+ },
+ {
+  "rule": "HD-4",
+  "where": "design/10-host-data-path.md:30",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-link-host/tests/link_host.rs:101-105",
+   "crates/ezsdr-link-host/src/lib.rs:82-86"
+  ],
+  "fix": "In HD-4's Test line change `*Checked by `hd_04_descriptor_and_create`.*` to `*Checked by `hd_04_descriptor_and_create`; none named for the `Rejected` kind of the zero-capacity refusal.*`."
+ },
+ {
+  "rule": "HD-9",
+  "where": "design/10-host-data-path.md:41",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:507-535",
+   "crates/ezsdr-sink-capture/src/lib.rs:527-543"
+  ],
+  "fix": "In HD-9's Test line write: `*Checked by `hd_09_prepare_cases`; none named for the link's `component` being `fragment.id` and its endpoint being `StreamIn` (every case attaches `rec`'s `StreamIn`; only the count and the port are refused).*`"
+ },
+ {
+  "rule": "HD-10",
+  "where": "design/10-host-data-path.md:52",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:1493-1520"
+  ],
+  "fix": "In HD-10's Test line add, before the final `and`: `` `hd_10_a_colliding_request_preserves_the_completed_recording` (output `rec_capture_1`'s own stem against output `rec`'s request stem `capture_1`: the second `step` errors with `cannot create` and the first recording's data, hash and metadata are unchanged)``; add the same test as a section 7 row."
+ },
+ {
+  "rule": "HD-10",
+  "where": "design/10-host-data-path.md:52",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:1522-1563"
+  ],
+  "fix": "In HD-10's Test line add: `` `hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture` (cf32 to sc16 and back, with and without a queued request: the outgoing capture is `partial: true` and keeps its zero-extent carry gap, and the queued capture starts on the new contract)``; add the same test as a section 7 row."
+ },
+ {
+  "rule": "HD-10",
+  "where": "design/10-host-data-path.md:52",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:1083",
+   "crates/ezsdr-sink-capture/src/lib.rs:393-405",
+   "crates/ezsdr-kernel/src/module_api.rs:1158"
+  ],
+  "fix": "In HD-10's Test line add: `none named for the `<run id>_` prefix of the file name and the replacement of every run-id character outside `[A-Za-z0-9_-]` by `_` (the tests check only the `_<stem>.sigmf-data` suffix)`."
+ },
+ {
+  "rule": "HD-11",
+  "where": "design/10-host-data-path.md:53",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:158-180",
+   "crates/ezsdr-kernel/src/module_api.rs:1236-1246",
+   "crates/ezsdr-sink-capture/src/lib.rs"
+  ],
+  "fix": "Add to HD-11, after its last sentence, a Test line: `*Checked by `hd_11_an_unexpected_action_is_rejected`, `hd_11_stop_for_own_target_finishes_the_capture`, `hd_11_stop_for_another_target_is_rejected` and `hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served`; none named for `step` never blocking and never calling `wait_until`.*`"
+ },
+ {
+  "rule": "HD-13",
+  "where": "design/10-host-data-path.md:56",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:876-949"
+  ],
+  "fix": "Add to HD-13 a Test line: `*Checked by `hd_13_partial_on_abort_and_on_an_unfinished_capture` (partial under either mode), `hd_13_stop_preserves_trailing_drop_carry` (the zero-extent trailing gap, under both modes) and `hd_11_targeted_stop_keeps_carry_on_the_finished_capture` (a targeted Stop keeps the carry's `lost` and `link_dropped`; its zero extent none named).*`"
+ },
+ {
+  "rule": "HD-14",
+  "where": "design/10-host-data-path.md:54",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:1017-1036",
+   "crates/ezsdr-sink-capture/src/lib.rs:258-262"
+  ],
+  "fix": "In HD-14's Test line, after `none named for the event's time (the current instant in the primary root)`, add: `; none named for a block of another contract returning `Rejected` (`hd_10_unknown_contract_is_rejected` checks `Err` and the `HD-10: contract` message, not the kind)`."
+ },
+ {
+  "rule": "HD-16",
+  "where": "design/10-host-data-path.md:66",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:416-438",
+   "crates/ezsdr-server/tests/protocol.rs:114-121",
+   "crates/ezsdr-sink-capture/src/lib.rs:477-491"
+  ],
+  "fix": "In HD-16's Test line, after `...and the Sink's `Err` comes back from `step`)`, add: `; the event's time (the current instant in the primary root) by `ea_12_time_and_events`, end to end through the server`; in HD-14's line change `none named for the event's time` to `none named for the `sink.REQUEST_REJECTED` event's time`."
+ },
+ {
+  "rule": "HD-16",
+  "where": "design/10-host-data-path.md:66",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sink-capture/src/lib.rs:455-472",
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:606-655",
+   "crates/ezsdr-sink-capture/tests/sink_capture.rs:1153-1178"
+  ],
+  "fix": "In HD-16's Test line, add to the closing `none named for ...` list: `, for the announcement of a capture with more than one ContinuityMap (HD-15 writes no metadata for it)`."
+ },
+ {
+  "rule": "CH-8",
+  "where": "design/11-simulation-channel.md:89",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1066-1087",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:489-518",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:317-346",
+   "design/09-mock-radio.md:207"
+  ],
+  "fix": "'*MockRadio's implementation is MR-32; its tests are MR-32's; the zero-order hold is pinned by `mr_35_a_cold_receive_change_samples_the_field_on_the_new_clock`, the carrier frequency by `mr_33_a_receiver_hears_only_its_own_frequency` and `mr_32_c_the_transmitted_frequency_is_read_at_the_samples_own_instant`; none named for the lock rule beyond the loopback tests not deadlocking.*'"
+ },
+ {
+  "rule": "CH-1",
+  "where": "design/11-simulation-channel.md:59",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_channel.rs:75-118"
+  ],
+  "fix": "*Checked by `ch_01_reader`; none named for the inclusive ends of `gain_db` (-400 and 400) and `noise_dbfs` (-400 and 100).*"
+ },
+ {
+  "rule": "CH-2",
+  "where": "design/11-simulation-channel.md:61",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_channel.rs:121-157",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:289-326"
+  ],
+  "fix": "*Checked by `ch_02_check`; none named for `requested: None` and for a name that is an output id passing the check.*"
+ },
+ {
+  "rule": "CH-3",
+  "where": "design/11-simulation-channel.md:65",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_channel.rs:176-204",
+   "crates/ezsdr-sim/src/channel.rs:145-175"
+  ],
+  "fix": "*Checked by `ch_03_root_instants_are_exact` and `ch_03_a_sample_at_or_before_saturates_with_the_sign_of_the_instant` (a quotient that does not fit an `i64` saturates to `i64::MIN` or `i64::MAX` by the sign of the instant, and is exact one tick inside the range); none named for `den > 0` and for an instant that is not reduced.*"
+ },
+ {
+  "rule": "CH-5",
+  "where": "design/11-simulation-channel.md:81",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_channel.rs:208-247",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1308-1334",
+   "crates/ezsdr-sim/tests/sim_channel.rs:313-341"
+  ],
+  "fix": "*Checked by `ch_05_noise_has_its_power_its_seed_and_one_stream_per_receive_channel`, `ch_05_gaussian_pair_follows_its_formula`, `ch_04_the_field_sums_paths_with_gain_delay_and_the_frequency_gate` (with no `noise_dbfs` entry nothing is added) and `mr_35_the_receive_gain_scales_the_noise_with_the_signal`; none named for a second receiving fragment's stream leaving the first one's noise unchanged.*"
+ },
+ {
+  "rule": "CH-6",
+  "where": "design/11-simulation-channel.md:85",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_channel.rs:368-377",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:303"
+  ],
+  "fix": "*Checked by `ch_06_join_rules_and_missing_fragments` (a later join refused for its Run, document, seed, root rate or an already joined fragment, each with the `CH-6: ` prefix; the overflow reason exactly); none named for the text of the Run and the document, seed and root rate refusals, and for `<fragment> has already joined` on the Medium itself.*"
+ },
+ {
+  "rule": "CH-7",
+  "where": "design/11-simulation-channel.md:87",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-sim/tests/sim_channel.rs:359-400",
+   "crates/ezsdr-sim/tests/sim_channel.rs:161-172",
+   "crates/ezsdr-sim/src/channel.rs:295-300"
+  ],
+  "fix": "*Checked by `ch_06_join_rules_and_missing_fragments` and, for the refusal, `mr_31_channel_mode_needs_a_medium_a_zero_pattern_and_valid_channels`; none named for `missing()`'s order when it differs from the document's.*"
+ },
+ {
+  "rule": "CH-9",
+  "where": "design/11-simulation-channel.md:99",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1202-1260",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1094-1150",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:644-682",
+   "crates/ezsdr-mock-radio/tests/mock_channel.rs:1335-1360"
+  ],
+  "fix": "*Checked by `ch_09_the_receive_output_does_not_depend_on_the_stepping_order`, `ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order` (a burst whose first sample, at 666 333⅓ ns, precedes the round of a stop), `mr_33_gain_scales_the_samples_from_its_instant` and `mr_33_a_receiver_hears_only_its_own_frequency` (a gain or frequency change takes effect at its instant), `v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order`, `kd_01_a_faulted_round_does_not_depend_on_fragment_names` and `ch_09_a_faulted_round_does_not_depend_on_the_stepping_order` end to end; none named for a cold change that meets a burst whose first sample lies between rounds.*"
+ },
+ {
+  "rule": "CH-11",
+  "where": "design/11-simulation-channel.md:103",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/governance.rs:198-240",
+   "crates/ezsdr-acceptance/tests/governance.rs:214",
+   "crates/ezsdr-sim/tests/sim_channel.rs:282-310",
+   "crates/ezsdr-sim/tests/sim_channel.rs:313-341"
+  ],
+  "fix": "*Checked by `po_11_no_hashmap_and_no_wall_clock_in_simulation_code` (the crate is in its list: no `HashMap`, `HashSet` or `rand::`), `ch_04_c_the_field_sums_the_paths_in_document_order`, `ch_05_noise_has_its_power_its_seed_and_one_stream_per_receive_channel`, `v58_03_channel_noise_reproduces_with_its_seed` and `v58_03_a_run_reproduces_from_its_own_manifest`.*"
+ },
+ {
+  "rule": "NX-3",
+  "where": "design/14-native-executor.md:122",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:269-286",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:74-83",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:106-108"
+  ],
+  "fix": "each refused naming the component, and no component prepared; none named for nothing built"
+ },
+ {
+  "rule": "NX-5",
+  "where": "design/14-native-executor.md:124",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:364-373",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:236-243"
+  ],
+  "fix": "components `b` and `a` placed in the Island in that order step `a` then `b`"
+ },
+ {
+  "rule": "NX-6",
+  "where": "design/14-native-executor.md:126",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:393-410"
+  ],
+  "fix": "the `ezsdr.target` refusal fails with the exact message naming the component, the Action kind and the check; the mixed refusal's message names each check; a refusal naming no check fails the step"
+ },
+ {
+  "rule": "NX-1",
+  "where": "design/14-native-executor.md:75",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:247-264",
+   "crates/ezsdr-exec-native/src/lib.rs:51",
+   "crates/ezsdr-kernel/src/module_api/registry.rs:110-115"
+  ],
+  "fix": "*Checked by `nx_01_descriptor_registers`; none named for `kernel_api: 4.0.0` exactly.*"
+ },
+ {
+  "rule": "NX-4",
+  "where": "design/14-native-executor.md:91",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:350-360",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:93-99",
+   "crates/ezsdr-exec-native/src/lib.rs:268-277"
+  ],
+  "fix": "*Checked by `nx_04_prepare_cases` (a non-Simulation class `Unsupported`; a link end for a component outside the Island refused; a component placed on two Islands refused; each component receives only its own link ends and its Island's source; two Islands on one Executor; a component whose `prepare` fails fails the Island's and is still cleaned up); none named for `stop` reaching a component whose `prepare` failed, and for a component of the Island with no descriptor in `ctx.components`.*"
+ },
+ {
+  "rule": "NX-5",
+  "where": "design/14-native-executor.md:95",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:331-343",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:363-379"
+  ],
+  "fix": "*Checked by `nx_05_components_step_in_id_order_and_their_actions_follow_each_step`; none named for the component-id order across two Islands.*"
+ },
+ {
+  "rule": "NX-5",
+  "where": "design/14-native-executor.md:95",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:65-67",
+   "crates/ezsdr-exec-native/tests/native_executor.rs:363-379"
+  ],
+  "fix": "*Checked by `nx_05_components_step_in_id_order_and_their_actions_follow_each_step`; none named for the order of two Actions pushed by one component.*"
+ },
+ {
+  "rule": "NX-8",
+  "where": "design/14-native-executor.md:101",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:428-446",
+   "crates/ezsdr-exec-native/src/lib.rs:221-227"
+  ],
+  "fix": "*Checked by `nx_08_stop_reaches_every_component_and_cleanup_is_idempotent` (a failing `stop` does not keep the next component's from running; after `cleanup` the Action queue and the submitter are held by the harness alone, and an Action pushed then reaches nothing); none named for `arm` and `start` doing nothing.*"
+ },
+ {
+  "rule": "NX-8",
+  "where": "design/14-native-executor.md:101",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-exec-native/tests/native_executor.rs:429-435",
+   "crates/ezsdr-exec-native/src/lib.rs:268-277"
+  ],
+  "fix": "*Checked by `nx_08_stop_reaches_every_component_and_cleanup_is_idempotent` (a failing `stop` does not keep the next component's from running; after `cleanup` the Action queue and the submitter are held by the harness alone, and an Action pushed then reaches nothing); none named for the first error when two components fail.*"
+ },
+ {
+  "rule": "EA-13",
+  "where": "design/16-easy-api.md:133",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:480-491",
+   "crates/ezsdr-server/tests/protocol.rs:123-129",
+   "crates/ezsdr-server/tests/protocol.rs:365-367"
+  ],
+  "fix": "an 800-byte body whose size equals the reply's `size` (the content of a read capture: `ea_09_the_default_profile_loops_back`); `not_found`; `not_found`"
+ },
+ {
+  "rule": "EA-14",
+  "where": "design/16-easy-api.md:138",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:668-688",
+   "crates/ezsdr-server/tests/protocol.rs:528-530",
+   "crates/ezsdr-server/src/lib.rs:289",
+   "crates/ezsdr-server/src/lib.rs:310"
+  ],
+  "fix": "`protocol`, `protocol` (by kind), and the messages of the targeted-Stop and oversize-duration refusals (the `refused` kind of the first: `ea_14_run_child`; none named for the oversize one's kind); nothing logged"
+ },
+ {
+  "rule": "EA-15",
+  "where": "design/16-easy-api.md:135",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:543-555",
+   "crates/ezsdr-server/tests/protocol.rs:581"
+  ],
+  "fix": "`finished` and `Exit::Replied` (the process's exit 0: `ea_binary_speaks_the_protocol`); `Stopped { client_disconnect }` in the written Manifest"
+ },
+ {
+  "rule": "EA-17",
+  "where": "design/16-easy-api.md:111",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:1088-1105",
+   "crates/ezsdr-acceptance/tests/uhd.rs:137-145"
+  ],
+  "fix": "on the fake device `ea_17_a_capture_ahead_starts_at_its_instant` (the first sample is not before `at`, 1 000 samples in the map; the exact start on a Spec is `uhd_59_receive_capture_starts_at_the_requested_index`'s) and `ea_17_a_capture_at_a_passed_instant_says_where_it_started`"
+ },
+ {
+  "rule": "EA-18",
+  "where": "design/16-easy-api.md:112",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/v58.rs:97",
+   "crates/ezsdr-server/src/catalogue.rs:198"
+  ],
+  "fix": "which pins only the absence of the ezsdr.* Module id prefixes, the profile names x310 and ideal, and the sim.channel, sim.seed and sim.faults sections (not `x3xx`); none named for the closed list of names the package may use"
+ },
+ {
+  "rule": "EA-7",
+  "where": "design/16-easy-api.md:43",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:286-296",
+   "crates/ezsdr-server/tests/protocol.rs:828-848",
+   "crates/ezsdr-server/tests/protocol.rs:1001-1010",
+   "crates/ezsdr-acceptance/tests/v58.rs:273-276",
+   "crates/ezsdr-server/src/catalogue.rs:44-60"
+  ],
+  "fix": "none named for the catalogue's exact membership (no test lists the registered Vocabularies and Modules, so an extra registration passes; `v58_07_manifest_records_every_input_and_output` checks only that `radio`, `sim`, `sink` and four Module ids appear in a Manifest), for a known Module bound in a role it cannot fill, or for the refusal of an Authority that is neither `ezsdr.sim-engine` nor `ezsdr.radio.uhd`."
+ },
+ {
+  "rule": "EA-8",
+  "where": "design/16-easy-api.md:44",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:319-336",
+   "crates/ezsdr-server/tests/protocol.rs:558-582",
+   "crates/ezsdr-server/tests/protocol.rs:1034-1050",
+   "crates/ezsdr-server/src/main.rs:12-13",
+   "python/ezsdr/_client.py:63-66"
+  ],
+  "fix": "none named for the default `ezsdr-runs` relative to the server's working directory (every binary and Python test passes `--runs-dir`)."
+ },
+ {
+  "rule": "EA-9",
+  "where": "design/16-easy-api.md:68",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:1013-1031",
+   "crates/ezsdr-server/tests/protocol.rs:1033-1062",
+   "python/tests/test_easy_api.py:79-88"
+  ],
+  "fix": "none named for the configured profile's capture Sink `dir` being used as written (the tests assert only that `connected` echoes the document, and none captures through it)."
+ },
+ {
+  "rule": "EA-12",
+  "where": "design/16-easy-api.md:71",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:449-457",
+   "crates/ezsdr-server/src/lib.rs:303-326",
+   "crates/ezsdr-server/src/lib.rs:429",
+   "python/tests/test_easy_api.py:690-712"
+  ],
+  "fix": "Add `ea_12_durations_round_up` (the `ticks` helper rounds a nanosecond count up to whole root ticks, on a 3 Hz root) to the Checked-by list, followed by: none named for `run_child`'s horizon `T0 + ticks(duration_ns)` on the child's primary root."
+ },
+ {
+  "rule": "EA-14",
+  "where": "design/16-easy-api.md:73",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-acceptance/tests/reactive.rs:342-399",
+   "crates/ezsdr-server/src/lib.rs:279-287"
+  ],
+  "fix": "Add `v58_09_a_reactor_runs_in_a_child_run_of_a_session` (two inputs split from the body by their sizes and keyed by ContentHash, used by the child's radios and responder) and `ea_14_refusals_before_a_child_runs` (sizes that overflow or differ from the body are `protocol` and change nothing) to the Checked-by list."
+ },
+ {
+  "rule": "EA-15",
+  "where": "design/16-easy-api.md:74",
+  "kind": "silent_gap",
+  "decision": "name_test",
+  "evidence": [
+   "crates/ezsdr-server/tests/protocol.rs:691-706"
+  ],
+  "fix": "*Checked by `ea_15_finish_and_disconnect` and `ea_15_a_manifest_that_cannot_be_written_is_still_returned`.*"
+ },
+ {
+  "rule": "EA-16",
+  "where": "design/16-easy-api.md:110",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "python/tests/test_easy_api.py:716-732",
+   "python/ezsdr/session.py:72-95"
+  ],
+  "fix": "none named for the Python floor and numpy dependency, a numpy array as `seconds` (its `TypeError`), `rx.start` inside `aligned`, or `next_at`'s non-positive `period`, off-root `start` and missing SampleClock refusals."
+ },
+ {
+  "rule": "EA-17",
+  "where": "design/16-easy-api.md:111",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "python/ezsdr/session.py:349-354",
+   "python/tests/test_easy_api.py:392-418",
+   "python/tests/test_easy_api.py:825-845"
+  ],
+  "fix": "none named for the default timeout `n / rate + 1` (the default captures assert only their shape; no test inspects the `within` that `capture` or `result` sends)."
+ },
+ {
+  "rule": "UR-11",
+  "where": "design/18-uhd-radio.md:199",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:529-540"
+  ],
+  "fix": "7 GHz rejected and the channel-2 key refused (as the §6 row at :416 already says)."
+ },
+ {
+  "rule": "UR-12",
+  "where": "design/18-uhd-radio.md:417",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:957-979"
+  ],
+  "fix": "`Unsupported` for the Simulation class (kind asserted); `Rejected` for the unknown key; the second call and the `Block` link each refused with their message read (kind unasserted); `RM-4` on the unknown key and no device apply"
+ },
+ {
+  "rule": "UR-12",
+  "where": "design/18-uhd-radio.md:418",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:981-993",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:4483"
+  ],
+  "fix": "no receive SampleClock is registered and no receive channel is configured (the declaration for an empty set: `ur_12_a_layout_s_stream_zero_with_no_channel_declares_no_clock`); or add a declared_sample_clocks() assertion to the test"
+ },
+ {
+  "rule": "UR-5",
+  "where": "design/18-uhd-radio.md:545",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:4058-4069"
+  ],
+  "fix": "a drop after the device is lost releases the serial (a read by the drop is not observed)"
+ },
+ {
+  "rule": "UR-21",
+  "where": "design/18-uhd-radio.md:446",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1467-1481"
+  ],
+  "fix": "admitted at or after the new clock's origin (RS-19), which uhd-control registered before the call returned (UR-25, KC-21a), never late, no `TIME_ERROR`; sample 0 is not asserted"
+ },
+ {
+  "rule": "UR-22",
+  "where": "design/18-uhd-radio.md:448",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1511-1525",
+   "crates/ezsdr-kernel/src/stream/burst.rs:160-171"
+  ],
+  "fix": "the fake saw `eob` on the last buffer; the record ends `Eob`, with 3 000 samples"
+ },
+ {
+  "rule": "UR-23",
+  "where": "design/18-uhd-radio.md:449",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1542-1574"
+  ],
+  "fix": "the repeat's record ends at the second's start with `Eob`; the second is `OnTime`; the fake saw one device burst (one start and one end of burst, none unended) across both; no transmission at the second's start is read"
+ },
+ {
+  "rule": "UR-24",
+  "where": "design/18-uhd-radio.md:485",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/control.rs:2331-2343"
+  ],
+  "fix": "the change's clock ends at its origin (the earlier transmit clock's end is not asserted)"
+ },
+ {
+  "rule": "UR-26",
+  "where": "design/18-uhd-radio.md:478",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1836-1856",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:5152-5182"
+  ],
+  "fix": "UR-26's effect for `<id>/tx/s0` and `<id>/rx/s0`; the `<id>` Stop admitted only (its effect on both streams by `ur_26_a_device_stop_stops_every_layout_stream`); the foreign target refused with UR-26's reason"
+ },
+ {
+  "rule": "UR-27",
+  "where": "design/18-uhd-radio.md:509",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1971-1981"
+  ],
+  "fix": "`clock_source: external`, the reference unlocked 2.3 s after the fake starts"
+ },
+ {
+  "rule": "UR-27",
+  "where": "design/18-uhd-radio.md:509",
+  "kind": "overclaim",
+  "decision": "partly",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1971-1981"
+  ],
+  "fix": "`CLOCK_LOST { reference: frequency }` with the device node as source; the Run aborts by that policy; the radios' stop before the next call is not asserted here"
+ },
+ {
+  "rule": "UR-33",
+  "where": "design/18-uhd-radio.md:522",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/device.rs:2268-2289",
+   "crates/ezsdr-radio-uhd/src/device.rs:2355-2377"
+  ],
+  "fix": "`TimeError` (the drop at a start at the previous burst's end: `ur_33_a_timed_start_at_the_previous_burst_s_end_is_late`); the second command applied late; the 17th apply ... (rest unchanged)"
+ },
+ {
+  "rule": "UR-34",
+  "where": "design/18-uhd-radio.md:348",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/hardware.rs:29-63",
+   "crates/ezsdr-radio-uhd/tests/common/mod.rs:79-82"
+  ],
+  "fix": "and checks the layout's channels and front ends against the board of the device's first receive front end as UR-5 does (any board the profile describes); none named for an OBX requirement"
+ },
+ {
+  "rule": "UR-34",
+  "where": "design/18-uhd-radio.md:348",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/hardware.rs:112-120",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:2404-2425",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:1117"
+  ],
+  "fix": "Steps B3, B4, B6 and B7 call the same functions as `tests/fake.rs`'s rehearsal cases ...; B5's `rehearse_overflow` has its fake-side case in the unit test `rehearsal_b5_overflow` in `src/provider/rx.rs`, on the controlled clock"
+ },
+ {
+  "rule": "UR-34",
+  "where": "design/18-uhd-radio.md:348",
+  "kind": "overclaim",
+  "decision": "real",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/hardware.rs:112-114",
+   "crates/ezsdr-radio-uhd/tests/common/mod.rs:577-591"
+  ],
+  "fix": "B3, B5, B6 and B7 print the records `bench-results.md` needs; B4 asserts its capture index and prints nothing"
+ },
+ {
+  "rule": "UR-11",
+  "where": "design/18-uhd-radio.md:199",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:481-483",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:529-540",
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:426-428",
+   "crates/ezsdr-radio-uhd/src/device.rs:698"
+  ],
+  "fix": "none named for `coerce` making no device call (MA-11): the test reads only the report, never `FakeDevice::calls()`."
+ },
+ {
+  "rule": "UR-13",
+  "where": "design/18-uhd-radio.md:208",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:4398-4424",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1130-1141",
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:562-573"
+  ],
+  "fix": "none named for the transmit clock's origin being the first lattice instant at or after `A` (the named tests pin the clock's stream, ratio and lattice alignment only)."
+ },
+ {
+  "rule": "UR-14",
+  "where": "design/18-uhd-radio.md:210",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1741",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1759",
+   "crates/ezsdr-radio-uhd/src/provider/control.rs:3858-3880",
+   "crates/ezsdr-radio-uhd/src/provider/core.rs:981-986",
+   "crates/ezsdr-radio-uhd/src/provider/core.rs:512"
+  ],
+  "fix": "none named for a refusal of something booked earlier, refused as it applies, naming no Action (`action` absent: the release's `COMMAND_REJECTED`, uhd-tx's refusals of a held burst)."
+ },
+ {
+  "rule": "UR-16",
+  "where": "design/18-uhd-radio.md:214",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:360-377",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1151-1161",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:3361-3379",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:6243-6291",
+   "crates/ezsdr-radio-uhd/src/device.rs:290"
+  ],
+  "fix": "none named for a panicking `uhd-tx` (recorded and `DEVICE_LOST`) or `uhd-control` (recorded in `rejected`, no `DEVICE_LOST`); the panic tests all panic a `uhd-rx`."
+ },
+ {
+  "rule": "UR-17",
+  "where": "design/18-uhd-radio.md:224",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:475-490",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:601",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:1389",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:2152"
+  ],
+  "fix": "none named for the index rounded to the nearest sample off the lattice, and for `stats.rx_off_lattice`, `stats.rx_before_origin` and `stats.link_drops_seen` (only `stats.rx_overlapping` is asserted)."
+ },
+ {
+  "rule": "UR-18",
+  "where": "design/18-uhd-radio.md:227",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:431-434",
+   "crates/ezsdr-radio-uhd/src/uhd.rs:1030",
+   "crates/ezsdr-radio-uhd/src/device.rs:116"
+  ],
+  "fix": "none named for a `BadPacket` as the sequence error (the tests use `Overflow { out_of_sequence: true }` and `FakeFault::SequenceError`)."
+ },
+ {
+  "rule": "UR-22",
+  "where": "design/18-uhd-radio.md:243",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:106",
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:421",
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:435",
+   "crates/ezsdr-radio-uhd/src/device.rs:1485-1499"
+  ],
+  "fix": "none named for the 1 s send timeout (the send-fault tests return at once; the timeout passed to `tx_send` is not observed)."
+ },
+ {
+  "rule": "UR-26",
+  "where": "design/18-uhd-radio.md:304",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:877-893",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:3173-3190",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:3276-3292"
+  ],
+  "fix": "none named for the 100 ms length of the shutdown's `BURST_ACK` window (only its device-clock domain and its end at a loss are pinned)."
+ },
+ {
+  "rule": "UR-27",
+  "where": "design/18-uhd-radio.md:310",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/provider/control.rs:1194-1206",
+   "crates/ezsdr-radio-uhd/src/provider/mod.rs:633",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1971-1981",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:2114-2123"
+  ],
+  "fix": "none named for the 500 ms cadence on the host clock, the single `CLOCK_LOST`, a `ref_locked` read error recorded with no `CLOCK_LOST`, and the reference not being read when `clock_source` is `internal` (the PPS is not monitored)."
+ },
+ {
+  "rule": "UR-28",
+  "where": "design/18-uhd-radio.md:313",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/tests/fake.rs:1984-1996",
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:843-850",
+   "crates/ezsdr-radio-uhd/src/provider/tx.rs:1379-1403"
+  ],
+  "fix": "none named for the `cause` (`starved` / `lost`) of `UnderflowInPacket` and `SeqErrorInBurst`."
+ },
+ {
+  "rule": "UR-29",
+  "where": "design/18-uhd-radio.md:316",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/uhd.rs:1021-1039",
+   "crates/ezsdr-radio-uhd/src/provider/rx.rs:467-471"
+  ],
+  "fix": "none named for a receive metadata error other than UR-18…UR-19's (`BROKEN_CHAIN`): an error, not a lost device."
+ },
+ {
+  "rule": "UR-30",
+  "where": "design/18-uhd-radio.md:322",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/device.rs:875-885",
+   "crates/ezsdr-radio-uhd/src/uhd.rs:663-685",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:3675",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:506"
+  ],
+  "fix": "`ur_05_the_layout_builds_the_subdev_spec` (the section's `rx_channels`); none named for the device section's `args`, master clock rate, transmit channel count, `pp_string` and `uhd_version`."
+ },
+ {
+  "rule": "UR-33",
+  "where": "design/18-uhd-radio.md:337",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/device.rs:1182-1190",
+   "crates/ezsdr-radio-uhd/src/device.rs:1228-1242",
+   "crates/ezsdr-radio-uhd/src/device.rs:1970-2007",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:2274-2290"
+  ],
+  "fix": "none named for `rx_start` and `rx_stop` on a stream with no streamer failing at once (`tx_send`'s refusal is asserted by `ur_33_one_channel_is_opened_by_one_streamer`, not its promptness)."
+ },
+ {
+  "rule": "UR-33",
+  "where": "design/18-uhd-radio.md:334",
+  "kind": "silent_gap",
+  "decision": "none_named",
+  "evidence": [
+   "crates/ezsdr-radio-uhd/src/device.rs:976-985",
+   "crates/ezsdr-radio-uhd/tests/fake.rs:321-327"
+  ],
+  "fix": "none named for `set_time_zero(true)` resetting the count at the next whole second of the fake's clock."
+ }
+]

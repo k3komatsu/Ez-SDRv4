@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `0fa2001`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). A2 done on 2026-10-25 (rows T34–T45; [phase 8 reviews/a2-opus](../phase8/reviews/a2-opus.md)): five conditions were already tested, nine got tests. B waits for Phase 8 stage 4. |
+| Status | Done for every accepted spec (01–11, 14, 16, 18) at base `0fa2001`; the fixes are one commit. A1's tests landed on 2026-10-16 (rows T01–T33); A2 and B go to Phase 8's plan (owner, 2026-10-16). A2 done on 2026-10-25 (rows T34–T45; [phase 8 reviews/a2-opus](../phase8/reviews/a2-opus.md)): five conditions were already tested, nine got tests. B waits for Phase 8 stage 4. A second sweep ran on 2026-10-25 (§ Second sweep): 263 checked findings applied to the Test lines, six spec/code disagreements left for the owner. |
 | Why | Every Sol review of DA-3 step 2 (specs 07, 09, 18) found Test lines or §6 rows that claimed more than their tests assert. No one had checked that across all specs. |
 | Tool | [`tools/sweep/`](tools/sweep/sweep.py): `sweep.py` and its two briefs. Run it again before the freeze review ("全規則の確認", handoff §2). |
 
@@ -47,3 +47,30 @@ DeepSeek read the code behind every `none named` condition the sweep added: 91 r
   - UR-3: `sc16` on the wire.
 - **C — stays `none named` (82).** Unreachable by design: a refusal the Kernel already prevents, such as spec 14's missing descriptor or UR-12's source that is not a node. Also forced by types, a process statement, or not worth the cost of a test, such as KC-36's `Release`, which nothing reads.
 
+
+## Second sweep (2026-10-25)
+
+Run at HEAD `2cf6431`, every accepted spec (01–11, 14, 16, 18; 40 chunks, 498 rules), with the same `tools/sweep/` (its extractor fixed in `57aa43d`: a run that reads its own brief leaves the brief's markers in the log).
+
+1. **Sweep.** DeepSeek V4.1 Flash (`opencode-go`, `#max`), 8 in parallel: 281 rules clean, 273 findings (169 silent gaps, 94 overclaims, 6 wrong tests, 4 stale "none named").
+2. **Adversarial check.** DeepSeek, 3 in parallel: 16 chunks on the free tier until its daily limit, 21 on `opencode-go`. 8 findings refuted.
+3. **Sonnet check.** Claude Sonnet 5.5 subagents, one at a time, opened every test for all 265 remaining findings (7 batches of overclaims and wrong tests, 12 of gaps; about 0.7 M and 1.6 M tokens). Overclaims and wrong tests: 67 real, 28 partly, 1 not real. Gaps: 103 none named, 61 a test the line did not name already asserts it, 4 stale, 1 not real. The DeepSeek passes' typical miss was again an unnamed test or a helper that asserts the condition.
+4. **Fixes.** One Sonnet subagent per spec, applying the checked wording to Test lines, tables, Checked-by sentences and one Changes row; `rules.py` after each.
+5. **Review.** Sol 6.1 in four batches (01–04, 05–08, 09–16, 18): 3 FAIL, 1 PASS; 5 major (two "none named" a test does assert, three overclaims left) and 4 minor (a rationale inside a "none named" clause, wording). Fixed by Sonnet; Sol's re-review found two minor left (an overclaim's remainder, one more rationale), fixed by the orchestrator in Sol's wording.
+
+The checked findings, each with its decision and applied wording, are [`32-sweep2.json`](32-sweep2.json).
+
+Cost: about 6 % of the `opencode-go` month for the sweep and part of the check, part of the free tier's day, the Sonnet work above, and five Sol runs. A Gemini 4 Argon review in parallel with Sol was tried through `agy` and dropped: headless mode stops at the first tool without an allow rule, and the model used the usage limit fast.
+
+Things learned:
+- Sonnet checking every finding before the fix is worth its cost: 61 of 165 silent gaps had a test, which a "none named" would have hidden.
+- Applying checked wording is light work (about 60–100 k tokens a spec); a Haiku run with "stop and report at the line-length limit or at a fix that asks for code" may do it.
+- Tell the fixer that a "none named" clause states the condition only; spec 01 and 02 had rationale in parentheses before the brief said so.
+
+Spec text that disagrees with the code, left for the owner (Test lines already say what is pinned):
+- MR-7: the second `prepare`'s quoted reason ("one resource per MockRadio instance") is not the code's ("prepare was already called", `crates/ezsdr-mock-radio/src/lib.rs:2280`).
+- SE-6: MockRadio's jitter stream `<device>/rx` no longer exists; the Mock builds only `<device>/rx/s<k>`.
+- SB-34: a `needs` entry whose every matching node is bound is refused with `NoSingleInstance` (`crates/ezsdr-kernel/src/plan/validation.rs:104`), not `NodeAlreadyBound`.
+- KC-45: `prepare.reports` is a map keyed by fragment, so the Manifest cannot hold "plan order".
+- OV-21 lists four keys while the test Vocabulary declares seven.
+- UR-34: `hw_b1_probe` does not fail on a non-OBX first board, B5 has no fake rehearsal, and B4 prints nothing.
