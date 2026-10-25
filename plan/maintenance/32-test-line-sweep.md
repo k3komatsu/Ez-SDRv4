@@ -67,7 +67,7 @@ Things learned:
 - Applying checked wording is light work (about 60–100 k tokens a spec); a Haiku run with "stop and report at the line-length limit or at a fix that asks for code" may do it.
 - Tell the fixer that a "none named" clause states the condition only; spec 01 and 02 had rationale in parentheses before the brief said so.
 
-Spec text that disagreed with the code; the owner decided each on 2026-10-25: the spec follows the code for MR-7, SE-6, KC-45, OV-21 and UR-34 (amended the same day), and the code follows the spec for SB-34 (a `needs` entry that finds every satisfying node bound is refused with `NodeAlreadyBound`, as a resource is; an implementation step):
+Spec text that disagreed with the code; the owner decided each on 2026-10-25: the spec follows the code for MR-7, SE-6, KC-45, OV-21 and UR-34 (amended the same day), and the code follows the spec for SB-34 (a `needs` entry takes a free satisfying node before a bound shareable one, and one that finds every satisfying node bound by an exclusive binding is refused with `NodeAlreadyBound`, as a resource is; implemented the same day by a Sonnet subagent, rows T46–T48, Sol PASS after one fix round that added the free-first order Sol found missing):
 - MR-7: the second `prepare`'s quoted reason ("one resource per MockRadio instance") is not the code's ("prepare was already called", `crates/ezsdr-mock-radio/src/lib.rs:2280`).
 - SE-6: MockRadio's jitter stream `<device>/rx` no longer exists; the Mock builds only `<device>/rx/s<k>`.
 - SB-34: a `needs` entry whose every matching node is bound is refused with `NoSingleInstance` (`crates/ezsdr-kernel/src/plan/validation.rs:104`), not `NodeAlreadyBound`.

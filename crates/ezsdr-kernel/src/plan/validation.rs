@@ -82,20 +82,43 @@ pub(super) fn validate(
             // resources take two lines when there are two.
             // Only the instances bound to this Spec's resources: an instance handed
             // in under a name no resource binds is never read (SB-22, SB-36).
-            let resolved = inputs
+            let mut matching = inputs
                 .providers
                 .iter()
                 .filter(|(bound, _)| spec.resources.contains_key(*bound))
                 .flat_map(|(_, p)| p.instance().tree.walk_iter())
-                .find(|n| {
-                    n.kind == need.kind
-                        && super::matching::need_satisfied(need, n)
-                        && (n.shareable || !taken.contains_key(&n.id))
-                })
-                .ok_or_else(|| SpecError::NoSingleInstance {
-                    name: need_name.clone(),
-                    constraint: format!("needs {}", need.kind),
-                })?;
+                .filter(|n| n.kind == need.kind && super::matching::need_satisfied(need, n));
+            // A free node first, else the first shareable one already bound (SB-34).
+            let (mut first_taken, mut first_shared, mut free) = (None, None, None);
+            for n in matching.by_ref() {
+                if !taken.contains_key(&n.id) {
+                    free = Some(n);
+                    break;
+                }
+                if n.shareable {
+                    first_shared.get_or_insert(n);
+                }
+                first_taken.get_or_insert(n);
+            }
+            let resolved = free.or(first_shared);
+            let resolved = match (resolved, first_taken) {
+                (Some(n), _) => n,
+                // Every satisfying node is taken and exclusive: refused as a
+                // resource is (SB-34), naming the binder.
+                (None, Some(n)) => {
+                    return Err(SpecError::NodeAlreadyBound {
+                        node: n.id.to_string(),
+                        first: taken[&n.id].clone(),
+                        second: need_name.clone(),
+                    })
+                }
+                (None, None) => {
+                    return Err(SpecError::NoSingleInstance {
+                        name: need_name.clone(),
+                        constraint: format!("needs {}", need.kind),
+                    })
+                }
+            };
             taken.insert(resolved.id.clone(), need_name.clone());
             // SB-36: a need's name is scoped to its resource, so the resolution is
             // filed under both.

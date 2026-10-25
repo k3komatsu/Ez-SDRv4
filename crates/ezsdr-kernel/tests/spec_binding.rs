@@ -1312,6 +1312,136 @@ fn sb_36_needs_resolves_across_instances() {
 }
 
 #[test]
+fn sb_34_a_need_whose_satisfying_nodes_are_bound_is_refused_with_node_already_bound() {
+    // Only `radio`'s two lines have `test.count` 5, and each need takes one of them;
+    // the third need finds both taken by exclusive bindings: refused as a resource
+    // is, naming the first binder of the first such node.
+    let need = |count: i64| SubResourceReq {
+        kind: ns("test.line"),
+        requires: [(
+            key("test.count"),
+            Constraint::Eq {
+                value: Scalar::from(count),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let device = |n: &str, count: i64| {
+        let mut r = resource("test.device", &[]);
+        r.needs.insert(id(n), need(count));
+        r
+    };
+    let fx = Fixture::new();
+    let gpio_x = TestProvider::new("gpio_x", 0);
+    let gpio_y = TestProvider::new("gpio_y", 0);
+    let radio = TestProvider::new("radio", 5);
+    let providers: BTreeMap<Ident, &dyn Provider> = [
+        (id("a"), &gpio_x as &dyn Provider),
+        (id("cap"), &gpio_y as &dyn Provider),
+        (id("peripheral"), &radio as &dyn Provider),
+    ]
+    .into_iter()
+    .collect();
+    let profile = distinct_instances(profile_binding(&["a", "cap", "peripheral"]), &["a", "cap", "peripheral"]);
+    let spec = spec_with(
+        [
+            (id("a"), device("nx", 5)),
+            (id("cap"), device("ny", 5)),
+            (id("peripheral"), device("nz", 5)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("two lines, three needs");
+    let SpecError::NodeAlreadyBound {
+        node,
+        first,
+        second,
+    } = err
+    else {
+        panic!("expected NodeAlreadyBound, got {err:?}")
+    };
+    assert_eq!(node, rid("radio/0").to_string());
+    assert_eq!(first, id("nx"));
+    assert_eq!(second, id("nz"));
+
+    // A need that no node satisfies is still `NoSingleInstance`.
+    let none = spec_with(
+        [
+            (id("a"), device("nx", 99)),
+            (id("cap"), resource("test.device", &[])),
+            (id("peripheral"), resource("test.device", &[])),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let refused = validate(&none, &profile, &fx.inputs(&providers));
+    assert!(
+        matches!(&refused, Err(SpecError::NoSingleInstance { .. })),
+        "{refused:?}"
+    );
+}
+
+/// `n` devices, each with one count-5 need, validated against a radio (the last
+/// device) whose two count-5 lines are shareable.
+fn needs_on_shareable_lines(n: usize) -> Result<ezsdr_kernel::binding::AdmissionResult, SpecError> {
+    let names = ["a", "cap", "peripheral"];
+    let device = |n: &str| {
+        let mut r = resource("test.device", &[]);
+        r.needs.insert(
+            id(n),
+            SubResourceReq {
+                kind: ns("test.line"),
+                requires: [(
+                    key("test.count"),
+                    Constraint::Eq {
+                        value: Scalar::from(5),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        r
+    };
+    let fx = Fixture::new();
+    // The last device is the radio itself; the others are bare Providers.
+    let bare: Vec<TestProvider> = names[..n - 1].iter().map(|b| TestProvider::new(b, 0)).collect();
+    let radio = TestProvider::new("radio", 5).with_shareable_lines();
+    let providers: BTreeMap<Ident, &dyn Provider> = names[..n - 1]
+        .iter()
+        .zip(&bare)
+        .map(|(b, p)| (id(b), p as &dyn Provider))
+        .chain([(id(names[n - 1]), &radio as &dyn Provider)])
+        .collect();
+    let spec = spec_with(
+        names[..n]
+            .iter()
+            .map(|b| (id(b), device(&format!("n_{b}"))))
+            .collect(),
+    );
+    let profile = distinct_instances(profile_binding(&names[..n]), &names[..n]);
+    validate(&spec, &profile, &fx.inputs(&providers))
+}
+
+#[test]
+fn sb_34_needs_share_a_shareable_node_when_more_needs_than_nodes() {
+    // Two shareable lines, three needs: the third shares one rather than failing.
+    let result = needs_on_shareable_lines(3).expect("shareable nodes may be bound twice");
+    assert_eq!(result.needs.len(), 3);
+}
+
+#[test]
+fn sb_34_a_need_takes_a_free_node_before_a_bound_shareable_one() {
+    // radio/0 is bound (shareable) by the first need; the second must take the free
+    // radio/1 although radio/0 comes first in the walk.
+    let result = needs_on_shareable_lines(2).expect("validates");
+    assert_eq!(result.needs[&id("a")][&id("n_a")], rid("radio/0"));
+    assert_eq!(result.needs[&id("cap")][&id("n_cap")], rid("radio/1"));
+}
+
+#[test]
 fn sb_37_matching_follows_binding() {
     // Two bound instances with different capabilities; the matcher uses the bound
     // instance's, not the union.

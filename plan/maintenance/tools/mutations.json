@@ -9698,5 +9698,35 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_17_a_block_s_channels_are_planar_cf32"
+ },
+ {
+  "id": "T46",
+  "name": "SB-34: a need whose satisfying nodes are all bound is refused as NoSingleInstance, not NodeAlreadyBound",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                (None, Some(n)) => {",
+  "new": "                (None, Some(_)) if true => {\n                    return Err(SpecError::NoSingleInstance {\n                        name: need_name.clone(),\n                        constraint: format!(\"needs {}\", need.kind),\n                    })\n                }\n                (None, Some(n)) => {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_34_a_need_whose_satisfying_nodes_are_bound_is_refused_with_node_already_bound"
+ },
+ {
+  "id": "T47",
+  "name": "SB-34: a need takes the first free-or-shareable node, so a bound shareable node beats a later free one",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                if !taken.contains_key(&n.id) {",
+  "new": "                if n.shareable || !taken.contains_key(&n.id) {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_34_a_need_takes_a_free_node_before_a_bound_shareable_one"
+ },
+ {
+  "id": "T48",
+  "name": "SB-34: a need never shares a shareable node",
+  "file": "crates/ezsdr-kernel/src/plan/validation.rs",
+  "old": "                if n.shareable {",
+  "new": "                if false {",
+  "crate": "ezsdr-kernel",
+  "test_bin": "spec_binding",
+  "filter": "sb_34_needs_share_a_shareable_node_when_more_needs_than_nodes"
  }
 ]
