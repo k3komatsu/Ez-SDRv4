@@ -29,7 +29,7 @@
      - [1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) の §9（修正の回 1・2）．
      - [1b-3c の報告](plan/phase8/reviews/1b3c-report.md) §10．
    - **その後**：
-     - 2（D9 の DDC/DUC の release の規則〈設計メモ [39](plan/phase8/39-dsp-timed-commands.md)：実機の probe `hw_d9_p1`〜`p3` を X300 #1＋OBX で流してから規則を決める．owner が大学にいる日〉．#62 は 38a，#59 と A2 は 2026-10-25 に済み〈[reviews/59-opus](plan/phase8/reviews/59-opus.md)，[reviews/a2-opus](plan/phase8/reviews/a2-opus.md)〉）．
+     - 2（D9 の DDC/DUC の release の規則〈設計メモ [39](plan/phase8/39-dsp-timed-commands.md)：実機の probe `hw_d9_p1`〜`p3` を X300 #1＋OBX で流してから規則を決める．owner が大学にいる日〉．#62 は 38a，#59 と A2 は 2026-10-25 に済み〈[reviews/59-opus](plan/phase8/reviews/59-opus.md)，[reviews/a2-opus](plan/phase8/reviews/a2-opus.md)〉，preemption の bound は設計メモ [40](plan/phase8/40-preemption-bound.md) で 2026-10-26 に済み〈[reviews/40-opus](plan/phase8/reviews/40-opus.md)．x3xx の `tx_in_flight_ns` 10 ms は INFERRED で bench で測る〉）．
      - 3（測定記録・比較テスト・測定スイート・ホスト設定の script）．
      - 段階 1 が終わったら，crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
    - **セルフレビュー**：checklist は 4 項目，`timeout 2400`，mutation を流さないと明記する（1b-4d-1a では判定が出ず，1b-4d-1b でこうしたら出た）．OpenCode2・Claude Code・Codex には ponytail が入っている．

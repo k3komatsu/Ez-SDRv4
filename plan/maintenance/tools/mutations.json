@@ -8005,8 +8005,8 @@
    "id": "P509",
    "name": "a transmit cold switch discards its held last sample (UR-23, RM-34)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if device_eob && device_open && !self.core.is_lost() {\n            self.close_device_burst(tail);",
-   "new": "        if device_eob && device_open && !self.core.is_lost() {\n            self.close_device_burst(None);",
+   "old": "            self.close_device_burst(tail);\n            if !self.core.is_lost() {",
+   "new": "            self.close_device_burst(None);\n            if !self.core.is_lost() {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_34_a_transmit_move_ends_the_old_burst_and_sends_the_new_burst_on_its_stream"
@@ -9728,5 +9728,495 @@
   "crate": "ezsdr-kernel",
   "test_bin": "spec_binding",
   "filter": "sb_34_needs_share_a_shareable_node_when_more_needs_than_nodes"
- }
+ },
+ {
+  "id": "P623",
+  "name": "the TX in-flight key has the declared name (RM-4)",
+  "file": "crates/ezsdr-radio/src/lib.rs",
+  "old": "pub const TX_IN_FLIGHT_NS: &str = \"radio.timing.tx_in_flight_ns\";",
+  "new": "pub const TX_IN_FLIGHT_NS: &str = \"radio.timing.tx_in_flight\";",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_04_the_key_table_is_exactly_the_declared_one"
+ } ,
+ {
+  "id": "P624",
+  "name": "the generated envelope declares the TX in-flight value as an integer (RM-20)",
+  "file": "schemas/radio/envelope.v1.json",
+  "old": "        \"tx_in_flight_ns\": {\n          \"description\": \"Maximum time ahead of the device that transmit samples may be handed over (RM-20).\",\n          \"format\": \"int64\",\n          \"type\": \"integer\"\n        },",
+  "new": "        \"tx_in_flight_ns\": {\n          \"description\": \"Maximum time ahead of the device that transmit samples may be handed over (RM-20).\",\n          \"format\": \"int64\",\n          \"type\": \"string\"\n        },",
+  "crate": "ezsdr-radio",
+  "test_bin": "radio_model",
+  "filter": "rm_20_schema_freeze"
+ } ,
+ {
+  "id": "P625",
+  "name": "the x3xx profile publishes a 10 ms TX in-flight window (MR-03, UR-09)",
+  "file": "crates/ezsdr-radio/src/x3xx.rs",
+  "old": "        tx_in_flight_ns: 10_000_000,",
+  "new": "        tx_in_flight_ns: 0,",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_03_profile_values_reach_the_capabilities_and_the_envelope_section"
+ } ,
+ {
+  "id": "P626",
+  "name": "the ideal layout publishes no TX in-flight window (RM-29)",
+  "file": "crates/ezsdr-radio/src/channels.rs",
+  "old": "                    tx_in_flight_ns: 0,",
+  "new": "                    tx_in_flight_ns: 10_000_000,",
+  "crate": "ezsdr-radio",
+  "test_bin": "channels",
+  "filter": "rm_29_the_ideal_layout_builds_its_tree_and_defaults"
+ } ,
+ {
+  "id": "P627",
+  "name": "MockRadio reads the TX in-flight window from its profile (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns)\n            .map_err(|error| ModuleError::rejected(format!(\"MR-17: {error}\")))?;",
+  "new": "        let window = time::ns_to_v(clocks, root, 10_000_000)\n            .map_err(|error| ModuleError::rejected(format!(\"MR-17: {error}\")))?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "mr_25_a_stopped_burst_transmits_every_sample_before_the_stop"
+ } ,
+ {
+  "id": "P628",
+  "name": "uhd-tx takes its open-window bound from the Description (UR-21, D1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);\n",
+  "new": "        let window = self.core.ticks(10_000_000);\n",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_tx_reads_in_flight_window_from_description"
+ } ,
+ {
+  "id": "P629",
+  "name": "MockRadio includes an earlier same-instant receipt in its conservative front (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "    if order < before {",
+   "new": "    if order.saturating_add(1) < before {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_front"
+ } ,
+ {
+  "id": "P630",
+  "name": "MockRadio counts a burst received before the preempting burst (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "    if order < before {",
+   "new": "    if false && order < before {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_front"
+ } ,
+ {
+  "id": "P631",
+  "name": "a burst starting exactly at the hand-over horizon is excluded (RM-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "start < window_end",
+  "new": "start <= window_end",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "lib",
+  "filter": "mr_17_handed_front_reduction_cases"
+ } ,
+ {
+  "id": "P632",
+  "name": "a finite burst stops contributing at its end (RM-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "end.min(window_end)",
+  "new": "end.max(window_end)",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_boundaries"
+ } ,
+ {
+  "id": "P633",
+  "name": "the front reduction chooses the greatest candidate (RM-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "Some(old.max(end))",
+  "new": "Some(old.min(end))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "lib",
+  "filter": "mr_17_handed_front_reduction_cases"
+ } ,
+ {
+  "id": "P634",
+  "name": "a repeat has no finite waveform end for the front (RM-15)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "(!repeat).then_some(start.saturating_add(len))",
+  "new": "Some(start.saturating_add(len))",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_front"
+ } ,
+ {
+  "id": "P635",
+  "name": "a prior held burst contributes to MockRadio's front (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            for held in self.tx[k].held.values() { include(held.order, held.start, held.len, held.repeat); }",
+  "new": "            for held in self.tx[k].held.values().filter(|_| false) { include(held.order, held.start, held.len, held.repeat); }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_boundaries"
+ } ,
+ {
+  "id": "P636",
+  "name": "the shared bound keeps the ordinary device-lead bound when it is later (RM-15)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    front.map_or(current, |front| current.max(front))",
+  "new": "    front.unwrap_or(current)",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_15_later_bound_combines_the_current_and_handed_front"
+ } ,
+ {
+  "id": "P637",
+  "name": "uhd-tx never hands a payload sample at or beyond the strict window edge (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        count = count.min(window_cut - open.next);",
+  "new": "        count = count.min(i64::MAX);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_send_does_not_cross_the_in_flight_window"
+ } ,
+ {
+  "id": "P638",
+  "name": "the strict UHD window rounds up to the first sample at or after its edge (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let window_cut = clock.at_or_after(now.saturating_add(window));",
+  "new": "        let window_cut = (now.saturating_add(window) - clock.origin).div_euclid(clock.n);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_send_does_not_cross_the_in_flight_window"
+  } ,
+  {
+   "id": "P640",
+  "name": "UHD leaves one sample between an EOB with the last payload and its restart (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            let safe_gap = if tail.is_some() { 1 } else { 2 };",
+  "new": "            let safe_gap = if tail.is_some() { 0 } else { 2 };",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
+ } ,
+ {
+  "id": "P641",
+  "name": "an empty Stop EOB needs the gap after its padded zero sample (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "            let safe_gap = if tail.is_some() { 1 } else { 2 };",
+  "new": "            let safe_gap = 1;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
+ } ,
+ {
+  "id": "P642",
+  "name": "Stop retains the UHD cursor as a front for a later burst (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                    self.remember_front(clock.domain, cursor.saturating_add(safe_gap));",
+  "new": "                    let _ = safe_gap;\n                    self.remember_front(clock.domain, cursor);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
+ } ,
+ {
+  "id": "P643",
+  "name": "the finite burst's held last sample is sent only once at continuation (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let sending = if hold { count - 1 } else { count } as usize;",
+  "new": "        let sending = count as usize;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
+ } ,
+ {
+  "id": "P644",
+  "name": "a moved UHD burst keeps its requested target (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                    held.k = bound;\n                    held.open.late = Some(late);\n                    held.open.requested_target = held.open.requested_target.or(Some(held.target));",
+  "new": "                    held.k = bound;\n                    held.open.late = Some(late);\n                    held.open.requested_target = None;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
+ } ,
+ {
+  "id": "P645",
+  "name": "Mock Stop transmits a prior-received burst through its handed front (MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);",
+   "new": "                let handover = false;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "mr_25_stop_hands_a_future_repeat_through_the_in_flight_window"
+ } ,
+ {
+  "id": "P646",
+  "name": "MockRadio does not compare a closed front across SampleClocks (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            let previous = self.tx[k].front.filter(|front| front.domain == clock.domain).map(|front| front.sample);",
+  "new": "            let previous = self.tx[k].front.map(|front| front.sample);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_cold_change_does_not_cross_sample_clocks"
+ } ,
+ {
+  "id": "P647",
+  "name": "uhd-tx does not compare a closed front across SampleClocks (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let front = self.front.filter(|(domain, _)| *domain == clock.domain).map(|(_, sample)| sample);",
+  "new": "        let front = self.front.map(|(_, sample)| sample);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_25_cold_change_does_not_inherit_old_tx_front"
+ } ,
+ {
+  "id": "P648",
+  "name": "a moved x3xx burst still refuses a collision at its held start (MR-16)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "} else if (current && self.tx[k].held.contains_key(&start)) || self.tx[k].later.iter().any(|(later, held)| *later == index && held.start == start) {\n            Some(\"MR-16: a held burst already has this start\")",
+  "new": "} else if self.tx[k].later.iter().any(|(later, held)| *later == index && held.start == start) {\n            Some(\"MR-16: a held burst already has this start\")",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_moved_start_overlap_still_refuses"
+ } ,
+ {
+  "id": "P649",
+  "name": "Mock reports late_by from the requested target to its moved start (MR-17)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "    let late_by = late_by(front - target)?;",
+  "new": "    let late_by = late_by(front - current)?;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_front"
+ } ,
+ {
+  "id": "P650",
+  "name": "UHD reports the full late duration to its hand-over bound (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "Duration::new(clock.domain, ticks)",
+  "new": "Duration::new(clock.domain, ticks.saturating_sub(1))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
+ } ,
+ {
+  "id": "P651",
+  "name": "Mock preserves the original target after a send_asap move (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                requested = requested.or(Some(at.time_point));",
+  "new": "                requested = None;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_x3xx_tx_preemption_front"
+ } ,
+ {
+  "id": "P652",
+  "name": "Mock keeps its handed front after Stop (MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                    self.remember_tx_front(k, domain, cut.saturating_add(2));",
+  "new": "                    let _ = (k, domain, cut);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_stop_preserves_front_until_expiry"
+ } ,
+ {
+  "id": "P653",
+  "name": "a stream's front includes no other stream's held burst (MR-17)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            for held in self.tx[k].held.values() { include(held.order, held.start, held.len, held.repeat); }",
+  "new": "            for held in self.tx[0].held.values() { include(held.order, held.start, held.len, held.repeat); }",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_17_tx_front_is_per_stream"
+ } ,
+ {
+  "id": "P654",
+  "name": "a cold change cuts at its instant, not its Stop hand-over horizon (MR-32)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);",
+  "new": "                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop | ezsdr_radio::CancelReason::ColdChange);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "mr_32_x3xx_cold_change_cuts_at_its_instant"
+ } ,
+ {
+  "id": "P655",
+  "name": "device loss cuts at its instant, not its Stop hand-over horizon (MR-20)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);",
+  "new": "                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop | ezsdr_radio::CancelReason::Loss);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_radio",
+  "filter": "mr_20_x3xx_loss_cuts_transmit_at_its_instant"
+ } ,
+ {
+  "id": "P656",
+  "name": "the held payload tail keeps a continuation in the same device burst (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        let device_eob = eob && !ends_at_held && !hold;",
+  "new": "        let device_eob = eob && !ends_at_held;",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
+  },
+ {
+  "id": "P657",
+  "name": "an abandoned send keeps two safe samples after its accepted cursor (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                    self.remember_front(clock.domain, cursor.saturating_add(2));",
+  "new": "                    self.remember_front(clock.domain, cursor.saturating_add(1));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
+ },
+ {
+  "id": "P658",
+  "name": "uhd-tx applies a closed front at first dispatch (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "held.policy, held.k, current, front, |ticks| self.front_late_by(clock, ticks),",
+  "new": "held.policy, held.k, current, None, |ticks| self.front_late_by(clock, ticks),",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
+ },
+ {
+  "id": "P659",
+  "name": "cold change and device loss do not preserve a Stop hand-over front (MR-25)",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                if handover {",
+   "new": "                if true {",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "lib",
+  "filter": "cold_change_and_loss_do_not_remember_a_stop_front"
+ },
+ {
+  "id": "P660",
+  "name": "a late move past the cursor closes the prior device burst (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "        if held.k == next && (self.continues_at.is_some() || self.open.as_ref().is_some_and(|open| !open.first)) {",
+  "new": "        if held.k != next && (self.continues_at.is_some() || self.open.as_ref().is_some_and(|open| !open.first)) {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_late_move_past_the_cursor_closes_before_a_held_burst"
+ },
+ {
+  "id": "P662",
+   "name": "a repeated Mock Stop keeps the earlier payload cut (MR-25)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "                    let previous = self.tx[k].stop_cut.filter(|front| front.domain == domain).map(|front| front.sample);",
+   "new": "                    let previous = None;",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_channel",
+  "filter": "mr_25_repeated_stop_preserves_handed_samples"
+ },
+ {
+  "id": "P663",
+  "name": "a short send advances recovery by the samples accepted (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                return self.abandon(was_open || sent > 0, sent);",
+  "new": "                return self.abandon(was_open || sent > 0, 0);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
+ },
+ {
+  "id": "P664",
+  "name": "a failed send conservatively advances recovery by the attempted samples (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                return self.abandon(true, sending);",
+  "new": "                return self.abandon(true, 0);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
+ },
+ {
+  "id": "P665",
+  "name": "continuation recovery does not double-count the held tail (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "open.next.saturating_add(handed)",
+  "new": "open.next.saturating_add(handed.saturating_add(1))",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_a_continuation_tail_is_counted_at_recovery"
+ },
+ {
+  "id": "P666",
+  "name": "a failed continuation-tail send does not advance past B's cursor (UR-23)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+  "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 0);\n                    }",
+  "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 1);\n                    }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_23_a_continuation_tail_is_counted_at_recovery"
+ },
+ {
+  "id": "P667",
+  "name": "a moved send_asap burst is not reported late twice (UR-21)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if held.open.late.is_none() {\n            self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);\n        }",
+   "new": "        self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_21_a_send_asap_move_is_reported_once_across_handovers"
+ },
+  {
+   "id": "P669",
+   "name": "a preemption front maps DropAndFlag to Drop (RM-15)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        LatePolicy::DropAndFlag => LateOutcome::Drop { late_by },",
+   "new": "        LatePolicy::DropAndFlag => LateOutcome::SendAsap { late_by },",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_15_preemption_front_applies_each_late_policy"
+  },
+   {
+    "id": "P670",
+    "name": "Mock Stop does not add the restart margin to its payload cut (MR-25)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "                    let cut = timeline::later_bound(at_stop, merge_front(payload, previous));",
+    "new": "                    let cut = timeline::later_bound(at_stop, merge_front(payload.map(|sample| sample.saturating_add(2)), previous));",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_25_stop_does_not_radiate_unhanded_window_edge_payload"
+   },
+  {
+   "id": "P671",
+   "name": "preemption does not repeat a reported SendAsap error (UR-21)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "                    reservations.insert((held.domain, bound));\n                    drop(reservations);\n                    self.report_send_asap(&held, late_by);",
+   "new": "                    reservations.insert((held.domain, bound));\n                    drop(reservations);\n                    self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_21_a_preempted_send_asap_move_keeps_one_error_and_its_requested_target"
+   },
+   {
+    "id": "P672",
+    "name": "Mock in-flight frontier keeps two samples after handed payload (MR-17, +1 mutant)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "merge_front(previous, handed.map(|sample| sample.saturating_add(2)))",
+    "new": "merge_front(previous, handed.map(|sample| sample.saturating_add(1)))",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_17_x3xx_tx_preemption_boundaries"
+   },
+   {
+    "id": "P673",
+    "name": "Mock in-flight frontier keeps two samples after handed payload (MR-17, +0 mutant)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "merge_front(previous, handed.map(|sample| sample.saturating_add(2)))",
+    "new": "merge_front(previous, handed)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_17_x3xx_tx_preemption_boundaries"
+   },
+   {
+    "id": "P674",
+    "name": "Mock Stop retains the cut plus two samples for later bookings (MR-25)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "                    self.remember_tx_front(k, domain, cut.saturating_add(2));",
+    "new": "                    self.remember_tx_front(k, domain, cut.saturating_add(1));",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_17_stop_preserves_front_until_expiry"
+  }
 ]

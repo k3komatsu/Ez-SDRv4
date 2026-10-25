@@ -231,6 +231,10 @@ struct TxStream {
     held: BTreeMap<i64, HeldBurst>,
     /// The burst being transmitted (MR-15).
     open: Option<OpenBurst>,
+    /// The uniform safe-start frontier on this transmit clock (MR-17).
+    front: Option<TxFront>,
+    /// The payload cut made by the last Stop on this SampleClock (MR-25).
+    stop_cut: Option<TxFront>,
     /// The instance-wide transmitter, read by logical channel and clock segment (MR-32).
     plan: Option<std::sync::Arc<channel::TxShared>>,
     /// The last segment whose untimed tunes were taken, by its origin and arrival order (MR-34).
@@ -250,6 +254,8 @@ impl TxStream {
             device: DeviceModel::new(),
             held: BTreeMap::new(),
             open: None,
+            front: None,
+            stop_cut: None,
             plan: None,
             tuned: None,
         }
@@ -291,6 +297,12 @@ struct HeldBurst {
     order: u64,
 }
 
+#[derive(Clone, Copy)]
+struct TxFront {
+    domain: ClockDomainId,
+    sample: i64,
+}
+
 struct OpenBurst {
     start: i64,
     len: i64,
@@ -298,6 +310,24 @@ struct OpenBurst {
     next: i64,
     first: bool,
     open: BurstOpen,
+    order: u64,
+}
+
+/// RM-15: an earlier-received burst contributes only when it starts before the hand-over
+/// horizon; a finite burst contributes no later than its exclusive end.
+fn handed_end(start: i64, end: Option<i64>, window_end: i64) -> Option<i64> {
+    (start < window_end).then(|| end.map_or(window_end, |end| end.min(window_end)))
+}
+
+fn handed_end_before(order: u64, before: u64, start: i64, end: Option<i64>, window_end: i64) -> Option<i64> {
+    if order < before { handed_end(start, end, window_end) } else { None }
+}
+
+fn merge_front(front: Option<i64>, candidate: Option<i64>) -> Option<i64> {
+    match (front, candidate) {
+        (Some(old), Some(end)) => Some(old.max(end)),
+        (old, end) => old.or(end),
+    }
 }
 
 struct PendingUpdate {
@@ -948,7 +978,7 @@ impl MockRadio {
             if self.tx[k].open.is_some() { break; }
             let Some(start) = self.tx[k].held.keys().next().copied().filter(|start| *start < cut) else { break };
             let held = self.tx[k].held.remove(&start).expect("the first held burst");
-            self.tx[k].open = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open });
+            self.tx[k].open = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open, order: held.order });
         }
         Ok(())
     }
@@ -1140,10 +1170,29 @@ impl MockRadio {
     }
 
     fn stop_tx(&mut self, k: usize, now: i64, reason: &str, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
-        if let Some((ratio, origin)) = self.tx_now(k).map(|clock| (clock.handle.root_ticks_per_tick(), clock.origin)) {
-            if let Some(cut) = time::k_at_or_after(origin, ratio, now) {
-                self.transmit_until_cut(k, now, cut)?;
+        if let (Some(index), Some(clock)) = (self.tx[k].cur, self.tx_now(k)) {
+            let (ratio, origin, domain) = (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain);
+            if let Some(at_stop) = time::k_at_or_after(origin, ratio, now) {
+                // MR-25's payload cut and MR-17's later-booking margin stay separate.
+                let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);
+                let (until, cut) = if handover {
+                    let clocks = self.clocks.as_ref().expect("prepared clocks");
+                    let window = time::ns_to_v(clocks, self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns)
+                        .map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?;
+                    let horizon = now.checked_add(window).ok_or_else(|| ModuleError::rejected("MR-25: hand-over horizon overflow"))?;
+                    let (payload, _) = self.tx_handed_front(k, index, now, self.next_order)?;
+                    let previous = self.tx[k].stop_cut.filter(|front| front.domain == domain).map(|front| front.sample);
+                    let cut = timeline::later_bound(at_stop, merge_front(payload, previous));
+                    (horizon, cut)
+                } else {
+                    (now, at_stop)
+                };
+                self.transmit_until_cut(k, until, cut)?;
                 self.cut_segments(k, cut);
+                if handover {
+                    self.tx[k].stop_cut = Some(TxFront { domain, sample: cut });
+                    self.remember_tx_front(k, domain, cut.saturating_add(2));
+                }
             }
         }
         let tracked = self.tx[k].tracker.as_mut().and_then(BurstTracker::stop);
@@ -1323,6 +1372,45 @@ impl MockRadio {
     /// The cut of transmit stream `k`'s current clock, from the plan (RM-25).
     fn tx_cut(&self, k: usize) -> Option<i64> {
         self.lines.line(Self::tx_key(k))?.plan.get(self.tx[k].cur?)?.cut
+    }
+
+    /// RM-15: the handed payload end and uniform safe-start front for `index`.
+    fn tx_handed_front(&self, k: usize, index: usize, now: i64, before: u64) -> Result<(Option<i64>, Option<i64>), ModuleError> {
+        let clock = &self.tx[k].clocks[index];
+        let root = self.root.expect("prepared root");
+        let clocks = self.clocks.as_ref().expect("prepared clocks");
+        let window = time::ns_to_v(clocks, root, self.profile.timing().tx_in_flight_ns)
+            .map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+        let horizon = now.checked_add(window).ok_or_else(|| ModuleError::rejected("MR-17: hand-over horizon overflow"))?;
+        let window_end = time::k_at_or_after(clock.origin, clock.handle.root_ticks_per_tick(), horizon)
+            .ok_or_else(|| ModuleError::rejected("MR-17: hand-over sample overflow"))?;
+        let mut payload = None;
+        let mut handed = None;
+        let mut include = |order: u64, start: i64, len: i64, repeat: bool| {
+            let end = (!repeat).then_some(start.saturating_add(len));
+            let candidate = handed_end_before(order, before, start, end, window_end);
+            payload = merge_front(payload, candidate);
+            handed = merge_front(handed, candidate);
+        };
+        if self.tx[k].cur == Some(index) {
+            if let Some(open) = self.tx[k].open.as_ref() { include(open.order, open.start, open.len, open.repeat); }
+            for held in self.tx[k].held.values() { include(held.order, held.start, held.len, held.repeat); }
+        }
+        for (later, held) in &self.tx[k].later {
+            if *later == index { include(held.order, held.start, held.len, held.repeat); }
+        }
+        let front = if self.profile.timing().tx_in_flight_ns == 0 {
+            None
+        } else {
+            let previous = self.tx[k].front.filter(|front| front.domain == clock.domain).map(|front| front.sample);
+            merge_front(previous, handed.map(|sample| sample.saturating_add(2)))
+        };
+        Ok((payload, front))
+    }
+
+    fn remember_tx_front(&mut self, k: usize, domain: ClockDomainId, sample: i64) {
+        let sample = self.tx[k].front.filter(|front| front.domain == domain).map_or(sample, |front| front.sample.max(sample));
+        self.tx[k].front = Some(TxFront { domain, sample });
     }
 
     /// RM-25, VH-2: a transmit clock of stream `k` is registered, and its predecessor ended,
@@ -1598,20 +1686,29 @@ impl MockRadio {
             ezsdr_kernel::time::Converted::Exact { point } => point,
             ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.checked_add(Duration::new(tx_domain, 1)).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?,
         };
-        let policy = late_policy.decide(
+        let target = at.time_point.ticks_in(tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+        let ordinary = decided.checked_add(lead).and_then(|earliest| time::k_at_or_after(origin, ratio, earliest))
+            .ok_or_else(|| ModuleError::rejected("MR-17: ordinary start bound overflow"))?;
+        let (_, front) = self.tx_handed_front(k, index, now, self.next_order)?;
+        let bound = timeline::later_bound(ordinary, front);
+        let mut policy = late_policy.decide(
             clocks,
             at.time_point,
             decided_tx,
             Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns),
         ).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
-        let mut start = at.time_point.ticks_in(tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
+        if let Some(outcome) = timeline::late_policy_front_outcome(late_policy, target, ordinary, front, |ticks| {
+            time::to_ns(clocks, Duration::new(tx_domain, ticks)).map(|ns| Duration::new(ClockDomainId::HOST_MONOTONIC, ns))
+        }).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))? {
+            policy = outcome;
+        }
+        let mut start = target;
         let mut requested = requested_at.map(|deadline| deadline.time_point);
         let mut send_asap_late_by = None;
         match policy {
             LateOutcome::OnTime {} => {}
             LateOutcome::SendAsap { late_by } => {
-                let earliest = decided.checked_add(lead).ok_or_else(|| ModuleError::rejected("MR-17: asap instant overflow"))?;
-                start = time::k_at_or_after(origin, ratio, earliest).ok_or_else(|| ModuleError::rejected("MR-17: asap sample overflow"))?;
+                start = bound;
                 requested = requested.or(Some(at.time_point));
                 send_asap_late_by = Some(late_by);
             }
@@ -1763,6 +1860,9 @@ impl MockRadio {
             self.add_stat("tx_blocks", 1);
             progressed = true;
             if ends {
+                if let Some(domain) = self.tx_now(k).map(|clock| clock.domain) {
+                    self.remember_tx_front(k, domain, stop.saturating_add(2));
+                }
                 self.tx[k].open = None;
                 self.tx[k].device.close();
             } else if let Some(open) = self.tx[k].open.as_mut() {
@@ -2187,6 +2287,7 @@ impl MockRadio {
                             next: held.start,
                             first: true,
                             open: held.open,
+                            order: held.order,
                         });
                     }
                 }
@@ -2723,6 +2824,35 @@ mod cancellation_tests {
     }
 
     #[test]
+    fn mr_17_held_cut_continuation_keeps_the_uniform_front() {
+        let (mut radio, _, _) = radio_with_reservations();
+        let clock = &radio.tx[0].clocks[0];
+        let until = time::v_of(clock.origin, clock.handle.root_ticks_per_tick(), 30).unwrap();
+        radio.tx[0].held.clear();
+        radio.tx[0].held.insert(30, held(30));
+        radio.tx[0].open = Some(OpenBurst {
+            start: 20, len: 100, repeat: true, next: 20, first: true, open: BurstOpen::default(), order: 1,
+        });
+
+        radio.emit_tx_until(0, until, None).unwrap();
+
+        assert!(radio.tx[0].open.is_none(), "the burst ended at the adjacent held continuation");
+        assert_eq!(radio.tx[0].front.map(|front| front.sample), Some(32), "every handed end keeps the same two-sample margin");
+    }
+
+    #[test]
+    fn cold_change_and_loss_do_not_remember_a_stop_front() {
+        for reason in [ezsdr_radio::CancelReason::ColdChange, ezsdr_radio::CancelReason::Loss] {
+            let (mut radio, _, _) = radio_with_reservations();
+            radio.tx[0].open = Some(OpenBurst {
+                start: 20, len: 1, repeat: true, next: 25, first: false, open: BurstOpen::default(), order: 1,
+            });
+            radio.stop_tx(0, 0, "test termination", reason).unwrap();
+            assert!(radio.tx[0].front.is_none(), "{reason:?} must cut at its instant");
+        }
+    }
+
+    #[test]
     fn a_cold_change_skipping_a_future_clock_releases_its_reservation() {
         let (mut radio, shared, events) = radio_with_reservations();
         radio.tx[0].held.clear();
@@ -2738,5 +2868,32 @@ mod cancellation_tests {
             .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
         assert_eq!(rejected.len(), 1, "{rejected:?}");
         assert_eq!(rejected[0].payload["reason"], "MR-18: cancelled by a cold change");
+    }
+}
+
+#[cfg(test)]
+mod preemption_tests {
+    use super::{handed_end, handed_end_before, merge_front};
+
+    #[test]
+    fn mr_17_handed_front_reduction_cases() {
+        for (start, end, window, expected) in [
+            (11, None, 10, None),
+            (10, None, 10, None),
+            (9, None, 10, Some(10)),
+            (4, Some(6), 10, Some(6)),
+            (4, Some(12), 10, Some(10)),
+        ] {
+            assert_eq!(handed_end(start, end, window), expected, "{start} {end:?} {window}");
+        }
+        assert_eq!(handed_end(9, Some(10), 20), Some(10));
+        assert_eq!(Some(10_i64).map(|sample| sample.saturating_add(2)), Some(12), "the uniform restart margin is two samples");
+        let front = [(2, Some(9)), (4, None), (10, Some(20))]
+            .into_iter()
+            .fold(None, |front, (start, end)| merge_front(front, handed_end(start, end, 10)));
+        assert_eq!(front, Some(10));
+        assert_eq!(handed_end_before(4, 5, 9, None, 10), Some(10), "an earlier same-instant receipt counts");
+        assert_eq!(handed_end_before(5, 5, 9, None, 10), None, "the current receipt is excluded");
+        assert_eq!(handed_end_before(6, 5, 9, None, 10), None, "a later receipt is excluded");
     }
 }

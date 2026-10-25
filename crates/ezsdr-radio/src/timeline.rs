@@ -11,8 +11,8 @@
 //! the moving channel, not only the cut the move's own item makes, so that a segment a `Stop`,
 //! a loss or a refusal ended later in the source's clock still floors the destination.
 
-use ezsdr_kernel::stream::Direction;
-use ezsdr_kernel::time::{Rational, TimeError};
+use ezsdr_kernel::stream::{Direction, LateOutcome, LatePolicy};
+use ezsdr_kernel::time::{Duration, Rational, TimeError};
 
 /// The Kernel's `ChannelMask` limit: a logical channel number is 0…63, one bit each (S1).
 const CHANNEL_LIMIT: u32 = 64;
@@ -812,6 +812,28 @@ fn config_at(line: &Line, e: i64) -> Config {
 /// never starts before the origin and one that would is late.
 pub fn decided_at(now: i64, origin: i64, lead: i64) -> i64 {
     now.max(origin.saturating_sub(lead))
+}
+
+/// RM-15: the later of the ordinary start bound and an optional same-clock hand-over front.
+pub fn later_bound(current: i64, front: Option<i64>) -> i64 {
+    front.map_or(current, |front| current.max(front))
+}
+
+/// RM-15: applies a burst's late policy when a later handed front passes its target.
+pub fn late_policy_front_outcome<E>(
+    policy: LatePolicy,
+    target: i64,
+    current: i64,
+    front: Option<i64>,
+    late_by: impl FnOnce(i64) -> Result<Duration, E>,
+) -> Result<Option<LateOutcome>, E> {
+    let Some(front) = front.filter(|front| *front > current && target < *front) else { return Ok(None) };
+    let late_by = late_by(front - target)?;
+    Ok(Some(match policy {
+        LatePolicy::RejectAtPlan => LateOutcome::PlanViolation { late_by },
+        LatePolicy::SendAsapAndFlag => LateOutcome::SendAsap { late_by },
+        LatePolicy::DropAndFlag => LateOutcome::Drop { late_by },
+    }))
 }
 
 /// RM-4, RM-25: a stream's start lead in nanoseconds, from the TimingEnvelope of its own

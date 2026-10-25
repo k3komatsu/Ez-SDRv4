@@ -453,6 +453,7 @@ fn rm_29_the_ideal_layout_builds_its_tree_and_defaults() {
     assert_eq!(description.timing.command_queue_depth, i64::from(u32::MAX));
     assert_eq!(description.timing.rx_start_lead_ns, 0);
     assert_eq!(description.timing.tx_start_lead_ns, 0);
+    assert_eq!(description.timing.tx_in_flight_ns, 0);
     assert_eq!(description.performance.rx_bytes_per_s, 1_i64 << 62);
     assert_eq!(description.performance.tx_bytes_per_s, 1_i64 << 62);
     assert_eq!(description.performance.wire_bytes_per_sample, 8);

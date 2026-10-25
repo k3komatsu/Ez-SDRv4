@@ -80,6 +80,11 @@
           "format": "int64",
           "type": "integer"
         },
+        "tx_in_flight_ns": {
+          "description": "Maximum time ahead of the device that transmit samples may be handed over (RM-20).",
+          "format": "int64",
+          "type": "integer"
+        },
         "tx_start_lead_ns": {
           "description": "The same for a transmit stream (RM-20, RM-25).",
           "format": "int64",
@@ -93,7 +98,8 @@
         "release_window_ns",
         "overflow_restart_gap_ns",
         "rx_start_lead_ns",
-        "tx_start_lead_ns"
+        "tx_start_lead_ns",
+        "tx_in_flight_ns"
       ],
       "type": "object"
     },

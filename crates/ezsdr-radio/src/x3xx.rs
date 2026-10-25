@@ -399,6 +399,7 @@ pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
         overflow_restart_gap_ns: 50_000_000,
         rx_start_lead_ns: 50_000_000,
         tx_start_lead_ns: 50_000_000,
+        tx_in_flight_ns: 10_000_000,
     }
 }
 

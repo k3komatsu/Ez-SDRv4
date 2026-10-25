@@ -7,11 +7,10 @@ use ezsdr_radio::x3xx::{self, ProviderTerms};
 /// The X310's master clock the profile needs (UR-5).
 pub const MASTER_CLOCK_HZ: u64 = x3xx::MASTER_CLOCK_HZ;
 /// The lead the device needs from receipt (§3, INFERRED; B8).
+/// The profile's in-flight window must cover this lead for uhd-tx to dispatch a burst.
 pub const DEVICE_LEAD_NS: i64 = 2_000_000;
 /// The delivery allowance: the poll period plus booking the Actions ahead (UR-14).
 pub const DELIVERY_ALLOWANCE_NS: i64 = 3_000_000;
-/// The most samples handed to the device ahead of its time (UR-23, INFERRED; B8).
-pub const IN_FLIGHT_WINDOW_NS: i64 = 10_000_000;
 /// The default samples per receive block (UR-5, UR-9).
 pub const DEFAULT_BLOCK_LEN: u32 = 2_000;
 
@@ -29,4 +28,14 @@ pub fn terms() -> ProviderTerms {
 /// The profile this Module's binding must name (UR-9, design 33 D5).
 pub fn profile_ref() -> ProfileRef {
     x3xx::profile_ref()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{terms, DEVICE_LEAD_NS};
+
+    #[test]
+    fn tx_in_flight_window_covers_device_lead() {
+        assert!(ezsdr_radio::x3xx::timing(&terms()).tx_in_flight_ns >= DEVICE_LEAD_NS);
+    }
 }

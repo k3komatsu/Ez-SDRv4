@@ -66,6 +66,8 @@ pub mod keys {
     pub const RX_START_LEAD_NS: &str = "radio.timing.rx_start_lead_ns";
     /// The same for a transmit stream (RM-4, RM-25).
     pub const TX_START_LEAD_NS: &str = "radio.timing.tx_start_lead_ns";
+    /// Maximum time ahead of the device that transmit samples may be handed over (RM-4, RM-15).
+    pub const TX_IN_FLIGHT_NS: &str = "radio.timing.tx_in_flight_ns";
     /// Receive throughput limit in bytes per second (RM-4).
     pub const RX_BYTES_PER_S: &str = "radio.perf.rx_bytes_per_s";
     /// Transmit throughput limit in bytes per second (RM-4).
@@ -219,6 +221,7 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
         key_decl(keys::RX_START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::TX_START_LEAD_NS, Int, false, Reject, None),
+        key_decl(keys::TX_IN_FLIGHT_NS, Int, false, Reject, None),
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
@@ -730,6 +733,8 @@ pub struct TimingEnvelope {
     pub rx_start_lead_ns: i64,
     /// The same for a transmit stream (RM-20, RM-25).
     pub tx_start_lead_ns: i64,
+    /// Maximum time ahead of the device that transmit samples may be handed over (RM-20).
+    pub tx_in_flight_ns: i64,
 }
 
 /// Throughput values recorded in a radio Provider's Manifest (RM-20).

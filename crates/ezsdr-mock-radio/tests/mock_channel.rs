@@ -641,6 +641,171 @@ fn mr_25_a_stopped_burst_transmits_every_sample_before_the_stop() {
 }
 
 #[test]
+fn mr_25_stop_hands_a_future_repeat_through_the_in_flight_window() {
+    let t0 = 2_000_000_000;
+    let world = World::new(loopback(None));
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    let samples = vec![(0.5, 0.0); 2_000];
+    let waveform = world.waveform(&samples);
+    radio.push(burst(&radio, &world, waveform, 2_004_000, true));
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    step(&world, &mut [&mut radio], t0);
+    let records: Vec<BurstRecord> = serde_json::from_value(radio.section("bursts")).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!((records[0].samples, records[0].end), (6_000, BurstEnd::Stop));
+
+    step(&world, &mut [&mut radio], t0 + 12_001_000);
+    let received = radio.received(0);
+    let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im))
+        .unwrap_or_else(|| panic!("no loopback sample {k}; range={:?}..{:?}; bursts={:?}", received.first(), received.last(), radio.section("bursts")));
+    let first = sample(4_045);
+    let last = sample(10_044);
+    assert!((f32::hypot(first.0, first.1) - 0.5).abs() < 1e-6, "the future burst radiates: {first:?}");
+    assert!((f32::hypot(last.0, last.1) - 0.5).abs() < 1e-6, "the last sample through Stop's handed frontier radiates: {last:?}");
+    assert_eq!(sample(10_045), (0.0, 0.0), "radiation ends at the delayed cut");
+}
+
+#[test]
+fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
+    let t0 = 2_000_000_000;
+    let world = World::new(loopback(None));
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    let domain = radio.tx_domain(&world);
+    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_000, false));
+    radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0)]), 2_009_999, false));
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    step(&world, &mut [&mut radio], t0);
+
+    let initial_records = records(&radio);
+    assert_eq!(initial_records.len(), 1, "only the one-sample A was handed over: {initial_records:?}");
+    assert_eq!((initial_records[0].target, initial_records[0].samples), (TimePoint::new(domain, 2_009_999), 1));
+    let rejected = radio.section("rejected");
+    assert_eq!(rejected.as_array().unwrap().len(), 1, "B at the window edge was cancelled");
+    assert!(rejected[0]["reason"].as_str().unwrap().contains("cancelled by stop"), "{rejected:?}");
+
+    let mut c = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_001, false);
+    if let Action::TxBurst { late_policy, .. } = &mut c { *late_policy = LatePolicy::DropAndFlag; }
+    radio.push(c);
+    step(&world, &mut [&mut radio], t0);
+    let errors: Vec<_> = radio.drain_events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+    assert_eq!(errors.len(), 1, "C at H+1 is late: {errors:?}");
+    assert_eq!((errors[0].payload["outcome"].as_str(), errors[0].payload["late_by_ns"].as_i64()), (Some("drop"), Some(1_000)));
+
+    let mut c = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_002, false);
+    if let Action::TxBurst { late_policy, .. } = &mut c { *late_policy = LatePolicy::DropAndFlag; }
+    radio.push(c);
+    step(&world, &mut [&mut radio], t0);
+    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "C at H+2 is on time");
+
+    step(&world, &mut [&mut radio], t0 + 12_006_001);
+    let final_records = records(&radio);
+    assert_eq!(final_records.len(), 2, "only A and on-time C have records: {final_records:?}");
+    assert_eq!((final_records[1].target, final_records[1].samples), (TimePoint::new(domain, 2_010_002), 1));
+    let received = radio.received(0);
+    let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im)).unwrap_or((0.0, 0.0));
+    let handed = sample(10_044);
+    assert!((f32::hypot(handed.0, handed.1) - 0.5).abs() < 1e-6, "A's payload through its exclusive end is radiated: {handed:?}");
+    assert_eq!(sample(10_045), (0.0, 0.0), "the safe restart gap is not payload handed at Stop");
+    assert_eq!(sample(10_046), (0.0, 0.0), "late C at H+1 was dropped");
+    let c_sample = sample(10_047);
+    assert!((f32::hypot(c_sample.0, c_sample.1) - 0.5).abs() < 1e-6, "on-time C at H+2 radiates: {c_sample:?}");
+    assert_eq!(sample(10_048), (0.0, 0.0), "radiation ends after C");
+}
+
+#[test]
+fn mr_17_a_one_sample_burst_uses_the_safe_sample() {
+    let t0 = 2_000_000_000;
+    for (target, expect_late, late_by) in [(2_004_001, true, 2_000), (2_004_002, true, 1_000), (2_004_003, false, 0)] {
+        let case = format!("B at sample {target}");
+        let world = World::new(loopback(None));
+        let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+        radio.mock.arm().unwrap();
+        radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+        let domain = radio.tx_domain(&world);
+        let a = world.waveform(&[(0.5, 0.0)]);
+        let b = world.waveform(&[(0.0, 0.5)]);
+        let mut a = burst(&radio, &world, a, 2_004_000, false);
+        let mut b = burst(&radio, &world, b, target, false);
+        if let Action::TxBurst { late_policy, .. } = &mut a { *late_policy = LatePolicy::DropAndFlag; }
+        if let Action::TxBurst { late_policy, .. } = &mut b { *late_policy = LatePolicy::DropAndFlag; }
+        radio.push(a);
+        radio.push(b);
+        step(&world, &mut [&mut radio], t0);
+
+        let errors: Vec<_> = radio.drain_events().into_iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        if expect_late {
+            assert_eq!(errors.len(), 1, "{case}: {errors:?}");
+            assert_eq!(errors[0].payload["outcome"], "drop", "{case}");
+            assert_eq!(errors[0].payload["late_by_ns"], late_by, "{case}");
+            assert_eq!(errors[0].payload["target"]["ticks"], target, "{case}");
+        } else {
+            assert!(errors.is_empty(), "{case}: {errors:?}");
+        }
+
+        step(&world, &mut [&mut radio], t0 + 6_100_001);
+        let records = records(&radio);
+        assert_eq!(records.len(), if expect_late { 1 } else { 2 }, "{case}: {records:?}");
+        assert_eq!(records[0].target, TimePoint::new(domain, 2_004_000));
+        assert_eq!(records[0].samples, 1);
+        if !expect_late {
+            assert_eq!(records[1].target, TimePoint::new(domain, target), "{case}: actual B start");
+            assert_eq!(records[1].samples, 1);
+        }
+        let received = radio.received(0);
+        let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im))
+            .unwrap_or((0.0, 0.0));
+        assert!((f32::hypot(sample(4_045).0, sample(4_045).1) - 0.5).abs() < 1e-6, "{case}: A's sample; records={records:?}");
+        let b_sample = sample(target - 2_004_000 + 4_045);
+        if expect_late {
+            assert_eq!(b_sample, (0.0, 0.0), "{case}: dropped B radiated");
+        } else {
+            assert!((f32::hypot(b_sample.0, b_sample.1) - 0.5).abs() < 1e-6, "{case}: B's actual loopback start {b_sample:?}");
+        }
+    }
+}
+
+#[test]
+fn mr_25_repeated_stop_preserves_handed_samples() {
+    let t0 = 2_000_000_000;
+    for (running, second_delay) in [(false, 0), (false, 1_000_000), (true, 0), (true, 1_000_000)] {
+        let case = format!("running={running}, second Stop +{second_delay} ns");
+        let world = World::new(loopback(None));
+        let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+        radio.mock.arm().unwrap();
+        radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+        let start = if running { 2_002_000 } else { 2_004_000 };
+        let handover = if running { 2_014_000 } else { 2_010_000 };
+        let waveform = world.waveform(&vec![(0.5, 0.0); 2_000]);
+        radio.push(burst(&radio, &world, waveform, start, true));
+        step(&world, &mut [&mut radio], t0);
+        let first_stop_at = if running { t0 + 4_000_000 } else { t0 };
+        if running { step(&world, &mut [&mut radio], first_stop_at); }
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+        step(&world, &mut [&mut radio], first_stop_at);
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+        step(&world, &mut [&mut radio], first_stop_at + second_delay);
+
+        let records = records(&radio);
+        assert_eq!(records.len(), 1, "{case}: {records:?}");
+        assert_eq!((records[0].samples, records[0].end), ((handover - start) as u64, BurstEnd::Stop), "{case}");
+        step(&world, &mut [&mut radio], t0 + 20_001_000);
+        let received = radio.received(0);
+        let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im))
+            .unwrap_or((0.0, 0.0));
+        for k in [start - 2_000_000 + 45, handover - 1 - 2_000_000 + 45] {
+            let got = sample(k);
+            assert!((f32::hypot(got.0, got.1) - 0.5).abs() < 1e-6, "{case}: handed sample {k} was recalled: {got:?}; records={records:?}; tail={:?}", received.iter().filter(|(at, _, _)| *at >= 14_035).collect::<Vec<_>>());
+        }
+        assert_eq!(sample(handover - 2_000_000 + 45), (0.0, 0.0), "{case}: radiation continued past the first Stop's handed front");
+    }
+}
+
+#[test]
 fn mr_33_gain_scales_the_samples_from_its_instant() {
     let world = World::new(loopback(None));
     let mut radio = prepare(&world, Options::default()).unwrap();
@@ -1060,6 +1225,41 @@ fn mr_32_a_cold_transmit_change_ends_the_old_radiation() {
         };
         assert_eq!((re, im), expected, "sample {k}");
     }
+}
+
+#[test]
+fn mr_32_x3xx_cold_change_cuts_at_its_instant() {
+    let t0 = 2_000_000_000;
+    let world = World::new(loopback(None));
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    let before = world.waveform(&vec![(0.5, 0.0); 2_000]);
+    radio.push(burst(&radio, &world, before, 2_002_000, true));
+    step(&world, &mut [&mut radio], t0);
+    step(&world, &mut [&mut radio], t0 + 4_000_000);
+    radio.push(Action::UpdateParameter {
+        target: tgt("mock"),
+        key: key("radio.tx.s0.sample_rate_hz"),
+        value: Value::num(500_000.0).unwrap(),
+        class: UpdateClass::Cold,
+        at: Some(AbsoluteDeadline::new(TimePoint::new(ROOT, t0 + 5_000_000))),
+    });
+    step(&world, &mut [&mut radio], t0 + 4_000_000);
+    step(&world, &mut [&mut radio], t0 + 5_000_000);
+    step(&world, &mut [&mut radio], t0 + 20_000_000);
+
+    let records: Vec<BurstRecord> = serde_json::from_value(radio.section("bursts")).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!((records[0].samples, records[0].end), (3_000, BurstEnd::Stop));
+    let received = radio.received(0);
+    let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im))
+        .unwrap_or_else(|| panic!("no loopback sample {k}; range={:?}..{:?}", received.first(), received.last()));
+    let first = sample(2_045);
+    let last = sample(5_044);
+    assert!((f32::hypot(first.0, first.1) - 0.5).abs() < 1e-6, "the old burst starts: {first:?}");
+    assert!((f32::hypot(last.0, last.1) - 0.5).abs() < 1e-6, "the old burst reaches the cold cut: {last:?}");
+    assert_eq!(sample(5_045), (0.0, 0.0), "the old clock radiated past the cold cut");
 }
 
 #[test]

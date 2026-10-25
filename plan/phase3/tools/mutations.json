@@ -263,8 +263,8 @@
   "id": "M27",
   "name": "MR-32 stop does not cut radiation",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                self.cut_segments(k, cut);\n            }\n        }\n        let tracked",
-  "new": "                let _ = cut;\n            }\n        }\n        let tracked",
+  "old": "                self.cut_segments(k, cut);",
+  "new": "                let _ = cut;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stopped"
@@ -273,8 +273,8 @@
   "id": "M28",
   "name": "MR-17 floor now",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        let policy = late_policy.decide(\n            clocks,\n            at.time_point,\n            decided_tx,",
-  "new": "        let policy = late_policy.decide(\n            clocks,\n            at.time_point,\n            now_tx,",
+  "old": "            at.time_point,\n            decided_tx,",
+  "new": "            at.time_point,\n            now_tx,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_17_a_target"
@@ -503,8 +503,8 @@
   "id": "M51",
   "name": "MR-32 cold change does not cut radiation",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                self.cut_segments(k, cut);\n            }\n        }\n        let tracked",
-  "new": "                if reason != \"MR-18: cancelled by a cold change\" { self.cut_segments(k, cut); }\n            }\n        }\n        let tracked",
+  "old": "                self.cut_segments(k, cut);",
+  "new": "                if reason != \"MR-18: cancelled by a cold change\" { self.cut_segments(k, cut); }",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_32_a_cold"
@@ -642,11 +642,11 @@
  {
   "name": "MR-25 stop cut one tick later",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "if let Some(cut) = time::k_at_or_after(origin, ratio, now) {\n                self.transmit_until_cut(k, now, cut)?;",
-  "new": "if let Some(cut) = time::k_at_or_after(origin, ratio, now + 1) {\n                self.transmit_until_cut(k, now, cut)?;",
+  "old": "if let Some(at_stop) = time::k_at_or_after(origin, ratio, now) {",
+  "new": "if let Some(at_stop) = time::k_at_or_after(origin, ratio, now + 1) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "",
+  "filter": "mr_25_a_stop_on_a_sample_instant_does_not_transmit_that_sample",
   "id": "M65"
  },
  {

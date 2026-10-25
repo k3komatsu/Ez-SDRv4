@@ -483,10 +483,10 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Scalar::from(if x3xx { 2 } else { 1 })));
         assert_eq!(capabilities[&key("radio.rx.block_len")], one(Scalar::from(2_000)));
         let envelope = &radio.instance().sections[&Namespace::parse("ezsdr.radio.mock.envelope").unwrap()];
-        let (lead, startup, depth, gap, bytes_per_s, wire) = if x3xx {
-            (2_000_000, 2_000_000_000, 16, 50_000_000, 100_000_000, 4)
+        let (lead, startup, depth, gap, bytes_per_s, wire, in_flight) = if x3xx {
+            (2_000_000, 2_000_000_000, 16, 50_000_000, 100_000_000, 4, 10_000_000)
         } else {
-            (0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8)
+            (0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8, 0)
         };
         // The release window is the profile's: x3xx emulates the UHD Module's, ideal none
         // (design 38 D1).
@@ -501,6 +501,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert!(!capabilities.contains_key(&key("radio.timing.stop_tail_ns")) && !capabilities.contains_key(&key("radio.timing.restart_lead_ns")));
         assert_eq!(capabilities[&key("radio.timing.rx_start_lead_ns")], one(Scalar::from(start_lead)));
         assert_eq!(capabilities[&key("radio.timing.tx_start_lead_ns")], one(Scalar::from(start_lead)));
+        assert_eq!(capabilities[&key("radio.timing.tx_in_flight_ns")], one(Scalar::from(in_flight)));
         assert!(!capabilities.contains_key(&key("radio.timing.start_lead_ns")));
         assert_eq!(capabilities[&key("radio.perf.rx_bytes_per_s")], one(Scalar::from(bytes_per_s)));
         assert_eq!(capabilities[&key("radio.perf.tx_bytes_per_s")], one(Scalar::from(bytes_per_s)));
@@ -526,6 +527,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert!(envelope["timing"].get("stop_tail_ns").is_none() && envelope["timing"].get("restart_lead_ns").is_none());
         assert_eq!(envelope["timing"]["rx_start_lead_ns"], start_lead);
         assert_eq!(envelope["timing"]["tx_start_lead_ns"], start_lead);
+        assert_eq!(envelope["timing"]["tx_in_flight_ns"], in_flight);
         assert_eq!(envelope["performance"]["rx_bytes_per_s"], bytes_per_s);
         assert_eq!(envelope["performance"]["tx_bytes_per_s"], bytes_per_s);
         assert_eq!(envelope["performance"]["wire_bytes_per_sample"], wire);
@@ -933,10 +935,10 @@ fn mr_16_burst_refusals() {
     assert_eq!(rejected.as_array().unwrap().len(), 1);
     assert!(rejected[0]["reason"].as_str().unwrap().contains("open burst's next sample"));
 
-    let mut moved_duplicate = tx_harness("x3xx");
+    let mut moved_duplicate = tx_harness("ideal");
     moved_duplicate.arm_start(2_000_000_000).unwrap();
     let domain = tx_domain(&moved_duplicate);
-    moved_duplicate.actions.push(tx_action(domain, 2_003_000, 2, false, LatePolicy::SendAsapAndFlag));
+    moved_duplicate.actions.push(tx_action(domain, 2_001_000, 2, false, LatePolicy::SendAsapAndFlag));
     moved_duplicate.actions.push(tx_action(domain, 2_000_000, 2, false, LatePolicy::SendAsapAndFlag));
     moved_duplicate.step(2_001_000_000).unwrap();
     let rejected = &moved_duplicate.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
@@ -949,6 +951,315 @@ fn mr_16_burst_refusals() {
     assert_eq!(refused.source, node_src("mock/tx/s0"));
     assert_eq!(refused.time.domain(), domain);
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 1);
+
+    let mut x3xx_move = tx_harness("x3xx");
+    x3xx_move.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&x3xx_move);
+    x3xx_move.actions.push(tx_action(domain, 2_003_000, 2, false, LatePolicy::SendAsapAndFlag));
+    x3xx_move.actions.push(tx_action(domain, 2_000_000, 2, false, LatePolicy::SendAsapAndFlag));
+    x3xx_move.step(2_001_000_000).unwrap();
+    x3xx_move.step(2_004_001_000).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = x3xx_move.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert_eq!(records.len(), 2, "the x3xx front moves B after A instead of refusing it");
+    assert_eq!(records[1].target, TimePoint::new(domain, 2_003_004));
+    assert_eq!(records[1].requested_target, Some(TimePoint::new(domain, 2_000_000)));
+    let events = x3xx_move.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+    let moved = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
+    assert_eq!(moved.payload["outcome"], "send_asap");
+    assert_eq!(moved.payload["late_by_ns"], 3_004_000);
+    assert_eq!(moved.payload["target"], serde_json::to_value(TimePoint::new(domain, 2_000_000)).unwrap());
+    assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0);
+}
+
+#[test]
+fn mr_17_x3xx_moved_start_overlap_still_refuses() {
+    let t0 = 2_000_000_000;
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(t0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_004_000, 2_000, true, LatePolicy::DropAndFlag));
+    harness.actions.push(tx_action(domain, 2_010_002, 2, false, LatePolicy::DropAndFlag));
+    harness.actions.push(tx_action(domain, 2_003_000, 2, false, LatePolicy::SendAsapAndFlag));
+    harness.step(t0).unwrap();
+
+    let rejected = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
+    assert_eq!(rejected.as_array().unwrap().len(), 1, "the x3xx move still reaches held-start refusal");
+    assert!(rejected[0]["reason"].as_str().unwrap().contains("held burst already has this start"));
+    assert!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().is_empty());
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let moved = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
+    assert_eq!(moved.payload["outcome"], "refused");
+    assert_eq!(moved.payload["late_by_ns"], 7_002_000);
+    assert_eq!(moved.payload["target"], serde_json::to_value(TimePoint::new(domain, 2_003_000)).unwrap());
+}
+
+/// D2'' counts earlier receipt order, even at the same instant; Vision §59 permits Mock to be stricter than UHD.
+#[test]
+fn mr_17_x3xx_tx_preemption_front() {
+    let t0 = 2_000_000_000;
+    for (case, same_step, now, front) in [
+        ("same step", true, t0, 2_010_002),
+        ("separate step, same instant", false, t0, 2_010_002),
+        ("one root tick later", false, t0 + 1, 2_010_003),
+    ] {
+        let mut harness = tx_harness("x3xx");
+        harness.arm_start(t0).unwrap();
+        let domain = tx_domain(&harness);
+        harness.actions.push(tx_action(domain, 2_004_000, 2_000, true, LatePolicy::SendAsapAndFlag));
+        if same_step {
+            harness.actions.push(tx_action(domain, 2_003_000, 2_000, false, LatePolicy::SendAsapAndFlag));
+            harness.step(now).unwrap();
+        } else {
+            harness.step(t0).unwrap();
+            harness.actions.push(tx_action(domain, 2_003_000, 2_000, false, LatePolicy::SendAsapAndFlag));
+            harness.step(now).unwrap();
+        }
+        let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let late = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap_or_else(|| panic!("{case}: {events:?}"));
+        assert_eq!(late.payload["outcome"], "send_asap", "{case}");
+        assert_eq!(late.payload["late_by_ns"], (front - 2_003_000) * 1_000, "{case}");
+        assert_eq!(late.payload["target"], serde_json::to_value(TimePoint::new(domain, 2_003_000)).unwrap(), "{case}");
+        assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0, "{case}");
+
+        let end = t0 + (front + 2_000 - 2_000_000) * 1_000 + 1;
+        harness.step(end).unwrap();
+        let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+            .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+        assert_eq!(records.len(), 2, "{case}: {records:?}");
+        assert_eq!(records[0].samples, (front - 2_004_000) as u64, "{case}: A's end is B's moved start");
+        assert_eq!(records[1].target, TimePoint::new(domain, front), "{case}: B's target");
+        assert_eq!(records[1].requested_target, Some(TimePoint::new(domain, 2_003_000)), "{case}: original B target");
+    }
+
+    for (case, same_step, now, front) in [
+        ("same step", true, t0, 2_010_002),
+        ("separate step, same instant", false, t0, 2_010_002),
+        ("one root tick later", false, t0 + 1, 2_010_003),
+    ] {
+        let mut dropped = tx_harness("x3xx");
+        dropped.arm_start(t0).unwrap();
+        let domain = tx_domain(&dropped);
+        dropped.actions.push(tx_action(domain, 2_004_000, 2_000, true, LatePolicy::SendAsapAndFlag));
+        if same_step {
+            dropped.actions.push(tx_action(domain, 2_003_000, 2_000, false, LatePolicy::DropAndFlag));
+            dropped.step(now).unwrap();
+        } else {
+            dropped.step(t0).unwrap();
+            dropped.actions.push(tx_action(domain, 2_003_000, 2_000, false, LatePolicy::DropAndFlag));
+            dropped.step(now).unwrap();
+        }
+        let events = dropped.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let late = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap_or_else(|| panic!("{case}: {events:?}"));
+        assert_eq!(late.payload["outcome"], "drop", "{case}");
+        assert_eq!(late.payload["late_by_ns"], (front - 2_003_000) * 1_000, "{case}");
+        assert!(dropped.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().is_empty(), "{case}");
+    }
+}
+
+#[test]
+fn mr_17_x3xx_tx_preemption_boundaries() {
+    let t0 = 2_000_000_000;
+    for (case, a, b_target, policy, expected_outcome, expected_start, expected_late) in [
+        ("no predecessor", None, 2_005_000, LatePolicy::DropAndFlag, None, Some(2_005_000), 0),
+        ("finite end inside window", Some((2_002_000, 1_000, false)), 2_005_000, LatePolicy::DropAndFlag, None, Some(2_005_000), 0),
+        ("finite end clamped at window", Some((2_002_000, 28_000, false)), 2_005_000, LatePolicy::DropAndFlag, Some("drop"), None, 5_002_000),
+        ("held repeat and target inside W", Some((2_004_000, 2_000, true)), 2_006_000, LatePolicy::DropAndFlag, Some("drop"), None, 4_002_000),
+        ("handed horizon", Some((2_004_000, 2_000, true)), 2_010_000, LatePolicy::DropAndFlag, Some("drop"), None, 2_000),
+        ("one sample into the margin", Some((2_004_000, 2_000, true)), 2_010_001, LatePolicy::DropAndFlag, Some("drop"), None, 1_000),
+        ("front boundary", Some((2_004_000, 2_000, true)), 2_010_002, LatePolicy::SendAsapAndFlag, None, Some(2_010_002), 0),
+        ("one sample after front", Some((2_004_000, 2_000, true)), 2_010_003, LatePolicy::SendAsapAndFlag, None, Some(2_010_003), 0),
+    ] {
+        let mut harness = tx_harness("x3xx");
+        harness.arm_start(t0).unwrap();
+        let domain = tx_domain(&harness);
+        if let Some((start, len, repeat)) = a {
+            harness.actions.push(tx_action(domain, start, len, repeat, LatePolicy::DropAndFlag));
+        }
+        harness.actions.push(tx_action(domain, b_target, 2_000, false, policy));
+        harness.step(t0).unwrap();
+        let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let errors: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(errors.first().map(|event| event.payload["outcome"].as_str().unwrap()), expected_outcome, "{case}: {events:?}");
+        if let Some(start) = expected_start {
+            assert!(errors.is_empty(), "{case}: {errors:?}");
+            let end = t0 + (start + 2_000 - 2_000_000) * 1_000 + 1;
+            harness.step(end).unwrap();
+            let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+                .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+            assert!(records.iter().any(|record| record.target == TimePoint::new(domain, start) && record.samples == 2_000), "{case}: {records:?}");
+        } else {
+            assert_eq!(errors[0].payload["late_by_ns"], expected_late, "{case}");
+            assert!(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().is_empty(), "{case}");
+        }
+    }
+}
+
+#[test]
+fn mr_17_stop_preserves_front_until_expiry() {
+    let t0 = 2_000_000_000;
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(t0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_004_000, 2_000, true, LatePolicy::DropAndFlag));
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    harness.step(t0).unwrap();
+    let record: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(
+        harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()][0].clone(),
+    ).unwrap();
+    assert_eq!((record.samples, record.end), (6_000, BurstEnd::Stop));
+
+    for (target, outcome, late_by) in [(2_010_000, Some("drop"), 2_000), (2_010_001, Some("drop"), 1_000), (2_010_002, None, 0)] {
+        harness.actions.push(tx_action(domain, target, 2, false, LatePolicy::DropAndFlag));
+        harness.step(t0).unwrap();
+        let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        let late = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR);
+        assert_eq!(late.map(|event| event.payload["outcome"].as_str().unwrap()), outcome, "target {target}");
+        if let Some(late) = late { assert_eq!(late.payload["late_by_ns"], late_by, "target {target}"); }
+    }
+    harness.step(2_012_004_001).unwrap();
+    let records = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap();
+    assert_eq!(records.len(), 2, "the safe H+2 burst is admitted: {records:?}");
+    let b: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(records[1].clone()).unwrap();
+    assert_eq!(b.target, TimePoint::new(domain, 2_010_002));
+}
+
+#[test]
+fn mr_17_tx_front_is_per_stream() {
+    let t0 = 2_000_000_000;
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c1.stream", eq(Scalar::from(1)))];
+    let mut harness = Harness::new("x3xx", &constraints, &[], &[], None);
+    harness.arm_start(t0).unwrap();
+    let domain0 = tx_domain(&harness);
+    let domain1 = harness.clocks.sample_clock_records().iter().find(|record| record.stream == rid("mock/tx/s1")).unwrap().domain;
+    harness.actions.push(tx_action(domain0, 2_004_000, 2_000, true, LatePolicy::DropAndFlag));
+    harness.step(t0).unwrap();
+    let mut b = tx_action(domain1, 2_003_000, 2_000, false, LatePolicy::DropAndFlag);
+    if let Action::TxBurst { target, .. } = &mut b { *target = tgt("mock/tx/s1"); }
+    harness.actions.push(b);
+    harness.step(t0).unwrap();
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+        .iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "stream 0's front affected stream 1");
+    harness.step(t0 + 5_000_001).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert!(records.iter().any(|record| record.target == TimePoint::new(domain1, 2_003_000) && record.samples == 2_000), "stream 1's on-time B was not sent: {records:?}");
+}
+
+#[test]
+fn mr_17_cold_change_does_not_cross_sample_clocks() {
+    let t0 = 2_000_000_000;
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(t0).unwrap();
+    let old_domain = tx_domain(&harness);
+    harness.actions.push(tx_action(old_domain, 2_004_000, 2_000, true, LatePolicy::DropAndFlag));
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    harness.step(t0).unwrap();
+    harness.actions.push(update_action("radio.tx.s0.sample_rate_hz", Value::num(500_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, t0 + 5_000_000))));
+    harness.step(t0).unwrap();
+    let now = t0 + 60_000_000;
+    harness.step(now).unwrap();
+    let new_domain = tx_domain(&harness);
+    assert_ne!(new_domain, old_domain);
+    let requested_root = TimePoint::new(ROOT, now + 3_000_000);
+    let target = match harness.clocks.convert(requested_root, new_domain).unwrap() {
+        ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(new_domain).unwrap(),
+        ezsdr_kernel::time::Converted::Inexact { floor, .. } => floor.checked_add(Duration::new(new_domain, 1)).unwrap().ticks_in(new_domain).unwrap(),
+    };
+    let target_root = harness.clocks.convert(TimePoint::new(new_domain, target), ROOT).unwrap().floor().ticks_in(ROOT).unwrap();
+    let old_front_root = harness.clocks.convert(TimePoint::new(old_domain, 2_010_002), ROOT).unwrap().floor().ticks_in(ROOT).unwrap();
+    assert!(target_root > old_front_root, "the new target is later in root time; SampleClock ticks are not compared");
+    harness.actions.push(tx_action(new_domain, target, 2, false, LatePolicy::DropAndFlag));
+    harness.step(now).unwrap();
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+        .iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "the old SampleClock's front leaked into the new one");
+    harness.step(now + 3_005_001).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert!(records.iter().any(|record| record.target == TimePoint::new(new_domain, target) && record.samples == 2), "the on-time new-clock B was not sent: {records:?}");
+}
+
+#[test]
+fn mr_17_a_target_after_a_stopped_burst_is_on_time() {
+    let t0 = 2_000_000_000;
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(t0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_004_000, 2_000, true, LatePolicy::DropAndFlag));
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    harness.step(t0).unwrap();
+    let now = t0 + 20_000_000;
+    harness.step(now).unwrap();
+    harness.actions.push(tx_action(domain, 2_023_000, 2, false, LatePolicy::DropAndFlag));
+    harness.step(now).unwrap();
+    assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+        .iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR));
+    harness.step(t0 + 25_003_001).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert!(records.iter().any(|record| record.target == TimePoint::new(domain, 2_023_000)));
+}
+
+#[test]
+fn mr_17_ideal_closed_finite_burst_has_no_extra_gap() {
+    let mut harness = tx_harness("ideal");
+    harness.arm_start(0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_000, 2_000, false, LatePolicy::SendAsapAndFlag));
+    harness.step(0).unwrap();
+    harness.step(4_000_000).unwrap();
+    harness.actions.push(tx_action(domain, 4_000, 2, false, LatePolicy::SendAsapAndFlag));
+    harness.step(4_000_000).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "W=0 preserves the ideal profile's gap-free start");
+    harness.step(4_003_001).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert_eq!(records[0].end, BurstEnd::Eob);
+    assert_eq!(records[1].target, TimePoint::new(domain, 4_000));
+    assert_eq!(records[1].requested_target, None);
+}
+
+#[test]
+fn mr_17_ideal_stop_has_no_in_flight_gap() {
+    let mut harness = tx_harness("ideal");
+    harness.arm_start(0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 0, 2_000, true, LatePolicy::SendAsapAndFlag));
+    harness.step(0).unwrap();
+    harness.step(2_000_000).unwrap();
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    harness.step(2_000_000).unwrap();
+    harness.actions.push(tx_action(domain, 2_000, 2, false, LatePolicy::SendAsapAndFlag));
+    harness.step(2_000_000).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "W=0 preserves the ideal profile's gap-free Stop");
+    harness.step(2_003_001).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert!(records.iter().any(|record| record.target == TimePoint::new(domain, 2_000) && record.requested_target.is_none()), "B did not start on time: {records:?}");
+}
+
+#[test]
+fn mr_17_a_finite_burst_front_stops_at_its_end() {
+    let t0 = 2_000_000_000;
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(t0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_002_000, 6_000, false, LatePolicy::DropAndFlag));
+    harness.actions.push(tx_action(domain, 2_005_000, 2, false, LatePolicy::SendAsapAndFlag));
+    harness.step(t0).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let late = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
+    assert_eq!(late.payload["outcome"], "send_asap");
+    assert_eq!(late.payload["late_by_ns"], 3_002_000);
+    harness.step(t0 + 10_001_000).unwrap();
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()]
+        .as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!((records[0].samples, records[0].end), (6_000, BurstEnd::Eob));
+    assert_eq!(records[1].target, TimePoint::new(domain, 2_008_002));
+    assert_eq!(records[1].requested_target, Some(TimePoint::new(domain, 2_005_000)));
 }
 
 #[test]
@@ -2631,6 +2942,24 @@ fn mr_20_a_loss_records_a_later_update_as_cancelled_at_the_loss() {
         ("update_parameter".to_owned(), LOST.to_owned(), T0 + 8_000_000),
         ("update_parameter".to_owned(), LOST.to_owned(), T0 + 8_000_000),
     ]);
+}
+
+#[test]
+fn mr_20_x3xx_loss_cuts_transmit_at_its_instant() {
+    let env = [("sim.faults", serde_json::json!([device_lost_at(5_000_000)]))];
+    let mut harness = Harness::new("x3xx", &[("radio.tx.c0.stream", eq(Scalar::from(0)))], &[], &env, None);
+    harness.arm_start(T0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_002_000, 2_000, true, LatePolicy::DropAndFlag));
+    harness.step(T0).unwrap();
+    harness.step(T0 + 4_000_000).unwrap();
+    let error = harness.step(T0 + 5_000_000).unwrap_err();
+    assert_eq!(error.kind, ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost);
+    let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(
+        harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].clone(),
+    ).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!((records[0].samples, records[0].end), (3_000, BurstEnd::Stop));
 }
 
 #[test]

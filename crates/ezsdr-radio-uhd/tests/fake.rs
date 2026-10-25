@@ -493,6 +493,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.timing.command_queue_depth"), one(Scalar::from(16)));
     // Design 38 D1: the release window is the profile's value, x3xx's 3 ms.
     assert_eq!(capability("radio.timing.release_window_ns"), one(Scalar::from(3_000_000)));
+    assert_eq!(capability("radio.timing.tx_in_flight_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
     assert_eq!(capability("radio.tx.repeat_align_samples"), one(Scalar::from(1)));
     assert_eq!(capability("radio.rx.block_len"), one(Scalar::from(2_000)));
@@ -502,6 +503,7 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["timing"]["release_window_ns"], 3_000_000);
+    assert_eq!(envelope["timing"]["tx_in_flight_ns"], 10_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 100_000_000);
     assert_eq!(section_of(instance, "device")["fake"], true);
 }
@@ -2835,10 +2837,11 @@ fn ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time() {
 fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
     // Review P, NB-1: a send that comes up short abandons the burst. The device burst is
     // closed with an empty end-of-burst (one zero sample) straight after the samples the
-    // device took; the burst's held last sample is not sent there. The final buffer cut
-    // short is the burst's first (1 000 samples) or its second (3 000; 2 000 a buffer).
+    // device took; the burst's held last sample is not sent there. The 6 000-sample case
+    // cuts the final buffer (the 31st device send); that last sample is held inside the
+    // in-flight window (D3).
     // A send that fails after taking half is ended the same way (Review Q, NB-Q1).
-    let cases = [(FakeFault::ShortSend(0), 1_000usize), (FakeFault::ShortSend(1), 3_000), (FakeFault::FailSend(0), 1_000)];
+    let cases = [(FakeFault::ShortSend(0), 1_000usize), (FakeFault::ShortSend(1), 3_000), (FakeFault::ShortSend(30), 6_000), (FakeFault::FailSend(0), 1_000)];
     for (fault, len) in cases {
         let nth = format!("{fault:?}");
         // Booked in the Spec at 40 ms, before the Run starts (rule (1)).

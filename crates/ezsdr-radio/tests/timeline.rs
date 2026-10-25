@@ -116,6 +116,7 @@ fn rm_26_each_stream_takes_its_own_directions_start_lead() {
         overflow_restart_gap_ns: 0,
         rx_start_lead_ns: 50 * MS,
         tx_start_lead_ns: 20 * MS,
+        tx_in_flight_ns: 0,
     };
     assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Rx), 50 * MS);
     assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Tx), 20 * MS);
@@ -136,6 +137,36 @@ fn rm_26_each_stream_takes_its_own_directions_start_lead() {
             "{direction:?}",
         );
     }
+}
+
+#[test]
+fn rm_15_later_bound_combines_the_current_and_handed_front() {
+    use ezsdr_radio::timeline::later_bound;
+
+    assert_eq!(later_bound(10, None), 10);
+    assert_eq!(later_bound(10, Some(9)), 10);
+    assert_eq!(later_bound(10, Some(10)), 10);
+    assert_eq!(later_bound(10, Some(11)), 11);
+}
+
+#[test]
+fn rm_15_preemption_front_applies_each_late_policy() {
+    use ezsdr_kernel::id::ClockDomainId;
+    use ezsdr_kernel::stream::{LateOutcome, LatePolicy};
+    use ezsdr_kernel::time::Duration;
+    use ezsdr_radio::timeline::late_policy_front_outcome;
+
+    let late_by = Duration::new(ClockDomainId::HOST_MONOTONIC, 2);
+    assert_eq!(late_policy_front_outcome(LatePolicy::RejectAtPlan, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(),
+        Some(LateOutcome::PlanViolation { late_by }));
+    assert_eq!(late_policy_front_outcome(LatePolicy::SendAsapAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(),
+        Some(LateOutcome::SendAsap { late_by }));
+    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(),
+        Some(LateOutcome::Drop { late_by }));
+    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 11, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), None,
+        "equality with the front is on time");
+    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 11, Some(10), |_| Ok::<_, ()>(late_by)).unwrap(), None,
+        "a front at or before the ordinary bound adds no lateness");
 }
 
 #[test]

@@ -121,7 +121,7 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 33);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 34);
     assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(
         checks
@@ -160,6 +160,7 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.timing.overflow_restart_gap_ns", int, false, reject, none),
         ("radio.timing.rx_start_lead_ns", int, false, reject, none),
         ("radio.timing.tx_start_lead_ns", int, false, reject, none),
+        ("radio.timing.tx_in_flight_ns", int, false, reject, none),
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
         ("radio.perf.wire_bytes_per_sample", int, false, reject, none),

@@ -21,7 +21,7 @@ use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::module_api::{ModuleError, StepOutcome, StopMode};
 use ezsdr_kernel::run::{StopCause, Termination};
 use ezsdr_kernel::spec::Ident;
-use ezsdr_kernel::stream::BurstRecord;
+use ezsdr_kernel::stream::{BurstEnd, BurstRecord};
 use ezsdr_kernel::time::TimePoint;
 use serde_json::json;
 use support::{artifact, finish_at, root, section, T0};
@@ -280,11 +280,12 @@ fn v58_12_a_reactor_answers_whatever_the_block_lengths() {
     let blocks = |manifest: &Manifest| section(manifest, "dev_b", "ezsdr.radio.mock.stats")["rx_blocks"].clone();
     assert_ne!(blocks(&plain), blocks(&jittered));
 
-    // A PING that straddles a block boundary is one PING, whatever seed: at 11 500 its
-    // first sample reaches the responder at 11 546 and its last at 12 545, across the
-    // boundary at 12 000, and it is answered once (Review F, P1-3).
-    let (straddling, _) = ping_pong(&rig::TempDir::new("v58-12-reactor-straddle"), Ping { pings: &[11_500], turnaround_ns: JITTER_TURNAROUND_NS, ..Ping::default() });
-    assert_eq!(bursts(&straddling, "dev_b").iter().map(decision).collect::<Vec<_>>(), vec![(TX_AT_T0 + 18_546, None, None, 500, 1)]);
+    // The first PING straddles the 12 000 block boundary; the second starts after only 50
+    // quiet samples in the next block. Rearm state must survive that boundary, so only the
+    // first PING gets a PONG (Review F, P1-3).
+    let (straddling, _) = ping_pong(&rig::TempDir::new("v58-12-reactor-straddle"), Ping { pings: &[11_000, 12_050], turnaround_ns: JITTER_TURNAROUND_NS, ..Ping::default() });
+    assert_eq!(bursts(&straddling, "dev_a").len(), 2, "both PINGs were sent");
+    assert_eq!(bursts(&straddling, "dev_b").iter().map(decision).collect::<Vec<_>>(), vec![(TX_AT_T0 + 18_046, None, None, 500, 1)]);
 }
 
 /// How many Actions the wrapped responder decided, for `ke_03`, the only test that wraps it
@@ -313,11 +314,11 @@ impl Component for Counting {
 
 #[test]
 fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
-    // The PING starts at 25 960 µs and the Run is stopped at 26 040 µs: the pinger radiates
-    // 80 samples, which reach the responder from receive sample 26 006, in the block the
-    // orderly stop ends at its instant, [26 000, 26 040), handed only in the drain (KA-12;
-    // RM-16). Dispatch is frozen by then, admit() refuses the PONG with ezsdr.dispatch, and
-    // that refusal must not become an abort (KE-3, NX-6).
+    // The PING starts at 25 960 µs and the Run is stopped at 26 040 µs. The x3xx Mock's
+    // 10 ms in-flight window carries the whole burst through its EOB at 26 960 µs; those
+    // samples reach the responder during the orderly drain (KA-12; RM-16). Dispatch is
+    // frozen by then, admit() refuses the PONG with ezsdr.dispatch, and that refusal must
+    // not become an abort (KE-3, NX-6).
     let counting = Implementation {
         id: responder::IMPL_ID.to_owned(),
         hash: responder::impl_hash(),
@@ -333,7 +334,7 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     assert_eq!(DECIDED.load(Ordering::SeqCst), 1);
     clean_stop(&manifest);
     let pinged = bursts(&manifest, "dev_a");
-    assert_eq!((pinged.len(), pinged[0].samples), (1, 80), "{pinged:?}");
+    assert_eq!((pinged.len(), pinged[0].samples, pinged[0].end), (1, 1_000, BurstEnd::Eob), "{pinged:?}");
     assert!(section(&manifest, "dev_b", "ezsdr.radio.mock.stats")["rx_samples"].as_u64().unwrap() > 26_006, "the PING's first sample was delivered");
     assert!(bursts(&manifest, "dev_b").is_empty());
 }
