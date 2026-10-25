@@ -1,6 +1,6 @@
 # 33 — Radio Model と UHD Module の汎用性の点検
 
-Status: 当てはめと Sol のレビューまで済み．判断1・2は決定（owner 2026-10-25），判断3・4は owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
+Status: 当てはめと Sol のレビューまで済み．判断1〜3は決定（owner 2026-10-25），判断4は owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
 
 ## 1. 目的と範囲
 
@@ -91,7 +91,7 @@ Status: 当てはめと Sol のレビューまで済み．判断1・2は決定�
 | G9 | 合う（8b） | B・H は PPS ではなく trigger で揃える（B はレベル感応，master が2台で pin を壊す警告．H は1 sample 未満と文書）．trigger の edge を epoch にした root は `Arbitrary { set_by }` で表せる．ただし B の trigger は sample を止めるだけでカウンタを揃えない．複数台を1 instance・1 root にする 8b の判断1が当たるかは 8b で確かめる |
 | G10 | 語彙 | H は半二重．「一つの装置で RX と TX の stream が同時に channel を持たない」を `Description::violations` の規則にする（RM-31 と同じ形）．`radio.full_duplex` は false で宣言する |
 | G11 | 語彙 | 共有の拘束：N1 は board 内の2 channel が方向ごとに LO を共有（一方の周波数を変えると相方も変わる），B は方向ごとに LO を共有し RX と TX の rate が連動（INFERRED），H は RX・TX で周波数と rate を共有．どれも `violations` の規則（design 33 D8 の channel 間の拘束の形）で表せる |
-| G12 | 語彙（D1 は方針） | B は 520 834〜61.44 MHz の 2 Hz 刻み（`device::Grid` に刻みが要る），H は整数 Hz に丸める分数合成．B の時刻のカウンタは sample の rate で進むので，Run の中で rate を変えたときに装置の時刻をどの root に写すかが問題になる（判断3）．N1（122.88／125／153.6 MHz）・N2（200／245.76／250 MHz）の MCR は変えると再初期化で，X3xx の `master_clock_hz` と同じ selector の値になる |
+| G12 | 語彙（判断3） | B は 520 834〜61.44 MHz の 2 Hz 刻み（`device::Grid` に刻みが要る），H は整数 Hz に丸める分数合成．B の時刻のカウンタは sample の rate で進むので，Run の中で rate を変えたときに装置の時刻をどの root に写すかが問題になる（判断3）．N1（122.88／125／153.6 MHz）・N2（200／245.76／250 MHz）の MCR は変えると再初期化で，X3xx の `master_clock_hz` と同じ selector の値になる |
 | G13 | 語彙 | B の RX と ZBX は gain の範囲が周波数で変わる．H は段ごとに刻みが違う（LNA 8 dB，VGA 2 dB，TX VGA 1 dB，amp の on/off）．RM-8 の「channel ごとに一つの範囲と刻み」を，周波数の帯ごとの表に広げるか段の key を足す．`coerce` は構成全体を見るので，周波数に依る範囲も純粋な関数のまま書ける |
 | G14 | Module | H は sc8（Pro は 4 bit・16 bit の mode もあるが host の API が未確認），B は SC16 Q11／SC8 Q7，N1・N2 は sc16．`radio.perf.wire_bytes_per_sample` で足りる |
 | G15 | 合う／語彙 | N1 は retune ごとに位相がランダム（`random`），B は資料なし（確かめるまで `random`），H も資料なし．LO の共有は design 33 の `lo_group`（形だけ決めて未実装）．N2・X4 の LO の export／import も同じ形 |
@@ -165,10 +165,13 @@ owner の方針（同日）：「安くて欠落等を適当に扱う装置を�
 
 ### 判断3（D1）：bladeRF の Run の中の rate の変更
 
-**推奨：最初の bladeRF の Module では，rate を binding の時に決める（layout の selector の値．description の rate の格子はその1値）．保守的な制限であって，Kernel の規則から強制される結論ではない（Sol の S5）．** Derived の比は有理数でよい（TM-10）ので，固定の rate の root に写す案は数の上では成り立つ．ただし rate の変更は untimed で（G4），変更の瞬間のカウンタの値が分からず，カウンタが 0 に戻るかも INFERRED なので，正確に写せるかは示せていない．H はカウンタを持たないので，この判断の対象ではない（K2）．
-- 利点：Kernel を変えずに最初の Module を出せる．X3xx の `master_clock_hz` と同じ扱いになる．
-- 欠点：bladeRF では Run の中で rate を変えられない．
-- 後で足せる道：変更の境界でのカウンタの振る舞いを bench で確かめたら，固定の rate の root への写しか，新しい root（TM-16a は governed の集合を宣言するもので，Run の root を固定しない）を検討する．
+**決定（owner 2026-10-25）：Run の中の rate の変更は許すが，変更の後の正確な時刻は保証の外とする．その扱いは判断2の設計メモの模型（時刻を持たない装置）で決める．** owner：「動作中にサンプリングレートを変更する時点で正確な時刻は消えて無くなるので，そこは保証対象外にしてもいい」．
+
+- B の時刻のカウンタは sample の rate で進み，rate の変更は untimed（G4）なので，変更の瞬間のカウンタの値が分からず，カウンタが 0 に戻るかも INFERRED．Root の rate は変わらない（TM-3）．
+- 判断2の設計メモは，時刻を持たない装置に加えて「rate の変更で時刻のつながりを失う装置」を扱う．変更の前は正確な時刻，変更の後はメモの軽い模型（分からないことは分からないと記し，ちゃんと動けばよい）になる．時刻の約束を弱めるのはこの場面に限る．
+- その模型ができるまで，最初の B の Module は rate を binding の時に決めてよい（layout の selector の値．description の rate の格子はその1値）．これは保守的な暫定で，Kernel の規則から強制される結論ではない（Sol の S5）．
+- bench で変更の境目のカウンタの値を正確につかめると分かれば，固定の rate の root へ有理数の比で写して，変更の後も正確な時刻を保てる（Kernel の型はこれを許す．radio の lattice の規則 RM-25 は変な比で粗くなるので Vocabulary の側で直す）．
+- 退けた案：B では rate を Run の中で変えられないままにする（owner の方針で不要）．rate が途中で変わる root を Kernel に足す（凍結する Kernel に一つの装置のための概念を入れる）．
 
 ### 判断4（K3）：command の格子
 
