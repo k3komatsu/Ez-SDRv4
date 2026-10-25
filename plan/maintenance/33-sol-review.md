@@ -152,3 +152,58 @@ The implementation citation is accurate: `control.rs:561–592` converts the dea
 **New findings:** None in the rewritten text or its immediate context.
 
 Not checked: builds, tests or hardware, as instructed. No files or Git state changed.
+
+## sol-d1（判断1を owner の (c) に書き直した後）
+
+VERDICT: FAIL
+
+References below: **P** = `plan/maintenance/33-radio-generality.md`.
+
+**D1 — major — P:132: The bounded-application promise lacks an observable completion criterion.**  
+**Problem:** “Applied” could mean register write, completed RPC, settled RF, or changed samples. Recording call start/return does not establish the physical switch instant. The bound also lacks defined clock, rounding, failure handling, and treatment of receipt after `at + max_delay`.  
+**Evidence:** UC-6 currently promises device application, not host invocation (`design/05-module-api.md:236`). Retune duration and sample behavior remain unknown or inferred (`plan/maintenance/33-facts-hackrf.md:102–105`; `33-facts-n3xx.md:72–74`).  
+**Fix:** The amendment must choose the observable guarantee, its measurement/verification method, and refusal or fault behavior when the deadline cannot be met. Decide whether a past `at` is late immediately, only upon missing the window, or rejected; do not silently restart the window.
+
+**D2 — major — P:132–134: Ordering and capacity are not yet coherent.**  
+**Problem:** Preserving UC-2 requires ordering actual applications, not merely issuing calls in order. Overlapping windows can otherwise invert two updates of one key. Serializing calls can instead exhaust a later window. Cross-key `cold` and `hardware_timed` changes can also change the configuration while an untimed call is outstanding.  
+**Evidence:** UC-2 orders effects (`design/05-module-api.md:227`); RM-25 orders commands and faults by effective instant (`design/07-radio-model.md:253`). RM-21’s existing queue/floor covers timed updates only.  
+**Fix:** Decide overlapping-window serialization, acceptance/capacity limits, equal-instant behavior, and arbitration against cold/timed operations. Test sequences where serialization makes an otherwise admitted deadline impossible.
+
+**D3 — major — P:132–134: Stop/loss settlement has no defined answer inside a window.**  
+**Problem:** If the window is `[100,120]` and shutdown occurs at 110, the update is nominally due but may not have applied. Neither cancellation nor recording successful application follows from that fact. An in-flight call might also return after shutdown.  
+**Evidence:** RM-16 settles commands by due instant and handover-at-call-start, and stream `Stop` cancels no update (`design/07-radio-model.md:168–170`). Those rules assume a known application instant.  
+**Fix:** Decide pending versus issued settlement, stop/loss tie-breaking, channel-less updates, and ownership of in-flight completion. Cover stream `Stop`, `Provider::stop`, loss, and restart separately.
+
+**D4 — major — P:132–133: Endpoint-only Mock behavior does not establish §59 parity.**  
+**Problem:** Applying at the window’s end supplies a predictable switch point absent on hardware. It exercises maximum delay but misses early-switch failures—for example, an experiment relying on the old frequency until the deadline. It is not inherently a stricter envelope.  
+**Evidence:** Vision §59 requires Mock not to be more permissive (`design/vision/10-implementation-path-and-testing.md:98–106`). RM-25 also governs timestamped segment publication, not host delivery time.  
+**Fix:** Keep endpoint application as a deterministic default only if justified separately. Define uncertainty-aware assertions or additional boundary scenarios. Decide how buffered blocks and transient samples are interpreted; no new block flag is necessarily required.
+
+**D5 — major — P:131,142: The Kernel change inventory is incomplete.**  
+**Problem:** One new UC rule and enum value are not the complete propagation surface.  
+**Evidence:** MA-24 and UC-1 explicitly reference UC-2…UC-6. Vision §27 enumerates four classes and makes Vocabulary declarations authoritative. `UpdateClass` is embedded in `schemas/{action,dispatched,experiment_spec,component_descriptor,vocabulary_descriptor}.v1.json`, alongside the proposed ProviderInstance schema change.  
+**Fix:** Include these contracts, `UPDATE_CLASSES`, schema regeneration, and declaration validation. Specify override identity, allowed keys, and rejection of unsupported overrides.
+
+**D6 — minor — P:131,137–141: Scheduling and comparisons need qualification.**  
+**Problem:** KC-17 assumes an earlier update’s value is present when the next entry applies; uncertainty weakens that premise. Stop/start can create an RX boundary but does not prove cold-update equivalence or uninterrupted physical sampling.  
+**Evidence:** `design/06-kernel-coordinator.md:250,331`; RS-49a schedules exact instants, while RS-19 separately resolves Session timing (`design/04-run-and-session.md:180,255`).  
+**Fix:** Decide scheduled-window configuration checks and Session compilation timing; qualify the continuity and alternative-equivalence claims.
+
+Read-only review; no edits, builds, or hardware checks. Physical retune timing remains unverified.
+
+## sol-d1b（判断1を owner の (c) に書き直した後）
+
+VERDICT: PASS
+
+References: **P** = `plan/maintenance/33-radio-generality.md`. “Fixed” means addressed at this decision-record stage; amendment details remain open.
+
+- **D1 — fixed:** P:137 requires an observable application criterion, clock and rounding, verification, missed-deadline behavior, and late-receipt handling without restarting the window.
+- **D2 — fixed:** P:138 requires application ordering, overlapping-window serialization, capacity limits, equal-instant handling, arbitration with cold/timed changes, and tests where serialization defeats an admitted deadline.
+- **D3 — fixed:** P:139 explicitly covers stream `Stop`, `Provider::stop`, loss, restart, settlement before call completion, and channel-less updates.
+- **D4 — fixed:** P:133 disclaims endpoint-only Mock parity. P:140 requires uncertainty-aware checks or boundary scenarios and interpretation of buffered blocks and transient samples.
+- **D5 — fixed:** P:131 expands the propagation inventory to contracts, declarations, validation, shared resolution, enum/constants, and schemas. The five listed schemas exactly match `schemas/*.json` containing `UpdateClass`: `action`, `dispatched`, `experiment_spec`, `component_descriptor`, and `vocabulary_descriptor`. `ProviderInstance` and its schema are separately included.
+- **D6 — fixed:** P:141 requires scheduled-configuration checks and Session compilation timing decisions. P:144 disclaims cold-update equivalence; P:148 qualifies physical reception continuity.
+
+**New findings:** None within the requested scope. Option (c) remains unchanged; the unresolved semantics are explicitly assigned to the follow-up amendment.
+
+Read-only review; no builds or hardware checks. Physical retune timing remains unverified.

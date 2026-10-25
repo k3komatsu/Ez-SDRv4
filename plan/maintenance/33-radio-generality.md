@@ -1,6 +1,6 @@
 # 33 — Radio Model と UHD Module の汎用性の点検
 
-Status: 当てはめと Sol のレビューまで済み，owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
+Status: 当てはめと Sol のレビューまで済み．判断1は決定（owner 2026-10-25），判断2〜4は owner の判断待ち．Sol は3回：FAIL（major 6，minor 1）→ FAIL（S1〜S7 は解消，major 1）→ PASS．判断1の書き直しに FAIL（major 5，minor 1）→ PASS（[記録](33-sol-review.md)）（owner 2026-10-24 の依頼，2026-10-25 開始）．事実：[HackRF](33-facts-hackrf.md)，[bladeRF](33-facts-bladerf.md)，[N3xx と X4xx の差分](33-facts-n3xx.md)（いずれも sonnet-researcher，2026-10-25．取得の道具が行番号を落としたので関数名と引用で示す）．handoff §2 の順番で Phase 8 の後・凍結前に置いた点検の設計メモ．紙の作業は Phase 8 段階 2 の合間に先にしてよい（同依頼）．
 
 ## 1. 目的と範囲
 
@@ -106,7 +106,7 @@ Status: 当てはめと Sol のレビューまで済み，owner の判断待ち�
 
 ### 5.2 Kernel に関わるもの
 
-**K1 時刻指定で変えられない更新（G4）．** key の update class は Vocabulary の `KeyDecl` だけから来る（RS-52，`design/04-run-and-session.md:261`．validate と admission は同じ `declared_class` を使う，`crates/ezsdr-kernel/src/spec.rs:1204-1228`）．radio の周波数と gain は `hardware_timed`（RM-27）で，UC-6 は「装置が effective instant にちょうど適用する」ことを Provider に課す．`at` のない更新にもこれが当たるので，N1・H・X410・X440 は周波数を設定するだけで UC-6 を破る．design 33 D6 はこれを「これらの装置を実装する phase の前に設計する」と先送りしていた．Kernel が要るのは，**今の key のまま，できる装置では timed の更新を残す**場合だけになる．周波数と gain を全 Provider で `cold` にすれば Vocabulary だけで済むが，UBX・OBX の timed tune（RM-9 の `random_unless_timed_tune`）を今の key で使えなくなる（Sol の S1）．
+**K1 時刻指定で変えられない更新（G4）．** key の update class は Vocabulary の `KeyDecl` だけから来る（RS-52，`design/04-run-and-session.md:261`．validate と admission は同じ `declared_class` を使う，`crates/ezsdr-kernel/src/spec.rs:1204-1228`）．radio の周波数と gain は `hardware_timed`（RM-27）で，UC-6 は「装置が effective instant にちょうど適用する」ことを Provider に課す．`at` のない更新にもこれが当たるので，N1・H・X410・X440 は周波数を設定するだけで UC-6 を破る．design 33 D6 はこれを「これらの装置を実装する phase の前に設計する」と先送りしていた．Kernel が要るのは，**今の key のまま，できる装置では timed の更新を残す**場合だけになる（owner はこれを選んだ：判断1）．周波数と gain を全 Provider で `cold` にすれば Vocabulary だけで済むが，UBX・OBX の timed tune（RM-9 の `random_unless_timed_tune`）を今の key で使えなくなる（Sol の S1）．
 
 **K2 時刻を持たない装置と，観測できない故障（G1〜G3，G5〜G7．主に H，G7 は B も）．** 今の Kernel は，時刻を持ち故障を観測できる装置を前提にしている：
 - TM-13b：受信の SampleClock の origin は「最初の sample を予定した root tick」．
@@ -125,14 +125,28 @@ H は stream を始めるまで数えるものがなく，始まりの時刻は 
 
 ### 判断1（K1）：時刻指定で変えられない更新をどう表すか
 
-二つの案がある．
-- **(a) 実効の宣言を instance ごとに持つ（Kernel）．** Provider の instance が，key ごとに `hardware_timed` を `cold` に狭めて宣言できる．宣言は bound な parameter ごとに一つで，validate から Run の終わりまで変わらず，device の node と stream の node のどちらを target にしても同じ class になる（RM-12 は両方を target に許す．Sol の S2）．変わるもの：RS-52，UC-1，SB-16，KC-17，KC-24 の手順5，共有の `declared_class`，`ProviderInstance` とその schema．radio の RM-21・RM-25 はこの実効の class を使う．timed tune の要る実験は，capability `radio.{rx,tx}.c<n>.timed_tune: eq true` で合わない装置を断る．値で可否が変わる装置は，範囲全体で `cold` と宣言する．
-- **(b) 全 Provider で `cold` にする（Vocabulary だけ）．** 周波数と gain の key を `cold` にし，timed の更新は，できる装置だけが宣言する別の key に分ける．Kernel は変わらない．一方で，一つの物理量に二つの key ができ，両者の順序（UC-2 は key ごと）と configuration of record の扱いを Vocabulary で決める必要がある．
+**決定（owner 2026-10-25）：(c)．instance ごとの実効の宣言と，新しい update class `untimed`．** 推奨は初め (a)（狭める先が `cold`）だった．owner が「cold ではなく時刻指定なしのコマンドのようにできないか」と問い，比べ直して (c) に変えた．
 
-**推奨：(a)．** key が一つのまま，§59 の「BindingProfile だけを変える」と，今の UBX・OBX の timed tune を保てる．Kernel の変更は凍結前なら小さく，一度で済む．
-- 利点：同じ Spec が timed の装置と untimed の装置で同じ key を使う．untimed の retune は `cold`（UC-3）として，stream の切れ目に見える．
-- 欠点：Kernel の宣言の道に，上の規則と型が加わる．untimed の装置では retune のたびに受信が途切れる．
-- 退けた案：timed の更新をやめて全部 `cold` にし，別の key も作らない（UBX・OBX の位相の揃え方を失う）．新しい class（「host の時刻でおおよそ」）を Kernel に足す（意味の弱い概念を凍結する Kernel に入れる）．機種ごとに Vocabulary を分ける（§59 の比較ができない）．
+(c) の中身：
+- **実効の宣言（(a) から引き継ぐ）．** Provider の instance が，key ごとに Vocabulary の `hardware_timed` を `untimed` に狭めて宣言できる．宣言は bound な parameter ごとに一つで，validate から Run の終わりまで変わらず，device の node と stream の node のどちらを target にしても同じ class になる（RM-12 は両方を target に許す．Sol の S2）．変わるもの：RS-52，RS-17，UC-1，MA-24（どちらも UC-2…UC-6 を名指す），SB-16，KC-17，KC-24 の手順5，Vision §27（4つの class を並べる），共有の `declared_class`，`UpdateClass` と `UPDATE_CLASSES`，`UpdateClass` を含む schema（`schemas/{action,dispatched,experiment_spec,component_descriptor,vocabulary_descriptor}.v1.json`）の再生成，`ProviderInstance` とその schema，宣言の検査（override の identity，許す key，許さない override の拒否．Sol の D5）．狭める向きは `hardware_timed` → `untimed` だけを許す．
+- **class `untimed`（新しい UC 規則）．** stream は止めず，受信と送信の timestamp は続く．値は effective instant（`at`，`at` がなければ受け取った瞬間）より前には適用されず，effective instant から装置が宣言した最大の遅れ（radio の capability，例：`radio.timing.untimed_apply_max_ns`）までの間に適用される．その幅の中のどこで切り替わったかは約束しない．Provider は命令を出した時刻と呼び出しが戻った時刻を，装置の時刻があればそれで記録する．幅の中の block に印は付けない（Kernel の block flag は増やさない）．UC-2 の順序（同じ key の更新は effective instant の順）は保つ．
+- **MockRadio の既定は幅の終わりで適用する．** 決定的な既定として置くだけで，これで Vision §59 の比較が成り立つとは言えない（実機は幅の中のどこでも切り替わりうるので，終わりだけの Mock は「期限まで古い周波数のまま」に頼る実験を見逃す．Sol の D4）．
+- **radio の規則と Module．** RM-21 の queue と floor は `hardware_timed` の規則なので，`untimed` の更新と `cold`・`hardware_timed` の変更の間の順序の規則を radio に足す．timed tune の要る実験は capability `radio.{rx,tx}.c<n>.timed_tune: eq true` で合わない装置を断る．値で可否が変わる装置（X420，spur reduction を有効にした N2）は範囲全体で `untimed` と宣言する．
+
+amendment が決めること（Sol の D1〜D4，D6．決定の向きは変えない）：
+1. **観測できる約束．** 「適用した」が何を指すか（register の書き込み，RPC の完了，RF の整定，sample の変化），幅の clock と丸め，確かめ方．期限に間に合わないときの扱い（拒否か故障か），`at + 最大の遅れ` の後に受け取った更新の扱い（すぐ late か，拒否か．幅を黙って起こし直さない）．
+2. **順序と容量．** UC-2 は適用の順を求めるので，同じ key の幅が重なるときの直列化，受け入れの上限，同じ瞬間の扱い，`cold`・`hardware_timed` の変更との調停．直列化のせいで受け入れた期限が守れなくなる列も試す．
+3. **Stop と loss の決済．** 幅の中で stream の `Stop`，`Provider::stop`，loss，再開が来たとき，その更新を issued とするか取り消すか，呼び出しが終わる前の決済，channel のない更新（RM-16 は適用の瞬間が分かる前提で書いてある）．
+4. **Mock と実機の比較．** 幅の終わりという既定とは別に，幅の不確かさを考えた検査か境界の場面を決める．buffer に入っていた block と過渡の sample の読み方（block の flag は必ずしも要らない）．
+5. **schedule と Session．** KC-17 は前の更新の値が次の entry の時点で入っている前提に立つので，幅のある更新の後の構成の検査．Session の compile の時期（RS-19，RS-49a）．
+
+比べた案：
+- (a) 狭める先を `cold` にする．切れ目は新しい SampleClock としてはっきり見えるが，retune のたびに受信が途切れる（UHD の `cold` の再開は約 55〜221 ms，handoff §3 の測って決め直す値）．sweep のように何度も retune する実験に向かない．切れ目の要る受信は Stop と `start_rx` で作れる（ただし `cold` の更新と同じではない．Sol の D6）．
+- (b) 全 Provider で `cold` にし，timed の更新は別の key に分ける（Vocabulary だけ）．一つの物理量に二つの key ができ，両者の順序と configuration of record を Vocabulary で決める必要がある．
+- 退けた案：timed の更新をやめて全部 `cold` にし，別の key も作らない（UBX・OBX の位相の揃え方を失う）．機種ごとに Vocabulary を分ける（§59 の比較ができない）．
+
+(c) の利点：retune で stream が途切れない（物理的な受信が途切れないかは装置による）．UHD で command time なしに `set_rx_freq` を呼ぶのと同じふるまいで，v3 もそうしていた．適用の幅は宣言された値なので，Mock と実機の比較に乗る．
+(c) の欠点：Kernel に class が一つ増え，上の規則と schema に波及する．幅の中の sample は新しい周波数か分からない．radio に `untimed` の順序の規則が要る．
 
 ### 判断2（K2）：時刻を持たない装置（HackRF）を v4.0 で受け入れるか
 
