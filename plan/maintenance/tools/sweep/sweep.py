@@ -44,15 +44,19 @@ def run(prompt, log):
 
 
 def extract(log):
-    t = open(log, errors="replace").read() if os.path.exists(log) else ""
-    m = re.findall(r"===JSON BEGIN===\s*(.*?)\s*===JSON END===", t, re.S)
-    if not m:
-        return None
-    body = re.sub(r"^```(json)?|```$", "", m[-1].strip(), flags=re.M).strip()
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError:
-        return None
+    # The answer is the last JSON object in the log that has `findings` or `verdicts`; the
+    # markers are not trusted: the brief's own copy of them appears when a run reads it
+    # (2026-10-25), and a run sometimes drops one or both.
+    t = re.sub(r"\x1b\[[0-9;]*m", "", open(log, errors="replace").read()) if os.path.exists(log) else ""
+    dec = json.JSONDecoder(strict=False)
+    for m in reversed(list(re.finditer(r"^\s*\{", t, re.M))):
+        try:
+            d, _ = dec.raw_decode(t, m.end() - 1)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict) and ("findings" in d or "verdicts" in d) and "<rule ids with no finding>" not in json.dumps(d):
+            return d
+    return None
 
 
 def sweep_prompt(c):
