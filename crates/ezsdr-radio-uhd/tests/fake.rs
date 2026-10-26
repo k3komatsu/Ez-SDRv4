@@ -31,7 +31,7 @@ use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BurstEnd, DataLinkDecl};
 use ezsdr_kernel::time::{ClockRegistry, Duration, EpochRef, RelativeBudget, TimePoint};
 use ezsdr_radio::payloads::{TimeErrorOutcome, TimeErrorPayload};
-use ezsdr_radio_uhd::{ClockMode, Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
+use ezsdr_radio_uhd::{ClockMode, Device, DeviceAuthority, Dir, FakeConfig, FakeDevice, FakeFault, TxCode, UhdRadio};
 use serde_json::{Value as Json, json};
 
 use common::*;
@@ -631,6 +631,10 @@ fn measurement_fake_rehearsal_round_trips_and_only_fails_source() {
 fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements() {
     let device = fake(one_obx());
     let plan = measurement::MeasurementPlan::rehearsal();
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false);
+    let binding = measurement::radio_binding(&doc).unwrap();
+    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
     let mut group = measurement::MeasurementGroup::default();
     group.append(measurement::measure_min_timed_command_lead(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_tx_in_flight(device.clone(), &plan).unwrap()).unwrap();
@@ -640,6 +644,8 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     group.append(measurement::measure_overflow_restart_gap(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_tx_throughput(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_full_duplex(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_command_queue_depth(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_coercion(device.clone(), &description).unwrap()).unwrap();
 
     let assert_stage = |stage: &Json, trials: usize| {
         let rows = stage["trials"].as_array().expect("every candidate has trial rows");
@@ -682,20 +688,88 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     assert_eq!(duplex.len(), plan.loopback_trials);
     assert!(duplex.iter().all(|row| row["class"].as_str().is_some_and(|class| !class.is_empty())));
 
+    let queue = result("raw_command_queue_depth");
+    assert_eq!(queue["conditions"].as_array().unwrap().len(), 5);
+    assert_eq!(queue["max_calls"].as_u64(), Some(plan.queue_max_calls as u64));
+    assert_eq!(queue["call_time_limit_ns"].as_u64(), Some(100_000_000));
+    assert_eq!(queue["depth_unit"].as_str(), Some("timed_apply_calls"));
+    assert!(queue["depth_definition"].as_str().is_some_and(|definition| definition.contains("not device FIFO entries")));
+    assert_eq!(queue["back_pressure_attribution"].as_str(), Some("INFERRED"));
+    assert!(queue["back_pressure_basis"].as_str().is_some_and(|basis| basis.contains("do not directly prove credit wait")));
+    assert_eq!(group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().trials, (5 * plan.queue_trials) as u32);
+    for condition in queue["conditions"].as_array().unwrap() {
+        let trials = condition["trials"].as_array().unwrap();
+        assert_eq!(trials.len(), plan.queue_trials);
+        assert!(trials.iter().all(|trial| trial["classification"].as_str().is_some_and(|class| !class.is_empty())));
+        assert!(trials.iter().all(|trial| trial["calls"].as_array().is_some_and(|calls| !calls.is_empty() && calls.len() <= plan.queue_max_calls)));
+        for trial in trials {
+            assert!(trial.get("first_command_tick").is_some(), "queue trial omits its first command time: {trial}");
+            for field in ["d0_tick", "h_before_ns", "h_after_ns", "h_after_minus_h_before_ns"] {
+                assert!(trial.get(field).is_some(), "queue trial omits {field}: {trial}");
+            }
+            for call in trial["calls"].as_array().unwrap() {
+                for field in ["scheduled_tick", "duration_ns", "h_i_ns", "device_time_lower_tick", "device_time_upper_tick", "apply_error"] {
+                    assert!(call.get(field).is_some(), "queue call omits {field}: {call}");
+                }
+            }
+        }
+    }
+    let coercion: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("raw_coercion_")).collect();
+    assert_eq!(coercion.len(), 10);
+    for row in &coercion {
+        let points = row.result["points"].as_array().unwrap();
+        assert_eq!(row.trials as usize, points.len().max(1), "{}", row.name);
+        let expected = match row.name.as_str() {
+            "raw_coercion_rx_c0_gain_db" | "raw_coercion_tx_c0_gain_db" => 64,
+            "raw_coercion_rx_c0_gain_step_db" | "raw_coercion_tx_c0_gain_step_db" => 316,
+            "raw_coercion_rx_c0_antenna" => description.rx[0].antennas.len(),
+            "raw_coercion_tx_c0_antenna" => description.tx[0].antennas.len(),
+            "raw_coercion_rx_c0_frequency_hz" => 50,
+            "raw_coercion_tx_c0_frequency_hz" => 20,
+            "raw_coercion_rx_s0_sample_rate_hz" | "raw_coercion_tx_s0_sample_rate_hz" => match &description.rates {
+                ezsdr_radio::device::Grid::Values(values) => values.len(),
+                other => panic!("the x3xx sample-rate profile must be enumerable: {other:?}"),
+            },
+            other => panic!("unexpected raw coercion observation {other}"),
+        };
+        assert_eq!(points.len(), expected, "{}", row.name);
+        for point in points {
+            for field in ["requested", "readback", "error"] {
+                assert!(point.get(field).is_some(), "{} point omits {field}: {point}", row.name);
+            }
+        }
+        if row.name == "raw_coercion_tx_c0_frequency_hz" {
+            assert!(points.iter().all(|point| point["requested"].as_f64().is_some_and(|hz| SAFE_TX_HZ.contains(&hz))));
+        }
+    }
+
+    let calls_before_restore = device.calls().len();
+    measurement::restore_measurement_defaults(&*device, &description).unwrap();
+    let calls = device.calls();
+    let restored = &calls[calls_before_restore..];
+    assert_eq!(restored.len(), description.rx.len() + description.tx.len());
+    for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
+        for (channel_index, channel) in channels.iter().enumerate() {
+            let expected = format!(
+                "apply {} {channel_index} rate={} freq=1000000000 gain=0 antenna={} at=-",
+                dir.name(), ezsdr_radio::channels::DEFAULT_SAMPLE_RATE_HZ, channel.default_antenna,
+            );
+            assert!(restored.contains(&expected), "missing restored settings: {expected}; {restored:?}");
+        }
+    }
+
     let measured_keys: std::collections::BTreeSet<_> = group.values.iter().map(|row| match row {
         ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
     }).collect();
     assert!(!measured_keys.contains("radio.timing.overflow_restart_gap_ns"), "overflow contributes observations but no value row");
     assert_eq!(measured_keys, [
         "radio.full_duplex", "radio.hardware_time", "radio.perf.rx_bytes_per_s", "radio.perf.tx_bytes_per_s",
-        "radio.timing.min_timed_command_lead_ns", "radio.timing.rx_start_lead_ns",
+        "radio.timing.command_queue_depth", "radio.timing.min_timed_command_lead_ns", "radio.timing.rx_start_lead_ns",
         "radio.timing.tx_in_flight_ns", "radio.timing.tx_start_lead_ns",
+        "radio.rx.c0.gain_db", "radio.rx.c0.gain_step_db", "radio.rx.c0.antenna", "radio.rx.s0.sample_rate_hz",
+        "radio.tx.c0.gain_db", "radio.tx.c0.gain_step_db", "radio.tx.c0.antenna", "radio.tx.s0.sample_rate_hz",
     ].into_iter().map(str::to_owned).collect());
 
-    let dir = TempDir::new();
-    let doc = bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false);
-    let binding = measurement::radio_binding(&doc).unwrap();
-    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
     let record = measurement::build_record(
         ezsdr_radio::measurement::Source::Fake, &binding, &*device, &measurement::rehearsal_metadata(),
         group, &description,
@@ -716,6 +790,24 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     let violations = ezsdr_radio::measurement::compare(&round_trip, &description);
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert_eq!(violations[0].key, "source");
+}
+
+#[test]
+fn measurement_defaults_restoration_attempts_all_channels_after_an_apply_error() {
+    let device = fake(FakeConfig { faults: vec![FakeFault::RxApplyFails], ..one_obx() });
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false);
+    let binding = measurement::radio_binding(&doc).unwrap();
+    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+    let calls_before = device.calls().len();
+
+    let error = measurement::restore_measurement_defaults(&*device, &description).unwrap_err();
+    assert!(error.contains("could not restore Rx channel 0"), "{error}");
+    let calls = device.calls();
+    let restored = &calls[calls_before..];
+    assert_eq!(restored.len(), description.rx.len() + description.tx.len(), "{restored:?}");
+    assert!(restored[0].starts_with("apply rx 0 "), "{restored:?}");
+    assert!(restored[1].starts_with("apply tx 0 "), "restoration continued after the receive error: {restored:?}");
 }
 
 #[test]

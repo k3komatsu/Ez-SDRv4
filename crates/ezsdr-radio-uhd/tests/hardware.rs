@@ -312,7 +312,6 @@ fn hw_b9_usrp2_probe() {
 // `SAFE_TX_HZ`, at most 2 Msps (so the emission stays inside the bench envelope's
 // 999–1001 MHz), 0 dB, amplitude ≤ 0.4, into the 30 dB loopback.
 
-const SAFE_TX_HZ: std::ops::RangeInclusive<f64> = 999_500_000.0..=1_000_500_000.0;
 const TICKS_PER_MS: i64 = 200_000;
 
 /// The device with its time set to zero on the internal reference.
@@ -1493,6 +1492,11 @@ fn hw_measurements_record() {
     assert_eq!(got, expected, "the record has exactly the raw probes it ran");
 
     let device = usrp();
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
+    let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
+    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())
+        .expect("the bound X3xx layout");
     let mut measured = measurement::MeasurementGroup::default();
     measured.append(measurement::measure_min_timed_command_lead(device.clone(), &plan).expect("Provider command-lead measurements"))
         .expect("merge command-lead measurements");
@@ -1510,12 +1514,16 @@ fn hw_measurements_record() {
         .expect("merge transmit-throughput measurements");
     measured.append(measurement::measure_full_duplex(device.clone(), &plan).expect("Provider full-duplex measurements"))
         .expect("merge full-duplex measurements");
+    let raw_measurements = (|| -> Result<measurement::MeasurementGroup, String> {
+        let mut group = measurement::measure_command_queue_depth(device.clone(), &plan)?;
+        group.append(measurement::measure_coercion(device.clone(), &description)?)?;
+        Ok(group)
+    })();
+    let restored = measurement::restore_measurement_defaults(&*device, &description);
+    let raw_measurements = raw_measurements.expect("raw queue-depth and coercion measurements");
+    restored.expect("restore the unstreamed bench settings after raw measurements");
+    measured.append(raw_measurements).expect("merge raw queue-depth and coercion measurements");
     measured.observations.extend(observations);
-    let dir = TempDir::new();
-    let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
-    let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
-    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())
-        .expect("the bound X3xx layout");
     let record = measurement::build_record(
         ezsdr_radio::measurement::Source::Hardware,
         &binding,

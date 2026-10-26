@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration as Wall;
+use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{Binding, BindingProfile};
 use ezsdr_kernel::spec::{Ident, Key};
@@ -17,13 +17,16 @@ use ezsdr_kernel::run::Lease;
 use ezsdr_kernel::stream::{BurstEnd, Direction};
 use ezsdr_kernel::time::{SampleClockRecord, TimePoint};
 use ezsdr_radio::channels;
+use ezsdr_radio::device::Grid;
 use ezsdr_radio::measurement::{
     self as model, Condition, Device as DeviceRecord, Host, Load, Observation, Record, Rule,
     Source, StreamCondition, StreamRef, ValueRecord,
 };
 use ezsdr_radio::x3xx::ProviderTerms;
-use ezsdr_radio_uhd::Device;
+use ezsdr_radio_uhd::{Device, Dir, Settings};
 use serde_json::{json, Value as Json};
+
+use super::SAFE_TX_HZ;
 
 const REQUIRED_ENV: [&str; 8] = [
     "EZSDR_MEASUREMENT_OUTPUT",
@@ -219,8 +222,19 @@ pub fn unmeasured_values(description: &channels::Description) -> Vec<ValueRecord
 }
 
 fn unmeasured_reason(key: &str) -> &'static str {
+    if key.starts_with("radio.rx.c") || key.starts_with("radio.tx.c") {
+        if key.ends_with(".frequency_hz") || key.ends_with(".frequency_step_hz") {
+            return "Phase 8 stage 3c-2a records frequency request/read-back samples as observations only; whether a finite sample represents a continuous tuning grid, and how to measure outside the TX safety band, awaits the owner decision.";
+        }
+        if key.ends_with(".gain_db") || key.ends_with(".gain_step_db") || key.ends_with(".antenna") {
+            return "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back.";
+        }
+    }
+    if key.starts_with("radio.rx.s") || key.starts_with("radio.tx.s") {
+        return "Not measured in this record; Phase 8 stage 3c-2a measures raw Device sample-rate read-back.";
+    }
     match key {
-        "radio.timing.command_queue_depth" => "Applied instants are reservations, not device execution observations; raw queue probes remain observations, and the comparison method is deferred to Phase 8 stage 3c.",
+        "radio.timing.command_queue_depth" => "Not measured in this record; Phase 8 stage 3c-2a measures raw Device timed-apply queue back-pressure.",
         "radio.timing.min_timed_command_lead_ns"
         | "radio.timing.tx_in_flight_ns"
         | "radio.timing.rx_start_lead_ns"
@@ -641,6 +655,9 @@ pub struct MeasurementPlan {
     pub throughput_seconds: u64,
     pub loopback_trials: usize,
     pub interval_ns: u64,
+    pub queue_trials: usize,
+    pub queue_ahead_ns: u64,
+    pub queue_max_calls: usize,
 }
 
 impl Default for MeasurementPlan {
@@ -662,6 +679,9 @@ impl Default for MeasurementPlan {
             throughput_seconds: 60,
             loopback_trials: 20,
             interval_ns: 20_000_000,
+            queue_trials: 5,
+            queue_ahead_ns: 3_000_000_000,
+            queue_max_calls: 64,
         }
     }
 }
@@ -684,6 +704,9 @@ impl MeasurementPlan {
             throughput_seconds: 1,
             loopback_trials: 1,
             interval_ns: 20_000_000,
+            queue_trials: 1,
+            queue_ahead_ns: 20_000_000,
+            queue_max_calls: 8,
         }
     }
 
@@ -706,8 +729,13 @@ impl MeasurementPlan {
         if self.overflow_stall_ms.len() != self.overflow_rates_hz.len() || self.overflow_stall_ms.contains(&0) || self.overflow_after_ms == 0 {
             return Err("overflow rates need one positive stall duration each and a positive pre-stall interval".to_owned());
         }
-        if self.step_trials == 0 || self.overflow_trials == 0 || self.throughput_seconds == 0 || self.loopback_trials == 0 || self.interval_ns == 0 {
+        if self.step_trials == 0 || self.overflow_trials == 0 || self.throughput_seconds == 0 || self.loopback_trials == 0
+            || self.interval_ns == 0 || self.queue_trials == 0 || self.queue_ahead_ns == 0 || self.queue_max_calls == 0
+        {
             return Err("measurement counts and inter-trial interval must be positive".to_owned());
+        }
+        if i64::try_from(self.queue_max_calls).is_err() {
+            return Err("queue command limit exceeds i64".to_owned());
         }
         let step_observations = [
             self.timed_command_leads_ns.len(),
@@ -732,10 +760,13 @@ impl MeasurementPlan {
         if self.loopback_trials > u32::MAX as usize {
             return Err("EZSDR_MEASURE_LOOPBACK_TRIALS exceeds the record's u32 trial limit".to_owned());
         }
+        if self.queue_trials.checked_mul(5).is_none_or(|trials| trials > u32::MAX as usize) {
+            return Err("EZSDR_MEASURE_QUEUE_TRIALS exceeds the record's u32 trial limit".to_owned());
+        }
         Ok(())
     }
 
-    /// Parses the four supported count overrides without consulting global state.
+    /// Parses the supported count overrides without consulting global state.
     pub fn from_env(values: &BTreeMap<String, String>) -> Result<MeasurementPlan, String> {
         fn count(values: &BTreeMap<String, String>, name: &str, default: u64) -> Result<u64, String> {
             let Some(value) = values.get(name) else { return Ok(default) };
@@ -748,6 +779,7 @@ impl MeasurementPlan {
             overflow_trials: usize::try_from(count(values, "EZSDR_MEASURE_OVERFLOW_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_OVERFLOW_TRIALS is too large".to_owned())?,
             throughput_seconds: count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
             loopback_trials: usize::try_from(count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
+            queue_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_QUEUE_TRIALS is too large".to_owned())?,
             ..MeasurementPlan::default()
         };
         plan.validate()?;
@@ -756,10 +788,630 @@ impl MeasurementPlan {
 
     /// Reads only the documented environment variables and validates before opening a device.
     pub fn process_env() -> Result<MeasurementPlan, String> {
-        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"];
+        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS"];
         let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
         MeasurementPlan::from_env(&values)
     }
+}
+
+const QUEUE_SPACING_NS: u64 = 1_000_000;
+const QUEUE_CALL_TIME_LIMIT_NS: u64 = 100_000_000;
+const QUEUE_DRAIN_MARGIN_NS: u64 = 10_000_000;
+const QUEUE_TEST: &str = "tests/hardware.rs::hw_measurements_record";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum QueueTrialClass {
+    Success { depth: usize },
+    Incomplete { reason: &'static str },
+    DeviceFailure { reason: String },
+}
+
+#[derive(Clone, Debug)]
+struct QueueCall {
+    duration_ns: u64,
+    h_i_ns: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QueueClock {
+    d0_tick: i64,
+    h_before_ns: u64,
+    h_after_ns: u64,
+}
+
+fn queue_device_time_bounds(clock: QueueClock, h_i_ns: u64, master_clock_hz: u64) -> Option<(i64, i64)> {
+    let since_before = h_i_ns.checked_sub(clock.h_before_ns)?;
+    let since_after = h_i_ns.checked_sub(clock.h_after_ns)?;
+    let upper_ticks = ticks_for_ns(since_before, master_clock_hz).ok()?;
+    let lower_ticks = i64::try_from((u128::from(since_after) * u128::from(master_clock_hz)) / 1_000_000_000).ok()?;
+    Some((clock.d0_tick.checked_add(lower_ticks)?, clock.d0_tick.checked_add(upper_ticks)?))
+}
+
+fn classify_queue_trial(
+    calls: &[QueueCall], clock: QueueClock, first_at: i64, stall_limit_ns: u64, return_limit_ticks: i64, master_clock_hz: u64,
+) -> QueueTrialClass {
+    let Some(read_duration_ns) = clock.h_after_ns.checked_sub(clock.h_before_ns) else {
+        return QueueTrialClass::Incomplete { reason: "the device-time read host interval was invalid" };
+    };
+    if read_duration_ns > QUEUE_CALL_TIME_LIMIT_NS {
+        return QueueTrialClass::Incomplete { reason: "the device-time read took too long to bound the host-clock interval" };
+    }
+    if let Some(reason) = calls.iter().find_map(|call| call.error.as_deref()) {
+        return QueueTrialClass::DeviceFailure { reason: reason.to_owned() };
+    }
+    let stalled: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.duration_ns > stall_limit_ns).collect();
+    let Some((depth, blocked)) = stalled.first().copied() else {
+        return QueueTrialClass::Incomplete { reason: "no timed apply blocked before the call limit" };
+    };
+    if stalled.len() != 1 {
+        return QueueTrialClass::Incomplete { reason: "more than one timed apply crossed the stall limit" };
+    }
+    if calls[..depth].iter().any(|call| call.duration_ns >= QUEUE_CALL_TIME_LIMIT_NS) {
+        return QueueTrialClass::Incomplete { reason: "a call before the blocked apply was not short" };
+    }
+    if calls[..depth].iter().any(|call| call.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz))
+        .is_none_or(|(_, upper)| upper >= first_at)) {
+        return QueueTrialClass::Incomplete { reason: "a call before the blocked apply has an upper device-time bound at or after the first command time" };
+    }
+    let Some(latest_return_tick) = first_at.checked_add(return_limit_ticks) else {
+        return QueueTrialClass::Incomplete { reason: "the blocked apply return-time limit overflowed" };
+    };
+    let blocked_bounds = blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz));
+    if blocked_bounds.is_none_or(|(lower, _)| lower < first_at) {
+        return QueueTrialClass::Incomplete { reason: "the blocked apply has a lower device-time bound before the first command time" };
+    }
+    if blocked_bounds.is_some_and(|(_, upper)| upper > latest_return_tick) {
+        return QueueTrialClass::Incomplete { reason: "the blocked apply has an upper device-time bound too long after the first command time" };
+    }
+    QueueTrialClass::Success { depth }
+}
+
+fn finish_queue_trial(queue_class: QueueTrialClass, operational_error: Option<String>, untimed_error: Option<String>) -> QueueTrialClass {
+    match operational_error.or(untimed_error) {
+        Some(reason) => QueueTrialClass::DeviceFailure { reason },
+        None => queue_class,
+    }
+}
+
+#[derive(Clone)]
+struct QueueOperation {
+    dir: Dir,
+    settings: Settings,
+}
+
+fn queue_condition(id: &str, operations: Vec<QueueOperation>) -> (Condition, Vec<QueueOperation>) {
+    (Condition { id: id.to_owned(), streams: vec![], concurrent: vec![], reopened: false }, operations)
+}
+
+fn queue_operations(dir: Dir, field: &str) -> Vec<QueueOperation> {
+    let settings: Vec<Settings> = match field {
+        "frequency" => [999_600_000.0, 1_000_400_000.0].into_iter().map(|value| {
+            if dir == Dir::Tx { assert!(SAFE_TX_HZ.contains(&value)); }
+            Settings { freq: Some(value), ..Settings::default() }
+        }).collect(),
+        "gain" => [0.0, 10.0].into_iter().map(|value| Settings { gain: Some(value), ..Settings::default() }).collect(),
+        _ => unreachable!("known queue operation"),
+    };
+    settings.into_iter().map(|settings| QueueOperation { dir, settings }).collect()
+}
+
+fn queue_conditions() -> Vec<(Condition, Vec<QueueOperation>)> {
+    let mut conditions = vec![
+        queue_condition("queue-rx-frequency", queue_operations(Dir::Rx, "frequency")),
+        queue_condition("queue-tx-frequency", queue_operations(Dir::Tx, "frequency")),
+        queue_condition("queue-rx-gain", queue_operations(Dir::Rx, "gain")),
+        queue_condition("queue-tx-gain", queue_operations(Dir::Tx, "gain")),
+    ];
+    conditions.push(queue_condition("queue-rx-tx-frequency", vec![
+        QueueOperation { dir: Dir::Rx, settings: Settings { freq: Some(999_600_000.0), ..Settings::default() } },
+        QueueOperation { dir: Dir::Tx, settings: Settings { freq: Some(1_000_400_000.0), ..Settings::default() } },
+        QueueOperation { dir: Dir::Rx, settings: Settings { freq: Some(1_000_400_000.0), ..Settings::default() } },
+        QueueOperation { dir: Dir::Tx, settings: Settings { freq: Some(999_600_000.0), ..Settings::default() } },
+    ]));
+    conditions
+}
+
+fn wait_for_device_tick(device: &dyn Device, target: i64, timeout: Wall) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        if device.time_now().map_err(|error| error.message)? >= target { return Ok(()); }
+        if start.elapsed() >= timeout { return Err(format!("device time did not reach {target} before the wait limit")); }
+        std::thread::sleep(Wall::from_millis(1));
+    }
+}
+
+fn queue_trial(
+    device: &dyn Device,
+    operations: &[QueueOperation],
+    plan: &MeasurementPlan,
+    trial: usize,
+) -> Result<(QueueTrialClass, Json), String> {
+    let ahead_ticks = ticks_for_ns(plan.queue_ahead_ns, device.master_clock_rate())?;
+    let spacing_ticks = ticks_for_ns(QUEUE_SPACING_NS, device.master_clock_rate())?;
+    let margin_ticks = ticks_for_ns(QUEUE_DRAIN_MARGIN_NS, device.master_clock_rate())?;
+    let return_limit_ticks = ticks_for_ns(QUEUE_CALL_TIME_LIMIT_NS, device.master_clock_rate())?;
+    let h_before = Instant::now();
+    let d0 = match device.time_now() {
+        Ok(now) => now,
+        Err(error) => return Ok((QueueTrialClass::DeviceFailure { reason: error.message.clone() }, json!({
+            "trial": trial, "classification": "device_failure", "error": error.message,
+        }))),
+    };
+    let h_after = Instant::now();
+    let clock = QueueClock {
+        d0_tick: d0,
+        h_before_ns: 0,
+        h_after_ns: u64::try_from(h_after.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX),
+    };
+    let first_at = match d0.checked_add(ahead_ticks) {
+        Some(at) => at,
+        None => return Ok((QueueTrialClass::DeviceFailure { reason: "queue target tick overflow".to_owned() }, json!({
+            "trial": trial, "classification": "device_failure", "error": "queue target tick overflow",
+        }))),
+    };
+    let stall_limit_ns = plan.queue_ahead_ns / 2;
+    if device.channels(Dir::Tx) == 0 {
+        return Ok((QueueTrialClass::DeviceFailure { reason: "queue probe requires transmit channel 0".to_owned() }, json!({
+            "trial": trial, "classification": "device_failure", "error": "queue probe requires transmit channel 0",
+        })));
+    }
+    let master_clock_hz = device.master_clock_rate();
+    let mut calls = Vec::new();
+    let mut rows = Vec::new();
+    let mut last_accepted_at = None;
+    let mut operational_error = None;
+    let read_duration_ns = clock.h_after_ns - clock.h_before_ns;
+    if read_duration_ns <= QUEUE_CALL_TIME_LIMIT_NS {
+        if let Err(error) = device.apply(Dir::Tx, 0, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None) {
+            return Ok((QueueTrialClass::DeviceFailure { reason: error.message.clone() }, json!({
+                "trial": trial, "classification": "device_failure", "error": error.message,
+            })));
+        }
+        for index in 0..plan.queue_max_calls {
+            let index = i64::try_from(index).map_err(|_| "queue command count exceeds i64")?;
+            let at = first_at.checked_add(spacing_ticks.checked_mul(index).ok_or("queue command spacing overflow")?)
+                .ok_or("queue command time overflow")?;
+            let operation = &operations[index as usize % operations.len()];
+            if operation.dir == Dir::Tx && operation.settings.freq.is_some_and(|frequency| !SAFE_TX_HZ.contains(&frequency)) {
+                return Err("queue probe requested a TX frequency outside SAFE_TX_HZ".to_owned());
+            }
+            let started = Instant::now();
+            let applied = device.apply(operation.dir, 0, &operation.settings, Some(at));
+            let h_i = Instant::now();
+            let duration_ns = u64::try_from(h_i.duration_since(started).as_nanos()).unwrap_or(u64::MAX);
+            let h_i_ns = u64::try_from(h_i.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX);
+            let apply_error = applied.as_ref().err().map(|error| error.message.clone());
+            let error = apply_error.clone();
+            if applied.is_ok() { last_accepted_at = Some(at); }
+            let bounds = queue_device_time_bounds(clock, h_i_ns, master_clock_hz);
+            calls.push(QueueCall { duration_ns, h_i_ns: Some(h_i_ns), error: error.clone() });
+            rows.push(json!({
+                "number": index + 1,
+                "direction": operation.dir.name(),
+                "scheduled_tick": at,
+                "duration_ns": duration_ns,
+                "h_i_ns": h_i_ns,
+                "device_time_lower_tick": bounds.map(|(lower, _)| lower),
+                "device_time_upper_tick": bounds.map(|(_, upper)| upper),
+                "apply_error": apply_error,
+            }));
+            if error.is_some() {
+                operational_error = error;
+                break;
+            }
+            if duration_ns > stall_limit_ns { break; }
+        }
+    }
+    let queue_class = classify_queue_trial(&calls, clock, first_at, stall_limit_ns, return_limit_ticks, master_clock_hz);
+    if let Some(last_at) = last_accepted_at {
+        let target = last_at.checked_add(margin_ticks).ok_or("queue drain time overflow")?;
+        let timeout_ns = plan.queue_ahead_ns.checked_add(QUEUE_DRAIN_MARGIN_NS + 2_000_000_000)
+            .ok_or("queue drain timeout overflow")?;
+        if let Err(error) = wait_for_device_tick(device, target, Wall::from_nanos(timeout_ns)) {
+            operational_error = Some(error);
+        }
+    }
+    let reset_dir = operations.first().map_or(Dir::Rx, |operation| operation.dir);
+    let untimed = device.apply(reset_dir, 0, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None);
+    let untimed_error = untimed.err().map(|error| error.message);
+    let class = finish_queue_trial(queue_class, operational_error, untimed_error.clone());
+    let depth = match &class { QueueTrialClass::Success { depth } => Some(*depth), _ => None };
+    let class_name = match &class {
+        QueueTrialClass::Success { .. } => "success",
+        QueueTrialClass::Incomplete { .. } => "incomplete",
+        QueueTrialClass::DeviceFailure { .. } => "device_failure",
+    };
+    let class_reason = match &class {
+        QueueTrialClass::Incomplete { reason } => Some((*reason).to_owned()),
+        QueueTrialClass::DeviceFailure { reason } => Some(reason.clone()),
+        QueueTrialClass::Success { .. } => None,
+    };
+    Ok((class, json!({
+        "trial": trial,
+        "d0_tick": clock.d0_tick,
+        "h_before_ns": clock.h_before_ns,
+        "h_after_ns": clock.h_after_ns,
+        "h_after_minus_h_before_ns": read_duration_ns,
+        "first_command_tick": first_at,
+        "classification": class_name,
+        "reason": class_reason,
+        "depth": depth,
+        "calls": rows,
+        "untimed_apply_error": untimed_error,
+    })))
+}
+
+fn summarize_queue_depth(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize) -> Option<(usize, String, usize)> {
+    if conditions.iter().any(|(_, trials)| trials.iter().filter(|trial| matches!(trial, QueueTrialClass::Success { .. })).count() < required_trials) {
+        return None;
+    }
+    conditions.iter().flat_map(|(condition, trials)| trials.iter().filter_map(move |trial| match trial {
+        QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.iter().filter(|row| matches!(row, QueueTrialClass::Success { .. })).count())),
+        QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
+    })).min_by_key(|(depth, _, _)| *depth)
+}
+
+fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize) -> Result<ValueRecord, String> {
+    let key = Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?;
+    Ok(match summarize_queue_depth(conditions, required_trials) {
+        Some((depth, condition, trials)) => ValueRecord::Measured {
+            key, worst: model::Worst::Number(depth as f64), trials: observation_trials(trials)?, condition,
+            test: QUEUE_TEST.to_owned(),
+        },
+        None => ValueRecord::Unmeasured {
+            key,
+            reason: format!("Phase 8 stage 3c-2a did not obtain {required_trials} successful back-pressure trials in every queue condition."),
+        },
+    })
+}
+
+/// Measures per-condition timed-apply queue depth on the raw device interface.
+pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let mut group = MeasurementGroup::default();
+    let mut condition_trials = Vec::new();
+    let mut observed_conditions = Vec::new();
+    let mut total_trials = 0usize;
+    for (condition, operations) in queue_conditions() {
+        let mut classes = Vec::new();
+        let mut trials = Vec::new();
+        for trial in 0..plan.queue_trials {
+            let (class, row) = queue_trial(&*device, &operations, plan, trial + 1)?;
+            classes.push(class);
+            trials.push(row);
+            total_trials += 1;
+        }
+        observed_conditions.push(json!({ "id": condition.id.clone(), "trials": trials }));
+        condition_trials.push((condition.id.clone(), classes));
+        group.conditions.push(condition);
+    }
+    group.values.push(queue_depth_value(&condition_trials, plan.queue_trials)?);
+    group.observations.push(observation("raw_command_queue_depth", QUEUE_TEST, None, observation_trials(total_trials)?, json!({
+        "ahead_ns": plan.queue_ahead_ns,
+        "spacing_ns": QUEUE_SPACING_NS,
+        "stall_limit_ns": plan.queue_ahead_ns / 2,
+        "call_time_limit_ns": QUEUE_CALL_TIME_LIMIT_NS,
+        "host_time_origin": "h_before_ns; all host timestamps are offsets from h_before",
+        "clock_rate_assumption": "device and host clocks advance at the same rate; drift is ignored (INFERRED)",
+        "device_time_bounds": "lower=d0+(h_i-h_after); upper=d0+(h_i-h_before)",
+        "depth_unit": "timed_apply_calls",
+        "depth_definition": "the count of timed Device::apply calls (high-level operations), not device FIFO entries",
+        "back_pressure_attribution": "INFERRED",
+        "back_pressure_basis": "host apply duration and device time do not directly prove credit wait",
+        "max_calls": plan.queue_max_calls,
+        "conditions": observed_conditions,
+    }))?);
+    Ok(group)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NumericSetting {
+    Rate,
+    Frequency,
+    Gain,
+}
+
+#[derive(Clone, Debug)]
+struct NumericReadback {
+    requested: f64,
+    returned: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AntennaReadback {
+    requested: String,
+    returned: Option<String>,
+    error: Option<String>,
+}
+
+fn apply_numeric(
+    device: &dyn Device,
+    dir: Dir,
+    channel: usize,
+    setting: NumericSetting,
+    requested: f64,
+) -> NumericReadback {
+    let settings = match setting {
+        NumericSetting::Rate => Settings { rate: Some(requested), ..Settings::default() },
+        NumericSetting::Frequency => Settings { freq: Some(requested), ..Settings::default() },
+        NumericSetting::Gain => Settings { gain: Some(requested), ..Settings::default() },
+    };
+    match device.apply(dir, channel, &settings, None) {
+        Ok(applied) => {
+            let returned = match setting {
+                NumericSetting::Rate => applied.rate,
+                NumericSetting::Frequency => applied.freq,
+                NumericSetting::Gain => applied.gain,
+            };
+            if returned.is_finite() {
+                NumericReadback { requested, returned: Some(returned), error: None }
+            } else {
+                NumericReadback { requested, returned: None, error: Some(format!("non-finite {setting:?} read-back")) }
+            }
+        }
+        Err(error) => NumericReadback { requested, returned: None, error: Some(error.message) },
+    }
+}
+
+fn apply_antenna(device: &dyn Device, dir: Dir, channel: usize, requested: &str) -> AntennaReadback {
+    match device.apply(dir, channel, &Settings { antenna: Some(requested.to_owned()), ..Settings::default() }, None) {
+        Ok(applied) => AntennaReadback { requested: requested.to_owned(), returned: applied.antenna, error: None },
+        Err(error) => AntennaReadback { requested: requested.to_owned(), returned: None, error: Some(error.message) },
+    }
+}
+
+fn grid_points(grid: &Grid) -> Result<Vec<f64>, String> {
+    match grid {
+        Grid::Values(values) if !values.is_empty() && values.iter().all(|value| value.is_finite())
+            && values.windows(2).all(|pair| pair[0] < pair[1]) => Ok(values.clone()),
+        Grid::Values(_) => Err("profile Values grid is empty, non-finite or not ascending".to_owned()),
+        Grid::Integer { lo, hi } if lo <= hi => Ok((*lo..=*hi).map(|value| value as f64).collect()),
+        Grid::Integer { .. } => Err("profile Integer grid has lo > hi".to_owned()),
+        Grid::Step { lo, hi, step } if lo.is_finite() && hi.is_finite() && step.is_finite() && lo <= hi && *step > 0.0 => {
+            let mut points = Vec::new();
+            let mut value = grid.at_or_above(*lo).ok_or("profile Step grid has no first point")?;
+            while value <= *hi {
+                points.push(value);
+                let next = value + step;
+                if next <= value { return Err("profile Step grid did not advance".to_owned()); }
+                value = next;
+            }
+            if points.is_empty() { Err("profile Step grid has no points".to_owned()) } else { Ok(points) }
+        }
+        Grid::Step { .. } => Err("profile Step grid is not enumerable".to_owned()),
+    }
+}
+
+fn fine_gain_points(grid: &Grid) -> Result<Vec<f64>, String> {
+    let step = grid.step();
+    if !step.is_finite() || step <= 0.0 || !grid.min().is_finite() || !grid.max().is_finite() {
+        return Err("profile gain grid has no finite positive step".to_owned());
+    }
+    let lo = grid.min();
+    let hi = grid.max();
+    let spacing = step / 5.0;
+    let intervals = ((hi - lo) / spacing).floor();
+    let count = usize::try_from(intervals as u64).map_err(|_| "gain sweep has too many points")?;
+    let mut points: Vec<_> = (0..=count).map(|index| {
+        let value = lo + index as f64 * step / 5.0;
+        (value * 1_000_000_000.0).round() / 1_000_000_000.0
+    }).collect();
+    if points.last().is_none_or(|last| *last < hi) { points.push((hi * 1_000_000_000.0).round() / 1_000_000_000.0); }
+    Ok(points)
+}
+
+fn sampled_grid_points(grid: &Grid, count: usize) -> Result<Vec<f64>, String> {
+    if count < 2 || !grid.min().is_finite() || !grid.max().is_finite() || grid.min() > grid.max() {
+        return Err("profile frequency grid cannot produce the requested samples".to_owned());
+    }
+    (0..count).map(|index| {
+        let fraction = index as f64 / (count - 1) as f64;
+        let target = grid.min() + (grid.max() - grid.min()) * fraction;
+        grid.nearest(target).ok_or_else(|| format!("profile frequency grid has no value near {target}"))
+    }).collect()
+}
+
+fn observation_number(value: f64) -> f64 {
+    if value == 0.0 { return value; }
+    let exponent = value.abs().log10().floor() as i32;
+    let scale = 10.0_f64.powi(12 - exponent);
+    (value * scale).round() / scale
+}
+
+fn numeric_points_json(points: &[NumericReadback]) -> Json {
+    // Keep observed decimals stable through serde_json's f64 parse/serialize round trip.
+    json!(points.iter().map(|point| json!({
+        "requested": observation_number(point.requested),
+        "readback": point.returned.map(observation_number),
+        "error": point.error.as_deref(),
+    })).collect::<Vec<_>>())
+}
+
+fn antenna_points_json(points: &[AntennaReadback]) -> Json {
+    json!(points.iter().map(|point| json!({
+        "requested": point.requested,
+        "readback": point.returned.as_deref(),
+        "error": point.error.as_deref(),
+    })).collect::<Vec<_>>())
+}
+
+fn gain_readback_matches(requested: f64, returned: f64) -> bool {
+    (requested - returned).abs() <= 1e-9
+}
+
+fn rate_readback_matches(requested: f64, returned: f64) -> bool {
+    (requested - returned).abs() <= requested.abs().max(returned.abs()) * 1e-12
+}
+
+fn numeric_readback_error(points: &[NumericReadback]) -> Option<String> {
+    points.iter().find_map(|point| point.error.as_ref().map(|error| format!("request {}: {error}", point.requested)))
+}
+
+fn coercion_grid_value(
+    key: &str,
+    points: &[NumericReadback],
+    condition: &str,
+    test: &str,
+    matches: impl Fn(f64, f64) -> bool,
+) -> Result<ValueRecord, String> {
+    let key = Key::parse(key).map_err(|error| error.to_string())?;
+    if let Some(error) = numeric_readback_error(points) {
+        return Ok(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a read-back failed: {error}.") });
+    }
+    let values: Vec<_> = points.iter().filter_map(|point| point.returned.filter(|actual| matches(point.requested, *actual)).map(|_| point.requested)).collect();
+    if values.is_empty() {
+        return Ok(ValueRecord::Unmeasured { key, reason: "Phase 8 stage 3c-2a had no request read back at its requested value.".to_owned() });
+    }
+    Ok(ValueRecord::Measured {
+        key, worst: model::Worst::Grid(model::GridValue::Values { values }),
+        trials: observation_trials(points.len())?, condition: condition.to_owned(), test: test.to_owned(),
+    })
+}
+
+fn gain_step_value(key: &str, points: &[NumericReadback], condition: &str, test: &str) -> Result<ValueRecord, String> {
+    let key = Key::parse(key).map_err(|error| error.to_string())?;
+    if let Some(error) = numeric_readback_error(points) {
+        return Ok(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a read-back failed: {error}.") });
+    }
+    let mut values: Vec<_> = points.iter().filter_map(|point| point.returned).collect();
+    values.sort_by(f64::total_cmp);
+    values.dedup_by(|left, right| (*left - *right).abs() <= 1e-9);
+    let Some(step) = values.windows(2).map(|pair| pair[1] - pair[0]).reduce(f64::max) else {
+        return Ok(ValueRecord::Unmeasured { key, reason: "Phase 8 stage 3c-2a gain sweep returned fewer than two distinct values.".to_owned() });
+    };
+    Ok(ValueRecord::Measured {
+        key, worst: model::Worst::Number(step), trials: observation_trials(points.len())?,
+        condition: condition.to_owned(), test: test.to_owned(),
+    })
+}
+
+fn antenna_value(key: &str, points: &[AntennaReadback], condition: &str, test: &str) -> Result<ValueRecord, String> {
+    let key = Key::parse(key).map_err(|error| error.to_string())?;
+    if let Some(error) = points.iter().find_map(|point| point.error.as_ref().map(|error| format!("request {}: {error}", point.requested))) {
+        return Ok(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a read-back failed: {error}.") });
+    }
+    if points.iter().any(|point| point.returned.is_none()) {
+        return Ok(ValueRecord::Unmeasured { key, reason: "Phase 8 stage 3c-2a returned no antenna read-back.".to_owned() });
+    }
+    let values = points.iter().filter(|point| point.returned.as_deref() == Some(point.requested.as_str())).map(|point| point.requested.clone()).collect();
+    Ok(ValueRecord::Measured {
+        key, worst: model::Worst::Texts(values), trials: observation_trials(points.len())?,
+        condition: condition.to_owned(), test: test.to_owned(),
+    })
+}
+
+fn raw_condition(id: &str) -> Condition {
+    Condition { id: id.to_owned(), streams: vec![], concurrent: vec![], reopened: false }
+}
+
+fn coercion_observation(name: String, condition: &str, result: Json, trials: usize) -> Result<Observation, String> {
+    observation(name, QUEUE_TEST, Some(condition.to_owned()), observation_trials(trials.max(1))?, result)
+}
+
+fn key_name(direction: Dir, channel: usize, field: &str) -> String {
+    format!("radio.{}.c{channel}.{field}", direction.name())
+}
+
+/// Measures the profile's gain, antenna and sample-rate coercions, retaining frequency
+/// request/read-back samples only as observations. No streamer is opened.
+pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Description) -> Result<MeasurementGroup, String> {
+    let condition = "raw-device-coercion";
+    let mut group = MeasurementGroup { conditions: vec![raw_condition(condition)], ..MeasurementGroup::default() };
+    let test = QUEUE_TEST;
+    for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
+        for (channel_index, channel) in channels.iter().enumerate() {
+            let safe_tx_error = if dir == Dir::Tx {
+                device.apply(dir, channel_index, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None)
+                    .err().map(|error| error.message)
+            } else { None };
+
+            let gain_key = key_name(dir, channel_index, "gain_db");
+            match grid_points(&channel.gain) {
+                Ok(requests) => {
+                    let points: Vec<_> = requests.iter().map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Gain, *requested)).collect();
+                    group.values.push(coercion_grid_value(&gain_key, &points, condition, test, gain_readback_matches)?);
+                    group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_gain_db", dir.name(), channel_index), condition, json!({ "points": numeric_points_json(&points) }), points.len())?);
+                }
+                Err(error) => {
+                    let key = Key::parse(&gain_key).map_err(|parse| parse.to_string())?;
+                    group.values.push(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a could not enumerate the gain grid: {error}.") });
+                    group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_gain_db", dir.name(), channel_index), condition, json!({ "error": error, "points": [] }), 1)?);
+                }
+            }
+
+            let gain_step_key = key_name(dir, channel_index, "gain_step_db");
+            match fine_gain_points(&channel.gain) {
+                Ok(requests) => {
+                    let points: Vec<_> = requests.iter().map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Gain, *requested)).collect();
+                    group.values.push(gain_step_value(&gain_step_key, &points, condition, test)?);
+                    group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_gain_step_db", dir.name(), channel_index), condition, json!({ "points": numeric_points_json(&points) }), points.len())?);
+                }
+                Err(error) => {
+                    let key = Key::parse(&gain_step_key).map_err(|parse| parse.to_string())?;
+                    group.values.push(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a could not sweep the gain grid: {error}.") });
+                    group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_gain_step_db", dir.name(), channel_index), condition, json!({ "error": error, "points": [] }), 1)?);
+                }
+            }
+
+            let antenna_key = key_name(dir, channel_index, "antenna");
+            let antenna_points: Vec<_> = channel.antennas.iter().map(|requested| apply_antenna(&*device, dir, channel_index, requested)).collect();
+            group.values.push(antenna_value(&antenna_key, &antenna_points, condition, test)?);
+            group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_antenna", dir.name(), channel_index), condition, json!({ "points": antenna_points_json(&antenna_points) }), antenna_points.len())?);
+
+            let frequency_requests = if dir == Dir::Tx {
+                let lo = *SAFE_TX_HZ.start();
+                let hi = *SAFE_TX_HZ.end();
+                (0..20).map(|index| (lo + (hi - lo) * index as f64 / 19.0).round()).collect::<Vec<_>>()
+            } else {
+                sampled_grid_points(&channel.frequency, 50).unwrap_or_default()
+            };
+            let frequency_points: Vec<_> = frequency_requests.iter().map(|requested| {
+                if dir == Dir::Tx { assert!(SAFE_TX_HZ.contains(requested)); }
+                let mut point = apply_numeric(&*device, dir, channel_index, NumericSetting::Frequency, *requested);
+                if dir == Dir::Tx && safe_tx_error.is_some() && point.error.is_none() { point.error = safe_tx_error.clone(); }
+                point
+            }).collect();
+            let frequency_error = if frequency_requests.is_empty() { Some("profile frequency grid could not produce samples".to_owned()) } else { None };
+            group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_frequency_hz", dir.name(), channel_index), condition,
+                json!({ "points": numeric_points_json(&frequency_points), "error": frequency_error, "tx_safe_band_hz": if dir == Dir::Tx { Some([*SAFE_TX_HZ.start(), *SAFE_TX_HZ.end()]) } else { None } }),
+                frequency_points.len().max(1))?);
+
+            // shortcut: Description has no stream membership, so rate probes use channel indices until a layout supplies it.
+            let rate_key = format!("radio.{}.s{}.sample_rate_hz", dir.name(), channel_index);
+            match grid_points(&description.rates) {
+                Ok(requests) => {
+                    let points: Vec<_> = requests.iter().map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Rate, *requested)).collect();
+                    group.values.push(coercion_grid_value(&rate_key, &points, condition, test, rate_readback_matches)?);
+                    group.observations.push(coercion_observation(format!("raw_coercion_{}_s{}_sample_rate_hz", dir.name(), channel_index), condition, json!({ "points": numeric_points_json(&points) }), points.len())?);
+                }
+                Err(error) => {
+                    let key = Key::parse(&rate_key).map_err(|parse| parse.to_string())?;
+                    group.values.push(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a could not enumerate the sample-rate grid: {error}.") });
+                    group.observations.push(coercion_observation(format!("raw_coercion_{}_s{}_sample_rate_hz", dir.name(), channel_index), condition, json!({ "error": error, "points": [] }), 1)?);
+                }
+            }
+        }
+    }
+    Ok(group)
+}
+
+/// Restores the unstreamed bench state after raw-device measurement: 1 Msps, 1 GHz, 0 dB,
+/// and each channel's profile antenna.
+pub fn restore_measurement_defaults(device: &dyn Device, description: &channels::Description) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (dir, channel_list) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
+        for (channel_index, channel) in channel_list.iter().enumerate() {
+            if let Err(error) = device.apply(dir, channel_index, &Settings {
+                rate: Some(channels::DEFAULT_SAMPLE_RATE_HZ), freq: Some(1_000_000_000.0), gain: Some(0.0),
+                antenna: Some(channel.default_antenna.clone()),
+            }, None) {
+                errors.push(format!("could not restore {:?} channel {channel_index}: {}", dir, error.message));
+            }
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
 }
 
 /// One group returns only comparable value rows and observations; fake records replace the
@@ -2276,6 +2928,124 @@ fn numeric_value(
 mod tests {
     use super::*;
 
+    #[test]
+    fn command_queue_depth_requires_backpressure_timing_and_success_in_every_condition() {
+        let call = |duration_ns, h_i_ns, error: Option<&str>| QueueCall {
+            duration_ns, h_i_ns, error: error.map(str::to_owned),
+        };
+        let clock = QueueClock { d0_tick: 1_000, h_before_ns: 0, h_after_ns: 10 };
+        let first_at = 1_100;
+        let stall_limit = 1_500_000_000;
+        let return_limit_ticks = 100;
+        let classify = |calls: &[QueueCall], timing| classify_queue_trial(calls, timing, first_at, stall_limit, return_limit_ticks, 1_000_000_000);
+        assert_eq!(classify(&[call(1_000_000, Some(99), None), call(stall_limit + 1, Some(110), None)], clock),
+            QueueTrialClass::Success { depth: 1 });
+        assert_eq!(classify(&[call(stall_limit + 1, Some(200), None)], QueueClock { h_after_ns: 0, ..clock }),
+            QueueTrialClass::Success { depth: 0 });
+        assert!(matches!(classify(&[call(stall_limit, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&vec![call(1_000_000, Some(99), None); 4], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(100_000_001, Some(99), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(stall_limit + 1, Some(109), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(stall_limit + 1, Some(210), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(stall_limit + 1, None, None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(1_000_000, Some(100), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(1_000_000, Some(101), None), call(stall_limit + 1, Some(111), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(1_000_000, None, None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(QUEUE_CALL_TIME_LIMIT_NS, Some(99), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[call(stall_limit + 1, Some(110), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
+        assert!(matches!(classify(&[], QueueClock { h_after_ns: QUEUE_CALL_TIME_LIMIT_NS + 1, ..clock }),
+            QueueTrialClass::Incomplete { reason: "the device-time read took too long to bound the host-clock interval" }));
+        assert!(matches!(classify(&[call(1, Some(110), Some("apply failed"))], clock), QueueTrialClass::DeviceFailure { .. }));
+        assert_eq!(finish_queue_trial(QueueTrialClass::Success { depth: 1 }, None, Some("untimed reset failed".to_owned())),
+            QueueTrialClass::DeviceFailure { reason: "untimed reset failed".to_owned() });
+        let conditions = [
+            ("a".to_owned(), vec![QueueTrialClass::Success { depth: 11 }, QueueTrialClass::Success { depth: 9 }]),
+            ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Success { depth: 8 }]),
+        ];
+        assert_eq!(summarize_queue_depth(&conditions, 2), Some((7, "b".to_owned(), 2)));
+        assert!(matches!(queue_depth_value(&conditions, 2).unwrap(), ValueRecord::Measured {
+            key, worst: model::Worst::Number(value), trials: 2, condition, test,
+        } if key.as_str() == "radio.timing.command_queue_depth" && value == 7.0 && condition == "b" && test == QUEUE_TEST));
+        let incomplete = [
+            ("a".to_owned(), vec![QueueTrialClass::Success { depth: 11 }, QueueTrialClass::Success { depth: 9 }]),
+            ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Incomplete { reason: "no stall" }]),
+        ];
+        assert!(summarize_queue_depth(&incomplete, 2).is_none());
+        assert!(matches!(queue_depth_value(&incomplete, 2).unwrap(), ValueRecord::Unmeasured { reason, .. } if reason.contains("2 successful back-pressure trials in every queue condition")));
+    }
+
+    #[test]
+    fn coercion_readbacks_keep_only_exact_gain_rate_and_antenna_values() {
+        let points = vec![
+            NumericReadback { requested: 1.0, returned: Some(1.0 + 1e-13), error: None },
+            NumericReadback { requested: 2.0, returned: Some(2.1), error: None },
+        ];
+        let gain = coercion_grid_value("radio.rx.c0.gain_db", &points, "coercion", "test", gain_readback_matches).unwrap();
+        assert!(matches!(gain, ValueRecord::Measured { worst: model::Worst::Grid(model::GridValue::Values { values }), .. } if values == [1.0]));
+        let rate = coercion_grid_value("radio.rx.s0.sample_rate_hz", &points, "coercion", "test", rate_readback_matches).unwrap();
+        assert!(matches!(rate, ValueRecord::Measured { worst: model::Worst::Grid(model::GridValue::Values { values }), .. } if values == [1.0]));
+        assert!(!gain_readback_matches(1.0, 1.0 + 1e-8));
+        assert!(!rate_readback_matches(1.0, 1.0 + 1e-10));
+        let failed = coercion_grid_value("radio.rx.c0.gain_db", &[NumericReadback {
+            requested: 3.0, returned: None, error: Some("set_gain failed".to_owned()),
+        }], "coercion", "test", |requested, actual| requested == actual).unwrap();
+        assert!(matches!(failed, ValueRecord::Unmeasured { reason, .. } if reason.contains("set_gain failed")));
+
+        let half_db = (0..=5).map(|index| NumericReadback {
+            requested: index as f64 / 10.0,
+            returned: Some(if index < 3 { 0.0 } else { 0.5 }), error: None,
+        }).collect::<Vec<_>>();
+        let one_db = (0..=5).map(|index| NumericReadback {
+            requested: index as f64 / 5.0,
+            returned: Some(if index < 3 { 0.0 } else { 1.0 }), error: None,
+        }).collect::<Vec<_>>();
+        let uneven = [0.0, 0.5, 1.5].into_iter().map(|value| NumericReadback {
+            requested: value, returned: Some(value), error: None,
+        }).collect::<Vec<_>>();
+        assert!(matches!(gain_step_value("radio.rx.c0.gain_step_db", &half_db, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Number(value), .. } if value == 0.5));
+        assert!(matches!(gain_step_value("radio.rx.c0.gain_step_db", &one_db, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Number(value), .. } if value == 1.0));
+        assert!(matches!(gain_step_value("radio.rx.c0.gain_step_db", &uneven, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Number(value), .. } if value == 1.0));
+        let antennas = vec![
+            AntennaReadback { requested: "RX2".to_owned(), returned: Some("RX2".to_owned()), error: None },
+            AntennaReadback { requested: "TX/RX".to_owned(), returned: Some("RX2".to_owned()), error: None },
+        ];
+        assert!(matches!(antenna_value("radio.rx.c0.antenna", &antennas, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Texts(values), .. } if values == ["RX2"]));
+        assert!(matches!(antenna_value("radio.rx.c0.antenna", &[AntennaReadback {
+            requested: "RX2".to_owned(), returned: None, error: None,
+        }], "coercion", "test").unwrap(), ValueRecord::Unmeasured { .. }));
+        assert_eq!(fine_gain_points(&Grid::Step { lo: 0.0, hi: 0.5, step: 0.5 }).unwrap(), [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn gain_grid_comparison_rejects_a_profile_point_missing_from_readback() {
+        let device = super::super::fake(super::super::one_obx());
+        let dir = super::super::TempDir::new();
+        let doc = super::super::bench_profile(&*device, &dir, Json::Object(Default::default()), super::super::bench_envelope(&*device), false);
+        let binding = radio_binding(&doc).unwrap();
+        let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        let mut record = build_record(Source::Fake, &binding, &*device, &rehearsal_metadata(), MeasurementGroup::default(), &description).unwrap();
+        record.source = Source::Hardware;
+        record.conditions.push(raw_condition("coercion"));
+        let key = Key::parse("radio.rx.c0.gain_db").unwrap();
+        let all = grid_points(&description.rx[0].gain).unwrap();
+        let set = |record: &mut Record, values: Vec<f64>| {
+            let row = record.values.iter_mut().find(|row| match row {
+                ValueRecord::Measured { key: found, .. } | ValueRecord::Unmeasured { key: found, .. } => found == &key,
+            }).unwrap();
+            *row = ValueRecord::Measured {
+                key: key.clone(), worst: model::Worst::Grid(model::GridValue::Values { values }), trials: 64,
+                condition: "coercion".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+            };
+        };
+        set(&mut record, all.clone());
+        assert!(model::compare(&record, &description).iter().all(|violation| violation.key != key.as_str()));
+        let mut missing = all;
+        missing.retain(|value| *value != 0.5);
+        set(&mut record, missing);
+        assert!(model::compare(&record, &description).iter().any(|violation| violation.key == key.as_str()
+            && violation.reason.starts_with("profile grid is not a subset")));
+    }
+
     fn synthetic_clock(domain: ClockDomainId, stream: &str, origin: i64, ended_at: Option<i64>) -> SampleClockRecord {
         let root = ClockDomainId::local(20);
         SampleClockRecord {
@@ -2936,12 +3706,18 @@ mod tests {
             _ => None,
         }).expect("the comparable key has an unmeasured reason");
         let queue_reason = reason("radio.timing.command_queue_depth");
+        let gain_reason = reason("radio.rx.c0.gain_db");
+        let antenna_reason = reason("radio.rx.c0.antenna");
+        let sample_rate_reason = reason("radio.rx.s0.sample_rate_hz");
         let lead_reason = reason("radio.timing.min_timed_command_lead_ns");
         let startup_reason = reason("radio.timing.startup_latency_ns");
         let tx_start_reason = reason("radio.timing.tx_start_lead_ns");
         let overflow_reason = reason("radio.timing.overflow_restart_gap_ns");
         let tx_throughput_reason = reason("radio.perf.tx_bytes_per_s");
-        assert!(queue_reason.contains("reservations"), "{queue_reason}");
+        assert!(queue_reason.contains("3c-2a") && queue_reason.contains("back-pressure"), "{queue_reason}");
+        assert!(gain_reason.contains("3c-2a") && gain_reason.contains("coercion read-back"), "{gain_reason}");
+        assert!(antenna_reason.contains("3c-2a") && antenna_reason.contains("coercion read-back"), "{antenna_reason}");
+        assert!(sample_rate_reason.contains("3c-2a") && sample_rate_reason.contains("sample-rate read-back"), "{sample_rate_reason}");
         assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
         assert!(tx_start_reason.contains("3c-1") && overflow_reason.contains("3c-1") && tx_throughput_reason.contains("3c-1"));
@@ -3074,8 +3850,10 @@ mod tests {
     #[test]
     fn measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts() {
         assert_eq!(MeasurementPlan::default().overflow_trials, 5);
+        assert_eq!(MeasurementPlan::default().queue_trials, 5);
         let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
         assert_eq!((defaults.step_trials, defaults.overflow_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 5, 60, 20));
+        assert_eq!((defaults.queue_trials, defaults.queue_ahead_ns, defaults.queue_max_calls), (5, 3_000_000_000, 64));
         assert_eq!(defaults.tx_start_leads_ns, defaults.rx_start_leads_ns);
         assert_eq!(defaults.overflow_rates_hz, [1_000_000, 10_000_000, 25_000_000, 50_000_000]);
         assert_eq!(defaults.overflow_stall_ms.len(), defaults.overflow_rates_hz.len());
@@ -3085,10 +3863,12 @@ mod tests {
             ("EZSDR_MEASURE_OVERFLOW_TRIALS".to_owned(), "3".to_owned()),
             ("EZSDR_MEASURE_THROUGHPUT_SECS".to_owned(), "3".to_owned()),
             ("EZSDR_MEASURE_LOOPBACK_TRIALS".to_owned(), "4".to_owned()),
+            ("EZSDR_MEASURE_QUEUE_TRIALS".to_owned(), "2".to_owned()),
         ]);
         let custom = MeasurementPlan::from_env(&values).unwrap();
         assert_eq!((custom.step_trials, custom.overflow_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 3, 4));
-        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"] {
+        assert_eq!(custom.queue_trials, 2);
+        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS"] {
             for invalid in ["0", "not-a-number"] {
                 assert!(MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), invalid.to_owned())])).is_err(), "{name}={invalid}");
             }
@@ -3096,6 +3876,10 @@ mod tests {
         let mut no_overflow_trials = defaults;
         no_overflow_trials.overflow_trials = 0;
         assert!(no_overflow_trials.validate().is_err());
+        let no_queue_calls = MeasurementPlan { queue_max_calls: 0, ..MeasurementPlan::default() };
+        assert!(no_queue_calls.validate().is_err());
+        let too_many_queue_trials = MeasurementPlan { queue_trials: (u32::MAX as usize / 5) + 1, ..MeasurementPlan::default() };
+        assert!(too_many_queue_trials.validate().is_err());
         let mut missing_stall = MeasurementPlan::default();
         missing_stall.overflow_stall_ms.pop();
         assert!(missing_stall.validate().is_err());

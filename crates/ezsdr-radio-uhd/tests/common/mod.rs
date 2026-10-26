@@ -41,6 +41,7 @@ pub mod measurement;
 
 pub const MCR: i64 = 200_000_000;
 pub const ARGS: &str = "type=fake-rig";
+pub const SAFE_TX_HZ: std::ops::RangeInclusive<f64> = 999_500_000.0..=1_000_500_000.0;
 
 pub fn ms(n: i64) -> i64 {
     n * MCR / 1_000
