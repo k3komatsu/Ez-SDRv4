@@ -1466,6 +1466,7 @@ fn hw_m2_tx_front_end_moves_between_streamers() {
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_measurements_record() {
     let metadata = measurement::process_metadata().expect("all EZSDR_MEASUREMENT_* values are valid before opening the USRP");
+    let plan = measurement::MeasurementPlan::process_env().expect("measurement trial counts are valid before opening the USRP");
     measurement::clear_raw_observations();
     hw_b8_raw_device_lead();
     hw_b8_raw_restart_lead();
@@ -1492,6 +1493,18 @@ fn hw_measurements_record() {
     assert_eq!(got, expected, "the record has exactly the raw probes it ran");
 
     let device = usrp();
+    let mut measured = measurement::MeasurementGroup::default();
+    measured.append(measurement::measure_min_timed_command_lead(device.clone(), &plan).expect("Provider command-lead measurements"))
+        .expect("merge command-lead measurements");
+    measured.append(measurement::measure_tx_in_flight(device.clone(), &plan).expect("Provider in-flight measurements"))
+        .expect("merge in-flight measurements");
+    measured.append(measurement::measure_rx_start_lead(device.clone(), &plan).expect("Provider receive-start measurements"))
+        .expect("merge receive-start measurements");
+    measured.append(measurement::measure_rx_throughput(device.clone(), &plan).expect("Provider receive-throughput measurements"))
+        .expect("merge receive-throughput measurements");
+    measured.append(measurement::measure_full_duplex(device.clone(), &plan).expect("Provider full-duplex measurements"))
+        .expect("merge full-duplex measurements");
+    measured.observations.extend(observations);
     let dir = TempDir::new();
     let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
     let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
@@ -1502,14 +1515,12 @@ fn hw_measurements_record() {
         &binding,
         &*device,
         &metadata,
-        Vec::new(),
-        observations,
+        measured,
         &description,
     ).expect("a hardware measurement record");
-    assert!(record.values.iter().all(|value| matches!(value, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
-    let violations = ezsdr_radio::measurement::compare(&record, &description);
-    assert!(violations.is_empty(), "{violations:?}");
     let path = metadata.output.as_deref().expect("the output path is mandatory");
-    measurement::write_record(path, &record).expect("create the record once without overwriting");
+    let violations = measurement::write_record_before_profile_assert(path, &record, &description)
+        .expect("a structurally valid measurement record is written before profile comparison");
+    assert!(violations.is_empty(), "measurement record comparison: {violations:?}");
     println!("Wrote hardware measurement record to {}", path.display());
 }

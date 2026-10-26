@@ -5,10 +5,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration as Wall;
 
 use ezsdr_kernel::binding::{Binding, BindingProfile};
 use ezsdr_kernel::spec::{Ident, Key};
-use ezsdr_kernel::stream::Direction;
+use ezsdr_kernel::coordinator::RunHandle;
+use ezsdr_kernel::id::ClockDomainId;
+use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
+use ezsdr_kernel::run::Lease;
+use ezsdr_kernel::stream::{BurstEnd, Direction};
+use ezsdr_kernel::time::{SampleClockRecord, TimePoint};
 use ezsdr_radio::channels;
 use ezsdr_radio::measurement::{
     self as model, Condition, Device as DeviceRecord, Host, Load, Observation, Record, Rule,
@@ -16,7 +23,7 @@ use ezsdr_radio::measurement::{
 };
 use ezsdr_radio::x3xx::ProviderTerms;
 use ezsdr_radio_uhd::Device;
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
 
 const REQUIRED_ENV: [&str; 8] = [
     "EZSDR_MEASUREMENT_OUTPUT",
@@ -130,14 +137,13 @@ pub fn description(binding: &Binding, block_len: u32, terms: &ProviderTerms) -> 
     Ok(channels::Description::new(&layout, block_len, terms))
 }
 
-/// Builds a record whose comparable keys are all explicitly unmeasured.
+/// Builds a complete record, replacing only the comparable rows supplied by a measurement group.
 pub fn build_record(
     source: Source,
     binding: &Binding,
     device: &dyn Device,
     metadata: &Metadata,
-    conditions: Vec<Condition>,
-    observations: Vec<Observation>,
+    measurements: MeasurementGroup,
     description: &channels::Description,
 ) -> Result<Record, String> {
     let device_description = device.describe();
@@ -166,10 +172,38 @@ pub fn build_record(
         host: metadata.host.clone(),
         load: metadata.load,
         commit: metadata.commit.clone(),
-        conditions,
-        values: unmeasured_values(description),
-        observations,
+        conditions: measurements.conditions,
+        values: merge_values(source, description, measurements.values)?,
+        observations: measurements.observations,
     })
+}
+
+fn merge_values(source: Source, description: &channels::Description, measured: Vec<ValueRecord>) -> Result<Vec<ValueRecord>, String> {
+    let mut values: BTreeMap<Key, ValueRecord> = unmeasured_values(description)
+        .into_iter()
+        .map(|value| match &value {
+            ValueRecord::Unmeasured { key, .. } | ValueRecord::Measured { key, .. } => (key.clone(), value),
+        })
+        .collect();
+    let mut supplied = BTreeSet::new();
+    for value in measured {
+        let key = match &value {
+            ValueRecord::Unmeasured { key, .. } | ValueRecord::Measured { key, .. } => key.clone(),
+        };
+        if !values.contains_key(&key) {
+            return Err(format!("measurement supplied an unknown or non-comparable key `{}`", key.as_str()));
+        }
+        if !supplied.insert(key.clone()) {
+            return Err(format!("measurement supplied `{}` more than once", key.as_str()));
+        }
+        let value = if source == Source::Fake {
+            ValueRecord::Unmeasured { key: key.clone(), reason: "FakeDevice は実機の証拠ではない".to_owned() }
+        } else {
+            value
+        };
+        values.insert(key, value);
+    }
+    Ok(values.into_values().collect())
 }
 
 /// Emits one row for each comparable capability and none for `NotCompared` keys.
@@ -192,7 +226,7 @@ fn unmeasured_reason(key: &str) -> &'static str {
         | "radio.timing.rx_start_lead_ns"
         | "radio.perf.rx_bytes_per_s"
         | "radio.full_duplex"
-        | "radio.hardware_time" => "The comparative Provider measurement group is deferred to Phase 8 stage 3b-2.",
+        | "radio.hardware_time" => "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run.",
         _ => "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required.",
     }
 }
@@ -252,6 +286,29 @@ pub fn write_record(path: &Path, record: &Record) -> Result<(), String> {
         .map_err(|error| format!("cannot write measurement output {}: {error}", path.display()))
 }
 
+/// Saves a structurally valid record before returning profile-value disagreements to the caller.
+pub fn write_record_before_profile_assert(path: &Path, record: &Record, description: &channels::Description) -> Result<Vec<model::Violation>, String> {
+    // A multiple's measured operand must be positive; `compare` reports that in the same words as a profile disagreement.
+    for value in &record.values {
+        if let ValueRecord::Measured { key, worst: model::Worst::Number(measured), .. } = value {
+            if model::rule(key.as_str()) == Some(Rule::Multiple) && (measured.is_nan() || *measured <= 0.0) {
+                return Err(format!("measurement record validation: {} is not a positive measured multiple", key.as_str()));
+            }
+        }
+    }
+    let violations = model::compare(record, description);
+    let structural: Vec<_> = violations.iter().filter(|violation| !matches!(violation.reason.as_str(),
+        reason if reason.starts_with("profile value ")
+            || reason.starts_with("profile antenna set ")
+            || reason.starts_with("profile grid is not a subset ")
+            || reason == "profile claims true but the measured result is false"
+            || reason == "profile phase guarantee is stronger than the measured guarantee"
+    )).collect();
+    if !structural.is_empty() { return Err(format!("measurement record validation: {structural:?}")); }
+    write_record(path, record)?;
+    Ok(violations)
+}
+
 /// One possible origin of failure evidence in a trial.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProviderTimeError {
@@ -270,12 +327,15 @@ pub enum EvidenceKind {
     CommandRejected,
     CommandQueueFull,
     AsyncTimeError,
+    OtherAsync,
     Underflow,
     UnderflowInPacket,
     SequenceError,
     SequenceErrorInBurst,
     BurstAck,
     ShortSendRejected,
+    RxOverflow,
+    UnknownTimeError,
 }
 
 /// Evidence with the device/Run tick used for conservative trial attribution.
@@ -310,7 +370,10 @@ pub struct TrialEvidence {
     pub expected_samples: u64,
     pub expected_end_tick: i64,
     pub completion: TrialCompletion,
+    pub requires_preemption_evidence: bool,
+    pub repeat_ended_at_target: bool,
     pub record: Option<TrialRecord>,
+    pub burst_ack_ticks: Vec<i64>,
     pub evidence: Vec<EvidenceKind>,
     pub unattributable: bool,
 }
@@ -331,7 +394,10 @@ impl TrialEvidence {
             expected_samples,
             expected_end_tick,
             completion,
+            requires_preemption_evidence: false,
+            repeat_ended_at_target: false,
             record: None,
+            burst_ack_ticks: Vec::new(),
             evidence: Vec::new(),
             unattributable: false,
         }
@@ -386,7 +452,8 @@ fn mark_unattributable(trials: &mut [TrialEvidence], tick: Option<i64>) {
         .iter()
         .rposition(|trial| trial.open)
         .or_else(|| match tick {
-            Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick),
+            Some(tick) if trials.first().is_some_and(|trial| tick < trial.start_tick) => Some(0),
+            Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick).or(Some(0)),
             None => trials.len().checked_sub(1),
         });
     if let Some(index) = target { trials[index].unattributable = true; }
@@ -395,7 +462,7 @@ fn mark_unattributable(trials: &mut [TrialEvidence], tick: Option<i64>) {
 /// Classifies a trial only after its record, samples, end, and device acknowledgement agree.
 pub fn classify_trial(trial: &TrialEvidence) -> TrialClass {
     if !trial.admitted { return TrialClass::AdmissionRejection; }
-    if trial.unattributable { return TrialClass::Unattributable; }
+    if trial.unattributable || trial.evidence.contains(&EvidenceKind::UnknownTimeError) { return TrialClass::Unattributable; }
     let provider = trial.evidence.iter().any(|evidence| matches!(
         evidence,
         EvidenceKind::ProviderTimeError(ProviderTimeError::Drop | ProviderTimeError::SendAsap | ProviderTimeError::Refused | ProviderTimeError::PlanViolation)
@@ -411,6 +478,8 @@ pub fn classify_trial(trial: &TrialEvidence) -> TrialClass {
             | EvidenceKind::UnderflowInPacket
             | EvidenceKind::SequenceError
             | EvidenceKind::SequenceErrorInBurst
+            | EvidenceKind::OtherAsync
+            | EvidenceKind::RxOverflow
     ));
     if provider && device { return TrialClass::Unattributable; }
     if provider { return TrialClass::ProviderFailure; }
@@ -421,8 +490,9 @@ pub fn classify_trial(trial: &TrialEvidence) -> TrialClass {
         TrialCompletion::TransmitBurstAck => !trial.evidence.contains(&EvidenceKind::BurstAck),
     };
     if record.samples != trial.expected_samples
-        || record.end_tick != trial.expected_end_tick
+        || (trial.completion == TrialCompletion::TransmitBurstAck && record.end_tick != trial.expected_end_tick)
         || missing_completion
+        || (trial.requires_preemption_evidence && !trial.repeat_ended_at_target)
         || trial.evidence.contains(&EvidenceKind::ShortSendRejected)
     {
         return TrialClass::Incomplete;
@@ -456,6 +526,7 @@ pub struct ConditionCounts {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CandidateSummary {
     pub worst: Option<u64>,
+    pub limiting_condition: Option<String>,
     pub unmeasured_reason: Option<String>,
     pub conditions: BTreeMap<String, ConditionCounts>,
 }
@@ -469,6 +540,7 @@ pub fn summarize_candidates(
     if candidates.is_empty() { return Err("at least one condition is required".to_owned()); }
     if required_trials == 0 { return Err("required_trials must be positive".to_owned()); }
     let mut common: Option<BTreeSet<u64>> = None;
+    let mut eligible_by_condition = BTreeMap::new();
     let mut sorted = BTreeMap::new();
     for (condition, stages) in candidates {
         if condition.trim().is_empty() || stages.is_empty() {
@@ -495,6 +567,7 @@ pub fn summarize_candidates(
                 (0..prefix).map(|index| stages[index].value).collect()
             }
         };
+        eligible_by_condition.insert(condition.clone(), eligible.clone());
         common = Some(match common { Some(common) => common.intersection(&eligible).copied().collect(), None => eligible });
         sorted.insert(condition.clone(), stages);
     }
@@ -502,6 +575,7 @@ pub fn summarize_candidates(
     if common.is_empty() {
         return Ok(CandidateSummary {
             worst: None,
+            limiting_condition: None,
             unmeasured_reason: Some("No candidate value satisfies every condition's successful edge rule with the required complete trials.".to_owned()),
             conditions: counts(&sorted, required_trials),
         });
@@ -511,7 +585,11 @@ pub fn summarize_candidates(
         SummaryMode::MinimumLead => values.first().copied(),
         SummaryMode::Capacity => values.last().copied(),
     };
-    Ok(CandidateSummary { worst, unmeasured_reason: None, conditions: counts(&sorted, required_trials) })
+    let limiting_condition = worst.and_then(|worst| eligible_by_condition.iter().find(|(_, eligible)| match mode {
+        SummaryMode::MinimumLead => eligible.range(..worst).next().is_none(),
+        SummaryMode::Capacity => eligible.range((std::ops::Bound::Excluded(worst), std::ops::Bound::Unbounded)).next().is_none(),
+    }).map(|(condition, _)| condition.clone()));
+    Ok(CandidateSummary { worst, limiting_condition, unmeasured_reason: None, conditions: counts(&sorted, required_trials) })
 }
 
 fn counts(stages: &BTreeMap<String, Vec<CandidateStage>>, required: usize) -> BTreeMap<String, ConditionCounts> {
@@ -544,9 +622,1034 @@ pub fn comparable_keys(description: &channels::Description) -> BTreeSet<Key> {
         .collect()
 }
 
+/// Candidate sweeps and trial counts for one hardware measurement suite.
+#[derive(Clone, Debug)]
+pub struct MeasurementPlan {
+    pub timed_command_leads_ns: Vec<u64>,
+    pub in_flight_windows_ns: Vec<u64>,
+    pub rx_start_leads_ns: Vec<u64>,
+    pub rx_rates_hz: Vec<u64>,
+    pub step_trials: usize,
+    pub throughput_seconds: u64,
+    pub loopback_trials: usize,
+    pub interval_ns: u64,
+}
+
+impl Default for MeasurementPlan {
+    fn default() -> Self {
+        MeasurementPlan {
+            timed_command_leads_ns: vec![500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
+            in_flight_windows_ns: vec![250_000, 500_000, 1_000_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
+            rx_start_leads_ns: vec![1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
+            rx_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
+            step_trials: 100,
+            throughput_seconds: 60,
+            loopback_trials: 20,
+            interval_ns: 20_000_000,
+        }
+    }
+}
+
+impl MeasurementPlan {
+    /// Small, deterministic-stage inputs for the FakeDevice record rehearsal.
+    pub fn rehearsal() -> MeasurementPlan {
+        MeasurementPlan {
+            timed_command_leads_ns: vec![1_000_000, 2_000_000],
+            in_flight_windows_ns: vec![1_000_000, 2_000_000],
+            rx_start_leads_ns: vec![1_000_000, 2_000_000],
+            rx_rates_hz: vec![390_625],
+            step_trials: 1,
+            throughput_seconds: 1,
+            loopback_trials: 1,
+            interval_ns: 20_000_000,
+        }
+    }
+
+    /// Validates the values before a device is opened or any measurement Run starts.
+    pub fn validate(&self) -> Result<(), String> {
+        let candidates = [
+            ("timed command lead", &self.timed_command_leads_ns),
+            ("in-flight window", &self.in_flight_windows_ns),
+            ("receive start lead", &self.rx_start_leads_ns),
+            ("receive rate", &self.rx_rates_hz),
+        ];
+        for (name, values) in candidates {
+            if values.is_empty() || values.contains(&0) || values.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(format!("{name} candidates must be nonempty, positive and strictly ascending"));
+            }
+        }
+        if self.step_trials == 0 || self.throughput_seconds == 0 || self.loopback_trials == 0 || self.interval_ns == 0 {
+            return Err("measurement counts and inter-trial interval must be positive".to_owned());
+        }
+        let step_observations = [
+            self.timed_command_leads_ns.len(),
+            self.in_flight_windows_ns.len(),
+            self.rx_start_leads_ns.len().checked_mul(2).ok_or("receive-start stage count overflow")?,
+        ];
+        for stages in step_observations {
+            if stages.checked_mul(self.step_trials).is_none_or(|trials| trials > u32::MAX as usize) {
+                return Err("measurement observation exceeds the record's u32 trial limit".to_owned());
+            }
+        }
+        if self.rx_rates_hz.len() > u32::MAX as usize {
+            return Err("receive-throughput observation count exceeds the record's u32 trial limit".to_owned());
+        }
+        if self.loopback_trials > u32::MAX as usize {
+            return Err("EZSDR_MEASURE_LOOPBACK_TRIALS exceeds the record's u32 trial limit".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Parses the three supported count overrides without consulting global state.
+    pub fn from_env(values: &BTreeMap<String, String>) -> Result<MeasurementPlan, String> {
+        fn count(values: &BTreeMap<String, String>, name: &str, default: u64) -> Result<u64, String> {
+            let Some(value) = values.get(name) else { return Ok(default) };
+            let parsed = value.parse::<u64>().map_err(|_| format!("{name} must be a positive integer"))?;
+            if parsed == 0 { return Err(format!("{name} must be positive")); }
+            Ok(parsed)
+        }
+        let plan = MeasurementPlan {
+            step_trials: usize::try_from(count(values, "EZSDR_MEASURE_STEP_TRIALS", 100)?).map_err(|_| "EZSDR_MEASURE_STEP_TRIALS is too large".to_owned())?,
+            throughput_seconds: count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
+            loopback_trials: usize::try_from(count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
+            ..MeasurementPlan::default()
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    /// Reads only the documented environment variables and validates before opening a device.
+    pub fn process_env() -> Result<MeasurementPlan, String> {
+        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"];
+        let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
+        MeasurementPlan::from_env(&values)
+    }
+}
+
+/// One group returns only comparable value rows and observations; fake records replace the
+/// rows with `unmeasured` while preserving these observations.
+#[derive(Clone, Debug, Default)]
+pub struct MeasurementGroup {
+    pub conditions: Vec<Condition>,
+    pub values: Vec<ValueRecord>,
+    pub observations: Vec<Observation>,
+}
+
+impl MeasurementGroup {
+    pub fn append(&mut self, mut other: MeasurementGroup) -> Result<(), String> {
+        for condition in other.conditions.drain(..) {
+            if let Some(existing) = self.conditions.iter().find(|row| row.id == condition.id) {
+                if existing != &condition { return Err(format!("measurement condition `{}` changed within one record", condition.id)); }
+            } else {
+                self.conditions.push(condition);
+            }
+        }
+        self.values.append(&mut other.values);
+        self.observations.append(&mut other.observations);
+        Ok(())
+    }
+}
+
+/// The booked interval and expected record for one sequential trial in a Run.
+#[derive(Clone, Debug)]
+pub struct TrialPlan {
+    pub start_tick: i64,
+    pub end_tick: i64,
+    pub admitted: bool,
+    pub expected_target: Option<TimePoint>,
+    pub expected_samples: u64,
+    pub expected_end_tick: i64,
+    pub booked_tick: Option<i64>,
+    pub completion: TrialCompletion,
+    pub requires_preemption_evidence: bool,
+    pub capture_index: Option<usize>,
+    pub capture_target: Option<TimePoint>,
+    pub cold_capture: bool,
+}
+
+fn default_timing() -> ezsdr_radio::TimingEnvelope {
+    ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms())
+}
+
+fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelope, String> {
+    let value = i64::try_from(value).map_err(|_| format!("{field} candidate exceeds i64"))?;
+    let mut timing = default_timing();
+    match field {
+        "min_timed_command_lead_ns" => timing.min_timed_command_lead_ns = value,
+        "tx_in_flight_ns" => timing.tx_in_flight_ns = value,
+        "rx_start_lead_ns" => timing.rx_start_lead_ns = value,
+        _ => return Err(format!("unsupported candidate timing field `{field}`")),
+    }
+    Ok(timing)
+}
+
+fn candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, super::TempDir), String> {
+    let dir = super::TempDir::new();
+    let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), super::bench_envelope(&*device), true);
+    let run = ezsdr_kernel::coordinator::connect(
+        &doc,
+        super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)),
+        Lease::attached(),
+    ).map_err(|error| error.to_string())?;
+    Ok((run, dir))
+}
+
+fn ticks_for_ns(ns: u64, master_clock_hz: u64) -> Result<i64, String> {
+    let ticks = (u128::from(ns) * u128::from(master_clock_hz)).div_ceil(1_000_000_000);
+    i64::try_from(ticks).map_err(|_| "device-tick conversion overflow".to_owned())
+}
+
+fn root_now(run: &RunHandle) -> Result<(ClockDomainId, i64), String> {
+    let now = run.now();
+    let domain = now.domain();
+    Ok((domain, now.ticks_in(domain).map_err(|error| error.to_string())?))
+}
+
+fn stream_clock(run: &RunHandle, direction: Direction) -> Result<SampleClockRecord, String> {
+    let suffix = match direction { Direction::Rx => "usrp/rx/s0", Direction::Tx => "usrp/tx/s0" };
+    run.sample_clocks().into_iter().rev().find(|clock| clock.stream.to_string().ends_with(suffix) && clock.ended_at.is_none())
+        .ok_or_else(|| format!("no active {direction:?} stream-0 SampleClock"))
+}
+
+fn sample_at_or_after(clock: &SampleClockRecord, root_tick: i64) -> Result<(TimePoint, i64), String> {
+    let origin = clock.origin.ticks_in(clock.root).map_err(|error| error.to_string())?;
+    let offset = i128::from(root_tick) - i128::from(origin);
+    let num = i128::from(clock.root_ticks_per_tick.num());
+    let den = i128::from(clock.root_ticks_per_tick.den());
+    let sample = if offset <= 0 { 0 } else { (offset * den + num - 1) / num };
+    let root = i128::from(origin) + (sample * num + den - 1) / den;
+    let sample = i64::try_from(sample).map_err(|_| "sample target overflow".to_owned())?;
+    let root = i64::try_from(root).map_err(|_| "root target overflow".to_owned())?;
+    Ok((TimePoint::new(clock.domain, sample), root))
+}
+
+fn sample_root_tick(clock: &SampleClockRecord, sample_tick: i64) -> Result<i64, String> {
+    let origin = clock.origin.ticks_in(clock.root).map_err(|error| error.to_string())?;
+    let num = i128::from(clock.root_ticks_per_tick.num());
+    let den = i128::from(clock.root_ticks_per_tick.den());
+    let scaled = i128::from(sample_tick) * num;
+    if scaled.rem_euclid(den) != 0 { return Err("sample instant is not an integral device tick".to_owned()); }
+    i64::try_from(i128::from(origin) + scaled / den).map_err(|_| "sample root tick overflow".to_owned())
+}
+
+fn sample_target(run: &RunHandle, direction: Direction, lead_ns: u64, device: &dyn Device) -> Result<(TimePoint, i64), String> {
+    let clock = stream_clock(run, direction)?;
+    let (root, now) = root_now(run)?;
+    if root != clock.root { return Err("Run now and stream clock have different roots".to_owned()); }
+    sample_at_or_after(&clock, now.checked_add(ticks_for_ns(lead_ns, device.master_clock_rate())?).ok_or("target root tick overflow")?)
+}
+
+fn effective_lead_ns(target_root: i64, receipt_time: TimePoint, root: ClockDomainId, master_clock_hz: u64) -> Result<(i64, i64), String> {
+    let receipt_tick = receipt_time.ticks_in(root).map_err(|error| error.to_string())?;
+    let lead_ns = i64::try_from((i128::from(target_root) - i128::from(receipt_tick)) * 1_000_000_000 / i128::from(master_clock_hz))
+        .map_err(|_| "effective lead overflow".to_owned())?;
+    Ok((receipt_tick, lead_ns))
+}
+
+fn advance_root(run: &mut RunHandle, root: ClockDomainId, tick: i64) -> Result<(), String> {
+    run.advance_to(TimePoint::new(root, tick)).map_err(|error| error.to_string())
+}
+
+fn enable_tx(run: &mut RunHandle) -> Result<(), String> {
+    super::past_t0(run, super::ms(1));
+    let entry = run.submit(super::set("radio.tx.c0.stream", ezsdr_kernel::spec::Value::from(0)), None).map_err(|error| error.to_string())?;
+    if !super::admitted(&entry) { return Err(format!("TX stream was not admitted: {:?}", entry.outcome)); }
+    super::past_tx_origin(run);
+    Ok(())
+}
+
+fn disable_rx(run: &mut RunHandle) -> Result<(), String> {
+    super::past_t0(run, super::ms(1));
+    let entry = run.submit(super::set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None)
+        .map_err(|error| error.to_string())?;
+    if !super::admitted(&entry) { return Err(format!("RX stream disable was not admitted: {:?}", entry.outcome)); }
+    super::wait(run, super::ms(100));
+    if run.sample_clocks().iter().any(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()) {
+        return Err("RX stream remained active during a TX-only measurement".to_owned());
+    }
+    Ok(())
+}
+
+fn start_repeat(run: &mut RunHandle, bytes: &[u8]) -> Result<(), String> {
+    let entry = run.submit(super::verb("start_repeat", super::resource("radio/tx/s0"), None, &[]), Some(bytes)).map_err(|error| error.to_string())?;
+    if !super::admitted(&entry) { return Err(format!("repeat was not admitted: {:?}", entry.outcome)); }
+    Ok(())
+}
+
+fn tx_trial(
+    run: &mut RunHandle,
+    device: &dyn Device,
+    bytes: &[u8],
+    samples: u64,
+    lead_ns: u64,
+    interval_ns: u64,
+) -> Result<(TrialPlan, i64), String> {
+    let (target, target_root) = sample_target(run, Direction::Tx, lead_ns, device)?;
+    let entry = run.submit(super::verb("send", super::resource("radio/tx/s0"), Some(target), &[]), Some(bytes)).map_err(|error| error.to_string())?;
+    let clock = stream_clock(run, Direction::Tx)?;
+    let (receipt_tick, effective_lead_ns) = effective_lead_ns(target_root, entry.time, clock.root, device.master_clock_rate())?;
+    let root = clock.root;
+    let end_sample = target.ticks_in(clock.domain).map_err(|error| error.to_string())?
+        .checked_add(i64::try_from(samples).map_err(|_| "burst sample count exceeds i64".to_owned())?)
+        .ok_or("burst end sample overflow")?;
+    let expected_end_tick = sample_root_tick(&clock, end_sample)?;
+    let end_tick = expected_end_tick.checked_add(ticks_for_ns(interval_ns, device.master_clock_rate())?).ok_or("trial end tick overflow")?;
+    advance_root(run, root, end_tick)?;
+    Ok((TrialPlan {
+        start_tick: receipt_tick, end_tick, admitted: super::admitted(&entry),
+        expected_target: Some(target), expected_samples: samples, expected_end_tick, booked_tick: Some(receipt_tick),
+        completion: TrialCompletion::TransmitBurstAck, requires_preemption_evidence: false,
+        capture_index: None, capture_target: None, cold_capture: false,
+    }, effective_lead_ns))
+}
+
+fn duplex_condition(id: &str) -> Condition {
+    Condition {
+        id: id.to_owned(),
+        streams: vec![stream_condition(Direction::Rx, 0, vec![0], 1e6), stream_condition(Direction::Tx, 0, vec![0], 1e6)],
+        concurrent: vec![stream_ref(Direction::Rx, 0), stream_ref(Direction::Tx, 0)],
+        reopened: false,
+    }
+}
+
+fn tx_only_condition(id: &str) -> Condition {
+    Condition { id: id.to_owned(), streams: vec![stream_condition(Direction::Tx, 0, vec![0], 1e6)], concurrent: vec![], reopened: false }
+}
+
+fn rx_condition(id: &str, rate: f64) -> Condition {
+    Condition { id: id.to_owned(), streams: vec![stream_condition(Direction::Rx, 0, vec![0], rate)], concurrent: vec![], reopened: false }
+}
+
+/// Provider-path `radio.timing.min_timed_command_lead_ns` sweep (UR-21).
+pub fn measure_min_timed_command_lead(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let condition = "tx-1msps";
+    let (bytes, _) = super::waveform_of(&super::pn(100));
+    let mut stages = Vec::new();
+    let mut rows = Vec::new();
+    let mut total = 0usize;
+    for value in &plan.timed_command_leads_ns {
+        let (mut run, _dir) = candidate_session(device.clone(), candidate_timing("min_timed_command_lead_ns", *value)?)?;
+        disable_rx(&mut run)?;
+        enable_tx(&mut run)?;
+        let mut trials: Vec<TrialPlan> = Vec::new();
+        let mut effective = Vec::new();
+        for _ in 0..plan.step_trials {
+            let (trial, lead) = tx_trial(&mut run, &*device, &bytes, 100, *value, plan.interval_ns)?;
+            if let Some(previous) = trials.last_mut() { previous.end_tick = trial.start_tick; }
+            trials.push(trial);
+            effective.push(Some(lead));
+        }
+        let manifest = run.finish();
+        let evidence = evidence_from_manifest(&manifest, &trials)?;
+        let classes: Vec<_> = evidence.iter().map(classify_trial).collect();
+        rows.push(tx_candidate_stage_json(condition, *value, &classes, &effective, &evidence));
+        stages.push(CandidateStage { value: *value, trials: classes });
+        total += plan.step_trials;
+    }
+    let candidates = BTreeMap::from([(condition.to_owned(), stages)]);
+    let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
+    let measured = numeric_value("radio.timing.min_timed_command_lead_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup {
+        conditions: vec![tx_only_condition(condition)], values: vec![measured],
+        observations: vec![observation("provider_min_timed_command_lead", "tests/hardware.rs::hw_measurements_record", Some(condition.to_owned()), observation_trials(total)?,
+            json!({ "interval_ns": plan.interval_ns, "candidates": rows }))?],
+    })
+}
+
+/// Provider-path `radio.timing.tx_in_flight_ns` preemption sweep (UR-21, UR-23).
+pub fn measure_tx_in_flight(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let condition = "tx-1msps";
+    let (repeat, _) = super::waveform_of(&super::pn(1_000));
+    let (burst, _) = super::waveform_of(&super::pn(100));
+    let device_lead_ns = u64::try_from(ezsdr_radio_uhd::profile::DEVICE_LEAD_NS).map_err(|_| "negative device lead")?;
+    let delivery_allowance_ns = u64::try_from(ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS).map_err(|_| "negative delivery allowance")?;
+    let mut stages = Vec::new();
+    let mut rows = Vec::new();
+    let mut total = 0usize;
+    for value in &plan.in_flight_windows_ns {
+        let (mut run, _dir) = candidate_session(device.clone(), candidate_timing("tx_in_flight_ns", *value)?)?;
+        disable_rx(&mut run)?;
+        enable_tx(&mut run)?;
+        start_repeat(&mut run, &repeat)?;
+        super::wait(&mut run, super::ms(100));
+        let mut trials: Vec<TrialPlan> = Vec::new();
+        let mut effective = Vec::new();
+        for index in 0..plan.step_trials {
+            if index > 0 { start_repeat(&mut run, &repeat)?; }
+            let lead = value.checked_add(device_lead_ns).and_then(|lead| lead.checked_add(delivery_allowance_ns))
+                .and_then(|lead| lead.checked_add(1_000_000)).ok_or("preemption lead overflow")?;
+            let (mut trial, actual) = tx_trial(&mut run, &*device, &burst, 100, lead, plan.interval_ns)?;
+            trial.requires_preemption_evidence = true;
+            if let Some(previous) = trials.last_mut() { previous.end_tick = trial.start_tick; }
+            trials.push(trial);
+            effective.push(Some(actual));
+        }
+        let manifest = run.finish();
+        let evidence = evidence_from_manifest(&manifest, &trials)?;
+        let classes: Vec<_> = evidence.iter().map(classify_trial).collect();
+        rows.push(tx_candidate_stage_json(condition, *value, &classes, &effective, &evidence));
+        stages.push(CandidateStage { value: *value, trials: classes });
+        total += plan.step_trials;
+    }
+    let candidates = BTreeMap::from([(condition.to_owned(), stages)]);
+    let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
+    let measured = numeric_value("radio.timing.tx_in_flight_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup {
+        conditions: vec![tx_only_condition(condition)], values: vec![measured],
+        observations: vec![observation("provider_tx_in_flight", "tests/hardware.rs::hw_measurements_record", Some(condition.to_owned()), observation_trials(total)?,
+            json!({ "interval_ns": plan.interval_ns, "device_lead_ns": device_lead_ns,
+                "delivery_allowance_ns": delivery_allowance_ns,
+                "lead_extra_ns": 1_000_000, "lead_is_inferred": true, "candidates": rows }))?],
+    })
+}
+
+fn cold_specs() -> [(u64, u64, &'static str); 2] {
+    [(1_000_000, 2_000_000, "cold-1msps-2msps"), (390_625, 400_000, "cold-390625-400000")]
+}
+
+fn capture_action(run: &mut RunHandle, target: TimePoint, samples: i64) -> Result<bool, String> {
+    let entry = run.submit(super::verb("capture", super::output("rec"), Some(target), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(samples))]), None)
+        .map_err(|error| error.to_string())?;
+    Ok(super::admitted(&entry))
+}
+
+/// Provider-path receive cold-change lead sweep across both transition pairs (UR-25).
+pub fn measure_rx_start_lead(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let mut condition_rows = Vec::new();
+    let mut candidates: BTreeMap<String, Vec<CandidateStage>> = BTreeMap::new();
+    let mut observation_stages = Vec::new();
+    let mut total = 0usize;
+    for (from, to, condition) in cold_specs() {
+        let mut stages = Vec::new();
+        for value in &plan.rx_start_leads_ns {
+            let (mut run, _dir) = candidate_session(device.clone(), candidate_timing("rx_start_lead_ns", *value)?)?;
+            super::past_t0(&mut run, super::ms(100));
+            let (_, run_root) = root_now(&run)?;
+            let clock = stream_clock(&run, Direction::Rx)?;
+            let root = clock.root;
+            if from != 1_000_000 {
+                let entry = run.submit(super::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from as f64).ok_or("invalid initial receive rate")?), None)
+                    .map_err(|error| error.to_string())?;
+                if !super::admitted(&entry) { return Err(format!("initial receive rate was not admitted: {:?}", entry.outcome)); }
+                let settle = run_root.checked_add(ticks_for_ns(*value + 50_000_000, device.master_clock_rate())?).ok_or("settle target overflow")?;
+                advance_root(&mut run, root, settle)?;
+            }
+            let count = ((from as u128 * 12 + to as u128 * 10) / 100).try_into().map_err(|_| "capture sample count overflow".to_owned())?;
+            let mut trial_plans: Vec<TrialPlan> = Vec::new();
+            for index in 0..plan.step_trials {
+                let next_rate = if index % 2 == 0 { to } else { from };
+                let active = stream_clock(&run, Direction::Rx)?;
+                let (_, start_tick) = root_now(&run)?;
+                let capture_at = sample_at_or_after(&active, start_tick.checked_add(ticks_for_ns(20_000_000, device.master_clock_rate())?).ok_or("capture target overflow")?)?.0;
+                let target_index = capture_at.ticks_in(active.domain).map_err(|error| error.to_string())?;
+                let before_events = run.events(0).len();
+                let capture_admitted = capture_action(&mut run, capture_at, i64::try_from(count).map_err(|_| "capture sample count exceeds i64".to_owned())?)?;
+                let start_capture = sample_root_tick(&active, target_index)?;
+                advance_root(&mut run, root, start_capture.checked_add(ticks_for_ns(40_000_000, device.master_clock_rate())?).ok_or("capture settling overflow")?)?;
+                let (_, booked_tick) = root_now(&run)?;
+                let entry = run.submit(super::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(next_rate as f64).ok_or("invalid receive rate")?), None)
+                    .map_err(|error| error.to_string())?;
+                let admitted = capture_admitted && super::admitted(&entry);
+                let horizon = TimePoint::new(root, booked_tick.checked_add(ticks_for_ns(3_000_000_000, device.master_clock_rate())?).ok_or("capture horizon overflow")?);
+                let written = run.wait_for(&[super::kind("sink.CAPTURE_WRITTEN")], before_events, horizon).map_err(|error| error.to_string())?;
+                let events = run.events(before_events);
+                let written_at = written.and_then(|_| events.iter().find(|event| event.kind == super::kind("sink.CAPTURE_WRITTEN")).map(|event| event.time))
+                    .and_then(|time| time.ticks_in(root).ok());
+                let end_tick = written_at.unwrap_or(root_now(&run)?.1)
+                    .checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("cold trial end overflow")?;
+                advance_root(&mut run, root, end_tick)?;
+                if let Some(previous) = trial_plans.last_mut() { previous.end_tick = start_tick; }
+                trial_plans.push(TrialPlan {
+                    start_tick, end_tick, admitted, expected_target: None,
+                    expected_samples: count, expected_end_tick: 0, booked_tick: Some(booked_tick), completion: TrialCompletion::ReceiveCapture,
+                    requires_preemption_evidence: false,
+                    capture_index: Some(index), capture_target: Some(capture_at), cold_capture: true,
+                });
+            }
+            let manifest = run.finish();
+            let evidence = evidence_from_manifest(&manifest, &trial_plans)?;
+            let classes: Vec<_> = evidence.iter().map(classify_trial).collect();
+            stages.push(CandidateStage { value: *value, trials: classes.clone() });
+            let effective: Vec<_> = trial_plans.iter().map(|trial| effective_cold_lead_ns(&manifest, trial, device.master_clock_rate())).collect();
+            observation_stages.push(cold_candidate_stage_json(condition, *value, &classes, &effective, from, to, plan.step_trials));
+            total += plan.step_trials;
+        }
+        candidates.insert(condition.to_owned(), stages);
+        condition_rows.push(rx_condition(condition, from as f64));
+    }
+    let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
+    let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup {
+        conditions: condition_rows, values: vec![measured],
+        observations: vec![observation("provider_rx_start_lead", "tests/hardware.rs::hw_measurements_record", None, observation_trials(total)?,
+            json!({ "interval_ns": plan.interval_ns, "candidates": observation_stages }))?],
+    })
+}
+
+fn rate_condition(rate_hz: u64) -> String {
+    if rate_hz % 1_000_000 == 0 { format!("rx-{}msps", rate_hz / 1_000_000) } else { format!("rx-{rate_hz}hz") }
+}
+
+/// Provider-path receive capacity sweep over duration-sized Runs (UR-34).
+pub fn measure_rx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let mut stages = Vec::new();
+    let mut observations = Vec::new();
+    let mut conditions = Vec::new();
+    let dir = super::TempDir::new();
+    let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+    let binding = radio_binding(&doc)?;
+    let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())?;
+    let wire_bytes = u64::try_from(description.performance.wire_bytes_per_sample).map_err(|_| "wire bytes per sample is negative".to_owned())?;
+    for rate in &plan.rx_rates_hz {
+        let id = rate_condition(*rate);
+        let dir = super::TempDir::new();
+        let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let spec = super::receive_spec(1, *rate as f64, super::bench_hz(&*device), None);
+        let mut run = super::spec_run(&spec, &doc, device.clone(), Default::default());
+        let t0 = run.start_instant().ok_or("receive Run has no T0")?;
+        let root = t0.domain();
+        let start = t0.ticks_in(root).map_err(|error| error.to_string())?;
+        let duration_ticks = device.master_clock_rate().checked_mul(plan.throughput_seconds).ok_or("throughput duration overflow")?;
+        let horizon = start.checked_add(i64::try_from(duration_ticks).map_err(|_| "throughput horizon overflow".to_owned())?).ok_or("throughput horizon overflow")?;
+        advance_root(&mut run, root, horizon)?;
+        let packet = device.rx_packet_samples(0).max(1) as u64;
+        let manifest = run.finish();
+        let actual = super::section(&manifest, "stats")["rx_samples"].as_i64().unwrap_or_default().max(0) as u64;
+        let mut rx_clocks = manifest.clocks.sample_clocks.iter()
+            .filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"));
+        let interval = rx_clocks.next().and_then(|clock| {
+            if rx_clocks.next().is_some() { None } else { expected_rx_samples(clock, *rate, device.master_clock_rate()) }
+        });
+        let (interval_ticks, expected) = interval.map_or((None, None), |(ticks, samples)| (Some(ticks), Some(samples)));
+        let overflow = manifest.events.delivered.iter().any(|event| event.kind.as_str() == "radio.RX_OVERFLOW");
+        let class = throughput_trial_class(actual, expected, packet, overflow);
+        let bytes_per_second = rate.checked_mul(wire_bytes).ok_or("receive bytes per second overflow")?;
+        stages.push(CandidateStage { value: bytes_per_second, trials: vec![class] });
+        conditions.push(rx_condition(&id, *rate as f64));
+        let stage = candidate_stage_json(&id, bytes_per_second, &[class], &[None]);
+        observations.push(observation(
+            format!("provider_rx_throughput_{rate}"), "tests/hardware.rs::hw_measurements_record", Some(id), 1,
+            json!({ "rate_hz": rate, "duration_secs": plan.throughput_seconds, "sample_clock_interval_ticks": interval_ticks,
+                "expected_samples": expected, "actual_samples": actual, "packet_samples": packet,
+                "rx_overflow": overflow, "wire_bytes_per_sample": wire_bytes, "stage": stage }),
+        )?);
+    }
+    let one_condition = BTreeMap::from([("rx-throughput".to_owned(), stages.clone())]);
+    let summary = summarize_candidates(SummaryMode::Capacity, &one_condition, 1)?;
+    let row = capacity_value(&summary, &plan.rx_rates_hz, &stages, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup { conditions, values: vec![row], observations })
+}
+
+fn capacity_value(summary: &CandidateSummary, rates_hz: &[u64], stages: &[CandidateStage], test: &str) -> Result<ValueRecord, String> {
+    let key = Key::parse("radio.perf.rx_bytes_per_s").map_err(|error| error.to_string())?;
+    match summary.worst {
+        Some(bytes) => {
+            let (rate, stage) = rates_hz.iter().zip(stages).find(|(_, stage)| stage.value == bytes).ok_or("selected throughput candidate has no rate")?;
+            Ok(ValueRecord::Measured {
+                key, worst: model::Worst::Number(bytes as f64), trials: observation_trials(stage.trials.len())?,
+                condition: rate_condition(*rate), test: test.to_owned(),
+            })
+        }
+        None => Ok(ValueRecord::Unmeasured {
+            key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No receive-throughput candidate completed a full successful trial.".to_owned()),
+        }),
+    }
+}
+
+fn expected_rx_samples(clock: &SampleClockRecord, rate_hz: u64, master_clock_hz: u64) -> Option<(i64, u64)> {
+    let start = clock.origin.ticks_in(clock.root).ok()?;
+    let end = clock.ended_at?.ticks_in(clock.root).ok()?;
+    let interval = end.checked_sub(start)?;
+    if interval <= 0 || master_clock_hz == 0 { return None; }
+    let samples = (interval as u128).checked_mul(u128::from(rate_hz))? / u128::from(master_clock_hz);
+    Some((interval, u64::try_from(samples).ok()?))
+}
+
+fn throughput_trial_class(actual: u64, expected: Option<u64>, packet: u64, overflow: bool) -> TrialClass {
+    if overflow { TrialClass::DeviceFailure }
+    else if expected.is_some_and(|expected| actual.abs_diff(expected) <= packet) { TrialClass::Success }
+    else { TrialClass::Incomplete }
+}
+
+fn loopback_values(classes: &[TrialClass], exact_starts: &[bool], heard: &[bool]) -> (bool, bool) {
+    (
+        classes.iter().zip(heard).all(|(class, heard)| *class == TrialClass::Success && *heard),
+        classes.iter().zip(exact_starts).all(|(class, exact)| *class == TrialClass::Success && *exact),
+    )
+}
+
+/// Provider-path full-duplex and timed-capture rehearsal (UR-34).
+pub fn measure_full_duplex(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let condition = "duplex-1msps";
+    let wave = super::pn(1_000);
+    let (bytes, _) = super::waveform_of(&wave);
+    let mut target_rows = Vec::new();
+    let mut classes = Vec::new();
+    let mut first_matches = Vec::new();
+    let mut heard = Vec::new();
+    for index in 0..plan.loopback_trials {
+        let (mut run, _dir) = candidate_session(device.clone(), default_timing())?;
+        let t0 = run.start_instant().ok_or("loopback Run has no T0")?;
+        let root = t0.domain();
+        let trial_start = t0.ticks_in(root).map_err(|error| error.to_string())?;
+        enable_tx(&mut run)?;
+        start_repeat(&mut run, &bytes)?;
+        let active = stream_clock(&run, Direction::Rx)?;
+        let (_, now) = root_now(&run)?;
+        let capture_target = sample_at_or_after(&active, now.checked_add(ticks_for_ns(50_000_000, device.master_clock_rate())?).ok_or("loopback capture target overflow")?)?.0;
+        let first = capture_target.ticks_in(active.domain).map_err(|error| error.to_string())?;
+        let from_events = run.events(0).len();
+        let capture_admitted = capture_action(&mut run, capture_target, 5_000)?;
+        let horizon = TimePoint::new(root, now.checked_add(ticks_for_ns(3_000_000_000, device.master_clock_rate())?).ok_or("loopback horizon overflow")?);
+        let written = run.wait_for(&[super::kind("sink.CAPTURE_WRITTEN")], from_events, horizon).map_err(|error| error.to_string())?;
+        let event_rows = run.events(from_events);
+        let end_tick = written.and_then(|_| event_rows.iter().find(|event| event.kind == super::kind("sink.CAPTURE_WRITTEN")).map(|event| event.time))
+            .and_then(|time| time.ticks_in(root).ok()).unwrap_or_else(|| root_now(&run).map_or(now, |(_, tick)| tick));
+        let interval_end = end_tick.checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("duplex trial end overflow")?;
+        advance_root(&mut run, root, interval_end)?;
+        let manifest = run.finish();
+        let capture = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
+        let capture_ref = manifest.artifacts.get(&Ident::parse("rec").map_err(|error| error.to_string())?)
+            .and_then(|artifacts| artifacts.first());
+        let capture_first = capture_ref.and_then(|artifact| artifact.continuity.first()).map(|map| map.first);
+        let exact_start = capture_first == Some(capture_target);
+        let samples = capture_ref.and_then(read_capture_samples);
+        let found = samples.as_ref().and_then(|samples| super::correlate(samples, &wave)).is_some();
+        let mut trial = TrialPlan {
+            start_tick: trial_start, end_tick: end_tick.checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("duplex trial end overflow")?,
+            admitted: capture_admitted, expected_target: None, expected_samples: 5_000,
+            expected_end_tick: 0, booked_tick: Some(now), completion: TrialCompletion::ReceiveCapture,
+            requires_preemption_evidence: false,
+            capture_index: Some(0), capture_target: Some(capture_target), cold_capture: false,
+        };
+        let evidence = evidence_from_sections(
+            super::section(&manifest, "bursts"), super::section(&manifest, "async"), super::section(&manifest, "rejected"),
+            &serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?,
+            &capture, &manifest.clocks.sample_clocks, std::slice::from_mut(&mut trial),
+        )?;
+        let mut class = classify_trial(&evidence[0]);
+        if !found && class == TrialClass::Success { class = TrialClass::Incomplete; }
+        classes.push(class);
+        first_matches.push(exact_start);
+        heard.push(found);
+        target_rows.push(json!({
+            "trial": index, "class": format!("{class:?}"), "capture_first": capture_first.map(|point| point.ticks_in(point.domain()).unwrap_or_default()),
+            "requested_capture_first": first, "hardware_time": exact_start, "waveform_found": found,
+        }));
+    }
+    let (full_duplex, hardware_time) = loopback_values(&classes, &first_matches, &heard);
+    let value = |key: &str, worst: bool| -> Result<ValueRecord, String> {
+        Ok(ValueRecord::Measured {
+            key: Key::parse(key).map_err(|error| error.to_string())?, worst: model::Worst::Boolean(worst),
+            trials: observation_trials(plan.loopback_trials)?, condition: condition.to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        })
+    };
+    Ok(MeasurementGroup {
+        conditions: vec![duplex_condition(condition)],
+        values: vec![value("radio.full_duplex", full_duplex)?, value("radio.hardware_time", hardware_time)?],
+        observations: vec![observation("provider_full_duplex", "tests/hardware.rs::hw_measurements_record", Some(condition.to_owned()), observation_trials(plan.loopback_trials)?,
+            json!({ "interval_ns": plan.interval_ns, "trials": target_rows, "full_duplex": full_duplex, "hardware_time": hardware_time }))?],
+    })
+}
+
+fn read_capture_samples(artifact: &ArtifactRef) -> Option<Vec<(f32, f32)>> {
+    if artifact.partial { return None; }
+    let path = artifact.uri.strip_prefix("file://")?;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() % 8 != 0 { return None; }
+    bytes.chunks_exact(8).map(|frame| Some((
+        f32::from_le_bytes(frame[0..4].try_into().ok()?),
+        f32::from_le_bytes(frame[4..8].try_into().ok()?),
+    ))).collect()
+}
+
+/// The six Manifest-derived outcomes for one trial. This accepts only immutable JSON sections
+/// and the pre-booked plan, so attribution and completion can be unit-tested without a Device.
+pub fn extract_trial_evidence(
+    bursts: &Json,
+    async_reports: &Json,
+    rejected: &Json,
+    radio_events: &Json,
+    artifacts: &Json,
+    clocks: &[SampleClockRecord],
+    plans: &[TrialPlan],
+) -> Result<Vec<TrialEvidence>, String> {
+    let mut trials: Vec<_> = plans.iter().map(|plan| {
+        let mut trial = TrialEvidence::new(plan.start_tick, plan.end_tick, plan.expected_samples, plan.expected_end_tick, plan.completion);
+        trial.admitted = plan.admitted;
+        trial.requires_preemption_evidence = plan.requires_preemption_evidence;
+        trial
+    }).collect();
+    if let Some(rows) = bursts.as_array() {
+        for burst in rows {
+            let Some(target) = serde_json::from_value::<TimePoint>(burst["target"].clone()).ok() else { continue };
+            let matching: Vec<_> = plans.iter().enumerate().filter(|(_, plan)| plan.expected_target == Some(target)).map(|(i, _)| i).collect();
+            if let [index] = matching.as_slice() {
+                let plan = &plans[*index];
+                let samples = burst["samples"].as_u64().unwrap_or_default();
+                let end = serde_json::from_value::<BurstEnd>(burst["end"].clone()).ok();
+                if trials[*index].record.is_some() {
+                    trials[*index].unattributable = true;
+                } else if end == Some(BurstEnd::Eob) {
+                    let clock = clocks.iter().find(|clock| clock.domain == target.domain()).ok_or_else(|| "burst target has no SampleClock record".to_owned())?;
+                    let end_sample = target.ticks_in(target.domain()).map_err(|error| error.to_string())?.checked_add(i64::try_from(samples).map_err(|_| "burst sample count exceeds i64".to_owned())?).ok_or("burst end sample overflow")?;
+                    let end_tick = sample_root_tick(clock, end_sample)?;
+                    trials[*index].record = Some(TrialRecord { samples, end_tick });
+                } else {
+                    trials[*index].record = Some(TrialRecord { samples, end_tick: plan.expected_end_tick.saturating_sub(1) });
+                }
+            }
+        }
+    }
+    if let Some(rows) = bursts.as_array() {
+        for (index, plan) in plans.iter().enumerate().filter(|(_, plan)| plan.requires_preemption_evidence) {
+            let Some(target) = plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()) else { continue };
+            let matching = rows.iter().filter(|burst| {
+                if serde_json::from_value::<BurstEnd>(burst["end"].clone()).ok() != Some(BurstEnd::Eob) { return false; }
+                let Some(repeat_target) = serde_json::from_value::<TimePoint>(burst["target"].clone()).ok() else { return false; };
+                if plan.expected_target == Some(repeat_target) { return false; }
+                let Some(samples) = burst["samples"].as_u64().and_then(|samples| i64::try_from(samples).ok()) else { return false; };
+                let Some(clock) = clocks.iter().find(|clock| clock.domain == repeat_target.domain()) else { return false; };
+                repeat_target.ticks_in(repeat_target.domain()).ok().and_then(|start| start.checked_add(samples))
+                    .and_then(|end| sample_root_tick(clock, end).ok()) == Some(target)
+            }).count();
+            if matching == 1 { trials[index].repeat_ended_at_target = true; }
+            else if matching > 1 { trials[index].unattributable = true; }
+        }
+    }
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.completion == TrialCompletion::ReceiveCapture {
+            trials[index].record = capture_record(artifacts, clocks, plan);
+        }
+    }
+    if let Some(rows) = radio_events.as_array() {
+        for event in rows {
+            let name = event["kind"].as_str().unwrap_or_default();
+            if name == "radio.TIME_ERROR" {
+                let evidence = match event["payload"]["outcome"].as_str() {
+                    Some("drop") => EvidenceKind::ProviderTimeError(ProviderTimeError::Drop),
+                    Some("send_asap") => EvidenceKind::ProviderTimeError(ProviderTimeError::SendAsap),
+                    Some("refused") => EvidenceKind::ProviderTimeError(ProviderTimeError::Refused),
+                    Some("plan_violation") => EvidenceKind::ProviderTimeError(ProviderTimeError::PlanViolation),
+                    Some("late_at_device") => EvidenceKind::ProviderTimeError(ProviderTimeError::LateAtDevice),
+                    _ => EvidenceKind::UnknownTimeError,
+                };
+                let target = serde_json::from_value::<TimePoint>(event["payload"]["target"].clone()).ok();
+                let matching: Vec<_> = plans.iter().enumerate().filter(|(_, plan)| target.is_some() && plan.expected_target == target).map(|(i, _)| i).collect();
+                let tick = event_tick(event, clocks);
+                if let [index] = matching.as_slice() {
+                    if tick.is_some_and(|tick| plans[*index].start_tick <= tick && tick < plans[*index].end_tick) {
+                        trials[*index].evidence.push(evidence);
+                    } else {
+                        trials[*index].unattributable = true;
+                    }
+                } else {
+                    attribute_manifest_evidence(&mut trials, TimedEvidence { tick, span: None, kind: evidence });
+                }
+            } else {
+                let kind = match name {
+                    "radio.LATE_COMMAND" => EvidenceKind::LateCommand,
+                    "radio.COMMAND_REJECTED" => EvidenceKind::CommandRejected,
+                    "radio.COMMAND_QUEUE_FULL" => EvidenceKind::CommandQueueFull,
+                    "radio.RX_OVERFLOW" => EvidenceKind::RxOverflow,
+                    "radio.TX_UNDERFLOW" => EvidenceKind::Underflow,
+                    _ => continue,
+                };
+                attribute_manifest_evidence(&mut trials, TimedEvidence { tick: event_tick(event, clocks), span: None, kind });
+            }
+        }
+    }
+    if let Some(rows) = async_reports.as_array() {
+        for report in rows {
+            let kind = match report["code"].as_str().unwrap_or_default() {
+                "BurstAck" => {
+                    let tick = report["tick"].as_i64();
+                    let Some(tick) = tick else {
+                        for (index, plan) in plans.iter().enumerate() {
+                            if plan.completion == TrialCompletion::TransmitBurstAck { trials[index].unattributable = true; }
+                        }
+                        continue;
+                    };
+                    let matching: Vec<_> = plans.iter().enumerate().filter(|(_, plan)| {
+                        plan.completion == TrialCompletion::TransmitBurstAck
+                            && plan.start_tick <= tick && tick < plan.end_tick
+                            && plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()).is_some_and(|target| tick >= target)
+                    }).map(|(index, _)| index).collect();
+                    if let [index] = matching.as_slice() {
+                        trials[*index].burst_ack_ticks.push(tick);
+                    } else {
+                        for index in matching { trials[index].unattributable = true; }
+                    }
+                    continue;
+                }
+                "TimeError" => EvidenceKind::AsyncTimeError,
+                "Underflow" => EvidenceKind::Underflow,
+                "UnderflowInPacket" => EvidenceKind::UnderflowInPacket,
+                "SeqError" => EvidenceKind::SequenceError,
+                "SeqErrorInBurst" => EvidenceKind::SequenceErrorInBurst,
+                _ => EvidenceKind::OtherAsync,
+            };
+            attribute_manifest_evidence(&mut trials, TimedEvidence { tick: report["tick"].as_i64(), span: None, kind });
+        }
+    }
+    for trial in &mut trials {
+        if trial.completion == TrialCompletion::TransmitBurstAck {
+            match trial.burst_ack_ticks.len() {
+                1 => trial.evidence.push(EvidenceKind::BurstAck),
+                0 => {},
+                _ => trial.unattributable = true,
+            }
+        }
+    }
+    if let Some(rows) = rejected.as_array() {
+        if rows.iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("send did not complete") || reason.contains("short send"))) {
+            for (index, plan) in plans.iter().enumerate() {
+                if plan.completion == TrialCompletion::TransmitBurstAck {
+                    trials[index].evidence.push(EvidenceKind::ShortSendRejected);
+                }
+            }
+        }
+    }
+    Ok(trials)
+}
+
+fn attribute_manifest_evidence(trials: &mut [TrialEvidence], evidence: TimedEvidence) {
+    attribute_evidence(trials, evidence);
+}
+
+fn event_tick(event: &Json, clocks: &[SampleClockRecord]) -> Option<i64> {
+    let point = serde_json::from_value::<TimePoint>(event["time"].clone()).ok()?;
+    point_root_tick(point, clocks).ok()
+}
+
+fn point_root_tick(point: TimePoint, clocks: &[SampleClockRecord]) -> Result<i64, String> {
+    if let Some(clock) = clocks.iter().find(|clock| clock.root == point.domain()) {
+        return point.ticks_in(clock.root).map_err(|error| error.to_string());
+    }
+    let clock = clocks.iter().find(|clock| clock.domain == point.domain()).ok_or("event time has no known device root")?;
+    sample_root_tick(clock, point.ticks_in(clock.domain).map_err(|error| error.to_string())?)
+}
+
+fn capture_record(artifacts: &Json, clocks: &[SampleClockRecord], plan: &TrialPlan) -> Option<TrialRecord> {
+    let artifact = artifacts.get("rec")?.as_array()?.get(plan.capture_index?)?;
+    if artifact.get("partial")?.as_bool()? { return None; }
+    let maps = artifact.get("continuity")?.as_array()?;
+    if maps.is_empty() { return None; }
+    let mut samples = 0u64;
+    for map in maps {
+        if !map.get("gaps")?.as_array()?.is_empty() || !map.get("channel_gaps")?.as_array()?.is_empty() { return None; }
+        let first: TimePoint = serde_json::from_value(map.get("first")?.clone()).ok()?;
+        let end: TimePoint = serde_json::from_value(map.get("end")?.clone()).ok()?;
+        let domain: ClockDomainId = serde_json::from_value(map.get("domain")?.clone()).ok()?;
+        if first.domain() != domain || end.domain() != domain { return None; }
+        let len = end.ticks_in(end.domain()).ok()?.checked_sub(first.ticks_in(first.domain()).ok()?)?;
+        samples = samples.checked_add(u64::try_from(len).ok()?)?;
+    }
+    if samples != plan.expected_samples { return None; }
+    if plan.cold_capture {
+        if maps.len() != 2 { return None; }
+        let capture_first: TimePoint = serde_json::from_value(maps[0].get("first")?.clone()).ok()?;
+        if plan.capture_target.is_some_and(|target| target != capture_first) { return None; }
+        let first_domain: ClockDomainId = serde_json::from_value(maps[0].get("domain")?.clone()).ok()?;
+        let second_domain: ClockDomainId = serde_json::from_value(maps[1].get("domain")?.clone()).ok()?;
+        if first_domain == second_domain { return None; }
+        let old = clocks.iter().find(|clock| clock.domain == first_domain)?;
+        let new = clocks.iter().find(|clock| clock.domain == second_domain)?;
+        if old.stream != new.stream || old.root != new.root || !old.stream.to_string().ends_with("usrp/rx/s0") { return None; }
+        let ended = old.ended_at?;
+        let ended_root = ended.ticks_in(old.root).ok()?;
+        if new.origin.ticks_in(new.root).ok()? <= ended_root { return None; }
+        let origin_root = old.origin.ticks_in(old.root).ok()?;
+        let numerator = i128::from(old.root_ticks_per_tick.num());
+        let denominator = i128::from(old.root_ticks_per_tick.den());
+        let elapsed = (i128::from(ended_root) - i128::from(origin_root)) * denominator;
+        if elapsed.rem_euclid(numerator) != 0 { return None; }
+        let e1 = elapsed / numerator;
+        let recorded_end: TimePoint = serde_json::from_value(maps[0].get("end")?.clone()).ok()?;
+        let new_first: TimePoint = serde_json::from_value(maps[1].get("first")?.clone()).ok()?;
+        if i128::from(recorded_end.ticks_in(first_domain).ok()?) != e1
+            || new_first.ticks_in(second_domain).ok()? != 0
+        { return None; }
+    }
+    Some(TrialRecord { samples, end_tick: plan.expected_end_tick })
+}
+
+fn effective_cold_lead_ns(manifest: &Manifest, plan: &TrialPlan, master_clock_hz: u64) -> Option<i64> {
+    let booked = plan.booked_tick?;
+    let timing = super::section(manifest, "timing").as_array()?;
+    let (row, booked_at) = timing.iter()
+        .filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.s0.sample_rate_hz")
+        .filter_map(|row| row["booked_at"].as_i64().map(|tick| (row, tick)))
+        .min_by_key(|(_, tick)| i128::from(*tick).abs_diff(i128::from(booked)))?;
+    let e = row["e"].as_i64()?;
+    let rx_clocks: Vec<_> = manifest.clocks.sample_clocks.iter()
+        .filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"))
+        .collect();
+    let old_index = rx_clocks.iter().position(|clock| clock.ended_at
+        .and_then(|ended| ended.ticks_in(clock.root).ok()) == Some(e))?;
+    let origin = rx_clocks.get(old_index + 1)?.origin.ticks_in(rx_clocks[old_index + 1].root).ok()?;
+    i64::try_from((i128::from(origin) - i128::from(booked_at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()
+}
+
+fn observation_trials(trials: usize) -> Result<u32, String> {
+    u32::try_from(trials).map_err(|_| "measurement observation exceeds the record's u32 trial limit".to_owned())
+}
+
+fn evidence_from_sections(
+    bursts: &Json,
+    async_reports: &Json,
+    rejected: &Json,
+    radio_events: &Json,
+    artifacts: &Json,
+    clocks: &[SampleClockRecord],
+    plans: &[TrialPlan],
+) -> Result<Vec<TrialEvidence>, String> {
+    extract_trial_evidence(bursts, async_reports, rejected, radio_events, artifacts, clocks, plans)
+}
+
+fn evidence_from_manifest(manifest: &Manifest, plans: &[TrialPlan]) -> Result<Vec<TrialEvidence>, String> {
+    let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
+    let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
+    evidence_from_sections(
+        super::section(manifest, "bursts"), super::section(manifest, "async"), super::section(manifest, "rejected"),
+        &events, &artifacts, &manifest.clocks.sample_clocks, plans,
+    )
+}
+
+fn trial_class_name(class: TrialClass) -> &'static str {
+    match class {
+        TrialClass::AdmissionRejection => "AdmissionRejection",
+        TrialClass::ProviderFailure => "ProviderFailure",
+        TrialClass::DeviceFailure => "DeviceFailure",
+        TrialClass::Incomplete => "Incomplete",
+        TrialClass::Unattributable => "Unattributable",
+        TrialClass::Success => "Success",
+    }
+}
+
+fn candidate_stage_json(condition: &str, value: u64, trials: &[TrialClass], effective_leads_ns: &[Option<i64>]) -> Json {
+    let mut counts = BTreeMap::from([
+        ("AdmissionRejection", 0usize), ("ProviderFailure", 0), ("DeviceFailure", 0),
+        ("Incomplete", 0), ("Unattributable", 0), ("Success", 0),
+    ]);
+    for trial in trials { *counts.get_mut(trial_class_name(*trial)).expect("all trial classes are listed") += 1; }
+    json!({ "condition": condition, "candidate": value, "classes": counts, "effective_lead_ns": effective_leads_ns,
+        "trials": trials.iter().enumerate().map(|(index, class)| json!({ "trial": index, "class": trial_class_name(*class), "effective_lead_ns": effective_leads_ns.get(index) })).collect::<Vec<_>>() })
+}
+
+fn tx_candidate_stage_json(
+    condition: &str,
+    value: u64,
+    trials: &[TrialClass],
+    effective_leads_ns: &[Option<i64>],
+    evidence: &[TrialEvidence],
+) -> Json {
+    let mut stage = candidate_stage_json(condition, value, trials, effective_leads_ns);
+    if let Some(rows) = stage["trials"].as_array_mut() {
+        for (row, trial) in rows.iter_mut().zip(evidence) {
+            row["expected_end_tick"] = json!(trial.expected_end_tick);
+            row["burst_ack_ticks"] = json!(trial.burst_ack_ticks);
+            row["burst_ack_offsets_from_expected_end_ticks"] = json!(trial.burst_ack_ticks.iter()
+                .map(|tick| tick.checked_sub(trial.expected_end_tick)).collect::<Vec<_>>());
+            row["repeat_ended_at_target"] = json!(trial.repeat_ended_at_target);
+        }
+    }
+    stage
+}
+
+fn cold_candidate_stage_json(
+    condition: &str,
+    value: u64,
+    trials: &[TrialClass],
+    effective_leads_ns: &[Option<i64>],
+    from_rate_hz: u64,
+    to_rate_hz: u64,
+    trial_count: usize,
+) -> Json {
+    let mut stage = candidate_stage_json(condition, value, trials, effective_leads_ns);
+    stage["rate_pair_hz"] = json!([from_rate_hz, to_rate_hz]);
+    stage["trial_transitions_hz"] = json!((0..trial_count).map(|index| {
+        if index % 2 == 0 { [from_rate_hz, to_rate_hz] } else { [to_rate_hz, from_rate_hz] }
+    }).collect::<Vec<_>>());
+    stage
+}
+
+fn numeric_value(
+    key: &str,
+    summary: &CandidateSummary,
+    candidates: &BTreeMap<String, Vec<CandidateStage>>,
+    required_trials: usize,
+    test: &str,
+) -> Result<ValueRecord, String> {
+    let key = Key::parse(key).map_err(|error| error.to_string())?;
+    let Some(worst) = summary.worst else {
+        return Ok(ValueRecord::Unmeasured { key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No candidate satisfies the successful-edge rule.".to_owned()) });
+    };
+    let condition = summary.limiting_condition.as_deref().ok_or("selected measurement has no limiting condition")?;
+    let trials = candidates.get(condition).and_then(|stages| stages.iter().find(|stage| stage.value == worst)).map(|stage| stage.trials.len()).unwrap_or(required_trials);
+    Ok(ValueRecord::Measured {
+        key, worst: model::Worst::Number(worst as f64), trials: u32::try_from(trials).map_err(|_| "measured trial count exceeds u32".to_owned())?,
+        condition: condition.to_owned(), test: test.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_clock(domain: ClockDomainId, stream: &str, origin: i64, ended_at: Option<i64>) -> SampleClockRecord {
+        let root = ClockDomainId::local(20);
+        SampleClockRecord {
+            stream: ezsdr_kernel::id::ResourceId::parse(stream).unwrap(),
+            domain,
+            root,
+            root_ticks_per_tick: ezsdr_kernel::time::Rational::new(1, 1).unwrap(),
+            origin: TimePoint::new(root, origin),
+            ended_at: ended_at.map(|tick| TimePoint::new(root, tick)),
+            nominal_rate: ezsdr_kernel::time::Rational::new(1, 1).unwrap(),
+        }
+    }
+
+    fn synthetic_tx_plan(start_tick: i64, end_tick: i64, target_tick: i64) -> TrialPlan {
+        let target = TimePoint::new(ClockDomainId::local(21), target_tick);
+        TrialPlan {
+            start_tick, end_tick, admitted: true, expected_target: Some(target), expected_samples: 4,
+            expected_end_tick: target_tick + 4, booked_tick: Some(start_tick), completion: TrialCompletion::TransmitBurstAck,
+            requires_preemption_evidence: false,
+            capture_index: None, capture_target: None, cold_capture: false,
+        }
+    }
+
+    fn synthetic_burst(target: TimePoint, samples: u64, end: &str) -> Json {
+        json!([{ "target": target, "samples": samples, "end": end }])
+    }
+
+    fn synthetic_radio_event(kind: &str, tick: i64, payload: Json) -> Json {
+        json!([{ "kind": kind, "time": TimePoint::new(ClockDomainId::local(20), tick), "payload": payload }])
+    }
+
+    #[test]
+    fn effective_lead_uses_the_action_receipt_instead_of_a_later_clock_read() {
+        let target = 300;
+        let root = ClockDomainId::local(21);
+        let receipt = 100;
+        let later_post_submit_read = 150;
+        assert_eq!(effective_lead_ns(target, TimePoint::new(root, receipt), root, 1_000_000_000).unwrap(), (receipt, 200));
+        assert_eq!(effective_lead_ns(target, TimePoint::new(root, later_post_submit_read), root, 1_000_000_000).unwrap(),
+            (later_post_submit_read, 150));
+    }
+
+    #[test]
+    fn cold_observations_record_both_rates_and_each_transition_direction() {
+        let stage = cold_candidate_stage_json("cold-1msps-2msps", 1, &[TrialClass::Success; 2], &[None, None], 1_000_000, 2_000_000, 2);
+        assert_eq!(stage["rate_pair_hz"], json!([1_000_000, 2_000_000]));
+        assert_eq!(stage["trial_transitions_hz"], json!([[1_000_000, 2_000_000], [2_000_000, 1_000_000]]));
+    }
 
     fn complete(start: i64) -> TrialEvidence {
         let mut trial = TrialEvidence::new(start, start + 10, 4, start + 10, TrialCompletion::TransmitBurstAck);
@@ -644,7 +1747,7 @@ mod tests {
 
         let mut before_first = vec![complete(10)];
         attribute_evidence(&mut before_first, TimedEvidence { tick: Some(0), span: None, kind: EvidenceKind::LateCommand });
-        assert!(!before_first[0].unattributable, "an event before every trial has no preceding trial to fail");
+        assert!(before_first[0].unattributable, "failure evidence before the first trial invalidates it");
 
         let mut matched_async = vec![complete(0)];
         attribute_evidence(&mut matched_async, TimedEvidence { tick: Some(5), span: None, kind: EvidenceKind::AsyncTimeError });
@@ -652,6 +1755,192 @@ mod tests {
         let mut unmatched_async = vec![complete(0)];
         attribute_evidence(&mut unmatched_async, TimedEvidence { tick: Some(99), span: None, kind: EvidenceKind::AsyncTimeError });
         assert_eq!(classify_trial(&unmatched_async[0]), TrialClass::Unattributable, "a report outside every trial cannot be credited to it");
+    }
+
+    #[test]
+    fn manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence() {
+        let clock = synthetic_clock(ClockDomainId::local(21), "usrp/tx/s0", 0, None);
+        let clocks = [clock];
+        let plan = synthetic_tx_plan(90, 120, 100);
+        let burst = synthetic_burst(plan.expected_target.unwrap(), 4, "eob");
+        let ack = json!([{ "code": "BurstAck", "tick": 102 }]);
+        let empty = json!([]);
+        let no_artifacts = json!({});
+        let evidence = |plan: &TrialPlan, bursts: &Json, async_rows: &Json, rejected: &Json, events: &Json| {
+            extract_trial_evidence(bursts, async_rows, rejected, events, &no_artifacts, &clocks, std::slice::from_ref(plan)).unwrap()
+        };
+
+        let completed = evidence(&plan, &burst, &ack, &empty, &empty);
+        assert_eq!(classify_trial(&completed[0]), TrialClass::Success, "the ACK need not equal the exclusive sample end");
+        assert_eq!(completed[0].burst_ack_ticks, [102]);
+        let tx_stage = tx_candidate_stage_json("tx-1msps", 1, &[TrialClass::Success], &[Some(3)], &completed);
+        assert_eq!(tx_stage["trials"][0]["expected_end_tick"], 104);
+        assert_eq!(tx_stage["trials"][0]["burst_ack_offsets_from_expected_end_ticks"], json!([-2]));
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &empty, &empty, &empty)[0]), TrialClass::Incomplete,
+            "a missing ACK does not complete a recorded burst");
+        let multiple_acks = json!([{ "code": "BurstAck", "tick": 101 }, { "code": "BurstAck", "tick": 103 }]);
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &multiple_acks, &empty, &empty)[0]), TrialClass::Unattributable,
+            "multiple ACKs in one isolated trial cannot be assigned");
+        let before_trial = synthetic_radio_event("radio.RX_OVERFLOW", 89, json!({}));
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &before_trial)[0]), TrialClass::Unattributable,
+            "a known failure before the first trial invalidates it");
+        let after_trial = synthetic_radio_event("radio.RX_OVERFLOW", 120, json!({}));
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &after_trial)[0]), TrialClass::Unattributable,
+            "a known failure after the last trial invalidates it");
+
+        let mut rejected_plan = plan.clone();
+        rejected_plan.admitted = false;
+        assert_eq!(classify_trial(&evidence(&rejected_plan, &empty, &empty, &empty, &empty)[0]), TrialClass::AdmissionRejection);
+
+        let provider_error = synthetic_radio_event("radio.TIME_ERROR", 95, json!({ "outcome": "drop", "target": plan.expected_target }));
+        assert_eq!(classify_trial(&evidence(&plan, &empty, &empty, &empty, &provider_error)[0]), TrialClass::ProviderFailure);
+        let device_error = synthetic_radio_event("radio.RX_OVERFLOW", 95, json!({}));
+        assert_eq!(classify_trial(&evidence(&plan, &empty, &empty, &empty, &device_error)[0]), TrialClass::DeviceFailure);
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &empty, &empty, &empty)[0]), TrialClass::Incomplete, "a burst record without its ACK is incomplete");
+        let truncated = synthetic_burst(plan.expected_target.unwrap(), 4, "discontinuity");
+        assert_eq!(classify_trial(&evidence(&plan, &truncated, &ack, &empty, &empty)[0]), TrialClass::Incomplete, "a started but non-EOB burst is incomplete");
+
+        let tickless = json!([{ "code": "TimeError", "tick": null }]);
+        assert_eq!(classify_trial(&evidence(&plan, &empty, &tickless, &empty, &empty)[0]), TrialClass::Unattributable);
+        let unknown_time_error = synthetic_radio_event("radio.TIME_ERROR", 95, json!({ "outcome": "future_outcome", "target": plan.expected_target }));
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &unknown_time_error)[0]), TrialClass::Unattributable,
+            "an unknown TIME_ERROR outcome cannot be ignored");
+        let short_send = json!([{ "reason": "UR-22: a send did not complete within 1 s" }]);
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &short_send, &empty)[0]), TrialClass::Incomplete);
+
+        let first = synthetic_tx_plan(90, 104, 100);
+        let second = synthetic_tx_plan(104, 220, 200);
+        let crossing_ack = json!([{ "code": "BurstAck", "tick": 104 }]);
+        let crossed = extract_trial_evidence(
+            &synthetic_burst(first.expected_target.unwrap(), 4, "eob"), &crossing_ack, &empty, &empty, &no_artifacts,
+            &clocks, &[first, second],
+        ).unwrap();
+        assert!(crossed.iter().all(|trial| classify_trial(trial) == TrialClass::Incomplete), "a boundary ACK before the next target cannot complete either trial");
+    }
+
+    #[test]
+    fn preemption_requires_the_repeat_record_to_reach_the_interrupt_target() {
+        let clock = synthetic_clock(ClockDomainId::local(21), "usrp/tx/s0", 0, None);
+        let clocks = [clock];
+        let mut plan = synthetic_tx_plan(90, 120, 100);
+        plan.requires_preemption_evidence = true;
+        let interrupt = synthetic_burst(plan.expected_target.unwrap(), 4, "eob");
+        let ack = json!([{ "code": "BurstAck", "tick": 102 }]);
+        let empty = json!([]);
+        let no_artifacts = json!({});
+        let no_repeat = extract_trial_evidence(&interrupt, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
+        assert_eq!(classify_trial(&no_repeat[0]), TrialClass::Incomplete,
+            "a complete interrupting burst cannot prove that a repeat was running");
+
+        let repeat = json!([
+            { "target": TimePoint::new(ClockDomainId::local(21), 50), "samples": 50, "end": "eob" },
+            { "target": plan.expected_target.unwrap(), "samples": 4, "end": "eob" }
+        ]);
+        let complete = extract_trial_evidence(&repeat, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
+        assert!(complete[0].repeat_ended_at_target);
+        assert_eq!(classify_trial(&complete[0]), TrialClass::Success);
+
+        let early = json!([
+            { "target": TimePoint::new(ClockDomainId::local(21), 50), "samples": 49, "end": "eob" },
+            { "target": plan.expected_target.unwrap(), "samples": 4, "end": "eob" }
+        ]);
+        let ended_early = extract_trial_evidence(&early, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
+        assert!(!ended_early[0].repeat_ended_at_target);
+        assert_eq!(classify_trial(&ended_early[0]), TrialClass::Incomplete, "a repeat ending one sample before the interrupt proves no preemption");
+
+        let before = synthetic_radio_event("radio.TX_UNDERFLOW", 89, json!({}));
+        let failed_setup = extract_trial_evidence(&repeat, &ack, &empty, &before, &no_artifacts, &clocks, &[plan]).unwrap();
+        assert_eq!(classify_trial(&failed_setup[0]), TrialClass::Unattributable,
+            "an underflow before the first trial is retained against that trial");
+    }
+
+    #[test]
+    fn cold_capture_evidence_requires_two_contiguous_clock_segments() {
+        let old_domain = ClockDomainId::local(21);
+        let new_domain = ClockDomainId::local(22);
+        let old = synthetic_clock(old_domain, "usrp/rx/s0", 0, Some(200));
+        let new = synthetic_clock(new_domain, "usrp/rx/s0", 250, None);
+        let target = TimePoint::new(old_domain, 100);
+        let plan = TrialPlan {
+            start_tick: 90, end_tick: 400, admitted: true, expected_target: None, expected_samples: 200,
+            expected_end_tick: 0, booked_tick: Some(150), completion: TrialCompletion::ReceiveCapture,
+            requires_preemption_evidence: false,
+            capture_index: Some(0), capture_target: Some(target), cold_capture: true,
+        };
+        let map = |domain, first, end| json!({
+            "domain": domain, "gaps": [], "channel_gaps": [],
+            "first": TimePoint::new(domain, first), "end": TimePoint::new(domain, end),
+        });
+        let artifacts = json!({ "rec": [{ "partial": false, "continuity": [map(old_domain, 100, 200), map(new_domain, 0, 100)] }] });
+        let empty = json!([]);
+        let evidence = extract_trial_evidence(&empty, &empty, &empty, &empty, &artifacts, &[old.clone(), new], std::slice::from_ref(&plan)).unwrap();
+        assert_eq!(classify_trial(&evidence[0]), TrialClass::Success);
+
+        let mut with_gap = artifacts.clone();
+        with_gap["rec"][0]["continuity"][0]["gaps"] = json!([{ "len": 1 }]);
+        let evidence = extract_trial_evidence(&empty, &empty, &empty, &empty, &with_gap, std::slice::from_ref(&old), std::slice::from_ref(&plan)).unwrap();
+        assert_eq!(classify_trial(&evidence[0]), TrialClass::Incomplete);
+        let wrong_origin = synthetic_clock(new_domain, "usrp/rx/s0", 200, None);
+        let evidence = extract_trial_evidence(&empty, &empty, &empty, &empty, &artifacts, &[old, wrong_origin], &[plan]).unwrap();
+        assert_eq!(classify_trial(&evidence[0]), TrialClass::Incomplete, "the new clock origin must follow the old clock's cut");
+    }
+
+    #[test]
+    fn throughput_success_requires_sample_tolerance_and_no_overflow() {
+        let clock = synthetic_clock(ClockDomainId::local(21), "usrp/rx/s0", 100, Some(1_200));
+        let (interval, expected) = expected_rx_samples(&clock, 1_000, 1_000).unwrap();
+        assert_eq!((interval, expected), (1_100, 1_100), "the recorded interval includes delayed shutdown");
+        let missing_end = synthetic_clock(ClockDomainId::local(21), "usrp/rx/s0", 100, None);
+        assert_eq!(expected_rx_samples(&missing_end, 1_000, 1_000), None,
+            "without an ended SampleClock there is no measured interval");
+        assert_eq!(throughput_trial_class(1_100, Some(expected), 100, false), TrialClass::Success);
+        assert_eq!(throughput_trial_class(1_200, Some(expected), 100, false), TrialClass::Success,
+            "a one-packet difference is within the permitted tolerance");
+        assert_eq!(throughput_trial_class(900, Some(expected), 100, false), TrialClass::Incomplete,
+            "a sample deficit beyond one packet remains incomplete");
+        assert_eq!(throughput_trial_class(1_100, None, 100, false), TrialClass::Incomplete,
+            "a SampleClock without an end cannot define an expected count");
+        assert_eq!(throughput_trial_class(1_100, Some(expected), 100, true), TrialClass::DeviceFailure,
+            "an overflow fails even with the expected sample count");
+    }
+
+    #[test]
+    fn loopback_success_separates_waveform_from_requested_sample_time() {
+        assert_eq!(loopback_values(&[TrialClass::Success], &[true], &[true]), (true, true));
+        assert_eq!(loopback_values(&[TrialClass::Success], &[false], &[true]), (true, false));
+        assert_eq!(loopback_values(&[TrialClass::Success], &[true], &[false]), (false, true));
+        assert_eq!(loopback_values(&[TrialClass::DeviceFailure], &[true], &[true]), (false, false));
+    }
+
+    #[test]
+    fn measured_rows_keep_the_selected_boundary_and_limiting_condition() {
+        let stages = |failed: &[u64]| [1, 2, 3].into_iter().map(|value| CandidateStage {
+            value, trials: vec![if failed.contains(&value) { TrialClass::ProviderFailure } else { TrialClass::Success }; 2],
+        }).collect();
+        let candidates = BTreeMap::from([
+            ("cold-fast".to_owned(), stages(&[1])),
+            ("cold-slow".to_owned(), stages(&[1, 2])),
+        ]);
+        let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, 2).unwrap();
+        let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, 2,
+            "tests/hardware.rs::hw_measurements_record").unwrap();
+        assert!(matches!(measured, ValueRecord::Measured {
+            key, worst: model::Worst::Number(3.0), trials: 2, condition, test
+        } if key.as_str() == "radio.timing.rx_start_lead_ns" && condition == "cold-slow"
+            && test == "tests/hardware.rs::hw_measurements_record"));
+
+        let rates = [10_000_000, 20_000_000, 40_000_000];
+        let capacity = vec![
+            CandidateStage { value: 20, trials: vec![TrialClass::Success] },
+            CandidateStage { value: 40, trials: vec![TrialClass::Success] },
+            CandidateStage { value: 80, trials: vec![TrialClass::DeviceFailure] },
+        ];
+        let candidates = BTreeMap::from([("rx-throughput".to_owned(), capacity.clone())]);
+        let summary = summarize_candidates(SummaryMode::Capacity, &candidates, 1).unwrap();
+        let measured = capacity_value(&summary, &rates, &capacity, "tests/hardware.rs::hw_measurements_record").unwrap();
+        assert!(matches!(measured, ValueRecord::Measured {
+            key, worst: model::Worst::Number(40.0), trials: 1, condition, ..
+        } if key.as_str() == "radio.perf.rx_bytes_per_s" && condition == "rx-20msps"));
     }
 
     #[test]
@@ -739,8 +2028,7 @@ mod tests {
             &binding,
             &*device,
             &rehearsal_metadata(),
-            vec![],
-            vec![],
+            MeasurementGroup::default(),
             &uhd,
         ).unwrap_err();
         assert!(hardware_error.contains("uhd_version"), "{hardware_error}");
@@ -751,8 +2039,7 @@ mod tests {
             &no_profile,
             &*device,
             &rehearsal_metadata(),
-            vec![],
-            vec![],
+            MeasurementGroup::default(),
             &uhd,
         ).is_err(), "profile must come from the binding");
         let mut no_fake_version = rehearsal_metadata();
@@ -762,8 +2049,7 @@ mod tests {
             &binding,
             &*device,
             &no_fake_version,
-            vec![],
-            vec![],
+            MeasurementGroup::default(),
             &uhd,
         ).is_err(), "FakeDevice version metadata must be explicit");
         let record = build_record(
@@ -771,8 +2057,7 @@ mod tests {
             &binding,
             &*device,
             &rehearsal_metadata(),
-            vec![condition],
-            vec![observation],
+            MeasurementGroup { conditions: vec![condition], values: vec![], observations: vec![observation] },
             &uhd,
         ).unwrap();
         let keys: BTreeSet<_> = record.values.iter().map(|value| match value {
@@ -798,10 +2083,18 @@ mod tests {
         let lead_reason = reason("radio.timing.min_timed_command_lead_ns");
         let startup_reason = reason("radio.timing.startup_latency_ns");
         assert!(queue_reason.contains("reservations"), "{queue_reason}");
-        assert!(lead_reason.contains("3b-2"), "{lead_reason}");
+        assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
         assert_ne!(queue_reason, lead_reason);
         assert_ne!(lead_reason, startup_reason);
+        let no_pass = BTreeMap::from([("tx-1msps".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure] }])]);
+        let summary = summarize_candidates(SummaryMode::MinimumLead, &no_pass, 1).unwrap();
+        let failed_row = numeric_value("radio.timing.min_timed_command_lead_ns", &summary, &no_pass, 1, "test").unwrap();
+        let failed_reason = match failed_row {
+            ValueRecord::Unmeasured { reason, .. } => reason,
+            ValueRecord::Measured { .. } => panic!("failed candidates cannot produce a measurement"),
+        };
+        assert_ne!(failed_reason, lead_reason, "not-run and measured-but-failed records need distinct reasons");
 
         let mut duplicate = record.clone();
         duplicate.values.push(duplicate.values[0].clone());
@@ -824,6 +2117,62 @@ mod tests {
         let mut bad_condition = record;
         bad_condition.observations[0].condition = Some("missing".to_owned());
         assert!(model::compare(&bad_condition, &uhd).iter().any(|violation| violation.key == "observations"));
+    }
+
+    #[test]
+    fn profile_disagreement_is_written_after_structural_validation() {
+        let dir = super::super::TempDir::new();
+        let document = super::super::profile(&dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let binding = radio_binding(&document).unwrap();
+        let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        let device = super::super::fake(ezsdr_radio_uhd::FakeConfig::default());
+        let mut record = build_record(Source::Fake, &binding, &*device, &rehearsal_metadata(), MeasurementGroup::default(), &description).unwrap();
+        record.source = Source::Hardware;
+        record.conditions.push(tx_only_condition("tx-1msps"));
+        assert!(description.full_duplex, "the test profile advertises full duplex");
+        record.conditions.push(duplex_condition("duplex-1msps"));
+        let key = Key::parse("radio.timing.min_timed_command_lead_ns").unwrap();
+        let profile_value = match model::profile_values(&description).get(&key).unwrap() {
+            model::Worst::Number(value) => value + 1.0,
+            other => panic!("expected a numeric lead profile, got {other:?}"),
+        };
+        let value = ValueRecord::Measured {
+            key: key.clone(), worst: model::Worst::Number(profile_value), trials: 1,
+            condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        };
+        let row = record.values.iter_mut().find(|row| matches!(row,
+            ValueRecord::Unmeasured { key: found, .. } if found == &key)).unwrap();
+        *row = value;
+        let duplex_key = Key::parse("radio.full_duplex").unwrap();
+        let row = record.values.iter_mut().find(|row| matches!(row,
+            ValueRecord::Unmeasured { key: found, .. } if found == &duplex_key)).unwrap();
+        *row = ValueRecord::Measured {
+            key: duplex_key.clone(), worst: model::Worst::Boolean(false), trials: 1,
+            condition: "duplex-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        };
+
+        let path = dir.0.join("measurement.json");
+        let violations = write_record_before_profile_assert(&path, &record, &description).unwrap();
+        assert!(violations.iter().any(|violation| violation.key == key.as_str() && violation.reason.starts_with("profile value ")));
+        assert!(violations.iter().any(|violation| violation.key == duplex_key.as_str()
+            && violation.reason == "profile claims true but the measured result is false"));
+        let saved: Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved, record, "a valid but profile-disagreeing record remains available for diagnosis");
+        let invalid_path = dir.0.join("invalid-measurement.json");
+        let mut zero_alignment = record.clone();
+        let align_key = Key::parse("radio.tx.repeat_align_samples").unwrap();
+        let row = zero_alignment.values.iter_mut().find(|row| matches!(row,
+            ValueRecord::Unmeasured { key: found, .. } if found == &align_key)).unwrap();
+        *row = ValueRecord::Measured {
+            key: align_key, worst: model::Worst::Number(0.0), trials: 1,
+            condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        };
+        assert!(write_record_before_profile_assert(&invalid_path, &zero_alignment, &description).is_err());
+        assert!(!invalid_path.exists(), "a zero alignment is not a profile disagreement and is not written");
+        let mut invalid = record;
+        invalid.source = Source::Fake;
+        assert!(write_record_before_profile_assert(&invalid_path, &invalid, &description).is_err());
+        assert!(!invalid_path.exists(), "record-shape violations are rejected before writing");
     }
 
     #[test]
@@ -854,12 +2203,51 @@ mod tests {
         let binding = radio_binding(&document).unwrap();
         let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
         let device = super::super::fake(ezsdr_radio_uhd::FakeConfig::default());
-        let record = build_record(Source::Fake, &binding, &*device, &rehearsal_metadata(), vec![], observations, &description).unwrap();
+        let record = build_record(Source::Fake, &binding, &*device, &rehearsal_metadata(), MeasurementGroup { observations, ..MeasurementGroup::default() }, &description).unwrap();
         assert!(record.values.iter().all(|value| matches!(value, ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
         let violations = model::compare(&record, &description);
         assert_eq!(violations.len(), 1, "{violations:?}");
         assert_eq!(violations[0].key, "source");
         assert!(record.observations.iter().all(|row| row.result.contains_key("raw_value")));
+    }
+
+    #[test]
+    fn measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts() {
+        let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
+        assert_eq!((defaults.step_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 60, 20));
+        let values = BTreeMap::from([
+            ("EZSDR_MEASURE_STEP_TRIALS".to_owned(), "2".to_owned()),
+            ("EZSDR_MEASURE_THROUGHPUT_SECS".to_owned(), "3".to_owned()),
+            ("EZSDR_MEASURE_LOOPBACK_TRIALS".to_owned(), "4".to_owned()),
+        ]);
+        let custom = MeasurementPlan::from_env(&values).unwrap();
+        assert_eq!((custom.step_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 4));
+        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"] {
+            for invalid in ["0", "not-a-number"] {
+                assert!(MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), invalid.to_owned())])).is_err(), "{name}={invalid}");
+            }
+        }
+    }
+
+    #[test]
+    fn measurement_group_merges_only_supplied_comparable_values() {
+        let dir = super::super::TempDir::new();
+        let document = super::super::profile(&dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let binding = radio_binding(&document).unwrap();
+        let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        let key = Key::parse("radio.timing.min_timed_command_lead_ns").unwrap();
+        let measured = ValueRecord::Measured {
+            key: key.clone(), worst: model::Worst::Number(1_000_000.0), trials: 1,
+            condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+        };
+        let hardware = merge_values(Source::Hardware, &description, vec![measured.clone()]).unwrap();
+        assert_eq!(hardware.len(), comparable_keys(&description).len());
+        assert_eq!(hardware.iter().filter(|row| matches!(row, ValueRecord::Measured { .. })).count(), 1);
+        assert!(hardware.iter().any(|row| row == &measured), "the supplied hardware measurement is preserved exactly");
+        let fake = merge_values(Source::Fake, &description, vec![measured]).unwrap();
+        assert!(fake.iter().all(|row| matches!(row, ValueRecord::Unmeasured { .. })));
+        assert!(fake.iter().any(|row| matches!(row, ValueRecord::Unmeasured { key: found, reason }
+            if found == &key && reason == "FakeDevice は実機の証拠ではない")));
     }
 
     #[test]

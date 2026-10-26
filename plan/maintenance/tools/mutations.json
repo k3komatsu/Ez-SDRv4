@@ -10685,7 +10685,7 @@
    "id": "P723",
    "name": "FakeDevice Run observations are retained in the record",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "        observations,\n    })",
+    "old": "        observations: measurements.observations,\n    })",
    "new": "        observations: Vec::new(),\n    })",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -10815,8 +10815,8 @@
    "id": "P736",
    "name": "out-of-range evidence is attributed to a later trial instead of the preceding trial",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick),",
-   "new": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick > tick),",
+    "old": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick).or(Some(0)),",
+    "new": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick > tick).or(Some(0)),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "incomplete_or_unattributable_trials_never_pass"
@@ -10889,6 +10889,326 @@
    "new": "let _ = &output;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "metadata_and_writer_fail_closed"
+    "filter": "metadata_and_writer_fail_closed"
+   },
+   {
+    "id": "P744",
+    "name": "unknown TIME_ERROR outcomes are ignored",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "_ => EvidenceKind::UnknownTimeError,",
+    "new": "_ => continue,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+     "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+   },
+   {
+    "id": "P745",
+    "name": "a non-EOB TX record is accepted as complete",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "} else if end == Some(BurstEnd::Eob) {",
+    "new": "} else if end == Some(BurstEnd::Eob) || end == Some(BurstEnd::Discontinuity) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+     "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+   },
+   {
+    "id": "P746",
+    "name": "TX in-flight trials ignore device underflow",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "EvidenceKind::ProviderTimeError(ProviderTimeError::LateAtDevice)\n            | EvidenceKind::AsyncTimeError\n            | EvidenceKind::Underflow",
+    "new": "EvidenceKind::ProviderTimeError(ProviderTimeError::LateAtDevice)\n            | EvidenceKind::AsyncTimeError",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "classify_trial_failure_origin_and_completion_evidence"
+   },
+   {
+    "id": "P747",
+    "name": "cold RX evidence accepts a new clock at the old cut",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "if new.origin.ticks_in(new.root).ok()? <= ended_root { return None; }",
+    "new": "if new.origin.ticks_in(new.root).ok()? < ended_root { return None; }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "cold_capture_evidence_requires_two_contiguous_clock_segments"
+   },
+   {
+    "id": "P748",
+    "name": "throughput excludes the one-packet tolerance boundary",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+     "old": "else if expected.is_some_and(|expected| actual.abs_diff(expected) <= packet) { TrialClass::Success }",
+     "new": "else if expected.is_some_and(|expected| actual.abs_diff(expected) < packet) { TrialClass::Success }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "throughput_success_requires_sample_tolerance_and_no_overflow"
+   },
+   {
+    "id": "P749",
+    "name": "throughput ignores an overflow when the sample count matches",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "if overflow { TrialClass::DeviceFailure }",
+     "new": "if overflow && false { TrialClass::DeviceFailure }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "throughput_success_requires_sample_tolerance_and_no_overflow"
+   },
+   {
+    "id": "P750",
+    "name": "full duplex ignores a missing loopback waveform",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "classes.iter().zip(heard).all(|(class, heard)| *class == TrialClass::Success && *heard),",
+    "new": "classes.iter().all(|class| *class == TrialClass::Success),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "loopback_success_separates_waveform_from_requested_sample_time"
+   },
+   {
+    "id": "P751",
+    "name": "hardware-time success uses waveform detection instead of sample position",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "classes.iter().zip(exact_starts).all(|(class, exact)| *class == TrialClass::Success && *exact),",
+    "new": "heard.iter().all(|heard| *heard),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "loopback_success_separates_waveform_from_requested_sample_time"
+   },
+   {
+    "id": "P752",
+    "name": "numeric measured rows ignore the limiting condition",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+     "old": "let condition = summary.limiting_condition.as_deref().ok_or(\"selected measurement has no limiting condition\")?;",
+     "new": "let condition = \"cold-1msps-2msps\";",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "measured_rows_keep_the_selected_boundary_and_limiting_condition"
+   },
+   {
+    "id": "P753",
+    "name": "throughput measured rows report the first candidate rate",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "condition: rate_condition(*rate), test: test.to_owned(),",
+    "new": "condition: rate_condition(rates_hz[0]), test: test.to_owned(),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "measured_rows_keep_the_selected_boundary_and_limiting_condition"
+   },
+   {
+    "id": "P754",
+    "name": "TX trial sample-count mismatch is accepted",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "record.samples != trial.expected_samples",
+    "new": "false",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "incomplete_or_unattributable_trials_never_pass"
+   },
+   {
+    "id": "P755",
+    "name": "TX trial end-time mismatch is accepted",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "(trial.completion == TrialCompletion::TransmitBurstAck && record.end_tick != trial.expected_end_tick)",
+    "new": "false",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "incomplete_or_unattributable_trials_never_pass"
+   },
+   {
+    "id": "P756",
+    "name": "out-of-trial reports invalidate all measurement trials",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+     "old": "Some(tick) if trials.first().is_some_and(|trial| tick < trial.start_tick) => Some(0),",
+     "new": "Some(tick) if trials.first().is_some_and(|trial| tick < trial.start_tick) => None,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+     "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+   },
+   {
+    "id": "P757",
+    "name": "hardware time ignores failed trial evidence",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "classes.iter().zip(exact_starts).all(|(class, exact)| *class == TrialClass::Success && *exact),",
+    "new": "classes.iter().zip(exact_starts).all(|(_, exact)| *exact),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "loopback_success_separates_waveform_from_requested_sample_time"
+   },
+   {
+    "id": "P758",
+    "name": "FakeDevice measurement rows remain measured",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "let value = if source == Source::Fake {",
+    "new": "let value = if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "measurement_group_merges_only_supplied_comparable_values"
+   },
+   {
+    "id": "P759",
+    "name": "hardware measurement rows are discarded",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "values.insert(key, value);",
+    "new": "values.insert(key.clone(), ValueRecord::Unmeasured { key: key.clone(), reason: \"discarded\".to_owned() });",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "measurement_group_merges_only_supplied_comparable_values"
+   },
+   {
+    "id": "P760",
+    "name": "not-run measurements use the candidate-failure reason",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "| \"radio.hardware_time\" => \"Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run.\",",
+    "new": "| \"radio.hardware_time\" => \"No candidate met the complete success criteria in Phase 8 stage 3b-2.\",",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+   },
+  {
+   "id": "P761",
+   "name": "step-trial count override is ignored",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "step_trials: usize::try_from(count(values, \"EZSDR_MEASURE_STEP_TRIALS\", 100)?).map_err(|_| \"EZSDR_MEASURE_STEP_TRIALS is too large\".to_owned())?,",
+   "new": "step_trials: MeasurementPlan::default().step_trials,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P762",
+   "name": "TX acknowledgement must equal the sample end",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "&& plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()).is_some_and(|target| tick >= target)",
+   "new": "&& plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()).is_some_and(|target| tick == plan.expected_end_tick && tick >= target)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+  },
+  {
+   "id": "P763",
+   "name": "multiple TX acknowledgements are accepted",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "_ => trial.unattributable = true,",
+   "new": "_ => trial.evidence.push(EvidenceKind::BurstAck),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+  },
+  {
+   "id": "P764",
+   "name": "TX ACK offsets are omitted from observations",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "row[\"burst_ack_offsets_from_expected_end_ticks\"] = json!(trial.burst_ack_ticks.iter()\n                .map(|tick| tick.checked_sub(trial.expected_end_tick)).collect::<Vec<_>>());",
+   "new": "row[\"burst_ack_offsets_from_expected_end_ticks\"] = json!([]);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+  },
+  {
+   "id": "P765",
+   "name": "TX preemption does not require a running repeat",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "|| (trial.requires_preemption_evidence && !trial.repeat_ended_at_target)",
+   "new": "|| false",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "preemption_requires_the_repeat_record_to_reach_the_interrupt_target"
+  },
+  {
+   "id": "P766",
+   "name": "preempted repeat may end away from the interrupt target",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": ".and_then(|end| sample_root_tick(clock, end).ok()) == Some(target)",
+   "new": ".and_then(|end| sample_root_tick(clock, end).ok()) != Some(target)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "preemption_requires_the_repeat_record_to_reach_the_interrupt_target"
+  },
+  {
+   "id": "P767",
+   "name": "failure evidence after the last trial is ignored",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick).or(Some(0)),",
+   "new": "Some(tick) => None,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
+  },
+  {
+   "id": "P768",
+   "name": "throughput ignores recorded receive duration",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let samples = (interval as u128).checked_mul(u128::from(rate_hz))? / u128::from(master_clock_hz);",
+   "new": "let samples = u128::from(rate_hz);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "throughput_success_requires_sample_tolerance_and_no_overflow"
+  },
+  {
+   "id": "P769",
+   "name": "throughput treats a missing SampleClock end as one second",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let end = clock.ended_at?.ticks_in(clock.root).ok()?;",
+   "new": "let end = clock.ended_at.unwrap_or(TimePoint::new(clock.root, start.saturating_add(master_clock_hz as i64))).ticks_in(clock.root).ok()?;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "throughput_success_requires_sample_tolerance_and_no_overflow"
+  },
+  {
+   "id": "P770",
+   "name": "a profile disagreement prevents writing the record",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "write_record(path, record)?;",
+   "new": "let _ = (path, record);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "profile_disagreement_is_written_after_structural_validation"
+  },
+  {
+   "id": "P771",
+   "name": "a false full-duplex measurement is treated as malformed",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "|| reason == \"profile claims true but the measured result is false\"",
+   "new": "|| false",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "profile_disagreement_is_written_after_structural_validation"
+  },
+  {
+   "id": "P772",
+   "name": "effective TX lead uses a later clock read",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "let receipt_tick = receipt_time.ticks_in(root).map_err(|error| error.to_string())?;",
+    "new": "let receipt_tick = receipt_time.ticks_in(root).map_err(|error| error.to_string())?.saturating_add(1);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "effective_lead_uses_the_action_receipt_instead_of_a_later_clock_read"
+  },
+  {
+   "id": "P773",
+   "name": "cold observation omits the transition's second rate",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "stage[\"rate_pair_hz\"] = json!([from_rate_hz, to_rate_hz]);",
+   "new": "stage[\"rate_pair_hz\"] = json!([from_rate_hz, from_rate_hz]);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "cold_observations_record_both_rates_and_each_transition_direction"
+  },
+  {
+   "id": "P774",
+   "name": "structurally invalid measurement records are written",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if !structural.is_empty() { return Err(format!(\"measurement record validation: {structural:?}\")); }",
+   "new": "if false && !structural.is_empty() { return Err(format!(\"measurement record validation: {structural:?}\")); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "profile_disagreement_is_written_after_structural_validation"
+  },
+  {
+   "id": "P775",
+   "name": "a zero measured alignment multiple is written as a profile disagreement",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if model::rule(key.as_str()) == Some(Rule::Multiple) && (measured.is_nan() || *measured <= 0.0) {",
+   "new": "if model::rule(key.as_str()) == Some(Rule::Multiple) && (measured.is_nan() || *measured < 0.0) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "profile_disagreement_is_written_after_structural_validation"
   }
  ]

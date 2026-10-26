@@ -612,8 +612,7 @@ fn measurement_fake_rehearsal_round_trips_and_only_fails_source() {
         &binding,
         &*device,
         &measurement::rehearsal_metadata(),
-        vec![condition],
-        vec![observation],
+        measurement::MeasurementGroup { conditions: vec![condition], values: vec![], observations: vec![observation] },
         &uhd,
     ).unwrap();
     let path = dir.0.join("fake-measurement.json");
@@ -624,6 +623,69 @@ fn measurement_fake_rehearsal_round_trips_and_only_fails_source() {
     assert_eq!(round_trip.observations[0].result["capture_first"], first, "the observation must come from the Run's capture continuity");
     assert!(round_trip.values.iter().all(|value| matches!(value, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
     let violations = ezsdr_radio::measurement::compare(&round_trip, &uhd);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].key, "source");
+}
+
+#[test]
+fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements() {
+    let device = fake(one_obx());
+    let plan = measurement::MeasurementPlan::rehearsal();
+    let mut group = measurement::MeasurementGroup::default();
+    group.append(measurement::measure_min_timed_command_lead(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_tx_in_flight(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_rx_start_lead(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_rx_throughput(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_full_duplex(device.clone(), &plan).unwrap()).unwrap();
+
+    let assert_stage = |stage: &Json, trials: usize| {
+        let rows = stage["trials"].as_array().expect("every candidate has trial rows");
+        assert_eq!(rows.len(), trials);
+        assert!(rows.iter().all(|row| row["class"].as_str().is_some_and(|class| !class.is_empty())));
+    };
+    let assert_stages = |stages: &Json, count: usize, trials: usize| {
+        let stages = stages.as_array().expect("candidate stages are an array");
+        assert_eq!(stages.len(), count);
+        for stage in stages { assert_stage(stage, trials); }
+    };
+    let result = |name: &str| group.observations.iter().find(|row| row.name == name).map(|row| &row.result).unwrap();
+    assert_stages(&result("provider_min_timed_command_lead")["candidates"], plan.timed_command_leads_ns.len(), plan.step_trials);
+    assert_stages(&result("provider_tx_in_flight")["candidates"], plan.in_flight_windows_ns.len(), plan.step_trials);
+    assert_stages(&result("provider_rx_start_lead")["candidates"], plan.rx_start_leads_ns.len() * 2, plan.step_trials);
+    let throughput: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("provider_rx_throughput_")).collect();
+    assert_eq!(throughput.len(), plan.rx_rates_hz.len());
+    for row in throughput { assert_stage(&row.result["stage"], 1); }
+    let duplex = result("provider_full_duplex")["trials"].as_array().unwrap();
+    assert_eq!(duplex.len(), plan.loopback_trials);
+    assert!(duplex.iter().all(|row| row["class"].as_str().is_some_and(|class| !class.is_empty())));
+
+    let measured_keys: std::collections::BTreeSet<_> = group.values.iter().map(|row| match row {
+        ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
+    }).collect();
+    assert_eq!(measured_keys, [
+        "radio.full_duplex", "radio.hardware_time", "radio.perf.rx_bytes_per_s",
+        "radio.timing.min_timed_command_lead_ns", "radio.timing.rx_start_lead_ns", "radio.timing.tx_in_flight_ns",
+    ].into_iter().map(str::to_owned).collect());
+
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false);
+    let binding = measurement::radio_binding(&doc).unwrap();
+    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+    let record = measurement::build_record(
+        ezsdr_radio::measurement::Source::Fake, &binding, &*device, &measurement::rehearsal_metadata(),
+        group, &description,
+    ).unwrap();
+    assert!(record.values.iter().all(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
+    for key in &measured_keys {
+        assert!(record.values.iter().any(|row| matches!(row,
+            ezsdr_radio::measurement::ValueRecord::Unmeasured { key: found, reason }
+                if found.as_str() == key && reason == "FakeDevice は実機の証拠ではない")));
+    }
+    let path = dir.0.join("provider-measurement-rehearsal.json");
+    measurement::write_record(&path, &record).unwrap();
+    let round_trip: ezsdr_radio::measurement::Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(round_trip, record);
+    let violations = ezsdr_radio::measurement::compare(&round_trip, &description);
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert_eq!(violations[0].key, "source");
 }
