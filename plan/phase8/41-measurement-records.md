@@ -71,3 +71,15 @@ channel 数は layout から決まり，key ではない．
 FAIL（major 7，minor 1）．すべて採った．N1：selector は物理の構成だけで，stream の channel・rate・同時運転は別に要る → `conditions`．N2：Description は block_len と Provider の terms でも決まり，Mock（2 ms）と UHD（5 ms）の lead が違う → 両 Provider の値で比べる．N3：key の表が足りない → §3 で全 key を扱う．N4：capability にならない結果（H1〜H5，#56 など）の置き場が無い → `observations`．N5：raw と Provider の値が同じ key で 1 度の規則と食い違う → `values` は Provider の値だけ，raw は observation．N6：admission が profile の値で拒否するので緩める向きを測れない → 候補の値で組み立てる道．N7：loopback の遅れは TX と RX の path delay に分けられない → observation．N8：リハーサルが形しか見ない → 観測から値を出す関数の unit test．
 
 再レビュー：PASS．3a の指示書へ：条件の id は一意，`(direction, stream)` も一意，stream の番号はその向きの範囲，一つの向きで channel を 2 つの stream に入れない，`concurrent` は向きつきで宣言した stream を指す（minor）．3b の指示書へ：測定ごとに，候補を受ける admission の値と実行時の確認（`DEVICE_LEAD_NS` は control・RX・TX で別に使われ，start lead などは `x3xx::timing` から来る），据え置く定数とその理由，既定の構築が今の値のままであること，統合テストからの入り方，段と回数，成功とみなす観測（async の失敗を含む．「すぐ拒否されなかった」は成功ではない）．
+
+## 8. 3c の分け方（orchestrator，2026-10-26．owner「推奨で作って」）
+
+3c は §1 の表のままでは 1 段階に収まらないので 3 つに分ける．どれも試験と bench のコード（`tests/` と ignored の `hardware.rs`）で，本番の Module と profile の値は変えない．profile の値を変える判断は段階 4（P3）．3b-2 で major になった形（実機でだけ起きる完了の証拠，止まりの時刻，前提の失敗）を避けるため，各測定の成功の条件は UHD の source か今の bench の記録に当てて書き，当てられないものは INFERRED として observation に残す．
+
+| 段階 | 中身 | 値の行 |
+|---|---|---|
+| 3c-1 | 送信の start lead（`cold` の送信の rate change の後，新しい clock の origin に置いた burst が on time），overflow の restart gap 単独（`with_rx_stall` で起こした overrun の gap を rate ごとに），送信の throughput（repeat を D 秒，記録された送信の区間 × rate と underflow なし） | `tx_start_lead_ns`（最小の lead），`overflow_restart_gap_ns`（全試行の最大．LowerBound で profile ≥ 測定），`tx_bytes_per_s`（容量） |
+| 3c-2 | queue depth（送信の tone の timed な周波数の変更を k 個前もって予約し，loopback の受信で周波数の変わる時刻を読む．装置の実行の時刻を観測する道），H1，H2，H3，H5，#56，coercion の read-back，UR-17 の受信要求長の上限 | `command_queue_depth`（容量）．ほかは observation |
+| 3c-3 | H4 の負荷（記録の `load` を `h4` にして同じ suite を流す手順と，負荷を作る script の置き場は 3d と合わせる），2 channel の throughput と同時運転，BP4b（混在構成），BP4c（XG，10 GbE 2 本．image の書き換えは owner に確認） | 2 channel の throughput．構成ごとの記録 |
+
+受信の throughput の値（profile 1 000 MB/s，1 channel の最大は 200 MS/s × 4 byte = 800 MB/s）は，3c-3 の 2 channel の測定を待ってから段階 4 で決める．
