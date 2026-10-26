@@ -1,0 +1,57 @@
+{
+  "schema": "ezsdr.radio.measurement.v1",
+  "source": "hardware",
+  "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+  "selector": { "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] },
+  "device": { "serial": "347D545", "mboard": "X300", "fpga_image": "HG", "uhd_version": "4.10.0.0" },
+  "host": { "name": "fixture-host", "settings_script": "usrp-net.sh", "settings_version": "1" },
+  "load": "none",
+  "commit": "548f675",
+  "conditions": [
+    {
+      "id": "baseline",
+      "streams": [
+        { "direction": "rx", "stream": 0, "channels": [0], "sample_rate_hz": 1000000.0 },
+        { "direction": "tx", "stream": 0, "channels": [0], "sample_rate_hz": 1000000.0 }
+      ],
+      "concurrent": [{ "direction": "rx", "stream": 0 }, { "direction": "tx", "stream": 0 }],
+      "reopened": false
+    }
+  ],
+  "values": [
+    { "status": "measured", "key": "radio.full_duplex", "worst": true, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.hardware_time", "worst": true, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.repeat_max_samples", "worst": 4294967295, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.repeat_align_samples", "worst": 1, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.min_timed_command_lead_ns", "worst": 3000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.startup_latency_ns", "worst": 1000000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.command_queue_depth", "worst": 20, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.release_window_ns", "worst": 2000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.overflow_restart_gap_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.rx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.tx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.timing.tx_in_flight_ns", "worst": 9000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.perf.rx_bytes_per_s", "worst": 100000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.perf.tx_bytes_per_s", "worst": 100000000, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.perf.wire_bytes_per_sample", "worst": 4, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.frequency_hz", "worst": { "kind": "step", "lo": 10000000, "hi": 6000000000, "step": 1 }, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.gain_db", "worst": { "kind": "step", "lo": 0, "hi": 31.5, "step": 0.5 }, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.antenna", "worst": ["RX2", "TX/RX"], "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.frequency_step_hz", "worst": 1, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.gain_step_db", "worst": 0.5, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.phase_behavior_on_retune", "worst": "random_unless_timed_tune", "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.rx.c0.path_delay_samples", "worst": 0, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "unmeasured", "key": "radio.rx.s0.sample_rate_hz", "reason": "rate grid not measured in this fixture" },
+    { "status": "measured", "key": "radio.tx.c0.frequency_hz", "worst": { "kind": "step", "lo": 10000000, "hi": 6000000000, "step": 1 }, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.c0.gain_db", "worst": { "kind": "step", "lo": 0, "hi": 31.5, "step": 0.5 }, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.c0.antenna", "worst": ["TX/RX"], "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.c0.frequency_step_hz", "worst": 1, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.c0.gain_step_db", "worst": 0.5, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.c0.phase_behavior_on_retune", "worst": "random_unless_timed_tune", "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.c0.path_delay_samples", "worst": 45, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "unmeasured", "key": "radio.tx.s0.sample_rate_hz", "reason": "rate grid not measured in this fixture" }
+  ],
+  "observations": [
+    { "name": "raw-device", "test": "fixture", "condition": "baseline", "trials": 1, "result": { "max_num_samps": 1996 } }
+  ]
+}

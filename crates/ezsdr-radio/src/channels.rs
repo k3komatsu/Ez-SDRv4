@@ -439,7 +439,7 @@ impl Description {
         }
     }
 
-    fn capabilities(&self) -> BTreeMap<Key, CapabilityValue> {
+    pub(crate) fn capabilities(&self) -> BTreeMap<Key, CapabilityValue> {
         let range = |min, max| CapabilityValue::Range { min, max };
         let one = |value| CapabilityValue::One { value };
         let mut capabilities = BTreeMap::new();

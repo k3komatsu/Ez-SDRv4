@@ -46,7 +46,7 @@ channel 数は layout から決まり，key ではない．
 置き場は `crates/ezsdr-acceptance/tests/measurements.rs`（MockRadio と UHD Module の両方に依存する crate）．`measurements/` の記録をすべて読み，記録ごとに：
 
 1. `schema` が違えば拒否．`source: "fake"` は拒否．`profile` が `x3xx::profile_ref()` と一致しなければ失敗．
-2. selector から layout を作り（`channels::from_selector`），**各 Provider が実際に使う値**で `Description` を作る：`Description::new(layout, <その Provider の block_len>, <その Provider の terms()>)`．MockRadio の `Profile::terms()` は今 `pub(crate)` なので公開する（UHD の `profile::terms()` は公開済み）．両方の Description をそれぞれ比べる（どちらかが緩ければ失敗．stage 4 で値をそろえるまで，2 つの terms は違う）．
+2. selector から layout を作り（`channels::from_selector`），各 Provider の `terms()` と block length で `Description` を作る：MockRadio は `BLOCK_LEN`，UHD は `DEFAULT_BLOCK_LEN` を使う（`radio.rx.block_len` は比べないので selector 値は使わない）．MockRadio の `Profile::terms()` は今 `pub(crate)` なので公開する（UHD の `profile::terms()` は公開済み）．両方の Description をそれぞれ比べる（どちらかが緩ければ失敗．stage 4 で値をそろえるまで，2 つの terms は違う）．
 3. `values` に，§3 で比べる key がそれぞれちょうど 1 度現れ，知らない key は無い．
 4. `measured` の値は §3 の扱いで，両 Provider の Description が記録より緩くない．
 5. `conditions` が §2 の規則で layout に合い，`values` と `observations` の `condition` が `conditions` にある．

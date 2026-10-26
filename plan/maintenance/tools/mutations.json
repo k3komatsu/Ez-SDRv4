@@ -10218,5 +10218,295 @@
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_17_stop_preserves_front_until_expiry"
+  },
+   {
+    "id": "P675",
+    "name": "measurement lower bound accepts equality",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if profile >= measured { Ok(()) } else { Err(format!(\"profile value {profile} is below measured value {measured}\")) }",
+    "new": "if profile > measured { Ok(()) } else { Err(format!(\"profile value {profile} is below measured value {measured}\")) }",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P676",
+    "name": "measurement upper bound accepts equality",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if profile <= measured { Ok(()) } else { Err(format!(\"profile value {profile} exceeds measured value {measured}\")) }",
+    "new": "if profile < measured { Ok(()) } else { Err(format!(\"profile value {profile} exceeds measured value {measured}\")) }",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P677",
+    "name": "measurement grid containment cannot ignore the grid step",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if grid_subset(&profile, &measured) { Ok(()) } else { Err(\"profile grid is not a subset of the measured grid\".to_owned()) }",
+    "new": "if match (&profile, &measured) { (Grid::Step { lo: profile_lo, hi: profile_hi, .. }, Grid::Step { lo: measured_lo, hi: measured_hi, .. }) => *profile_lo >= *measured_lo && *profile_hi <= *measured_hi, _ => false } { Ok(()) } else { Err(\"profile grid is not a subset of the measured grid\".to_owned()) }",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P678",
+    "name": "measurement repeat alignment must be a positive multiple",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if profile > 0.0 && measured > 0.0 && ratio.is_finite() && ratio.fract() == 0.0 {",
+    "new": "if profile > 0.0 && measured > 0.0 && ratio.is_finite() && ratio.fract() != 0.0 {",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P679",
+    "name": "measurement phase guarantee accepts equal strength",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "(Some(profile), Some(measured)) if profile <= measured => Ok(()),",
+    "new": "(Some(profile), Some(measured)) if profile < measured => Ok(()),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P680",
+    "name": "measurement rejects a true profile claim contradicted by false",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "(Worst::Boolean(true), Worst::Boolean(false)) => Err(\"profile claims true but the measured result is false\".to_owned()),",
+    "new": "(Worst::Boolean(true), Worst::Boolean(false)) => Ok(()),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P681",
+    "name": "measurement equality rule requires exact equality",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if profile == measured { Ok(()) } else { Err(format!(\"profile value {profile} differs from measured value {measured}\")) }",
+    "new": "if profile != measured { Ok(()) } else { Err(format!(\"profile value {profile} differs from measured value {measured}\")) }",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_ones"
+   },
+   {
+    "id": "P682",
+    "name": "measurement values reject duplicate capability keys",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if !seen.insert(value.key().clone()) {",
+    "new": "if !seen.insert(value.key().clone()) && false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_values_must_cover_each_comparable_capability_once"
+   },
+   {
+    "id": "P683",
+    "name": "measurement values require every comparable capability key",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if rule(key.as_str()).is_some_and(|rule| rule != Rule::NotCompared) && !seen.contains(key) {",
+    "new": "if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_values_must_cover_each_comparable_capability_once"
+   },
+   {
+    "id": "P684",
+    "name": "measurement values reject an unknown Radio Model capability key",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "        let Some(rule) = rule(name) else {\n            reject(&mut violations, name, \"unknown Radio Model capability key\");\n            continue;\n        };",
+    "new": "        let Some(rule) = rule(name) else {\n            continue;\n        };",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_values_must_cover_each_comparable_capability_once"
+   },
+   {
+    "id": "P685",
+    "name": "measurement comparisons reject fake-device records",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if record.source != Source::Hardware {",
+    "new": "if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_schema_source_and_profile_are_checked"
+   },
+   {
+    "id": "P686",
+    "name": "measurement comparisons require the matching profile",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if record.profile != description.profile {",
+    "new": "if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_schema_source_and_profile_are_checked"
+   },
+   {
+    "id": "P687",
+    "name": "measurement acceptance uses the UHD Provider's own profile terms",
+    "file": "crates/ezsdr-acceptance/tests/measurements.rs",
+    "old": "Description::new(&layout, DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()),",
+    "new": "Description::new(&layout, DEFAULT_BLOCK_LEN, &ezsdr_mock_radio::Profile::terms()),",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "measurements",
+    "filter": "measurement_between_the_provider_leads_passes_only_uhd"
+   },
+   {
+    "id": "P689",
+    "name": "hardware_time uses the true-implies comparison rule",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "keys::FULL_DUPLEX | keys::HARDWARE_TIME => return Some(TrueImplies),",
+    "new": "keys::FULL_DUPLEX | keys::HARDWARE_TIME => return Some(Equal),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_rule_labels_match_the_declared_comparison_classes"
+   },
+   {
+    "id": "P690",
+    "name": "receive and transmit throughput use the upper-bound comparison rule",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "| keys::TX_BYTES_PER_S => return Some(UpperBound),",
+    "new": "| keys::TX_BYTES_PER_S => return Some(LowerBound),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_rule_labels_match_the_declared_comparison_classes"
+   },
+   {
+    "id": "P692",
+    "name": "measurement Values-grid containment checks every profile value",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "Grid::Values(values) => values.iter().all(|value| measured.contains(*value)),",
+    "new": "Grid::Values(values) => values.first().is_some_and(|value| measured.contains(*value)) && values.last().is_some_and(|value| measured.contains(*value)),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_stream_rate_grid_containment_is_checked"
+   },
+   {
+    "id": "P693",
+    "name": "measurement Step-profile to Values-measurement containment is checked",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "Grid::Values(values) => stepped_values(*lo, *hi, *step, values.len())\n                .is_some_and(|values| values.iter().all(|value| measured.contains(*value))),",
+    "new": "Grid::Values(_) => false,",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_step_and_values_grids_compare_by_all_members"
+   },
+   {
+    "id": "P694",
+    "name": "measurement Values-profile to Step-measurement containment is checked",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "Grid::Values(values) => values.iter().all(|value| measured.contains(*value)),",
+    "new": "Grid::Values(_) => false,",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_step_and_values_grids_compare_by_all_members"
+   },
+   {
+    "id": "P695",
+    "name": "measurement numeric comparison rejects values at the f64 precision limit",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "Worst::Number(value) if exact_f64(*value) => Some(*value),",
+    "new": "Worst::Number(value) if value.is_finite() => Some(*value),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_rejects_numeric_values_at_the_exact_f64_limit"
+   },
+   {
+    "id": "P696",
+    "name": "measurement grid comparison rejects inexact f64 magnitudes",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if !grid_numbers_are_exact(profile) || !grid_numbers_are_exact(measured) {",
+    "new": "if false && (!grid_numbers_are_exact(profile) || !grid_numbers_are_exact(measured)) {",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_integer_grid_containment_rejects_inexact_endpoints"
+   },
+   {
+    "id": "P697",
+    "name": "measurement singleton grid containment ignores the step ratio",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "if first == last {\n                    return measured.contains(first);\n                }",
+    "new": "if false && first == last {\n                    return measured.contains(first);\n                }",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_singleton_step_grid_is_contained_without_a_step_ratio"
+   },
+   {
+    "id": "P698",
+    "name": "measurement file comparison enforces the MockRadio verdict",
+    "file": "crates/ezsdr-acceptance/tests/measurements.rs",
+    "old": "mock_violations: measurement::compare(&record, &mock),",
+    "new": "mock_violations: Vec::new(),",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "measurements",
+    "filter": "measurement_fixture_files_enforce_provider_specific_rejections"
+   },
+   {
+    "id": "P699",
+    "name": "measurement file comparison enforces the UHD verdict",
+    "file": "crates/ezsdr-acceptance/tests/measurements.rs",
+    "old": "uhd_violations: measurement::compare(&record, &uhd),",
+    "new": "uhd_violations: Vec::new(),",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "measurements",
+    "filter": "measurement_fixture_files_enforce_provider_specific_rejections"
+   },
+   {
+    "id": "P700",
+    "name": "measurement condition stream bounds use the named direction",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "Direction::Tx => (false, description.tx.len()),",
+    "new": "Direction::Tx => (false, description.rx.len()),",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_condition_validation_keeps_direction_in_stream_channel_and_concurrent_checks"
+   },
+   {
+    "id": "P701",
+    "name": "measurement concurrent references preserve direction",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "let rx = stream.direction == Direction::Rx;",
+    "new": "let rx = true;",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_condition_validation_keeps_direction_in_stream_channel_and_concurrent_checks"
+   },
+  {
+    "id": "P702",
+    "name": "measurement duplicate channels do not report a cross-stream conflict",
+    "file": "crates/ezsdr-radio/src/measurement.rs",
+    "old": "            if !local.insert(*channel) {\n                reject(violations, &name, format!(\"channel {channel} is repeated in the stream\"));\n                continue;\n            }",
+    "new": "            if !local.insert(*channel) {\n                reject(violations, &name, format!(\"channel {channel} is repeated in the stream\"));\n            }",
+    "crate": "ezsdr-radio",
+    "test_bin": "measurement",
+    "filter": "rm_35_conditions_and_references_match_the_layout"
+  },
+  {
+   "id": "P703",
+   "name": "measurement acceptance gate can reject MockRadio violations",
+   "file": "crates/ezsdr-acceptance/tests/measurements.rs",
+   "old": "    if !comparison.mock_violations.is_empty() {",
+   "new": "    if false {",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "measurements",
+   "filter": "measurement_fixture_files_enforce_provider_specific_rejections"
+  },
+  {
+   "id": "P704",
+   "name": "measurement acceptance gate can reject UHD violations",
+   "file": "crates/ezsdr-acceptance/tests/measurements.rs",
+   "old": "    if !comparison.uhd_violations.is_empty() {",
+   "new": "    if false {",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "measurements",
+   "filter": "measurement_fixture_files_enforce_provider_specific_rejections"
+  },
+  {
+   "id": "P705",
+   "name": "measurement RX condition bounds use the RX channel count",
+   "file": "crates/ezsdr-radio/src/measurement.rs",
+   "old": "            Direction::Rx => (true, description.rx.len()),",
+   "new": "            Direction::Rx => (true, description.tx.len()),",
+   "crate": "ezsdr-radio",
+   "test_bin": "measurement",
+   "filter": "rm_35_condition_validation_keeps_direction_in_stream_channel_and_concurrent_checks"
   }
 ]

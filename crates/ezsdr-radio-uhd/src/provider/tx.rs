@@ -971,13 +971,10 @@ mod tests {
 
     use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind};
     use ezsdr_kernel::hash::ContentHash;
-    use ezsdr_kernel::id::ResourceId;
-    use ezsdr_kernel::module_api::Authority;
-    use ezsdr_kernel::policy::{EventKindRegistry, Policy};
     use ezsdr_kernel::module_api::{ActionReceiver, Dispatched, StopMode, UpdateClass};
     use ezsdr_kernel::spec::{Scalar, Value};
     use ezsdr_kernel::stream::{BurstOpen, LatePolicy};
-    use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, TimePoint};
+    use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 
     use super::{Held, Tx, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, Settings, TxCode, TxReport};
@@ -986,7 +983,6 @@ mod tests {
     use crate::provider::test_support::device_at;
     use ezsdr_radio::timeline::Channels;
     use super::super::mode::DescriptionExt;
-    use crate::DeviceAuthority;
     use super::super::control::Control;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {
@@ -2912,57 +2908,46 @@ mod tests {
         // RM-15 as VE-2 amends it: B, late against the open burst A's next sample, moves
         // there under `send_asap`; C is already held at that sample, so B is refused
         // (`TIME_ERROR { refused }`, `COMMAND_REJECTED`) and C keeps its start.
-        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
-        let clocks = Arc::new(ClockRegistry::new());
-        let authority = DeviceAuthority::new(device.clone(), clocks.clone(), "internal", "internal", "fake").unwrap();
+        let config = FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let (core, device, time, events) = crate::provider::test_support::rig_with(config, Vec::new());
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
-        let mut kinds = EventKindRegistry::with_kernel_kinds();
-        ezsdr_radio::register(&mut ezsdr_kernel::module_api::ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
-        let usrp = ResourceId::parse("usrp").unwrap();
-        let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0"].iter().flat_map(|s| kinds.kinds().into_iter().map(move |k| (ezsdr_kernel::event::EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
-        let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
-        let inputs: Arc<BTreeMap<ContentHash, Arc<[u8]>>> = Arc::new(BTreeMap::new());
-        let core = Arc::new(Core::new(
-            device.clone(),
-            usrp,
-            authority.root(),
-            authority.time(),
-            clocks,
-            events.clone(),
-            inputs,
-            Vec::new(),
-            super::super::test_support::default_description(2_000),
-        ).expect("the rx node is inside the instance root"));
         let origin = (core.now() / 200 + 1) * 200;
         let clock = core.register(Dir::Tx, 200, origin).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        // A, 30 ms, 20 ms ahead; stepped until it has handed over a few buffers.
+        // A is 20 ms ahead; advance the manual device clock until it has handed over a few buffers.
         let a = clock.at_or_after(core.now() + core.ticks(20_000_000));
         tx.command(TxCmd::Burst(held(&clock, a, 30_000, LatePolicy::DropAndFlag)));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while tx.open.as_ref().is_none_or(|open| open.next < a + 4_000) {
-            assert!(std::time::Instant::now() < deadline, "A never got 4 000 samples out");
-            if !tx.step() {
-                std::thread::sleep(std::time::Duration::from_micros(200));
-            }
+        let mut now = core.now();
+        for _ in 0..50 {
+            if tx.open.as_ref().is_some_and(|open| open.next >= a + 4_000) { break; }
+            now += core.ticks(1_000_000);
+            device_at(&core, &time, &device, now);
+            tx.step();
         }
         let next = tx.open.as_ref().unwrap().next;
+        assert!(next >= a + 4_000, "A never handed over 4 000 samples: next={next}, start={a}");
         // C at A's next sample, B before it: both queued before the step that decides B.
+        let decision_time = core.now();
         tx.command(TxCmd::Burst(held(&clock, next, 1_000, LatePolicy::DropAndFlag)));
         tx.command(TxCmd::Burst(held(&clock, next - 500, 1_000, LatePolicy::SendAsapAndFlag)));
         lock(&core.held).insert((clock.domain, next));
         lock(&core.held).insert((clock.domain, next - 500));
+        assert_eq!(core.now(), decision_time, "reserving B and C advanced the held Core clock");
+        assert_eq!(device.time_now().unwrap(), decision_time, "reserving B and C advanced the held device clock");
         assert!(tx.step());
+        assert_eq!(core.now(), decision_time, "the decision advanced the held Core clock");
+        assert_eq!(device.time_now().unwrap(), decision_time, "the decision advanced the held device clock");
         assert!(tx.held.contains_key(&next), "C keeps its start");
         assert_eq!(tx.held.len(), 1, "B is not held: {:?}", tx.held.keys().collect::<Vec<_>>());
         let reasons: Vec<String> = lock(&core.rec).rejected.iter().filter_map(|r| r["reason"].as_str().map(str::to_owned)).collect();
         assert!(reasons.iter().any(|r| r == "UR-21: the moved start is a held burst's"), "{reasons:?}");
-        let refused = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().any(|e| {
-            e.kind == EventKind::parse(ezsdr_radio::kinds::TIME_ERROR).unwrap() && e.payload["outcome"] == "refused"
-        });
-        assert!(refused, "no TIME_ERROR {{ refused }}");
+        let emitted = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert!(emitted.iter().any(|e| e.kind == EventKind::parse(ezsdr_radio::kinds::TIME_ERROR).unwrap() && e.payload["outcome"] == "refused"), "no TIME_ERROR {{ refused }}: {emitted:?}");
+        assert!(emitted.iter().any(|e| e.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "no COMMAND_REJECTED: {emitted:?}");
     }
     #[test]
     fn ur_29_eob_device_errors_are_escalated() {

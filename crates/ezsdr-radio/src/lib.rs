@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod channels;
 pub mod device;
+pub mod measurement;
 pub mod timeline;
 pub mod x3xx;
 
@@ -981,7 +982,7 @@ pub mod payloads {
     }
 }
 
-/// Generates the eleven committed Radio Model schemas (RM-20, RM-22, RM-24).
+/// Generates the twelve committed Radio Model schemas (RM-20, RM-22, RM-24, RM-35).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     use payloads::{
         AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload,
@@ -996,6 +997,7 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     BTreeMap::from([
         ("rf_envelope", of::<RfEnvelope>()),
         ("envelope", of::<RadioEnvelope>()),
+        ("measurement", of::<measurement::Record>()),
         ("rx_overflow_payload", of::<RxOverflowPayload>()),
         ("rx_overflow_hot_payload", of::<RxOverflowHotPayload>()),
         ("time_error_payload", of::<TimeErrorPayload>()),

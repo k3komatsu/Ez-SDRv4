@@ -14,7 +14,7 @@ use ezsdr_radio::x3xx::{self, ProviderTerms};
 use ezsdr_radio::{PerformanceEnvelope, RadioEnvelope, TimingEnvelope};
 
 /// The samples in one receive block (MR-3).
-pub(crate) const BLOCK_LEN: u32 = 2_000;
+pub const BLOCK_LEN: u32 = 2_000;
 
 /// Which profile the Mock presents (MR-3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,7 +46,7 @@ impl Profile {
 
     /// The values only the Mock contributes to the `x3xx` description (design 33 D5): its
     /// 2 ms lead (INFERRED, measured by Phase 8) and its Replay-like repeat constraints.
-    pub(crate) fn terms() -> ProviderTerms {
+    pub fn terms() -> ProviderTerms {
         ProviderTerms {
             min_timed_command_lead_ns: 2_000_000,
             repeat_max_samples: 268_435_456,

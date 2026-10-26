@@ -1,0 +1,615 @@
+{
+  "$defs": {
+    "Condition": {
+      "additionalProperties": false,
+      "description": "The active stream layout and concurrency for one measurement condition.",
+      "properties": {
+        "concurrent": {
+          "description": "The declared streams exercised concurrently.",
+          "items": {
+            "$ref": "#/$defs/StreamRef"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "The condition's unique identifier within the record.",
+          "type": "string"
+        },
+        "reopened": {
+          "description": "Whether this condition was measured after reopening the device.",
+          "type": "boolean"
+        },
+        "streams": {
+          "description": "The streams and their channel/rate configuration.",
+          "items": {
+            "$ref": "#/$defs/StreamCondition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "streams",
+        "concurrent",
+        "reopened"
+      ],
+      "type": "object"
+    },
+    "Device": {
+      "additionalProperties": false,
+      "description": "One device's identifying details in a measurement record.",
+      "properties": {
+        "fpga_image": {
+          "description": "The loaded FPGA image.",
+          "type": "string"
+        },
+        "mboard": {
+          "description": "The motherboard model.",
+          "type": "string"
+        },
+        "serial": {
+          "description": "The device serial.",
+          "type": "string"
+        },
+        "uhd_version": {
+          "description": "The UHD version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "serial",
+        "mboard",
+        "fpga_image",
+        "uhd_version"
+      ],
+      "type": "object"
+    },
+    "Direction": {
+      "description": "Which side of the radio produced the block, taken from the producing Port at\nconstruction. Without the field nothing can detect a receive Provider that sets\na start-of-burst flag by copying a transmit code path (SC-16).",
+      "oneOf": [
+        {
+          "const": "rx",
+          "description": "A receive stream.",
+          "type": "string"
+        },
+        {
+          "const": "tx",
+          "description": "A transmit stream.",
+          "type": "string"
+        }
+      ]
+    },
+    "Finite": {
+      "description": "A finite 64-bit float: NaN and the infinities are refused, so OV-15's\ncanonicaliser never meets one.\n\nRule: SB-4, OV-15.",
+      "format": "double",
+      "type": "number"
+    },
+    "GridValue": {
+      "description": "A finite or stepped set of values measured for a containment key.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "An explicit, ascending set.",
+          "properties": {
+            "kind": {
+              "const": "values",
+              "type": "string"
+            },
+            "values": {
+              "description": "Its values.",
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Every integer in the inclusive range.",
+          "properties": {
+            "hi": {
+              "description": "The greatest integer.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "integer",
+              "type": "string"
+            },
+            "lo": {
+              "description": "The least integer.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "lo",
+            "hi"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Multiples of `step` in the inclusive range; zero is continuous.",
+          "properties": {
+            "hi": {
+              "description": "The upper bound.",
+              "format": "double",
+              "type": "number"
+            },
+            "kind": {
+              "const": "step",
+              "type": "string"
+            },
+            "lo": {
+              "description": "The lower bound.",
+              "format": "double",
+              "type": "number"
+            },
+            "step": {
+              "description": "The grid spacing, or zero for a continuous interval.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "lo",
+            "hi",
+            "step"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Host": {
+      "additionalProperties": false,
+      "description": "The host and network-configuration script used for a measurement.",
+      "properties": {
+        "name": {
+          "description": "The host name.",
+          "type": "string"
+        },
+        "settings_script": {
+          "description": "The settings script name or path.",
+          "type": "string"
+        },
+        "settings_version": {
+          "description": "The settings script version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "settings_script",
+        "settings_version"
+      ],
+      "type": "object"
+    },
+    "Key": {
+      "description": "A `<vocabulary prefix><path>` or `ext.<module-id>.<path>` key: a Vocabulary key\nmatches `^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$` and an Extension key\n`^ext(\\.[A-Za-z0-9_-]+){2,}$`; a key beginning `ext.` is read as an Extension key only.\n\nThe Kernel checks the prefix and the value's shape against the `KeyDecl` and\nnever interprets the meaning (audit Finding 7).\n\nRule: SB-1, SB-2, MA-34.",
+      "type": "string"
+    },
+    "Load": {
+      "description": "The recorded load condition.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No added load.",
+          "type": "string"
+        },
+        {
+          "const": "h4",
+          "description": "The H4 load condition.",
+          "type": "string"
+        }
+      ]
+    },
+    "Observation": {
+      "additionalProperties": false,
+      "description": "A non-capability observation kept with its test result.",
+      "properties": {
+        "condition": {
+          "description": "The condition used, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The observation name.",
+          "type": "string"
+        },
+        "note": {
+          "description": "Optional explanatory note.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "additionalProperties": true,
+          "description": "The structured observation result.",
+          "type": "object"
+        },
+        "test": {
+          "description": "The test that produced it.",
+          "type": "string"
+        },
+        "trials": {
+          "description": "The number of trials.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "test",
+        "trials",
+        "result"
+      ],
+      "type": "object"
+    },
+    "ProfileRef": {
+      "additionalProperties": false,
+      "description": "A declared profile, by name and version. Vision §59 bumps a Mock profile's\nversion on measurement.\n\nRule: SB-22, MA-33 (decision B7).",
+      "properties": {
+        "name": {
+          "description": "The profile's name.",
+          "type": "string"
+        },
+        "version": {
+          "$ref": "#/$defs/Version",
+          "description": "Its version."
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Scalar": {
+      "anyOf": [
+        {
+          "description": "A boolean.",
+          "type": "boolean"
+        },
+        {
+          "description": "A signed 64-bit integer, written as an exact decimal by the canonicaliser (OV-15).",
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/Finite",
+          "description": "A finite float (OV-15)."
+        },
+        {
+          "description": "A string.",
+          "type": "string"
+        }
+      ],
+      "description": "The one scalar type: a `Value`'s scalar, a constraint's and a capability's value,\nand a `DataContract` attribute (SB-4, SB-5, SC-2).\n\nCarries no tag (OV-13's carve-out): a scalar is the value an author wrote, not a\ntwo-field object wrapping it.\n\nRule: SB-4, SB-6, SC-2."
+    },
+    "Schema": {
+      "description": "The one measurement-record schema this version reads and writes.",
+      "oneOf": [
+        {
+          "const": "ezsdr.radio.measurement.v1",
+          "description": "`ezsdr.radio.measurement.v1`.",
+          "type": "string"
+        }
+      ]
+    },
+    "Source": {
+      "description": "Whether a record came from hardware or a fake device.",
+      "oneOf": [
+        {
+          "const": "hardware",
+          "description": "A physical device.",
+          "type": "string"
+        },
+        {
+          "const": "fake",
+          "description": "A fake device; never evidence for a hardware profile.",
+          "type": "string"
+        }
+      ]
+    },
+    "StreamCondition": {
+      "additionalProperties": false,
+      "description": "The channels and sample rate used by one stream in a condition.",
+      "properties": {
+        "channels": {
+          "description": "The logical channels assigned to this stream.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "direction": {
+          "$ref": "#/$defs/Direction",
+          "description": "The stream direction."
+        },
+        "sample_rate_hz": {
+          "description": "The configured sample rate in hertz.",
+          "format": "double",
+          "type": "number"
+        },
+        "stream": {
+          "description": "The stream number.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "direction",
+        "stream",
+        "channels",
+        "sample_rate_hz"
+      ],
+      "type": "object"
+    },
+    "StreamRef": {
+      "additionalProperties": false,
+      "description": "One declared stream reference in a condition.",
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/Direction",
+          "description": "The stream direction."
+        },
+        "stream": {
+          "description": "The stream number.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "direction",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Scalar",
+          "description": "A scalar."
+        },
+        {
+          "description": "A list of scalars.",
+          "items": {
+            "$ref": "#/$defs/Scalar"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/Scalar"
+          },
+          "description": "A map of scalars; its keys are ASCII (SB-9a).",
+          "type": "object"
+        }
+      ],
+      "description": "A scalar, or a list or map of scalars. One level is the type: nothing deeper can\nbe built or parsed.\n\nA Spec is data, not a document tree: one level is what a structured parameter\nsuch as a capture request needs, and more invites the schema-inside-a-schema\nthat Vision §9 rejects.\n\nRule: SB-4."
+    },
+    "ValueRecord": {
+      "description": "A measured value or an explicit statement that it was not measured.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The worst observed value for one capability key.",
+          "properties": {
+            "condition": {
+              "description": "The condition under which it was measured.",
+              "type": "string"
+            },
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "The capability key."
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            },
+            "test": {
+              "description": "The test that produced it.",
+              "type": "string"
+            },
+            "trials": {
+              "description": "The number of trials.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "worst": {
+              "$ref": "#/$defs/Worst",
+              "description": "The worst observed result, with a shape selected by the key's rule."
+            }
+          },
+          "required": [
+            "status",
+            "key",
+            "worst",
+            "trials",
+            "condition",
+            "test"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A capability key deliberately left without a measured value.",
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/Key",
+              "description": "The capability key."
+            },
+            "reason": {
+              "description": "Why it was not measured.",
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "key",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Version": {
+      "additionalProperties": false,
+      "description": "A release-only version. Module and Vocabulary versions carry a minor and a patch;\ndocuments do not, which is decision B7 of `03-spec-and-binding.md`.\n\nRule: MA-33, decision B7.",
+      "properties": {
+        "major": {
+          "description": "Breaking changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "description": "Additive changes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "description": "Fixes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "type": "object"
+    },
+    "Worst": {
+      "anyOf": [
+        {
+          "description": "A finite numeric result.",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A boolean result.",
+          "type": "boolean"
+        },
+        {
+          "description": "A text result.",
+          "type": "string"
+        },
+        {
+          "description": "A set of supported names, such as antenna ports.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/GridValue",
+          "description": "A supported numeric grid."
+        }
+      ],
+      "description": "The JSON shape of a measured worst value."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One hardware measurement run for one device and selector layout.",
+  "properties": {
+    "commit": {
+      "description": "The source commit identifier.",
+      "type": "string"
+    },
+    "conditions": {
+      "description": "Operating conditions used by the measurements and observations.",
+      "items": {
+        "$ref": "#/$defs/Condition"
+      },
+      "type": "array"
+    },
+    "device": {
+      "$ref": "#/$defs/Device",
+      "description": "Device identity and software details."
+    },
+    "host": {
+      "$ref": "#/$defs/Host",
+      "description": "Host identity and settings-script details."
+    },
+    "load": {
+      "$ref": "#/$defs/Load",
+      "description": "The load condition for the run."
+    },
+    "observations": {
+      "description": "Results which are recorded but not compared as capabilities.",
+      "items": {
+        "$ref": "#/$defs/Observation"
+      },
+      "type": "array"
+    },
+    "profile": {
+      "$ref": "#/$defs/ProfileRef",
+      "description": "The profile whose values this run measures."
+    },
+    "schema": {
+      "$ref": "#/$defs/Schema",
+      "description": "The exact schema identifier, rejected on deserialization if unsupported."
+    },
+    "selector": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Value"
+      },
+      "description": "The Provider binding's flat selector.",
+      "type": "object"
+    },
+    "source": {
+      "$ref": "#/$defs/Source",
+      "description": "Whether the result came from hardware or a fake device."
+    },
+    "values": {
+      "description": "One row for every comparable capability key.",
+      "items": {
+        "$ref": "#/$defs/ValueRecord"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "source",
+    "profile",
+    "selector",
+    "device",
+    "host",
+    "load",
+    "commit",
+    "conditions",
+    "values",
+    "observations"
+  ],
+  "title": "Record",
+  "type": "object"
+}

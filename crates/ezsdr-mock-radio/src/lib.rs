@@ -31,7 +31,7 @@ use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey, NO_RELEA
 use ezsdr_radio::{channels, x3xx, Addressed, Concrete};
 
 pub use device::{DeviceModel, DeviceTimeError};
-pub use profile::{Profile, ProfileKind};
+pub use profile::{Profile, ProfileKind, BLOCK_LEN};
 
 /// The reason a lost device gives for everything it cancels or refuses (MR-20).
 const DEVICE_LOST: &str = "MR-20: device lost";
