@@ -79,7 +79,10 @@ FAIL（major 7，minor 1）．すべて採った．N1：selector は物理の構
 | 段階 | 中身 | 値の行 |
 |---|---|---|
 | 3c-1 | 送信の start lead（`cold` の送信の rate change の後，新しい clock の origin に置いた burst が on time），overflow の restart gap 単独（`with_rx_stall` で起こした overrun の gap を rate ごとに），送信の throughput（repeat を D 秒，記録された送信の区間 × rate と underflow なし） | `tx_start_lead_ns`（最小の lead），`overflow_restart_gap_ns`（全試行の最大．LowerBound で profile ≥ 測定），`tx_bytes_per_s`（容量） |
-| 3c-2 | queue depth（送信の tone の timed な周波数の変更を k 個前もって予約し，loopback の受信で周波数の変わる時刻を読む．装置の実行の時刻を観測する道），H1，H2，H3，H5，#56，coercion の read-back，UR-17 の受信要求長の上限 | `command_queue_depth`（容量）．ほかは observation |
+| 3c-2a | queue depth（`Device::apply` の timed な変更を先の時刻に k 個積み，返りが前の command の時刻まで止まる呼び出しで深さを読む．条件は受信・送信の周波数と利得，受信と送信を交互），coercion の read-back（利得と sample rate の格子を全部，antenna を全部，untimed の `apply` で要求して読み返す．利得の刻みは細かい掃引で．周波数は受信の全範囲と送信の `SAFE_TX_HZ` の中を抜き取り，observation だけ） | `command_queue_depth`（容量），`radio.{rx,tx}.c<n>.gain_db`・`gain_step_db`・`antenna`，`radio.{rx,tx}.s<k>.sample_rate_hz`．`frequency_hz`・`frequency_step_hz` は `unmeasured`（連続の格子を抜き取りで測ったとみなすか，送信の RF 安全の外をどうするかは owner） |
+| 3c-2b | H1，H2，H5，#56，UR-17 の受信要求長の上限．H3（送信の `max_num_samps`）は `Device` に読む道が無く `src/` を変えるので段階 4 に | observation だけ |
 | 3c-3 | H4 の負荷（記録の `load` を `h4` にして同じ suite を流す手順と，負荷を作る script の置き場は 3d と合わせる），2 channel の throughput と同時運転，BP4b（混在構成），BP4c（XG，10 GbE 2 本．image の書き換えは owner に確認） | 2 channel の throughput．構成ごとの記録 |
 
 受信の throughput の値（profile 1 000 MB/s，1 channel の最大は 200 MS/s × 4 byte = 800 MB/s）は，3c-3 の 2 channel の測定を待ってから段階 4 で決める．
+
+3c-2a の値は raw の `Device` を通すが，3b-1 の「raw の probe は値にしない」の例外にする：queue の深さと coercion は装置そのものの性質で，Provider が呼ぶのと同じ `Device::apply` で測り，判定は装置が返すもの（back-pressure で止まった呼び出し，読み返した値）だけに頼る（3b-1 の Sol major 1 は Provider の `applied` の時刻が予約でしかないことで，この道はそれを使わない）．（orchestrator，2026-10-27．owner「推奨で作って」）
