@@ -425,6 +425,7 @@ fn hw_b8_raw_device_lead() {
     raw_tx(&*device, 1e6, 1e9);
     while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let wave = iq(&pn(100));
+    let mut observations = Vec::new();
     for lead_us in [3_000i64, 2_000, 1_500, 1_000, 700, 500, 300, 200, 100, 50, 0] {
         let mut outcomes = Vec::new();
         let mut send_us = Vec::new();
@@ -453,7 +454,9 @@ fn hw_b8_raw_device_lead() {
         }
         let late = outcomes.iter().filter(|o| o.contains("TimeError")).count();
         println!("B8 device lead {lead_us} µs: {late}/8 late; send took {send_us:?} µs; outcomes {outcomes:?}");
+        observations.push(serde_json::json!({ "lead_us": lead_us, "late": late, "send_us": send_us, "outcomes": outcomes }));
     }
+    measurement::push_raw_observation("hw_b8_raw_device_lead", 88, serde_json::json!({ "leads": observations }));
 }
 
 #[test]
@@ -467,6 +470,7 @@ fn hw_b8_raw_restart_lead() {
     device.rx_start(0, start).unwrap();
     let _ = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|e| e >= start + 100 * TICKS_PER_MS));
     let mut rate = 1e6;
+    let mut observations = Vec::new();
     // `reopen` also makes a new receive streamer, as uhd-rx's `cold` switch does (UR-25).
     for (cold, reopen) in [(false, false), (true, false), (true, true)] {
         for lead_ms in [100i64, 50, 25, 10, 5, 2, 1] {
@@ -500,11 +504,17 @@ fn hw_b8_raw_restart_lead() {
                 got.blocks.iter().filter(|(t, _)| *t < now).count(),
                 got.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>()
             );
+            observations.push(serde_json::json!({
+                "cold": cold, "reopen": reopen, "lead_ms": lead_ms, "stopped": stopped,
+                "now": now, "start_at": at, "first_new": first_new, "apply_ms": apply_ms,
+                "blocks": got.blocks, "other": got.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>(),
+            }));
             let _ = read(&*device, Wall::from_millis(200), None, |_| false);
         }
     }
     device.rx_stop(0, None).unwrap();
     let _ = drain(&*device);
+    measurement::push_raw_observation("hw_b8_raw_restart_lead", 21, serde_json::json!({ "restarts": observations }));
 }
 
 #[test]
@@ -513,15 +523,18 @@ fn hw_b8_raw_queue_depth() {
     // UR-24's queue depth (16, INFERRED): timed OBX tunes queued ahead of their time; the
     // call that blocks marks the depth. Nothing is streamed, so nothing is emitted.
     let device = raw();
+    let mut observations = Vec::new();
     for dir in [Dir::Rx, Dir::Tx] {
         let base = device.time_now().unwrap() + 3_000 * TICKS_PER_MS;
         let mut took = Vec::new();
+        let mut calls = Vec::new();
         for i in 0..40i64 {
             let freq = if i % 2 == 0 { 999_600_000.0 } else { 1_000_400_000.0 };
             let begun = Instant::now();
             let result = device.apply(dir, 0, &Settings { freq: Some(freq), ..Settings::default() }, Some(base + i * TICKS_PER_MS));
             let ms = begun.elapsed().as_secs_f64() * 1e3;
             took.push(format!("{ms:.2}"));
+            calls.push(serde_json::json!({ "number": i + 1, "duration_ms": ms, "result": format!("{result:?}") }));
             if result.is_err() || ms > 500.0 {
                 println!("B8 queue {dir:?}: call {} took {ms:.1} ms: {result:?}", i + 1);
                 break;
@@ -530,7 +543,9 @@ fn hw_b8_raw_queue_depth() {
         println!("B8 queue {dir:?}: apply ms per call {took:?}");
         std::thread::sleep(Wall::from_millis(3_200));
         println!("B8 queue {dir:?}: after the queue, untimed {:?}", device.apply(dir, 0, &Settings { freq: Some(1e9), ..Settings::default() }, None));
+        observations.push(serde_json::json!({ "direction": format!("{dir:?}"), "calls": calls, "duration_ms": took }));
     }
+    measurement::push_raw_observation("hw_b8_raw_queue_depth", 2, serde_json::json!({ "directions": observations }));
 }
 
 #[test]
@@ -547,6 +562,7 @@ fn hw_b8_raw_timed_tune_phase() {
         let phase = 2.0 * std::f64::consts::PI * f_bb * (tick as f64 / 200e6);
         [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32]
     };
+    let mut observations = Vec::new();
     // 1 GHz and a frequency no integer multiple of a reference lands on (fractional-N).
     for (f0, timed) in [(1e9, true), (1e9, false), (1_000_123_400.0, true), (1_000_123_400.0, false)] {
         assert!(SAFE_TX_HZ.contains(&(f0 + f_bb)));
@@ -588,7 +604,9 @@ fn hw_b8_raw_timed_tune_phase() {
         }
         let spread = phases.iter().map(|p| ((p - phases[0] + 540.0).rem_euclid(360.0) - 180.0).abs()).fold(0.0, f64::max);
         println!("B8 phase {f0} Hz {} tune: phases {phases:.1?}, largest difference from the first {spread:.1}°", if timed { "timed" } else { "untimed" });
+        observations.push(serde_json::json!({ "frequency_hz": f0, "timed": timed, "phases_deg": phases, "spread_deg": spread }));
     }
+    measurement::push_raw_observation("hw_b8_raw_timed_tune_phase", 24, serde_json::json!({ "cases": observations }));
 }
 
 #[test]
@@ -600,6 +618,7 @@ fn hw_b8_raw_in_flight_window() {
     raw_tx(&*device, 2e6, 1e9);
     while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let wave = iq(&pn(1_000));
+    let mut observations = Vec::new();
     for window_us in [10_000u64, 5_000, 3_000, 2_000, 1_000, 500, 250] {
         let now = device.time_now().unwrap();
         let host_now = Instant::now();
@@ -637,7 +656,17 @@ fn hw_b8_raw_in_flight_window() {
             count(ezsdr_radio_uhd::TxCode::BurstAck),
             reports.iter().take(5).collect::<Vec<_>>()
         );
+        observations.push(serde_json::json!({
+            "window_us": window_us,
+            "underflow": count(ezsdr_radio_uhd::TxCode::Underflow),
+            "underflow_in_packet": count(ezsdr_radio_uhd::TxCode::UnderflowInPacket),
+            "time_error": count(ezsdr_radio_uhd::TxCode::TimeError),
+            "sequence_error": count(ezsdr_radio_uhd::TxCode::SeqError) + count(ezsdr_radio_uhd::TxCode::SeqErrorInBurst),
+            "burst_ack": count(ezsdr_radio_uhd::TxCode::BurstAck),
+            "first_reports": reports.iter().take(5).map(|r| format!("{r:?}")).collect::<Vec<_>>(),
+        }));
     }
+    measurement::push_raw_observation("hw_b8_raw_in_flight_window", 7, serde_json::json!({ "windows": observations }));
 }
 
 #[test]
@@ -736,6 +765,7 @@ fn rx_clock(manifest: &ezsdr_kernel::manifest::Manifest) -> (i64, i64) {
 fn hw_b8_stop_end() {
     // bench.md B8: a repeat stopped by `Stop`; where its record ends and where the loop
     // stops hearing it, against the instant the Stop was submitted (UR-23: by s + 10 ms).
+    let mut observations = Vec::new();
     for trial in 0..3 {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
@@ -765,8 +795,19 @@ fn hw_b8_stop_end() {
             power[last + 2..].iter().sum::<f32>() / (power.len() - last - 2).max(1) as f32,
             section(&manifest, "bursts")
         );
-        println!("B8 stop end, trial {trial}: tx clocks {:?}", manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx/s0")).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.root_ticks_per_tick.num())).collect::<Vec<_>>());
+        let tx_clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx/s0"))
+            .map(|r| (r.origin.ticks_in(r.root).unwrap(), r.root_ticks_per_tick.num())).collect();
+        println!("B8 stop end, trial {trial}: tx clocks {tx_clocks:?}");
+        observations.push(serde_json::json!({
+            "trial": trial,
+            "stop_tick": s.ticks_in(s.domain()).unwrap(),
+            "heard_until_tick": heard_until,
+            "offset_ms": (heard_until - s.ticks_in(s.domain()).unwrap()) as f64 / TICKS_PER_MS as f64,
+            "bursts": section(&manifest, "bursts"),
+            "tx_clocks": tx_clocks,
+        }));
     }
+    measurement::push_raw_observation("hw_b8_stop_end", 3, serde_json::json!({ "trials": observations }));
 }
 
 #[test]
@@ -1056,6 +1097,7 @@ fn hw_b6_delay_by_rate() {
     // profile's `tx_path_delay_samples` is one number (45).
     let wave = pn(1_000);
     let (bytes, waveform) = waveform_of(&wave);
+    let mut observations = Vec::new();
     for rate in [400e3, 500e3, 1e6, 2e6] {
         let dir = TempDir::new();
         let device = usrp();
@@ -1072,7 +1114,14 @@ fn hw_b6_delay_by_rate() {
         diagnose(&format!("B6 {} ksps", rate / 1e3), &samples, &wave);
         let at = correlate(&samples, &wave);
         println!("B6 {} ksps: delay {at:?} samples = {:?} µs; TIME_ERROR {}", rate / 1e3, at.map(|a| a as f64 / rate * 1e6), events_of(&manifest, "radio.TIME_ERROR").len());
+        observations.push(serde_json::json!({
+            "rate_hz": rate,
+            "correlation_delay_samples": at,
+            "total_delay_us": at.map(|a| a as f64 / rate * 1e6),
+            "time_error_count": events_of(&manifest, "radio.TIME_ERROR").len(),
+        }));
     }
+    measurement::push_raw_observation("hw_b6_delay_by_rate", 4, serde_json::json!({ "rates": observations }));
 }
 
 #[test]
@@ -1136,6 +1185,7 @@ fn hw_b8_raw_burst_gap() {
     raw_tx(&*device, 1e6, 1e9);
     while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
+    let mut observations = Vec::new();
     for gap in [0i64, 1, 2, 3, 5, 10, 20, 50, 100, 1_000] {
         let mut outcomes = Vec::new();
         for _ in 0..4 {
@@ -1153,7 +1203,9 @@ fn hw_b8_raw_burst_gap() {
             outcomes.push(codes.join("+"));
         }
         println!("B8 burst gap {gap} samples: {outcomes:?}");
+        observations.push(serde_json::json!({ "gap_samples": gap, "outcomes": outcomes }));
     }
+    measurement::push_raw_observation("hw_b8_raw_burst_gap", 40, serde_json::json!({ "gaps": observations }));
 }
 
 #[test]
@@ -1199,6 +1251,7 @@ fn hw_b8_raw_empty_eob_gap() {
     raw_tx(&*device, 1e6, 1e9);
     while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
     let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
+    let mut observations = Vec::new();
     for empty_eob in [true, false] {
         for gap in [0i64, 1, 2, 3, 5] {
             let mut outcomes = Vec::new();
@@ -1229,8 +1282,10 @@ fn hw_b8_raw_empty_eob_gap() {
             }
             let late = outcomes.iter().filter(|o| o.contains("TimeError")).count();
             println!("B8 A closed by {}, B at gap {gap} samples: {late}/4 late; {outcomes:?}", if empty_eob { "an empty end-of-burst 2 ms before its end" } else { "end-of-burst on its last data buffer" });
+            observations.push(serde_json::json!({ "empty_eob": empty_eob, "gap_samples": gap, "late": late, "outcomes": outcomes }));
         }
     }
+    measurement::push_raw_observation("hw_b8_raw_empty_eob_gap", 40, serde_json::json!({ "gaps": observations }));
 }
 
 #[test]
@@ -1405,4 +1460,56 @@ fn hw_m2_tx_front_end_moves_between_streamers() {
     opened.expect("the front end opens on stream 1 once stream 0's streamer is closed");
     assert!(acks0 == ["BurstAck"] && acks1 == ["BurstAck"], "both bursts are played on time");
     assert!(burst0.1 > 0 && burst1.1 > 0 && burst0.0 > 10.0 * quiet.0 && burst1.0 > 10.0 * quiet.0, "both bursts reach the loopback receiver");
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_measurements_record() {
+    let metadata = measurement::process_metadata().expect("all EZSDR_MEASUREMENT_* values are valid before opening the USRP");
+    measurement::clear_raw_observations();
+    hw_b8_raw_device_lead();
+    hw_b8_raw_restart_lead();
+    hw_b8_raw_queue_depth();
+    hw_b8_raw_in_flight_window();
+    hw_b8_raw_burst_gap();
+    hw_b8_raw_empty_eob_gap();
+    hw_b8_raw_timed_tune_phase();
+    hw_b6_delay_by_rate();
+    hw_b8_stop_end();
+    let observations = measurement::take_raw_observations();
+    let expected: std::collections::BTreeSet<_> = [
+        "hw_b8_raw_device_lead",
+        "hw_b8_raw_restart_lead",
+        "hw_b8_raw_queue_depth",
+        "hw_b8_raw_in_flight_window",
+        "hw_b8_raw_burst_gap",
+        "hw_b8_raw_empty_eob_gap",
+        "hw_b8_raw_timed_tune_phase",
+        "hw_b6_delay_by_rate",
+        "hw_b8_stop_end",
+    ].into_iter().collect();
+    let got: std::collections::BTreeSet<_> = observations.iter().map(|observation| observation.name.as_str()).collect();
+    assert_eq!(got, expected, "the record has exactly the raw probes it ran");
+
+    let device = usrp();
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
+    let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
+    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())
+        .expect("the bound X3xx layout");
+    let record = measurement::build_record(
+        ezsdr_radio::measurement::Source::Hardware,
+        &binding,
+        &*device,
+        &metadata,
+        Vec::new(),
+        observations,
+        &description,
+    ).expect("a hardware measurement record");
+    assert!(record.values.iter().all(|value| matches!(value, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
+    let violations = ezsdr_radio::measurement::compare(&record, &description);
+    assert!(violations.is_empty(), "{violations:?}");
+    let path = metadata.output.as_deref().expect("the output path is mandatory");
+    measurement::write_record(path, &record).expect("create the record once without overwriting");
+    println!("Wrote hardware measurement record to {}", path.display());
 }

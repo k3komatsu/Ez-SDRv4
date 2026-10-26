@@ -8351,8 +8351,8 @@
     "id": "J277",
     "name": "UHD declares a non-host domain on its Provider root (MA-10)",
     "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-    "old": "            tree: description.tree(&resource, HOST_MEMORY),",
-    "new": "            tree: description.tree(&resource, ezsdr_kernel::id::MemoryDomainId::local(1)),",
+    "old": "description.tree(id, HOST_MEMORY)",
+    "new": "description.tree(id, ezsdr_kernel::id::MemoryDomainId::local(1))",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "ur_10_instance"
@@ -10508,5 +10508,387 @@
    "crate": "ezsdr-radio",
    "test_bin": "measurement",
    "filter": "rm_35_condition_validation_keeps_direction_in_stream_channel_and_concurrent_checks"
+  },
+  {
+   "id": "P706",
+   "name": "measurement timing builder leaves the Description at profile defaults",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "self.description.timing = timing;",
+   "new": "let _ = timing;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_timing_candidate_updates_every_surface_and_the_start_boundary"
+  },
+  {
+   "id": "P707",
+   "name": "measurement timing builder leaves the admission lead at its default",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+    "old": "Duration::new(ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns)",
+    "new": "Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_timing_candidate_updates_every_surface_and_the_start_boundary"
+  },
+  {
+   "id": "P708",
+   "name": "measurement timing builder does not refresh the capability tree",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+    "old": "self.instance.tree = tree;",
+    "new": "self.instance.tree = { let mut tree = tree; tree.capabilities.clear(); tree };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_timing_candidate_updates_every_surface_and_the_start_boundary"
+  },
+  {
+   "id": "P709",
+   "name": "measurement timing builder does not refresh the envelope section",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+    "old": "self.instance.sections.insert(section(\"envelope\"), envelope);",
+    "new": "self.instance.sections.insert(section(\"envelope\"), Json::Null);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_timing_candidate_updates_every_surface_and_the_start_boundary"
+  },
+  {
+   "id": "P710",
+   "name": "the measurement admission lead replaces the independent UHD device lead",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(DEVICE_LEAD_NS);",
+   "new": "    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
+   "old2": "        let outcome = held.policy.decide(&self.core.clocks,\n            TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now),\n            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS));",
+   "new2": "        let outcome = held.policy.decide(&self.core.clocks,\n            TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now),\n            Duration::new(ClockDomainId::HOST_MONOTONIC, self.core.description.timing.min_timed_command_lead_ns));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_candidate_admission_lead_does_not_override_the_device_lead"
+  },
+  {
+   "id": "P711",
+   "name": "a cold change uses the receive lead for both directions",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "timeline::start_lead_ns(&core.description.timing, key.0)",
+   "new": "timeline::start_lead_ns(&core.description.timing, Direction::Rx)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_candidate_directional_start_leads_set_cold_change_origins"
+  },
+  {
+   "id": "P712",
+   "name": "UHD arm ignores the candidate startup latency",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "let s = a + core.ticks(core.description.timing.startup_latency_ns);",
+   "new": "let s = a + core.ticks(2_000_000_000);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_timing_candidate_updates_every_surface_and_the_start_boundary"
+  },
+  {
+   "id": "P713",
+   "name": "the command queue uses its profile default instead of the candidate depth",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "let depth = self.core.description.timing.command_queue_depth as usize;",
+   "new": "let depth = 16usize;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_the_command_queue_is_counted_per_instance_across_streams"
+  },
+  {
+   "id": "P714",
+   "name": "TX chunks ignore the candidate in-flight window",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, self.core.block_len as i64);",
+   "new": "let chunk = self.core.block_len as i64;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "measurement_candidate_in_flight_window_sets_the_tx_chunk_size"
+  },
+  {
+   "id": "P715",
+   "name": "late-at-device evidence is classified as a Provider failure",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "EvidenceKind::ProviderTimeError(ProviderTimeError::LateAtDevice)\n            | EvidenceKind::AsyncTimeError",
+   "new": "EvidenceKind::ProviderTimeError(ProviderTimeError::Drop)\n            | EvidenceKind::AsyncTimeError",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "classify_trial_failure_origin_and_completion_evidence"
+  },
+  {
+   "id": "P716",
+   "name": "ambiguous reports spanning trials are attributed to neither trial",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "        indexes => {\n            for index in indexes { trials[*index].unattributable = true; }\n        }",
+   "new": "        indexes => { let _ = indexes; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "incomplete_or_unattributable_trials_never_pass"
+  },
+  {
+   "id": "P717",
+   "name": "candidate summaries accept failed trials",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "stage.trials.len() >= required_trials && stage.trials.iter().all(|trial| *trial == TrialClass::Success)",
+   "new": "stage.trials.len() >= required_trials",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection"
+  },
+  {
+   "id": "P718",
+   "name": "raw hardware probe observations are not retained",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "RAW_OBSERVATIONS.with(|observations| {\n        observations.borrow_mut().push(\n            observation(name, format!(\"tests/hardware.rs::{name}\"), None, trials, result)\n                .unwrap_or_else(|error| panic!(\"invalid raw observation {name}: {error}\")),\n        );\n    });",
+   "new": "let _ = (name, trials, result);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_probe_results_are_observations_only"
+  },
+  {
+   "id": "P719",
+   "name": "measurement records include non-comparable keys as unmeasured values",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": ".filter(|key| model::rule(key.as_str()).is_some_and(|rule| rule != Rule::NotCompared))\n        .map(|key| ValueRecord::Unmeasured {",
+   "new": ".filter(|_| true)\n        .map(|key| ValueRecord::Unmeasured {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P720",
+   "name": "measurement metadata accepts empty required values",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if value.trim().is_empty() {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "metadata_and_writer_fail_closed"
+  },
+  {
+   "id": "P721",
+   "name": "measurement writer truncates an existing output",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": ".create_new(true)",
+   "new": ".create(true).truncate(true)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "metadata_and_writer_fail_closed"
+  },
+  {
+   "id": "P722",
+   "name": "FakeDevice source records pass comparison as hardware",
+   "file": "crates/ezsdr-radio/src/measurement.rs",
+   "old": "if record.source != Source::Hardware {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_fake_rehearsal_round_trips_and_only_fails_source"
+  },
+  {
+   "id": "P723",
+   "name": "FakeDevice Run observations are retained in the record",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "        observations,\n    })",
+   "new": "        observations: Vec::new(),\n    })",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_fake_rehearsal_round_trips_and_only_fails_source"
+  },
+  {
+   "id": "P724",
+   "name": "candidate timing is missing from the Run Manifest envelope",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "self.instance.sections.insert(section(\"envelope\"), envelope);",
+   "new": "self.instance.sections.insert(section(\"envelope\"), Json::Null);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_candidate_propagates_all_timing_fields_to_the_run_manifest"
+  },
+  {
+   "id": "P725",
+   "name": "RX capture completion incorrectly requires a TX BurstAck",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "TrialCompletion::ReceiveCapture => false,",
+   "new": "TrialCompletion::ReceiveCapture => !trial.evidence.contains(&EvidenceKind::BurstAck),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "classify_trial_failure_origin_and_completion_evidence"
+  },
+  {
+   "id": "P726",
+   "name": "TX trial completion ignores the BurstAck",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "TrialCompletion::TransmitBurstAck => !trial.evidence.contains(&EvidenceKind::BurstAck),",
+   "new": "TrialCompletion::TransmitBurstAck => false,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "incomplete_or_unattributable_trials_never_pass"
+  },
+  {
+   "id": "P727",
+   "name": "asynchronous device errors are ignored by trial classification",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "| EvidenceKind::AsyncTimeError",
+   "new": "| EvidenceKind::BurstAck",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "classify_trial_failure_origin_and_completion_evidence"
+  },
+  {
+   "id": "P728",
+   "name": "minimum lead does not require a successful suffix",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "SummaryMode::MinimumLead => (0..stages.len())\n                .filter(|index| passing[*index..].iter().all(|passed| *passed))\n                .map(|index| stages[index].value)\n                .collect(),",
+    "new": "SummaryMode::MinimumLead => (0..stages.len())\n                .filter(|index| passing[*index..].iter().any(|passed| *passed))\n                .map(|index| stages[index].value)\n                .collect(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection"
+  },
+  {
+   "id": "P729",
+   "name": "capacity does not require a successful prefix",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let prefix = passing.iter().take_while(|passed| **passed).count();",
+   "new": "let prefix = passing.iter().filter(|passed| **passed).count();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection"
+  },
+  {
+   "id": "P730",
+   "name": "candidate summaries ignore the required trial count",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "stage.trials.len() >= required_trials && stage.trials.iter().all(|trial| *trial == TrialClass::Success)",
+   "new": "!stage.trials.is_empty() && stage.trials.iter().all(|trial| *trial == TrialClass::Success)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection"
+  },
+  {
+   "id": "P731",
+   "name": "candidate summaries combine conditions without intersecting their values",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "common.intersection(&eligible).copied().collect()",
+    "new": "common.union(&eligible).copied().collect()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection"
+  },
+  {
+   "id": "P732",
+   "name": "queue depth uses the generic unmeasured reason",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "\"Applied instants are reservations, not device execution observations; raw queue probes remain observations, and the comparison method is deferred to Phase 8 stage 3c.\"",
+   "new": "\"Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required.\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P733",
+   "name": "metadata validation rejects the H4 load",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "\"h4\" => Load::H4,",
+   "new": "\"h4\" => Load::None,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "metadata_and_writer_fail_closed"
+  },
+  {
+   "id": "P734",
+   "name": "metadata validation supplies a default for missing environment values",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let value = values.get(name).ok_or_else(|| format!(\"{name} is required\"))?;",
+   "new": "let value = values.get(name).cloned().unwrap_or_else(|| \"not_applicable\".to_owned());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "metadata_and_writer_fail_closed"
+  },
+  {
+   "id": "P735",
+   "name": "measurement comparison accepts duplicate value keys",
+   "file": "crates/ezsdr-radio/src/measurement.rs",
+   "old": "if !seen.insert(value.key().clone()) {",
+   "new": "if !seen.insert(value.key().clone()) && false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P736",
+   "name": "out-of-range evidence is attributed to a later trial instead of the preceding trial",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick),",
+   "new": "Some(tick) => trials.iter().rposition(|trial| trial.start_tick > tick),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "incomplete_or_unattributable_trials_never_pass"
+  },
+  {
+   "id": "P737",
+   "name": "measurement records infer a missing profile from Description",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let profile = binding.profile.clone().ok_or_else(|| \"radio binding has no profile\".to_owned())?;",
+   "new": "let profile = binding.profile.clone().unwrap_or_else(|| ezsdr_kernel::module_api::ProfileRef { name: description.profile.name.clone(), version: description.profile.version });",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P738",
+   "name": "hardware records replace a missing UHD version with a placeholder",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "(Source::Hardware, None) => return Err(\"device metadata does not include a nonempty uhd_version\".to_owned()),",
+   "new": "(Source::Hardware, None) => metadata.uhd_version.clone().unwrap_or_else(|| \"not_applicable\".to_owned()),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P739",
+   "name": "measurement record serial does not come from the device",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "serial: device.serial().map_err(|error| error.message)?,",
+   "new": "serial: \"not_applicable\".to_owned(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P740",
+   "name": "measurement record selector does not come from the binding",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "selector: binding.selector.clone(),",
+   "new": "selector: BTreeMap::new(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P741",
+   "name": "measurement comparison accepts an undeclared observation condition",
+   "file": "crates/ezsdr-radio/src/measurement.rs",
+   "old": "if let Some(condition) = &observation.condition {\n            if !condition_ids.contains(condition.as_str()) {",
+   "new": "if let Some(condition) = &observation.condition {\n            if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
+  },
+  {
+   "id": "P742",
+   "name": "a span crossing one trial edge is treated as contained",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let contained = matches.len() == 1\n            && start >= trials[matches[0]].start_tick\n            && end <= trials[matches[0]].end_tick;",
+   "new": "let contained = matches.len() == 1;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "incomplete_or_unattributable_trials_never_pass"
+  },
+  {
+   "id": "P743",
+   "name": "measurement metadata skips output destination preflight",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "validate_output_path(&output)?;",
+   "new": "let _ = &output;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "metadata_and_writer_fail_closed"
   }
-]
+ ]

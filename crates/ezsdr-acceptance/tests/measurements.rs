@@ -116,3 +116,15 @@ fn measurement_between_the_provider_leads_passes_only_uhd() {
     let uhd_violations = measurement::compare(&record, &uhd);
     assert!(uhd_violations.is_empty(), "UHD's 5 ms lead covers the 3 ms measurement: {uhd_violations:?}");
 }
+
+#[test]
+fn fake_source_is_rejected_by_both_providers_only_for_source() {
+    let mut record: Record = serde_json::from_str(FIXTURE).unwrap();
+    record.source = measurement::Source::Fake;
+    let (mock, uhd) = descriptions(&record);
+    for (provider, description) in [("MockRadio", &mock), ("UHD", &uhd)] {
+        let violations = measurement::compare(&record, description);
+        assert_eq!(violations.len(), 1, "{provider}: {violations:?}");
+        assert_eq!(violations[0].key, "source", "{provider}: {violations:?}");
+    }
+}

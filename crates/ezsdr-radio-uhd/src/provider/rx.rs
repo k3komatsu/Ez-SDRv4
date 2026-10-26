@@ -1097,7 +1097,10 @@ mod tests {
         // the late start is decided at plus `radio.timing.rx_start_lead_ns` — measured from
         // the decision's `now`, not from the origin the start missed.
         let link = link();
-        let (core, _device, time, events) = super::super::test_support::rig_with_links(vec![link]);
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let mut description = super::super::test_support::default_description(2_000);
+        description.timing.rx_start_lead_ns = 19_000_005;
+        let (core, time, events) = super::super::test_support::rig_on_description(device, vec![link], BTreeMap::new(), description);
         let (mut rx, clock) = rx(&core, 1);
         time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
         rx.receive(RxRecv::LateCommand);

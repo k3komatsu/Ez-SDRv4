@@ -63,6 +63,15 @@ fn section(suffix: &str) -> Namespace {
     Namespace::parse(&format!("ezsdr.radio.uhd.{suffix}")).expect("a section name")
 }
 
+fn description_surfaces(description: &channels::Description, id: &ResourceId) -> (ezsdr_kernel::module_api::Resource, Duration, Json) {
+    let timing = description.timing;
+    (
+        description.tree(id, HOST_MEMORY),
+        Duration::new(ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns),
+        serde_json::to_value(description.envelope()).expect("an envelope"),
+    )
+}
+
 const JOIN_BOUND: Wall = Wall::from_secs(1);
 
 /// A receive stream's owner thread (UR-15, design 33 D15): one per declared stream, in
@@ -307,17 +316,17 @@ impl UhdRadio {
         }
         let mut sections = BTreeMap::new();
         sections.insert(section("device"), describe);
-        sections.insert(section("envelope"), serde_json::to_value(description.envelope()).expect("an envelope"));
-        let timing = description.timing;
+        let (tree, min_command_lead, envelope) = description_surfaces(&description, &resource);
+        sections.insert(section("envelope"), envelope);
         let instance = ProviderInstance {
             id: resource.clone(),
             module: crate::module_ref(),
             profile: binding.profile.clone(),
-            tree: description.tree(&resource, HOST_MEMORY),
+            tree,
             fidelity: device.fidelity(),
             driving: Driving { stepped: false },
             arm_after: Vec::new(),
-            min_command_lead: Some(Duration::new(ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns)),
+            min_command_lead: Some(min_command_lead),
             sections,
         };
         Ok(UhdRadio {
@@ -350,6 +359,17 @@ impl UhdRadio {
     /// keys declare. Only Rust code reaches it (GZ-9).
     pub fn with_rx_stall(mut self, after: Wall, duration: Wall) -> UhdRadio {
         self.rx_stall = Some((after, duration));
+        self
+    }
+
+    /// Rebuilds this measurement instance with candidate timing values; the ordinary
+    /// construction path continues to use the profile's terms.
+    pub fn with_measurement_timing(mut self, timing: ezsdr_radio::TimingEnvelope) -> UhdRadio {
+        self.description.timing = timing;
+        let (tree, min_command_lead, envelope) = description_surfaces(&self.description, &self.instance.id);
+        self.instance.tree = tree;
+        self.instance.min_command_lead = Some(min_command_lead);
+        self.instance.sections.insert(section("envelope"), envelope);
         self
     }
 
@@ -826,6 +846,65 @@ mod tests {
         let calls = device.calls();
         assert!(!calls.iter().any(|call| call.starts_with("tx_send")), "arm radiated: {calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the transmit streamer's open: {calls:?}");
+    }
+
+    #[test]
+    fn measurement_timing_candidate_updates_every_surface_and_the_start_boundary() {
+        use ezsdr_kernel::spec::{CapabilityValue, Scalar};
+
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        })).unwrap();
+        let candidate = ezsdr_radio::TimingEnvelope {
+            min_timed_command_lead_ns: 11_000_001,
+            startup_latency_ns: 12_000_002,
+            command_queue_depth: 7,
+            release_window_ns: 13_000_003,
+            overflow_restart_gap_ns: 17_000_004,
+            rx_start_lead_ns: 19_000_005,
+            tx_start_lead_ns: 23_000_006,
+            tx_in_flight_ns: 29_000_007,
+        };
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        {
+            let ordinary = UhdRadio::from_binding(&binding, device.clone()).unwrap();
+            assert_eq!(ordinary.description.timing, x3xx::timing(&profile::terms()));
+        }
+        let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap().with_measurement_timing(candidate);
+        assert_eq!(radio.description.timing, candidate);
+        assert_eq!(radio.instance.min_command_lead, Some(Duration::new(ClockDomainId::HOST_MONOTONIC, candidate.min_timed_command_lead_ns)));
+        let fields = [
+            ("min_timed_command_lead_ns", candidate.min_timed_command_lead_ns),
+            ("startup_latency_ns", candidate.startup_latency_ns),
+            ("command_queue_depth", candidate.command_queue_depth),
+            ("release_window_ns", candidate.release_window_ns),
+            ("overflow_restart_gap_ns", candidate.overflow_restart_gap_ns),
+            ("rx_start_lead_ns", candidate.rx_start_lead_ns),
+            ("tx_start_lead_ns", candidate.tx_start_lead_ns),
+            ("tx_in_flight_ns", candidate.tx_in_flight_ns),
+        ];
+        let envelope = &radio.instance.sections[&section("envelope")];
+        for (field, value) in fields {
+            let key = Key::parse(&format!("radio.timing.{field}")).unwrap();
+            assert_eq!(radio.instance.tree.capabilities[&key], CapabilityValue::One { value: Scalar::from(value) }, "{field}");
+            assert_eq!(envelope["timing"][field], value, "{field}");
+        }
+
+        let (core, _time, _events) = test_support::rig_on_description(device, Vec::new(), BTreeMap::new(), radio.description.clone());
+        *lock(&core.streams) = core::Streams::with_streams(0, 0);
+        radio.prepared = Some(Prepared { core: core.clone(), actions: Arc::new(NoActions), config: BTreeMap::new(), rx: Vec::new(), tx: Vec::new() });
+        let armed_at = core.now();
+        radio.arm().unwrap();
+        let boundary = armed_at + core.ticks(candidate.startup_latency_ns);
+        assert_eq!(core.start_up.load(Ordering::Acquire), boundary);
+        let error = radio.start(Some(core.at(boundary - 1))).unwrap_err();
+        assert!(error.message.contains(&format!("precedes the device's start-up at {boundary}")), "{}", error.message);
+        radio.start(Some(core.at(boundary))).unwrap();
+        assert!(lock(&core.rec).timing.iter().any(|row| row["what"] == "start" && row["t0"] == boundary));
+        radio.stop(StopMode::Orderly).unwrap();
+        radio.cleanup();
     }
 
     #[test]

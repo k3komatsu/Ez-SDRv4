@@ -2286,6 +2286,50 @@ mod tests {
     }
 
     #[test]
+    fn measurement_candidate_in_flight_window_sets_the_tx_chunk_size() {
+        let samples = vec![[0.25, 0.0]; 10_000];
+        let (wave, bytes) = waveform_input("candidate_chunk", &samples);
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() }));
+        let mut description = super::super::test_support::default_description(10_000);
+        description.timing.tx_in_flight_ns = 8_000_000;
+        let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::from([
+            (wave.hash.clone(), Arc::<[u8]>::from(bytes)),
+        ]), description);
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        device.tx_open(0, &[0]).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (mut control, cmds) = booking_control_on(&core, clock);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        book_burst(&mut control, &core, 1, clock, 3_000, &wave, true, LatePolicy::DropAndFlag);
+        drain_tx(&mut tx);
+        assert!(tx.step());
+        assert_eq!(tx.open.as_ref().unwrap().next, 5_000, "the candidate 8 ms window hands over its 2 ms chunk");
+        assert_eq!(sends(&device).iter().map(|(n, _, _)| n).sum::<usize>(), 2_000);
+    }
+
+    #[test]
+    fn measurement_candidate_admission_lead_does_not_override_the_device_lead() {
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let mut description = super::super::test_support::default_description(2_000);
+        description.timing.min_timed_command_lead_ns = 1_000_000;
+        let (core, _time, events) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), description);
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, commands) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core, 0, commands, Some(clock), Channels::first(1));
+        let target = clock.at_or_after(tx.core.now() + tx.core.ticks(1_500_000));
+        tx.held.insert(target, held(&clock, target, 100, LatePolicy::DropAndFlag));
+        assert!(tx.step(), "the queued burst is evaluated by the Provider");
+        assert!(tx.open.is_none(), "the burst inside the device lead is dropped");
+        let errors: Vec<_> = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].payload["outcome"], "drop");
+        assert!(device.calls().iter().all(|call| !call.starts_with("tx_send ")), "a dropped burst reached the device: {:?}", device.calls());
+    }
+
+    #[test]
     fn ur_21_a_new_burst_without_an_open_predecessor_is_on_time() {
         let samples = vec![[0.75, -0.25]];
         let (wave, bytes) = waveform_input("alone", &samples);

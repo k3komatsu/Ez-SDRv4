@@ -157,6 +157,15 @@ fn ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
     let manifest = run.finish();
     let applied = section(&manifest, "applied").as_array().unwrap().iter().find(|r| r["key"] == "radio.rx.c0.frequency_hz").cloned().unwrap();
     assert_eq!(applied["claimed"], 1e9);
+    let timing = &section(&manifest, "envelope")["timing"];
+    assert_eq!(timing["min_timed_command_lead_ns"], 5_000_000);
+    assert_eq!(timing["startup_latency_ns"], 2_000_000_000i64);
+    assert_eq!(timing["command_queue_depth"], 16);
+    assert_eq!(timing["release_window_ns"], 3_000_000);
+    assert_eq!(timing["overflow_restart_gap_ns"], 50_000_000);
+    assert_eq!(timing["rx_start_lead_ns"], 50_000_000);
+    assert_eq!(timing["tx_start_lead_ns"], 50_000_000);
+    assert_eq!(timing["tx_in_flight_ns"], 10_000_000);
 }
 
 #[test]
@@ -493,6 +502,9 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.timing.command_queue_depth"), one(Scalar::from(16)));
     // Design 38 D1: the release window is the profile's value, x3xx's 3 ms.
     assert_eq!(capability("radio.timing.release_window_ns"), one(Scalar::from(3_000_000)));
+    assert_eq!(capability("radio.timing.overflow_restart_gap_ns"), one(Scalar::from(50_000_000)));
+    assert_eq!(capability("radio.timing.rx_start_lead_ns"), one(Scalar::from(50_000_000)));
+    assert_eq!(capability("radio.timing.tx_start_lead_ns"), one(Scalar::from(50_000_000)));
     assert_eq!(capability("radio.timing.tx_in_flight_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
     assert_eq!(capability("radio.tx.repeat_align_samples"), one(Scalar::from(1)));
@@ -502,10 +514,118 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     let envelope = &section_of(instance, "envelope");
     assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
+    assert_eq!(envelope["timing"]["startup_latency_ns"], 2_000_000_000i64);
+    assert_eq!(envelope["timing"]["command_queue_depth"], 16);
     assert_eq!(envelope["timing"]["release_window_ns"], 3_000_000);
+    assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], 50_000_000);
+    assert_eq!(envelope["timing"]["rx_start_lead_ns"], 50_000_000);
+    assert_eq!(envelope["timing"]["tx_start_lead_ns"], 50_000_000);
     assert_eq!(envelope["timing"]["tx_in_flight_ns"], 10_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 100_000_000);
     assert_eq!(section_of(instance, "device")["fake"], true);
+}
+
+#[test]
+fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
+    let candidate = ezsdr_radio::TimingEnvelope {
+        min_timed_command_lead_ns: 11_000_001,
+        startup_latency_ns: 12_000_002,
+        command_queue_depth: 7,
+        release_window_ns: 13_000_003,
+        overflow_restart_gap_ns: 17_000_004,
+        rx_start_lead_ns: 19_000_005,
+        tx_start_lead_ns: 23_000_006,
+        tx_in_flight_ns: 29_000_007,
+    };
+    let dir = TempDir::new();
+    let doc = profile(&dir, json!({}), json!({}), false);
+    let device = fake(FakeConfig::default());
+    let run = start_spec_run(
+        &receive_spec(1, 1e6, 1e9, Some(100)),
+        &doc,
+        assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_timing(candidate)),
+    ).unwrap();
+    let manifest = captured(run);
+    let timing = &section(&manifest, "envelope")["timing"];
+    for (field, value) in [
+        ("min_timed_command_lead_ns", candidate.min_timed_command_lead_ns),
+        ("startup_latency_ns", candidate.startup_latency_ns),
+        ("command_queue_depth", candidate.command_queue_depth),
+        ("release_window_ns", candidate.release_window_ns),
+        ("overflow_restart_gap_ns", candidate.overflow_restart_gap_ns),
+        ("rx_start_lead_ns", candidate.rx_start_lead_ns),
+        ("tx_start_lead_ns", candidate.tx_start_lead_ns),
+        ("tx_in_flight_ns", candidate.tx_in_flight_ns),
+    ] {
+        assert_eq!(timing[field], value, "{field}");
+    }
+}
+
+#[test]
+fn measurement_fake_rehearsal_round_trips_and_only_fails_source() {
+    let device = fake(FakeConfig::default());
+    let (heard, _) = rehearse_txrx_and_repeat(device.clone(), true);
+    let records = bursts(&heard);
+    let burst = &records[0];
+    let artifact = capture_of(&heard, "rec");
+    let continuity = &artifact.continuity[0];
+    let target = burst.target.ticks_in(burst.target.domain()).unwrap();
+    let first = continuity.first.ticks_in(continuity.domain).unwrap();
+    let end = continuity.end.ticks_in(continuity.domain).unwrap();
+    let observation = measurement::observation(
+        "fake_txrx_run",
+        "tests/fake.rs::measurement_fake_rehearsal_round_trips_and_only_fails_source",
+        Some("txrx".to_owned()),
+        1,
+        json!({
+            "burst_target": target,
+            "burst_samples": burst.samples,
+            "capture_first": first,
+            "capture_end": end,
+            "capture_gaps": continuity.gaps.len(),
+        }),
+    ).unwrap();
+    assert_eq!(observation.result["burst_target"], target);
+    assert_eq!(observation.result["burst_samples"], burst.samples);
+    assert_eq!(observation.result["capture_first"], first);
+    assert_eq!(observation.result["capture_end"], end);
+    assert_eq!(observation.result["capture_gaps"], continuity.gaps.len());
+
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false);
+    let binding = measurement::radio_binding(&doc).unwrap();
+    let uhd = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+    let condition = ezsdr_radio::measurement::Condition {
+        id: "txrx".to_owned(),
+        streams: vec![
+            measurement::stream_condition(ezsdr_kernel::stream::Direction::Rx, 0, vec![0], 1e6),
+            measurement::stream_condition(ezsdr_kernel::stream::Direction::Tx, 0, vec![0], 1e6),
+        ],
+        concurrent: vec![
+            measurement::stream_ref(ezsdr_kernel::stream::Direction::Rx, 0),
+            measurement::stream_ref(ezsdr_kernel::stream::Direction::Tx, 0),
+        ],
+        reopened: false,
+    };
+    let record = measurement::build_record(
+        ezsdr_radio::measurement::Source::Fake,
+        &binding,
+        &*device,
+        &measurement::rehearsal_metadata(),
+        vec![condition],
+        vec![observation],
+        &uhd,
+    ).unwrap();
+    let path = dir.0.join("fake-measurement.json");
+    measurement::write_record(&path, &record).unwrap();
+    let round_trip: ezsdr_radio::measurement::Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(round_trip, record);
+    assert_eq!(round_trip.observations[0].result["burst_target"], target, "the observation must come from the Run's burst record");
+    assert_eq!(round_trip.observations[0].result["capture_first"], first, "the observation must come from the Run's capture continuity");
+    assert!(round_trip.values.iter().all(|value| matches!(value, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
+    let violations = ezsdr_radio::measurement::compare(&round_trip, &uhd);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].key, "source");
 }
 
 #[test]

@@ -1706,9 +1706,18 @@ mod tests {
 
     #[test]
     fn ur_24_the_command_queue_is_counted_per_instance_across_streams() {
-        // UR-24 (S10): the queue depth is the instance's, whatever streams the commands name;
-        // a released command still takes its slot, and the seventeenth is refused.
-        let (core, device, time, events) = two_stream_rig();
+        // UR-24 (S10): the candidate depth is shared across streams; future reservations fill
+        // it, and a released command continues to take its slot.
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let device = Arc::new(crate::device::FakeDevice::new(config));
+        let mut description = layout_description();
+        description.timing.command_queue_depth = 3;
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(
+            device.clone(),
+            vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]],
+            BTreeMap::new(),
+            description,
+        );
         let _frozen = hold(&core, &time, &device);
         let (to_tx, _tx) = channel();
         let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(1), 200))], tx: vec![None] };
@@ -1717,25 +1726,25 @@ mod tests {
         control.config.insert(key("radio.rx.c1.stream"), Value::from(1));
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
-        for i in 0..16 {
+        for i in 0..3 {
             let (key, channel) = if i % 2 == 0 { (key("radio.rx.c0.gain_db"), ActionId(i as u64 + 1)) } else { (key("radio.rx.c1.gain_db"), ActionId(i as u64 + 1)) };
             let value = Value::num(i as f64 + 1.0).unwrap();
             control.book_timed(channel, key, value, at(5_000 + i));
         }
-        assert_eq!(control.held.len(), 16, "{:?}", control.held.keys().collect::<Vec<_>>());
+        assert_eq!(control.held.len(), 3, "{:?}", control.held.keys().collect::<Vec<_>>());
         assert!(device.calls().iter().all(|call| !call.starts_with("apply")), "{:?}", device.calls());
         let _ = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         control.book_timed(ActionId(20), key("radio.rx.c0.gain_db"), Value::num(9.0).unwrap(), at(5_500));
         let full = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         assert_eq!(full.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).count(), 1, "{:?}", full.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>());
-        assert_eq!(full.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).unwrap().payload["depth"], 16, "{full:?}");
-        assert_eq!(control.held.len(), 16, "the refused command took no slot");
+        assert_eq!(full.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_QUEUE_FULL).unwrap().payload["depth"], 3, "{full:?}");
+        assert_eq!(control.held.len(), 3, "the refused command took no slot");
         // Release the first: its slot is still counted (UR-24: held plus released).
         time.advance_to(core.at(ms(4_997))).unwrap();
         control.release();
-        assert_eq!((control.held.len(), control.released.len()), (15, 1), "{:?}", control.held.keys().collect::<Vec<_>>());
+        assert_eq!((control.held.len(), control.released.len()), (2, 1), "{:?}", control.held.keys().collect::<Vec<_>>());
         control.book_timed(ActionId(21), key("radio.rx.c1.gain_db"), Value::num(7.0).unwrap(), at(7_000));
-        assert_eq!(control.held.len(), 15, "the released one still fills its slot");
+        assert_eq!(control.held.len(), 2, "the released one still fills its slot");
     }
 
     #[test]
@@ -5654,6 +5663,34 @@ mod tests {
         time.advance_to(core.at(ms(12))).unwrap();
         control.release();
         assert_eq!(rows_of(&core, &gain), [(ms(12), true, false), (ms(12), true, false)]);
+    }
+
+    #[test]
+    fn measurement_candidate_directional_start_leads_set_cold_change_origins() {
+        for (dir, lead_ns, field) in [
+            (Dir::Rx, 333_000_000, "radio.rx.s0.sample_rate_hz"),
+            (Dir::Tx, 277_000_000, "radio.tx.s0.sample_rate_hz"),
+        ] {
+            let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
+            let mut description = layout_description();
+            match dir {
+                Dir::Rx => description.timing.rx_start_lead_ns = lead_ns,
+                Dir::Tx => description.timing.tx_start_lead_ns = lead_ns,
+            }
+            let (core, _time, _events) = crate::provider::test_support::rig_on_description(device, vec![Arc::new(NoLink)], BTreeMap::new(), description);
+            let (mut control, _tx) = control(&core, &[dir]);
+            let requested = core.ticks(100_000_000);
+            control.book_cold(ActionId(1), key(field), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(requested))));
+            let planned = plan_of(&core, dir);
+            assert_eq!(planned.len(), 2, "{dir:?}: expected the original and changed segments");
+            let first = &planned[0].segment;
+            let cut = first.instant(first.cut.expect("the old segment is cut")).unwrap();
+            let rx_ready = if dir == Dir::Rx {
+                core.ticks(crate::profile::DELIVERY_ALLOWANCE_NS)
+                    + core.block_len.max(core.device.rx_packet_samples(0)) as i64 * first.config.ratio.num() as i64
+            } else { 0 };
+            assert_eq!(planned[1].segment.origin, cut + rx_ready + core.ticks(lead_ns), "{dir:?}: the named cold rate change must read its directional candidate lead");
+        }
     }
 
     #[test]
