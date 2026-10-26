@@ -1500,8 +1500,14 @@ fn hw_measurements_record() {
         .expect("merge in-flight measurements");
     measured.append(measurement::measure_rx_start_lead(device.clone(), &plan).expect("Provider receive-start measurements"))
         .expect("merge receive-start measurements");
+    measured.append(measurement::measure_tx_start_lead(device.clone(), &plan).expect("Provider transmit-start measurements"))
+        .expect("merge transmit-start measurements");
     measured.append(measurement::measure_rx_throughput(device.clone(), &plan).expect("Provider receive-throughput measurements"))
         .expect("merge receive-throughput measurements");
+    measured.append(measurement::measure_overflow_restart_gap(device.clone(), &plan).expect("Provider overflow restart-gap measurements"))
+        .expect("merge overflow restart-gap measurements");
+    measured.append(measurement::measure_tx_throughput(device.clone(), &plan).expect("Provider transmit-throughput measurements"))
+        .expect("merge transmit-throughput measurements");
     measured.append(measurement::measure_full_duplex(device.clone(), &plan).expect("Provider full-duplex measurements"))
         .expect("merge full-duplex measurements");
     measured.observations.extend(observations);

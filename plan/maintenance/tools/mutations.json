@@ -11210,5 +11210,285 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "profile_disagreement_is_written_after_structural_validation"
+  },
+  {
+   "id": "P776",
+   "name": "TX start at the origin is counted as early",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if at.is_some_and(|at| at < origin) { TrialClass::Success } else { TrialClass::Incomplete }",
+   "new": "if at.is_some_and(|at| at <= origin) { TrialClass::Success } else { TrialClass::Incomplete }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_start_lead_requires_an_early_switch_and_no_failure_evidence"
+  },
+  {
+   "id": "P777",
+   "name": "TX start lead does not use the successful suffix",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "summarize_candidates(SummaryMode::MinimumLead, candidates, required_trials)",
+   "new": "summarize_candidates(SummaryMode::Capacity, candidates, required_trials)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_start_lead_value_uses_the_successful_suffix_intersection"
+  },
+  {
+   "id": "P778",
+   "name": "TX start lead is written under the RX key",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "numeric_value(\"radio.timing.tx_start_lead_ns\", summary, candidates, required_trials, test)",
+   "new": "numeric_value(\"radio.timing.rx_start_lead_ns\", summary, candidates, required_trials, test)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_start_lead_value_uses_the_successful_suffix_intersection"
+  },
+  {
+   "id": "P779",
+   "name": "overflow gap lost count need not equal gap length",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "&& overflow_gaps[0].lost == Some(overflow_gaps[0].len)",
+   "new": "&& true",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_evidence_requires_one_overrun_one_matching_gap_and_the_measured_rate"
+  },
+  {
+   "id": "P780",
+   "name": "overflow interpretation selects the minimum gap",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if maximum.is_none_or(|(_, current)| gap_ns > current) { maximum = Some((*rate, gap_ns)); }",
+   "new": "if maximum.is_none_or(|(_, current)| gap_ns < current) { maximum = Some((*rate, gap_ns)); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+    "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+   },
+   {
+    "id": "P782",
+    "name": "TX throughput ignores underflow and async failure evidence",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "if underflow_events > 0 || !async_failures.is_empty() || !short_send_rejections.is_empty() { TrialClass::DeviceFailure }",
+    "new": "if false { TrialClass::DeviceFailure }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+   },
+  {
+   "id": "P784",
+   "name": "TX throughput does not select the successful capacity prefix",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "summarize_candidates(SummaryMode::Capacity, &BTreeMap::from([(\"tx-throughput\".to_owned(), stages.to_vec())]), 1)",
+   "new": "summarize_candidates(SummaryMode::MinimumLead, &BTreeMap::from([(\"tx-throughput\".to_owned(), stages.to_vec())]), 1)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+    "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P785",
+   "name": "TX throughput is written under the RX key",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let key = Key::parse(\"radio.perf.tx_bytes_per_s\").map_err(|error| error.to_string())?;",
+   "new": "let key = Key::parse(\"radio.perf.rx_bytes_per_s\").map_err(|error| error.to_string())?;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+    "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P786",
+   "name": "TX start-lead observation records the wrong transition pair",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "stage[\"tx_rate_pair_hz\"] = json!([rate_pair_hz.0, rate_pair_hz.1]);",
+   "new": "stage[\"tx_rate_pair_hz\"] = json!([rate_pair_hz.0, rate_pair_hz.0]);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_start_lead_requires_an_early_switch_and_no_failure_evidence"
+  },
+   {
+   "id": "P788",
+   "name": "partial overflow captures count as complete",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "rows[0][\"partial\"] == false",
+   "new": "rows[0][\"partial\"] == true",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_evidence_requires_one_overrun_one_matching_gap_and_the_measured_rate"
+  },
+  {
+   "id": "P789",
+   "name": "overflow capture horizon omits stall-length drain time",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "stall_ms.checked_mul(2)",
+   "new": "stall_ms.checked_mul(1)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_wait_horizon_allows_capture_to_finish_after_the_stall"
+  },
+  {
+   "id": "P790",
+   "name": "TX start-lead admission rejection is counted as success",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if !trial.admitted { return TrialClass::AdmissionRejection; }",
+   "new": "if false { return TrialClass::AdmissionRejection; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_start_lead_requires_an_early_switch_and_no_failure_evidence"
+  },
+  {
+   "id": "P791",
+   "name": "TX throughput anchors its interval to the TX clock origin",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let burst_start_tick = burst_target.and_then(|target| {\n        tx_clock.filter(|clock| clock.domain == target.domain()).and_then(|_| point_root_tick(target, clocks).ok())\n    });",
+   "new": "let burst_start_tick = tx_clock.and_then(|clock| clock.origin.ticks_in(clock.root).ok());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P792",
+   "name": "TX throughput rejects an ACK exactly at the D-second boundary",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let ack_after_minimum = burst_ack_tick.zip(minimum_ack_tick).is_some_and(|(ack, minimum)| ack >= minimum);",
+   "new": "let ack_after_minimum = burst_ack_tick.zip(minimum_ack_tick).is_some_and(|(ack, minimum)| ack > minimum);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P793",
+   "name": "TX throughput rejects exactly D times rate samples",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let enough_samples = actual_samples.zip(minimum_samples).is_some_and(|(actual, minimum)| actual >= minimum);",
+   "new": "let enough_samples = actual_samples.zip(minimum_samples).is_some_and(|(actual, minimum)| actual > minimum);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P794",
+   "name": "TX throughput accepts two BurstAck reports",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "else if burst_ack_count > 1 || burst_count > 1 { TrialClass::Unattributable }",
+   "new": "else if burst_ack_count > 2 || burst_count > 1 { TrialClass::Unattributable }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P795",
+   "name": "overflow restart estimate subtracts resume from gap end",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let Some(restart_samples) = gap_end_sample.checked_sub(reader_resume_sample) else {",
+   "new": "let Some(restart_samples) = reader_resume_sample.checked_sub(gap_end_sample) else {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_restart_after_resume_estimate_uses_gap_end_and_nulls_negative_results"
+  },
+  {
+   "id": "P796",
+   "name": "zero overflow restart estimate is made null",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if restart_samples < 0 {",
+   "new": "if restart_samples <= 0 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_restart_after_resume_estimate_uses_gap_end_and_nulls_negative_results"
+  },
+  {
+   "id": "P797",
+   "name": "overflow per-rate restart estimate selects the minimum",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if rate_restart_maximum.is_none_or(|current| restart_ns > current) { rate_restart_maximum = Some(restart_ns); }",
+   "new": "if rate_restart_maximum.is_none_or(|current| restart_ns < current) { rate_restart_maximum = Some(restart_ns); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+  },
+  {
+   "id": "P798",
+   "name": "overflow cross-rate restart estimate selects the minimum",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if maximum_restart.is_none_or(|(_, current)| restart_ns > current) { maximum_restart = Some((*rate, restart_ns)); }",
+   "new": "if maximum_restart.is_none_or(|(_, current)| restart_ns < current) { maximum_restart = Some((*rate, restart_ns)); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+  },
+  {
+   "id": "P799",
+   "name": "overflow summary includes incomplete trial restart estimates",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "for trial in successful {",
+   "new": "for trial in trials {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_summary_keeps_observations_and_the_key_is_not_a_record_value"
+  },
+  {
+   "id": "P800",
+   "name": "overflow measurement emits a comparable value row",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "conditions, values: vec![],\n        observations: vec![observation(\"provider_overflow_restart_gap\"",
+   "new": "conditions, values: vec![ValueRecord::Unmeasured { key: Key::parse(\"radio.timing.overflow_restart_gap_ns\").unwrap(), reason: \"mutation\".to_owned() }],\n        observations: vec![observation(\"provider_overflow_restart_gap\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+  },
+  {
+   "id": "P801",
+   "name": "overflow estimate rounds reader resume down",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "samples.div_ceil(1_000)",
+   "new": "samples / 1_000",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "overflow_restart_after_resume_estimate_uses_gap_end_and_nulls_negative_results"
+  },
+  {
+   "id": "P802",
+   "name": "TX short-send rejection is treated as complete",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "|| !short_send_rejections.is_empty()",
+   "new": "|| false",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P803",
+   "name": "TX sequence and timing async reports are ignored",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": ".filter(|code| matches!(*code, \"Underflow\" | \"UnderflowInPacket\" | \"TimeError\") || code.starts_with(\"SeqError\"))",
+   "new": ".filter(|_| false)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
+  },
+  {
+   "id": "P804",
+   "name": "overflow trial default remains twenty",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "overflow_trials: 5,",
+   "new": "overflow_trials: 20,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P805",
+   "name": "overflow environment default remains twenty",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "count(values, \"EZSDR_MEASURE_OVERFLOW_TRIALS\", 5)?",
+   "new": "count(values, \"EZSDR_MEASURE_OVERFLOW_TRIALS\", 20)?",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P806",
+   "name": "TX throughput accepts any ACK after burst start",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let ack_after_minimum = burst_ack_tick.zip(minimum_ack_tick).is_some_and(|(ack, minimum)| ack >= minimum);",
+   "new": "let ack_after_minimum = burst_ack_tick.zip(burst_start_tick).is_some_and(|(ack, start)| ack >= start);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
   }
  ]

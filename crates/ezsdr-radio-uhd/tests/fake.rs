@@ -635,7 +635,10 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     group.append(measurement::measure_min_timed_command_lead(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_tx_in_flight(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_rx_start_lead(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_tx_start_lead(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_rx_throughput(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_overflow_restart_gap(device.clone(), &plan).unwrap()).unwrap();
+    group.append(measurement::measure_tx_throughput(device.clone(), &plan).unwrap()).unwrap();
     group.append(measurement::measure_full_duplex(device.clone(), &plan).unwrap()).unwrap();
 
     let assert_stage = |stage: &Json, trials: usize| {
@@ -652,9 +655,29 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     assert_stages(&result("provider_min_timed_command_lead")["candidates"], plan.timed_command_leads_ns.len(), plan.step_trials);
     assert_stages(&result("provider_tx_in_flight")["candidates"], plan.in_flight_windows_ns.len(), plan.step_trials);
     assert_stages(&result("provider_rx_start_lead")["candidates"], plan.rx_start_leads_ns.len() * 2, plan.step_trials);
+    assert_stages(&result("provider_tx_start_lead")["candidates"], plan.tx_start_leads_ns.len() * 2, plan.step_trials);
     let throughput: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("provider_rx_throughput_")).collect();
     assert_eq!(throughput.len(), plan.rx_rates_hz.len());
     for row in throughput { assert_stage(&row.result["stage"], 1); }
+    let tx_throughput: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("provider_tx_throughput_")).collect();
+    assert_eq!(tx_throughput.len(), plan.tx_throughput_rates_hz.len());
+    for row in tx_throughput {
+        assert_stage(&row.result["stage"], 1);
+        for key in ["burst_target", "burst_start_tick", "burst_ack_count", "burst_ack_tick", "ack_elapsed_samples", "actual_samples"] {
+            assert!(row.result.contains_key(key), "TX observation omits {key}: {:?}", row.result);
+        }
+    }
+    let overflow = result("provider_overflow_restart_gap");
+    let overflow_rates = overflow["rate_measurements"].as_array().expect("overflow rates are an array");
+    assert_eq!(overflow_rates.len(), plan.overflow_rates_hz.len());
+    for rate in overflow_rates {
+        let trials = rate["trials"].as_array().expect("overflow trials are an array");
+        assert_eq!(trials.len(), plan.overflow_trials);
+        assert!(trials.iter().all(|row| row["class"].as_str().is_some_and(|class| !class.is_empty())));
+        assert!(rate.get("maximum_restart_after_resume_ns").is_some());
+        assert!(trials.iter().all(|row| row.get("restart_after_resume_ns").is_some()
+            && row.get("restart_after_resume_reason").is_some() && row.get("gaps").is_some()));
+    }
     let duplex = result("provider_full_duplex")["trials"].as_array().unwrap();
     assert_eq!(duplex.len(), plan.loopback_trials);
     assert!(duplex.iter().all(|row| row["class"].as_str().is_some_and(|class| !class.is_empty())));
@@ -662,9 +685,11 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     let measured_keys: std::collections::BTreeSet<_> = group.values.iter().map(|row| match row {
         ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
     }).collect();
+    assert!(!measured_keys.contains("radio.timing.overflow_restart_gap_ns"), "overflow contributes observations but no value row");
     assert_eq!(measured_keys, [
-        "radio.full_duplex", "radio.hardware_time", "radio.perf.rx_bytes_per_s",
-        "radio.timing.min_timed_command_lead_ns", "radio.timing.rx_start_lead_ns", "radio.timing.tx_in_flight_ns",
+        "radio.full_duplex", "radio.hardware_time", "radio.perf.rx_bytes_per_s", "radio.perf.tx_bytes_per_s",
+        "radio.timing.min_timed_command_lead_ns", "radio.timing.rx_start_lead_ns",
+        "radio.timing.tx_in_flight_ns", "radio.timing.tx_start_lead_ns",
     ].into_iter().map(str::to_owned).collect());
 
     let dir = TempDir::new();
@@ -676,6 +701,9 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
         group, &description,
     ).unwrap();
     assert!(record.values.iter().all(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if !reason.trim().is_empty())));
+    assert!(record.values.iter().any(|row| matches!(row,
+        ezsdr_radio::measurement::ValueRecord::Unmeasured { key, reason }
+            if key.as_str() == "radio.timing.overflow_restart_gap_ns" && reason.contains("pending the first hardware bench reading"))));
     for key in &measured_keys {
         assert!(record.values.iter().any(|row| matches!(row,
             ezsdr_radio::measurement::ValueRecord::Unmeasured { key: found, reason }

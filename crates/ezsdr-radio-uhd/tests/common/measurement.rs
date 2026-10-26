@@ -227,6 +227,8 @@ fn unmeasured_reason(key: &str) -> &'static str {
         | "radio.perf.rx_bytes_per_s"
         | "radio.full_duplex"
         | "radio.hardware_time" => "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run.",
+        "radio.timing.tx_start_lead_ns" | "radio.perf.tx_bytes_per_s" => "Not measured in this record; the Phase 8 stage 3c-1 hardware measurement has not been run.",
+        "radio.timing.overflow_restart_gap_ns" => "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision.",
         _ => "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required.",
     }
 }
@@ -628,8 +630,14 @@ pub struct MeasurementPlan {
     pub timed_command_leads_ns: Vec<u64>,
     pub in_flight_windows_ns: Vec<u64>,
     pub rx_start_leads_ns: Vec<u64>,
+    pub tx_start_leads_ns: Vec<u64>,
     pub rx_rates_hz: Vec<u64>,
+    pub tx_throughput_rates_hz: Vec<u64>,
+    pub overflow_rates_hz: Vec<u64>,
+    pub overflow_stall_ms: Vec<u64>,
+    pub overflow_after_ms: u64,
     pub step_trials: usize,
+    pub overflow_trials: usize,
     pub throughput_seconds: u64,
     pub loopback_trials: usize,
     pub interval_ns: u64,
@@ -641,8 +649,16 @@ impl Default for MeasurementPlan {
             timed_command_leads_ns: vec![500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
             in_flight_windows_ns: vec![250_000, 500_000, 1_000_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
             rx_start_leads_ns: vec![1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
+            tx_start_leads_ns: vec![1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
             rx_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
+            tx_throughput_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
+            overflow_rates_hz: vec![1_000_000, 10_000_000, 25_000_000, 50_000_000],
+            // INFERRED from the 50 MB receive socket buffer: each stall exceeds its
+            // approximate fill time at the configured wire rate (RM-17, bench B5).
+            overflow_stall_ms: vec![20_000, 2_000, 1_000, 500],
+            overflow_after_ms: 500,
             step_trials: 100,
+            overflow_trials: 5,
             throughput_seconds: 60,
             loopback_trials: 20,
             interval_ns: 20_000_000,
@@ -657,8 +673,14 @@ impl MeasurementPlan {
             timed_command_leads_ns: vec![1_000_000, 2_000_000],
             in_flight_windows_ns: vec![1_000_000, 2_000_000],
             rx_start_leads_ns: vec![1_000_000, 2_000_000],
+            tx_start_leads_ns: vec![1_000_000],
             rx_rates_hz: vec![390_625],
+            tx_throughput_rates_hz: vec![390_625],
+            overflow_rates_hz: vec![1_000_000],
+            overflow_stall_ms: vec![300],
+            overflow_after_ms: 200,
             step_trials: 1,
+            overflow_trials: 1,
             throughput_seconds: 1,
             loopback_trials: 1,
             interval_ns: 20_000_000,
@@ -671,20 +693,27 @@ impl MeasurementPlan {
             ("timed command lead", &self.timed_command_leads_ns),
             ("in-flight window", &self.in_flight_windows_ns),
             ("receive start lead", &self.rx_start_leads_ns),
+            ("transmit start lead", &self.tx_start_leads_ns),
             ("receive rate", &self.rx_rates_hz),
+            ("transmit throughput rate", &self.tx_throughput_rates_hz),
+            ("overflow rate", &self.overflow_rates_hz),
         ];
         for (name, values) in candidates {
             if values.is_empty() || values.contains(&0) || values.windows(2).any(|pair| pair[0] >= pair[1]) {
                 return Err(format!("{name} candidates must be nonempty, positive and strictly ascending"));
             }
         }
-        if self.step_trials == 0 || self.throughput_seconds == 0 || self.loopback_trials == 0 || self.interval_ns == 0 {
+        if self.overflow_stall_ms.len() != self.overflow_rates_hz.len() || self.overflow_stall_ms.contains(&0) || self.overflow_after_ms == 0 {
+            return Err("overflow rates need one positive stall duration each and a positive pre-stall interval".to_owned());
+        }
+        if self.step_trials == 0 || self.overflow_trials == 0 || self.throughput_seconds == 0 || self.loopback_trials == 0 || self.interval_ns == 0 {
             return Err("measurement counts and inter-trial interval must be positive".to_owned());
         }
         let step_observations = [
             self.timed_command_leads_ns.len(),
             self.in_flight_windows_ns.len(),
             self.rx_start_leads_ns.len().checked_mul(2).ok_or("receive-start stage count overflow")?,
+            self.tx_start_leads_ns.len().checked_mul(2).ok_or("transmit-start stage count overflow")?,
         ];
         for stages in step_observations {
             if stages.checked_mul(self.step_trials).is_none_or(|trials| trials > u32::MAX as usize) {
@@ -694,13 +723,19 @@ impl MeasurementPlan {
         if self.rx_rates_hz.len() > u32::MAX as usize {
             return Err("receive-throughput observation count exceeds the record's u32 trial limit".to_owned());
         }
+        if self.tx_throughput_rates_hz.len() > u32::MAX as usize {
+            return Err("transmit-throughput observation count exceeds the record's u32 trial limit".to_owned());
+        }
+        if self.overflow_rates_hz.len().checked_mul(self.overflow_trials).is_none_or(|trials| trials > u32::MAX as usize) {
+            return Err("overflow observation exceeds the record's u32 trial limit".to_owned());
+        }
         if self.loopback_trials > u32::MAX as usize {
             return Err("EZSDR_MEASURE_LOOPBACK_TRIALS exceeds the record's u32 trial limit".to_owned());
         }
         Ok(())
     }
 
-    /// Parses the three supported count overrides without consulting global state.
+    /// Parses the four supported count overrides without consulting global state.
     pub fn from_env(values: &BTreeMap<String, String>) -> Result<MeasurementPlan, String> {
         fn count(values: &BTreeMap<String, String>, name: &str, default: u64) -> Result<u64, String> {
             let Some(value) = values.get(name) else { return Ok(default) };
@@ -710,6 +745,7 @@ impl MeasurementPlan {
         }
         let plan = MeasurementPlan {
             step_trials: usize::try_from(count(values, "EZSDR_MEASURE_STEP_TRIALS", 100)?).map_err(|_| "EZSDR_MEASURE_STEP_TRIALS is too large".to_owned())?,
+            overflow_trials: usize::try_from(count(values, "EZSDR_MEASURE_OVERFLOW_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_OVERFLOW_TRIALS is too large".to_owned())?,
             throughput_seconds: count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
             loopback_trials: usize::try_from(count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
             ..MeasurementPlan::default()
@@ -720,7 +756,7 @@ impl MeasurementPlan {
 
     /// Reads only the documented environment variables and validates before opening a device.
     pub fn process_env() -> Result<MeasurementPlan, String> {
-        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"];
+        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"];
         let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
         MeasurementPlan::from_env(&values)
     }
@@ -778,6 +814,7 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
         "min_timed_command_lead_ns" => timing.min_timed_command_lead_ns = value,
         "tx_in_flight_ns" => timing.tx_in_flight_ns = value,
         "rx_start_lead_ns" => timing.rx_start_lead_ns = value,
+        "tx_start_lead_ns" => timing.tx_start_lead_ns = value,
         _ => return Err(format!("unsupported candidate timing field `{field}`")),
     }
     Ok(timing)
@@ -1089,6 +1126,458 @@ pub fn measure_rx_start_lead(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
     })
 }
 
+fn tx_start_specs() -> [(u64, u64, &'static str); 2] {
+    [(1_000_000, 2_000_000, "tx-cold-1msps-2msps"), (390_625, 1_000_000, "tx-cold-390625-1msps")]
+}
+
+fn tx_rate_condition(id: &str, rate_hz: u64) -> Condition {
+    Condition { id: id.to_owned(), streams: vec![stream_condition(Direction::Tx, 0, vec![0], rate_hz as f64)], concurrent: vec![], reopened: false }
+}
+
+fn clock_rate_matches(clock: &SampleClockRecord, rate_hz: u64) -> bool {
+    u128::from(clock.nominal_rate.num()) == u128::from(rate_hz) * u128::from(clock.nominal_rate.den())
+}
+
+fn tx_switch_at(timing: &Json, origin: i64) -> Option<i64> {
+    let mut rows = timing.as_array()?.iter().filter(|row| row["what"] == "tx_switch" && row["origin"].as_i64() == Some(origin));
+    let at = rows.next()?.get("at")?.as_i64()?;
+    rows.next().is_none().then_some(at)
+}
+
+fn tx_start_trial_class(trial: &TrialEvidence, timing: &Json, origin: Option<i64>) -> (TrialClass, Option<i64>) {
+    let mut completion = trial.clone();
+    completion.expected_samples = 0;
+    completion.completion = TrialCompletion::ReceiveCapture;
+    completion.record = Some(TrialRecord { samples: 0, end_tick: 0 });
+    let class = classify_trial(&completion);
+    if class != TrialClass::Success { return (class, origin.and_then(|origin| tx_switch_at(timing, origin))); }
+    let Some(origin) = origin else { return (TrialClass::Incomplete, None) };
+    let at = tx_switch_at(timing, origin);
+    (if at.is_some_and(|at| at < origin) { TrialClass::Success } else { TrialClass::Incomplete }, at)
+}
+
+fn tx_start_candidate_stage_json(
+    condition: &str,
+    value: u64,
+    rate_pair_hz: (u64, u64),
+    master_clock_hz: u64,
+    trials: &[TrialClass],
+    transitions: &[[u64; 2]],
+    segments: &[(Option<i64>, Option<i64>)],
+) -> Json {
+    let effective_leads_ns: Vec<_> = segments.iter().map(|(origin, at)| {
+        origin.and_then(|origin| at.and_then(|at| i64::try_from((i128::from(origin) - i128::from(at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()))
+    }).collect();
+    let mut stage = candidate_stage_json(condition, value, trials, &effective_leads_ns);
+    stage["tx_rate_pair_hz"] = json!([rate_pair_hz.0, rate_pair_hz.1]);
+    stage["initial_tx_rate_hz"] = json!(transitions.first().map(|pair| pair[0]));
+    stage["trial_transitions_hz"] = json!(transitions);
+    stage["segment_starts"] = json!(segments.iter().enumerate().map(|(index, (origin, at))| json!({
+        "trial": index, "origin_tick": origin, "at_tick": at,
+        "start_lead_ns": origin.and_then(|origin| at.and_then(|at| i64::try_from((i128::from(origin) - i128::from(at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok())),
+        "at_before_origin": origin.zip(*at).map(|(origin, at)| at < origin),
+    })).collect::<Vec<_>>());
+    stage["burst_criterion"] = json!("omitted: the test thread must reserve the burst after the new SampleClock is registered, which can be too close to the origin at the 1 ms candidate; tx_switch.at records configuration completion and clock adoption, not that a transmitted burst started; the measurement uses tx_switch.at < origin and error-free evidence");
+    stage
+}
+
+fn tx_start_value(
+    summary: &CandidateSummary,
+    candidates: &BTreeMap<String, Vec<CandidateStage>>,
+    required_trials: usize,
+    test: &str,
+) -> Result<ValueRecord, String> {
+    numeric_value("radio.timing.tx_start_lead_ns", summary, candidates, required_trials, test)
+}
+
+fn summarize_tx_start_lead(candidates: &BTreeMap<String, Vec<CandidateStage>>, required_trials: usize) -> Result<CandidateSummary, String> {
+    summarize_candidates(SummaryMode::MinimumLead, candidates, required_trials)
+}
+
+/// Provider-path transmit cold-change start-lead sweep across both rate pairs (UR-25).
+pub fn measure_tx_start_lead(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let mut conditions = Vec::new();
+    let mut candidates = BTreeMap::new();
+    let mut observed = Vec::new();
+    let mut total = 0usize;
+    for (from_rate, to_rate, condition) in tx_start_specs() {
+        conditions.push(tx_rate_condition(condition, from_rate));
+        let mut stages = Vec::new();
+        for value in &plan.tx_start_leads_ns {
+            let (mut run, _dir) = candidate_session(device.clone(), candidate_timing("tx_start_lead_ns", *value)?)?;
+            disable_rx(&mut run)?;
+            enable_tx(&mut run)?;
+            let initial_clock = stream_clock(&run, Direction::Tx)?;
+            if !clock_rate_matches(&initial_clock, 1_000_000) {
+                return Err("TX start-lead measurement requires the X3xx bench profile's 1 MS/s initial TX rate".to_owned());
+            }
+            let mut current_rate = 1_000_000;
+            let mut plans: Vec<TrialPlan> = Vec::new();
+            let mut origins = Vec::new();
+            let mut transitions = Vec::new();
+            for _ in 0..plan.step_trials {
+                let next_rate = if current_rate == from_rate { to_rate } else { from_rate };
+                if current_rate != from_rate && current_rate != to_rate {
+                    return Err(format!("TX start-lead condition {condition} is not at either candidate rate"));
+                }
+                let previous = stream_clock(&run, Direction::Tx)?;
+                let entry = run.submit(super::set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(next_rate as f64).ok_or("invalid transmit rate")?), None)
+                    .map_err(|error| error.to_string())?;
+                let admitted = super::admitted(&entry);
+                let clock = if admitted {
+                    run.sample_clocks().into_iter().rev().find(|clock| {
+                        clock.stream == previous.stream && clock.domain != previous.domain && clock.ended_at.is_none()
+                    })
+                } else {
+                    None
+                };
+                if let Some(clock) = &clock {
+                    if clock.root != previous.root || !clock_rate_matches(clock, next_rate) {
+                        return Err(format!("TX cold rate change registered an invalid SampleClock for {next_rate} Hz"));
+                    }
+                }
+                let origin = clock.as_ref().map(|clock| clock.origin.ticks_in(clock.root).map_err(|error| error.to_string())).transpose()?;
+                let (root, receipt) = root_now(&run)?;
+                if root != previous.root { return Err("TX cold rate change changed the Run root clock".to_owned()); }
+                let start_tick = entry.time.ticks_in(root).map_err(|error| error.to_string())?;
+                let interval = ticks_for_ns(plan.interval_ns, device.master_clock_rate())?;
+                let end_tick = origin.unwrap_or(receipt).max(receipt).checked_add(interval).ok_or("TX start trial end overflow")?;
+                if let Some(previous) = plans.last_mut() { previous.end_tick = start_tick; }
+                plans.push(TrialPlan {
+                    start_tick, end_tick, admitted, expected_target: None, expected_samples: 0,
+                    expected_end_tick: 0, booked_tick: Some(start_tick), completion: TrialCompletion::ReceiveCapture,
+                    requires_preemption_evidence: false, capture_index: None, capture_target: None, cold_capture: false,
+                });
+                origins.push(origin);
+                transitions.push([current_rate, next_rate]);
+                advance_root(&mut run, root, end_tick)?;
+                if origin.is_some() { current_rate = next_rate; }
+            }
+            let manifest = run.finish();
+            let evidence = evidence_from_manifest(&manifest, &plans)?;
+            let timing = manifest.section(&super::usrp(), "ezsdr.radio.uhd.timing").ok_or("TX start-lead Run has no timing section")?;
+            let mut classes = Vec::new();
+            let mut starts = Vec::new();
+            for (trial, origin) in evidence.iter().zip(&origins) {
+                let (class, at) = tx_start_trial_class(trial, timing, *origin);
+                classes.push(class);
+                starts.push(at);
+            }
+            let segments: Vec<_> = origins.iter().copied().zip(starts.iter().copied()).collect();
+            observed.push(tx_start_candidate_stage_json(condition, *value, (from_rate, to_rate), device.master_clock_rate(), &classes, &transitions, &segments));
+            stages.push(CandidateStage { value: *value, trials: classes });
+            total += plan.step_trials;
+        }
+        candidates.insert(condition.to_owned(), stages);
+    }
+    let summary = summarize_tx_start_lead(&candidates, plan.step_trials)?;
+    let measured = tx_start_value(&summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup {
+        conditions, values: vec![measured],
+        observations: vec![observation("provider_tx_start_lead", "tests/hardware.rs::hw_measurements_record", None, observation_trials(total)?, json!({
+            "interval_ns": plan.interval_ns,
+            "rate_pairs_hz": tx_start_specs().iter().map(|(from, to, _)| [from, to]).collect::<Vec<_>>(),
+            "candidates": observed,
+        }))?],
+    })
+}
+
+#[derive(Clone, Debug)]
+struct OverflowGap {
+    cause: String,
+    start_sample: Option<i64>,
+    len: u64,
+    lost: Option<u64>,
+    nanoseconds: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct OverflowRestartEstimate {
+    gap_end_sample: Option<i64>,
+    reader_resume_sample: Option<i64>,
+    nanoseconds: Option<u64>,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct OverflowTrialEvidence {
+    class: TrialClass,
+    overflow_count: usize,
+    overflow_causes: Vec<String>,
+    payload_lost: Vec<Option<u64>>,
+    gaps: Vec<OverflowGap>,
+    gap_ns: Option<u64>,
+    restart_after_resume: OverflowRestartEstimate,
+    sample_clock_rate_matches: bool,
+}
+
+fn samples_to_ns_ceil(samples: u64, rate_hz: u64) -> Option<u64> {
+    if rate_hz == 0 { return None; }
+    u64::try_from((u128::from(samples) * 1_000_000_000).div_ceil(u128::from(rate_hz))).ok()
+}
+
+fn restart_after_resume_estimate(
+    first_sample: i64,
+    gap_start_sample: i64,
+    gap_len: u64,
+    rate_hz: u64,
+    after_ms: u64,
+    stall_ms: u64,
+) -> OverflowRestartEstimate {
+    let unavailable = |reason: String, gap_end_sample, reader_resume_sample| OverflowRestartEstimate {
+        gap_end_sample, reader_resume_sample, nanoseconds: None, reason: Some(reason),
+    };
+    let Some(duration_ms) = after_ms.checked_add(stall_ms) else {
+        return unavailable("reader-resume estimate duration overflow".to_owned(), None, None);
+    };
+    let Some(resume_offset) = u128::from(rate_hz).checked_mul(u128::from(duration_ms)).map(|samples| samples.div_ceil(1_000))
+        .and_then(|samples| i64::try_from(samples).ok()) else {
+        return unavailable("reader-resume estimate sample conversion overflow".to_owned(), None, None);
+    };
+    let Some(gap_end_sample) = i64::try_from(gap_len).ok().and_then(|len| gap_start_sample.checked_add(len)) else {
+        return unavailable("overflow gap end sample overflow".to_owned(), None, None);
+    };
+    let Some(reader_resume_sample) = first_sample.checked_add(resume_offset) else {
+        return unavailable("reader-resume estimate sample overflow".to_owned(), Some(gap_end_sample), None);
+    };
+    let Some(restart_samples) = gap_end_sample.checked_sub(reader_resume_sample) else {
+        return unavailable("restart-after-resume sample difference overflow".to_owned(), Some(gap_end_sample), Some(reader_resume_sample));
+    };
+    if restart_samples < 0 {
+        // The stall starts after the first block is received, so this early estimate overstates restart-after-resume.
+        return unavailable(
+            format!("gap ends {0} samples before the estimated reader resume", restart_samples.unsigned_abs()),
+            Some(gap_end_sample), Some(reader_resume_sample),
+        );
+    }
+    match samples_to_ns_ceil(restart_samples as u64, rate_hz) {
+        Some(nanoseconds) => OverflowRestartEstimate {
+            gap_end_sample: Some(gap_end_sample), reader_resume_sample: Some(reader_resume_sample),
+            nanoseconds: Some(nanoseconds), reason: None,
+        },
+        None => unavailable("restart-after-resume time conversion overflow".to_owned(), Some(gap_end_sample), Some(reader_resume_sample)),
+    }
+}
+
+fn extract_overflow_trial(
+    events: &Json,
+    artifacts: &Json,
+    clocks: &[SampleClockRecord],
+    rate_hz: u64,
+    after_ms: u64,
+    stall_ms: u64,
+) -> OverflowTrialEvidence {
+    let overflow_rows: Vec<_> = events.as_array().into_iter().flatten()
+        .filter(|event| event["kind"] == "radio.RX_OVERFLOW").collect();
+    let payloads: Vec<_> = overflow_rows.iter().map(|event| {
+        ezsdr_radio::payloads::RxOverflowPayload::from_payload(&event["payload"]).ok()
+    }).collect();
+    let overflow_causes = payloads.iter().map(|payload| match payload.map(|payload| payload.cause) {
+        Some(ezsdr_radio::payloads::RxOverflowCause::Overrun) => "overrun",
+        Some(ezsdr_radio::payloads::RxOverflowCause::Sequence) => "sequence",
+        None => "invalid",
+    }.to_owned()).collect();
+    let payload_lost: Vec<_> = payloads.iter().map(|payload| payload.map(|payload| payload.lost)).collect();
+    let artifacts_for_capture = artifacts["rec"].as_array();
+    let one_complete_capture = artifacts_for_capture.is_some_and(|rows| rows.len() == 1 && rows[0]["partial"] == false);
+    let maps = artifacts_for_capture.and_then(|rows| rows.first()).and_then(|artifact| artifact["continuity"].as_array());
+    let mut gaps = Vec::new();
+    if let Some(maps) = maps {
+        for map in maps {
+            let map_domain = serde_json::from_value::<ClockDomainId>(map["domain"].clone()).ok();
+            for gap in map["gaps"].as_array().into_iter().flatten() {
+                let len = gap["len"].as_u64().unwrap_or_default();
+                let cause = gap["cause"]["kind"].as_str().unwrap_or("invalid").to_owned();
+                let start_sample = map_domain.and_then(|domain| {
+                    serde_json::from_value::<TimePoint>(gap["start"].clone()).ok()
+                        .filter(|start| start.domain() == domain)
+                        .and_then(|start| start.ticks_in(domain).ok())
+                });
+                gaps.push(OverflowGap {
+                    cause, start_sample,
+                    len,
+                    lost: gap["lost"].as_u64(),
+                    nanoseconds: samples_to_ns_ceil(len, rate_hz),
+                });
+            }
+        }
+    }
+    let rate_matches = clocks.iter().filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"))
+        .collect::<Vec<_>>().as_slice().first().is_some_and(|clock| {
+            clocks.iter().filter(|candidate| candidate.stream.to_string().ends_with("usrp/rx/s0")).count() == 1
+                && clock_rate_matches(clock, rate_hz)
+        });
+    let overflow_gaps: Vec<_> = gaps.iter().filter(|gap| gap.cause == "overflow_restart").collect();
+    let capture_first_sample = maps.and_then(|maps| {
+        if maps.len() != 1 { return None; }
+        let map = &maps[0];
+        let domain = serde_json::from_value::<ClockDomainId>(map["domain"].clone()).ok()?;
+        let first = serde_json::from_value::<TimePoint>(map["first"].clone()).ok()?;
+        (first.domain() == domain).then(|| first.ticks_in(domain).ok()).flatten()
+    });
+    let restart_after_resume = match (capture_first_sample, overflow_gaps.as_slice()) {
+        (Some(first), [gap]) => gap.start_sample.map_or_else(
+            || OverflowRestartEstimate {
+                gap_end_sample: None, reader_resume_sample: None, nanoseconds: None,
+                reason: Some("overflow gap has no sample-clock start".to_owned()),
+            },
+            |start| restart_after_resume_estimate(first, start, gap.len, rate_hz, after_ms, stall_ms),
+        ),
+        _ => OverflowRestartEstimate {
+            gap_end_sample: None, reader_resume_sample: None, nanoseconds: None,
+            reason: Some("restart estimate needs one capture map and one overflow_restart gap".to_owned()),
+        },
+    };
+    let valid = one_complete_capture
+        && maps.is_some_and(|maps| maps.len() == 1)
+        && rate_matches
+        && overflow_rows.len() == 1
+        && payloads.first().is_some_and(|payload| payload.is_some_and(|payload| payload.cause == ezsdr_radio::payloads::RxOverflowCause::Overrun))
+        && overflow_gaps.len() == 1
+        && overflow_gaps[0].len > 0
+        && overflow_gaps[0].lost == Some(overflow_gaps[0].len)
+        && payload_lost.first().copied().flatten() == Some(overflow_gaps[0].len);
+    OverflowTrialEvidence {
+        class: if valid { TrialClass::Success } else { TrialClass::Incomplete },
+        overflow_count: overflow_rows.len(), overflow_causes, payload_lost,
+        gap_ns: valid.then(|| overflow_gaps[0].nanoseconds).flatten(), gaps,
+        restart_after_resume,
+        sample_clock_rate_matches: rate_matches,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OverflowSummary {
+    worst_gap_ns: Option<u64>,
+    limiting_rate_hz: Option<u64>,
+    maximum_restart_after_resume_ns: Option<u64>,
+    maximum_restart_rate_hz: Option<u64>,
+    maximum_restart_by_rate: BTreeMap<u64, Option<u64>>,
+    successful_by_rate: BTreeMap<u64, usize>,
+    unmeasured_reason: Option<String>,
+}
+
+fn summarize_overflow_gaps(candidates: &BTreeMap<u64, Vec<OverflowTrialEvidence>>, required_trials: usize) -> Result<OverflowSummary, String> {
+    if candidates.is_empty() { return Err("at least one overflow rate is required".to_owned()); }
+    if required_trials == 0 { return Err("required overflow trials must be positive".to_owned()); }
+    let mut successful_by_rate = BTreeMap::new();
+    let mut maximum = None::<(u64, u64)>;
+    let mut maximum_restart = None::<(u64, u64)>;
+    let mut maximum_restart_by_rate = BTreeMap::new();
+    let mut insufficient = Vec::new();
+    for (rate, trials) in candidates {
+        if *rate == 0 || trials.is_empty() { return Err("overflow rates and trial lists must be nonempty and positive".to_owned()); }
+        let successful: Vec<_> = trials.iter().filter(|trial| trial.class == TrialClass::Success).collect();
+        successful_by_rate.insert(*rate, successful.len());
+        if successful.len() < required_trials {
+            insufficient.push(format!("{rate} Hz: {} complete overflow trials, need {required_trials}", successful.len()));
+        }
+        let mut rate_restart_maximum = None;
+        for trial in successful {
+            if let Some(gap_ns) = trial.gap_ns {
+                if maximum.is_none_or(|(_, current)| gap_ns > current) { maximum = Some((*rate, gap_ns)); }
+            }
+            if let Some(restart_ns) = trial.restart_after_resume.nanoseconds {
+                if rate_restart_maximum.is_none_or(|current| restart_ns > current) { rate_restart_maximum = Some(restart_ns); }
+                if maximum_restart.is_none_or(|(_, current)| restart_ns > current) { maximum_restart = Some((*rate, restart_ns)); }
+            }
+        }
+        maximum_restart_by_rate.insert(*rate, rate_restart_maximum);
+    }
+    let (worst_gap_ns, limiting_rate_hz) = maximum.map_or((None, None), |(rate, gap)| (Some(gap), Some(rate)));
+    let (maximum_restart_after_resume_ns, maximum_restart_rate_hz) =
+        maximum_restart.map_or((None, None), |(rate, gap)| (Some(gap), Some(rate)));
+    Ok(OverflowSummary {
+        worst_gap_ns, limiting_rate_hz, maximum_restart_after_resume_ns, maximum_restart_rate_hz,
+        maximum_restart_by_rate, successful_by_rate,
+        unmeasured_reason: (!insufficient.is_empty()).then(|| format!("Insufficient complete overflow trials: {}.", insufficient.join("; "))),
+    })
+}
+
+fn overflow_wait_ms(after_ms: u64, stall_ms: u64) -> Result<u64, String> {
+    let stall_recovery_ms = stall_ms.checked_mul(2).ok_or("overflow Run horizon overflow")?;
+    2_000u64.checked_add(after_ms).and_then(|ms| ms.checked_add(stall_recovery_ms)).and_then(|ms| ms.checked_add(500))
+        .ok_or_else(|| "overflow Run horizon overflow".to_owned())
+}
+
+fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall_ms: u64) -> Result<Manifest, String> {
+    let capture_ms = after_ms.checked_add(stall_ms).and_then(|ms| ms.checked_add(250)).ok_or("overflow capture duration overflow")?;
+    let samples = (u128::from(rate_hz) * u128::from(capture_ms)).div_ceil(1_000);
+    let samples = i64::try_from(samples).map_err(|_| "overflow capture sample count exceeds i64".to_owned())?;
+    let dir = super::TempDir::new();
+    let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+    let spec = super::receive_spec(1, rate_hz as f64, super::bench_hz(&*device), Some(samples));
+    let mut run = super::start_spec_run(&spec, &doc, super::assembly(&doc, device.clone(), BTreeMap::new(), |radio| {
+        radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms))
+    })).map_err(|error| error.to_string())?;
+    let wait_ms = overflow_wait_ms(after_ms, stall_ms)?;
+    let wait_ns = wait_ms.checked_mul(1_000_000).ok_or("overflow Run horizon overflow")?;
+    let (root, now) = root_now(&run)?;
+    let horizon = now.checked_add(ticks_for_ns(wait_ns, device.master_clock_rate())?).ok_or("overflow Run horizon overflow")?;
+    advance_root(&mut run, root, horizon)?;
+    Ok(run.finish())
+}
+
+/// Provider-path overflow restart-gap measurement, retaining non-overflowing trials as failures (RM-17).
+pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let mut by_rate = BTreeMap::new();
+    let mut conditions = Vec::new();
+    let mut total = 0usize;
+    for (rate_hz, stall_ms) in plan.overflow_rates_hz.iter().zip(&plan.overflow_stall_ms) {
+        let condition = rate_condition(*rate_hz);
+        conditions.push(rx_condition(&condition, *rate_hz as f64));
+        let mut trials = Vec::new();
+        for _ in 0..plan.overflow_trials {
+            let manifest = overflow_manifest(device.clone(), *rate_hz, plan.overflow_after_ms, *stall_ms)?;
+            let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
+            let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
+            let evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, *rate_hz,
+                plan.overflow_after_ms, *stall_ms);
+            trials.push(evidence);
+        }
+        total += plan.overflow_trials;
+        by_rate.insert(*rate_hz, trials);
+    }
+    let summary = summarize_overflow_gaps(&by_rate, plan.overflow_trials)?;
+    let rate_observations: Vec<_> = by_rate.iter().map(|(rate, trials)| json!({
+        "rate_hz": rate,
+        "after_ms": plan.overflow_after_ms,
+        "stall_ms": plan.overflow_stall_ms[plan.overflow_rates_hz.iter().position(|candidate| candidate == rate).unwrap()],
+        "successful_trials": summary.successful_by_rate.get(rate),
+            "required_successful_trials": plan.overflow_trials,
+            "maximum_restart_after_resume_ns": summary.maximum_restart_by_rate.get(rate),
+            "trials": trials.iter().enumerate().map(|(index, trial)| json!({
+                "trial": index, "class": trial_class_name(trial.class),
+                "overflow_count": trial.overflow_count, "overflow_causes": trial.overflow_causes,
+                "payload_lost": trial.payload_lost, "sample_clock_rate_matches": trial.sample_clock_rate_matches,
+                "restart_after_resume_ns": trial.restart_after_resume.nanoseconds,
+                "restart_after_resume_reason": trial.restart_after_resume.reason,
+                "gap_end_sample": trial.restart_after_resume.gap_end_sample,
+                "estimated_reader_resume_sample": trial.restart_after_resume.reader_resume_sample,
+                "gaps": trial.gaps.iter().map(|gap| json!({ "cause": gap.cause, "len_samples": gap.len, "lost": gap.lost, "gap_ns": gap.nanoseconds })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+    })).collect();
+    Ok(MeasurementGroup {
+        conditions, values: vec![],
+        observations: vec![observation("provider_overflow_restart_gap", "tests/hardware.rs::hw_measurements_record", None,
+            observation_trials(total)?, json!({
+                "after_ms": plan.overflow_after_ms,
+                "gap_rule": "gap_ns = ceil(lost_samples * 1e9 / sample_rate_hz)",
+                "gap_scope": "the full RM-17 continuity gap includes loss during the configured reader stall and socket-backlog drain; it is not UHD recovery time alone",
+                "restart_after_resume_rule": "restart_after_resume_ns = ceil((gap_end_sample - ceil(capture_first_sample + (after_ms + stall_ms) * rate_hz / 1000)) * 1e9 / rate_hz); negative results are null",
+                "restart_after_resume_interpretation": "INFERRED: the stall begins after the host receives the first block, so the estimated resume sample is early and this value is high-side; it includes draining buffered samples",
+                "maximum_gap_ns": summary.worst_gap_ns,
+                "maximum_rate_hz": summary.limiting_rate_hz,
+                "maximum_restart_after_resume_ns": summary.maximum_restart_after_resume_ns,
+                "maximum_restart_rate_hz": summary.maximum_restart_rate_hz,
+                "unmeasured_reason": summary.unmeasured_reason,
+                "rate_measurements": rate_observations,
+            }))?],
+    })
+}
+
 fn rate_condition(rate_hz: u64) -> String {
     if rate_hz % 1_000_000 == 0 { format!("rx-{}msps", rate_hz / 1_000_000) } else { format!("rx-{rate_hz}hz") }
 }
@@ -1158,6 +1647,191 @@ fn capacity_value(summary: &CandidateSummary, rates_hz: &[u64], stages: &[Candid
             key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No receive-throughput candidate completed a full successful trial.".to_owned()),
         }),
     }
+}
+
+fn tx_rate_id(rate_hz: u64) -> String {
+    if rate_hz % 1_000_000 == 0 { format!("tx-{}msps", rate_hz / 1_000_000) } else { format!("tx-{rate_hz}hz") }
+}
+
+fn tx_bytes_per_second(rate_hz: u64, wire_bytes_per_sample: u64) -> Result<u64, String> {
+    rate_hz.checked_mul(wire_bytes_per_sample).ok_or_else(|| "transmit bytes per second overflow".to_owned())
+}
+
+fn tx_capacity_value(summary: &CandidateSummary, rates_hz: &[u64], stages: &[CandidateStage], test: &str) -> Result<ValueRecord, String> {
+    let key = Key::parse("radio.perf.tx_bytes_per_s").map_err(|error| error.to_string())?;
+    match summary.worst {
+        Some(bytes) => {
+            let (rate, stage) = rates_hz.iter().zip(stages).find(|(_, stage)| stage.value == bytes).ok_or("selected transmit-throughput candidate has no rate")?;
+            Ok(ValueRecord::Measured {
+                key, worst: model::Worst::Number(bytes as f64), trials: observation_trials(stage.trials.len())?,
+                condition: tx_rate_id(*rate), test: test.to_owned(),
+            })
+        }
+        None => Ok(ValueRecord::Unmeasured {
+            key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No transmit-throughput candidate completed a full successful trial.".to_owned()),
+        }),
+    }
+}
+
+fn summarize_tx_throughput(stages: &[CandidateStage]) -> Result<CandidateSummary, String> {
+    summarize_candidates(SummaryMode::Capacity, &BTreeMap::from([("tx-throughput".to_owned(), stages.to_vec())]), 1)
+}
+
+#[derive(Clone, Debug)]
+struct TxThroughputEvidence {
+    class: TrialClass,
+    actual_samples: Option<u64>,
+    burst_count: usize,
+    burst_target: Option<TimePoint>,
+    burst_start_tick: Option<i64>,
+    burst_target_matches_schedule: bool,
+    burst_ack_count: usize,
+    burst_ack_tick: Option<i64>,
+    minimum_ack_tick: Option<i64>,
+    ack_elapsed_ticks: Option<i64>,
+    ack_elapsed_samples: Option<u64>,
+    minimum_samples: Option<u64>,
+    tx_samples_minus_ack_elapsed_samples: Option<i64>,
+    underflow_events: usize,
+    async_failures: Vec<String>,
+    short_send_rejections: Vec<String>,
+}
+
+struct TxThroughputInput<'a> {
+    stats: &'a Json,
+    async_reports: &'a Json,
+    events: &'a Json,
+    bursts: &'a Json,
+    rejected: &'a Json,
+    clocks: &'a [SampleClockRecord],
+    scheduled_target: TimePoint,
+    rate_hz: u64,
+    master_clock_hz: u64,
+    duration_secs: u64,
+}
+
+fn samples_for_root_ticks(ticks: i64, rate_hz: u64, master_clock_hz: u64) -> Option<u64> {
+    if ticks < 0 || master_clock_hz == 0 { return None; }
+    let samples = u128::try_from(ticks).ok()?.checked_mul(u128::from(rate_hz))? / u128::from(master_clock_hz);
+    u64::try_from(samples).ok()
+}
+
+fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence {
+    let TxThroughputInput { stats, async_reports, events, bursts, rejected, clocks, scheduled_target, rate_hz, master_clock_hz, duration_secs } = input;
+    let actual_samples = stats.get("tx_samples").and_then(Json::as_u64)
+        .or_else(|| stats.get("tx_samples").and_then(Json::as_i64).and_then(|samples| u64::try_from(samples).ok()));
+    let burst_rows = bursts.as_array().cloned().unwrap_or_default();
+    let burst_count = burst_rows.len();
+    let burst = (burst_count == 1).then(|| &burst_rows[0]);
+    let burst_target = burst.and_then(|row| serde_json::from_value::<TimePoint>(row["target"].clone()).ok());
+    let tx_clocks: Vec<_> = clocks.iter().filter(|clock| clock.stream.to_string().ends_with("usrp/tx/s0")).collect();
+    let tx_clock = (tx_clocks.len() == 1).then(|| tx_clocks[0]);
+    let burst_start_tick = burst_target.and_then(|target| {
+        tx_clock.filter(|clock| clock.domain == target.domain()).and_then(|_| point_root_tick(target, clocks).ok())
+    });
+    let burst_target_matches_schedule = burst_target == Some(scheduled_target);
+    let burst_ends_on_stop = burst.is_some_and(|row| serde_json::from_value::<BurstEnd>(row["end"].clone()).ok() == Some(BurstEnd::Stop));
+    let minimum_ack_tick = burst_start_tick.and_then(|start| {
+        duration_secs.checked_mul(master_clock_hz).and_then(|ticks| i64::try_from(ticks).ok()).and_then(|ticks| start.checked_add(ticks))
+    });
+    let minimum_samples = duration_secs.checked_mul(rate_hz);
+    let burst_acks: Vec<_> = async_reports.as_array().into_iter().flatten()
+        .filter(|report| report["code"] == "BurstAck")
+        .map(|report| report["tick"].as_i64()).collect();
+    let burst_ack_count = burst_acks.len();
+    let burst_ack_tick = (burst_ack_count == 1).then(|| burst_acks[0]).flatten();
+    let ack_elapsed_ticks = burst_ack_tick.zip(burst_start_tick).and_then(|(ack, start)| ack.checked_sub(start));
+    let ack_elapsed_samples = ack_elapsed_ticks.and_then(|ticks| samples_for_root_ticks(ticks, rate_hz, master_clock_hz));
+    let tx_samples_minus_ack_elapsed_samples = actual_samples.zip(ack_elapsed_samples).and_then(|(actual, elapsed)| {
+        i64::try_from(i128::from(actual) - i128::from(elapsed)).ok()
+    });
+    let underflow_events = events.as_array().into_iter().flatten().filter(|event| event["kind"] == "radio.TX_UNDERFLOW").count();
+    let async_failures: Vec<_> = async_reports.as_array().into_iter().flatten()
+        .filter_map(|report| report["code"].as_str())
+        .filter(|code| matches!(*code, "Underflow" | "UnderflowInPacket" | "TimeError") || code.starts_with("SeqError"))
+        .map(str::to_owned).collect();
+    let short_send_rejections: Vec<_> = rejected.as_array().into_iter().flatten()
+        .filter_map(|row| row["reason"].as_str())
+        .filter(|reason| reason.contains("short send") || reason.contains("send did not complete"))
+        .map(str::to_owned).collect();
+    let complete_burst = burst_count == 1 && burst_ends_on_stop && burst_target_matches_schedule && burst_start_tick.is_some();
+    let enough_samples = actual_samples.zip(minimum_samples).is_some_and(|(actual, minimum)| actual >= minimum);
+    let ack_after_minimum = burst_ack_tick.zip(minimum_ack_tick).is_some_and(|(ack, minimum)| ack >= minimum);
+    let class = if underflow_events > 0 || !async_failures.is_empty() || !short_send_rejections.is_empty() { TrialClass::DeviceFailure }
+        else if burst_ack_count > 1 || burst_count > 1 { TrialClass::Unattributable }
+        else if !complete_burst || !enough_samples || !ack_after_minimum { TrialClass::Incomplete }
+        else { TrialClass::Success };
+    TxThroughputEvidence {
+        class, actual_samples, burst_count, burst_target, burst_start_tick, burst_target_matches_schedule,
+        burst_ack_count, burst_ack_tick, minimum_ack_tick, ack_elapsed_ticks, ack_elapsed_samples,
+        minimum_samples, tx_samples_minus_ack_elapsed_samples, underflow_events, async_failures, short_send_rejections,
+    }
+}
+
+/// Provider-path transmit capacity sweep over duration-sized repeat Runs (UR-34).
+pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    let dir = super::TempDir::new();
+    let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+    let mut conditions = Vec::new();
+    let mut stages = Vec::new();
+    let mut observations = Vec::new();
+    let wire_bytes = u64::try_from(description(
+        &radio_binding(&doc)?, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms(),
+    )?.performance.wire_bytes_per_sample).map_err(|_| "wire bytes per sample is negative".to_owned())?;
+    for rate in &plan.tx_throughput_rates_hz {
+        let id = tx_rate_id(*rate);
+        let (bytes, waveform) = super::waveform_of(&super::pn(1_000));
+        let run_dir = super::TempDir::new();
+        let profile = super::bench_profile(&*device, &run_dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+        let spec = super::with_burst(
+            super::with_tx(super::receive_spec(0, *rate as f64, super::bench_hz(&*device), None), *rate as f64),
+            &waveform, true, "send_asap_and_flag", 0,
+        );
+        let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
+        let mut run = super::spec_run(&spec, &profile, device.clone(), inputs);
+        let clock = stream_clock(&run, Direction::Tx)?;
+        if !clock_rate_matches(&clock, *rate) { return Err(format!("TX throughput Run declared the wrong SampleClock rate for {rate} Hz")); }
+        let t0 = run.start_instant().ok_or("TX throughput Run has no T0")?;
+        if t0.domain() != clock.root { return Err("TX throughput T0 and SampleClock have different root clocks".to_owned()); }
+        let t0_tick = t0.ticks_in(clock.root).map_err(|error| error.to_string())?;
+        let (scheduled_target, burst_start_root_tick) = sample_at_or_after(&clock, t0_tick)?;
+        let duration_ticks = device.master_clock_rate().checked_mul(plan.throughput_seconds).ok_or("TX throughput duration overflow")?;
+        let horizon = burst_start_root_tick.checked_add(i64::try_from(duration_ticks).map_err(|_| "TX throughput horizon overflow")?)
+            .ok_or("TX throughput horizon overflow")?;
+        advance_root(&mut run, clock.root, horizon)?;
+        let manifest = run.finish();
+        let stats = manifest.section(&super::usrp(), "ezsdr.radio.uhd.stats").ok_or("TX throughput Run has no stats section")?;
+        let async_reports = manifest.section(&super::usrp(), "ezsdr.radio.uhd.async").ok_or("TX throughput Run has no async section")?;
+        let bursts = manifest.section(&super::usrp(), "ezsdr.radio.uhd.bursts").ok_or("TX throughput Run has no burst section")?;
+        let rejected = manifest.section(&super::usrp(), "ezsdr.radio.uhd.rejected").ok_or("TX throughput Run has no rejected section")?;
+        let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
+        let evidence = tx_throughput_evidence(TxThroughputInput {
+            stats, async_reports, events: &events, bursts, rejected, clocks: &manifest.clocks.sample_clocks,
+            scheduled_target, rate_hz: *rate, master_clock_hz: device.master_clock_rate(), duration_secs: plan.throughput_seconds,
+        });
+        let value = tx_bytes_per_second(*rate, wire_bytes)?;
+        stages.push(CandidateStage { value, trials: vec![evidence.class] });
+        conditions.push(tx_rate_condition(&id, *rate));
+        let stage = candidate_stage_json(&id, value, &[evidence.class], &[None]);
+        observations.push(observation(
+            format!("provider_tx_throughput_{rate}"), "tests/hardware.rs::hw_measurements_record", Some(id), 1,
+            json!({ "rate_hz": rate, "duration_secs": plan.throughput_seconds,
+                "scheduled_burst_target": scheduled_target, "burst_target": evidence.burst_target,
+                "burst_target_matches_schedule": evidence.burst_target_matches_schedule,
+                "burst_start_tick": evidence.burst_start_tick, "burst_ack_count": evidence.burst_ack_count,
+                "burst_ack_tick": evidence.burst_ack_tick, "minimum_ack_tick": evidence.minimum_ack_tick,
+                "ack_elapsed_ticks": evidence.ack_elapsed_ticks, "ack_elapsed_samples": evidence.ack_elapsed_samples,
+                "minimum_samples": evidence.minimum_samples, "actual_samples": evidence.actual_samples,
+                "tx_samples_minus_ack_elapsed_samples": evidence.tx_samples_minus_ack_elapsed_samples,
+                "burst_count": evidence.burst_count, "tx_underflow_events": evidence.underflow_events,
+                "async_failures": evidence.async_failures, "short_send_rejections": evidence.short_send_rejections,
+                "stage": stage }),
+        )?);
+    }
+    let summary = summarize_tx_throughput(&stages)?;
+    let row = tx_capacity_value(&summary, &plan.tx_throughput_rates_hz, &stages, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup { conditions, values: vec![row], observations })
 }
 
 fn expected_rx_samples(clock: &SampleClockRecord, rate_hz: u64, master_clock_hz: u64) -> Option<(i64, u64)> {
@@ -1905,6 +2579,188 @@ mod tests {
     }
 
     #[test]
+    fn tx_start_lead_requires_an_early_switch_and_no_failure_evidence() {
+        let trial = TrialEvidence::new(0, 200, 0, 0, TrialCompletion::ReceiveCapture);
+        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), Some(100)).0, TrialClass::Success,
+            "the permitted start-lead observation is tx_switch.at < origin; no thread-timed burst is reserved");
+        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 100 }]), Some(100)).0, TrialClass::Incomplete,
+            "a switch at the origin is not early");
+        assert_eq!(tx_start_trial_class(&trial, &json!([]), Some(100)).0, TrialClass::Incomplete,
+            "a missing segment-start record is not success");
+        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), None).0, TrialClass::Incomplete,
+            "without a newly registered clock there is no measured origin");
+        let mut rejected = trial.clone();
+        rejected.admitted = false;
+        assert_eq!(tx_start_trial_class(&rejected, &json!([]), None).0, TrialClass::AdmissionRejection,
+            "a rejected rate-change action is classified instead of aborting the measurement");
+        let mut failed = trial;
+        failed.evidence.push(EvidenceKind::LateCommand);
+        assert_eq!(tx_start_trial_class(&failed, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), Some(100)).0, TrialClass::ProviderFailure);
+        let stage = tx_start_candidate_stage_json("cold-390625-1msps", 1_000_000, (390_625, 1_000_000), 200_000_000,
+            &[TrialClass::Success; 2], &[[1_000_000, 390_625], [390_625, 1_000_000]], &[(Some(200), Some(100)), (Some(400), Some(300))]);
+        assert_eq!(stage["tx_rate_pair_hz"], json!([390_625, 1_000_000]));
+        assert_eq!(stage["trial_transitions_hz"], json!([[1_000_000, 390_625], [390_625, 1_000_000]]));
+        assert!(stage["burst_criterion"].as_str().unwrap().contains("omitted"));
+    }
+
+    #[test]
+    fn tx_start_lead_value_uses_the_successful_suffix_intersection() {
+        let stages = |failed: &[u64]| [1, 2, 5].into_iter().map(|value| CandidateStage {
+            value, trials: vec![if failed.contains(&value) { TrialClass::Incomplete } else { TrialClass::Success }; 2],
+        }).collect();
+        let candidates = BTreeMap::from([
+            ("condition-a".to_owned(), stages(&[1])),
+            ("condition-b".to_owned(), stages(&[1, 2])),
+        ]);
+        let summary = summarize_tx_start_lead(&candidates, 2).unwrap();
+        assert!(matches!(tx_start_value(&summary, &candidates, 2, "test").unwrap(), ValueRecord::Measured {
+            key, worst: model::Worst::Number(5.0), condition, trials: 2, ..
+        } if key.as_str() == "radio.timing.tx_start_lead_ns" && condition == "condition-b"));
+    }
+
+    #[test]
+    fn overflow_evidence_requires_one_overrun_one_matching_gap_and_the_measured_rate() {
+        let domain = ClockDomainId::local(21);
+        let mut clock = synthetic_clock(domain, "usrp/rx/s0", 0, None);
+        clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000_000, 1).unwrap();
+        let clocks = [clock.clone()];
+        let event = |cause: &str, lost: u64| json!([{ "kind": "radio.RX_OVERFLOW", "payload": { "cause": cause, "lost": lost } }]);
+        let gap = |len: u64, lost: Json| json!({ "start": TimePoint::new(domain, 2_000), "cause": { "kind": "overflow_restart" }, "len": len, "lost": lost });
+        let artifacts = |gaps: Json| json!({ "rec": [{ "partial": false, "continuity": [{
+            "domain": domain, "first": TimePoint::new(domain, 0), "end": TimePoint::new(domain, 3_000), "gaps": gaps, "channel_gaps": []
+        }] }] });
+        let extract = |events: &Json, artifacts: &Json, rate| extract_overflow_trial(events, artifacts, &clocks, rate, 1, 1);
+        let complete = extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50))])), 1_000_000);
+        assert_eq!(complete.class, TrialClass::Success);
+        assert_eq!(complete.gap_ns, Some(50_000));
+        assert_eq!(complete.gaps[0].len, 50);
+        assert_eq!(complete.restart_after_resume.nanoseconds, Some(50_000));
+        let mut partial_capture = artifacts(json!([gap(50, json!(50))]));
+        partial_capture["rec"][0]["partial"] = json!(true);
+        assert_eq!(extract(&event("overrun", 50), &partial_capture, 1_000_000).class, TrialClass::Incomplete,
+            "a partial capture cannot provide a complete overflow trial");
+        assert_eq!(samples_to_ns_ceil(1, 3), Some(333_333_334), "fractional sample periods round upward conservatively");
+        assert_eq!(extract(&json!([]), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
+            "a capture gap without exactly one RX_OVERFLOW is not evidence");
+        assert_eq!(extract(&json!([event("overrun", 50)[0].clone(), event("overrun", 50)[0].clone()]),
+            &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
+            "duplicate overflow reports are not collapsed");
+        assert_eq!(extract(&event("sequence", 50), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
+            "a sequence report cannot stand in for an overrun");
+        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([])), 1_000_000).class, TrialClass::Incomplete);
+        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50)), gap(60, json!(60))])), 1_000_000).class, TrialClass::Incomplete);
+        assert_eq!(extract(&event("overrun", 51), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
+            "the event's lost count must equal the continuity gap");
+        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(49))])), 1_000_000).class, TrialClass::Incomplete,
+            "the gap must report losing its entire length");
+        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50))])), 2_000_000).class, TrialClass::Incomplete,
+            "the clock must prove the requested rate");
+    }
+
+    #[test]
+    fn overflow_restart_after_resume_estimate_uses_gap_end_and_nulls_negative_results() {
+        let estimate = restart_after_resume_estimate(100, 1_050, 250, 1_000, 500, 500);
+        assert_eq!((estimate.gap_end_sample, estimate.reader_resume_sample, estimate.nanoseconds), (Some(1_300), Some(1_100), Some(200_000_000)));
+        let zero = restart_after_resume_estimate(0, 1, 0, 3, 1, 0);
+        assert_eq!((zero.reader_resume_sample, zero.nanoseconds), (Some(1), Some(0)), "fractional sample durations round up to the first sample at or after resume");
+        let negative = restart_after_resume_estimate(100, 500, 100, 1_000, 500, 500);
+        assert_eq!((negative.gap_end_sample, negative.reader_resume_sample, negative.nanoseconds), (Some(600), Some(1_100), None));
+        assert!(negative.reason.as_deref().is_some_and(|reason| reason.contains("before the estimated reader resume")));
+    }
+
+    #[test]
+    fn overflow_wait_horizon_allows_capture_to_finish_after_the_stall() {
+        assert_eq!(overflow_wait_ms(500, 20_000).unwrap(), 43_000,
+            "the horizon includes the TX/RX start lead, pre-stall interval, stall, one stall-length drain allowance, and margin");
+        assert!(overflow_wait_ms(500, u64::MAX).is_err(), "horizon arithmetic must reject overflow");
+    }
+
+    #[test]
+    fn overflow_summary_keeps_observations_and_the_key_is_not_a_record_value() {
+        let complete = |gap_ns, restart_ns| OverflowTrialEvidence {
+            class: TrialClass::Success, overflow_count: 1, overflow_causes: vec!["overrun".to_owned()],
+            payload_lost: vec![Some(1)], gaps: vec![], gap_ns: Some(gap_ns),
+            restart_after_resume: OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: Some(restart_ns), reason: None },
+            sample_clock_rate_matches: true,
+        };
+        let candidates = BTreeMap::from([
+            (1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]),
+            (10_000_000, vec![complete(60_000, 7_000), complete(55_000, 4_000)]),
+        ]);
+        let summary = summarize_overflow_gaps(&candidates, 2).unwrap();
+        assert_eq!((summary.worst_gap_ns, summary.limiting_rate_hz), (Some(60_000), Some(10_000_000)));
+        assert_eq!((summary.maximum_restart_after_resume_ns, summary.maximum_restart_rate_hz), (Some(7_000), Some(10_000_000)));
+        assert_eq!(summary.maximum_restart_by_rate, BTreeMap::from([(1_000_000, Some(6_000)), (10_000_000, Some(7_000))]));
+
+        let mut incomplete = complete(55_000, 8_000);
+        incomplete.class = TrialClass::Incomplete;
+        incomplete.gap_ns = None;
+        let under_trialed = BTreeMap::from([
+            (1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]),
+            (10_000_000, vec![complete(60_000, 7_000), incomplete]),
+        ]);
+        let summary = summarize_overflow_gaps(&under_trialed, 2).unwrap();
+        assert_eq!(summary.worst_gap_ns, Some(60_000), "observations retain the maximum even when the required trial count is short");
+        assert_eq!(summary.maximum_restart_after_resume_ns, Some(7_000), "incomplete trial estimates are not included in the summary");
+        assert!(summary.unmeasured_reason.as_deref().unwrap().contains("10000000 Hz"));
+    }
+
+    #[test]
+    fn tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples() {
+        let domain = ClockDomainId::local(21);
+        let mut clock = synthetic_clock(domain, "usrp/tx/s0", 100, None);
+        clock.nominal_rate = ezsdr_kernel::time::Rational::new(1_000, 1).unwrap();
+        let target = TimePoint::new(domain, 2_000);
+        let bursts = json!([{ "target": target, "samples": 1_000, "end": "stop" }]);
+        let empty = json!([]);
+        let ack = json!([{ "code": "BurstAck", "tick": 3_100 }]);
+        let evaluate = |samples, async_reports: &Json, events: &Json, bursts: &Json, rejected: &Json, scheduled_target| {
+            tx_throughput_evidence(TxThroughputInput {
+                stats: &json!({ "tx_samples": samples }), async_reports, events, bursts, rejected,
+                clocks: &[clock.clone()], scheduled_target, rate_hz: 1_000, master_clock_hz: 1_000, duration_secs: 1,
+            })
+        };
+        let complete = evaluate(1_000, &ack, &empty, &bursts, &empty, target);
+        assert_eq!(complete.class, TrialClass::Success, "an unended TX SampleClock does not prevent a completed repeat measurement");
+        assert_eq!((complete.burst_start_tick, complete.burst_ack_tick, complete.ack_elapsed_samples,
+            complete.minimum_samples, complete.tx_samples_minus_ack_elapsed_samples), (Some(2_100), Some(3_100), Some(1_000), Some(1_000), Some(0)));
+        assert_eq!(evaluate(1_100, &ack, &empty, &bursts, &empty, target).class, TrialClass::Success,
+            "already-handed-over in-flight samples are not rejected by an upper bound");
+        assert_eq!(evaluate(999, &ack, &empty, &bursts, &empty, target).class, TrialClass::Incomplete,
+            "fewer than D times rate samples cannot pass");
+        assert_eq!(evaluate(1_000, &json!([]), &empty, &bursts, &empty, target).class, TrialClass::Incomplete,
+            "no BurstAck leaves the repeat incomplete");
+        assert_eq!(evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 3_100 }, { "code": "BurstAck", "tick": 3_200 }]),
+            &empty, &bursts, &empty, target).class, TrialClass::Unattributable, "multiple acknowledgements cannot be assigned to one interval");
+        assert_eq!(evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 1_500 }]), &empty, &bursts, &empty, target).class,
+            TrialClass::Incomplete, "an ACK after clock arm but before burst start plus D is too early");
+        assert_eq!(evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 3_099 }]), &empty, &bursts, &empty, target).class,
+            TrialClass::Incomplete, "an ACK after burst start but before the D-second boundary is too early");
+        assert_eq!(evaluate(1_000, &ack, &empty, &bursts, &empty, TimePoint::new(domain, 1_999)).class,
+            TrialClass::Incomplete, "the run must record the scheduled burst target");
+        let underflow = json!([{ "kind": "radio.TX_UNDERFLOW" }]);
+        assert_eq!(evaluate(1_000, &ack, &underflow, &bursts, &empty, target).class, TrialClass::DeviceFailure,
+            "TX_UNDERFLOW fails an otherwise complete interval");
+        for code in ["Underflow", "UnderflowInPacket", "SeqError", "SeqErrorInBurst", "TimeError"] {
+            assert_eq!(evaluate(1_000, &json!([{ "code": code }]), &empty, &bursts, &empty, target).class,
+                TrialClass::DeviceFailure, "{code} is device failure evidence");
+        }
+        assert_eq!(evaluate(1_000, &ack, &empty, &bursts, &json!([{ "reason": "short send" }]), target).class, TrialClass::DeviceFailure,
+            "short-send rejections are device failures");
+        assert_eq!(evaluate(1_000, &ack, &empty, &json!([bursts[0].clone(), bursts[0].clone()]), &empty, target).class,
+            TrialClass::Unattributable, "multiple burst records cannot provide one start boundary");
+        assert_eq!(tx_bytes_per_second(10_000_000, 4).unwrap(), 40_000_000);
+        let stages = vec![
+            CandidateStage { value: 40_000_000, trials: vec![TrialClass::Success] },
+            CandidateStage { value: 80_000_000, trials: vec![TrialClass::DeviceFailure] },
+        ];
+        let summary = summarize_tx_throughput(&stages).unwrap();
+        assert!(matches!(tx_capacity_value(&summary, &[10_000_000, 20_000_000], &stages, "test").unwrap(), ValueRecord::Measured {
+            key, worst: model::Worst::Number(40_000_000.0), condition, ..
+        } if key.as_str() == "radio.perf.tx_bytes_per_s" && condition == "tx-10msps"));
+    }
+
+    #[test]
     fn loopback_success_separates_waveform_from_requested_sample_time() {
         assert_eq!(loopback_values(&[TrialClass::Success], &[true], &[true]), (true, true));
         assert_eq!(loopback_values(&[TrialClass::Success], &[false], &[true]), (true, false));
@@ -2082,9 +2938,13 @@ mod tests {
         let queue_reason = reason("radio.timing.command_queue_depth");
         let lead_reason = reason("radio.timing.min_timed_command_lead_ns");
         let startup_reason = reason("radio.timing.startup_latency_ns");
+        let tx_start_reason = reason("radio.timing.tx_start_lead_ns");
+        let overflow_reason = reason("radio.timing.overflow_restart_gap_ns");
+        let tx_throughput_reason = reason("radio.perf.tx_bytes_per_s");
         assert!(queue_reason.contains("reservations"), "{queue_reason}");
         assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
+        assert!(tx_start_reason.contains("3c-1") && overflow_reason.contains("3c-1") && tx_throughput_reason.contains("3c-1"));
         assert_ne!(queue_reason, lead_reason);
         assert_ne!(lead_reason, startup_reason);
         let no_pass = BTreeMap::from([("tx-1msps".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure] }])]);
@@ -2213,20 +3073,32 @@ mod tests {
 
     #[test]
     fn measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts() {
+        assert_eq!(MeasurementPlan::default().overflow_trials, 5);
         let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
-        assert_eq!((defaults.step_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 60, 20));
+        assert_eq!((defaults.step_trials, defaults.overflow_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 5, 60, 20));
+        assert_eq!(defaults.tx_start_leads_ns, defaults.rx_start_leads_ns);
+        assert_eq!(defaults.overflow_rates_hz, [1_000_000, 10_000_000, 25_000_000, 50_000_000]);
+        assert_eq!(defaults.overflow_stall_ms.len(), defaults.overflow_rates_hz.len());
+        assert_eq!(defaults.tx_throughput_rates_hz, defaults.rx_rates_hz);
         let values = BTreeMap::from([
             ("EZSDR_MEASURE_STEP_TRIALS".to_owned(), "2".to_owned()),
+            ("EZSDR_MEASURE_OVERFLOW_TRIALS".to_owned(), "3".to_owned()),
             ("EZSDR_MEASURE_THROUGHPUT_SECS".to_owned(), "3".to_owned()),
             ("EZSDR_MEASURE_LOOPBACK_TRIALS".to_owned(), "4".to_owned()),
         ]);
         let custom = MeasurementPlan::from_env(&values).unwrap();
-        assert_eq!((custom.step_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 4));
-        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"] {
+        assert_eq!((custom.step_trials, custom.overflow_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 3, 4));
+        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"] {
             for invalid in ["0", "not-a-number"] {
                 assert!(MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), invalid.to_owned())])).is_err(), "{name}={invalid}");
             }
         }
+        let mut no_overflow_trials = defaults;
+        no_overflow_trials.overflow_trials = 0;
+        assert!(no_overflow_trials.validate().is_err());
+        let mut missing_stall = MeasurementPlan::default();
+        missing_stall.overflow_stall_ms.pop();
+        assert!(missing_stall.validate().is_err());
     }
 
     #[test]

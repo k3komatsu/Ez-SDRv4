@@ -24,6 +24,14 @@ cannot move the device's time past a deadline, and the smoke set no longer prove
 the Provider catches up with real time: that is Phase 8's bench work. The fake's clock
 and the hardware envelope are still not slowed or relaxed to make a test pass.
 
+`provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements`
+also runs the Phase 8 stage 3c-1 TX start-lead, overflow-gap and TX-throughput groups.
+It checks their observations, classifications and fake-record round trip; overflow records
+the full gap and inferred restart-after-resume estimate as observations without supplying a
+comparable value. The rehearsal does not assert that a timing candidate passes or that a
+measured value has a particular magnitude. Their hardware evidence is collected by
+`hw_measurements_record`.
+
 No test's verdict may depend on when the test thread runs. The device's time moves while
 every Provider thread is idle (M3, M5), so a test thread that reads a time or observes
 state before its next operation or assertion can be descheduled while the device's time
