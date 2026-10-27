@@ -226,6 +226,26 @@ fn rm_35_step_and_values_grids_compare_by_all_members() {
 }
 
 #[test]
+fn rm_35_a_measured_frequency_sweep_passes_or_fails_the_profile_grid_by_its_ends_and_step() {
+    // The OBX's profile grid, 10 MHz to 8.4 GHz in 1 Hz steps, against what a stage 3c-2c sweep measures.
+    let mut record = fixture_record();
+    let mut desc = description(&record, mock_terms());
+    desc.rx[0].frequency = Grid::Step { lo: 10_000_000.0, hi: 8_400_000_000.0, step: 1.0 };
+    let (frequency, step) = ("radio.rx.c0.frequency_hz", "radio.rx.c0.frequency_step_hz");
+    set_worst(&mut record, frequency, Worst::Grid(GridValue::Step { lo: 10_000_000.0, hi: 8_400_000_000.0, step: 1.0 }));
+    set_worst(&mut record, step, Worst::Number(0.08));
+    assert_clear(&record, &desc);
+
+    set_worst(&mut record, frequency, Worst::Grid(GridValue::Step { lo: 10_000_000.0, hi: 6_000_000_000.0, step: 1.0 }));
+    assert_rejected(&record, &desc, frequency, "not a subset");
+    set_worst(&mut record, frequency, Worst::Grid(GridValue::Step { lo: 10_000_000.0, hi: 8_400_000_000.0, step: 2.0 }));
+    assert_rejected(&record, &desc, frequency, "not a subset");
+    set_worst(&mut record, frequency, Worst::Grid(GridValue::Step { lo: 10_000_000.0, hi: 8_400_000_000.0, step: 1.0 }));
+    set_worst(&mut record, step, Worst::Number(2.0));
+    assert_rejected(&record, &desc, step, "below measured");
+}
+
+#[test]
 fn rm_35_singleton_step_grid_is_contained_without_a_step_ratio() {
     let mut record = fixture_record();
     let mut desc = description(&record, mock_terms());

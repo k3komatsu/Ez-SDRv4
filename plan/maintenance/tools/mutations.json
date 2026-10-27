@@ -10845,8 +10845,8 @@
    "id": "P739",
    "name": "measurement record serial does not come from the device",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "serial: device.serial().map_err(|error| error.message)?,",
-   "new": "serial: \"not_applicable\".to_owned(),",
+   "old": "let serial = device.serial().map_err(|error| error.message)?;",
+   "new": "let serial = \"not_applicable\".to_owned();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
@@ -11625,8 +11625,8 @@
    "id": "P820",
    "name": "gain coercion sweeps only the first profile point",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let points: Vec<_> = requests.iter().map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Gain, *requested)).collect();\n                    group.values.push(coercion_grid_value(&gain_key",
-   "new": "let points: Vec<_> = requests.iter().take(1).map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Gain, *requested)).collect();\n                    group.values.push(coercion_grid_value(&gain_key",
+   "old": "let points = sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Gain, &requests);\n                    group.values.push(match raw.unmeasured(Key::parse(&gain_key)",
+   "new": "let points = sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Gain, &requests[..1]);\n                    group.values.push(match raw.unmeasured(Key::parse(&gain_key)",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
@@ -11635,18 +11635,18 @@
    "id": "P821",
    "name": "sample-rate coercion sweeps only the first profile point",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let points: Vec<_> = requests.iter().map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Rate, *requested)).collect();",
-   "new": "let points: Vec<_> = requests.iter().take(1).map(|requested| apply_numeric(&*device, dir, channel_index, NumericSetting::Rate, *requested)).collect();",
+   "old": "let points = sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Rate, &requests);",
+   "new": "let points = sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Rate, &requests[..1]);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   },
   {
    "id": "P822",
-   "name": "TX frequency coercion samples leave the RF safety band",
+   "name": "the frequency sweep stops at the top of the TX safe band instead of the profile grid's high end",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let lo = *SAFE_TX_HZ.start();\n                let hi = *SAFE_TX_HZ.end();",
-   "new": "let lo = *SAFE_TX_HZ.start() - 1_000_000.0;\n                let hi = *SAFE_TX_HZ.end();",
+   "old": "let (lo, hi) = (grid.min(), grid.max());\n    if count < 4",
+   "new": "let (lo, hi) = (grid.min(), grid.max().min(1_000_500_000.0));\n    if count < 4",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
@@ -11705,8 +11705,8 @@
    "id": "P828",
    "name": "queue observation trial-count validation underestimates rows",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "self.queue_trials.checked_mul(5)",
-   "new": "self.queue_trials.checked_mul(4)",
+   "old": "self.queue_trials.checked_mul(3)",
+   "new": "self.queue_trials.checked_mul(2)",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
@@ -11733,13 +11733,13 @@
   },
   {
    "id": "P831",
-   "name": "measurement restoration stops at the first apply error",
+   "name": "restoration does not latch its failed apply",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "errors.push(format!(\"could not restore {:?} channel {channel_index}: {}\", dir, error.message));",
-   "new": "errors.push(format!(\"could not restore {:?} channel {channel_index}: {}\", dir, error.message));\n                return Err(errors.join(\"; \"));",
+   "old": "raw.fail(message.clone());\n                return Err(message);",
+   "new": "return Err(message);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "measurement_defaults_restoration_attempts_all_channels_after_an_apply_error"
+   "filter": "measurement_defaults_restoration_stops_at_the_first_apply_error"
   },
   {
    "id": "P832",
@@ -12040,5 +12040,517 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "common::probe_device::tests::tx_eob_count_tracks_recorded_eob_sends"
+  },
+  {
+   "id": "P862",
+   "name": "a failed queue trial does not latch the group",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "raw.fail(format!(\"queue condition {label}: {reason}\"));\n    (QueueTrialClass::DeviceFailure",
+   "new": "let _ = (label, &reason);\n    (QueueTrialClass::DeviceFailure",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_sends_nothing_after_a_failed_clock_read"
+  },
+  {
+   "id": "P863",
+   "name": "a failed timed apply is followed by the drain clock read",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "last_accepted_at.filter(|_| operational_error.is_none())",
+   "new": "last_accepted_at",
+   "old2": "loop {\n        if raw.halted() { return Err(raw.failure().unwrap_or_default()); }\n        if device.time_now()",
+   "new2": "loop {\n        if device.time_now()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_sends_nothing_after_a_failed_timed_apply"
+  },
+  {
+   "id": "P864",
+   "name": "a failed timed apply is followed by the untimed reset",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let untimed_error = if operational_error.is_some() { None } else {",
+   "new": "let untimed_error = if false { None } else {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_sends_nothing_after_a_failed_timed_apply"
+  },
+  {
+   "id": "P865",
+   "name": "the plan's raw group limit is read as seconds",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "RawGroup::with_limit(Wall::from_millis(plan.raw_group_limit_ms))",
+   "new": "RawGroup::with_limit(Wall::from_secs(plan.raw_group_limit_ms))",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_limit_stops_every_later_call"
+  },
+  {
+   "id": "P866",
+   "name": "the raw group keeps its last failure instead of its first",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if failure.is_none() { *failure = Some(reason.into()); }",
+   "new": "*failure = Some(reason.into());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_limit_stops_every_later_call"
+  },
+  {
+   "id": "P867",
+   "name": "the raw group's limit is not checked before a coercion request",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "for requested in requests {\n        if raw.halted() { break; }\n        let point = apply_numeric(",
+   "new": "for requested in requests {\n        let point = apply_numeric(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_limit_stops_every_later_call"
+  },
+  {
+   "id": "P868",
+   "name": "the receive-frequency queue condition does not stream",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "operation.dir == Dir::Rx && operation.settings.freq.is_some()",
+   "new": "operation.dir == Dir::Rx && operation.settings.freq.is_none()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency"
+  },
+  {
+   "id": "P869",
+   "name": "the queue trial's receiver is never drained",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "while !stop.load(Ordering::Acquire) && !raw.halted() {",
+   "new": "while false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency"
+  },
+  {
+   "id": "P870",
+   "name": "a failed streaming queue trial still stops the receiver",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    if !raw.halted() {\n        match device.rx_stop(0, None) {",
+   "new": "    if true {\n        match device.rx_stop(0, None) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_stops_a_streaming_trial_without_stopping_or_resetting_the_receiver"
+  },
+  {
+   "id": "P871",
+   "name": "the queue value is the greatest depth instead of the least",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": ".min_by_key(|(depth, _, _)| *depth)",
+   "new": ".max_by_key(|(depth, _, _)| *depth)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_conditions_stream_only_for_receive_frequency_and_the_value_is_the_least_depth"
+  },
+  {
+   "id": "P872",
+   "name": "the raw group's guard does not restore after a panic",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if !self.restored { let _ = restore_measurement_defaults(",
+   "new": "if false && !self.restored { let _ = restore_measurement_defaults(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_restores_after_a_panic_in_it"
+  },
+  {
+   "id": "P873",
+   "name": "a stopped raw group still restores the device",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let (status, error) = match run.raw.failure() {\n        Some(failure) => (\"skipped\"",
+   "new": "let (status, error) = match None::<String> {\n        Some(failure) => (\"skipped\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_group_sends_nothing_after_its_first_failed_apply"
+  },
+  {
+   "id": "P874",
+   "name": "a failed group's keys do not carry the failure",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "reason: format!(\"Phase 8 stage 3c-2c: group `{name}` failed: {error}\") });",
+   "new": "reason: format!(\"Phase 8 stage 3c-2c: group `{name}` failed\") });",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "group_run_keeps_the_other_groups_after_an_error_or_a_panic"
+  },
+  {
+   "id": "P875",
+   "name": "a panic message is not kept in the failure",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Ok(text) => format!(\"panic: {text}\"),",
+   "new": "Ok(_) => \"panic\".to_owned(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "group_run_keeps_the_other_groups_after_an_error_or_a_panic"
+  },
+  {
+   "id": "P876",
+   "name": "the partial record has the wrong name",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "name.push(\".partial.json\");",
+   "new": "name.push(\".partial\");",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "group_run_keeps_the_other_groups_after_an_error_or_a_panic"
+  },
+  {
+   "id": "P877",
+   "name": "a panicking raw probe is not counted as a probe",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "self.probes.insert(name.to_owned());\n                self.fail(",
+   "new": "self.fail(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "group_run_keeps_the_other_groups_after_an_error_or_a_panic"
+  },
+  {
+   "id": "P878",
+   "name": "a refused receive-throughput rate is classified Incomplete",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let stage = candidate_stage_json(&id, bytes_per_second, &[TrialClass::AdmissionRejection], &[None]);",
+   "new": "let stage = candidate_stage_json(&id, bytes_per_second, &[TrialClass::Incomplete], &[None]);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "rejected_runs_are_admission_rejections_not_group_failures"
+  },
+  {
+   "id": "P879",
+   "name": "a refused receive-throughput rate is counted as a passing stage",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "stages.push(CandidateStage { value: bytes_per_second, trials: vec![TrialClass::AdmissionRejection] });",
+   "new": "stages.push(CandidateStage { value: bytes_per_second, trials: vec![TrialClass::Success] });",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "rejected_runs_are_admission_rejections_not_group_failures"
+  },
+  {
+   "id": "P880",
+   "name": "a Run that started is reported as refused",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if run.start_instant().is_some() { return None; }",
+   "new": "if false { return None; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "rejected_runs_are_admission_rejections_not_group_failures"
+  },
+  {
+   "id": "P881",
+   "name": "a refused overflow Run keeps its Incomplete class",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if rejection.is_some() { evidence.class = TrialClass::AdmissionRejection; }",
+   "new": "if false { evidence.class = TrialClass::AdmissionRejection; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "rejected_runs_are_admission_rejections_not_group_failures"
+  },
+  {
+   "id": "P882",
+   "name": "a refused transmit-throughput rate is classified Incomplete",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let stage = candidate_stage_json(&id, value, &[TrialClass::AdmissionRejection], &[None]);",
+   "new": "let stage = candidate_stage_json(&id, value, &[TrialClass::Incomplete], &[None]);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "rejected_runs_are_admission_rejections_not_group_failures"
+  },
+  {
+   "id": "P883",
+   "name": "the frequency read-back tolerance is 0.5 Hz",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "const FREQUENCY_READBACK_TOLERANCE_HZ: f64 = 0.05;",
+   "new": "const FREQUENCY_READBACK_TOLERANCE_HZ: f64 = 0.5;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "frequency_values_need_every_point_within_a_twentieth_of_a_hertz"
+  },
+  {
+   "id": "P884",
+   "name": "the frequency step is the greatest difference, not twice it",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "worst: model::Worst::Number(worst * 2.0),",
+   "new": "worst: model::Worst::Number(worst),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "frequency_values_need_every_point_within_a_twentieth_of_a_hertz"
+  },
+  {
+   "id": "P885",
+   "name": "a stopped frequency sweep is still a value",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if points.len() != requests.len() {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "frequency_values_need_every_point_within_a_twentieth_of_a_hertz"
+  },
+  {
+   "id": "P886",
+   "name": "the measured frequency grid's step is 2 Hz",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "step: FREQUENCY_STEP_HZ }),",
+   "new": "step: 2.0 }),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "frequency_values_need_every_point_within_a_twentieth_of_a_hertz"
+  },
+  {
+   "id": "P887",
+   "name": "the frequency sweep has no off-MHz points",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "(target / 1e6).floor() * 1e6 + 370_000.0",
+   "new": "(target / 1e6).floor() * 1e6 + 0.0",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "frequency_sweep_covers_both_ends_and_mixes_whole_and_off_mhz_points"
+  },
+  {
+   "id": "P888",
+   "name": "the transmit frequency sweep runs at the last swept gain",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if dir == Dir::Tx { sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Gain, &[0.0]); }",
+   "new": "if dir == Dir::Tx { sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Gain, &[31.5]); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+  },
+  {
+   "id": "P889",
+   "name": "the transmitter stays on the sweep's last frequency",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if dir == Dir::Tx { sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Frequency, &[1_000_000_000.0]); }\n                    let values",
+   "new": "let values",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+  },
+  {
+   "id": "P890",
+   "name": "a failed coercion apply does not stop the group",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if let Some(error) = &point.error { raw.fail(format!(\"{} channel {channel} {setting:?} request {requested}: {error}\", dir.name())); }",
+   "new": "if let Some(_error) = &point.error { }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "coercion_stops_after_its_first_failed_apply"
+  },
+  {
+   "id": "P891",
+   "name": "the queue's excluded conditions are not named",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "(\"queue-tx-frequency\", \"the DUC",
+   "new": "(\"queue-tx-frequency-x\", \"the DUC",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+  },
+  {
+   "id": "P892",
+   "name": "a text panic message is not kept in the failure",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "|text| format!(\"panic: {text}\")),",
+   "new": "|_| \"panic\".to_owned()),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "group_run_keeps_the_other_groups_after_an_error_or_a_panic"
+  },
+  {
+   "id": "P893",
+   "name": "the receive-frequency trial submits settings without waiting for the first samples",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if let Err(reason) = wait_for_rx_samples(raw, &progress, Wall::from_millis(QUEUE_RX_READY_LIMIT_MS)) {",
+   "new": "if let Err(reason) = Ok::<(), String>(()) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_started_receiver_that_returns_no_samples_stops_the_group_before_any_setting_goes_out"
+  },
+  {
+   "id": "P894",
+   "name": "the receive-frequency trial does not wait for the samples to pass the last command",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Some(progress) => wait_for_rx_end(raw, progress, target, timeout),",
+   "new": "Some(_) => Ok(()),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_receiver_whose_samples_stop_short_of_the_last_command_fails_the_trial"
+  },
+  {
+   "id": "P895",
+   "name": "the end of the received samples ignores their count",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "progress.advance(first_tick, first_tick.saturating_add(count.saturating_mul(ticks_per_sample)));",
+   "new": "progress.advance(first_tick, first_tick);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_receiver_whose_samples_pass_the_last_command_completes_the_trial"
+  },
+  {
+   "id": "P896",
+   "name": "the drain thread is not stopped when the command thread unwinds",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "fn drop(&mut self) { self.0.store(true, Ordering::Release); }",
+   "new": "fn drop(&mut self) {}",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_panic_on_the_command_thread_stops_the_drain_and_the_record_continues"
+  },
+  {
+   "id": "P897",
+   "name": "the queue loop does not look at the deadline before each timed apply",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "            if raw.halted() {\n                operational_error = raw.failure();",
+   "new": "            if false {\n                operational_error = raw.failure();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_raw_group_deadline_is_checked_between_two_device_calls"
+  },
+  {
+   "id": "P898",
+   "name": "a failed receiver stop is followed by the close",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "match device.rx_stop(0, None) {",
+   "new": "match { let stopped = device.rx_stop(0, None); device.rx_close(0); stopped } {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_failed_receiver_stop_is_not_followed_by_a_close"
+  },
+  {
+   "id": "P899",
+   "name": "restoration does not look at the group's latch before each channel",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if raw.halted() { return Err(format!(\"the raw group stopped before restoring",
+   "new": "if false { return Err(format!(\"the raw group stopped before restoring",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_defaults_restoration_stops_at_the_first_apply_error"
+  },
+  {
+   "id": "P900",
+   "name": "a failed lease still drops its handle",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if self.failed { std::mem::forget(self.device.take()); }",
+   "new": "if false { std::mem::forget(self.device.take()); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_failed_restore_leaks_the_handle_even_when_the_record_s_writing_panics"
+  },
+  {
+   "id": "P901",
+   "name": "UR-7 retries an error that is not the reference clock not locking",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) { break; }",
+   "new": "if false { break; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_7_retries_only_the_reference_clock_not_locking"
+  },
+  {
+   "id": "P902",
+   "name": "a probe's long arrays stay whole in the record",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Json::Array(rows) if rows.len() > SUMMARISED_ARRAY_LEN => {",
+   "new": "Json::Array(rows) if rows.len() > 100_000_000 => {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_probe_s_long_arrays_are_summarised_and_their_rows_go_to_a_side_file"
+  },
+  {
+   "id": "P903",
+   "name": "the summarised rows are not written to the side file",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "for (path, index, whole) in &sink { writeln!(file, \"{}\", json!({ \"path\": path, \"index\": index, \"row\": whole }))?; }",
+   "new": "for (path, index, whole) in &sink { let _ = (path, index, whole); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_probe_s_long_arrays_are_summarised_and_their_rows_go_to_a_side_file"
+  },
+  {
+   "id": "P904",
+   "name": "the summary's median is its minimum",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "summary.insert(\"median\".to_owned(), json!(sorted[sorted.len() / 2]));",
+   "new": "summary.insert(\"median\".to_owned(), json!(sorted[0]));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_probe_s_long_arrays_are_summarised_and_their_rows_go_to_a_side_file"
+  },
+  {
+   "id": "P905",
+   "name": "the summary keeps no row that carries an error",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "[\"error\", \"apply_error\"].iter().any",
+   "new": "[\"apply_error\"].iter().any",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_probe_s_long_arrays_are_summarised_and_their_rows_go_to_a_side_file"
+  },
+  {
+   "id": "P906",
+   "name": "the raw group reports its stop from before the restore",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    let stopped = run.raw.failure();\n",
+   "new": "    let stopped: Option<String> = None;\n",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_failed_restore_leaks_the_handle_even_when_the_record_s_writing_panics"
+  },
+  {
+   "id": "P907",
+   "name": "the receiver is closed after a stop that crossed the deadline",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Ok(()) => if !raw.halted() { device.rx_close(0) },",
+   "new": "Ok(()) => device.rx_close(0),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_deadline_passing_during_the_receiver_s_stop_leaves_the_close_unsent"
+  },
+  {
+   "id": "P908",
+   "name": "the group's injected elapsed time is ignored",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "self.started.elapsed() + Wall::from_nanos(self.skew_ns.load(Ordering::Acquire))",
+   "new": "self.started.elapsed()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_raw_group_deadline_is_checked_between_two_device_calls"
+  },
+  {
+   "id": "P909",
+   "name": "a failed group marks the lease clean",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if stopped.is_none() && restored.is_none() && groups.failed().is_empty() { lease.mark_clean(); }",
+   "new": "if true { lease.mark_clean(); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_failed_restore_leaks_the_handle_even_when_the_record_s_writing_panics"
+  },
+  {
+   "id": "P910",
+   "name": "the command loop does not look at the latch before each timed apply",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "            if raw.halted() {\n                operational_error = raw.failure();",
+   "new": "            if false {\n                operational_error = raw.failure();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_command_thread_begins_no_call_after_the_drain_latches"
+  },
+  {
+   "id": "P911",
+   "name": "a failed drain read is not latched",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "raw.fail(format!(\"rx_recv: {}\", error.message));",
+   "new": "let _ = &error;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_command_thread_begins_no_call_after_the_drain_latches"
+  },
+  {
+   "id": "P912",
+   "name": "a new lease drops its handle before the run is marked clean",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "DeviceLease { device: Some(device), failed: true }",
+   "new": "DeviceLease { device: Some(device), failed: false }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_lease_leaks_the_handle_when_the_run_unwinds_before_it_is_marked_clean"
   }
  ]

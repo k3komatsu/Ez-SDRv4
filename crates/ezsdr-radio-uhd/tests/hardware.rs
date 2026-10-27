@@ -2146,79 +2146,65 @@ fn hw_measurements_record() {
     let metadata = measurement::process_metadata().expect("all EZSDR_MEASUREMENT_* values are valid before opening the USRP");
     let plan = measurement::MeasurementPlan::process_env().expect("measurement trial counts are valid before opening the USRP");
     measurement::clear_raw_observations();
-    hw_b8_raw_device_lead();
-    hw_b8_raw_restart_lead();
-    hw_b8_raw_queue_depth();
-    hw_b8_raw_in_flight_window();
-    hw_b8_raw_burst_gap();
-    hw_b8_raw_empty_eob_gap();
-    hw_b8_raw_timed_tune_phase();
-    hw_b6_delay_by_rate();
-    hw_b8_stop_end();
-    hw_h1_late_multi_packet_burst();
-    hw_h2_underflow_mid_burst();
-    hw_h5_held_last_sample();
-    hw_56_stop_between_starts();
-    hw_56_stop_lag();
-    hw_ur17_receive_call_duration();
-    let observations = measurement::take_raw_observations();
-    let expected: std::collections::BTreeSet<_> = [
-        "hw_b8_raw_device_lead",
-        "hw_b8_raw_restart_lead",
-        "hw_b8_raw_queue_depth",
-        "hw_b8_raw_in_flight_window",
-        "hw_b8_raw_burst_gap",
-        "hw_b8_raw_empty_eob_gap",
-        "hw_b8_raw_timed_tune_phase",
-        "hw_b6_delay_by_rate",
-        "hw_b8_stop_end",
-        "hw_h1_late_multi_packet_burst",
-        "hw_h2_underflow_mid_burst",
-        "hw_h5_held_last_sample",
-        "hw_56_stop_between_starts",
-        "hw_56_stop_lag",
-        "hw_ur17_receive_call_duration",
-    ].into_iter().collect();
-    let got: std::collections::BTreeSet<_> = observations.iter().map(|observation| observation.name.as_str()).collect();
-    assert_eq!(got, expected, "the record has exactly the raw probes it ran");
+    // Each probe and group runs on its own: an error or a panic is that group's failure, its keys are
+    // `unmeasured`, and the record is still written (stage 3c-2c).
+    let mut groups = measurement::GroupRun::new(metadata.output.as_deref());
+    let raw_probes: [(&str, fn()); 15] = [
+        ("hw_b8_raw_device_lead", hw_b8_raw_device_lead),
+        ("hw_b8_raw_restart_lead", hw_b8_raw_restart_lead),
+        ("hw_b8_raw_queue_depth", hw_b8_raw_queue_depth),
+        ("hw_b8_raw_in_flight_window", hw_b8_raw_in_flight_window),
+        ("hw_b8_raw_burst_gap", hw_b8_raw_burst_gap),
+        ("hw_b8_raw_empty_eob_gap", hw_b8_raw_empty_eob_gap),
+        ("hw_b8_raw_timed_tune_phase", hw_b8_raw_timed_tune_phase),
+        ("hw_b6_delay_by_rate", hw_b6_delay_by_rate),
+        ("hw_b8_stop_end", hw_b8_stop_end),
+        ("hw_h1_late_multi_packet_burst", hw_h1_late_multi_packet_burst),
+        ("hw_h2_underflow_mid_burst", hw_h2_underflow_mid_burst),
+        ("hw_h5_held_last_sample", hw_h5_held_last_sample),
+        ("hw_56_stop_between_starts", hw_56_stop_between_starts),
+        ("hw_56_stop_lag", hw_56_stop_lag),
+        ("hw_ur17_receive_call_duration", hw_ur17_receive_call_duration),
+    ];
+    for (name, probe) in raw_probes { groups.probe(name, probe); }
+    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned()).collect();
+    assert_eq!(groups.probes(), &expected, "every raw probe either ran or failed");
 
-    let device = usrp();
-    let dir = TempDir::new();
-    let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
-    let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
-    let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())
-        .expect("the bound X3xx layout");
-    let mut measured = measurement::MeasurementGroup::default();
-    measured.append(measurement::measure_min_timed_command_lead(device.clone(), &plan).expect("Provider command-lead measurements"))
-        .expect("merge command-lead measurements");
-    measured.append(measurement::measure_tx_in_flight(device.clone(), &plan).expect("Provider in-flight measurements"))
-        .expect("merge in-flight measurements");
-    measured.append(measurement::measure_rx_start_lead(device.clone(), &plan).expect("Provider receive-start measurements"))
-        .expect("merge receive-start measurements");
-    measured.append(measurement::measure_tx_start_lead(device.clone(), &plan).expect("Provider transmit-start measurements"))
-        .expect("merge transmit-start measurements");
-    measured.append(measurement::measure_rx_throughput(device.clone(), &plan).expect("Provider receive-throughput measurements"))
-        .expect("merge receive-throughput measurements");
-    measured.append(measurement::measure_overflow_restart_gap(device.clone(), &plan).expect("Provider overflow restart-gap measurements"))
-        .expect("merge overflow restart-gap measurements");
-    measured.append(measurement::measure_tx_throughput(device.clone(), &plan).expect("Provider transmit-throughput measurements"))
-        .expect("merge transmit-throughput measurements");
-    measured.append(measurement::measure_full_duplex(device.clone(), &plan).expect("Provider full-duplex measurements"))
-        .expect("merge full-duplex measurements");
-    let raw_measurements = (|| -> Result<measurement::MeasurementGroup, String> {
-        let mut group = measurement::measure_command_queue_depth(device.clone(), &plan)?;
-        group.append(measurement::measure_coercion(device.clone(), &description)?)?;
-        Ok(group)
-    })();
-    let restored = measurement::restore_measurement_defaults(&*device, &description);
-    let raw_measurements = raw_measurements.expect("raw queue-depth and coercion measurements");
-    restored.expect("restore the unstreamed bench settings after raw measurements");
-    measured.append(raw_measurements).expect("merge raw queue-depth and coercion measurements");
-    measured.observations.extend(observations);
-    let record = measurement::build_record(
+    // The device is opened, described and identified before any group runs, so that a group that
+    // wedges it cannot stop the record being written; a failure here is recorded, and no record can be assembled.
+    let setup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let device = usrp();
+        let dir = TempDir::new();
+        let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
+        let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
+        let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())
+            .expect("the bound X3xx layout");
+        let identity = (device.describe(), device.serial().expect("the device's serial before the measurement groups"));
+        (device, dir, binding, description, identity)
+    }));
+    let (device, _dir, binding, description, (device_description, serial)) = match setup {
+        Ok(setup) => setup,
+        Err(payload) => {
+            let error = measurement::GroupRun::panic_text(payload);
+            groups.record_failure("device_setup", error.clone());
+            panic!("the device could not be opened and identified, so no record can be assembled (diagnostics in the partial file): {error}");
+        }
+    };
+    // From here the device lives in a lease that leaks the handle instead of dropping it unless the
+    // raw group marks the run clean, so a failure or a panic anywhere before that never tears it down.
+    let mut lease = measurement::DeviceLease::new(device);
+    for (name, measure, keys) in measurement::provider_groups() {
+        let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+        groups.run(name, &keys, || measure(lease.device(), &plan));
+    }
+    let (stopped, restored) = measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan);
+    let failed = groups.failed().to_vec();
+    let measured = groups.take();
+    let record = measurement::build_record_with_identity(
         ezsdr_radio::measurement::Source::Hardware,
         &binding,
-        &*device,
+        device_description,
+        serial,
         &metadata,
         measured,
         &description,
@@ -2226,6 +2212,10 @@ fn hw_measurements_record() {
     let path = metadata.output.as_deref().expect("the output path is mandatory");
     let violations = measurement::write_record_before_profile_assert(path, &record, &description)
         .expect("a structurally valid measurement record is written before profile comparison");
+    groups.remove_partial();
+    assert!(failed.is_empty(), "groups failed (their keys are unmeasured in the written record): {failed:?}");
+    assert!(stopped.is_none(), "the raw group stopped (its keys are unmeasured in the written record): {stopped:?}");
+    assert!(restored.is_none(), "restoring the unstreamed bench settings after the raw group: {restored:?}");
     assert!(violations.is_empty(), "measurement record comparison: {violations:?}");
     println!("Wrote hardware measurement record to {}", path.display());
 }

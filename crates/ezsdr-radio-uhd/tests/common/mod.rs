@@ -278,13 +278,11 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
         Some(Value::Scalar(Scalar::Str(s))) => s.clone(),
         _ => selector("args"),
     };
-    // UR-7: the reference PLL misses its lock on about 4% of opens (handoff §6.2); try once more.
-    let authority = DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args)
-        .or_else(|first| {
-            println!("UR-7 retry: {first}");
-            DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args)
-        })
-        .unwrap();
+    // UR-7: the reference PLL misses its lock on about 4% of opens (handoff §6.2); try up to three more times, a second apart.
+    let authority = open_with_pll_retries(
+        || DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args),
+        3, Wall::from_secs(1),
+    ).unwrap();
     let mut clean = radio.clone();
     clean.selector.remove(&Ident::parse("authority_args").unwrap());
     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
@@ -308,6 +306,21 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
     assembly.links = links;
     assembly.inputs = inputs;
     assembly
+}
+
+/// Runs `open`, and again up to `retries` times after the reference clock's PLL failing to lock
+/// (UR-7), `pause` apart. Any other error is returned at once, so that it cannot disappear into a
+/// run that then succeeds.
+pub fn open_with_pll_retries<T>(mut open: impl FnMut() -> Result<T, String>, retries: usize, pause: Wall) -> Result<T, String> {
+    let mut opened = open();
+    for retry in 1..=retries {
+        let Err(error) = &opened else { break };
+        if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) { break; }
+        println!("UR-7 retry {retry}: {error}");
+        std::thread::sleep(pause);
+        opened = open();
+    }
+    opened
 }
 
 pub fn fake(config: FakeConfig) -> Arc<FakeDevice> {
