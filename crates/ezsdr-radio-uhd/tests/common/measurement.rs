@@ -681,7 +681,10 @@ pub struct MeasurementPlan {
     pub throughput_seconds: u64,
     pub loopback_trials: usize,
     pub interval_ns: u64,
+    /// The successful queue trials each condition needs (`EZSDR_MEASURE_QUEUE_TRIALS`); trials go on until it has them or `queue_max_trials` have run.
     pub queue_trials: usize,
+    /// The most queue trials one condition runs (`EZSDR_MEASURE_QUEUE_MAX_TRIALS`), at least `queue_trials`.
+    pub queue_max_trials: usize,
     pub queue_ahead_ns: u64,
     pub queue_max_calls: usize,
     /// Wall-clock limit of the whole raw group (queue depth and coercion), in milliseconds.
@@ -712,6 +715,7 @@ impl Default for MeasurementPlan {
             loopback_trials: 20,
             interval_ns: 20_000_000,
             queue_trials: 5,
+            queue_max_trials: 15,
             queue_ahead_ns: 3_000_000_000,
             queue_max_calls: 512,
             raw_group_limit_ms: 300_000,
@@ -740,6 +744,7 @@ impl MeasurementPlan {
             loopback_trials: 1,
             interval_ns: 20_000_000,
             queue_trials: 1,
+            queue_max_trials: 1,
             queue_ahead_ns: 20_000_000,
             queue_max_calls: 8,
             raw_group_limit_ms: 300_000,
@@ -799,8 +804,11 @@ impl MeasurementPlan {
         if self.loopback_trials > u32::MAX as usize {
             return Err("EZSDR_MEASURE_LOOPBACK_TRIALS exceeds the record's u32 trial limit".to_owned());
         }
-        if self.queue_trials.checked_mul(3).is_none_or(|trials| trials > u32::MAX as usize) {
-            return Err("EZSDR_MEASURE_QUEUE_TRIALS exceeds the record's u32 trial limit".to_owned());
+        if self.queue_max_trials < self.queue_trials {
+            return Err("EZSDR_MEASURE_QUEUE_MAX_TRIALS must be at least EZSDR_MEASURE_QUEUE_TRIALS".to_owned());
+        }
+        if self.queue_max_trials.checked_mul(3).is_none_or(|trials| trials > u32::MAX as usize) {
+            return Err("EZSDR_MEASURE_QUEUE_MAX_TRIALS exceeds the record's u32 trial limit".to_owned());
         }
         Ok(())
     }
@@ -819,6 +827,7 @@ impl MeasurementPlan {
             throughput_seconds: count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
             loopback_trials: usize::try_from(count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
             queue_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_QUEUE_TRIALS is too large".to_owned())?,
+            queue_max_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_MAX_TRIALS", 15)?).map_err(|_| "EZSDR_MEASURE_QUEUE_MAX_TRIALS is too large".to_owned())?,
             nics: values.get("EZSDR_MEASUREMENT_NICS").or(values.get("EZSDR_BENCH_NIC")).map(|text| text.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
             ..MeasurementPlan::default()
         };
@@ -828,7 +837,7 @@ impl MeasurementPlan {
 
     /// Reads only the documented environment variables and validates before opening a device.
     pub fn process_env() -> Result<MeasurementPlan, String> {
-        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS", "EZSDR_MEASUREMENT_NICS", "EZSDR_BENCH_NIC"];
+        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS", "EZSDR_MEASURE_QUEUE_MAX_TRIALS", "EZSDR_MEASUREMENT_NICS", "EZSDR_BENCH_NIC"];
         let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
         MeasurementPlan::from_env(&values)
     }
@@ -1345,12 +1354,21 @@ fn queue_trial_calls(
     })))
 }
 
+fn queue_successes(trials: &[QueueTrialClass]) -> usize {
+    trials.iter().filter(|trial| matches!(trial, QueueTrialClass::Success { .. })).count()
+}
+
+/// A condition's trials stop at `required_trials` successes or `max_trials` trials, whichever comes first.
+fn queue_condition_done(trials: &[QueueTrialClass], required_trials: usize, max_trials: usize) -> bool {
+    queue_successes(trials) >= required_trials || trials.len() >= max_trials
+}
+
 fn summarize_queue_depth(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize) -> Option<(usize, String, usize)> {
-    if conditions.iter().any(|(_, trials)| trials.iter().filter(|trial| matches!(trial, QueueTrialClass::Success { .. })).count() < required_trials) {
+    if conditions.iter().any(|(_, trials)| queue_successes(trials) < required_trials) {
         return None;
     }
     conditions.iter().flat_map(|(condition, trials)| trials.iter().filter_map(move |trial| match trial {
-        QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.iter().filter(|row| matches!(row, QueueTrialClass::Success { .. })).count())),
+        QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.len())),
         QueueTrialClass::Ambiguous { .. } | QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
     })).min_by_key(|(depth, _, _)| *depth)
 }
@@ -1373,7 +1391,7 @@ fn queue_index_agreement(trials: &[Json]) -> Json {
     json!({ "by_ahead_ns": by_ahead.iter().map(|(ahead, indexes)| (ahead.to_string(), json!(indexes))).collect::<serde_json::Map<_, _>>(), "agree": agree })
 }
 
-fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize) -> Result<ValueRecord, String> {
+fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize, max_trials: usize) -> Result<ValueRecord, String> {
     let key = Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?;
     Ok(match summarize_queue_depth(conditions, required_trials) {
         Some((depth, condition, trials)) => ValueRecord::Measured {
@@ -1382,7 +1400,9 @@ fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_tri
         },
         None => ValueRecord::Unmeasured {
             key,
-            reason: format!("Phase 8 stage 3e did not obtain {required_trials} successful back-pressure trials in every queue condition."),
+            reason: format!(
+                "Phase 8 stage 3f did not obtain {required_trials} successful back-pressure trials in every queue condition within at most {max_trials} trials each ({}).",
+                conditions.iter().map(|(condition, trials)| format!("{condition}: {} successes in {} trials", queue_successes(trials), trials.len())).collect::<Vec<_>>().join(", ")),
         },
     })
 }
@@ -1399,15 +1419,15 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
     'conditions: for (condition, operations) in queue_conditions() {
         let mut classes = Vec::new();
         let mut trials = Vec::new();
-        for trial in 0..plan.queue_trials {
+        while !queue_condition_done(&classes, plan.queue_trials, plan.queue_max_trials) {
             if raw.halted() { break; }
-            let (class, row) = queue_trial(&*device, &operations, plan, trial + 1, &condition.id, raw)?;
+            let (class, row) = queue_trial(&*device, &operations, plan, classes.len() + 1, &condition.id, raw)?;
             classes.push(class);
             trials.push(row);
             total_trials += 1;
         }
         if !trials.is_empty() || raw.failure().is_none() {
-            observed_conditions.push(json!({ "id": condition.id.clone(), "blocked_index_across_ahead": queue_index_agreement(&trials), "trials": trials }));
+            observed_conditions.push(json!({ "id": condition.id.clone(), "trial_count": classes.len(), "success_count": queue_successes(&classes), "blocked_index_across_ahead": queue_index_agreement(&trials), "trials": trials }));
             condition_trials.push((condition.id.clone(), classes));
             group.conditions.push(condition);
         }
@@ -1415,10 +1435,12 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
     }
     group.values.push(match raw.unmeasured(Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?, "the queue-depth trials") {
         Some(value) => value,
-        None => queue_depth_value(&condition_trials, plan.queue_trials)?,
+        None => queue_depth_value(&condition_trials, plan.queue_trials, plan.queue_max_trials)?,
     });
     group.observations.push(observation("raw_command_queue_depth", QUEUE_TEST, None, observation_trials(total_trials.max(1))?, json!({
         "ahead_ns": plan.queue_ahead_ns,
+        "required_successes": plan.queue_trials,
+        "max_trials": plan.queue_max_trials,
         "spacing_ns": QUEUE_SPACING_NS,
         "stall_limit_ns": "half of each trial's own ahead_ns (the trial rows give ahead_ns and every call's duration_ns)",
         "call_time_limit_ns": QUEUE_CALL_TIME_LIMIT_NS,
@@ -3923,7 +3945,7 @@ mod tests {
             ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Success { depth: 8 }]),
         ];
         assert_eq!(summarize_queue_depth(&conditions, 2), Some((7, "b".to_owned(), 2)));
-        assert!(matches!(queue_depth_value(&conditions, 2).unwrap(), ValueRecord::Measured {
+        assert!(matches!(queue_depth_value(&conditions, 2, 15).unwrap(), ValueRecord::Measured {
             key, worst: model::Worst::Number(value), trials: 2, condition, test,
         } if key.as_str() == "radio.timing.command_queue_depth" && value == 7.0 && condition == "b" && test == QUEUE_TEST));
         let incomplete = [
@@ -3931,7 +3953,7 @@ mod tests {
             ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Incomplete { reason: "no stall" }]),
         ];
         assert!(summarize_queue_depth(&incomplete, 2).is_none());
-        assert!(matches!(queue_depth_value(&incomplete, 2).unwrap(), ValueRecord::Unmeasured { reason, .. } if reason.contains("2 successful back-pressure trials in every queue condition")));
+        assert!(matches!(queue_depth_value(&incomplete, 2, 15).unwrap(), ValueRecord::Unmeasured { reason, .. } if reason.contains("2 successful back-pressure trials in every queue condition")));
     }
 
     #[test]
@@ -3961,8 +3983,38 @@ mod tests {
         assert!(matches!(classify(150_000), QueueTrialClass::Incomplete { reason } if reason.contains("too long after")));
         // Ambiguous trials never count: three of five successes do not make five.
         let mixed = [("a".to_owned(), vec![QueueTrialClass::Success { depth: 8 }, QueueTrialClass::Ambiguous { depth: 2 }, QueueTrialClass::Success { depth: 9 }])];
-        assert_eq!(summarize_queue_depth(&mixed, 2), Some((8, "a".to_owned(), 2)));
+        // The value comes from successes only; the trial count is what the limiting condition actually ran.
+        assert_eq!(summarize_queue_depth(&mixed, 2), Some((8, "a".to_owned(), 3)));
         assert!(summarize_queue_depth(&mixed, 3).is_none());
+    }
+
+    #[test]
+    fn queue_trials_go_on_until_the_required_successes_or_the_trial_limit() {
+        use QueueTrialClass::{Ambiguous, DeviceFailure, Incomplete, Success};
+        let sequence = [Success { depth: 8 }, Ambiguous { depth: 2 }, Incomplete { reason: "x" }, Success { depth: 9 }, DeviceFailure { reason: "y".to_owned() }, Success { depth: 7 }, Success { depth: 8 }];
+        // Mixed trials: the loop's own stop test, applied as the loop applies it, stops at the third success and runs nothing after it.
+        let run = |required: usize, max: usize, pool: &[QueueTrialClass]| {
+            let mut classes = Vec::new();
+            while !queue_condition_done(&classes, required, max) { classes.push(pool[classes.len()].clone()); }
+            classes
+        };
+        let stopped = run(3, 15, &sequence);
+        assert_eq!(stopped.len(), 6, "{stopped:?}");
+        assert_eq!(queue_successes(&stopped), 3);
+        // Ambiguous, incomplete and failed trials never count: with the limit at 5 the third success does not come.
+        let limited = run(3, 5, &sequence);
+        assert_eq!(limited.len(), 5);
+        assert!(queue_successes(&limited) < 3);
+        assert!(summarize_queue_depth(&[("a".to_owned(), limited.clone())], 3).is_none());
+        let reason = match queue_depth_value(&[("a".to_owned(), limited)], 3, 5).unwrap() { ValueRecord::Unmeasured { reason, .. } => reason, other => panic!("{other:?}") };
+        // Five successes that took eight trials are recorded as eight trials, the count of the condition that gave the value.
+        let slow = [("a".to_owned(), vec![Ambiguous { depth: 1 }, Success { depth: 9 }, Incomplete { reason: "x" }, Success { depth: 8 }, Ambiguous { depth: 1 }, Success { depth: 8 }, DeviceFailure { reason: "y".to_owned() }, Success { depth: 8 }]),
+            ("b".to_owned(), vec![Success { depth: 12 }, Success { depth: 12 }])];
+        assert!(matches!(queue_depth_value(&slow, 2, 15).unwrap(), ValueRecord::Measured { trials: 8, condition, worst: model::Worst::Number(value), .. } if condition == "a" && value == 8.0));
+        assert!(reason.contains("at most 5 trials") && reason.contains("a: 2 successes in 5 trials"), "{reason}");
+        assert!(queue_condition_done(&[Success { depth: 1 }], 1, 15));
+        assert!(!queue_condition_done(&[Ambiguous { depth: 1 }], 1, 2));
+        assert!(queue_condition_done(&[Ambiguous { depth: 1 }, Ambiguous { depth: 1 }], 1, 2));
     }
 
     #[test]
@@ -4871,7 +4923,7 @@ mod tests {
         let custom = MeasurementPlan::from_env(&values).unwrap();
         assert_eq!((custom.step_trials, custom.overflow_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 3, 4));
         assert_eq!(custom.queue_trials, 2);
-        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS"] {
+        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS", "EZSDR_MEASURE_QUEUE_MAX_TRIALS"] {
             for invalid in ["0", "not-a-number"] {
                 assert!(MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), invalid.to_owned())])).is_err(), "{name}={invalid}");
             }
@@ -4881,8 +4933,17 @@ mod tests {
         assert!(no_overflow_trials.validate().is_err());
         let no_queue_calls = MeasurementPlan { queue_max_calls: 0, ..MeasurementPlan::default() };
         assert!(no_queue_calls.validate().is_err());
-        let too_many_queue_trials = MeasurementPlan { queue_trials: (u32::MAX as usize / 3) + 1, ..MeasurementPlan::default() };
+        let too_many_queue_trials = MeasurementPlan { queue_trials: (u32::MAX as usize / 3) + 1, queue_max_trials: (u32::MAX as usize / 3) + 1, ..MeasurementPlan::default() };
         assert!(too_many_queue_trials.validate().is_err());
+        assert_eq!(MeasurementPlan::default().queue_max_trials, 15);
+        assert_eq!(custom.queue_max_trials, 15);
+        // The limit may not lie below the successes a condition needs.
+        let limit_below_required = MeasurementPlan { queue_max_trials: 4, ..MeasurementPlan::default() };
+        assert!(limit_below_required.validate().is_err());
+        assert!(MeasurementPlan { queue_max_trials: 5, ..MeasurementPlan::default() }.validate().is_ok());
+        assert!(MeasurementPlan::from_env(&BTreeMap::from([("EZSDR_MEASURE_QUEUE_MAX_TRIALS".to_owned(), "4".to_owned())])).is_err());
+        assert_eq!(MeasurementPlan::from_env(&BTreeMap::from([("EZSDR_MEASURE_QUEUE_MAX_TRIALS".to_owned(), "9".to_owned())])).unwrap().queue_max_trials, 9);
+        assert!(MeasurementPlan::from_env(&BTreeMap::from([("EZSDR_MEASURE_QUEUE_MAX_TRIALS".to_owned(), "0".to_owned())])).is_err());
         let mut missing_stall = MeasurementPlan::default();
         missing_stall.overflow_stall_ms.pop();
         assert!(missing_stall.validate().is_err());

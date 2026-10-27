@@ -716,10 +716,12 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     assert!(queue["depth_definition"].as_str().is_some_and(|definition| definition.contains("not device FIFO entries")));
     assert_eq!(queue["back_pressure_attribution"].as_str(), Some("INFERRED"));
     assert!(queue["back_pressure_basis"].as_str().is_some_and(|basis| basis.contains("do not directly prove credit wait")));
-    assert_eq!(group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().trials, (3 * plan.queue_trials) as u32);
+    assert_eq!(group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().trials, (3 * plan.queue_max_trials) as u32);
     for condition in queue["conditions"].as_array().unwrap() {
         let trials = condition["trials"].as_array().unwrap();
-        assert_eq!(trials.len(), plan.queue_trials);
+        // The fake never blocks, so no trial succeeds and every condition runs to the plan's limit (stage 3f).
+        assert_eq!(trials.len(), plan.queue_max_trials);
+        assert_eq!((condition["trial_count"].as_u64(), condition["success_count"].as_u64()), (Some(plan.queue_max_trials as u64), Some(0)));
         assert!(trials.iter().all(|trial| trial["classification"].as_str().is_some_and(|class| !class.is_empty())));
         assert!(trials.iter().all(|trial| trial["calls"].as_array().is_some_and(|calls| !calls.is_empty() && calls.len() <= plan.queue_max_calls)));
         for trial in trials {
@@ -917,7 +919,7 @@ fn a_receiver_whose_samples_pass_the_last_command_completes_the_trial() {
     probe.script_rx(vec![ready_receiver(i64::MAX / 4)]);
     let (group, stopped, restore_error) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
     assert_eq!((stopped, restore_error), (None, None));
-    assert_eq!(probe.count("rx_stop"), plan.queue_trials);
+    assert_eq!(probe.count("rx_stop"), plan.queue_max_trials);
     let queue = &group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().result;
     let rx = queue["conditions"].as_array().unwrap().iter().find(|condition| condition["id"] == "queue-rx-frequency").unwrap();
     assert_eq!(rx["trials"][0]["rx_progress"]["end_tick"], i64::MAX / 4 + 200);
@@ -1295,8 +1297,8 @@ fn queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency() {
     let (device, _, plan) = raw_group_fixture(one_obx());
     let probe = Arc::new(probe_device::ProbeDevice::new(device));
     let group = measurement::measure_command_queue_depth(probe.clone(), &plan, &measurement::RawGroup::new(&plan)).unwrap();
-    assert_eq!(probe.count("rx_start"), plan.queue_trials, "one receive start for each queue-rx-frequency trial and none for gain");
-    assert_eq!(probe.count("rx_stop"), plan.queue_trials);
+    assert_eq!(probe.count("rx_start"), plan.queue_max_trials, "one receive start for each queue-rx-frequency trial and none for gain");
+    assert_eq!(probe.count("rx_stop"), plan.queue_max_trials);
     assert!(probe.count("rx_recv") > 0, "the receiver is drained while the commands are queued");
     let rows = probe.rows();
     let start = rows.iter().position(|row| row["call"] == "rx_start").unwrap();
@@ -3349,7 +3351,9 @@ fn a_duplex_pair_that_does_not_flow_says_the_two_values_were_not_shown_to_hold()
 fn queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number() {
     // Stage 3e: odd trials wait the plan's delay, even ones two thirds of it, so the blocked call's number can be compared.
     let (device, _, mut plan) = raw_group_fixture(one_obx());
-    plan.queue_trials = 2;
+    // One success is needed and the fake gives none, so the loop runs to the limit of two.
+    plan.queue_trials = 1;
+    plan.queue_max_trials = 2;
     let raw = Arc::new(measurement::RawGroup::with_limit(Wall::from_secs(3_600)));
     let group = measurement::measure_command_queue_depth(device, &plan, &raw).unwrap();
     let queue = &group.observations[0].result;

@@ -11535,8 +11535,8 @@
    "id": "P811",
    "name": "queue depth needs enough successful trials in every condition",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if conditions.iter().any(|(_, trials)| trials.iter().filter(|trial| matches!(trial, QueueTrialClass::Success { .. })).count() < required_trials) {",
-   "new": "if conditions.iter().all(|(_, trials)| trials.iter().filter(|trial| matches!(trial, QueueTrialClass::Success { .. })).count() < required_trials) {",
+   "old": "if conditions.iter().any(|(_, trials)| queue_successes(trials) < required_trials) {",
+   "new": "if conditions.iter().all(|(_, trials)| queue_successes(trials) < required_trials) {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
@@ -11705,8 +11705,8 @@
    "id": "P828",
    "name": "queue observation trial-count validation underestimates rows",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "self.queue_trials.checked_mul(3)",
-   "new": "self.queue_trials.checked_mul(2)",
+   "old": "self.queue_max_trials.checked_mul(3)",
+   "new": "self.queue_max_trials.checked_mul(2)",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
@@ -13782,5 +13782,75 @@
    "crate": "ezsdr-acceptance",
    "test_bin": "v58",
    "filter": "mr_34_a_scheduled_receive_retune_inside_a_running_segment_is_a_timed_tune"
+  },
+  {
+   "id": "P1038",
+   "name": "a queue condition's trials go on past the required successes (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "queue_successes(trials) >= required_trials || trials.len() >= max_trials",
+   "new": "queue_successes(trials) > required_trials || trials.len() >= max_trials",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
+  },
+  {
+   "id": "P1039",
+   "name": "a queue condition's trials run one past the limit (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "queue_successes(trials) >= required_trials || trials.len() >= max_trials",
+   "new": "queue_successes(trials) >= required_trials || trials.len() > max_trials",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
+  },
+  {
+   "id": "P1040",
+   "name": "the queue loop stops at the required count of trials, not successes (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "while !queue_condition_done(&classes, plan.queue_trials, plan.queue_max_trials) {",
+   "new": "while classes.len() < plan.queue_trials {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number"
+  },
+  {
+   "id": "P1041",
+   "name": "validate accepts a queue trial limit one below the required count (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if self.queue_max_trials < self.queue_trials {",
+   "new": "if self.queue_max_trials + 1 < self.queue_trials {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P1042",
+   "name": "the queue trial limit defaults to the required count (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "queue_max_trials: 15,",
+   "new": "queue_max_trials: 5,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P1043",
+   "name": "the queue trial limit's environment default is the required count (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "count(values, \"EZSDR_MEASURE_QUEUE_MAX_TRIALS\", 15)?",
+   "new": "count(values, \"EZSDR_MEASURE_QUEUE_MAX_TRIALS\", 5)?",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P1044",
+   "name": "the value's trial count is its successes, not the trials its condition ran (stage 3f)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Some((*depth, condition.clone(), trials.len())),",
+   "new": "Some((*depth, condition.clone(), queue_successes(trials))),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
   }
  ]
