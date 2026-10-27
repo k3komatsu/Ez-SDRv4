@@ -2517,13 +2517,15 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
     // UR-24, UR-26, UR-30, RM-16 (the exit review's clause): a timed command already
     // released to the device (inside the 3 ms release window) when a `Stop` comes is not
     // recalled: it is applied at its `e`, and recorded in `applied` as issued, not cancelled.
+    // A gain: a receive frequency after a stop is given to no device (UR-24), and a stop booked
+    // after its release must not change the result.
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
     let radio = serde_json::to_value(resource("radio")).unwrap();
     let mut spec = receive_spec(1, 1e6, 1e9, None);
     spec["schedule"] = json!([{
         "at": { "clock": "radio", "offset_ticks": 20_000 },
-        "action": { "kind": "update_parameter", "target": radio, "key": "radio.rx.c0.frequency_hz", "value": 2.3e9 }
+        "action": { "kind": "update_parameter", "target": radio, "key": "radio.rx.c0.gain_db", "value": 3.0 }
     }, {
         "at": { "clock": "radio", "offset_ticks": 19_500 },
         "action": { "kind": "stop", "target": radio }
@@ -2532,10 +2534,10 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
     let t0 = run.start_instant().unwrap();
     run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(100))).unwrap();
     let manifest = run.finish();
-    let applied = calls(&device, "apply rx 0 rate=- freq=2300000000");
+    let applied = calls(&device, "apply rx 0 rate=- freq=- gain=3");
     assert_eq!(applied.len(), 1, "{:?}", device.calls());
     assert!(!applied[0].contains("at=-"), "a timed apply: {applied:?}");
-    let rows: Vec<_> = section(&manifest, "applied").as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.c0.frequency_hz" && r["claimed"] == 2.3e9).cloned().collect();
+    let rows: Vec<_> = section(&manifest, "applied").as_array().unwrap().iter().filter(|r| r["key"] == "radio.rx.c0.gain_db" && r["claimed"] == 3.0).cloned().collect();
     assert!(rows.iter().any(|r| r["issued"] == true), "{rows:?}");
     assert!(rows.iter().all(|r| r.get("cancelled").is_none()), "{rows:?}");
 }
@@ -2543,16 +2545,17 @@ fn ur_24_a_released_command_is_not_recalled_by_stop() {
 #[test]
 fn ur_24_stop_cancels_held_commands() {
     // RM-16, UR-26 (spec 22, VH-6): a `Stop` of the device cancels no held timed command —
-    // the one for 5 ms after it is issued —, and `Provider::stop` cancels those still held.
+    // the one for 5 ms after it is issued —, and `Provider::stop` cancels those still held. The
+    // commands are gains: a receive frequency after the stop is given to no device (UR-24).
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
     let mut spec = receive_spec(1, 1e6, 1e9, None);
     let update = |offset: i64, value: f64| json!({
         "at": { "clock": "radio", "offset_ticks": offset },
         "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
-                    "key": "radio.rx.c0.frequency_hz", "value": value }
+                    "key": "radio.rx.c0.gain_db", "value": value }
     });
-    spec["schedule"] = json!([update(1_000_000, 2.3e9), update(10_000_000_000, 2.2e9), {
+    spec["schedule"] = json!([update(1_000_000, 3.0), update(10_000_000_000, 2.0), {
         "at": { "clock": "radio", "offset_ticks": 10_000 },
         "action": { "kind": "stop", "target": serde_json::to_value(resource("radio")).unwrap() }
     }]);
@@ -2560,11 +2563,11 @@ fn ur_24_stop_cancels_held_commands() {
     let t0 = run.start_instant().unwrap();
     run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(1_100))).unwrap();
     let manifest = run.finish();
-    assert_eq!(calls(&device, "apply rx 0 rate=- freq=2300000000").len(), 1, "{:?}", device.calls());
-    assert!(calls(&device, "apply rx 0 rate=- freq=2200000000").is_empty(), "{:?}", device.calls());
+    assert_eq!(calls(&device, "apply rx 0 rate=- freq=- gain=3").len(), 1, "{:?}", device.calls());
+    assert!(calls(&device, "apply rx 0 rate=- freq=- gain=2").is_empty(), "{:?}", device.calls());
     let applied = section(&manifest, "applied").as_array().unwrap().clone();
     assert!(applied.iter().all(|r| r["cancelled"] != "Stop"), "{applied:?}");
-    assert!(applied.iter().any(|r| r["cancelled"] == "Provider::stop" && r["claimed"] == 2.2e9), "{applied:?}");
+    assert!(applied.iter().any(|r| r["cancelled"] == "Provider::stop" && r["claimed"] == 2.0), "{applied:?}");
 }
 
 
@@ -8177,4 +8180,152 @@ fn the_waveforms_of_the_added_transmissions_stay_within_half_a_unit() {
     let magnitudes: Vec<f32> = bytes.chunks(8).map(|pair| f32::from_le_bytes(pair[..4].try_into().unwrap()).hypot(f32::from_le_bytes(pair[4..].try_into().unwrap()))).collect();
     assert_eq!(magnitudes.len(), 1_000);
     assert!(magnitudes.iter().all(|magnitude| *magnitude <= 0.5) && magnitudes.iter().any(|magnitude| *magnitude > 0.4), "{magnitudes:?}");
+}
+
+// ---------------------------------------------------------------- D9a: a frequency and the DDC/DUC FIFOs (UR-24, UR-33)
+
+#[test]
+fn ur_24_a_restart_after_deferred_frequencies_starts_on_the_last_one() {
+    // UR-24 (R1): a stopped receive channel is given no timed frequency — nothing would take it
+    // and the DDC would fill —; the restart's configure carries the last value, so the first
+    // sample of the new stream has it and the DDC took nothing.
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.stop_at("usrp/rx/s0");
+    direct.settle(Wall::from_millis(20));
+    for k in 0..40 {
+        direct.update("radio.rx.c0.frequency_hz", Value::num(2.0e9 + f64::from(k) * 1e6).unwrap(), HardwareTimed, Some(direct.now() + ms(10)));
+        direct.settle(Wall::from_millis(3));
+    }
+    direct.settle(Wall::from_millis(40));
+    let before = calls(&direct.device, "rx_start").len();
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.until("the restart's start", |direct| calls(&direct.device, "rx_start").len() > before);
+    direct.settle(Wall::from_millis(150));
+    let device = direct.device.clone();
+    assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0 ") && call.contains("freq=2") && !call.ends_with("at=-") && call.contains("effective")), "no timed frequency was given: {:?}", device.calls());
+    let starts = calls(&device, "rx_start");
+    let restart: i64 = starts.last().unwrap().split(' ').nth(2).unwrap().parse().unwrap();
+    assert_eq!(device.freq_at(ezsdr_radio_uhd::Dir::Rx, 0, restart), 2.0e9 + 39e6, "{starts:?}");
+    assert_eq!(device.dsp_pending(ezsdr_radio_uhd::Dir::Rx, 0), 0);
+    assert!(device.dsp_log(ezsdr_radio_uhd::Dir::Rx, 0).iter().all(|(_, _, timed)| !timed), "{:?}", device.dsp_log(ezsdr_radio_uhd::Dir::Rx, 0));
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 0);
+}
+
+#[test]
+fn ur_24_a_running_stream_takes_many_retunes_without_filling_the_ddc() {
+    // UR-24, UR-33 (R5): forty retunes of a running receive stream, each a timed command its own
+    // samples take, leave the DDC empty and fail no call.
+    use ezsdr_kernel::module_api::UpdateClass::HardwareTimed;
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    for k in 0..40 {
+        direct.update("radio.rx.c0.frequency_hz", Value::num(2.0e9 + f64::from(k) * 1e6).unwrap(), HardwareTimed, Some(direct.now() + ms(10)));
+        direct.settle(Wall::from_millis(3));
+        assert!(direct.device.dsp_pending(ezsdr_radio_uhd::Dir::Rx, 0) <= 16);
+    }
+    direct.settle(Wall::from_millis(40));
+    assert_eq!(direct.device.dsp_pending(ezsdr_radio_uhd::Dir::Rx, 0), 0);
+    assert_eq!(direct.device.dsp_log(ezsdr_radio_uhd::Dir::Rx, 0).iter().filter(|(_, _, timed)| *timed).count(), 40);
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 0);
+}
+
+/// A transmit Spec: a 60 000-sample burst at 40 ms, a transmit frequency update at `update_us`,
+/// and a second burst at `second_us`; the Run goes to 260 ms. Returns the device and T0.
+fn transmit_with_update(update_us: i64, second_us: i64) -> (Arc<FakeDevice>, i64, Manifest) {
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let (bytes, waveform) = waveform_of(&tone(60_000));
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    let target = serde_json::to_value(resource("radio/tx/s0")).unwrap();
+    let burst = |offset: i64| json!({ "at": { "clock": "radio", "offset_ticks": offset },
+        "action": { "kind": "tx_burst", "target": target, "waveform": waveform, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } });
+    spec["schedule"] = json!([
+        burst(40_000),
+        { "at": { "clock": "radio", "offset_ticks": update_us },
+          "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(), "key": "radio.tx.c0.frequency_hz", "value": 1.2e9 } },
+        burst(second_us),
+    ]);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let t0 = run.start_instant().expect("a Spec Run starts");
+    let t0_ticks = t0.ticks_in(t0.domain()).unwrap();
+    let _ = run.advance_to(TimePoint::new(t0.domain(), t0_ticks + ms(260)));
+    let manifest = run.finish();
+    (device, t0_ticks, manifest)
+}
+
+#[test]
+fn ur_24_a_transmit_frequency_booked_between_bursts_takes_the_next_bursts_first_sample() {
+    // UR-24, UR-33 (R5; bench P3): an update due in the gap between two bursts waits in the DUC
+    // and the next burst's first sample, a timed send's, takes it.
+    let (device, t0, manifest) = transmit_with_update(120_000, 150_000);
+    let timed: Vec<_> = device.dsp_log(ezsdr_radio_uhd::Dir::Tx, 0).into_iter().filter(|(_, _, timed)| *timed).collect();
+    assert_eq!(timed, vec![(t0 + ms(150), 1.2e9, true)], "{:?}", calls(&device, "tx_send"));
+    assert_eq!(device.dsp_pending(ezsdr_radio_uhd::Dir::Tx, 0), 0);
+    assert!(events_of(&manifest, "radio.COMMAND_REJECTED").is_empty(), "{:?}", events_of(&manifest, "radio.COMMAND_REJECTED"));
+}
+
+#[test]
+fn ur_24_a_transmit_frequency_inside_a_burst_waits_for_the_next_burst() {
+    // UR-24, UR-33 (R5; F3', a current limitation — R4 is D9b): uhd-tx stamps a device burst's
+    // first send only, and the DUC takes a command only from samples that still carry a time, so
+    // an update due 20 ms into a 60 ms burst is not taken by it: the radio's LO moves at its
+    // instant and the DSP value waits for the next burst's first sample.
+    let (device, t0, manifest) = transmit_with_update(60_000, 150_000);
+    let timed: Vec<_> = device.dsp_log(ezsdr_radio_uhd::Dir::Tx, 0).into_iter().filter(|(_, _, timed)| *timed).collect();
+    assert_eq!(timed, vec![(t0 + ms(150), 1.2e9, true)], "taken at the next burst's start, not at 60 ms: {:?}", calls(&device, "tx_send"));
+    assert!(calls(&device, "tx_send").iter().any(|call| call.contains("at=- sob=false")), "{:?}", calls(&device, "tx_send"));
+    assert!(events_of(&manifest, "radio.COMMAND_REJECTED").is_empty());
+}
+
+#[test]
+fn the_tone_classifier_finds_an_attenuated_shift_in_noise() {
+    // No hardware: a 100 kHz tone of amplitude 0.008 (the loopback's attenuation of 0.4) over
+    // noise, shifting to 150 kHz early (2 ms into the burst), on time (20 ms) or never; and noise alone.
+    let (start, e) = (1_000_000i64, 1_000_000 + 20 * 200_000);
+    let make = |shift_ms: Option<i64>, tone: bool| -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let mut phase = 0.0f64;
+        (0..70_000i64).map(|i| {
+            let t = start - 5 * 200_000 + i * 200;
+            let in_burst = t >= start && t < start + 60 * 200_000;
+            let hz = if shift_ms.is_some_and(|ms| t >= start + ms * 200_000) { 150e3 } else { 100e3 };
+            phase += 2.0 * std::f64::consts::PI * hz / 1e6;
+            let amplitude = if tone && in_burst { 0.008 } else { 0.0 };
+            (t, [(amplitude * phase.cos() + 0.006 * noise()) as f32, (amplitude * phase.sin() + 0.006 * noise()) as f32])
+        }).collect()
+    };
+    let end = start + 60 * 200_000;
+    let early = tone::classify_tone(&make(Some(2), true), start, end, e, 100e3);
+    assert!(early.usable(), "{early:?}");
+    let at = early.moves_at.expect("an early shift") as f64 / 200.0;
+    assert!((at + 18_000.0).abs() < 1_500.0, "the tone leaves 100 kHz about 18 ms before e: {at} µs ({early:?})");
+    let on_time = tone::classify_tone(&make(Some(20), true), start, end, e, 100e3);
+    assert!(on_time.usable() && on_time.moves_at.is_some_and(|t| (t as f64 / 200.0).abs() < 1_500.0), "{on_time:?}");
+    let never = tone::classify_tone(&make(None, true), start, end, e, 100e3);
+    assert!(never.usable() && never.moves_at.is_none(), "{never:?}");
+    let silent = tone::classify_tone(&make(Some(2), false), start, end, e, 100e3);
+    assert!(!silent.usable() && silent.before * 2 < silent.before_of && silent.after * 2 < silent.after_of, "noise alone is not a tone: {silent:?}");
+    assert!(tone::tone_verdict(&silent).starts_with("INCONCLUSIVE"));
+    // A hole in the capture around an on-time shift: the packets' timestamps jump from 19 ms to
+    // 40 ms into the burst, so the move is known only to lie in the hole.
+    let holed = |from: i64, to: i64, shift: i64| -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        make(Some(shift), true).into_iter().filter(|(t, _)| *t < start + from * 200_000 || *t >= start + to * 200_000).collect()
+    };
+    let gapped = tone::classify_tone(&holed(19, 40, 20), start, end, e, 100e3);
+    assert!(gapped.gapped && gapped.moves_at.is_none() && !gapped.usable(), "{gapped:?}");
+    assert!(tone::tone_verdict(&gapped).starts_with("INCONCLUSIVE"));
+    // A hole well after the shift does not hide it.
+    let elsewhere = tone::classify_tone(&holed(40, 50, 20), start, end, e, 100e3);
+    assert!(!elsewhere.gapped && elsewhere.moves_at.is_some_and(|t| (t as f64 / 200.0).abs() < 1_500.0), "{elsewhere:?}");
+    // A capture with no windows before the burst has no floor.
+    let short: Vec<_> = make(Some(2), true).into_iter().filter(|(t, _)| *t >= start).collect();
+    assert!(!tone::classify_tone(&short, start, end, e, 100e3).usable());
 }

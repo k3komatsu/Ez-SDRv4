@@ -6,6 +6,7 @@ Ez-SDR v4 is a clean-sheet Rust rewrite of Ez-SDR — an SDR experiment runtime 
 - [AGENTS.md](AGENTS.md) — the rules for working in this repository.
 - [Ez-SDR_v4_ARCHITECTURE_VISION.md](Ez-SDR_v4_ARCHITECTURE_VISION.md) — the design; the accepted specs live under `design/`.
 - [handoff.md](handoff.md) — the current state and the next step.
+- [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) — limits you can run into on MockRadio, the simulator or a USRP, and how to work around them.
 - [k3komatsu/Ez-SDR](https://github.com/k3komatsu/Ez-SDR) — the v3 implementation (behavioural compatibility only, not a template).
 
 Tests:

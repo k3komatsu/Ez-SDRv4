@@ -38,7 +38,7 @@
 | Opus | — | — | 指摘なし |
 | セルフレビュー | 3（P1） | 14 | 直した（P1-3 は退けた，テストを足した） |
 
-**三振の規則**：「失敗した装置にそれ以上触らない」は 3c-2c（major 9 のうち 6）と 3c-3a（6）で同じ機構の指摘が続いた．`failure-mechanisms.md` の既存の機構には当てない（測定の道具の中）が，3 を越えたので設計を疑う：測定の群ごとに別の process で流せば，guard・lease・latch のほとんどが要らなくなる．owner に諮った（2026-10-27，返事待ち．推奨は今の形を残し，理由と固める試験を `failure-mechanisms.md` に書くこと）．
+**三振の規則**：「失敗した装置にそれ以上触らない」は 3c-2c（major 9 のうち 6）と 3c-3a（6）で同じ機構の指摘が続いた．`failure-mechanisms.md` の既存の機構には当てない（測定の道具の中）が，3 を越えたので設計を疑う：測定の群ごとに別の process で流せば，guard・lease・latch のほとんどが要らなくなる．owner に諮り，今の形を残すと決まった（2026-10-27）．理由と固める試験は [failure-mechanisms.md](../../maintenance/failure-mechanisms.md) に書いた．
 
 ## 4. gate
 

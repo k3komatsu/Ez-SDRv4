@@ -1,5 +1,7 @@
 # 設計メモ 39：DDC/DUC に届く timed command（設計 33 の D9）
 
+> **訂正（設計メモ [42](42-d9-production-fix.md)，2026-10-27）**：§1.4 の「残った設定は後で上書きする」は VERIFIED（`ddc.v`，`dds_timed.v`）．F3 の機構は，in-flight window と release window の差ではなく，DUC が時刻の続く sample でしか取り出さないこと（F3'，`axi_rate_change.v:396-433`）．F5 の答え：UHD は open のたびに全 block を flush して reset するので，Run の終わりの残りは次の Run に持ち越されない（`rfnoc_graph.cpp:714-722`）．F7（DUC の stale header）は新しい（P5 で確かめる）．§3 の LO/DSP の分割は採らない（AUTO/AUTO のまま）．規則は UHD Module（spec 18）に置いた．
+
 | 項目 | 内容 |
 |---|---|
 | 段階 | Phase 8 段階 2（設計 [33](33-channels-and-streams.md) の D9「流れていない DDC/DUC への timed command」，[00-overview](00-overview.md) の P4 (1)） |

@@ -3492,8 +3492,8 @@
   "id": "J326",
   "name": "the fake honours a timed receive stop, delivering up to its time, where the X3x0 stops at once (UR-33; design-notes §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/device.rs",
-  "old": "        let now = self.now(&st);\n        let Some(streamer) = st.rx.get_mut(&stream) else {\n            return Err(DeviceError::failed(format!(\"fake: receive stream {stream} is not open\")));\n        };\n        streamer.then = None;",
-  "new": "        let now = at.unwrap_or_else(|| self.now(&st));\n        let Some(streamer) = st.rx.get_mut(&stream) else {\n            return Err(DeviceError::failed(format!(\"fake: receive stream {stream} is not open\")));\n        };\n        streamer.then = None;",
+  "old": "        let now = self.now(&st);\n        let Some(channels) = st.rx.get(&stream).map(|streamer| streamer.channels.clone()) else {",
+  "new": "        let now = at.unwrap_or_else(|| self.now(&st));\n        let Some(channels) = st.rx.get(&stream).map(|streamer| streamer.channels.clone()) else {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_33_a_timed_receive_stop_stops_the_stream_at_once"
@@ -5872,8 +5872,8 @@
    "id": "P215",
    "name": "a receive start recorded on stream 0 whatever stream it names (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "            None => {\n                let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n            }",
-   "new": "            None => {\n                let streamer = st.rx.get_mut(&0).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n            }",
+   "old": "            None => {\n                let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n                open_flow(&mut st, Dir::Rx, &channels, at);\n            }",
+   "new": "            None => {\n                let streamer = st.rx.get_mut(&0).expect(\"checked\");\n                streamer.next = Some(at);\n                streamer.origin = at;\n                streamer.ratio = ratio;\n                open_flow(&mut st, Dir::Rx, &channels, at);\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
@@ -5882,8 +5882,8 @@
    "id": "P216",
    "name": "a receive stop issued on stream 0 whatever stream it names (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        let Some(streamer) = st.rx.get_mut(&stream) else {\n            return Err(DeviceError::failed(format!(\"fake: receive stream {stream} is not open\")));\n        };",
-   "new": "        let Some(streamer) = st.rx.get_mut(&0) else {\n            return Err(DeviceError::failed(format!(\"fake: receive stream {stream} is not open\")));\n        };",
+   "old": "        let streamer = st.rx.get_mut(&stream).expect(\"checked\");\n        streamer.then = None;",
+   "new": "        let streamer = st.rx.get_mut(&0).expect(\"checked\");\n        streamer.then = None;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
@@ -5912,8 +5912,8 @@
    "id": "P219",
    "name": "a refused reopen leaves the stream's old streamer open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is\n        // made, so a refused reopen leaves the stream with none.\n        st.rx.remove(&stream);",
-   "new": "        // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is\n        // made, so a refused reopen leaves the stream with none.",
+   "old": "        // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is\n        // made, so a refused reopen leaves the stream with none.\n        self.end_rx_flow(&mut st, stream);\n        st.rx.remove(&stream);",
+   "new": "        // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is\n        // made, so a refused reopen leaves the stream with none.\n        self.end_rx_flow(&mut st, stream);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
@@ -5982,8 +5982,8 @@
    "id": "P226",
    "name": "a spec change leaves that direction's streamers open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "            Dir::Rx => st.rx.clear(),",
-   "new": "            Dir::Rx => {}",
+   "old": "                st.rx.clear();\n            }\n            Dir::Tx => st.tx.clear(),",
+   "new": "            }\n            Dir::Tx => st.tx.clear(),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_setting_a_spec_disconnects_that_direction_s_streamers"
@@ -7224,8 +7224,8 @@
    "id": "P409",
    "name": "a release is a timed command (UR-24, S1, S12, S16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            if let Err(error) = self.core.device.apply(timed.dir, *chan, &settings, Some(e)) {",
-   "new": "                if let Err(error) = self.core.device.apply(timed.dir, *chan, &settings, None) {",
+   "old": "                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),",
+   "new": "                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_release_without_a_live_channel_reaches_the_pending_segment"
@@ -13052,5 +13052,345 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "the_selector_environment_names_only"
+  },
+  {
+   "id": "P965",
+   "name": "a stopped channel's frequency is given as a timed command: the cover test is reversed (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        if passes {\n            return Reach::Timed;\n        }",
+   "new": "        if !passes {\n            return Reach::Timed;\n        }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_stopped_receive_channel_is_given_no_timed_frequency"
+  },
+  {
+   "id": "P966",
+   "name": "a gain is deferred like a frequency (UR-24: the radio takes a gain whatever streams)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "let reach = if timed.dir == Dir::Rx && settings.freq.is_some() {",
+   "new": "let reach = if timed.dir == Dir::Rx {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_stopped_receive_channel_still_takes_its_gain"
+  },
+  {
+   "id": "P967",
+   "name": "a segment does not cover its own origin (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            segment.origin <= e && segment.cut.is_none_or(",
+   "new": "            segment.origin < e && segment.cut.is_none_or(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_the_frequency_boundaries_at_the_origin_and_the_cut"
+  },
+  {
+   "id": "P968",
+   "name": "a segment still covers its cut's instant (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "segment.instant(cut).is_ok_and(|end| end > e))\n        });",
+   "new": "segment.instant(cut).is_ok_and(|end| end >= e))\n        });",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_the_frequency_boundaries_at_the_origin_and_the_cut"
+  },
+  {
+   "id": "P969",
+   "name": "a segment with no cut covers nothing (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            segment.origin <= e && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > e))",
+   "new": "            segment.origin <= e && segment.cut.is_some_and(|cut| segment.instant(cut).is_ok_and(|end| end > e))",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_frequency_inside_a_running_segment_is_given_timed"
+  },
+  {
+   "id": "P970",
+   "name": "a deferred frequency is given as a timed command anyway (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                Reach::Deferred => None,",
+   "new": "                Reach::Deferred => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_frequency_for_a_far_planned_segment_is_deferred_to_its_configure"
+  },
+  {
+   "id": "P971",
+   "name": "a release untimed is a timed command (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),",
+   "new": "                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_gap_value_for_a_configured_segment_is_applied_untimed_at_its_release"
+  },
+  {
+   "id": "P972",
+   "name": "the release applies untimed whether or not the segment was configured (UR-24, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            Some(planned) if planned.settings.as_ref().is_none_or(|settings| settings.is_configured()) => Reach::Untimed,",
+   "new": "            Some(_) => Reach::Untimed,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_gap_value_for_a_move_destination_waits_for_the_source_to_release"
+  },
+  {
+   "id": "P973",
+   "name": "the stream's first segment is not counted as configured (UR-24, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "planned.settings.as_ref().is_none_or(|settings| settings.is_configured())",
+   "new": "planned.settings.as_ref().is_some_and(|settings| settings.is_configured())",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_frequency_before_t0_for_the_first_segment_is_applied_untimed"
+  },
+  {
+   "id": "P974",
+   "name": "the mark is not set by a configure (UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            self.configured.store(true, Ordering::SeqCst);\n        }\n        configured",
+   "new": "        }\n        configured",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_value_booked_just_after_the_owner_configures_is_not_lost"
+  },
+  {
+   "id": "P975",
+   "name": "an enable from no stream does not mark its segment configured (UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                segment_config.configured.store(true, Ordering::SeqCst);",
+   "new": "                let _ = &segment_config;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_gap_value_for_a_configured_segment_is_applied_untimed_at_its_release"
+  },
+  {
+   "id": "P976",
+   "name": "the mark of any configured segment of the dir decides, not the destination's (UR-24)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "            Some(planned) if planned.settings.as_ref().is_none_or(|settings| settings.is_configured()) => Reach::Untimed,",
+   "new": "            Some(_) if planned.iter().any(|other| other.settings.as_ref().is_none_or(|settings| settings.is_configured())) => Reach::Untimed,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_move_round_trip_does_not_use_the_first_segment_s_mark"
+  },
+  {
+   "id": "P977",
+   "name": "the fake's radio queue applies a timed frequency at its instant, whatever streams (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "            let channel = &mut st.settings[dir as usize][chan];\n            if let Some(gain) = s.gain {\n                channel.gain = (gain * 2.0).round() / 2.0;\n            }\n        }\n        self.drain(st, now);",
+   "new": "            let channel = &mut st.settings[dir as usize][chan];\n            if let Some(freq) = s.freq {\n                channel.freq = freq;\n            }\n            if let Some(gain) = s.gain {\n                channel.gain = (gain * 2.0).round() / 2.0;\n            }\n        }\n        self.drain(st, now);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_stopped_ddc_takes_nothing"
+  },
+  {
+   "id": "P978",
+   "name": "the DDC holds one more command (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "const DSP_FIFO: usize = 32;",
+   "new": "const DSP_FIFO: usize = 33;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_full_ddc_refuses_the_next_timed_write"
+  },
+  {
+   "id": "P979",
+   "name": "a full DDC accepts a timed write (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                            if dir == Dir::Rx {\n                                return Err(DeviceError::failed(\"fake: control operation timed out waiting for ACK (UHD error 47)\"));\n                            }",
+   "new": "                            if false {\n                                return Err(DeviceError::failed(\"fake: control operation timed out waiting for ACK (UHD error 47)\"));\n                            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_full_ddc_refuses_the_next_timed_write"
+  },
+  {
+   "id": "P980",
+   "name": "a full DDC accepts an untimed frequency write (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "        if dir == Dir::Rx && s.freq.is_some() && dsp_of(&mut st, dir, chan).is_some_and(|chain| chain.fifo.len() >= DSP_FIFO) {",
+   "new": "        if false && dir == Dir::Rx && s.freq.is_some() && dsp_of(&mut st, dir, chan).is_some_and(|chain| chain.fifo.len() >= DSP_FIFO) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_full_ddc_refuses_the_next_timed_write"
+  },
+  {
+   "id": "P981",
+   "name": "a DDC takes a command before the stream flows (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                    let tick = want.max(*start);",
+   "new": "                    let tick = want;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_ddc_takes_one_entry_per_radio_rate_tick"
+  },
+  {
+   "id": "P982",
+   "name": "a DDC takes every due command at one tick (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                chain.cursor = tick + 1;",
+   "new": "                chain.cursor = tick;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_ddc_takes_one_entry_per_radio_rate_tick"
+  },
+  {
+   "id": "P983",
+   "name": "a stopped DDC goes on taking commands (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "        close_flow(&mut st, Dir::Rx, &channels, now);\n        let streamer = st.rx.get_mut(&stream).expect(\"checked\");",
+   "new": "        let streamer = st.rx.get_mut(&stream).expect(\"checked\");",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_stopped_ddc_takes_nothing"
+  },
+  {
+   "id": "P984",
+   "name": "a receive start opens no flow (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                streamer.ratio = ratio;\n                open_flow(&mut st, Dir::Rx, &channels, at);",
+   "new": "                streamer.ratio = ratio;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_timed_ddc_value_waits_for_an_input_sample_at_or_after_its_time"
+  },
+  {
+   "id": "P985",
+   "name": "a send without a time does not end a burst's time (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "            if !sob && at.is_none() {\n                streamer.timed = false;\n            }",
+   "new": "            if false {\n                streamer.timed = false;\n            }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_timed_duc_value_is_taken_only_while_has_time_holds"
+  },
+  {
+   "id": "P986",
+   "name": "a burst that starts without a time has one (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                streamer.timed = at.is_some();",
+   "new": "                streamer.timed = true;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_an_untimed_burst_takes_no_duc_entry"
+  },
+  {
+   "id": "P987",
+   "name": "a sample's frequency is the chain's latest, not its own tick's (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "    chain.log.iter().rev().find(|(tick, ..)| *tick <= t).map_or(chain.initial, |(_, freq, _)| *freq)",
+   "new": "    chain.log.last().map_or(chain.initial, |(_, freq, _)| *freq)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_later_write_does_not_change_samples_already_produced"
+  },
+  {
+   "id": "P988",
+   "name": "a full DUC keeps the youngest command's value (UR-33, a model)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                                last.1 = freq;",
+   "new": "                                let _ = freq;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_a_full_duc_is_a_model_that_breaks_the_time_value_pairing"
+  },
+  {
+   "id": "P989",
+   "name": "a segment that does not hold the channel covers its frequency (UR-24, R1)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let holds = |planned: &&Planned| !planned.refused && planned.segment.config.channels.contains(chan as u32);",
+   "new": "        let holds = |planned: &&Planned| !planned.refused;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_frequency_of_a_channel_the_running_segment_does_not_hold_is_deferred"
+  },
+  {
+   "id": "P990",
+   "name": "a new channel map leaves the receive flow running (UR-33)",
+   "file": "crates/ezsdr-radio-uhd/src/device.rs",
+   "old": "                for stream in streams {\n                    self.end_rx_flow(&mut st, stream);\n                }\n                st.rx.clear();",
+   "new": "                for stream in streams {\n                    let _ = stream;\n                }\n                st.rx.clear();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_33_replacing_the_subdev_spec_stops_the_receive_flow"
+  },
+  {
+   "id": "P991",
+   "name": "the mark is published after the projection's lock is let go (UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        core.probe(\"mark_publishing\", None);",
+   "new": "        drop(updates);\n        core.probe(\"mark_publishing\", None);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_the_mark_is_published_while_the_projection_lock_is_held"
+  },
+  {
+   "id": "P992",
+   "name": "a release reads the mark without the projections' locks (UR-24, UR-25)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();",
+   "new": "        let updates: Vec<()> = Vec::new();\n        let _ = &projections;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_release_waits_for_a_configure_that_carried_its_booking"
+  },
+  {
+   "id": "P993",
+   "name": "a refused untimed release write is not reported (UR-24, UR-29)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),",
+   "new": "                Reach::Untimed => { let _ = self.core.device.apply(timed.dir, *chan, &settings, None); None }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_refused_untimed_release_is_a_refusal_like_a_timed_one"
+  },
+  {
+   "id": "P994",
+   "name": "the tone threshold ignores the noise floor and the 0.5 minimum (probe classifier)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "(2.0 * floor).max(0.5)",
+   "new": "0.0",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P995",
+   "name": "a move needs only a 1 kHz offset, so noise looks like one (probe classifier)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "(hz - base_hz).abs() > 25e3",
+   "new": "(hz - base_hz).abs() > 1e3",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P996",
+   "name": "a capture with no windows before the burst is usable (probe classifier)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "self.floor.is_some() && self.before_of >= 10",
+   "new": "self.before_of >= 10",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P997",
+   "name": "a noise floor from fewer than 10 windows is accepted (probe classifier)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "(quiet.len() >= 10).then(",
+   "new": "(quiet.len() >= 0).then(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P998",
+   "name": "a hole between the last base window and the first shifted one is not a gap (probe classifier)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "first_shifted.is_some_and(|i| i == 0 || signal[i].0 - (signal[i - 1].0 + SPAN) > 0)",
+   "new": "false",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
   }
  ]

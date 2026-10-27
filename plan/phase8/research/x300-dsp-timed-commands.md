@@ -29,7 +29,7 @@ Sonnet researcher，2026-10-24，読むだけ．設計メモ [39](../39-dsp-time
 - 深さ：`CMD_FIFO_SIZE = 5`（log2）で 32（parameter は VERIFIED，`axi_fifo` の SIZE の意味は INFERRED）．
 - DDC が満杯：`rb_stb = ~timed_cmd_fifo_full` で書き込みの ack が止まり，DDC の ctrl の道（64 word）が詰まる．untimed の書き込みも同じ道なので止まる．host は `MASSIVE_TIMEOUT = 10.0` s の後 `op_timeout`，VERIFIED．
 - untimed の書き込みは `axi_tag_time` の FIFO を通らずにすぐ当たる，VERIFIED．待っている timed の設定は，後で sample が通ると同じ register を上書きする（INFERRED：同じ `SR_FREQ_ADDR`）．
-- DUC：`axi_tag_time` は無く，`axi_setting_reg set_freq_timed`（FIFO 32）．`phase_inc_timed_tready ? phase_inc_timed_tdata : phase_inc_tdata` で，timed の値が来ると untimed より優先，VERIFIED．満杯でも ack を止めない（`rb_stb` は常に 1）．満杯の書き込みがどうなるかは読んでいない（INFERRED：捨てられる）．
+- DUC：（訂正，設計メモ 42：DUC にも `axi_tag_time` は有る．`dds_timed.v` の中で，tag は時刻が instant 以上で，かつその sample の header の `has_time` が立つとき）`axi_setting_reg set_freq_timed`（FIFO 32 は INFERRED）．`phase_inc_timed_tready ? phase_inc_timed_tdata : phase_inc_tdata` で，timed の値が来ると untimed より優先，VERIFIED．満杯でも ack を止めない（`rb_stb` は常に 1）．満杯の書き込みがどうなるかは読んでいない（INFERRED：捨てられる）．
 - DUC の時刻は TX の packet の header から（INFERRED）．
 
 ## 5. Phase 7 の bench との照合（INFERRED）

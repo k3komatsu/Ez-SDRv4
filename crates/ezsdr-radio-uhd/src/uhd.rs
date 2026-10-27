@@ -552,6 +552,43 @@ impl UhdDevice {
         }
     }
 
+    /// Design note 42's bench probes only: tunes `chan` to `target_hz` as `apply` does — AUTO
+    /// for the LO and for the DSP, at `at` or now —, and returns what UHD reports it chose,
+    /// `(actual_rf_freq, actual_dsp_freq)`, so a probe knows whether the DSP value changed.
+    pub fn tune_auto(&self, dir: Dir, chan: usize, target_hz: f64, at: Option<i64>) -> Result<(f64, f64), DeviceError> {
+        let empty = cstring("")?;
+        let _control = lock(&self.control);
+        // SAFETY: every pointer passed outlives its call; the command time is set and
+        // cleared under the control mutex, as `apply` does.
+        unsafe {
+            if let Some(at) = at {
+                let (full, frac) = to_time_spec(at, self.mcr);
+                self.check_usrp("uhd_usrp_set_command_time", uhd_usrp_set_command_time(self.usrp, full, frac, 0), false)?;
+            }
+            let mut request = uhd_tune_request_t {
+                target_freq: target_hz,
+                rf_freq_policy: UHD_TUNE_REQUEST_POLICY_AUTO,
+                rf_freq: 0.0,
+                dsp_freq_policy: UHD_TUNE_REQUEST_POLICY_AUTO,
+                dsp_freq: 0.0,
+                args: empty.as_ptr() as *mut c_char,
+            };
+            let mut result = uhd_tune_result_t::default();
+            let tuned = match dir {
+                Dir::Rx => self.check_usrp("uhd_usrp_set_rx_freq", uhd_usrp_set_rx_freq(self.usrp, &mut request, chan, &mut result), false),
+                Dir::Tx => self.check_usrp("uhd_usrp_set_tx_freq", uhd_usrp_set_tx_freq(self.usrp, &mut request, chan, &mut result), false),
+            };
+            let cleared = if at.is_some() {
+                self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false)
+            } else {
+                Ok(())
+            };
+            tuned?;
+            cleared?;
+            Ok((result.actual_rf_freq, result.actual_dsp_freq))
+        }
+    }
+
     fn stream_cmd(&self, stream: usize, start: bool, at: Option<i64>) -> Result<(), DeviceError> {
         let Some(stream) = lock(&self.rx).get(&stream).cloned() else {
             return Err(DeviceError::failed("UR-3: the receive streamer is not open"));

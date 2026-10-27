@@ -11,7 +11,7 @@ Status: owner の決め（2026-10-27）．D9a（R1，R5，S2・F3' の Ceiling�
 ## 1. 分かったこと（UHD 4.10 の source．Sol が裏取り）
 
 - F1（受信の詰まり）：経路 A（受信を Stop した channel．`channel_live` は Stop を見ない，`control.rs:516-523`，`timeline.rs:941-944`）と経路 B（遠い先の planned segment，`control.rs:532-538`）で，sample の流れない DDC に timed の `SR_FREQ` が溜まる．`booked` は instant を過ぎたものを数えないので深さで止まらない．DDC は満杯で ack を止める（`rfnoc_block_ddc.v:298-319`）．CONFIRMED．
-- F3'（送信の burst の途中）：DUC の timed の値は，burst の先頭からその sample まで `has_time` が続くときだけ当たる（`axi_rate_change.v:396-433`，`axi_tag_time.v:207-230`）．uhd-tx は device burst の最初の send にだけ時刻を付ける（`tx.rs:434`；`:442`，`:579` は無し）．DSP の値が変わる tune なら，LO は e で変わり DSP は次の burst まで古い．CONFIRMED（実機は未）．
+- F3'（送信の burst の途中）：DUC の timed の値は，burst の先頭からその sample まで `has_time` が続くときだけ当たる（`axi_rate_change.v:396-433`，`axi_tag_time.v:207-230`）．uhd-tx は device burst の最初の send にだけ時刻を付ける（`tx.rs:434`；`:442`，`:579` は無し）．DSP の値が変わる tune で，e が最初の（時刻つきの）send より後なら，LO は e で変わり DSP は次の burst まで古い（最初の send の中の e は時刻どおりに当たる．D9a の Sol のコードレビュー）．CONFIRMED（実機は未）．
 - F7：DUC の tag は idle でも最後の sample の header で立つ．open で時刻は 0．前の process の最後の時刻つきの header が残ると，新しい Run の最初の burst より前に渡した値がすぐ当たる．機構は CONFIRMED，P2 の「早い」の原因かは UNCLEAR．
 - DUC は詰まらないが，溢れると時刻と値の対応が壊れる（`axi_setting_reg.v:55-87`）．害が無いとはしない．
 - release window 3 ms は 1 MS/s の 1 例で間に合っただけ（保証ではない）．

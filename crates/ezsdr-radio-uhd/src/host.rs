@@ -412,7 +412,13 @@ impl HostClock {
     /// A clock lock (§4.7) over `value`.
     pub(crate) fn clock_mutex<T>(&self, value: T) -> ClockMutex<T> {
         let key = self.inner.next_lock.fetch_add(1, Ordering::Relaxed);
-        ClockMutex { clock: self.clone(), key, data: Mutex::new(value) }
+        ClockMutex {
+            clock: self.clone(),
+            key,
+            data: Mutex::new(value),
+            #[cfg(test)]
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// Acquires the clock lock `key`; `None` on the real clock, whose plain mutex is enough.
@@ -513,14 +519,34 @@ pub(crate) struct ClockMutex<T> {
     clock: HostClock,
     key: u64,
     data: Mutex<T>,
+    /// Test only: the threads inside `lock`, waiting for it or just through it.
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl<T> ClockMutex<T> {
     /// Acquires the lock, waiting on the clock when another participant holds it (§4.7).
     pub(crate) fn lock(&self) -> ClockGuard<'_, T> {
+        #[cfg(test)]
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         let token = self.clock.acquire_lock(self.key);
         let data = lock(&self.data);
+        #[cfg(test)]
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
         ClockGuard { clock: self.clock.clone(), key: self.key, token, data: Some(data) }
+    }
+
+    /// Test only: whether some thread holds the lock now (a `try_lock` that fails).
+    #[cfg(test)]
+    pub(crate) fn is_held(&self) -> bool {
+        self.data.try_lock().is_err()
+    }
+
+    /// Test only: how many threads are inside `lock` without having it yet: the handshake
+    /// that a thread has reached the lock and is held there by its holder.
+    #[cfg(test)]
+    pub(crate) fn waiters(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
     }
 }
 

@@ -171,10 +171,16 @@ selector は SB-4 で書ける平らな形にする（入れ子の object は書
 
 **timed command の queue**：Phase 8 では今の UR-24 と同じく1列の queue とし，その深さは bench で測った最悪値1つ（P3）にする．Mock はその1列で順番どおりの実行（#62）を模擬する．block ごと（radio，DDC，DUC）の queue と，操作ごとにどの queue をいくつ使うか（footprint）は形だけ決め，測った値がそれを要るときに入れる．
 
-**流れていない DDC/DUC への timed command（Opus の P1-2，Sol の v3 P1-4）**：X3x0 の DDC/DUC は流れる packet から時刻を得るので，packet の流れていない chain に timed command を送ると queue が溜まり，あふれると装置の full restart が要る（`usrp_x3x0.dox:861-863`，VERIFIED）．radio block（RF の LO，利得，antenna の register）は timekeeper から直接時刻を得るので，この問題は DSP の tune など **DDC/DUC に行く command** にだけある（INFERRED，FakeDevice の止まる queue で先に固定する）．規則：
-  1. DDC/DUC に行く timed command は，**その instant に chain を packet が通ると計画で分かっているときだけ** device に渡す（release する）．受信は stream が run している segment の中，送信は burst が開いていて in-flight window の中にあるとき．
-  2. そうでない command（stream に入っていない channel，off・halt の stream，burst の間の送信）は，記録だけして渡さず，次に chain が流れ始める前に，stream を設定し直す一部として untimed に適用する（今の UR-25 の「direction を設定するときは現在の設定を全部 untimed に適用」と同じ）．
-  3. 渡した後に cut が予約されたら：release window（3 ms）より先の command は渡していないので取り消せる．渡し済みで cut より後の instant の command は残りうるので，cut を予約するときに，その chain に渡し済みの command の instant が cut より後なら，cut をその instant の後まで延ばすか，cut を受けたことを記録して次の開始時に stream を設定し直す（どちらにするかは spec で FakeDevice の試験とともに決める）．
+**流れていない DDC/DUC への timed command（Opus の P1-2，Sol の v3 P1-4）**：X3x0 の DDC/DUC は流れる packet から時刻を得るので，packet の流れていない chain に timed command を送ると queue が溜まり，あふれると装置の full restart が要る（`usrp_x3x0.dox:861-863`，VERIFIED）．radio block（RF の LO，利得，antenna の register）は timekeeper から直接時刻を得るので，この問題は DSP の tune など **DDC/DUC に行く command** にだけある（FakeDevice の DSP の FIFO で固定した：UR-33）．規則は**設計メモ [42](42-d9-production-fix.md)（owner の決め，2026-10-27）で改めた**．初版（2026-10-16）の 1〜4 は，記録のために下に残す：
+  1. **（改）受信の周波数**は，その instant に拒否されていない走行中の segment が覆う chain にだけ device に timed で渡す（UR-24）．送信の周波数は今のまま渡す．DUC は時刻の続く sample の位置で取り出すので，burst が時刻を失った後（最初の send の後）の instant は次の burst の最初の sample まで効かない．最初の send の中の instant はその send が取り出す（F3'：現存の制約．R4 は D9b）．
+  2. **（改）渡さなかった受信の周波数**は，記録と投影を今のままにし，宛先の segment の configure が untimed で当てる．その segment の configure が済んでいれば（最初の segment を含む）release が untimed で当てる．
+  3. **（改）渡した後に cut が予約されたら**：残った値は次の開始の最初の sample で configure を上書きする（現存の制約．R2 は P4 の結果の後）．送信の channel が stream を離れて戻る場合も同じ（S2）．
+  4. **（改）規則は UHD Module（spec 18 UR-24）に置く**．`ezsdr_radio` の語彙と MockRadio は変えない（見える振る舞いが変わらない）．測定スイートでこの状態を作ってはいけない．
+
+  初版：
+  1. DDC/DUC に行く timed command は，その instant に chain を packet が通ると計画で分かっているときだけ device に渡す（release する）．受信は stream が run している segment の中，送信は burst が開いていて in-flight window の中にあるとき．
+  2. そうでない command（stream に入っていない channel，off・halt の stream，burst の間の送信）は，記録だけして渡さず，次に chain が流れ始める前に，stream を設定し直す一部として untimed に適用する．
+  3. 渡した後に cut が予約されたら，cut を延ばすか，cut を受けたことを記録して次の開始時に stream を設定し直す（spec で FakeDevice の試験とともに決める）．
   4. この規則は `ezsdr_radio` に1か所で書き，両 Provider が使う．測定スイートでこの状態を作ってはいけない．
 
 **runtime**：静的な組み合わせ（throughput，拘束）は `coerce` で判定する．適用時刻に投影した設定での再判定（RM-7 の今の MR-18 の判定と同じ），queue の数え方，release の順番，read-back の拒否の後の扱いは，`ezsdr_radio` に1か所で書き，両 Provider が使う（spec 22 VH-7 の timeline と同じ方針）．

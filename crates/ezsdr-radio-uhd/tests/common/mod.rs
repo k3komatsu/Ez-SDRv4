@@ -38,6 +38,7 @@ pub use watchdog::watch;
 pub mod measurement;
 pub mod observations;
 pub mod probe_device;
+pub mod tone;
 
 // ---------------------------------------------------------------- fixtures
 

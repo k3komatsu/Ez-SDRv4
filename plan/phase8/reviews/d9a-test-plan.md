@@ -1,4 +1,4 @@
-STATUS: plan
+STATUS: implemented
 
 # D9a：試験計画（改訂 3）— R1（受信の周波数）と R5（FakeDevice の DSP FIFO）
 
@@ -270,3 +270,64 @@ fake では走らない。`cargo test -p ezsdr-radio-uhd --test hardware --no-ru
 8. `ur_24_a_timed_update_reaches_a_later_stream_s_pending_segment` の rig が from-none かは INFERRED。
 9. 系列 8 は burst 2 の最初の send が `at=Some`（`device_sob`）の前提。前の burst の続き（`continuing`、時刻なし）なら取り出されない。gap を取る。
 10. 本数：必須の 11 本（M1、M3、M4a、M5b、M6、4c、R5g、R5k、R5l、9、10）を先に、残りは実装役の判断で束ねてよい（2b と 2c は 2a の変種、M2 と 3d は束ねてよい）。
+
+## 実装の記録（D9a，HEAD 660213b の上）
+
+計画どおりに実装した所は省く。計画から変えた所、実装で足した状態や失敗の道、書かなかった試験を記す。
+
+### 足した状態と道
+
+- `ColdConfig::configured`（`AtomicBool`）：`ColdConfig::configure` が `core.configure` の成功の直後、`updates` ロックを持ったまま立てる。uhd-control の enable from no stream は configure の成功の後に `segment_config` に立てる。`give` が全 projection のロックを取った後に読む。`Planned.settings` が無い segment（最初の segment、または owner が begin 済みで prune されたもの）は configure 済みと数える。
+- `Reach { Timed, Untimed, Deferred }` と `Control::reach(chan, e)`（`give` の channel ごとのループの中、`is_lost()` の確認と `probe("before_timed_apply")` の後）。受信の周波数にだけ使い、gain と送信は `Reach::Timed`（今のまま）。`reach` は `streams` ロックの下で `planned()` を全 stream から読む（`updates` → `streams` の向き）。`handed_at`、`released.push(e)`、行、projection は今のまま。
+- FakeDevice：`Dsp`（FIFO、履歴 `log`、流れている区間 `flows`、`cursor`）を `(方向, front end)` ごと。消費は `settle()` から呼ぶ `drain(st, now)`（device の時刻で、流れている区間の radio rate の tick に 1 つ）。受信の区間は `rx_start`（`then` の枝も）で開き、`rx_stop`・`rx_close`・`rx_open` の置き換え・`close_streams` で閉じる（`close_flow`、始まっていない区間は消す）。送信は `tx_send` が、`TxStreamer::timed` が真の間の send の区間 `[start, start + n·ratio)` を足す。sample の値は履歴から引く（`freq_of`）。block ごとに変化が無ければ 1 回だけ引く（`freq_constant`：`a_stage_between_the_profile_limit_…` の rehearsal が 200 MS/s で、sample ごとの引きだと 120 s の watchdog を越えた。今は 31〜59 s、HEAD は 44 s）。
+- `UhdDevice::tune_auto`（probe 専用、`src/uhd.rs`、`Device` trait に入れない）。
+
+### 計画から変えた所
+
+- M1：計画どおり本物の `await_release`（`wait_release` の probe、owner を `host.spawn` の thread）。ただし source の「最後の sample の旧値」は `freq_at(Rx, 1, ms(99)) == 1e9` で見る（loopback の sample ではない）。
+- 系列 1c、4b は `Direct`（`direct.device` の `freq_at`、`dsp_log`）、系列 8、10 は Spec の Run（`transmit_with_update`）で、`Direct` ではない。
+- 系列 9（S2）と系列 6 は control.rs の単体テスト（TX は `device.tx_send` を直接、RX は `device.rx_stop`/`rx_start`/`apply` を直接）。
+- M5a：RX の Stop が `at` の cut で segment を plan から外す（零長の segment は plan に残らない）ので、「零長の segment は宛先にならない」は plan に零長の segment が現れる並びでは試験できない。宛先の選択の零長の除外は防御で、この試験は「止めた後の値で configured の印が使われない」ことだけを見る。
+- R5i、R5m、R5g ほかは計画どおり。R5j は新しい装置が空という弱い試験のまま。
+
+### 書かなかった試験（理由）
+
+- 系列 2c（cold の rate 変更を挟む deferral）、3d（untimed の apply の失敗）、12b（対の一致）、15（settle が渡した値と同じ）、14（stop の後の release）：12d、M2、1a の行の明示でこれらの観測する性質のほとんどを見るので、重ねなかった。3d の untimed の失敗の道（`Handed::Refused`）は timed の失敗と同じ分岐で、既存の `ur_24_a_refused_release_*` が分岐を見る。
+- 系列 7（2 channel の stream の中の channel ごとの値）：FIFO の key は `(dir, front end)` なので `ur_33_each_chain_has_its_own_fifo`（device 単位）で固めた。`flows` の chan の取り違えを殺す stream 単位の試験は無い。
+- P4〜P7 は `--features uhd` の docker clippy まで（実機では流していない）。
+
+### 壊れた既存のテスト（直した）
+
+| 試験 | 分類 | 直し |
+|---|---|---|
+| `ur_24_a_timed_update_reaches_a_later_stream_s_pending_segment` | R1（from-none の enable で configure 済み → release が untimed） | timed 0、untimed 1 |
+| `ur_25_the_switch_applies_the_configuration_in_effect_at_e2`、`ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch` | R1（試験が `plan[1].configure` を直接呼ぶので印が立つ → release が untimed で冗長に 1 回） | timed 0、untimed の release 1 |
+| `ur_34_a_timed_update_crossing_the_move_reaches_each_streamer_channel_at_its_instant` | 緩い（R5：`read_back().freq` が即時に当たる前提） | `dsp_pending`、`freq_at` |
+| `ur_33_a_timed_command_follows_its_front_end_across_a_spec`、`ur_33_a_command_due_while_its_front_end_was_out_never_applies` | 緩い（R5） | timed の gain に替えた（§6 の行も） |
+| `ur_24_stop_cancels_held_commands`（`tests/fake.rs`） | R1 | gain に替えた |
+| `ur_25_an_enable_at_a_timed_update_s_instant_applies_it`、`ur_24_a_released_command_is_not_recalled_by_stop` | 通る（e が走行中の segment に覆われる） | 変えない |
+
+### セルフレビューの後の変更（2026-10-28）
+
+セルフレビュー（free の枠が尽きたので `opencode-go/deepseek-v4.1-flash#max`、1 回）は P1 0、P2 8、P3 13。
+
+- 直した：`drain` の `cursor = max(cursor, now + 1)` を外した（flow の最初の tick が現在の tick のとき、その tick の sample で取り出す。試験 `ur_33_a_stream_that_starts_now_takes_a_due_command_at_its_first_sample`）。系列 7 を control 側に足した（`ur_24_a_frequency_of_a_channel_the_running_segment_does_not_hold_is_deferred`、`holds` の `contains` を落とす mutant を殺す：P989）。M4a/M4b は worker の「started」を受けてから 300 ms の timeout を見る。M5a の並びを origin（100 ms）での Stop にした。12d に「e より前の stop は cancelled」を足した。P4 は `unconsumed` を出力に足し、P6 の継続を「最後に queue した sample の次の時刻」で送る（遅れた packet の扱いを見る）。UR-24 の文（「calls the device for the gain alone」を「makes no device call for the frequency」に、「runs the channel」を「holds the channel」に）、§2 の「untimed frequency writes」、UR-25 の `*Test:*` の位置、from-none が印を立てる理由、Changes の行を直した。計画の `dsp_log` の説明は実際（すべての書き込みと取り出し）に合わせた。
+- 退けた：遅れた受信 start に flow を開かない（P2-2）：`rx_start` の late の枝は `next` を立てず、`rx_recv` は `LateCommand` を返した後 `Timeout` を返す（`device.rs` の `(Some(at), _) if now >= at` の枝）ので、遅れた start の stream は sample を作らず、flow は要らない（コードを読んで確かめた）。from-none の印を `updates` ロックの中で立てない（P2-3）：uhd-control 自身が configure し release も同じ thread なので交差せず、`updates` を取るために `configure` の経路を変えるのは道を増やす。spec に理由を書いた。P4 の SAFE の assert（P3-9）：P4 は TX を調律せず（tone は 1 GHz のまま）、assert は TX の tone を守るので δ を足す必要がない。読んだ指摘のうち、sample の有効値や burst 1 の途中の `dsp_pending` を計画どおりに足さなかった所（P3-7）は、性質が calls と FIFO の数で見えるので足していない（M1 の source の sample は `freq_at`、1c は `freq_at`）。README の link（P3-11）と UR-22 を設計メモ 42 §5 に挙げている点（P3-12：D9a は UR-22 を変えない、R4 は D9b）は orchestrator の gate。15（`handed_at > S`）と 14（stop の後の release）は、新しい試験を足していない：渡さなかった値の `handed_at` は `Some(now)` で渡した値と同じ道を通り、渡した値の settle は既存の `ur_26_…`・`ur_29_…` の試験が見るが、渡さなかった値の `handed_at > S` を直接見る試験は無い（12d は `e == S` の行だけ）。残りとして記録する。
+- mutation 行：P989 を足した。P977 の filter を `ur_33_a_stopped_ddc_takes_nothing` に変えた（`read_back` で見る）。計画 §8 の「印を `updates` ロックの外で公開」「`Holder::Owner` で代用」「`handed_at` を `None`」「`released.push(e)` を落とす」は行にしていない：前の 2 つは、ロックの外の公開は configure の中の store の位置の違いで試験の hook が無く、`Holder::Owner` の代用はこの実装に無い道。`handed_at` は `Some(now)` のまま（`None` の道は無い）、`released.push` は production で読まれない。
+
+### 修正 1（Sol 4 major、Opus mi-1〜5）
+
+- Sol 1：`set_subdev_spec` は clear の前に受信の flow を旧 map の下で閉じる（`end_rx_flow`）。試験 `ur_33_replacing_the_subdev_spec_stops_the_receive_flow`、mutation P990、P226 の `old` を更新。
+- Sol 2：P5 は signal のある窓（平均の大きさ > 0.2、burst の開始の 1 ms 後から）だけで移動を探す。stale header の時刻（burst の 400 ms 後）と新しい instant を出力し、header ≥ e が成り立たなければ INCONCLUSIVE を出す。entry の数と RF 条件は同じ。
+- Sol 3：`ColdConfig::configure` の store の直前に `probe("mark_publishing")`。試験 `ur_25_the_mark_is_published_while_the_projection_lock_is_held`（probe の中で lock が held で印が未設定）、mutation P991（store の前に lock を外す）。`ClockMutex` に試験用の `is_held`、`waiters`（lock の中の待ちの数）を足し、M4a/M4b は「300 ms 完了しない」をやめ、待ちが lock に着いたことを待つ。mutation P992（`give` が projection の lock を取らない）の行。
+- Sol 4：spec 18 の送信の段落、設計 33 D9 の規則 1、Changes の行を「最初の send の後（burst が時刻を失った後）の instant」に絞り、最初の send の中の instant は取り出される、と書いた。
+- mi-1：UR-24 の文を「gives the device no timed command for the frequency」に。mi-2：`ur_25_a_timed_update_at_the_cold_change_s_instant_reaches_the_switch` の configure を cut（300 ms）の後に動かし、298 ms の release は装置を呼ばない。mi-3：`ur_24_a_released_command_is_not_recalled_by_stop` を gain に。mi-5：系列 3d `ur_24_a_refused_untimed_release_is_a_refusal_like_a_timed_one`（`ApplyFails::new`）、mutation P993。
+- 変えていない：Opus MA-1（T0 より前の受信周波数）の M6・最初の segment の振る舞い（owner の判断待ち）。
+
+### 修正 2（Sol の major：P5 の信号判定）
+
+P5 の「平均の大きさ > 0.2」は bench の tone（0 dB で約 0.008）を全部落とすので、判定を純粋な関数に替えた：`tests/common/tone.rs` の `classify_tone`（25 sample の窓の coherence。burst の前の窓から雑音の床を測り、閾値は `max(0.5, 2 × 床)`。burst の中の窓だけを見、3 窓続けて 25 kHz 以上ずれたときだけ「動いた」）と `tone_verdict`。信号の窓が `e` の前後で半分に満たない、または床の窓が 10 未満なら INCONCLUSIVE を出す（P5 は header < e の INCONCLUSIVE に加える）。P6・P7 は同じ関数に替え、P4 は再開後の信号の窓の数を出す（P2 は元の probe のまま）。試験は合成（雑音の上の約 0.008 の 100→150 kHz の tone、早い shift・時刻どおりの shift・shift 無し・雑音だけ・床の無い capture）：`the_tone_classifier_finds_an_attenuated_shift_in_noise`（`tests/fake.rs`、機材なしで走る）。mutation P994〜P997。
+
+### 確かめたこと
+
+結果は報告の本文（impl report）。
