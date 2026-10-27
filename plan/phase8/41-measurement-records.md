@@ -86,3 +86,14 @@ FAIL（major 7，minor 1）．すべて採った．N1：selector は物理の構
 受信の throughput の値（profile 1 000 MB/s，1 channel の最大は 200 MS/s × 4 byte = 800 MB/s）は，3c-3 の 2 channel の測定を待ってから段階 4 で決める．
 
 3c-2a の値は raw の `Device` を通すが，3b-1 の「raw の probe は値にしない」の例外にする：queue の深さと coercion は装置そのものの性質で，Provider が呼ぶのと同じ `Device::apply` で測り，判定は装置が返すもの（back-pressure で止まった呼び出し，読み返した値）だけに頼る（3b-1 の Sol major 1 は Provider の `applied` の時刻が予約でしかないことで，この道はそれを使わない）．（orchestrator，2026-10-27．owner「推奨で作って」）
+
+**owner の決め（2026-10-27）**：
+- 送信の利得の掃引（3c-2a の coercion）は最大まで．条件は，送信の streamer を開かず，LO を 1 GHz に置くこと．bench の手順では，流す前に毎回 owner に att（30 dB 以上，18 GHz 定格，TX/RX → att → RX2）が入っていることを確かめる．受信の利得の掃引は制限しない．
+- 周波数の格子は，厳しい抜き取りで値にする（3c-2c）．
+  - 両端と整数でない位置を含む数百点を要求し，全点が 0.05 Hz 以内で読み返せたときだけ，実機の格子を「lo〜hi，1 Hz 刻み」とする．
+  - 刻みは差の最大の 2 倍とする．抜き取りの間の点は INFERRED と observation に書く．
+  - 送信も OBX の全範囲で測る（sample は送らない，利得 0．att とケーブルは 18 GHz まで効く）．
+- overflow の `overflow_restart_gap_ns` は最初の bench の数を見て決める．
+  - 「読み直しから再開まで」の推定（3c-1）を見る．全 rate・全試行で「最大と最小の差が最大の半分以下」なら，その最大を値にし，RM-17 の文を「consumer が読み直した後に失う長さ」に直す（spec 07 の改訂）．
+  - そうでなければ `unmeasured` のままにし，parity から外すかを改めて決める．
+- 順番：最初の実機の流し（shake-out，profile の値には使わない）を 3c-2b の後に行い，3c-2c，3d（その結果を入れる），3c-3 の順にする．

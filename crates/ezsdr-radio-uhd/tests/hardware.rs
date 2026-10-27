@@ -11,10 +11,12 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration as Wall, Instant};
 
-use common::*;
 use ezsdr_kernel::module_api::Authority;
 use ezsdr_kernel::time::{ClockRegistry, TimePoint};
 use ezsdr_radio_uhd::{Device, DeviceAuthority, Dir, Settings, UhdRadio};
+use serde_json::Value as Json;
+
+use common::*;
 
 fn args() -> String {
     std::env::var("EZSDR_UHD_ARGS").expect("EZSDR_UHD_ARGS names the device, e.g. addr=192.168.40.2")
@@ -1461,6 +1463,683 @@ fn hw_m2_tx_front_end_moves_between_streamers() {
     assert!(burst0.1 > 0 && burst1.1 > 0 && burst0.0 > 10.0 * quiet.0 && burst1.0 > 10.0 * quiet.0, "both bursts reach the loopback receiver");
 }
 
+// ----------------------------------------------------------- stage 3c-2b observations
+
+const LOOPBACK_DELAY_SAMPLES: i64 = 44;
+const SIGNAL_THRESHOLD: f64 = 0.001;
+
+fn ticks_for_wall(ticks: i64, master_clock_hz: u64) -> Wall {
+    let ns = (u128::try_from(ticks.max(0)).unwrap() * 1_000_000_000).div_ceil(u128::from(master_clock_hz));
+    Wall::from_nanos(u64::try_from(ns).unwrap_or(u64::MAX))
+}
+
+fn wait_until_host(deadline: Instant) {
+    while Instant::now() < deadline {
+        std::thread::sleep((deadline - Instant::now()).min(Wall::from_millis(1)));
+    }
+}
+
+fn read_until_tick_without_clock(device: &dyn Device, end_tick: i64, ticks_per_sample: i64, limit: Wall) -> Read {
+    let mut out = Read::default();
+    let begun = Instant::now();
+    while begun.elapsed() < limit && out.end(ticks_per_sample).is_none_or(|end| end < end_tick) {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                out.blocks.push((first_tick, samples[0].len()));
+                out.samples.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * ticks_per_sample, *sample)));
+            }
+            other => out.other.push((-1, format!("{other:?}"))),
+        }
+    }
+    out
+}
+
+fn drain_without_clock(device: &dyn Device, timeout: Wall, limit: Wall) -> Vec<Json> {
+    let begun = Instant::now();
+    let mut idle = 0;
+    let mut rows = Vec::new();
+    while begun.elapsed() < limit && idle < 2 {
+        match device.rx_recv(0, 2_000, timeout) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                idle = 0;
+                rows.push(serde_json::json!({ "kind": "samples", "first_tick": first_tick, "samples": samples[0].len() }));
+            }
+            ezsdr_radio_uhd::RxRecv::Timeout => {
+                idle += 1;
+                rows.push(serde_json::json!({ "kind": "timeout" }));
+            }
+            other => {
+                idle = 0;
+                rows.push(serde_json::json!({ "kind": "other", "result": format!("{other:?}") }));
+            }
+        }
+    }
+    rows
+}
+
+fn raw_report_rows(device: &dyn Device, limit: Wall) -> Vec<Json> {
+    let begun = Instant::now();
+    let mut quiet = 0;
+    let mut rows = Vec::new();
+    while begun.elapsed() < limit {
+        match device.tx_async(0, Wall::from_millis(20)) {
+            Ok(Some(report)) => {
+                quiet = 0;
+                rows.push(serde_json::json!({ "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel }));
+            }
+            Ok(None) => {
+                quiet += 1;
+                if quiet >= 3 { break; }
+            }
+            Err(error) => {
+                rows.push(serde_json::json!({ "code": "tx_async_error", "error": error.message }));
+                break;
+            }
+        }
+    }
+    rows
+}
+
+fn raw_send_row(
+    device: &dyn Device,
+    wave: &[ezsdr_radio_uhd::Iq],
+    at: Option<i64>,
+    sob: bool,
+    eob: bool,
+    trial_origin: Instant,
+) -> Json {
+    assert!(wave.iter().all(|sample| f64::from(sample[0]).hypot(f64::from(sample[1])) <= 0.5), "bench RF safety: TX amplitude exceeds 0.5");
+    let host_before_ns = u64::try_from(trial_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let result = device.tx_send(0, &[wave], at, sob, eob, Wall::from_millis(100));
+    let host_after_ns = u64::try_from(trial_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let accepted = result.as_ref().ok().copied();
+    serde_json::json!({
+        "requested_samples": wave.len(), "accepted_samples": accepted,
+        "difference_samples": accepted.map(|count| wave.len() as i64 - count as i64),
+        "at_tick": at, "sob": sob, "eob": eob,
+        "host_before_ns": host_before_ns, "host_after_ns": host_after_ns,
+        "error": result.err().map(|error| error.message),
+    })
+}
+
+fn correlation_json(result: observations::CorrelationOffset) -> Json {
+    serde_json::json!({
+        "status": format!("{:?}", result.status), "matched_tick": result.matched_tick,
+        "sample_offset": result.sample_offset, "peak": result.peak,
+        "second_peak": result.second_peak, "median": result.median,
+    })
+}
+
+fn safe_pn_iq(n: usize) -> Vec<ezsdr_radio_uhd::Iq> {
+    pn(n).into_iter().map(|(i, q)| [i * 0.7, q * 0.7]).collect()
+}
+
+fn restore_raw_probe(device: &dyn Device) -> Json {
+    let mut errors = Vec::new();
+    if let Err(error) = device.rx_stop(0, None) { errors.push(format!("rx_stop: {}", error.message)); }
+    let drain = drain_without_clock(device, Wall::from_millis(10), Wall::from_millis(300));
+    device.rx_close(0);
+    device.tx_close(0);
+    let mut applied = Vec::new();
+    for (dir, antenna) in [(Dir::Rx, "RX2"), (Dir::Tx, "TX/RX")] {
+        for chan in 0..device.channels(dir) {
+            let settings = Settings { rate: Some(1e6), freq: Some(1e9), gain: Some(0.0), antenna: Some(antenna.to_owned()) };
+            match device.apply(dir, chan, &settings, None) {
+                Ok(readback) => applied.push(serde_json::json!({ "direction": dir.name(), "channel": chan, "rate": readback.rate, "freq": readback.freq, "gain": readback.gain, "antenna": readback.antenna })),
+                Err(error) => errors.push(format!("{} channel {chan}: {}", dir.name(), error.message)),
+            }
+        }
+    }
+    serde_json::json!({ "rx_stopped": true, "rx_drain": drain, "tx_streamer_closed": true, "applied": applied, "errors": errors })
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_h1_late_multi_packet_burst() {
+    // H1 compares a single timed send with later untimed sends after its first packet is late.
+    let device = raw();
+    raw_rx(&*device, 1e6, 1e9);
+    raw_tx(&*device, 1e6, 1e9);
+    let wave = tone_1msps(20_000);
+    assert!(wave.iter().all(|sample| f64::from(sample[0]).hypot(f64::from(sample[1])) <= 0.5), "bench RF safety");
+    let mut trials = Vec::new();
+    for mode in ["all_timed", "timed_head_untimed_tail"] {
+        for late_ms in [1i64, 5, 10] {
+            for trial in 0..3 {
+                let trial_origin = Instant::now();
+                let host_before = Instant::now();
+                let device_time_host_before_ns = u64::try_from(host_before.duration_since(trial_origin).as_nanos()).unwrap_or(u64::MAX);
+                let d0 = device.time_now().unwrap();
+                let host_after = Instant::now();
+                let device_time_host_after_ns = u64::try_from(host_after.duration_since(trial_origin).as_nanos()).unwrap_or(u64::MAX);
+                let rx_start = d0 + 20 * TICKS_PER_MS;
+                let send_reference = d0 + 70 * TICKS_PER_MS;
+                let tx_at = send_reference - late_ms * TICKS_PER_MS;
+                let rx_start_before = u64::try_from(trial_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let rx_start_result = device.rx_start(0, rx_start);
+                let rx_start_after = u64::try_from(trial_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                wait_until_host(host_after + ticks_for_wall(send_reference - d0, device.master_clock_rate()));
+                let send_host_ns = u64::try_from(trial_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let mut sends = Vec::new();
+                if mode == "all_timed" {
+                    sends.push(raw_send_row(&*device, &wave, Some(tx_at), true, true, trial_origin));
+                } else {
+                    sends.push(raw_send_row(&*device, &wave[..500], Some(tx_at), true, false, trial_origin));
+                    let rest = &wave[500..];
+                    let chunks: Vec<_> = rest.chunks(5_000).collect();
+                    for (index, chunk) in chunks.iter().enumerate() {
+                        sends.push(raw_send_row(&*device, chunk, None, false, index + 1 == chunks.len(), trial_origin));
+                    }
+                }
+                let received = read_until_tick_without_clock(&*device, d0 + 110 * TICKS_PER_MS, 200, Wall::from_millis(500));
+                let intervals = observations::heard_intervals(&received.samples, 200, SIGNAL_THRESHOLD, LOOPBACK_DELAY_SAMPLES);
+                let reports = raw_report_rows(&*device, Wall::from_secs(1));
+                device.rx_stop(0, None).unwrap_or_else(|error| println!("H1 rx_stop: {}", error.message));
+                let drain = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
+                trials.push(serde_json::json!({
+                    "mode": mode, "late_ms_from_pretrial_device_read_inferred": late_ms, "trial": trial,
+                    "d0_tick": d0, "device_time_read_host_before_ns": device_time_host_before_ns,
+                    "device_time_read_host_after_ns": device_time_host_after_ns,
+                    "rx_start_tick": rx_start, "rx_start_host_before_ns": rx_start_before,
+                    "rx_start_host_after_ns": rx_start_after, "rx_start_error": rx_start_result.err().map(|error| error.message),
+                    "tx_reference_tick": send_reference, "requested_tx_tick": tx_at,
+                    "send_host_ns_after_reference_wait": send_host_ns, "sends": sends,
+                    "reports": reports, "report_counts": observations::count_report_codes(&reports),
+                    "heard_intervals": intervals.iter().map(|interval| serde_json::json!({
+                        "first_tick": interval.first_tick, "last_tick": interval.last_tick, "samples": interval.samples,
+                    })).collect::<Vec<_>>(), "signal_amplitude_threshold": SIGNAL_THRESHOLD,
+                    "received_blocks": received.blocks, "receive_other": received.other, "drain": drain,
+                }));
+            }
+        }
+    }
+    let cleanup = restore_raw_probe(&*device);
+    println!("H1 late multi-packet burst: {} trials", trials.len());
+    measurement::push_raw_observation("hw_h1_late_multi_packet_burst", 18, serde_json::json!({
+        "trials": trials, "loopback_delay_samples": LOOPBACK_DELAY_SAMPLES,
+        "amplitude_threshold": SIGNAL_THRESHOLD, "cleanup": cleanup,
+        "timing_note": "Each trial reads device time once; requested lateness is inferred from that read and the host wait, not re-read from the device.",
+    }));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_h2_underflow_mid_burst() {
+    // H2 starves an open burst, then resumes with untimed PN samples and records their alignment.
+    let device = raw();
+    raw_rx(&*device, 1e6, 1e9);
+    raw_tx(&*device, 1e6, 1e9);
+    let wave = safe_pn_iq(20_000);
+    assert!(wave.iter().all(|sample| f64::from(sample[0]).hypot(f64::from(sample[1])) <= 0.5), "bench RF safety");
+    let head = &wave[..10_000];
+    let tail = &wave[10_000..];
+    let per_sample = 200;
+    let mut observed_underflow = Vec::new();
+    let mut no_underflow = Vec::new();
+    for trial in 0..3 {
+        let _ = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
+        let trial_origin = Instant::now();
+        let host_before = Instant::now();
+        let device_time_host_before_ns = u64::try_from(host_before.duration_since(trial_origin).as_nanos()).unwrap_or(u64::MAX);
+        let d0 = device.time_now().unwrap();
+        let host_after = Instant::now();
+        let device_time_host_after_ns = u64::try_from(host_after.duration_since(trial_origin).as_nanos()).unwrap_or(u64::MAX);
+        let rx_start = d0 + 60 * TICKS_PER_MS;
+        let tx_start = d0 + 80 * TICKS_PER_MS;
+        let tail_send_tick = tx_start + 20 * TICKS_PER_MS;
+        let rx_started = device.rx_start(0, rx_start);
+        let head_send = raw_send_row(&*device, head, Some(tx_start), true, false, trial_origin);
+        wait_until_host(host_after + ticks_for_wall(tail_send_tick - d0, device.master_clock_rate()));
+        let tail_send_host_ns = u64::try_from(trial_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let tail_send = raw_send_row(&*device, tail, None, false, true, trial_origin);
+        let received = read_until_tick_without_clock(&*device, d0 + 135 * TICKS_PER_MS, per_sample, Wall::from_millis(700));
+        let reports = raw_report_rows(&*device, Wall::from_secs(1));
+        let report_counts = observations::count_report_codes(&reports);
+        let underflow = report_counts.contains_key("Underflow") || report_counts.contains_key("UnderflowInPacket");
+        let expected_head = tx_start + LOOPBACK_DELAY_SAMPLES * per_sample;
+        let expected_tail = tx_start + 10 * TICKS_PER_MS + LOOPBACK_DELAY_SAMPLES * per_sample;
+        let head_match = observations::correlation_offset(&received.samples, &head[..1_024], expected_head, per_sample, 20_000);
+        let tail_match = observations::correlation_offset(&received.samples, &tail[..1_024], expected_tail, per_sample, 30_000);
+        let row = serde_json::json!({
+            "trial": trial, "d0_tick": d0,
+            "device_time_read_host_before_ns": device_time_host_before_ns,
+            "device_time_read_host_after_ns": device_time_host_after_ns,
+            "rx_start_tick": rx_start, "rx_start_error": rx_started.err().map(|error| error.message),
+            "tx_start_tick": tx_start, "planned_head_end_tick": tx_start + 10 * TICKS_PER_MS,
+            "starvation_after_head_end_ms": 10, "tail_send_inferred_tick": tail_send_tick,
+            "tail_send_host_ns": tail_send_host_ns, "sends": [head_send, tail_send],
+            "underflow_observed": underflow, "reports": reports, "report_counts": report_counts,
+            "underflow_report_ticks": reports.iter().filter(|r| matches!(r["code"].as_str(), Some("Underflow" | "UnderflowInPacket"))).map(|r| r["tick"].clone()).collect::<Vec<_>>(),
+            "head_correlation": correlation_json(head_match), "tail_correlation": correlation_json(tail_match),
+            "tail_heard_tick_source_axis": tail_match.matched_tick.map(|tick| tick - LOOPBACK_DELAY_SAMPLES * per_sample),
+            "tail_offset_samples": tail_match.sample_offset, "tail_heard": tail_match.status == observations::CorrelationStatus::Found,
+            "loopback_delay_samples": LOOPBACK_DELAY_SAMPLES,
+            "received_blocks": received.blocks, "receive_other": received.other,
+        });
+        if underflow { observed_underflow.push(row); } else { no_underflow.push(row); }
+        device.rx_stop(0, None).unwrap_or_else(|error| println!("H2 rx_stop: {}", error.message));
+        let _ = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
+    }
+    let cleanup = restore_raw_probe(&*device);
+    println!("H2 underflow mid-burst: underflow {}, no underflow {}", observed_underflow.len(), no_underflow.len());
+    measurement::push_raw_observation("hw_h2_underflow_mid_burst", 3, serde_json::json!({
+        "observed_underflow": observed_underflow, "no_underflow_observed": no_underflow,
+        "starvation_ms": 10, "cleanup": cleanup,
+        "correlation_note": "PN correlation uses a 1,024-sample prefix; ties and weak peaks are recorded as ambiguous or absent.",
+    }));
+}
+
+fn wait_for_rx_start_and_sample(probe: &probe_device::ProbeDevice, start_index: usize, timeout: Wall) -> Option<Json> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let rows = probe.rows();
+        let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index).cloned();
+        if let Some(start) = start {
+            if let Some(sample) = rows.iter().find(|row| probe_device::receive_sample_follows_start(&start, row)).cloned() {
+                return Some(serde_json::json!({ "rx_start": start, "rx_sample": sample }));
+            }
+        }
+        if Instant::now() >= deadline { return None; }
+        std::thread::sleep(Wall::from_millis(1));
+    }
+}
+
+fn tx_send_rows_since(probe: &probe_device::ProbeDevice, count: usize) -> Vec<Json> {
+    probe.rows().into_iter().filter(|row| row["call"] == "tx_send").skip(count).collect()
+}
+
+fn wait_for_tx_eob(probe: &probe_device::ProbeDevice, eob_count: usize, timeout: Wall) -> Option<Json> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if probe.tx_eob_count() > eob_count {
+            return probe.rows().into_iter()
+                .filter(|row| row["call"] == "tx_send" && row["eob"].as_bool() == Some(true))
+                .nth(eob_count);
+        }
+        if Instant::now() >= deadline { return None; }
+        std::thread::sleep(Wall::from_millis(1));
+    }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_h5_held_last_sample() {
+    // Prebooked adjacent and positive-gap controls, then isolated bursts with no queued successor.
+    let inner = usrp();
+    let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+    let dir = TempDir::new();
+    let mut run = tx_session(probe.clone(), &dir);
+    let wave: Vec<_> = pn(100).into_iter().map(|(re, im)| (re * 0.7, im * 0.7)).collect();
+    assert!(wave.iter().all(|(re, im)| f64::from(*re).hypot(f64::from(*im)) <= 0.5), "bench RF safety");
+    let (bytes, _) = waveform_of(&wave);
+    let mut cases = Vec::new();
+    let mut case_ranges = Vec::new();
+    for (name, gap_samples) in [("adjacent_control", 0i64), ("positive_gap", 3_000i64)] {
+        let base = tx_at(&run, ms(1_000));
+        let first_tick = base.ticks_in(base.domain()).unwrap();
+        let interval = 100 + gap_samples;
+        let end_tick = first_tick + 199 * interval + 100;
+        let tx_send_baseline = probe.count("tx_send");
+        case_ranges.push((base.domain(), first_tick, end_tick));
+        let mut submits = Vec::new();
+        for index in 0..200i64 {
+            let at = TimePoint::new(base.domain(), base.ticks_in(base.domain()).unwrap() + index * interval);
+            let host_before_ns = probe.host_ns();
+            let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&bytes)).unwrap();
+            let host_after_ns = probe.host_ns();
+            submits.push(serde_json::json!({
+                "index": index, "requested_start": at, "entry_time": entry.time,
+                "host_before_ns": host_before_ns, "host_after_ns": host_after_ns,
+                "outcome": entry.outcome,
+            }));
+        }
+        wait(&mut run, ms(2_000));
+        cases.push(serde_json::json!({
+            "name": name, "rate_hz": 1e6, "bursts_requested": 200, "samples_per_burst": 100,
+            "gap_samples": gap_samples, "first_requested_start_tick": first_tick,
+            "end_tick_exclusive": end_tick, "next_bursts_prebooked": true, "submit_entries": submits,
+            "tx_send_records": tx_send_rows_since(&probe, tx_send_baseline),
+        }));
+    }
+
+    let mut deadline_submits = Vec::new();
+    let mut deadline_start_ticks = Vec::new();
+    let tx_send_baseline = probe.count("tx_send");
+    let mut termination_reason = "all_bursts_submitted";
+    for index in 0..200i64 {
+        let at = tx_at(&run, ms(15));
+        let start_tick = at.ticks_in(at.domain()).unwrap();
+        let previous_tick = deadline_start_ticks.last().copied();
+        let tx_eob_baseline_for_burst = probe.tx_eob_count();
+        let host_before_ns = probe.host_ns();
+        let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&bytes)).unwrap();
+        let host_after_ns = probe.host_ns();
+        deadline_start_ticks.push(start_tick);
+        wait(&mut run, ms(17));
+        let eob = wait_for_tx_eob(&probe, tx_eob_baseline_for_burst, Wall::from_secs(1));
+        let accepted_eob = eob.as_ref().is_some_and(probe_device::successful_tx_eob);
+        let closure_status = match eob.as_ref() {
+            None => "not_observed",
+            Some(_) if accepted_eob => "accepted",
+            Some(_) => "incomplete",
+        };
+        deadline_submits.push(serde_json::json!({
+            "index": index, "requested_start": at, "entry_time": entry.time,
+            "host_before_ns": host_before_ns, "host_after_ns": host_after_ns, "outcome": entry.outcome,
+            "requested_gap_after_previous_samples": previous_tick.map(|previous| start_tick - previous - 100),
+            "accepted_eob_before_next_submit": accepted_eob, "closure_status": closure_status,
+            "incomplete_closure": if closure_status == "incomplete" { eob.clone() } else { None }, "eob_record": eob,
+        }));
+        if deadline_submits.last().unwrap()["accepted_eob_before_next_submit"] != true {
+            termination_reason = "accepted_eob_not_observed";
+            break;
+        }
+    }
+    let first_deadline_tick = deadline_start_ticks.first().copied().unwrap_or(0);
+    let end_deadline_tick = deadline_start_ticks.last().copied().unwrap_or(first_deadline_tick) + 100;
+    case_ranges.push((tx_at(&run, ms(15)).domain(), first_deadline_tick, end_deadline_tick));
+    let incomplete_closures: Vec<_> = deadline_submits.iter()
+        .filter(|submit| submit["closure_status"] == "incomplete").cloned().collect();
+    cases.push(serde_json::json!({
+        "name": "positive_gap_deadline", "rate_hz": 1e6,
+        "bursts_requested": 200, "bursts_submitted": deadline_submits.len(), "samples_per_burst": 100,
+        "first_requested_start_tick": first_deadline_tick, "end_tick_exclusive": end_deadline_tick,
+        "next_burst_submitted_only_after_prior_accepted_eob": true,
+        "termination_reason": termination_reason, "incomplete_closures": incomplete_closures,
+        "submit_entries": deadline_submits,
+        "tx_send_records": tx_send_rows_since(&probe, tx_send_baseline),
+    }));
+
+    let manifest = run.finish();
+    let burst_records = bursts(&manifest);
+    for (case, (domain, first, end)) in cases.iter_mut().zip(case_ranges) {
+        let records: Vec<_> = burst_records.iter().filter(|record| {
+            record.requested_target.unwrap_or(record.target).ticks_in(domain).is_ok_and(|tick| (first..end).contains(&tick))
+        }).map(|record| serde_json::to_value(record).unwrap()).collect();
+        case["burst_record_count"] = serde_json::json!(records.len());
+        case["burst_records"] = Json::Array(records);
+    }
+    let async_reports = section(&manifest, "async").clone();
+    let events: Vec<_> = ["radio.TIME_ERROR", "radio.TX_UNDERFLOW"].into_iter().flat_map(|kind| {
+        events_of(&manifest, kind).into_iter().map(move |event| serde_json::json!({ "kind": kind, "time": event.time, "payload": event.payload }))
+    }).collect();
+    let event_counts = serde_json::json!({
+        "radio.TIME_ERROR": events.iter().filter(|event| event["kind"] == "radio.TIME_ERROR").count(),
+        "radio.TX_UNDERFLOW": events.iter().filter(|event| event["kind"] == "radio.TX_UNDERFLOW").count(),
+    });
+    let cleanup = restore_raw_probe(&*probe);
+    println!("H5 held-last-sample observation: {} submits, {} burst records", cases.iter().map(|case| case["bursts_submitted"].as_u64().unwrap_or_else(|| case["bursts_requested"].as_u64().unwrap_or(0))).sum::<u64>(), section(&manifest, "bursts").as_array().map_or(0, Vec::len));
+    measurement::push_raw_observation("hw_h5_held_last_sample", 600, serde_json::json!({
+        "cases": cases, "all_burst_records": section(&manifest, "bursts"),
+        "termination": manifest.termination.clone(),
+        "async": async_reports, "async_report_counts": observations::count_report_codes(&async_reports.as_array().cloned().unwrap_or_default()),
+        "events": events, "event_counts": event_counts, "rejected": section(&manifest, "rejected"),
+        "timing": section(&manifest, "timing"), "cleanup": cleanup,
+        "note": "Observation from an unladen bench with TX recording instrumentation; recorder overhead was not measured, so this is not a measurement of the held-sample deadline (INFERRED).",
+    }));
+}
+
+fn session_event_rows(manifest: &ezsdr_kernel::manifest::Manifest, kind: &str) -> Vec<Json> {
+    events_of(manifest, kind).into_iter().map(|event| serde_json::json!({ "time": event.time, "payload": event.payload })).collect()
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_56_stop_between_starts() {
+    let mut trials = Vec::new();
+    for trial in 0..3 {
+        let inner = usrp();
+        let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+        let dir = TempDir::new();
+        let mut run = session(&bench_profile(&*probe, &dir, serde_json::json!({}), serde_json::json!({}), true), probe.clone());
+        past_t0(&mut run, ms(100));
+        let change_entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(2e6).unwrap()), None).unwrap();
+        wait(&mut run, ms(10));
+        let stop_host_before_ns = probe.host_ns();
+        let stop_entry = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
+        let stop_host_after_ns = probe.host_ns();
+        wait(&mut run, ms(120));
+        let device_drain = probe.drain_without_reader(0, 2_000, Wall::from_millis(10), Wall::from_millis(100));
+        let recovery_start_baseline = probe.count("rx_start");
+        let recovery_entry = run.submit(verb("start_rx", resource("radio/rx/s0"), None, &[]), None).unwrap();
+        let recovery_device_start_and_sample = wait_for_rx_start_and_sample(&probe, recovery_start_baseline, Wall::from_secs(2));
+        let capture_entry = recovery_device_start_and_sample.as_ref().map(|_| {
+            let capture_at = after_ticks(&run, ms(60));
+            let entry = run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(20_000))]), None).unwrap();
+            let horizon = after_ticks(&run, ms(3_000));
+            let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
+            wait(&mut run, ms(100));
+            entry
+        });
+        let manifest = run.finish();
+        let timing = section(&manifest, "timing").as_array().cloned().unwrap_or_default();
+        let cold = timing.iter().find(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.s0.sample_rate_hz").cloned();
+        let e1 = cold.as_ref().and_then(|row| row["e"].as_i64());
+        let recovery_tick = recovery_entry.time.ticks_in(recovery_entry.time.domain()).ok();
+        let cold_segment = timing.iter().skip_while(|row| row["what"] != "cold_change")
+            .find(|row| row["what"] == "rx_segment" && e1.zip(recovery_tick).is_some_and(|(e, recovery)| row["origin"].as_i64().is_some_and(|origin| origin > e && origin < recovery))).cloned();
+        let e2 = cold_segment.as_ref().and_then(|row| row["origin"].as_i64());
+        let stop_tick = stop_entry.time.ticks_in(stop_entry.time.domain()).ok();
+        let nominal_placement = match (e1, e2, stop_tick) {
+            (Some(e1), Some(e2), Some(stop)) if stop > e1 && stop < e2 => "between_e1_e2",
+            (Some(e1), Some(_), Some(stop)) if stop <= e1 => "at_or_before_e1",
+            (Some(_), Some(_), Some(_)) => "at_or_after_e2",
+            _ => "not_classifiable_from_recorded_segment",
+        };
+        let device_rows = probe.rows();
+        let rx_calls: Vec<_> = device_rows.iter().filter(|row| matches!(row["call"].as_str(), Some("rx_start" | "rx_stop" | "rx_recv" | "device_drain"))).cloned().collect();
+        let e2_rx_start = rx_calls.iter().find(|row| row["call"] == "rx_start" && row["at"].as_i64() == e2).cloned();
+        let stop_rx_call = rx_calls.iter().find(|row| row["call"] == "rx_stop" && row["host_before_ns"].as_u64().is_some_and(|time| time >= stop_host_before_ns)).cloned();
+        let device_order = match (&stop_rx_call, &e2_rx_start) {
+            (Some(stop), Some(start)) => {
+                let stop_before = stop["host_before_ns"].as_u64();
+                let stop_after = stop["host_after_ns"].as_u64();
+                let start_before = start["host_before_ns"].as_u64();
+                let start_after = start["host_after_ns"].as_u64();
+                match (stop_before, stop_after, start_before, start_after) {
+                    (Some(_), Some(se), Some(rb), Some(_)) if se <= rb => "rx_stop_before_e2_rx_start",
+                    (Some(sb), Some(_), Some(_), Some(re)) if re <= sb => "e2_rx_start_before_rx_stop",
+                    (Some(_), Some(_), Some(_), Some(_)) => "host_call_intervals_overlap",
+                    _ => "host_call_times_missing",
+                }
+            }
+            (None, Some(_)) => "rx_stop_after_stop_submit_not_observed",
+            (Some(_), None) => "e2_rx_start_not_observed",
+            (None, None) => "neither_call_observed",
+        };
+        let capture = manifest.artifacts.iter().find(|(name, _)| name.as_str() == "rec").and_then(|(_, artifacts)| artifacts.first())
+            .map(|artifact| serde_json::json!({ "continuity": artifact.continuity, "uri": artifact.uri }));
+        let cleanup = restore_raw_probe(&*probe);
+        trials.push(serde_json::json!({
+            "trial": trial, "cold_submit": serde_json::to_value(&change_entry).unwrap(),
+            "stop_submit": serde_json::to_value(&stop_entry).unwrap(),
+            "stop_host_before_ns": stop_host_before_ns, "stop_host_after_ns": stop_host_after_ns,
+            "recovery_start_rx": serde_json::to_value(&recovery_entry).unwrap(),
+            "recovery_device_start_and_sample": recovery_device_start_and_sample,
+            "recovery_capture": capture_entry.as_ref().map(|entry| serde_json::to_value(entry).unwrap()),
+            "e1_tick": e1, "e2_tick": e2, "stop_placement_nominal": nominal_placement,
+            "device_call_order": {
+                "first_rx_stop_after_stop_submit": stop_rx_call,
+                "e2_rx_start": e2_rx_start,
+                "ordering": device_order,
+            },
+            "timing": timing.iter().filter(|row| matches!(row["what"].as_str(), Some("cold_change" | "rx_stop_untimed" | "rx_segment" | "stop"))).cloned().collect::<Vec<_>>(),
+            "device_rx_calls": rx_calls, "device_level_drain": device_drain,
+            "capture_written": capture.is_some(), "capture": capture, "async": section(&manifest, "async"), "rejected": section(&manifest, "rejected"),
+            "command_rejected_events": session_event_rows(&manifest, "radio.COMMAND_REJECTED"),
+            "time_error_events": session_event_rows(&manifest, "radio.TIME_ERROR"),
+            "cleanup": cleanup,
+        }));
+    }
+    println!("#56 Stop between starts: {} trials", trials.len());
+    measurement::push_raw_observation("hw_56_stop_between_starts", 3, serde_json::json!({ "trials": trials }));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_56_stop_lag() {
+    let inner = usrp();
+    let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+    let dir = TempDir::new();
+    let mut run = session(&bench_profile(&*probe, &dir, serde_json::json!({}), serde_json::json!({}), true), probe.clone());
+    past_t0(&mut run, ms(100));
+    wait(&mut run, ms(60));
+    let initial_receive = wait_for_rx_start_and_sample(&probe, 0, Wall::from_secs(2));
+    let mut trials = Vec::new();
+    let mut not_counted = Vec::new();
+    if initial_receive.is_some() {
+        for trial in 0..20 {
+            let stop_baseline = probe.count("rx_stop");
+            let host_before_ns = probe.host_ns();
+            let entry = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
+            let host_after_ns = probe.host_ns();
+            let deadline = Instant::now() + Wall::from_secs(1);
+            while probe.count("rx_stop") == stop_baseline && Instant::now() < deadline { std::thread::sleep(Wall::from_millis(1)); }
+            let rows = probe.rows();
+            let stop_call = rows.iter().filter(|row| row["call"] == "rx_stop").nth(stop_baseline).cloned();
+            let call_before = stop_call.as_ref().and_then(|row| row["host_before_ns"].as_u64());
+            let call_after = stop_call.as_ref().and_then(|row| row["host_after_ns"].as_u64());
+            let enable_baseline = probe.count("rx_start");
+            let recovery_host_before_ns = probe.host_ns();
+            let enable = run.submit(verb("start_rx", resource("radio/rx/s0"), None, &[]), None).unwrap();
+            let recovery = wait_for_rx_start_and_sample(&probe, enable_baseline, Wall::from_secs(2));
+            let row = serde_json::json!({
+                "trial": trial, "stop_submit": serde_json::to_value(&entry).unwrap(),
+                "stop_submit_host_before_ns": host_before_ns, "stop_submit_host_after_ns": host_after_ns,
+                "rx_stop_call": stop_call,
+                "submit_to_rx_stop_start_ns": call_before.map(|call| if call >= host_after_ns { i64::try_from(call - host_after_ns).unwrap_or(i64::MAX) } else { -i64::try_from(host_after_ns - call).unwrap_or(i64::MAX) }),
+                "submit_to_rx_stop_end_ns": call_after.map(|call| if call >= host_before_ns { i64::try_from(call - host_before_ns).unwrap_or(i64::MAX) } else { -i64::try_from(host_before_ns - call).unwrap_or(i64::MAX) }),
+                "re_enable_start_rx": serde_json::to_value(&enable).unwrap(),
+                "re_enable_submit_host_before_ns": recovery_host_before_ns,
+                "recovery_device_start_and_sample": recovery,
+            });
+            if stop_call.is_some() && row["recovery_device_start_and_sample"].is_object() {
+                trials.push(row);
+            } else {
+                not_counted.push(row);
+            }
+            if not_counted.last().is_some_and(|row| row["recovery_device_start_and_sample"].is_null()) { break; }
+        }
+    }
+    let manifest = run.finish();
+    let stop_timing = section(&manifest, "timing").as_array().unwrap().iter().filter(|row| row["what"] == "stop").cloned().collect::<Vec<_>>();
+    let device_rx_calls: Vec<_> = probe.rows().into_iter().filter(|row| matches!(row["call"].as_str(), Some("rx_start" | "rx_stop" | "rx_recv"))).collect();
+    let cleanup = restore_raw_probe(&*probe);
+    println!("#56 Stop lag: {} counted Stops, {} not counted", trials.len(), not_counted.len());
+    measurement::push_raw_observation("hw_56_stop_lag", 20, serde_json::json!({
+        "initial_receive_start_and_sample": initial_receive,
+        "trials": trials, "not_counted_trials": not_counted, "provider_stop_timing": stop_timing,
+        "device_rx_calls": device_rx_calls,
+        "session_log_stop_time_unit": "Run root ticks; rx_stop lag uses the shared host monotonic nanosecond clock.",
+        "cleanup": cleanup,
+    }));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_ur17_receive_call_duration() {
+    let device = raw();
+    let mut conditions = Vec::new();
+    for rate in [390_625.0, 1e6, 10e6, 50e6] {
+        for request_samples in [2_000usize, 65_536] {
+            device.rx_close(0);
+            raw_rx(&*device, rate, 1e9);
+            let packet_samples = device.rx_packet_samples(0);
+            let ticks_per_sample = (device.master_clock_rate() as f64 / rate).round() as i64;
+            let now = device.time_now().unwrap();
+            let start = (now + 10 * TICKS_PER_MS + ticks_per_sample - 1).div_euclid(ticks_per_sample) * ticks_per_sample;
+            device.rx_start(0, start).unwrap();
+            let timeout = Wall::from_secs(1);
+            let expected_duration_ns = request_samples as f64 / rate * 1e9;
+            let mut calls = Vec::new();
+            let mut durations = Vec::new();
+            let mut sample_counts = std::collections::BTreeMap::<usize, usize>::new();
+            for index in 0..200 {
+                let begun = Instant::now();
+                let result = device.rx_recv(0, request_samples, timeout);
+                let duration_ns = u64::try_from(begun.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                durations.push(duration_ns);
+                let (kind, first_tick, last_tick, samples) = match result {
+                    ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                        let count = samples.first().map_or(0, Vec::len);
+                        let last = (count > 0).then_some(first_tick + (count as i64 - 1) * ticks_per_sample);
+                        ("samples", Some(first_tick), last, count)
+                    }
+                    ezsdr_radio_uhd::RxRecv::Overflow { out_of_sequence } => (if out_of_sequence { "sequence_error" } else { "overflow" }, None, None, 0),
+                    ezsdr_radio_uhd::RxRecv::LateCommand => ("late_command", None, None, 0),
+                    ezsdr_radio_uhd::RxRecv::Alignment => ("alignment", None, None, 0),
+                    ezsdr_radio_uhd::RxRecv::BadPacket => ("bad_packet", None, None, 0),
+                    ezsdr_radio_uhd::RxRecv::Timeout => ("timeout", None, None, 0),
+                    ezsdr_radio_uhd::RxRecv::Failed(_) => ("failed", None, None, 0),
+                };
+                let error = kind != "samples";
+                *sample_counts.entry(samples).or_default() += 1;
+                calls.push(serde_json::json!({
+                    "index": index,
+                    "class": if error { "error" } else if index == 0 { "beginning" } else { "steady" },
+                    "rate_hz": rate, "packet_samples": packet_samples,
+                    "request_samples": request_samples, "timeout_ns": timeout.as_nanos(),
+                    "duration_ns": duration_ns, "expected_block_duration_ns": expected_duration_ns,
+                    "duration_minus_block_ns": duration_ns as f64 - expected_duration_ns,
+                    "result": kind, "first_tick": first_tick, "last_tick": last_tick,
+                    "returned_samples": samples,
+                }));
+            }
+            durations.sort_unstable();
+            let summary = serde_json::json!({
+                "min_ns": durations.first(), "median_ns": durations.get(durations.len() / 2), "max_ns": durations.last(),
+                "returned_sample_count_distribution": sample_counts,
+            });
+            println!("UR-17 rate {rate} S/s request {request_samples}: {summary}");
+            conditions.push(serde_json::json!({
+                "rate_hz": rate, "request_samples": request_samples, "packet_samples": packet_samples,
+                "calls": calls, "summary": summary,
+            }));
+            let _ = device.rx_stop(0, None);
+            let _ = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
+        }
+    }
+    let raw_cleanup = restore_raw_probe(&*device);
+
+    let inner = usrp();
+    let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+    let dir = TempDir::new();
+    let selector = serde_json::json!({ "block_len": 65_536 });
+    let mut run = session(&bench_profile(&*probe, &dir, selector, serde_json::json!({}), true), probe.clone());
+    past_t0(&mut run, ms(100));
+    let _ = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(50e6).unwrap()), None).unwrap();
+    wait(&mut run, ms(300));
+    probe.pause_reader();
+    let before_count = probe.count("rx_recv");
+    let pause_host_ns = probe.host_ns();
+    let cut_entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(10e6).unwrap()), None).unwrap();
+    std::thread::sleep(Wall::from_millis(300));
+    let resume_host_ns = probe.host_ns();
+    probe.resume_reader();
+    wait(&mut run, ms(300));
+    let manifest = run.finish();
+    let device_rows = probe.rows();
+    let rx_rows: Vec<_> = device_rows.iter().filter(|row| row["call"] == "rx_recv").cloned().collect();
+    let cut_observation = serde_json::json!({
+        "rate_change_to_50msps_warmup_rx_calls": before_count,
+        "paused_host_ns": pause_host_ns, "resume_host_ns": resume_host_ns,
+        "cold_change_submit": serde_json::to_value(&cut_entry).unwrap(),
+        "timing": section(&manifest, "timing").as_array().unwrap().iter()
+            .filter(|row| matches!(row["what"].as_str(), Some("cold_change" | "rx_segment" | "rx_stop_untimed"))).cloned().collect::<Vec<_>>(),
+        "rx_calls_before": rx_rows.iter().take(before_count).rev().take(5).cloned().collect::<Vec<_>>(),
+        "rx_calls_after": rx_rows.iter().skip(before_count).take(20).cloned().collect::<Vec<_>>(),
+        "overflow_events": session_event_rows(&manifest, "radio.RX_OVERFLOW"),
+        "async": section(&manifest, "async"), "rejected": section(&manifest, "rejected"),
+    });
+    let session_cleanup = restore_raw_probe(&*probe);
+    println!("UR-17 receive-call duration: {} conditions, overrun-near-cut calls {}", conditions.len(), cut_observation["rx_calls_after"].as_array().map_or(0, Vec::len));
+    measurement::push_raw_observation("hw_ur17_receive_call_duration", 1_600, serde_json::json!({
+        "calls_per_rate_and_length": 200, "conditions": conditions,
+        "overrun_near_cut": cut_observation,
+        "raw_cleanup": raw_cleanup, "session_cleanup": session_cleanup,
+    }));
+}
+
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_measurements_record() {
@@ -1476,6 +2155,12 @@ fn hw_measurements_record() {
     hw_b8_raw_timed_tune_phase();
     hw_b6_delay_by_rate();
     hw_b8_stop_end();
+    hw_h1_late_multi_packet_burst();
+    hw_h2_underflow_mid_burst();
+    hw_h5_held_last_sample();
+    hw_56_stop_between_starts();
+    hw_56_stop_lag();
+    hw_ur17_receive_call_duration();
     let observations = measurement::take_raw_observations();
     let expected: std::collections::BTreeSet<_> = [
         "hw_b8_raw_device_lead",
@@ -1487,6 +2172,12 @@ fn hw_measurements_record() {
         "hw_b8_raw_timed_tune_phase",
         "hw_b6_delay_by_rate",
         "hw_b8_stop_end",
+        "hw_h1_late_multi_packet_burst",
+        "hw_h2_underflow_mid_burst",
+        "hw_h5_held_last_sample",
+        "hw_56_stop_between_starts",
+        "hw_56_stop_lag",
+        "hw_ur17_receive_call_duration",
     ].into_iter().collect();
     let got: std::collections::BTreeSet<_> = observations.iter().map(|observation| observation.name.as_str()).collect();
     assert_eq!(got, expected, "the record has exactly the raw probes it ran");

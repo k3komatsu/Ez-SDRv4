@@ -36,6 +36,8 @@ use serde_json::{Value as Json, json};
 mod watchdog;
 pub use watchdog::watch;
 pub mod measurement;
+pub mod observations;
+pub mod probe_device;
 
 // ---------------------------------------------------------------- fixtures
 

@@ -11900,5 +11900,145 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+  },
+  {
+   "id": "P848",
+   "name": "heard intervals are not shifted back by the loopback delay",
+   "file": "crates/ezsdr-radio-uhd/tests/common/observations.rs",
+   "old": "    let delay = delay_samples.saturating_mul(ticks_per_sample);",
+   "new": "    let delay = 0;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "heard_intervals_cover_silence_midstream_and_a_truncated_tail"
+  },
+  {
+   "id": "P849",
+   "name": "PN correlation reports a one-sample offset error",
+   "file": "crates/ezsdr-radio-uhd/tests/common/observations.rs",
+   "old": "    let offset = ((i128::from(tick) - i128::from(expected_tick)) / i128::from(ticks_per_sample)) as i64;",
+   "new": "    let offset = ((i128::from(tick) - i128::from(expected_tick)) / i128::from(ticks_per_sample) + 1) as i64;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "correlation_offset_finds_zero_positive_negative_and_noisy_offsets"
+  },
+  {
+   "id": "P850",
+   "name": "PN correlation accepts a tied peak as unambiguous",
+   "file": "crates/ezsdr-radio-uhd/tests/common/observations.rs",
+   "old": "    } else if second >= peak * 0.8 {",
+   "new": "    } else if second >= peak * 1.1 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "correlation_offset_marks_equal_peaks_ambiguous"
+  },
+  {
+   "id": "P851",
+   "name": "report rows without a code are not retained as missing",
+   "file": "crates/ezsdr-radio-uhd/tests/common/observations.rs",
+   "old": "        let code = report.get(\"code\").and_then(Json::as_str).unwrap_or(\"<missing>\");",
+   "new": "        let code = report.get(\"code\").and_then(Json::as_str).unwrap_or(\"unknown\");",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "report_counts_include_all_codes_and_malformed_rows"
+  },
+  {
+   "id": "P852",
+   "name": "deadline closure does not require an accepted EOB",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "row[\"call\"] == \"tx_send\" && row[\"eob\"].as_bool() == Some(true)",
+   "new": "row[\"call\"] == \"tx_send\" && row[\"eob\"].as_bool() == Some(false)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::successful_tx_eob_requires_an_accepted_eob"
+  },
+  {
+   "id": "P853",
+   "name": "deadline closure accepts a partially accepted EOB send",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "count.as_u64() == Some(accepted)",
+   "new": "count.as_u64().is_some()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::successful_tx_eob_requires_an_accepted_eob"
+  },
+  {
+   "id": "P854",
+   "name": "restart evidence accepts non-sample receive results",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "sample[\"outcome\"][\"kind\"] == \"samples\"",
+   "new": "sample[\"outcome\"][\"kind\"] == \"timeout\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::receive_sample_follows_a_successful_device_start"
+  },
+  {
+   "id": "P855",
+   "name": "restart evidence accepts a failed device start",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "start[\"result\"].is_null()",
+   "new": "start[\"result\"].is_string()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::receive_sample_follows_a_successful_device_start"
+  },
+  {
+   "id": "P856",
+   "name": "restart evidence rejects a sample begun exactly when device start returned",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "begun >= finished",
+   "new": "begun > finished",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::receive_sample_follows_a_successful_device_start"
+  },
+  {
+   "id": "P857",
+   "name": "restart evidence rejects a sample at the requested start tick",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "first >= at",
+   "new": "first > at",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::receive_sample_follows_a_successful_device_start"
+  },
+  {
+   "id": "P858",
+   "name": "reader remains paused after a drain panic",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "let _resume = ResumeReaderOnDrop(self);",
+   "new": "let _resume = ();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::drain_without_reader_resumes_after_rx_panic"
+  },
+  {
+   "id": "P859",
+   "name": "restart evidence accepts a sample begun before device start returned",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "begun >= finished",
+   "new": "true",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::receive_sample_follows_a_successful_device_start"
+  },
+  {
+   "id": "P860",
+   "name": "restart evidence accepts a sample before the requested start tick",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "first >= at",
+   "new": "true",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::receive_sample_follows_a_successful_device_start"
+  },
+  {
+   "id": "P861",
+   "name": "EOB wait counter does not advance for a recorded EOB",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "self.tx_eob_count.fetch_add(1, Ordering::Release);",
+   "new": "let _ = self.tx_eob_count.load(Ordering::Relaxed);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "common::probe_device::tests::tx_eob_count_tracks_recorded_eob_sends"
   }
  ]
