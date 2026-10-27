@@ -143,6 +143,10 @@ pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environ
     let (rx, tx) = layout_of(device);
     doc["bindings"]["radio"]["selector"]["rx"] = rx;
     doc["bindings"]["radio"]["selector"]["tx"] = tx;
+    // The bench's HG image streams over its 10 GbE port (bench.md B0.2); the HG default is 1 GbE.
+    if doc["bindings"]["radio"]["selector"].get("link_gbps").is_none() {
+        doc["bindings"]["radio"]["selector"]["link_gbps"] = json!([10]);
+    }
     doc
 }
 
