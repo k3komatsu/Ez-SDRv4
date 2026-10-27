@@ -74,3 +74,70 @@ ref PLL の lock 失敗は最初の回で約 35 回の open のうち 2 回．�
 
 - 1b-4e-2 の設計の前提（閉じた streamer の front end は別の stream の streamer で開ける）は実機でも成り立つ．
 - FakeDevice は 2 本目の open を「拒否して，持っている streamer はそのまま」とまねるが，実機では持っている streamer を壊し，プロセスを落とす．Module はその open をしない設計（待ちと from-none の委譲）なので今の挙動は変わらない．同じ日に FakeDevice を直した：その open は拒否したうえで fake の drop でテストを失敗させる（UR-33，`ur_33_an_open_of_a_held_front_end_fails_the_test_at_drop`）．全テストで踏むものは無かった．
+
+## 2026-10-27：shake-out（X300 #1＋OBX，結果は profile に使わない）
+
+### 機材と配線
+
+X300 #1，serial `347D545`，slot A OBX，slot B 空，UHD 4.10 の HG image（FPGA `39.3`，git `d375d68`），`addr=192.168.40.36`，10 GbE NIC `enp1s0f0np0`．master clock 200 MHz，最大 frame size 8000 bytes．40 dB / 18 GHz attenuator を TX/RX → RX2 に接続した．att の型番と最大入力電力は記録に残っていない（次の送信前に確認する）．probe は RX/TX とも 2 channel と報告したが，slot B は `Unknown (0xffff)`；OBX の実使用 channel は 1 本．記録は `~/.cache/ezsdr-bench/2026-10-27/` の `probe.txt` と各 `shakeout-*.log` にある．この shake-out 記録を `measurements/` に置かない．
+
+### 記録済みの 1〜3 回目
+
+| 回 | 結果 | 対応・範囲 |
+|---|---|---|
+| 1 | 約 1118 s 後，受信 throughput の `Run` に T0 がなく失敗．profile が HG の 10 GbE link を宣言せず，rate が admission で拒否されていた． | `8f4f060` で link を `link_gbps=[10]` と宣言．その後の shake-out で同じ箇所まで進めることを確認した．最終 record は未作成． |
+| 2 | DDC の `Control operation timed out waiting for space in command buffer` が繰り返し，記録 suite が完了しなかった．shake-out 2 log で最初に失敗した request は timestamp 付きの address `0x00420`；その後 `0x00430` の request も失敗した． | log には `0x00420` が 60 request，後続の timestamp なし `0x00430` が 360 request ある．受信 sample が来るまで timed DDC frequency command は FIFO から抜けない（設計メモ [39 §1](39-dsp-timed-commands.md)）．詰まった handle へ追加 command・reset・coercion を送らず，必要なら電源を入れ直す．後続の queue-depth 測定では RX frequency 条件を sample drain 付きで行い，TX frequency / RX-TX 交互条件は連続 TX の RF 扱いを避けるため測定範囲から外した． |
+| 3 | 264.33 s 後，open の UR-7 `Reference Clock PLL failed to lock to internal source` で panic．それ以前の測定行は log にあるが，suite と record は失敗． | 電源 cycle 後の B1 で `ref_locked: true` を確認．UR-7 は測定値に含めない． |
+
+### 途中までに得た観測（いずれも参考値）
+
+下表は shake-out log の出力であり，1 台・少数試行の観測．profile 値や複数台 parity の根拠にはしない．run 間で揺れた値はそのまま記す．
+
+| 観測 | log の結果 |
+|---|---|
+| Device lead | 500 µs・300 µs は各回 0/8 late．200 µs は shake-out 1/2/3 で 0/8，8/8，2/8 late（run 間で不一致）． |
+| TX in-flight | 500–10000 µs は記録された run で underflow / TIME_ERROR なし．250 µs は shake-out 1 で underflow 0・TIME_ERROR 0，2 で 1・35，3 で 0・38（run 間で不一致）． |
+| Burst gap | gap 0 sample は 4/4 `BurstAck+TimeError`；測定した gap 1,2,3,5,10,20,50,100,1000 は各 4/4 `BurstAck`．empty EOB 条件では B の gap 0・1 が各 run 4/4 late，gap 2・3 は各 run 0/4，gap 5 は shake-out 1・3 が 0/4，2 が 1/4 late（`Underflow+TimeError`）．A の最後の data buffer に EOB を置く条件では gap 0 が各 run 4/4 late，gap 1・2・3・5 は各 run 0/4． |
+| Timed tune phase | `1000.1234 MHz` の timed tune spread は shake-out 1/2/3 で 99.0° / 137.5° / 156.0°，untimed は 148.6° / 117.8° / 118.7°．少数 run で安定せず，この値から profile を決めない． |
+| Loopback delay | B6：400 kS/s 35 samples（87.5 µs），500 kS/s 44（88 µs），1 MS/s 44（44 µs），2 MS/s 36（18 µs）．shake-out 2 の 500 kS/s だけ TIME_ERROR 1，ほかは 0． |
+| UR-17 | 390625，1M，10M，50M S/s × request 2000 / 65536 の 8 条件で，各 200/200 回が要求 sample 数を返した．呼び出し時間は最小 2.2 µs，最大 178.5 ms の範囲で揺れた． |
+| H2 / H5 | H2 underflow mid-burst：underflow 3，no-underflow 0．H5 held-last-sample：600 submits，600 burst records． |
+| #56 | Stop between starts は 3 trials．Stop lag は 20 counted Stops，0 not counted． |
+
+記録 suite の見込みは 30〜40 分（INFERRED）．shake-out 1 は途中で終了し，shake-out 2〜3 も正常完了していないため，完全な measurement record はまだ揃っていない．段階4では X300 2台，負荷ありの記録，必要試行数を揃えてから profile を判断する．
+
+### 4回目（電源 cycle 後，commit `8f4f060`＋一時的なローカル変更）
+
+raw queue と coercion を一時的に外して実行．測定 suite は最後まで進み，`shakeout-4.json`（約157 MB）を書いたが，最後の profile 比較で `hw_measurements_record` は失敗した．所要 2,155.32 s（約35分55秒）．profile との比較で落ちたのは RX throughput（800 MB/s，profile 1,000 MB/s）と TX throughput（200 MB/s，profile 1,000 MB/s）．TX throughput は 100 MS/s で約29 s 後に Underflow，200 MS/s では約3.3 s 後に Underflow した．B1 の `ref_locked` は電源 cycle 後に true．
+
+| key | 結果 | 条件・注記 |
+|---|---|---|
+| `radio.full_duplex`，`radio.hardware_time` | true（20/20） | duplex-1msps |
+| `radio.perf.rx_bytes_per_s` | 800,000,000 | rx-200msps |
+| `radio.perf.tx_bytes_per_s` | 200,000,000 | tx-50msps |
+| `radio.timing.min_timed_command_lead_ns` | 5,000,000 | tx-1msps，100試行 |
+| `radio.timing.tx_in_flight_ns` | 3,000,000 | tx-1msps，100試行 |
+| `radio.timing.rx_start_lead_ns` | 1,000,000 | cold-1msps-2msps，100試行，一番小さい候補 |
+| `radio.timing.tx_start_lead_ns` | 1,000,000 | tx-cold-1msps-2msps，100試行，一番小さい候補；構成が間に合った証拠で，burst は未観測 |
+
+追加観測（shake-out のため profile 値には使わない）：
+
+| 観測 | 結果 |
+|---|---|
+| Overflow gap | 最大13.97 s（stall と socket backlog drain を含む）．読み直しから再開までの推定最大75.0 ms（1 MS/s，INFERRED，高めの推定）．`overflow_restart_gap_ns` は `unmeasured` のまま．|
+| Burst gap | 通常 burst は gap 0 sample で4/4 `BurstAck+TimeError`，gap 1〜1000 sample は各4/4 `BurstAck`．empty EOB 条件は gap 0・1 で4/4 late，gap 2・3・5 は0/4 late；最後の data buffer の EOB 条件は gap 0 で4/4 late，gap 1・2・3・5 は0/4 late．|
+| Timed tune phase | `1000.1234 MHz`：timed spread 0.8°，untimed spread 170.1°．|
+| Loopback delay | 400 kS/s：35 samples（87.5 µs），500 kS/s：44（88 µs），1 MS/s：44（44 µs），2 MS/s：36（18 µs）．TIME_ERROR は0．|
+| UR-17 | 390625，1M，10M，50M S/s × request 2000 / 65536 の8条件で，各200/200回が要求 sample 数を返した．呼出し時間は2.2 µs〜178.6 ms．|
+| H1 / H2 / H5 | H1 multi-packet burst 18試行．H2 underflow mid-burst：underflow 3，no-underflow 0．H5 held-last-sample：600 submits，600 burst records．|
+| #56 | Stop between starts：3 trials．Stop lag：20 counted Stops，0 not counted．|
+
+## D9 probe（設計メモ [39 §3](39-dsp-timed-commands.md)，`8f4f060` の写しを別 volume で build）
+
+| probe | 結果 |
+|---|---|
+| `hw_d9_p1_ddc_entries_wait_for_samples` | 受信していない channel に時刻つき DDC shift を20・40・60 kHz渡し，untimed で0に戻してから受信開始すると，tone は約160 kHz（median 約159.98 kHz）．untimed reset を各 command の時刻より前に行っても後に行っても，最後の時刻つき設定（60 kHz）が残った．F2 を確認．3 件が 1 sample に 1 件ずつ取り出されることは log では確かめていない（設計メモ 39 §1 の source からの推定，INFERRED）．|
+| `hw_d9_p2_duc_entry_after_its_samples` | burst 前に時刻つき DUC shift を渡す（e = burst start + 20 ms）と，tone は e の約19 ms前，burst の先頭から移動した．head samples の送信後，e の3 ms前に渡すと e の+25 µsで移動した．|
+| `hw_d9_p3_duc_entries_between_bursts` | burst 間の時刻つき +50 kHz は次の burst に当たった．時刻つき +80 kHz の直後に untimed 0 を渡しても，次の burst は約+80 kHz（median 約179.9 kHz）となり，時刻つき値が残った（F4）．|
+
+3回目までの失敗理由・修正は上表のとおり．4回目も profile 比較で失敗しており，完全に成功した measurement suite はまだ無い．queue/coercion の再測定，profile 値の見直し，overflow restart gap の扱いは段階4で判断する．shake-out と D9 の log / JSON は `~/.cache/ezsdr-bench/2026-10-27/` に保存し，`measurements/` へは置かない．
