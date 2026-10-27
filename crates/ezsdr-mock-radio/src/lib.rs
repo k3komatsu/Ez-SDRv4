@@ -1010,6 +1010,15 @@ impl MockRadio {
         }
     }
 
+    /// MR-34: the stream and origin of the segment of a receiving stream (one with a link,
+    /// MR-39) that covers receive channel `channel` at `t` (`timeline::covering`, RM-36).
+    fn covering_rx(&self, channel: u32, t: i64) -> Option<(usize, i64)> {
+        (0..self.rx.len()).filter(|k| !self.rx[*k].links.is_empty()).find_map(|k| {
+            let line = self.lines.line(Self::rx_key(k))?;
+            timeline::covering(&line.plan, channel, t).map(|segment| (k, segment.origin))
+        })
+    }
+
     /// MR-34: the first segment of stream `k`'s line after the one it last tuned, by origin and
     /// arrival order.
     fn tune_next(&self, direction: Direction, k: usize) -> Option<(i64, Option<u64>)> {
@@ -2165,16 +2174,20 @@ impl MockRadio {
             }
         } else if leaf == "frequency_hz" {
             if rx {
+                // MR-34: timed only if the segment that covers the channel at `tick` began at least the release window before it.
+                let window = self.profile.timing().release_window_ns;
+                let window = self.clocks.as_deref().zip(self.root).and_then(|(clocks, root)| time::ns_to_v(clocks, root, window).ok()).unwrap_or(i64::MAX);
+                let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) <= tick);
                 if let Some(mode) = self.channel.as_mut() {
                     if let Some(model) = mode.rx_channels.get_mut(number as usize) {
                         let phase = match model.phase_behavior.as_str() {
-                            "random_unless_timed_tune" => model.timed_phase,
-                            "random" => channel::lo_phase(&mut mode.lo_retune),
+                            "random_unless_timed_tune" if timed => model.timed_phase,
+                            "random_unless_timed_tune" | "random" => channel::lo_phase(&mut mode.lo_retune),
                             _ => 0.0,
                         };
                         model.frequency_hz.set(tick, value);
                         model.phase.set(tick, phase);
-                        model.phase_fixed.set(tick, if model.phase_behavior != "random" { 1.0 } else { 0.0 });
+                        model.phase_fixed.set(tick, if model.phase_behavior == "deterministic" || (model.phase_behavior != "random" && timed) { 1.0 } else { 0.0 });
                     }
                 }
             } else if let (Some(mode), Some(shared)) = (self.channel.as_mut(), self.tx.iter().find_map(|stream| stream.plan.clone())) {

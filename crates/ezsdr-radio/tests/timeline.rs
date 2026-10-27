@@ -8,7 +8,7 @@ use ezsdr_kernel::stream::Direction;
 use ezsdr_kernel::time::Rational;
 use ezsdr_radio::stream_target;
 use ezsdr_radio::timeline::{
-    Channels, Config, Item, Kind, Line, Lines, MoveError, Segment, Stream, StreamKey, NO_RELEASE, plan,
+    Channels, Config, Item, Kind, Line, Lines, MoveError, Segment, Stream, StreamKey, NO_RELEASE, covering, plan,
 };
 use generator::{CLASSES, Terms};
 
@@ -1545,4 +1545,46 @@ fn mr_29_a_receive_link_floors_a_command_at_its_t0() {
         (t0 - 2 * MS, false),
         "a transmit link takes `max(at, now)`",
     );
+}
+
+#[test]
+fn rm_36_covering_boundaries() {
+    // RM-36: a segment covers `t` from its origin and, if cut, until the instant of its cut
+    // sample; at the 3/2 and 1/3 ratios that instant is rounded up (RM-16).
+    let at = |origin: i64, cut: Option<i64>, numbers: &[u32], rate: u64| Segment { origin, cut, config: set_config(numbers, rate), by: None };
+    let open = at(10 * MS, None, &[0], 1_000_000);
+    assert_eq!(covering([&open], 0, 10 * MS - 1), None);
+    assert_eq!(covering([&open], 0, 10 * MS), Some(&open));
+    assert_eq!(covering([&open], 0, 10 * MS + 1), Some(&open));
+    assert_eq!(covering([&open], 0, i64::MAX), Some(&open));
+    assert_eq!(covering([&open], 1, 20 * MS), None, "another channel");
+    assert_eq!(covering(&[] as &[Segment], 0, 20 * MS), None);
+    // Cut at sample 5 of 1 MS/s: instant 10 ms + 5 us.
+    let cut = at(10 * MS, Some(5), &[0, 1], 1_000_000);
+    let end = cut.instant(5).unwrap();
+    assert_eq!(end, 10 * MS + 5_000);
+    assert_eq!(covering([&cut], 1, end - 1), Some(&cut));
+    assert_eq!(covering([&cut], 1, end), None);
+    assert_eq!(covering([&cut], 1, end + 1), None);
+    // A cut at sample 0 ends at the origin: nothing passes.
+    let empty = at(10 * MS, Some(0), &[0], 1_000_000);
+    assert_eq!(covering([&empty], 0, 10 * MS), None);
+    // Ratios whose sample instants are rounded up.
+    for (num, den, k, expected) in [(3, 2, 3, 10 * MS + 5), (1, 3, 7, 10 * MS + 3)] {
+        let odd = Segment { origin: 10 * MS, cut: Some(k), config: Config { channels: channels(&[0]), ratio: Rational::new(num, den).unwrap() }, by: None };
+        let end = odd.instant(k).unwrap();
+        assert_eq!(end, expected, "ratio {num}/{den}");
+        assert_eq!(covering([&odd], 0, end - 1), Some(&odd), "ratio {num}/{den}");
+        assert_eq!(covering([&odd], 0, end), None, "ratio {num}/{den}");
+    }
+    // An instant that cannot be computed covers nothing.
+    let overflow = Segment { origin: i64::MAX - 1, cut: Some(i64::MAX), config: set_config(&[0], 1), by: None };
+    assert!(overflow.instant(i64::MAX).is_err());
+    assert_eq!(covering([&overflow], 0, i64::MAX), None);
+    // Of several segments the one that passes at `t` is returned, not the first listed.
+    let first = at(0, Some(5), &[0], 1_000_000);
+    let second = at(30 * MS, None, &[0], 1_000_000);
+    assert_eq!(covering([&first, &second], 0, 40 * MS), Some(&second));
+    assert_eq!(covering([&first, &second], 0, 2_000), Some(&first));
+    assert_eq!(covering([&first, &second], 0, 20 * MS), None);
 }

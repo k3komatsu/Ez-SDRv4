@@ -622,8 +622,8 @@
  {
   "name": "MR-34 rx timed tune takes the tx constants",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => model.timed_phase,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
-   "new": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => 0.0,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+   "old": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" if timed => model.timed_phase,\n                            \"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+   "new": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" if timed => 0.0,\n                            \"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
    "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant",

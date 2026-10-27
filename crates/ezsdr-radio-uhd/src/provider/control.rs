@@ -741,12 +741,8 @@ impl Control {
             (0..streams.count(Dir::Rx)).flat_map(|k| streams.planned(stream_key(Dir::Rx, k))).collect()
         };
         let holds = |planned: &&Planned| !planned.refused && planned.segment.config.channels.contains(chan as u32);
-        // A segment of the channel whose samples pass at `e`; `cut` is a sample number.
-        let passes = planned.iter().filter(holds).any(|planned| {
-            let segment = planned.segment;
-            segment.origin <= e && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > e))
-        });
-        if passes {
+        // A segment of the channel whose samples pass at `e` (RM-36).
+        if timeline::covering(planned.iter().filter(|planned| !planned.refused).map(|planned| &planned.segment), chan as u32, e).is_some() {
             return Reach::Timed;
         }
         // The segment the value is for: the first to begin after `e` that runs at all. One with

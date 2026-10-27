@@ -187,6 +187,18 @@ impl Segment {
     }
 }
 
+/// RM-36: the segment of `channel` whose samples pass at root tick `t`: it has begun
+/// (`origin <= t`) and is not cut, or its cut sample's instant is after `t`; an `instant` that
+/// fails does not cover. The caller passes only the segments its stream's owner really runs: a
+/// refused segment is never in a plan, and a stream that does not receive passes none.
+pub fn covering<'a>(segments: impl IntoIterator<Item = &'a Segment>, channel: u32, t: i64) -> Option<&'a Segment> {
+    segments.into_iter().find(|segment| {
+        segment.config.channels.contains(channel)
+            && segment.origin <= t
+            && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > t))
+    })
+}
+
 /// RM-34: what a line's plan gives RM-34 besides its segments: the receive segments RM-25
 /// leaves out of the plan, and the instant the last loss or `Provider::stop` took effect, which
 /// a transmit clock runs on through.

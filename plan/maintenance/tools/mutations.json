@@ -5462,8 +5462,8 @@
    "id": "P168",
    "name": "a receive frequency update changes channel 0's timeline instead of the named channel",
    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "                    if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => model.timed_phase,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
-    "new": "                    if let Some(model) = mode.rx_channels.get_mut(0) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" => model.timed_phase,\n                            \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+    "old": "                    if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" if timed => model.timed_phase,\n                            \"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+    "new": "                    if let Some(model) = mode.rx_channels.get_mut(0) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" if timed => model.timed_phase,\n                            \"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
    "filter": "mr_33_layout_gain_and_frequency_timelines_are_per_logical_channel"
@@ -5616,7 +5616,7 @@
    "new": "candidates.push((key.0, 0, tune_order(Direction::Rx, k), WorkKind::Tune { direction: Direction::Rx, stream: k, key }));\n                    }\n                }\n                for k in 0..self.tx.len() {\n                    if let Some(key) = self.tune_next(Direction::Tx, k) {\n                        candidates.push((key.0, 0, tune_order(Direction::Tx, k), WorkKind::Tune",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_layout",
-   "filter": "mr_34_a_layout_untimed_tune_follows_a_timed_tune_at_its_instant"
+   "filter": "mr_34_a_layout_a_transmit_origin_s_untimed_tune_follows_a_timed_update_at_its_instant"
   },
   {
    "id": "P190",
@@ -13057,8 +13057,8 @@
    "id": "P965",
    "name": "a stopped channel's frequency is given as a timed command: the cover test is reversed (UR-24, R1)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        if passes {\n            return Reach::Timed;\n        }",
-   "new": "        if !passes {\n            return Reach::Timed;\n        }",
+   "old": "        if timeline::covering(planned.iter().filter(|planned| !planned.refused).map(|planned| &planned.segment), chan as u32, e).is_some() {\n            return Reach::Timed;\n        }",
+   "new": "        if timeline::covering(planned.iter().filter(|planned| !planned.refused).map(|planned| &planned.segment), chan as u32, e).is_none() {\n            return Reach::Timed;\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_stopped_receive_channel_is_given_no_timed_frequency"
@@ -13076,9 +13076,9 @@
   {
    "id": "P967",
    "name": "a segment does not cover its own origin (UR-24, R1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            segment.origin <= e && segment.cut.is_none_or(",
-   "new": "            segment.origin < e && segment.cut.is_none_or(",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "&& segment.origin <= t\n",
+   "new": "&& segment.origin < t\n",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_the_frequency_boundaries_at_the_origin_and_the_cut"
@@ -13086,9 +13086,9 @@
   {
    "id": "P968",
    "name": "a segment still covers its cut's instant (UR-24, R1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "segment.instant(cut).is_ok_and(|end| end > e))\n        });",
-   "new": "segment.instant(cut).is_ok_and(|end| end >= e))\n        });",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "end > t))\n    })",
+   "new": "end >= t))\n    })",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_the_frequency_boundaries_at_the_origin_and_the_cut"
@@ -13096,9 +13096,9 @@
   {
    "id": "P969",
    "name": "a segment with no cut covers nothing (UR-24, R1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "            segment.origin <= e && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > e))",
-   "new": "            segment.origin <= e && segment.cut.is_some_and(|cut| segment.instant(cut).is_ok_and(|end| end > e))",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "            && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > t))",
+   "new": "            && segment.cut.is_some_and(|cut| segment.instant(cut).is_ok_and(|end| end > t))",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_frequency_inside_a_running_segment_is_given_timed"
@@ -13296,9 +13296,9 @@
   {
    "id": "P989",
    "name": "a segment that does not hold the channel covers its frequency (UR-24, R1)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        let holds = |planned: &&Planned| !planned.refused && planned.segment.config.channels.contains(chan as u32);",
-   "new": "        let holds = |planned: &&Planned| !planned.refused;",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "segment.config.channels.contains(channel)\n",
+   "new": "true\n",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_frequency_of_a_channel_the_running_segment_does_not_hold_is_deferred"
@@ -13622,5 +13622,165 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
+  },
+  {
+   "id": "P1022",
+   "name": "covering: a segment does not cover its own origin (RM-36)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "&& segment.origin <= t\n",
+   "new": "&& segment.origin < t\n",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_36_covering_boundaries"
+  },
+  {
+   "id": "P1023",
+   "name": "covering: a segment still covers its cut's instant (RM-36)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "end > t))\n    })",
+   "new": "end >= t))\n    })",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_36_covering_boundaries"
+  },
+  {
+   "id": "P1024",
+   "name": "covering: another channel's segment covers (RM-36)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "segment.config.channels.contains(channel)\n",
+   "new": "true\n",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_36_covering_boundaries"
+  },
+  {
+   "id": "P1025",
+   "name": "covering: an instant that cannot be computed covers (RM-36)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "segment.instant(cut).is_ok_and(|end| end > t)",
+   "new": "segment.instant(cut).map_or(true, |end| end > t)",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_36_covering_boundaries"
+  },
+  {
+   "id": "P1026",
+   "name": "the Mock drops the release window: any covering segment makes a receive update timed (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) <= tick);",
+   "new": "let timed = self.covering_rx(number, tick).is_some();",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_receive_update_is_timed_from_the_release_window_after_the_segment_origin"
+  },
+  {
+   "id": "P1027",
+   "name": "the Mock counts a segment that began exactly the release window before the update as too young (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) <= tick);",
+   "new": "let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) < tick);",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_receive_update_is_timed_from_the_release_window_after_the_segment_origin"
+  },
+  {
+   "id": "P1028",
+   "name": "the Mock does not look for a covering segment when the update applies (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) <= tick);",
+   "new": "let timed = true;",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_a_stop_after_the_update_makes_it_untimed_at_application"
+  },
+  {
+   "id": "P1029",
+   "name": "the Mock looks only at receive stream 0 for a covering segment (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "(0..self.rx.len()).filter(|k| !self.rx[*k].links.is_empty())",
+   "new": "(0..1).filter(|k| !self.rx[*k].links.is_empty())",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_the_other_streams_segment_covers"
+  },
+  {
+   "id": "P1030",
+   "name": "the Mock counts a receive stream with no link as covering (MR-34, MR-39)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": ".filter(|k| !self.rx[*k].links.is_empty()).find_map(|k| {",
+   "new": ".find_map(|k| {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_a_linkless_stream_does_not_cover_even_after_start_rx"
+  },
+  {
+   "id": "P1031",
+   "name": "an untimed receive update takes the timed-tune constant instead of a draw (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "\"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,",
+   "new": "\"random_unless_timed_tune\" | \"random\" => model.timed_phase,\n                            _ => 0.0,",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_receive_update_before_t0_is_an_untimed_tune"
+  },
+  {
+   "id": "P1032",
+   "name": "an untimed receive update leaves the channel coherent (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "model.phase_behavior == \"deterministic\" || (model.phase_behavior != \"random\" && timed) { 1.0 }",
+   "new": "model.phase_behavior == \"deterministic\" || model.phase_behavior != \"random\" { 1.0 }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_receive_update_before_t0_is_an_untimed_tune"
+  },
+  {
+   "id": "P1033",
+   "name": "a transmit frequency update is judged like a receive one (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "\"random_unless_timed_tune\" => model.timed_phase,",
+   "new": "\"random_unless_timed_tune\" => channel::lo_phase(&mut mode.lo_retune),",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_a_transmit_update_before_t0_stays_a_timed_tune"
+  },
+  {
+   "id": "P1034",
+   "name": "a deterministic receive update draws a phase (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "\"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
+   "new": "\"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => channel::lo_phase(&mut mode.lo_retune),\n                        };",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_deterministic_receive_update_before_t0_stays_zero"
+  },
+  {
+   "id": "P1035",
+   "name": "the UHD Module gives every receive frequency to the device timed (UR-24, RM-36)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": ".is_some() {\n            return Reach::Timed;",
+   "new": ".is_some() || true {\n            return Reach::Timed;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_stopped_receive_channel_is_given_no_timed_frequency"
+  },
+  {
+   "id": "P1036",
+   "name": "the Mock ignores the description's release window (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "let window = self.profile.timing().release_window_ns;",
+   "new": "let window = 0;",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_receive_update_is_timed_from_the_release_window_after_the_segment_origin"
+  },
+  {
+   "id": "P1037",
+   "name": "no receive frequency update is a timed tune: a Spec Run's scheduled retune draws a fresh phase (MR-34)",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "old": "let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) <= tick);",
+   "new": "let timed = false;",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "v58",
+   "filter": "mr_34_a_scheduled_receive_retune_inside_a_running_segment_is_a_timed_tune"
   }
  ]

@@ -446,14 +446,15 @@ fn mr_32_b_the_transmitted_timelines_are_read_at_the_samples_own_instant() {
     // at t0 + 1000k and the loopback path has no delay, so it hears transmit sample
     // 2 000 000 + k, less the profile's 45-sample advance: heard from k = 2 045.
     radio.push(burst(&radio, &world, waveform, 2_002_000, true));
-    let switch = 2_002_500_000;
+    // at least the release window after the segment's origin, so the receive tune is a timed tune (MR-34)
+    let switch = 2_003_500_000;
     radio.push(update(&radio, "radio.tx.c0.frequency_hz", Value::num(1.0e9).unwrap(), switch));
     radio.push(update(&radio, "radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap(), switch));
     // handle the burst in the round at t0, where its target is inside the 2 ms lead; a
     // later round would find it late and MR-17 would move it
     step(&world, &mut [&mut radio], t0);
-    // the receive block holding k = 2 545 is published at T0 + 3 999 001
-    run_to(&world, &mut [&mut radio], 2_004_000_000);
+    // the receive block holding k = 3 545 is published before T0 + 5 ms
+    run_to(&world, &mut [&mut radio], 2_005_000_000);
 
     let Phases { rx, tx, rx_timed, tx_timed } = phases(0, "mock");
     assert!((tx[0] - tx_timed[0]).abs() > 1e-3, "the timed tune must move the transmit phase, or this test proves nothing");
@@ -462,19 +463,19 @@ fn mr_32_b_the_transmitted_timelines_are_read_at_the_samples_own_instant() {
     // value already in force, so only the phase changes; `mr_32_c_…` moves the frequency.
     let heard: Vec<_> = radio.received(0).into_iter().filter(|(k, _, _)| *k >= 2_045).collect();
     assert!(heard.len() > 600, "the burst must be heard well past the tune, {} samples", heard.len());
-    assert!(heard.iter().any(|(k, _, _)| *k < 2_500) && heard.iter().any(|(k, _, _)| *k >= 2_545), "both sides of both tunes must be heard");
+    assert!(heard.iter().any(|(k, _, _)| *k < 3_500) && heard.iter().any(|(k, _, _)| *k >= 3_545), "both sides of both tunes must be heard");
     for (k, re, im) in &heard {
         assert!(*re != 0.0 || *im != 0.0, "sample {k} is silent");
         // The receive phase is read at the receive sample's own instant, so the receive
-        // tune reaches k = 2 500. The transmit phase is read at the *transmitted*
+        // tune reaches k = 3 500. The transmit phase is read at the *transmitted*
         // sample's own instant, which is 45 samples earlier than the instant it is
-        // radiated at, so the transmit tune reaches k = 2 545. Reading it at the antenna
-        // instant instead would move that boundary to k = 2 500 and lose the middle
+        // radiated at, so the transmit tune reaches k = 3 545. Reading it at the antenna
+        // instant instead would move that boundary to k = 3 500 and lose the middle
         // region. What is heard is the transmit phase minus the receive phase
         // (MR-32 and MR-35).
         let phase = match k {
-            k if *k < 2_500 => tx[0] - rx[0],
-            k if *k < 2_545 => tx[0] - rx_timed[0],
+            k if *k < 3_500 => tx[0] - rx[0],
+            k if *k < 3_545 => tx[0] - rx_timed[0],
             _ => tx_timed[0] - rx_timed[0],
         };
         let (want_re, want_im) = (0.5 * phase.cos(), 0.5 * phase.sin());

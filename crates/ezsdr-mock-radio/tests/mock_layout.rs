@@ -1740,11 +1740,12 @@ fn mr_34_a_layout_receive_entry_is_an_untimed_tune() {
 }
 
 #[test]
-fn mr_34_a_layout_untimed_tune_follows_a_timed_tune_at_its_instant() {
-    // The receive entry above, with a timed frequency update at the re-entry's origin: the
-    // untimed tune is taken after that update, so the channel carries the untimed phase and is
-    // not coherent there (MR-34). A stream's origin is known only once it has begun, so the
-    // scenario runs twice: once to read the origin, once with the update at it.
+fn mr_34_a_layout_an_untimed_update_and_the_entry_tune_at_one_instant_draw_in_application_order() {
+    // The receive entry above, with a frequency update at the re-entry's origin. The segment
+    // has not run the release window by then, so it is an untimed tune and draws first; the entry's untimed
+    // tune at the same instant draws after it and is what the channel carries, not coherent
+    // there (MR-34, MR-30). A stream's origin is known only once it has begun, so the scenario
+    // runs twice: once to read the origin, once with the update at it.
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let env = [
         ("sim.seed", serde_json::json!(7)),
@@ -1787,7 +1788,8 @@ fn mr_34_a_layout_untimed_tune_follows_a_timed_tune_at_its_instant() {
     let _rx_phase = phase(&mut lo);
     let tx_phase = phase(&mut lo);
     let rx_timed = phase(&mut lo);
-    let rx_entry = phase(&mut ezsdr_sim::SimRng::new(7, "mock/lo/retune"));
+    let (update_draw, rx_entry) = (retune_draw(0), retune_draw(1));
+    assert_ne!(update_draw, rx_entry);
     assert_ne!(rx_entry, rx_timed);
     let blocks = harness.blocks("rx0");
     assert_near(heard(&blocks, &entered, origin + 100_000), rotated(0.5, tx_phase - rx_entry));
@@ -2979,4 +2981,717 @@ fn mr_20_a_transmit_change_with_no_sample_is_a_candidate() {
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
     assert_eq!(bursts.len(), 1, "{bursts:?}");
     assert_eq!((bursts[0].target, bursts[0].samples), (TimePoint::new(clocks[2].domain, 16_000), 100));
+}
+
+/// MA1 (MR-34): a ubx receive layout looped back from one transmit stream at seed 7, with the
+/// transmit burst queued and the Mock armed for `T0`; blocks are collected as it steps.
+struct Ma1 {
+    h: Harness,
+    got: Vec<BlockRef>,
+    /// The latest instant stepped to; `go` to an earlier one steps nowhere.
+    now: i64,
+}
+
+impl Ma1 {
+    fn new(rx: Value, constraints: &[(&str, Constraint)], rx_channels: &[u32], faults: serde_json::Value, ports: &[&str]) -> Ma1 {
+        let couplings: Vec<_> = rx_channels.iter()
+            .map(|rx| serde_json::json!({"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":rx,"gain_db":0.0,"delay_ns":0}))
+            .collect();
+        let env = [("sim.seed", serde_json::json!(7)), ("sim.channel", serde_json::json!({ "couplings": couplings })), ("sim.faults", faults)];
+        let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 400_000]);
+        let mut h = built_with_inputs(Layout {
+            profile: "x3xx", id: "mock", rx, tx: elements(&["0:A:ubx:0"]), selector: &[], constraints, env: &env, ports,
+        }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        h.arm_start(T0).unwrap();
+        let tx = h.clocks_of("mock/tx/s0")[0].domain;
+        h.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+        Ma1 { h, got: Vec::new(), now: 0 }
+    }
+
+    /// One ubx receive channel `c0` in stream 0, looped back.
+    fn single(faults: serde_json::Value) -> Ma1 {
+        Ma1::new(elements(&["0:A:ubx:0"]), &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))], &[0], faults, &["rx0"])
+    }
+
+    /// Steps to `tick` and keeps the blocks that came out.
+    fn go(&mut self, tick: i64) {
+        if tick < self.now { return; }
+        self.now = tick;
+        self.h.step(tick).unwrap();
+        let ports: Vec<String> = self.h.links.keys().cloned().collect();
+        for port in ports { self.got.extend(self.h.blocks(&port)); }
+    }
+
+    /// As `go`, in steps of at most 10 ms, so a link of 64 blocks drops none of what it holds.
+    fn go_by(&mut self, tick: i64) {
+        while self.now < tick { self.go((self.now + 10_000_000).min(tick)); }
+    }
+
+    fn push(&self, action: Action) { self.h.push(action); }
+
+    /// A frequency update to the value the key already has (so the loopback stays tuned alike), due at `e`.
+    fn tune(&self, name: &str, e: i64) { self.push(update(name, self.h.effective[&key(name)].clone(), UpdateClass::HardwareTimed, Some(e))); }
+
+    /// The last SampleClock of the stream at `path` and its origin.
+    fn last_clock(&self, path: &str) -> (SampleClockRecord, i64) {
+        let clock = self.h.clocks_of(path).last().unwrap().clone();
+        let origin = clock.origin.ticks_in(ROOT).unwrap();
+        (clock, origin)
+    }
+
+    /// What channel 0 hears of the clock at `tick`.
+    fn ear(&self, clock: &SampleClockRecord, tick: i64) -> (f32, f32) { heard(&self.got, clock, tick) }
+
+    /// The `coherence` rows of the receive segment of stream `stream` that begins at `origin`.
+    fn coherence(&self, stream: u64, origin: i64) -> Vec<serde_json::Value> {
+        let segments = self.h.section("segments");
+        let row = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == stream && row["origin"]["ticks"] == origin).expect("a segment row");
+        row["coherence"].as_array().unwrap().clone()
+    }
+
+    /// Stops stream `path` at `from`, then restarts it, and returns the restarted clock and
+    /// its origin: the stream's untimed entry tune is the draw that tells how many an earlier
+    /// update took. The restart is booked after every earlier update has been applied.
+    fn restart(&mut self, path: &str, from: i64) -> (SampleClockRecord, i64) {
+        self.push(stop(path));
+        self.go(from);
+        self.push(start_rx(path, Some(from + 2_000_000)));
+        self.go(from + 1_000_000);
+        self.go(from + 2_000_001);
+        self.go(from + 100_000_000);
+        self.last_clock(path)
+    }
+}
+
+/// The `n`th draw of the seed-7 retune stream.
+fn retune_draw(n: usize) -> f64 {
+    let mut rng = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    (0..=n).map(|_| phase(&mut rng)).last().unwrap()
+}
+
+/// The first four draws of the seed-7 LO stream: with one receive and one transmit channel, receive phase, transmit phase, receive timed phase, transmit timed phase (with more channels, all receive initials come first, then all transmit initials, then the timed constants).
+fn lo_draws() -> [f64; 4] {
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    [phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo)]
+}
+
+const FREQ0: &str = "radio.rx.c0.frequency_hz";
+
+#[test]
+fn mr_34_a_layout_receive_update_before_t0_is_an_untimed_tune() {
+    // MR-34: the update applies at T0 - 1 ms, before the first segment began, so no segment
+    // covers e and it is an untimed tune.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.tune(FREQ0, T0 - 1_000_000);
+    m.go(0);
+    m.go(T0 + 10_000_000);
+    let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+    let [_, tx_phase, ..] = lo_draws();
+    assert_near(m.ear(&first, T0 + 5_000_000), rotated(0.5, tx_phase - retune_draw(0)));
+    let coherence = m.coherence(0, T0);
+    assert_eq!(coherence.last().unwrap()["basis"], "none");
+    assert_eq!(coherence.last().unwrap()["valid"], false);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_deterministic_receive_update_before_t0_stays_zero() {
+    // An `ideal` channel is deterministic: an update applied before its segment began takes
+    // no draw, so its phase stays 0 and it stays coherent.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.25, 0.0); 100_000]);
+    let mut h = built_with_inputs(Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    h.arm_start(T0).unwrap();
+    let tx = h.clocks_of("mock/tx/s0")[0].domain;
+    h.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    let mut m = Ma1 { h, got: Vec::new(), now: 0 };
+    m.tune(FREQ0, T0 - 1_000_000);
+    m.go(0);
+    m.go(T0 + 10_000_000);
+    let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+    assert_eq!(m.ear(&first, T0 + 100_000), (0.25, 0.0));
+    assert_eq!(m.ear(&first, T0 + 4_000_000), (0.25, 0.0));
+    assert_eq!(m.coherence(0, T0).last().unwrap()["basis"], "deterministic");
+    assert_eq!(m.coherence(0, T0).last().unwrap()["valid"], true);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_an_update_received_while_samples_pass_draws_nothing() {
+    // r = T0 + 3 ms: the first segment covers the channel then and at e = T0 + 5 ms, so the
+    // update is a timed tune and takes no draw; the restart's own entry tune is the first.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+    m.tune(FREQ0, T0 + 5_000_000);
+    m.go(T0 + 3_000_000);
+    m.go(T0 + 8_000_000);
+    let [_, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(m.ear(&first, T0 + 5_500_000), rotated(0.5, tx_phase - rx_timed));
+    let coherence = m.coherence(0, T0);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 5_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    let (restarted, origin) = m.restart("mock/rx/s0", T0 + 9_000_000);
+    m.go(origin + 10_000_000);
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_update_to_a_stopped_receive_stream_is_untimed_and_the_restart_adds_its_draw() {
+    // Received at T0 + 6.5 ms with the stream stopped, so no segment covers e: untimed (draw 0); the restart's entry
+    // tune is draw 1, which the restarted segment hears.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.push(stop("mock/rx/s0"));
+    m.go(T0 + 6_000_000);
+    m.tune(FREQ0, T0 + 9_000_000);
+    m.go(T0 + 6_500_000);
+    m.go(T0 + 9_000_001);
+    m.push(start_rx("mock/rx/s0", Some(T0 + 10_000_000)));
+    m.go(T0 + 10_000_000);
+    m.go(T0 + 100_000_000);
+    let (restarted, origin) = m.last_clock("mock/rx/s0");
+    m.go(origin + 10_000_000);
+    let [_, tx_phase, ..] = lo_draws();
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_update_before_a_planned_segment_is_untimed_and_the_segment_adds_its_draw() {
+    // The channel leaves its stream at T0 + 6 ms and a segment to bring it back is booked for
+    // T0 + 8 ms; an update received after both bookings, to take effect before that segment
+    // begins, is untimed: draw 0, then the planned segment's entry tune is draw 1.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.push(update("radio.rx.c0.stream", Value::from(-1), UpdateClass::Cold, Some(T0 + 6_000_000)));
+    m.push(update("radio.rx.c0.stream", Value::from(0), UpdateClass::Cold, Some(T0 + 8_000_000)));
+    m.go(T0 + 3_000_000);
+    m.tune(FREQ0, T0 + 20_000_000);
+    m.go(T0 + 6_500_000);
+    m.go(T0 + 100_000_000);
+    let (entered, origin) = m.last_clock("mock/rx/s0");
+    assert!(origin > T0 + 20_000_000, "{origin}");
+    m.go(origin + 10_000_000);
+    let [_, tx_phase, ..] = lo_draws();
+    assert_near(m.ear(&entered, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_an_update_at_a_cut_is_untimed() {
+    // The update is received at T0 + 1 ms, while the segment runs, and a stop at T0 + 3.5 ms
+    // cuts the segment at c. With e = c exactly the segment no longer covers the channel when
+    // the update applies: untimed. The cut is read in a first run.
+    let run = |e: i64| {
+        let mut m = Ma1::single(serde_json::json!([]));
+        m.go(0);
+        m.go(T0 + 500_000);
+        m.tune(FREQ0, e);
+        m.go(T0 + 1_000_000);
+        m.push(stop("mock/rx/s0"));
+        m.go(T0 + 3_500_000);
+        let cut = m.h.clocks_of("mock/rx/s0")[0].ended_at.map(|at| at.ticks_in(ROOT).unwrap());
+        (m, cut)
+    };
+    let cut = run(T0 + 10_000_000).1.expect("the stop cut the segment");
+    assert!(cut >= T0 + 3_000_000, "{cut}");
+    let (mut m, _) = run(cut);
+    m.go(cut + 1);
+    assert!(m.h.applied().iter().any(|(key, at)| key == FREQ0 && *at == cut));
+    m.push(start_rx("mock/rx/s0", Some(cut + 4_000_000)));
+    m.go(cut + 2_000_000);
+    m.go(cut + 100_000_000);
+    let (restarted, origin) = m.last_clock("mock/rx/s0");
+    m.go(origin + 10_000_000);
+    let [_, tx_phase, ..] = lo_draws();
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_deterministic_and_cbx_receive_channels_under_the_new_rule() {
+    // A `random` (CBX) channel draws one phase for every applied update, timed or not and
+    // never coherent: c0's update applies before its segment began (untimed), c1's after it
+    // has run the release window (timed), and they take retune draws 0 and 1.
+    let constraints = [
+        ("radio.rx.c1.stream", eq(Scalar::from(1))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c1.stream", eq(Scalar::from(1))),
+    ];
+    let env = [
+        ("sim.seed", serde_json::json!(19)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 10_000]);
+    let mut h = built_with_inputs(Layout {
+        profile: "x3xx", id: "mock", rx: elements(&["0:A:cbx:0", "0:B:cbx:0"]),
+        tx: elements(&["0:A:cbx:0", "0:B:cbx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"],
+    }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    h.arm_start(T0).unwrap();
+    let (tx0, tx1) = (h.clocks_of("mock/tx/s0")[0].domain, h.clocks_of("mock/tx/s1")[0].domain);
+    h.push(burst_with_waveform("mock/tx/s0", tx0, 2_000_000, waveform.clone()));
+    h.push(burst_with_waveform("mock/tx/s1", tx1, 2_000_000, waveform));
+    let mut m = Ma1 { h, got: Vec::new(), now: 0 };
+    m.tune(FREQ0, T0 - 1_000_000);
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.tune("radio.rx.c1.frequency_hz", T0 + 5_000_000);
+    m.go(T0 + 3_000_000);
+    m.go(T0 + 9_000_000);
+    let mut lo = ezsdr_sim::SimRng::new(19, "mock/lo");
+    let (_, _, tx0_phase, tx1_phase) = (phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(19, "mock/lo/retune");
+    let (c0_draw, c1_draw) = (phase(&mut retune), phase(&mut retune));
+    let (s0, s1) = (m.h.clocks_of("mock/rx/s0")[0].clone(), m.h.clocks_of("mock/rx/s1")[0].clone());
+    assert_near(m.ear(&s0, T0 + 7_000_000), rotated(0.5, tx0_phase - c0_draw));
+    assert_near(m.ear(&s1, T0 + 7_000_000), rotated(0.5, tx1_phase - c1_draw));
+    for (stream, row) in [(0, m.coherence(0, T0)), (1, m.coherence(1, T0))] {
+        assert_eq!(row.last().unwrap()["basis"], "none", "stream {stream}");
+        assert_eq!(row.last().unwrap()["valid"], false, "stream {stream}");
+    }
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_30_a_layout_untimed_update_draws_are_reproducible_and_in_application_order() {
+    // Two channels of one stream, each looped back from its own transmit stream, both updated
+    // before the segment began (untimed) for one instant, received c1 first: c1 takes retune
+    // draw 0 and c0 draw 1, in both runs.
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c1.stream", eq(Scalar::from(1))), ("radio.rx.c1.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[
+            {"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},
+            {"tx":"radio","tx_channel":1,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}
+        ]})),
+    ];
+    let run = || {
+        let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 10_000]);
+        let mut h = built_with_inputs(Layout {
+            profile: "x3xx", id: "mock", rx: two(), tx: two(), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+        }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        h.arm_start(T0).unwrap();
+        let (tx0, tx1) = (h.clocks_of("mock/tx/s0")[0].domain, h.clocks_of("mock/tx/s1")[0].domain);
+        h.push(burst_with_waveform("mock/tx/s0", tx0, 2_000_000, waveform.clone()));
+        h.push(burst_with_waveform("mock/tx/s1", tx1, 2_000_000, waveform));
+        let mut m = Ma1 { h, got: Vec::new(), now: 0 };
+        m.tune("radio.rx.c1.frequency_hz", T0 - 1_000_000);
+        m.tune(FREQ0, T0 - 1_000_000);
+        m.go(0);
+        m.go(T0 + 9_000_000);
+        let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+        (heard_channel(&m.got, &first, T0 + 5_000_000, 0), heard_channel(&m.got, &first, T0 + 5_000_000, 1))
+    };
+    let (c0, c1) = run();
+    assert_eq!((c0, c1), run());
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (_, _, tx0_phase, tx1_phase) = (phase(&mut lo), phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    assert_near(c0, rotated(0.5, tx0_phase - retune_draw(1)));
+    assert_near(c1, rotated(0.5, tx1_phase - retune_draw(0)));
+}
+
+#[test]
+fn mr_34_a_layout_a_transmit_update_before_t0_stays_a_timed_tune() {
+    // A transmit update is a timed tune whenever it applies; it takes no draw, so the receive
+    // restart's entry tune is retune draw 0.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.tune("radio.tx.c0.frequency_hz", T0 - 1_000_000);
+    m.go(0);
+    m.go(T0 + 8_000_000);
+    let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+    let [rx_phase, _, _, tx_timed] = lo_draws();
+    assert_near(m.ear(&first, T0 + 5_000_000), rotated(0.5, tx_timed - rx_phase));
+    let segments = m.h.section("segments");
+    let tx = segments.iter().filter(|row| row["direction"] == "tx").flat_map(|row| row["coherence"].as_array().unwrap().clone()).collect::<Vec<_>>();
+    assert_eq!(tx.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(tx.last().unwrap()["valid"], true);
+    assert_eq!(tx.last().unwrap()["at"]["ticks"], T0 - 1_000_000);
+    let (restarted, origin) = m.restart("mock/rx/s0", T0 + 9_000_000);
+    m.go(origin + 10_000_000);
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_timed - retune_draw(0)));
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_the_other_streams_segment_covers() {
+    // Channel c0 is in stream 1 and c1 in stream 0. The update to c0 is due while stream 1's
+    // segment has run the release window, so it is timed; stream 0 alone would not cover c0.
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(1))), ("radio.rx.c1.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0))),
+    ];
+    let mut m = Ma1::new(two(), &constraints, &[0, 1], serde_json::json!([]), &["rx0", "rx1"]);
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.tune(FREQ0, T0 + 5_000_000);
+    m.go(T0 + 3_000_000);
+    m.go(T0 + 8_000_000);
+    let s1 = m.h.clocks_of("mock/rx/s1")[0].clone();
+    let [_, _, tx_phase, rx0_timed] = lo_draws();
+    assert_near(m.ear(&s1, T0 + 6_000_000), rotated(0.5, tx_phase - rx0_timed));
+    let (restarted, origin) = m.restart("mock/rx/s1", T0 + 9_000_000);
+    m.go(origin + 10_000_000);
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_a_linkless_stream_does_not_cover_even_after_start_rx() {
+    // Stream 1 (c1) has no link. Even after a `start_rx` has begun a segment of it, an update
+    // to c1 is untimed (draw 0) and stream 0's restart takes draw 1.
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let mut m = Ma1::new(two(), &constraints, &[0], serde_json::json!([]), &["rx0"]);
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.push(start_rx("mock/rx/s1", Some(T0 + 3_000_000)));
+    m.go(T0 + 3_000_000);
+    m.go(T0 + 120_000_000);
+    m.tune("radio.rx.c1.frequency_hz", T0 + 135_000_000);
+    m.go(T0 + 130_000_000);
+    m.go(T0 + 136_000_000);
+    assert!(m.h.clocks_of("mock/rx/s1").is_empty());
+    assert!(m.h.section("segments").iter().all(|row| !(row["direction"] == "rx" && row["stream"] == 1)));
+    let (restarted, origin) = m.restart("mock/rx/s0", T0 + 140_000_000);
+    m.go(origin + 10_000_000);
+    let tx_phase = lo_draws()[2];
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_a_stop_after_the_update_makes_it_untimed_at_application() {
+    // Due at T0 + 8 ms, while the segment runs when it is received (T0 + 3 ms), but a stop at
+    // T0 + 4 ms cuts it before the update applies: no segment covers e, so it is untimed.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.tune(FREQ0, T0 + 8_000_000);
+    m.go(T0 + 3_000_000);
+    m.push(stop("mock/rx/s0"));
+    m.go(T0 + 4_000_000);
+    m.push(start_rx("mock/rx/s0", Some(T0 + 10_000_000)));
+    m.go(T0 + 5_000_000);
+    m.go(T0 + 8_000_001);
+    m.go(T0 + 100_000_000);
+    let (restarted, origin) = m.last_clock("mock/rx/s0");
+    assert!(origin > T0 + 8_000_000, "{origin}");
+    m.go(origin + 10_000_000);
+    let tx_phase = lo_draws()[1];
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.first().unwrap()["basis"], "none");
+    assert_eq!(coherence.first().unwrap()["valid"], false);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_an_update_received_while_stopped_is_timed_when_a_later_segment_covers_e() {
+    // Received at T0 + 2 ms with the stream stopped; the restart's segment (begun about
+    // T0 + 70 ms) has run the release window when the update applies at e = T0 + 120 ms, so it
+    // is a timed tune whenever it was received: the restart's entry tune is draw 0 and the
+    // update takes no draw.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.push(stop("mock/rx/s0"));
+    m.go(T0 + 1_000_000 + 1_100_001);
+    m.tune(FREQ0, T0 + 120_000_000);
+    m.go(T0 + 3_000_000);
+    m.push(start_rx("mock/rx/s0", Some(T0 + 20_000_000)));
+    m.go(T0 + 4_000_000);
+    m.go(T0 + 100_000_000);
+    let (restarted, origin) = m.last_clock("mock/rx/s0");
+    assert!(origin + 3_000_000 <= T0 + 120_000_000, "{origin}");
+    m.go(T0 + 130_000_000);
+    let [_, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_near(m.ear(&restarted, T0 + 125_000_000), rotated(0.5, tx_phase - rx_timed));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 120_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_a_flip_flop_is_timed_by_the_segment_that_covers_e() {
+    // Received at T0 + 3 ms while segment S runs. S is stopped and a new segment S' begins
+    // well before e = T0 + 150 ms: S' has run the release window when the update applies, so
+    // it is a timed tune, though S' is not the segment that ran when it was received. S''s
+    // entry tune is draw 0; the update takes none.
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.tune(FREQ0, T0 + 150_000_000);
+    m.go(T0 + 3_000_000);
+    m.push(stop("mock/rx/s0"));
+    m.go(T0 + 10_000_000);
+    m.push(start_rx("mock/rx/s0", Some(T0 + 20_000_000)));
+    m.go(T0 + 11_000_000);
+    m.go(T0 + 100_000_000);
+    let (restarted, origin) = m.last_clock("mock/rx/s0");
+    assert!(origin + 3_000_000 <= T0 + 150_000_000 && origin > T0, "{origin}");
+    m.go(T0 + 160_000_000);
+    let [_, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_near(m.ear(&restarted, T0 + 155_000_000), rotated(0.5, tx_phase - rx_timed));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 150_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_layout_an_update_received_before_t0_is_timed_when_its_segment_has_run_the_release_window() {
+    // Received at 0, before T0, as a Spec Run's scheduled update is (KC-17, KC-18): the first
+    // segment (origin T0) has run the release window when it applies at T0 + 5 ms, so it is a
+    // timed tune and takes no draw (the restart's entry tune is draw 0).
+    let mut m = Ma1::single(serde_json::json!([]));
+    m.tune(FREQ0, T0 + 5_000_000);
+    m.go(0);
+    m.go(T0 + 10_000_000);
+    let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+    let [rx_phase, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(m.ear(&first, T0 + 3_000_000), rotated(0.5, tx_phase - rx_phase));
+    assert_near(m.ear(&first, T0 + 7_000_000), rotated(0.5, tx_phase - rx_timed));
+    let coherence = m.coherence(0, T0);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], T0 + 5_000_000);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+    let (restarted, origin) = m.restart("mock/rx/s0", T0 + 11_000_000);
+    m.go(origin + 10_000_000);
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_eq!(m.h.rejected(), Vec::<String>::new());
+}
+
+#[test]
+fn mr_34_a_receive_update_is_timed_from_the_release_window_after_the_segment_origin() {
+    // A receive update is a timed tune when the segment that covers its instant began at least
+    // the release window (the description's, RM-6) before it. Segment origin T0: e = T0 + W is
+    // timed and one root tick earlier is not, whether the update is received before T0 or by a
+    // Session at T0 with the Mock's 2 ms command lead (e = T0 + 2 ms, inside the window); a
+    // Session update received at T0 + 5 ms with that lead is timed.
+    let window = ezsdr_radio::x3xx::timing(&ezsdr_mock_radio::Profile::terms()).release_window_ns;
+    assert!(window > 2_000_000, "the Session lead case needs a window longer than the lead");
+    // `received`: the instant the update is handed over; `due`: a requested instant, or none.
+    let run = |received: i64, due: Option<i64>| {
+        let mut m = Ma1::single(serde_json::json!([]));
+        if received > 0 { m.go(0); }
+        let value = m.h.effective[&key(FREQ0)].clone();
+        m.push(update(FREQ0, value, UpdateClass::HardwareTimed, due));
+        m.go(received);
+        m.go(T0 + 20_000_000);
+        let first = m.h.clocks_of("mock/rx/s0")[0].clone();
+        let [_, tx_phase, rx_timed, _] = lo_draws();
+        let e = m.h.applied_of(FREQ0)[0].1;
+        let coherence = m.coherence(0, T0).last().unwrap().clone();
+        let timed = coherence["basis"] == "timed_tune";
+        let after = m.ear(&first, e + 1_000_000);
+        assert_near(after, if timed { rotated(0.5, tx_phase - rx_timed) } else { rotated(0.5, tx_phase - retune_draw(0)) });
+        assert_eq!(coherence["at"]["ticks"], e);
+        (e, timed)
+    };
+    assert_eq!(run(0, Some(T0 + window)), (T0 + window, true));
+    assert_eq!(run(0, Some(T0 + window - 1)), (T0 + window - 1, false));
+    assert_eq!(run(T0, None), (T0 + 2_000_000, false));
+    assert_eq!(run(T0 + 5_000_000, None), (T0 + 7_000_000, true));
+}
+
+/// MA1: the rate changes the refusal tests book (receive stream 0, one `cold` segment each).
+const E_C1: i64 = T0 + 10_000_000;
+const E_C2: i64 = T0 + 70_000_000;
+
+/// One run of the refusal scene: C1 (due `E_C1`) and, with `second`, C2 (due `E_C2`) are booked
+/// at T0 + 3 ms; the cold-change fault, when `faulted`, refuses C1. An `update` is a frequency
+/// update received at `r` for `e`. Runs to T0 + 250 ms.
+fn refusal_run(faulted: bool, second: bool, update: Option<(i64, i64)>) -> Ma1 {
+    let mut m = Ma1::single(if faulted { serde_json::json!([cold_change_refused_at(1_000_000)]) } else { serde_json::json!([]) });
+    m.go(0);
+    m.go(T0 + 2_100_001);
+    m.push(update_rate(2_000_000.0, E_C1));
+    if second { m.push(update_rate(1_000_000.0, E_C2)); }
+    m.go(T0 + 3_000_000);
+    m.go(E_C1 + 1);
+    if let Some((r, e)) = update {
+        assert!(r > E_C1 && e >= r + 2_000_000);
+        m.tune(FREQ0, e);
+        m.go(r);
+    }
+    m.go_by(T0 + 250_000_000);
+    m
+}
+
+fn update_rate(rate: f64, e: i64) -> Action { update("radio.rx.s0.sample_rate_hz", Value::num(rate).unwrap(), UpdateClass::Cold, Some(e)) }
+
+fn origins(m: &Ma1) -> Vec<i64> { m.h.clocks_of("mock/rx/s0").iter().map(|clock| clock.origin.ticks_in(ROOT).unwrap()).collect() }
+
+#[test]
+fn mr_34_a_layout_a_refused_segment_does_not_cover_an_update_received_after_its_planned_origin() {
+    // C1 would begin S2 at o2. Received at o2 + 3 ms, an update is a timed tune when C1 is
+    // not refused (S2 runs); when C1 is refused S2 never exists and S1 is cut at C1, so
+    // nothing covers the channel: untimed (draw 0), and the restart's entry tune is draw 1; a
+    // timed update would leave the restart draw 0.
+    let calibration = refusal_run(false, false, None);
+    let o2 = origins(&calibration)[1];
+    let (r, e) = (o2 + 3_000_000, o2 + 6_000_000);
+    let timed = refusal_run(false, false, Some((r, e)));
+    let coherence = timed.coherence(0, o2);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], e);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    let [_, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(timed.ear(&timed.last_clock("mock/rx/s0").0, e + 3_000_000), rotated(0.5, tx_phase - rx_timed));
+    let mut m = refusal_run(true, false, Some((r, e)));
+    assert_eq!(m.h.rejected(), [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(origins(&m).len(), 1, "{:?}", origins(&m));
+    assert!(m.h.section("segments").iter().all(|row| row["origin"]["ticks"] != o2), "the refused segment left a row");
+    let (restarted, origin) = m.restart("mock/rx/s0", T0 + 260_000_000);
+    m.go(origin + 10_000_000);
+    assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+}
+
+#[test]
+fn mr_34_a_layout_an_update_at_a_cold_instant_is_timed_whatever_the_refusal_order() {
+    // C1 is due off the sample lattice. The update, received while S1 runs, is due at the
+    // same instant; whether it arrives before or after C1 and whether C1 is refused, S1 is
+    // the segment that covers it when it applies (S1 is cut after e): timed, no draw.
+    let e_c = T0 + 6_000_500;
+    for update_first in [true, false] {
+        let mut m = Ma1::single(serde_json::json!([cold_change_refused_at(1_000_000)]));
+        m.go(0);
+        m.go(T0 + 2_100_001);
+        if update_first { m.tune(FREQ0, e_c); }
+        m.push(update_rate(2_000_000.0, e_c));
+        if !update_first { m.tune(FREQ0, e_c); }
+        m.go(T0 + 3_000_000);
+        m.go(T0 + 20_000_000);
+        assert_eq!(m.h.rejected(), [REFUSED_CHANGE.to_owned()], "update first {update_first}");
+        assert!(m.h.applied().iter().any(|(key, at)| key == FREQ0 && *at == e_c), "{:?}", m.h.applied());
+        let coherence = m.coherence(0, T0);
+        assert_eq!(coherence.last().unwrap()["basis"], "timed_tune", "update first {update_first}");
+        assert_eq!(coherence.last().unwrap()["valid"], true, "update first {update_first}");
+        let (restarted, origin) = m.restart("mock/rx/s0", T0 + 30_000_000);
+        m.go(origin + 10_000_000);
+        let tx_phase = lo_draws()[1];
+        assert_near(m.ear(&restarted, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    }
+}
+
+/// The origins the refusal scene's second segment has with C1 refused (S3') and, without the
+/// fault, S2 and S3.
+fn refusal_origins() -> (i64, i64, i64) {
+    let plain = origins(&refusal_run(false, true, None));
+    let refused = origins(&refusal_run(true, true, None));
+    assert_eq!((plain.len(), refused.len()), (3, 2), "{plain:?} {refused:?}");
+    (plain[1], plain[2], refused[1])
+}
+
+#[test]
+fn mr_34_a_layout_an_update_due_in_a_refusal_advanced_segment_is_timed() {
+    // C1 (refused) would begin S2; C2, booked after it, begins S3 at o3 behind S2's cut. With
+    // C1 refused S3 begins earlier, at o3'. An update received before o3' (nothing runs: S1 is
+    // cut at C1) and due 5 ms after o3', before o3: S3' has run the release window when it
+    // applies, so it is a timed tune, however the refusal and the update were ordered. S3''s
+    // entry tune is draw 0; the update takes none.
+    let (o2, o3, early) = refusal_origins();
+    assert!(early < o3 && E_C2 > o2, "{o2} {o3} {early}");
+    let (r, e) = (early - 5_000_000, early + 5_000_000);
+    assert!(r > E_C1 && e < o3);
+    let m = refusal_run(true, true, Some((r, e)));
+    assert_eq!(m.h.rejected(), [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(origins(&m), [T0, early]);
+    assert!(m.h.section("segments").iter().all(|row| row["origin"]["ticks"] != o2), "the refused segment left a row");
+    let (s3, origin) = m.last_clock("mock/rx/s0");
+    let [_, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(m.ear(&s3, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_near(m.ear(&s3, e + 5_000_000), rotated(0.5, tx_phase - rx_timed));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], e);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+}
+
+#[test]
+fn mr_34_a_layout_an_update_received_after_a_refusal_advanced_segment_began_is_timed() {
+    // As above, but received after S3' began: timed, no draw.
+    // The rule assumes the owner starts S3' in time (MR-34's Ceiling): the Mock does not model a host delay.
+    let (_, o3, early) = refusal_origins();
+    let (r, e) = (early + 5_000_000, early + 10_000_000);
+    assert!(e < o3);
+    let m = refusal_run(true, true, Some((r, e)));
+    assert_eq!(origins(&m), [T0, early]);
+    let (s3, origin) = m.last_clock("mock/rx/s0");
+    let [_, tx_phase, rx_timed, _] = lo_draws();
+    assert_near(m.ear(&s3, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
+    assert_near(m.ear(&s3, e + 5_000_000), rotated(0.5, tx_phase - rx_timed));
+    let coherence = m.coherence(0, origin);
+    assert_eq!(coherence.last().unwrap()["at"]["ticks"], e);
+    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
+    assert_eq!(coherence.last().unwrap()["valid"], true);
+}
+
+#[test]
+fn mr_34_a_layout_a_transmit_origin_s_untimed_tune_follows_a_timed_update_at_its_instant() {
+    // A timed transmit frequency update due at the origin of a transmit segment a rate change
+    // begins: the origin's untimed tune is taken after it (MR-34), so the burst on that clock
+    // radiates the untimed draw, not the timed constant, and the segment is `none` there. The
+    // origin is known once the segment is booked, so the scenario runs twice.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        ("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]})),
+    ];
+    let run = |at_origin: Option<i64>| {
+        let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 150_000]);
+        let mut harness = built_with_inputs(Layout {
+            profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"],
+        }, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+        harness.arm_start(T0).unwrap();
+        harness.step(T0 + 3_000_000).unwrap();
+        harness.push(update_at("mock/tx/s0", "radio.tx.s0.sample_rate_hz", Value::num(1.0e6).unwrap(), UpdateClass::Cold, Some(T0 + 10_000_000)));
+        harness.step(T0 + 10_000_001).unwrap();
+        if let Some(origin) = at_origin {
+            let same = harness.effective[&key("radio.tx.c0.frequency_hz")].clone();
+            harness.push(update("radio.tx.c0.frequency_hz", same, UpdateClass::HardwareTimed, Some(origin)));
+        }
+        harness.step(T0 + 30_000_000).unwrap();
+        let s0 = harness.clocks_of("mock/tx/s0").last().unwrap().clone();
+        (s0.origin.ticks_in(ROOT).unwrap(), harness, s0, waveform)
+    };
+    let (origin, ..) = run(None);
+    assert!(origin > T0 + 30_000_000, "{origin}");
+    let (rerun, mut harness, s0, waveform) = run(Some(origin));
+    assert_eq!(rerun, origin);
+    harness.step(origin + 1_000_000).unwrap();
+    assert!(harness.applied().iter().any(|(key, at)| key == "radio.tx.c0.frequency_hz" && *at == origin));
+    harness.push(burst_with_waveform("mock/tx/s0", s0.domain, sample_of(&s0, T0 + 150_000_000), waveform));
+    let blocks = collect_blocks(&mut harness, origin + 20_000_000, T0 + 300_000_000);
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    let [rx_phase, _, _, tx_timed] = lo_draws();
+    let tx_retuned = retune_draw(0);
+    assert_ne!(tx_retuned, tx_timed);
+    let rx_clock = harness.clocks_of("mock/rx/s0")[0].clone();
+    assert_near(heard(&blocks, &rx_clock, T0 + 160_000_000), rotated(0.5, tx_retuned - rx_phase));
+    let segment = harness.section("segments").into_iter().find(|row| row["direction"] == "tx" && row["stream"] == 0 && row["origin"]["ticks"] == origin).unwrap();
+    let at_origin = segment["coherence"].as_array().unwrap().iter().rfind(|entry| entry["at"]["ticks"] == origin).unwrap().clone();
+    assert_eq!(at_origin["basis"], "none");
+    assert_eq!(at_origin["valid"], false);
 }

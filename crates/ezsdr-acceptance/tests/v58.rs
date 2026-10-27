@@ -797,3 +797,42 @@ fn v58_03_a_run_reproduces_from_its_own_manifest() {
     let second = finish_at(rerun, clock, T0 + 25_000_000);
     assert_eq!(rig::determinism_projection(&first), rig::determinism_projection(&second));
 }
+
+#[test]
+fn mr_34_a_scheduled_receive_retune_inside_a_running_segment_is_a_timed_tune() {
+    // A Spec Run's scheduled `update_parameter` reaches the Provider before T0 (KC-17, KC-18),
+    // yet a retune due 5 ms into the first receive segment is a timed tune (MR-34): the captured
+    // samples carry the timed-tune constant from it on, and the segment's coherence says so.
+    let temp = rig::TempDir::new("mr-34-scheduled-retune");
+    let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
+    let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
+    spec["schedule"].as_array_mut().unwrap().push(json!({
+        "at": { "clock": "radio", "offset_ticks": 5_000 },
+        "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": "radio.rx.c0.frequency_hz", "value": 1.0e9 }
+    }));
+    let environment = json!({ "sim.seed": 7, "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0, "delay_ns": 0 }] } });
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, environment);
+    let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let clock = root(&run);
+    let manifest = finish_at(run, clock, T0 + 30_000_000);
+    let capture = artifact(&manifest, "rec", 0);
+    let first = capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap();
+    let samples = rig::read_capture(capture, 1).remove(0);
+    // The layout is two UBX channels per direction: draws are rx0, rx1, tx0, tx1, then the timed constants rx0, rx1, tx0, tx1.
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let draws: Vec<f64> = (0..8).map(|_| 2.0 * std::f64::consts::PI * ((lo.next_u64() >> 11) as f64 / (1u64 << 53) as f64)).collect();
+    let (rx0, tx0, rx0_timed) = (draws[0], draws[2], draws[4]);
+    let heard = |k: i64| samples[(k - first) as usize];
+    let near = |actual: (f32, f32), phase: f64| {
+        let expected = ((0.5 * phase.cos()) as f32, (0.5 * phase.sin()) as f32);
+        assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+    };
+    near(heard(3_000), tx0 - rx0);
+    near(heard(8_000), tx0 - rx0_timed);
+    near(heard(15_000), tx0 - rx0_timed);
+    let segments = section(&manifest, "mock", "ezsdr.radio.mock.segments").as_array().unwrap();
+    let rx = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0).expect("the receive segment");
+    let last = rx["coherence"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["at"]["ticks"], T0 + 5_000_000);
+    assert_eq!(last["basis"], "timed_tune");
+}
