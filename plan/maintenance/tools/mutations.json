@@ -12552,5 +12552,505 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "a_lease_leaks_the_handle_when_the_run_unwinds_before_it_is_marked_clean"
+  },
+  {
+   "id": "P913",
+   "name": "selector accepts an unknown key",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "if let Some(key) = object.keys().find(|key| !SELECTOR_KEYS.contains(&key.as_str())) {",
+   "new": "if let Some(key) = object.keys().find(|key| false && !SELECTOR_KEYS.contains(&key.as_str())) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_selector_environment_names_only"
+  },
+  {
+   "id": "P914",
+   "name": "the installed selector is not laid over the bench profile",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "if let Some(Json::Object(overlay)) = selector_override() {",
+   "new": "if let Some(Json::Object(overlay)) = selector_override().filter(|_| false) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_installed_selector_keeps_its_layout"
+  },
+  {
+   "id": "P915",
+   "name": "an explicit layout is replaced by the device's",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "(Some(rx), Some(tx)) => (rx, tx),",
+   "new": "(Some(_), Some(_)) => (layout_of(device).0, layout_of(device).1),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_installed_selector_keeps_its_layout"
+  },
+  {
+   "id": "P916",
+   "name": "every channel gets the first channel's frequency",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "elements.get(chan).and_then(Json::as_str)",
+   "new": "elements.get(0).and_then(Json::as_str)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_installed_selector_keeps_its_layout"
+  },
+  {
+   "id": "P917",
+   "name": "the RF envelope has a band for the first channel only",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "for chan in 0..channels {",
+   "new": "for chan in 0..1 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_installed_selector_keeps_its_layout"
+  },
+  {
+   "id": "P918",
+   "name": "the RF envelope enables the first transmit channel only",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "\"tx_enabled\": vec![true; channels]",
+   "new": "\"tx_enabled\": vec![true; 1]",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_installed_selector_keeps_its_layout"
+  },
+  {
+   "id": "P919",
+   "name": "the candidate performance builder does not replace the envelope",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "self.description.performance = performance;",
+   "new": "let _ = performance;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_candidate_ceiling_admits_what_the_profiles_link_limit_refuses"
+  },
+  {
+   "id": "P920",
+   "name": "a stage's class is no worse than a better stream's",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if rank(second) > rank(first) { second } else { first }",
+   "new": "if rank(second) > rank(first) { first } else { second }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_is_as_bad_as_its_worst_stream"
+  },
+  {
+   "id": "P921",
+   "name": "an empty stage is a success",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": ".reduce(worse).unwrap_or(TrialClass::Incomplete)",
+   "new": ".reduce(worse).unwrap_or(TrialClass::Success)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_is_as_bad_as_its_worst_stream"
+  },
+  {
+   "id": "P922",
+   "name": "the capacity climbs past a failed stage",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if let Some(stage) = at.iter().find(|stage| stage.class != Some(TrialClass::Success)) {",
+   "new": "if let Some(stage) = at.iter().find(|stage| stage.class.is_none()) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "capacity_over_conditions_judges_each_t"
+  },
+  {
+   "id": "P923",
+   "name": "the capacity names no deciding condition",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "best = Some((*total, at[0].condition.clone()));",
+   "new": "best = Some((*total, String::new()));",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "capacity_over_conditions_judges_each_t"
+  },
+  {
+   "id": "P924",
+   "name": "the mixed-rate stage gives every channel the same rate",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "(0..channels).map(|chan| rates[top - chan]).collect();",
+   "new": "(0..channels).map(|_| rates[top]).collect();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "stage_lists_follow_the_layout"
+  },
+  {
+   "id": "P925",
+   "name": "the mixed-rate stage skips the lowest pair",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "for top in channels - 1..rates.len() {",
+   "new": "for top in channels..rates.len() {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "stage_lists_follow_the_layout"
+  },
+  {
+   "id": "P926",
+   "name": "a duplex stage is planned with no transmit channel",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if channels >= 1 && other_channels >= 1 {",
+   "new": "if channels >= 1 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "stage_lists_follow_the_layout"
+  },
+  {
+   "id": "P927",
+   "name": "a stage's bytes per second ignore its channel count",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "u64::try_from(stream.channels.len()).ok()?.checked_mul(stream.rate_hz)?",
+   "new": "1u64.checked_mul(stream.rate_hz)?",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "stage_lists_follow_the_layout"
+  },
+  {
+   "id": "P928",
+   "name": "the candidate ceiling is the profile's link",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "link_gbps.saturating_mul(125_000_000)",
+   "new": "link_gbps.saturating_mul(100_000_000)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_candidate_ceiling_is_one_links_line_rate"
+  },
+  {
+   "id": "P929",
+   "name": "a control timeout is not recognised",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "message.contains(\"Control operation timed out\")",
+   "new": "message.contains(\"Control operation timed out!\")",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_guard_latches_on_apply_errors_timeouts"
+  },
+  {
+   "id": "P930",
+   "name": "a later latch reason replaces the first",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if held.is_none() { *held = Some(reason.into()); }",
+   "new": "*held = Some(reason.into());",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_guard_latches_on_apply_errors_timeouts"
+  },
+  {
+   "id": "P931",
+   "name": "an apply error does not latch",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if apply || error.lost || is_control_timeout(&error.message) {",
+   "new": "if error.lost || is_control_timeout(&error.message) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "nothing_reaches_the_device_after_a_prepare_time_apply_failure"
+  },
+  {
+   "id": "P932",
+   "name": "a latched guard forwards the call",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "self.latch.reason().map(|reason| DeviceError::failed(",
+   "new": "self.latch.reason().filter(|_| false).map(|reason| DeviceError::failed(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "nothing_reaches_the_device_after_a_control_timeout"
+  },
+  {
+   "id": "P933",
+   "name": "a streamer left open does not latch",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if !open.is_empty() { self.latch.set(format!(\"{after} left streamers open: {open:?}\")); }",
+   "new": "if false { self.latch.set(format!(\"{after} left streamers open: {open:?}\")); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "nothing_reaches_the_device_after_a_group_leaves_a_streamer_open"
+  },
+  {
+   "id": "P934",
+   "name": "the counting Device counts no received sample",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "+= samples.first().map_or(0, Vec::len) as u64;",
+   "new": "+= 0;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_receive_throughput_runs"
+  },
+  {
+   "id": "P935",
+   "name": "the counting Device counts no accepted send",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "*counts.tx.entry(stream).or_default() += accepted as u64;",
+   "new": "*counts.tx.entry(stream).or_default() += 0;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_transmit_throughput_runs"
+  },
+  {
+   "id": "P936",
+   "name": "a partial send is not counted",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if accepted < given { *counts.short.entry(stream).or_default() += 1; }",
+   "new": "if accepted < given { *counts.short.entry(stream).or_default() += 0; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_partial_send_fails_the_transmit_stage"
+  },
+  {
+   "id": "P937",
+   "name": "the group goes on after a stage left a streamer open",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "stopped = result.left_open;",
+   "new": "stopped = false;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_that_wedges_the_handle_stops_the_group"
+  },
+  {
+   "id": "P938",
+   "name": "the group goes on after the latch holds",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if stopped || record_latch_reason().is_some() {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_that_wedges_the_handle_stops_the_group"
+  },
+  {
+   "id": "P939",
+   "name": "a transmit stream is judged on stream 0's clock",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "ends_with(&tx_suffix)",
+   "new": "ends_with(\"usrp/tx/s0\")",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_transmit_throughput_runs"
+  },
+  {
+   "id": "P940",
+   "name": "every channel is tuned to the first channel's frequency",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "eq(json!(common::channel_hz(device, direction, *chan)))",
+   "new": "eq(json!(1e9))",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_receive_throughput_runs"
+  },
+  {
+   "id": "P941",
+   "name": "the later receive streams have no sink",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "for k in 1..stage.rx.len() {",
+   "new": "for k in 1..1 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_receive_throughput_runs"
+  },
+  {
+   "id": "P942",
+   "name": "a receive stream is judged to one packet's tolerance",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "let slack = packets[k].max(u64::from(ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN));",
+   "new": "let slack = packets[k];",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_receive_throughput_runs"
+  },
+  {
+   "id": "P943",
+   "name": "the receive capacity ignores the layout's conditions",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "class: stage.trials.first().copied() }).collect();\n        family.extend(extra.stages);\n        let (row, capacity) = throughput_value(\"radio.perf.rx_bytes_per_s\"",
+   "new": "class: stage.trials.first().copied() }).collect();\n        drop(extra.stages);\n        let (row, capacity) = throughput_value(\"radio.perf.rx_bytes_per_s\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_receive_throughput_runs"
+  },
+  {
+   "id": "P944",
+   "name": "the transmit capacity ignores the layout's conditions",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "class: stage.trials.first().copied() }).collect();\n        family.extend(extra.stages);\n        let (row, capacity) = throughput_value(\"radio.perf.tx_bytes_per_s\"",
+   "new": "class: stage.trials.first().copied() }).collect();\n        drop(extra.stages);\n        let (row, capacity) = throughput_value(\"radio.perf.tx_bytes_per_s\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "two_channel_transmit_throughput_runs"
+  },
+  {
+   "id": "P945",
+   "name": "a receive lead's companion group runs without its companion stream",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "format!(\"{id}-with-tx\") } else { (*id).to_owned() }, companion_group)).collect();",
+   "new": "format!(\"{id}-with-tx\") } else { (*id).to_owned() }, false)).collect();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "leads_and_the_overflow_gap_add_a_condition"
+  },
+  {
+   "id": "P946",
+   "name": "the overflow companion group declares no condition",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "conditions: vec![companion_condition(&condition, Direction::Rx, rate_hz, Direction::Tx)], values: vec![],",
+   "new": "conditions: vec![], values: vec![],",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "leads_and_the_overflow_gap_add_a_condition"
+  },
+  {
+   "id": "P947",
+   "name": "a partial set of acknowledgements counts as the stream's acknowledgement",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "let acknowledged = acks.len() == stream.channels.len() && ack_channels.len() == stream.channels.len();",
+   "new": "let acknowledged = !acks.is_empty();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "one_unacknowledged_channel_of_a_stream_leaves_it_incomplete"
+  },
+  {
+   "id": "P948",
+   "name": "a layout that is not slot A on a UBX or OBX still gets the raw probes",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if ![\"0:A:ubx:0\", \"0:A:obx:0\"].contains(&element) {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_probes_are_inapplicable"
+  },
+  {
+   "id": "P949",
+   "name": "an applicable raw probe is not run",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Ok(()) => groups.probe(name, *probe),",
+   "new": "Ok(()) => groups.probe(name, || ()),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "raw_probes_are_inapplicable"
+  },
+  {
+   "id": "P950",
+   "name": "the one-channel transmit keeps the receive channel's frequency",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "json!({ \"kind\": \"eq\", \"value\": super::channel_hz(device, Dir::Tx, 0) })",
+   "new": "json!({ \"kind\": \"eq\", \"value\": 1e9 })",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_one_channel_transmit_spec_carries"
+  },
+  {
+   "id": "P951",
+   "name": "a stage is run under the profile's own link limit",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "radio.with_measurement_performance(performance)",
+   "new": "radio",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_between_the_profile_limit_and_the_candidate_ceiling_is_admitted"
+  },
+  {
+   "id": "P954",
+   "name": "an open of channels another open stream holds reaches the device",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "held.iter().any(|chan| wanted.contains(chan)))\n            .map(",
+   "new": "false)\n            .map(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_open_of_channels_another_open_stream_holds"
+  },
+  {
+   "id": "P955",
+   "name": "a latched record still calls the opener",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if let Some(reason) = latch.reason() { panic!(\"not opening the device: the record's latch holds ({reason})\"); }",
+   "new": "if false { panic!(\"not opening the device\"); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_latched_record_calls_no_opener"
+  },
+  {
+   "id": "P956",
+   "name": "a latched guard drops its handle",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if self.latch.reason().is_some() { std::mem::forget(self.inner.take()); }",
+   "new": "if false { std::mem::forget(self.inner.take()); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_latched_guard_reads_nothing_from_the_device_and_leaks"
+  },
+  {
+   "id": "P957",
+   "name": "a companion group supplies the solo group's value key",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "(\"rx_start_lead_with_tx\", measure_rx_start_lead_with_tx, &[]),",
+   "new": "(\"rx_start_lead_with_tx\", measure_rx_start_lead_with_tx, &[\"radio.timing.rx_start_lead_ns\"]),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "provider_measurement_groups_fake_rehearsal"
+  },
+  {
+   "id": "P958",
+   "name": "a companion group runs on a layout without the opposite direction",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "if !layout.rx.is_empty() && !layout.tx.is_empty() { return Ok(None); }",
+   "new": "if true { return Ok(None); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_companion_group_is_skipped_with_an_observation"
+  },
+  {
+   "id": "P959",
+   "name": "an added transmission is not scaled under half a unit",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "(re * 0.875, im * 0.875)",
+   "new": "(re, im)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_waveforms_of_the_added_transmissions_stay_within_half_a_unit"
+  },
+  {
+   "id": "P960",
+   "name": "a forwarded receive timeout or loss does not latch",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if error.lost || is_control_timeout(&error.message) { self.latch.set(format!(\"device call failed: {}\", error.message)); }",
+   "new": "if false { self.latch.set(format!(\"device call failed: {}\", error.message)); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_forwarded_receive_timeout_or_loss_latches"
+  },
+  {
+   "id": "P961",
+   "name": "a latched guard still forwards a receive",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if let Some(error) = self.refusal() { return RxRecv::Failed(error); }",
+   "new": "if false { return RxRecv::Timeout; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_forwarded_receive_timeout_or_loss_latches"
+  },
+  {
+   "id": "P962",
+   "name": "a re-open of the same stream is refused",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "*open_rx == rx && *open_stream != stream && held.iter()",
+   "new": "*open_rx == rx && held.iter()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_reopen_of_the_same_stream_and_a_disjoint"
+  },
+  {
+   "id": "P963",
+   "name": "an empty channel list is not channel 0",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "if channels.is_empty() { vec![0] } else { channels.to_vec() }",
+   "new": "if channels.is_empty() { vec![] } else { channels.to_vec() }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "an_open_of_channels_another_open_stream_holds"
+  },
+  {
+   "id": "P964",
+   "name": "a selector with one direction's layout is accepted",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "if object.contains_key(\"rx\") != object.contains_key(\"tx\") {",
+   "new": "if false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_selector_environment_names_only"
   }
  ]

@@ -629,7 +629,11 @@ fn measurement_fake_rehearsal_round_trips_and_only_fails_source() {
 
 #[test]
 fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements() {
-    let device = fake(one_obx());
+    // The whole group list runs through a guard on the device: none of it makes the guard latch (an open of a stream still open,
+    // an `apply` error, a timeout).
+    let inner = fake(one_obx());
+    let guard = Arc::new(measurement::GuardedDevice::new(inner.clone(), measurement::Latch::new()));
+    let device: Arc<dyn Device> = guard.clone();
     let plan = measurement::MeasurementPlan::rehearsal();
     let dir = TempDir::new();
     let doc = bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false);
@@ -659,14 +663,20 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
         for stage in stages { assert_stage(stage, trials); }
     };
     let result = |name: &str| group.observations.iter().find(|row| row.name == name).map(|row| &row.result).unwrap();
+    assert_eq!(guard.latched(), None, "no group of the list makes the guard latch");
+    for companion in ["provider_rx_start_lead_with_tx", "provider_tx_start_lead_with_rx", "provider_overflow_restart_gap_with_tx"] {
+        assert_eq!(result(companion)["observation_only"], true, "{companion}");
+    }
     assert_stages(&result("provider_min_timed_command_lead")["candidates"], plan.timed_command_leads_ns.len(), plan.step_trials);
     assert_stages(&result("provider_tx_in_flight")["candidates"], plan.in_flight_windows_ns.len(), plan.step_trials);
     assert_stages(&result("provider_rx_start_lead")["candidates"], plan.rx_start_leads_ns.len() * 2, plan.step_trials);
     assert_stages(&result("provider_tx_start_lead")["candidates"], plan.tx_start_leads_ns.len() * 2, plan.step_trials);
-    let throughput: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("provider_rx_throughput_")).collect();
+    let one_channel_row = |prefix: &str, row: &&ezsdr_radio::measurement::Observation| row.name.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+    let throughput: Vec<_> = group.observations.iter().filter(|row| one_channel_row("provider_rx_throughput_", row)).collect();
     assert_eq!(throughput.len(), plan.rx_rates_hz.len());
+    assert!(group.observations.iter().any(|row| row.name == "provider_rx_throughput_rx-duplex-390625hz"), "a one-channel layout with both directions runs its duplex stage");
     for row in throughput { assert_stage(&row.result["stage"], 1); }
-    let tx_throughput: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("provider_tx_throughput_")).collect();
+    let tx_throughput: Vec<_> = group.observations.iter().filter(|row| one_channel_row("provider_tx_throughput_", row)).collect();
     assert_eq!(tx_throughput.len(), plan.tx_throughput_rates_hz.len());
     for row in tx_throughput {
         assert_stage(&row.result["stage"], 1);
@@ -748,9 +758,9 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
         }
     }
 
-    let calls_before_restore = device.calls().len();
+    let calls_before_restore = inner.calls().len();
     measurement::restore_measurement_defaults(&*device, &description, &measurement::RawGroup::with_limit(Wall::from_secs(60))).unwrap();
-    let calls = device.calls();
+    let calls = inner.calls();
     let restored = &calls[calls_before_restore..];
     assert_eq!(restored.len(), description.rx.len() + description.tx.len());
     for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
@@ -764,7 +774,7 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     }
 
     // The transmit frequency sweep runs at gain 0 and ends back on the safe 1 GHz; no streamer is opened for it.
-    let calls = device.calls();
+    let calls = inner.calls();
     let first_sweep = calls.iter().position(|call| call.starts_with("apply tx 0 rate=- freq=10000000 gain=-")).expect("the transmit sweep starts at the grid's low end");
     assert_eq!(calls[first_sweep - 1], "apply tx 0 rate=- freq=- gain=0 antenna=- at=-");
     let last_sweep = calls.iter().rposition(|call| call.starts_with("apply tx 0 rate=- freq=8400000000 gain=-")).expect("the transmit sweep ends at the grid's high end");
@@ -1348,6 +1358,10 @@ fn rejected_runs_are_admission_rejections_not_group_failures() {
         let wire = 4.0 * 390_625.0;
         assert!(group.values.iter().any(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Measured { key: found, worst: ezsdr_radio::measurement::Worst::Number(bytes), .. }
             if found.as_str() == key && *bytes == wire)), "{key}: the accepted rate is the capacity and the refused one is not claimed");
+        // The duplex condition's own refusal at the same total also stops the climb, so the refused stage is checked where the capacity lists it.
+        let capacity = group.observations.iter().find(|row| row.name == key.replace("radio.perf.", "provider_").replace("_bytes_per_s", "_throughput_capacity")).unwrap();
+        let refused = 4 * 400_000_000u64;
+        assert!(capacity.result["conditions"].as_object().unwrap().values().all(|condition| !condition["passed_bytes_per_s"].as_array().unwrap().contains(&json!(refused))), "{key}: the refused stage is not a pass: {:?}", capacity.result);
     }
     plan.overflow_rates_hz = vec![390_625, 400_000_000];
     plan.overflow_stall_ms = vec![300, 300];
@@ -7598,4 +7612,569 @@ fn ur_30_the_plan_names_every_stream_at_the_stop() {
         assert_eq!(open.len(), if k == 0 { 2 } else { 1 }, "stream {k}'s clocks: {records:?}");
         assert!(open.last().unwrap().ended_at.is_none(), "a stop keeps stream {k}'s transmit clock: {records:?}");
     }
+}
+
+// ------------------------------------------------ stage 3c-3a: layouts, streams and conditions
+
+/// An OBX in slot A and a CBX in slot B: a two-channel layout of two boards (RM-28 admits the pair).
+fn obx_and_cbx() -> FakeConfig {
+    FakeConfig { front_ends: vec!["OBX", "CBX-120"], ..FakeConfig::default() }
+}
+
+fn two_channel_selector() -> Json {
+    json!({ "rx": ["0:A:obx:0", "0:B:cbx:0"], "tx": ["0:A:obx:0", "0:B:cbx:0"] })
+}
+
+/// The rehearsal plan with two grid rates, so that the mixed-rate condition has a pair.
+fn two_rate_plan() -> measurement::MeasurementPlan {
+    let mut plan = measurement::MeasurementPlan::rehearsal();
+    plan.rx_rates_hz = vec![390_625, 781_250];
+    plan.tx_throughput_rates_hz = vec![390_625, 781_250];
+    plan
+}
+
+fn names(group: &measurement::MeasurementGroup) -> Vec<String> {
+    group.observations.iter().map(|row| row.name.clone()).collect()
+}
+
+/// Runs one direction's throughput group of an OBX+CBX layout, checks each stage of `tags` and the record built from it.
+fn rehearse_two_channel_group(dir: &str, tags: &[&str], one_rate: bool, capacity: f64) {
+    let device = fake(obx_and_cbx());
+    let mut plan = two_rate_plan();
+    if one_rate { plan.rx_rates_hz.truncate(1); plan.tx_throughput_rates_hz.truncate(1); }
+    let (group, description, binding) = with_selector(two_channel_selector(), || {
+        let group = if dir == "rx" { measurement::measure_rx_throughput(device.clone(), &plan) } else { measurement::measure_tx_throughput(device.clone(), &plan) }.unwrap();
+        let tmp = TempDir::new();
+        let binding = measurement::radio_binding(&bench_profile(&*device, &tmp, json!({}), bench_envelope(&*device), false)).unwrap();
+        let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        (group, description, binding)
+    });
+    assert_eq!((description.rx.len(), description.tx.len()), (2, 2));
+    let ids: Vec<String> = group.conditions.iter().map(|condition| condition.id.clone()).filter(|id| id.matches('-').count() >= 2).collect();
+    assert_eq!(ids, tags.iter().map(|tag| format!("{dir}-{tag}")).collect::<Vec<_>>(), "{dir}: {:?}", names(&group));
+    for tag in tags {
+        let row = group.observations.iter().find(|row| row.name == format!("provider_{dir}_throughput_{dir}-{tag}")).unwrap_or_else(|| panic!("{dir} {tag}: {:?}", names(&group)));
+        let streams = row.result["streams"].as_array().unwrap();
+        assert!(!streams.is_empty() && streams.iter().all(|stream| stream["class"] == "Success"), "{dir} {tag}: {:?}", row.result);
+        assert!(row.result["streamers_opened_in_order"].as_array().is_some_and(|opened| !opened.is_empty()), "{:?}", row.result);
+        assert!(row.result["nic_bytes"].as_object().is_some_and(|nics| nics.is_empty()), "no NIC named, none read");
+    }
+    assert!(group.observations.iter().any(|row| row.name == format!("provider_{dir}_throughput_capacity")), "{:?}", names(&group));
+    // Every stage succeeded on the fake, so the capacity is the largest total over all the conditions' stages.
+    assert!(matches!(&group.values[..], [ezsdr_radio::measurement::ValueRecord::Measured { worst: ezsdr_radio::measurement::Worst::Number(bytes), .. }] if *bytes == capacity), "{:?}", group.values);
+    let record = measurement::build_record(ezsdr_radio::measurement::Source::Fake, &binding, &*device, &measurement::rehearsal_metadata(), group, &description).unwrap();
+    let violations = ezsdr_radio::measurement::compare(&record, &description);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].key, "source");
+}
+
+#[test]
+fn two_channel_receive_throughput_runs_the_grouped_split_mixed_and_duplex_conditions() {
+    // UR-34, design 41 §8: each condition's streams are judged on their own, and the record's conditions and rows
+    // pass the comparison apart from its source.
+    rehearse_two_channel_group("rx", &["grouped-390625hz", "grouped-781250hz", "split-390625hz", "split-781250hz", "mixed-781250hz-390625hz", "duplex-390625hz", "duplex-781250hz"], false, 6_250_000.0);
+}
+
+#[test]
+fn two_channel_transmit_throughput_runs_the_grouped_split_mixed_and_duplex_conditions() {
+    rehearse_two_channel_group("tx", &["grouped-390625hz", "grouped-781250hz", "split-390625hz", "split-781250hz", "mixed-781250hz-390625hz", "duplex-390625hz", "duplex-781250hz"], false, 6_250_000.0);
+}
+
+#[test]
+fn duplex_stages_run_a_stream_each_way_and_judge_both() {
+    // UR-34: the duplex condition joins each direction's throughput, and both streams must have flowed.
+    rehearse_two_channel_group("tx", &["grouped-390625hz", "split-390625hz", "duplex-390625hz"], true, 3_125_000.0);
+}
+
+fn stage_of(id: &'static str, family: &'static str, rx: &[(&[usize], u64)], tx: &[(&[usize], u64)]) -> measurement::Stage {
+    let streams = |rows: &[(&[usize], u64)]| rows.iter().map(|(channels, rate_hz)| measurement::StreamPlan { channels: channels.to_vec(), rate_hz: *rate_hz }).collect();
+    measurement::Stage { id: id.to_owned(), family, rx: streams(rx), tx: streams(tx) }
+}
+
+/// One stage on the OBX+CBX layout, with `fault` injected into its streams.
+fn run_two_channel_stage(stage: &measurement::Stage, fault: measurement::InjectedFault) -> Result<measurement::StageResult, String> {
+    let device = fake(obx_and_cbx());
+    let plan = two_rate_plan();
+    with_selector(two_channel_selector(), || measurement::with_injected_fault(fault, || measurement::run_stage(device.clone(), &plan, stage, 4)))
+}
+
+fn stream_classes(result: &measurement::StageResult) -> Vec<(String, u64, String)> {
+    result.observation["streams"].as_array().unwrap().iter()
+        .map(|row| (row["direction"].as_str().unwrap().to_owned(), row["stream"].as_u64().unwrap(), row["class"].as_str().unwrap().to_owned())).collect()
+}
+
+#[test]
+fn a_starved_stream_fails_its_stage_and_the_others_still_show_success() {
+    // The starved stream's own samples fall short of its SampleClock's interval; the total does not hide it.
+    let stage = stage_of("rx-split-test", "split", &[(&[0], 390_625), (&[1], 390_625)], &[]);
+    let result = run_two_channel_stage(&stage, measurement::InjectedFault { starve_rx: Some(1), ..Default::default() }).unwrap();
+    assert!(result.left_open, "the stage reports the streamers it left open");
+    assert_eq!(stream_classes(&result), [("rx".to_owned(), 0, "Success".to_owned()), ("rx".to_owned(), 1, "Incomplete".to_owned())], "{:?}", result.observation);
+    // The Provider gave the starved stream's Run up with its streamers open: the stage fails, and the handle is marked wedged.
+    assert_eq!(result.class, measurement::TrialClass::DeviceFailure, "{:?}", result.observation);
+    assert_eq!(result.observation["streamers_left_open"], json!(["rx0", "rx1"]));
+}
+
+#[test]
+fn a_partial_send_fails_the_transmit_stage() {
+    let stage = stage_of("tx-split-test", "split", &[], &[(&[0], 390_625), (&[1], 390_625)]);
+    let result = run_two_channel_stage(&stage, measurement::InjectedFault { short_tx: Some(0), ..Default::default() }).unwrap();
+    assert_eq!(result.class, measurement::TrialClass::DeviceFailure, "{:?}", result.observation);
+    let classes = stream_classes(&result);
+    assert_eq!(classes[0].2, "DeviceFailure", "{classes:?}");
+    assert_eq!(classes[1].2, "Success", "the other stream's own evidence is kept: {classes:?}");
+    assert!(result.observation["short_send_rejections"].as_array().is_some_and(|rows| !rows.is_empty()), "{:?}", result.observation);
+    assert!(result.observation["streams"][0]["short_sends"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn a_burst_acknowledgement_that_never_comes_leaves_the_stream_incomplete() {
+    let stage = stage_of("tx-split-test", "split", &[], &[(&[0], 390_625), (&[1], 390_625)]);
+    let result = run_two_channel_stage(&stage, measurement::InjectedFault { swallow_ack: Some(1), ..Default::default() }).unwrap();
+    let classes = stream_classes(&result);
+    assert_eq!((classes[0].2.as_str(), classes[1].2.as_str()), ("Success", "Incomplete"), "{:?}", result.observation);
+    assert_eq!(result.observation["streams"][1]["burst_acks_found"], 0);
+}
+
+#[test]
+fn one_unacknowledged_channel_of_a_stream_leaves_it_incomplete() {
+    // A stream of two channels is acknowledged once per channel; with channel 1's acknowledgement missing the stream shows none.
+    let stage = stage_of("tx-grouped-test", "grouped", &[], &[(&[0, 1], 390_625)]);
+    let result = run_two_channel_stage(&stage, measurement::InjectedFault { swallow_ack_channel: Some(1), ..Default::default() }).unwrap();
+    assert_eq!(stream_classes(&result), [("tx".to_owned(), 0, "Incomplete".to_owned())], "{:?}", result.observation);
+    assert_eq!((result.observation["streams"][0]["burst_acks_found"].as_u64(), result.observation["streams"][0]["burst_acks_expected"].as_u64()), (Some(1), Some(2)));
+}
+
+#[test]
+fn a_duplex_stage_fails_when_the_companion_direction_does_not_flow() {
+    // The receive stream of the pair starves, so the stage is not a success; its own rows say which stream fell short.
+    let stage = stage_of("tx-duplex-test", "duplex", &[(&[0], 390_625)], &[(&[0], 390_625)]);
+    let result = run_two_channel_stage(&stage, measurement::InjectedFault { starve_rx: Some(0), ..Default::default() }).unwrap();
+    assert_ne!(result.class, measurement::TrialClass::Success, "{:?}", result.observation);
+    let classes = stream_classes(&result);
+    assert_eq!(classes.iter().find(|(direction, ..)| direction == "rx").unwrap().2, "Incomplete", "{classes:?}");
+}
+
+#[test]
+fn a_stage_above_the_admission_ceiling_is_an_admission_rejection_not_a_failure() {
+    // Two channels at 200 MS/s are 1 600 MB/s, past one 10 GbE link's 1 250 MB/s ceiling (RM-32): validate refuses the Run.
+    let stage = stage_of("rx-grouped-test", "grouped", &[(&[0, 1], 200_000_000)], &[]);
+    let result = run_two_channel_stage(&stage, Default::default()).unwrap();
+    assert_eq!(result.class, measurement::TrialClass::AdmissionRejection, "{:?}", result.observation);
+    assert!(result.observation["run_termination"].as_str().is_some_and(|text| !text.is_empty()));
+}
+
+#[test]
+fn the_candidate_ceiling_admits_what_the_profiles_link_limit_refuses() {
+    // 200 + 100 MS/s is 1 200 MB/s: over the profile's 1 000 MB/s, under the candidate's 1 250 MB/s.
+    let device = fake(obx_and_cbx());
+    let dir = TempDir::new();
+    let spec = {
+        let mut spec = receive_spec(1, 2e8, 1e9, None);
+        let requires = &mut spec["resources"]["radio"]["requires"];
+        requires["radio.rx.c1.stream"] = json!({ "kind": "eq", "value": 1 });
+        requires["radio.rx.s1.sample_rate_hz"] = json!({ "kind": "eq", "value": 1e8 });
+        requires["radio.rx.c1.frequency_hz"] = json!({ "kind": "eq", "value": 2.45e9 });
+        spec
+    };
+    let mut doc = with_selector(two_channel_selector(), || bench_profile(&*device, &dir, json!({}), json!({}), false));
+    let sink = doc["bindings"]["rec"].clone();
+    doc["bindings"]["rec1"] = sink;
+    doc["placements"]["links"].as_array_mut().unwrap().push(json!({
+        "link": { "id": "ezsdr.link.host", "version": { "major": 1, "minor": 0, "patch": 0 } },
+        "from": { "component": "radio", "port": "rx1" }, "to": { "component": "rec1", "port": "in" }
+    }));
+    let mut spec = spec;
+    spec["outputs"].as_array_mut().unwrap().push(json!({ "id": "rec1", "kind": "sink.capture", "params": {},
+        "feed": { "port": { "component": "radio", "port": "rx1" }, "policy": "drop_oldest", "capacity": 64 } }));
+    let refused = spec_run(&spec, &doc, device.clone(), BTreeMap::new()).start_instant().is_none();
+    assert!(refused, "the profile's own limit refuses it");
+    let raised = ezsdr_radio::x3xx::performance(10);
+    let candidate = ezsdr_radio::PerformanceEnvelope { rx_bytes_per_s: 1_250_000_000, tx_bytes_per_s: 1_250_000_000, wire_bytes_per_sample: raised.wire_bytes_per_sample };
+    let admitted = start_spec_run(&spec, &doc, assembly(&doc, device, BTreeMap::new(), |radio| radio.with_measurement_performance(candidate))).unwrap();
+    assert!(admitted.start_instant().is_some(), "the candidate ceiling admits it: {:?}", admitted.state());
+}
+
+
+#[test]
+fn the_selector_environment_names_only_the_layout_image_and_links() {
+    // Stage 3c-3a: an object of rx, tx, image, links and link_gbps only; the rest is refused before a device is opened.
+    let selector = parse_selector(r#"{"rx":["0:A:obx:0"],"tx":["0:A:obx:0"],"image":["xg"],"links":[2],"link_gbps":[10]}"#).unwrap();
+    assert_eq!(selector["links"], json!([2]));
+    for bad in ["{\"args\":\"addr=1\"}", "{\"rx\":[],\"id\":\"x\"}", "{\"tx\":[\"0:A:obx:0\"]}", "{\"rx\":[\"0:A:obx:0\"],\"image\":[\"hg\"]}", "[1]", "\"rx\"", "not json", "", "null"] {
+        assert!(parse_selector(bad).is_err(), "{bad}");
+    }
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    for name in ["EZSDR_MEASUREMENT_MBOARD", "EZSDR_MEASUREMENT_FPGA_IMAGE", "EZSDR_MEASUREMENT_HOST_NAME", "EZSDR_MEASUREMENT_SETTINGS_SCRIPT", "EZSDR_MEASUREMENT_SETTINGS_VERSION", "EZSDR_MEASUREMENT_COMMIT"] {
+        env.insert(name.to_owned(), "x".to_owned());
+    }
+    env.insert("EZSDR_MEASUREMENT_LOAD".to_owned(), "none".to_owned());
+    env.insert("EZSDR_MEASUREMENT_OUTPUT".to_owned(), format!("{}/record.json", std::env::temp_dir().display()));
+    assert_eq!(measurement::metadata_from_env(&env).unwrap().selector, None);
+    env.insert(measurement::SELECTOR_ENV.to_owned(), "{\"rx\":[],\"tx\":[]}".to_owned());
+    assert_eq!(measurement::metadata_from_env(&env).unwrap().selector, Some(json!({ "rx": [], "tx": [] })));
+    env.insert(measurement::SELECTOR_ENV.to_owned(), "{\"rx\":[\"0:B:cbx:0\"]}".to_owned());
+    assert!(measurement::metadata_from_env(&env).is_err(), "one direction's layout without the other is refused");
+    env.insert(measurement::SELECTOR_ENV.to_owned(), "{\"image\":[\"xg\"]}".to_owned());
+    assert!(measurement::metadata_from_env(&env).is_ok(), "a selector with neither keeps the device's layout");
+    env.insert(measurement::SELECTOR_ENV.to_owned(), "{\"nope\":1}".to_owned());
+    assert!(measurement::metadata_from_env(&env).is_err(), "a refused selector stops the record before the device opens");
+    env.insert(measurement::SELECTOR_ENV.to_owned(), String::new());
+    assert!(measurement::metadata_from_env(&env).is_err());
+}
+
+#[test]
+fn an_installed_selector_keeps_its_layout_and_gives_each_channel_its_own_band() {
+    // The bench profile used to overwrite `rx` and `tx` with the device's slot-A layout; an explicit layout now stays, and
+    // each transmit channel has its board's frequency, a band around it and an enable entry (RM-33).
+    let device = fake(obx_and_cbx());
+    let dir = TempDir::new();
+    let plain = bench_profile(&*device, &dir, json!({}), json!({}), false);
+    assert_eq!(plain["bindings"]["radio"]["selector"]["tx"], json!(["0:A:obx:0"]), "no selector: the device's slot-A layout, as before");
+    assert_eq!(bench_hz(&*device), 1e9);
+    assert_eq!(bench_envelope(&*device)["radio.rf_envelope"], json!({ "allowed_bands": [{ "lo_hz": 999e6, "hi_hz": 1001e6 }], "max_gain_db": 0.0, "tx_enabled": [true] }));
+    with_selector(json!({ "rx": ["0:A:obx:0", "0:B:cbx:0"], "tx": ["0:A:obx:0", "0:B:cbx:0"], "image": ["xg"], "links": [2], "link_gbps": [10] }), || {
+        let doc = bench_profile(&*device, &dir, json!({}), json!({}), false);
+        let selector = &doc["bindings"]["radio"]["selector"];
+        assert_eq!((&selector["rx"], &selector["tx"]), (&json!(["0:A:obx:0", "0:B:cbx:0"]), &json!(["0:A:obx:0", "0:B:cbx:0"])));
+        assert_eq!((&selector["image"], &selector["links"], &selector["link_gbps"]), (&json!(["xg"]), &json!([2]), &json!([10])));
+        // The Provider's own parse accepts it (RM-28), where a scalar `image` or a two-element `link_gbps` would be refused.
+        let binding = measurement::radio_binding(&doc).unwrap();
+        measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+        assert_eq!(selector["args"], ARGS, "the device's args are not the selector's to change");
+        assert_eq!((channel_hz(&*device, Dir::Tx, 0), channel_hz(&*device, Dir::Tx, 1)), (1e9, 2.45e9));
+        assert_eq!(bench_envelope(&*device)["radio.rf_envelope"], json!({
+            "allowed_bands": [{ "lo_hz": 999e6, "hi_hz": 1001e6 }, { "lo_hz": 2.449e9, "hi_hz": 2.451e9 }], "max_gain_db": 0.0, "tx_enabled": [true, true] }));
+    });
+    assert_eq!(selector_override(), None, "the selector is removed when the closure ends");
+    // Without a selector, a device with two boards of one kind has each transmit channel enabled in the envelope too.
+    let pair = fake(FakeConfig { front_ends: vec!["OBX", "OBX"], ..FakeConfig::default() });
+    assert_eq!(bench_envelope(&*pair)["radio.rf_envelope"]["tx_enabled"], json!([true, true]));
+}
+
+#[test]
+fn a_selector_the_device_does_not_fit_is_the_groups_failure() {
+    // UR-5: a layout naming a UBX on a device that has an OBX is refused when the first Run is assembled; the group fails
+    // and the record keeps the failure.
+    let device = fake(one_obx());
+    let plan = measurement::MeasurementPlan::rehearsal();
+    let mut groups = measurement::GroupRun::new(None);
+    with_selector(json!({ "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }), || {
+        groups.run("rx_throughput", &["radio.perf.rx_bytes_per_s".to_owned()], || measurement::measure_rx_throughput(device.clone(), &plan));
+    });
+    let failed = groups.failed();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].1.contains("UR-5"), "{failed:?}");
+}
+
+#[test]
+fn leads_and_the_overflow_gap_add_a_condition_with_the_other_direction_running() {
+    // Each lead and the overflow gap has a companion group with a 10 MS/s stream of the other direction running. It is an
+    // observation only; the solo groups' conditions and values are those of the solo conditions alone.
+    let device = fake(one_obx());
+    let plan = measurement::MeasurementPlan::rehearsal();
+    let rx_solo = measurement::measure_rx_start_lead(device.clone(), &plan).unwrap();
+    assert!(rx_solo.conditions.iter().all(|condition| !condition.id.ends_with("-with-tx")), "the solo group has no companion condition");
+    let rx = measurement::measure_rx_start_lead_with_tx(device.clone(), &plan).unwrap();
+    let ids: Vec<_> = rx.conditions.iter().map(|condition| condition.id.as_str()).collect();
+    assert_eq!(ids, ["cold-1msps-2msps-with-tx", "cold-390625-400000-with-tx"]);
+    assert!(rx.values.is_empty(), "a companion group supplies no value");
+    assert_eq!((rx.conditions[0].streams.len(), rx.conditions[0].concurrent.len()), (2, 2));
+    let stages = rx.observations[0].result["candidates"].as_array().unwrap();
+    assert_eq!(stages.len(), plan.rx_start_leads_ns.len() * 2);
+    for stage in stages { assert_eq!((stage["companion"]["observation_only"].as_bool(), stage["companion"]["direction"].as_str()), (Some(true), Some("tx")), "{stage}"); }
+    let tx_solo = measurement::measure_tx_start_lead(device.clone(), &plan).unwrap();
+    assert!(tx_solo.conditions.iter().all(|condition| !condition.id.ends_with("-with-rx")));
+    let tx = measurement::measure_tx_start_lead_with_rx(device.clone(), &plan).unwrap();
+    let ids: Vec<_> = tx.conditions.iter().map(|condition| condition.id.as_str()).collect();
+    assert_eq!(ids, ["tx-cold-1msps-2msps-with-rx", "tx-cold-390625-1msps-with-rx"]);
+    assert!(tx.values.is_empty());
+    for stage in tx.observations[0].result["candidates"].as_array().unwrap() { assert_eq!(stage["companion"]["observation_only"], true, "{stage}"); }
+    let overflow_solo = measurement::measure_overflow_restart_gap(device.clone(), &plan).unwrap();
+    assert!(overflow_solo.conditions.iter().all(|condition| !condition.id.ends_with("-with-tx")));
+    let overflow = measurement::measure_overflow_restart_gap_with_tx(device, &plan).unwrap();
+    let extra = &overflow.observations[0];
+    assert_eq!((extra.name.as_str(), extra.condition.as_deref()), ("provider_overflow_restart_gap_with_tx", Some("rx-1msps-with-tx")));
+    assert!(overflow.conditions.iter().any(|condition| Some(condition.id.as_str()) == extra.condition.as_deref()));
+    assert_eq!(extra.result["trials"].as_array().unwrap().len(), plan.overflow_trials);
+    assert_eq!(extra.result["observation_only"], true);
+    assert_eq!(extra.result["trials"][0]["companion"]["observation_only"], true, "{:?}", extra.result);
+}
+
+#[test]
+fn a_companion_that_fails_after_a_solo_measurement_keeps_the_solo_value() {
+    // The companion is its own group: here the latch holds after the solo group, so the companion is refused, and the solo value stays.
+    let inner = fake(one_obx());
+    let guard = Arc::new(measurement::GuardedDevice::new(inner, measurement::Latch::new()));
+    let device: Arc<dyn Device> = guard.clone();
+    let plan = measurement::MeasurementPlan::rehearsal();
+    let mut groups = measurement::GroupRun::new(None);
+    let solo_keys = vec!["radio.timing.rx_start_lead_ns".to_owned()];
+    groups.run("rx_start_lead", &solo_keys, || measurement::measure_rx_start_lead(device.clone(), &plan));
+    let _ = guard.note(Err::<(), _>(ezsdr_radio_uhd::DeviceError::failed("Control operation timed out")), false);
+    groups.run("rx_start_lead_with_tx", &[], || measurement::measure_rx_start_lead_with_tx(device.clone(), &plan));
+    let failed: Vec<_> = groups.failed().iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(failed, ["rx_start_lead_with_tx"], "only the companion group failed");
+    let taken = groups.take();
+    let solo = taken.values.iter().find(|row| match row {
+        ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str() == "radio.timing.rx_start_lead_ns",
+    }).expect("the solo group's row is kept");
+    assert!(!matches!(solo, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if reason.contains("failed")), "{solo:?}");
+}
+
+#[test]
+fn a_companion_group_is_skipped_with_an_observation_when_the_layout_lacks_the_opposite_direction() {
+    let device = fake(one_obx());
+    let plan = measurement::MeasurementPlan::rehearsal();
+    let calls = device.calls().len();
+    for (group, name) in [
+        (with_selector(json!({ "rx": ["0:A:obx:0"], "tx": [] }), || measurement::measure_rx_start_lead_with_tx(device.clone(), &plan)), "provider_rx_start_lead_with_tx"),
+        (with_selector(json!({ "rx": ["0:A:obx:0"], "tx": [] }), || measurement::measure_tx_start_lead_with_rx(device.clone(), &plan)), "provider_tx_start_lead_with_rx"),
+        (with_selector(json!({ "rx": ["0:A:obx:0"], "tx": [] }), || measurement::measure_overflow_restart_gap_with_tx(device.clone(), &plan)), "provider_overflow_restart_gap_with_tx"),
+    ] {
+        let group = group.unwrap();
+        assert!(group.conditions.is_empty() && group.values.is_empty());
+        assert_eq!((group.observations[0].name.as_str(), group.observations[0].result["status"].as_str()), (name, Some("skipped_no_opposite_direction")));
+    }
+    assert_eq!(device.calls().len(), calls, "a skipped companion touches nothing");
+}
+
+#[test]
+fn a_stage_that_wedges_the_handle_stops_the_group_and_caps_the_capacity() {
+    // A streamer left open ends the sending: the stages after it are not run, and the capacity stops below them.
+    let device = fake(obx_and_cbx());
+    let plan = two_rate_plan();
+    let group = with_selector(two_channel_selector(), || measurement::with_injected_fault(measurement::InjectedFault { starve_rx: Some(0), ..Default::default() }, || {
+        measurement::measure_rx_throughput(device.clone(), &plan).unwrap()
+    }));
+    let ran: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("provider_rx_throughput_rx-")).map(|row| row.name.as_str()).collect();
+    assert_eq!(ran, ["provider_rx_throughput_rx-grouped-390625hz"], "no stage runs after the first wedged one: {:?}", names(&group));
+    assert_eq!(group.conditions.iter().filter(|condition| condition.id.starts_with("rx-grouped") || condition.id.starts_with("rx-split") || condition.id.starts_with("rx-mixed")).count(), 5, "the planned conditions are still declared");
+    // The wedged grouped stage failed, the stages after it did not run, and the capacity stops at the first of them that shares a
+    // total with the passing one-channel stage: it is `unmeasured`, with the blocker named.
+    assert!(matches!(&group.values[..], [ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. }] if reason.contains("rx-duplex-390625hz") && reason.contains("is not run")), "{:?}", group.values);
+    let capacity = group.observations.iter().find(|row| row.name == "provider_rx_throughput_capacity").unwrap();
+    assert_eq!(capacity.result["conditions"]["rx-grouped-390625hz"]["failed"][0]["class"], "DeviceFailure", "{:?}", capacity.result);
+    assert_eq!(capacity.result["conditions"]["rx-split-390625hz"]["failed"][0]["class"], "NotRun", "{:?}", capacity.result);
+}
+
+/// Every call that would reach the device, once the guard latches; none of them may add to the inner device's call log.
+fn assert_refused_without_reaching(guard: &measurement::GuardedDevice, device: &FakeDevice) {
+    let before = device.calls().len();
+    let settings = ezsdr_radio_uhd::Settings { rate: Some(1e6), freq: Some(1e9), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
+    assert!(guard.apply(Dir::Rx, 0, &settings, None).is_err());
+    assert!(guard.rx_open(0, &[0]).is_err() && guard.tx_open(0, &[0]).is_err());
+    assert!(guard.time_now().is_err() && guard.serial().is_err() && guard.front_end(Dir::Rx, 0).is_err());
+    assert!(guard.set_sources("internal", "internal").is_err() && guard.rx_start(0, 0).is_err() && guard.rx_stop(0, None).is_err());
+    assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)));
+    guard.rx_close(0);
+    guard.tx_close(0);
+    guard.close_streams();
+    assert_eq!(device.calls().len(), before, "nothing reached the inner device after the latch: {:?}", &device.calls()[before..]);
+}
+
+#[test]
+fn nothing_reaches_the_device_after_a_control_timeout() {
+    let device = fake(one_obx());
+    let guard = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    assert!(guard.serial().is_ok(), "an unlatched guard forwards");
+    let _ = guard.note(Err::<(), _>(ezsdr_radio_uhd::DeviceError::failed("RuntimeError: Control operation timed out waiting for reply")), false);
+    assert!(guard.latched().is_some_and(|reason| reason.contains("timed out")));
+    assert_refused_without_reaching(&guard, &device);
+}
+
+#[test]
+fn nothing_reaches_the_device_after_a_prepare_time_apply_failure() {
+    // A Provider group whose first Run's configuration `apply` fails: the group fails and the guard holds the apply error.
+    let device = fake(FakeConfig { faults: vec![FakeFault::RxApplyFails], ..one_obx() });
+    let guard = Arc::new(measurement::GuardedDevice::new(device.clone(), measurement::Latch::new()));
+    let plan = measurement::MeasurementPlan::rehearsal();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::measure_rx_throughput(guard.clone(), &plan)));
+    assert!(outcome.is_err() || outcome.unwrap().is_err() || guard.latched().is_some(), "the failing apply fails the group");
+    assert!(guard.latched().is_some_and(|reason| reason.starts_with("apply failed")), "{:?}", guard.latched());
+    assert_refused_without_reaching(&guard, &device);
+}
+
+#[test]
+fn nothing_reaches_the_device_after_a_group_leaves_a_streamer_open() {
+    let device = fake(one_obx());
+    let guard = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    guard.rx_open(0, &[0]).unwrap();
+    assert_eq!(guard.latch_if_streamers_open("a group"), Some("a group left streamers open: [\"rx0\"]".to_owned()));
+    assert_refused_without_reaching(&guard, &device);
+    let clean = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    clean.rx_open(0, &[0]).unwrap();
+    clean.rx_close(0);
+    assert_eq!(clean.latch_if_streamers_open("a group"), None, "a streamer closed again leaves nothing to latch");
+}
+
+static RAW_PROBES_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn a_raw_probe() { RAW_PROBES_RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+
+#[test]
+fn raw_probes_are_inapplicable_when_channel_zero_is_not_slot_a_on_a_ubx_or_obx() {
+    let applicable = |selector: Option<Json>| measurement::raw_probes_applicable(selector.as_ref());
+    assert!(applicable(None).is_ok() && applicable(Some(json!({ "image": ["xg"] }))).is_ok());
+    assert!(applicable(Some(json!({ "rx": ["0:A:obx:0", "0:B:cbx:0"], "tx": ["0:A:obx:0", "0:B:cbx:0"] }))).is_ok());
+    assert!(applicable(Some(json!({ "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }))).is_ok());
+    for bad in [json!({ "rx": ["0:B:cbx:0"] }), json!({ "tx": ["0:A:cbx:0"] }), json!({ "rx": ["0:A:obx:0"], "tx": ["0:B:obx:0"] }), json!({ "rx": ["0:A:basic_rx:0"] })] {
+        assert!(applicable(Some(bad.clone())).is_err(), "{bad}");
+    }
+    let mut groups = measurement::GroupRun::new(None);
+    let probes: [(&str, fn()); 2] = [("probe_a", a_raw_probe), ("probe_b", a_raw_probe)];
+    measurement::run_raw_probes(&mut groups, &probes, applicable(Some(json!({ "rx": ["0:B:cbx:0"], "tx": ["0:B:cbx:0"] }))));
+    assert_eq!(RAW_PROBES_RUN.load(std::sync::atomic::Ordering::SeqCst), 0, "no raw probe ran");
+    assert!(groups.failed().is_empty(), "an inapplicable probe is not a failure: {:?}", groups.failed());
+    let taken = groups.take();
+    let statuses: Vec<_> = taken.observations.iter().map(|row| (row.name.as_str(), row.result["status"].as_str())).collect();
+    assert_eq!(statuses, [("probe_a", Some("inapplicable_to_this_layout")), ("probe_b", Some("inapplicable_to_this_layout"))]);
+    measurement::run_raw_probes(&mut groups, &probes, applicable(None));
+    assert_eq!(RAW_PROBES_RUN.load(std::sync::atomic::Ordering::SeqCst), 2, "on an applicable layout they run");
+}
+
+#[test]
+fn a_stage_between_the_profile_limit_and_the_candidate_ceiling_is_admitted() {
+    // 200 + 100 MS/s is 1 200 MB/s: over the profile's 1 000 MB/s link, under the candidate ceiling `run_stage` passes to the Run.
+    let stage = stage_of("rx-mixed-test", "mixed", &[(&[0], 200_000_000), (&[1], 100_000_000)], &[]);
+    let result = run_two_channel_stage(&stage, Default::default()).unwrap();
+    assert_ne!(result.class, measurement::TrialClass::AdmissionRejection, "{:?}", result.observation);
+    assert_eq!(result.observation["admission_ceiling_bytes_per_s"], 1_250_000_000);
+}
+
+#[test]
+fn the_one_channel_transmit_spec_carries_transmit_channel_zero_s_own_frequency() {
+    // `with_tx` copies the receive channel's frequency; a CBX's transmit channel 0 is tuned to its own 2.45 GHz.
+    let device = fake(one_cbx());
+    let spec = measurement::tx_at_channel_zero_frequency(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &*device);
+    assert_eq!(spec["resources"]["radio"]["requires"]["radio.tx.c0.frequency_hz"], json!({ "kind": "eq", "value": 2.45e9 }));
+    assert_eq!(spec["resources"]["radio"]["requires"]["radio.rx.c0.frequency_hz"], json!({ "kind": "eq", "value": 1e9 }), "only the transmit side changes");
+}
+
+#[test]
+fn a_latched_guard_reads_nothing_from_the_device_and_leaks_it_when_dropped() {
+    let device = fake(one_obx());
+    let baseline = Arc::strong_count(&device);
+    {
+        let guard = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+        assert_eq!(guard.describe(), device.describe(), "the description is read when the guard is made");
+        guard.rx_close(0);
+    }
+    assert_eq!(Arc::strong_count(&device), baseline, "an unlatched guard hands the device back when dropped");
+    let latch = measurement::Latch::new();
+    let guard = measurement::GuardedDevice::new(device.clone(), latch.clone());
+    let described = guard.describe();
+    latch.set("a timeout");
+    let calls = device.calls().len();
+    assert_eq!((guard.describe(), guard.master_clock_rate()), (described, device.master_clock_rate()), "describe and the clock rate come from the cache");
+    drop(guard);
+    assert_eq!(Arc::strong_count(&device), baseline + 1, "a latched guard leaks its handle: no teardown reaches the device");
+    assert_eq!(device.calls().len(), calls);
+    // An unwinding probe that held a latched guard leaks it the same way.
+    let latch = measurement::Latch::new();
+    let before = Arc::strong_count(&device);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let guard = measurement::GuardedDevice::new(device.clone(), latch.clone());
+        latch.set("an apply error");
+        let _held = &guard;
+        panic!("the probe fails");
+    }));
+    assert!(unwound.is_err());
+    assert_eq!(Arc::strong_count(&device), before + 1, "the handle of a probe that unwound latched is leaked");
+}
+
+#[test]
+fn a_latched_record_calls_no_opener() {
+    let opened = std::cell::Cell::new(0);
+    let opener = || -> Arc<dyn Device> { opened.set(opened.get() + 1); fake(one_obx()) };
+    // No record: the opener's device is returned as it is.
+    let plain = measurement::guard_open(opener);
+    assert_eq!(opened.get(), 1);
+    drop(plain);
+    let latch = measurement::Latch::new();
+    measurement::install_record_latch(Some(latch.clone()));
+    let guarded = measurement::guard_open(opener);
+    assert_eq!(opened.get(), 2);
+    assert!(guarded.serial().is_ok());
+    latch.set("a probe's apply error");
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::guard_open(opener)));
+    let typed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::open_record_guard(opener)));
+    measurement::install_record_latch(None);
+    assert!(refused.is_err() && typed.is_err(), "a latched record opens no device");
+    assert_eq!(opened.get(), 2, "the opener was not called");
+}
+
+#[test]
+fn an_open_of_channels_another_open_stream_holds_is_refused_before_the_device() {
+    // Two candidates in a row: the first Run leaves stream 0's streamer open on channel 0, and stream 1 opened on channel 0 never reaches the device.
+    let device = fake(obx_and_cbx());
+    let guard = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    guard.rx_open(0, &[0]).unwrap();
+    let calls = device.calls().len();
+    assert!(guard.rx_open(1, &[0]).is_err());
+    assert!(guard.latched().is_some_and(|reason| reason.contains("rx1 [0] was opened while rx0 still held [0]")), "{:?}", guard.latched());
+    assert_eq!(device.calls().len(), calls, "the second open did not reach the device");
+    assert_refused_without_reaching(&guard, &device);
+    // An empty channel list is channel 0.
+    let empty = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    empty.rx_open(0, &[]).unwrap();
+    assert!(empty.rx_open(1, &[0]).is_err() && empty.latched().is_some());
+}
+
+#[test]
+fn a_reopen_of_the_same_stream_and_a_disjoint_channel_set_are_allowed() {
+    // `hw_b8_raw_restart_lead`'s sequence: open, start, stop, open the same stream again; UhdDevice drops the old streamer first.
+    let device = fake(obx_and_cbx());
+    let guard = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    guard.rx_open(0, &[0]).unwrap();
+    let at = guard.time_now().unwrap() + 20_000_000;
+    guard.rx_start(0, at).unwrap();
+    guard.rx_stop(0, None).unwrap();
+    guard.rx_open(0, &[0]).unwrap();
+    guard.rx_open(0, &[0]).unwrap();
+    assert_eq!(guard.latched(), None, "a same-stream re-open replaces its entry and is forwarded");
+    // The two-channel conditions: one stream per channel, then a stream of both channels after both are closed.
+    let split = measurement::GuardedDevice::new(device.clone(), measurement::Latch::new());
+    split.rx_open(0, &[0]).unwrap();
+    split.rx_open(1, &[1]).unwrap();
+    split.tx_open(0, &[0]).unwrap();
+    assert_eq!(split.latched(), None, "disjoint channels on other streams, and the other direction, are allowed");
+    split.rx_close(0);
+    split.rx_close(1);
+    split.rx_open(0, &[0, 1]).unwrap();
+    assert_eq!(split.latched(), None);
+}
+
+#[test]
+fn a_forwarded_receive_timeout_or_loss_latches_and_blocks_later_calls() {
+    for (message, lost) in [("Control operation timed out", false), ("the device is gone", true)] {
+        let inner = fake(one_obx());
+        let probe = Arc::new(common::probe_device::ProbeDevice::new(inner.clone()));
+        let failed = ezsdr_radio_uhd::RxRecv::Failed(ezsdr_radio_uhd::DeviceError { lost, message: message.to_owned() });
+        probe.script_rx(vec![failed]);
+        let guard = measurement::GuardedDevice::new(probe.clone(), measurement::Latch::new());
+        assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)));
+        assert!(guard.latched().is_some_and(|reason| reason.contains(message)), "{message}: {:?}", guard.latched());
+        let rows = probe.control_log().len();
+        assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)));
+        assert_eq!(probe.control_log().len(), rows, "the second receive did not reach the device");
+        assert_refused_without_reaching(&guard, &inner);
+    }
+    // An ordinary receive failure does not latch.
+    let inner = fake(one_obx());
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(inner));
+    probe.script_rx(vec![ezsdr_radio_uhd::RxRecv::Failed(ezsdr_radio_uhd::DeviceError::failed("a bad packet"))]);
+    let guard = measurement::GuardedDevice::new(probe, measurement::Latch::new());
+    let _ = guard.rx_recv(0, 100, Wall::from_millis(1));
+    assert_eq!(guard.latched(), None);
+}
+
+#[test]
+fn the_waveforms_of_the_added_transmissions_stay_within_half_a_unit() {
+    // `pn` swings both components by 0.4, which is a magnitude of 0.566; the added transmissions scale it under bench.md's 0.5.
+    assert!(pn(1_000).iter().any(|(re, im)| re.hypot(*im) > 0.5));
+    let (bytes, _) = transmit_waveform(1_000);
+    let magnitudes: Vec<f32> = bytes.chunks(8).map(|pair| f32::from_le_bytes(pair[..4].try_into().unwrap()).hypot(f32::from_le_bytes(pair[4..].try_into().unwrap()))).collect();
+    assert_eq!(magnitudes.len(), 1_000);
+    assert!(magnitudes.iter().all(|magnitude| *magnitude <= 0.5) && magnitudes.iter().any(|magnitude| *magnitude > 0.4), "{magnitudes:?}");
 }

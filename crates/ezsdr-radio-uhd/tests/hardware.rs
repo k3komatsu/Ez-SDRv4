@@ -23,7 +23,8 @@ fn args() -> String {
 }
 
 fn usrp() -> Arc<dyn Device> {
-    ezsdr_radio_uhd::open(&args()).expect("the USRP opens")
+    // Inside a record run the handle is guarded: after the record's latch holds, no device is opened and no call reaches one.
+    measurement::guard_open(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"))
 }
 
 #[test]
@@ -2146,6 +2147,10 @@ fn hw_measurements_record() {
     let metadata = measurement::process_metadata().expect("all EZSDR_MEASUREMENT_* values are valid before opening the USRP");
     let plan = measurement::MeasurementPlan::process_env().expect("measurement trial counts are valid before opening the USRP");
     measurement::clear_raw_observations();
+    // The environment's selector (layout, image, links) is laid over every profile this record opens, raw probes included.
+    set_selector_override(metadata.selector.clone());
+    // One latch for the record: a failure that makes the handle unsafe to touch ends every later group and probe's device access.
+    measurement::install_record_latch(Some(measurement::Latch::new()));
     // Each probe and group runs on its own: an error or a panic is that group's failure, its keys are
     // `unmeasured`, and the record is still written (stage 3c-2c).
     let mut groups = measurement::GroupRun::new(metadata.output.as_deref());
@@ -2166,23 +2171,19 @@ fn hw_measurements_record() {
         ("hw_56_stop_lag", hw_56_stop_lag),
         ("hw_ur17_receive_call_duration", hw_ur17_receive_call_duration),
     ];
-    for (name, probe) in raw_probes { groups.probe(name, probe); }
-    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned()).collect();
-    assert_eq!(groups.probes(), &expected, "every raw probe either ran or failed");
-
-    // The device is opened, described and identified before any group runs, so that a group that
-    // wedges it cannot stop the record being written; a failure here is recorded, and no record can be assembled.
+    // The device is opened, described and identified first and closed again, so that no raw probe or group can stop the
+    // record from being written; a failure here is recorded, and no record can be assembled.
     let setup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let device = usrp();
+        let device: Arc<dyn Device> = measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"));
         let dir = TempDir::new();
         let doc = bench_profile(&*device, &dir, serde_json::json!({}), bench_envelope(&*device), false);
         let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
         let description = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())
             .expect("the bound X3xx layout");
         let identity = (device.describe(), device.serial().expect("the device's serial before the measurement groups"));
-        (device, dir, binding, description, identity)
+        (binding, description, identity)
     }));
-    let (device, _dir, binding, description, (device_description, serial)) = match setup {
+    let (binding, description, (device_description, serial)) = match setup {
         Ok(setup) => setup,
         Err(payload) => {
             let error = measurement::GroupRun::panic_text(payload);
@@ -2190,14 +2191,46 @@ fn hw_measurements_record() {
             panic!("the device could not be opened and identified, so no record can be assembled (diagnostics in the partial file): {error}");
         }
     };
-    // From here the device lives in a lease that leaks the handle instead of dropping it unless the
-    // raw group marks the run clean, so a failure or a panic anywhere before that never tears it down.
-    let mut lease = measurement::DeviceLease::new(device);
-    for (name, measure, keys) in measurement::provider_groups() {
-        let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
-        groups.run(name, &keys, || measure(lease.device(), &plan));
-    }
-    let (stopped, restored) = measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan);
+    measurement::run_raw_probes(&mut groups, &raw_probes, measurement::raw_probes_applicable(metadata.selector.as_ref()));
+    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned()).collect();
+    assert_eq!(groups.probes(), &expected, "every raw probe either ran or failed");
+
+    // The groups run on a device opened again, unless a probe latched the record: then none is opened and every group is not run.
+    let reopened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"))));
+    let (stopped, restored) = match reopened {
+        Ok(guard) => {
+            // From here the device lives in a lease that leaks the handle instead of dropping it unless the
+            // raw group marks the run clean, so a failure or a panic anywhere before that never tears it down.
+            let mut lease = measurement::DeviceLease::new(guard.clone());
+            for (name, measure, keys) in measurement::provider_groups() {
+                let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+                // After the latch holds the guard refuses every call, and later groups are not run.
+                groups.run(name, &keys, || match measurement::record_latch_reason() {
+                    Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
+                    None => measure(lease.device(), &plan),
+                });
+                guard.latch_if_streamers_open(name);
+            }
+            match measurement::record_latch_reason() {
+                Some(reason) => {
+                    let skipped = format!("not run: the device handle is latched ({reason}); nothing is sent to it, which may need a power cycle");
+                    groups.run("raw_queue_depth_and_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
+                    (Some(skipped), None)
+                }
+                None => measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan),
+            }
+        }
+        Err(payload) => {
+            let reason = measurement::GroupRun::panic_text(payload);
+            let skipped = format!("not run: the device was not opened again ({reason})");
+            for (name, _, keys) in measurement::provider_groups() {
+                let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+                groups.run(name, &keys, || Err(skipped.clone()));
+            }
+            groups.run("raw_queue_depth_and_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
+            (Some(skipped), None)
+        }
+    };
     let failed = groups.failed().to_vec();
     let measured = groups.take();
     let record = measurement::build_record_with_identity(

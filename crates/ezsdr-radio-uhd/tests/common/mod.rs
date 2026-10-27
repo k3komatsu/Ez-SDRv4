@@ -110,6 +110,73 @@ pub fn layout_of(device: &dyn Device) -> (Json, Json) {
     (elements(ezsdr_radio_uhd::Dir::Rx), elements(ezsdr_radio_uhd::Dir::Tx))
 }
 
+/// The keys `EZSDR_MEASUREMENT_SELECTOR` may carry (stage 3c-3a): the layout, the image and the links.
+pub const SELECTOR_KEYS: [&str; 5] = ["rx", "tx", "image", "links", "link_gbps"];
+
+/// The selector `EZSDR_MEASUREMENT_SELECTOR` holds: a JSON object of `SELECTOR_KEYS` only. Whether the
+/// layout fits the device is the Provider's to judge (UR-5, RM-28), not this function's.
+pub fn parse_selector(text: &str) -> Result<Json, String> {
+    let value: Json = serde_json::from_str(text).map_err(|error| format!("EZSDR_MEASUREMENT_SELECTOR is not JSON: {error}"))?;
+    let object = value.as_object().ok_or("EZSDR_MEASUREMENT_SELECTOR must be a JSON object")?;
+    if let Some(key) = object.keys().find(|key| !SELECTOR_KEYS.contains(&key.as_str())) {
+        return Err(format!("EZSDR_MEASUREMENT_SELECTOR has the key `{key}`; it may carry only {SELECTOR_KEYS:?}"));
+    }
+    // A selector that names one direction's layout names both: the other would be inherited from the device, and the record's
+    // transmitting channels would not be the ones the attenuator confirmation names.
+    if object.contains_key("rx") != object.contains_key("tx") {
+        return Err("EZSDR_MEASUREMENT_SELECTOR must give both `rx` and `tx`, or neither".to_owned());
+    }
+    Ok(value)
+}
+
+thread_local! {
+    static SELECTOR_OVERRIDE: std::cell::RefCell<Option<Json>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The selector every `bench_profile` of this thread overlays, if one was installed.
+pub fn selector_override() -> Option<Json> {
+    SELECTOR_OVERRIDE.with(|cell| cell.borrow().clone())
+}
+
+/// Installs `selector` for this thread (`None` removes it); the hardware record installs the environment's once.
+pub fn set_selector_override(selector: Option<Json>) {
+    SELECTOR_OVERRIDE.with(|cell| *cell.borrow_mut() = selector);
+}
+
+/// Runs `body` with `selector` installed, and removes it again, also on a panic.
+pub fn with_selector<T>(selector: Json, body: impl FnOnce() -> T) -> T {
+    struct Remove;
+    impl Drop for Remove {
+        fn drop(&mut self) { set_selector_override(None); }
+    }
+    set_selector_override(Some(selector));
+    let _remove = Remove;
+    body()
+}
+
+/// The layout elements the bench profile names: the installed selector's `rx` and `tx` where it has them, else the device's.
+pub fn effective_layout(device: &dyn Device) -> (Json, Json) {
+    let selector = selector_override();
+    let named = |key: &str| selector.as_ref().and_then(|selector| selector.get(key)).filter(|value| value.is_array()).cloned();
+    match (named("rx"), named("tx")) {
+        (Some(rx), Some(tx)) => (rx, tx),
+        (rx, tx) => {
+            let (device_rx, device_tx) = layout_of(device);
+            (rx.unwrap_or(device_rx), tx.unwrap_or(device_tx))
+        }
+    }
+}
+
+/// The default frequency of channel `chan`'s front end in `dir` (RM-5; a Basic/LF board's is 0 Hz), or the
+/// device's first board's where the layout has no such channel.
+pub fn channel_hz(device: &dyn Device, dir: ezsdr_radio_uhd::Dir, chan: usize) -> f64 {
+    let (rx, tx) = effective_layout(device);
+    let elements = if dir == ezsdr_radio_uhd::Dir::Rx { rx } else { tx };
+    elements.get(chan).and_then(Json::as_str).and_then(|element| element.split(':').nth(2))
+        .and_then(ezsdr_radio::x3xx::FrontEnd::parse)
+        .map_or_else(|| board_of(device).default_frequency_hz(), ezsdr_radio::x3xx::FrontEnd::default_frequency_hz)
+}
+
 /// A fake of `x3xx`'s device, the bench's: an OBX in slot A and slot B empty, which
 /// UHD reports as a second channel on its unknown board (`db_unknown.cpp`).
 pub fn one_obx() -> FakeConfig {
@@ -125,24 +192,35 @@ pub fn one_cbx() -> FakeConfig {
 /// The frequency the steps receive and transmit at: the default of the device's board
 /// (UR-9), so a Session that sets none (B7) stays inside the RF envelope around it.
 pub fn bench_hz(device: &dyn Device) -> f64 {
-    board_of(device).default_frequency_hz()
+    channel_hz(device, ezsdr_radio_uhd::Dir::Rx, 0)
 }
 
 /// bench.md's RF envelope around the bench frequency: every step that transmits carries
-/// it (RM-19), so that nothing but the envelope holds the transmitter to the band.
+/// it (RM-19), so that nothing but the envelope holds the transmitter to the band. It has a band around each
+/// transmit channel's frequency and one `tx_enabled` entry each (RM-33).
 pub fn bench_envelope(device: &dyn Device) -> Json {
-    let hz = bench_hz(device);
-    json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": hz - 1e6, "hi_hz": hz + 1e6 }], "max_gain_db": 0.0, "tx_enabled": [true] } })
+    let channels = effective_layout(device).1.as_array().map_or(1, Vec::len).max(1);
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    for chan in 0..channels {
+        let hz = channel_hz(device, ezsdr_radio_uhd::Dir::Tx, chan);
+        let band = ((hz - 1e6).max(0.0), hz + 1e6);
+        if !bands.contains(&band) { bands.push(band); }
+    }
+    let bands: Vec<Json> = bands.into_iter().map(|(lo, hi)| json!({ "lo_hz": lo, "hi_hz": hi })).collect();
+    json!({ "radio.rf_envelope": { "allowed_bands": bands, "max_gain_db": 0.0, "tx_enabled": vec![true; channels] } })
 }
 
 /// `profile` with the radio binding's profile the `x3xx` one and its layout the device's
-/// front ends (UR-5, design 33 D5).
+/// front ends (UR-5, design 33 D5); the installed selector (`EZSDR_MEASUREMENT_SELECTOR`) is laid over it.
 pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environment: Json, session: bool) -> Json {
     let mut doc = profile(dir, selector, environment, session);
     doc["bindings"]["radio"]["profile"] = x3xx();
-    let (rx, tx) = layout_of(device);
+    let (rx, tx) = effective_layout(device);
     doc["bindings"]["radio"]["selector"]["rx"] = rx;
     doc["bindings"]["radio"]["selector"]["tx"] = tx;
+    if let Some(Json::Object(overlay)) = selector_override() {
+        for (key, value) in overlay { doc["bindings"]["radio"]["selector"][key] = value; }
+    }
     // The bench's HG image streams over its 10 GbE port (bench.md B0.2); the HG default is 1 GbE.
     if doc["bindings"]["radio"]["selector"].get("link_gbps").is_none() {
         doc["bindings"]["radio"]["selector"]["link_gbps"] = json!([10]);
@@ -241,6 +319,14 @@ pub fn waveform_of(samples: &[(f32, f32)]) -> (Vec<u8>, ArtifactRef) {
         &bytes,
     );
     (bytes, reference)
+}
+
+/// A waveform for the transmissions added in stage 3c-3a (duplex stages and companions): `pn` scaled so that every sample's complex
+/// magnitude is within bench.md's 0.5; the bound is asserted before anything is sent. (The earlier steps keep sending `pn` itself.)
+pub fn transmit_waveform(n: usize) -> (Vec<u8>, ArtifactRef) {
+    let samples: Vec<(f32, f32)> = pn(n).into_iter().map(|(re, im)| (re * 0.875, im * 0.875)).collect();
+    assert!(samples.iter().all(|(re, im)| re.hypot(*im) <= 0.5), "bench.md RF safety: a transmit waveform's magnitude is at most 0.5");
+    waveform_of(&samples)
 }
 
 pub fn tone(n: usize) -> Vec<(f32, f32)> {

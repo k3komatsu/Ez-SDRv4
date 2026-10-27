@@ -373,6 +373,15 @@ impl UhdRadio {
         self
     }
 
+    /// Rebuilds this measurement instance with a candidate PerformanceEnvelope (RM-32), so that a Run can be
+    /// admitted above the profile's link limit: an admission ceiling for a measurement, not the link's
+    /// capacity. The ordinary construction path continues to use the profile's link.
+    pub fn with_measurement_performance(mut self, performance: ezsdr_radio::PerformanceEnvelope) -> UhdRadio {
+        self.description.performance = performance;
+        let timing = self.description.timing;
+        self.with_measurement_timing(timing)
+    }
+
     fn prepared(&self) -> Result<&Prepared, ModuleError> {
         self.prepared.as_ref().ok_or_else(|| rejected("UR-12: prepare must come first"))
     }
