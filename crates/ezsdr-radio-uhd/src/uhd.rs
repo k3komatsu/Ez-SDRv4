@@ -996,7 +996,7 @@ impl Device for UhdDevice {
             let mut samples = 0usize;
             // SAFETY: the device handle lives as long as `self`; `args` outlives the call.
             unsafe {
-                self.check_usrp("uhd_usrp_get_rx_stream", uhd_usrp_get_rx_stream(self.usrp, &mut args, h), true)?;
+                check_rx(h, "uhd_usrp_get_rx_stream", uhd_usrp_get_rx_stream(self.usrp, &mut args, h))?;
                 check_rx(h, "uhd_rx_streamer_max_num_samps", uhd_rx_streamer_max_num_samps(h, &mut samples))?;
             }
             Ok(samples)
@@ -1089,7 +1089,7 @@ impl Device for UhdDevice {
             let mut samples = 0usize;
             // SAFETY: as for `rx_open`.
             unsafe {
-                self.check_usrp("uhd_usrp_get_tx_stream", uhd_usrp_get_tx_stream(self.usrp, &mut args, h), true)?;
+                check_tx(h, "uhd_usrp_get_tx_stream", uhd_usrp_get_tx_stream(self.usrp, &mut args, h))?;
                 check_tx(h, "uhd_tx_streamer_max_num_samps", uhd_tx_streamer_max_num_samps(h, &mut samples))
             }
         })?;
@@ -1196,6 +1196,7 @@ mod ffi_tests {
     static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
     static ENTERED: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
     static RX_STREAM_FREES: AtomicUsize = AtomicUsize::new(0);
+    static OPEN_STREAM_FAILS: AtomicBool = AtomicBool::new(false);
 
     fn native_entry() {
         if !PROBE.load(Ordering::SeqCst) { return; }
@@ -1402,7 +1403,37 @@ mod ffi_tests {
     #[unsafe(no_mangle)]
     unsafe extern "C" fn uhd_usrp_get_rx_stream(_usrp: uhd_usrp_handle, _args: *mut uhd_stream_args_t, _h: uhd_rx_streamer_handle) -> c_int {
         native_entry();
+        if OPEN_STREAM_FAILS.load(Ordering::SeqCst) { UHD_ERROR_RUNTIME } else { UHD_ERROR_NONE }
+    }
+
+    /// Every test that opens a transmit streamer wants it to fail, so that no real graph is needed.
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_usrp_get_tx_stream(_usrp: uhd_usrp_handle, _args: *mut uhd_stream_args_t, _h: uhd_tx_streamer_handle) -> c_int {
+        UHD_ERROR_RUNTIME
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_rx_streamer_last_error(_h: uhd_rx_streamer_handle, buf: *mut c_char, len: usize) -> c_int {
+        let text = b"ffi test: the rx streamer's text\0";
+        // SAFETY: `buf` is writable for `len` bytes, as `text` passes it.
+        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len)); }
         UHD_ERROR_NONE
+    }
+
+    #[test]
+    fn uhd_a_failed_streamer_open_reads_its_text_from_the_streamer() {
+        // UHD saves the error of `uhd_usrp_get_rx_stream` and `uhd_usrp_get_tx_stream` on the streamer's handle
+        // (`UHD_SAFE_C_SAVE_ERROR(h_s, ...)`, usrp_c.cpp, v4.10.0.0), so the device handle's text is another call's.
+        let _test = lock(&TEST_LOCK);
+        OPEN_STREAM_FAILS.store(true, Ordering::SeqCst);
+        let rx = rx_dummy(true).rx_open(0, &[0]);
+        OPEN_STREAM_FAILS.store(false, Ordering::SeqCst);
+        let tx = dummy(1).tx_open(0, &[0]);
+        for (call, texts, error) in [("uhd_usrp_get_rx_stream", "the rx streamer's text", rx), ("uhd_usrp_get_tx_stream", "async message failed", tx)] {
+            let error = error.unwrap_err();
+            assert!(error.message.starts_with(&format!("{call}: UHD error 44: ")) && error.message.ends_with(texts), "{}", error.message);
+            assert!(!error.message.contains("the usrp set failed"), "the device handle's text was read: {}", error.message);
+        }
     }
 
     #[unsafe(no_mangle)]

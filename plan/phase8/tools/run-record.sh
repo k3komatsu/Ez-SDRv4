@@ -118,6 +118,7 @@ case "$OUT" in
 esac
 mkdir -p "$DAY_DIR"
 mkdir "$OUT"
+printf '%s\n' "$SETTINGS_SUMMARY" >"$OUT/bench-host.txt"
 SRC="$OUT/src"
 mkdir "$SRC"
 # Cargo freshness is mtime-based; archive timestamps can leave a newer target artifact looking current.
@@ -135,7 +136,9 @@ if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 fi
 CONTAINER=(docker run --rm --name "$CONTAINER_NAME" --network=host --cap-add=SYS_NICE --ulimit rtprio=99
     --user "$(id -u):$(id -g)"
+    --tmpfs /tmp:rw,size=4g
     -v "$SRC:/work" -v "$OUT:/bench" -v "$TARGET_VOLUME:/cargo-target" -w /work
+    -e CARGO_HOME=/cargo-target/.cargo-home
     -e "EZSDR_UHD_ARGS=$UHD_ARGS" "$IMAGE")
 TEST_COMMAND=(cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware)
 
@@ -180,7 +183,9 @@ LOAD=${EZSDR_MEASUREMENT_LOAD:-none}
 
 RECORD_CONTAINER=(docker run --rm --name "$CONTAINER_NAME" --network=host --cap-add=SYS_NICE --ulimit rtprio=99
     --user "$(id -u):$(id -g)"
+    --tmpfs /tmp:rw,size=4g
     -v "$SRC:/work" -v "$OUT:/bench" -v "$TARGET_VOLUME:/cargo-target" -w /work
+    -e CARGO_HOME=/cargo-target/.cargo-home
     -e "EZSDR_UHD_ARGS=$UHD_ARGS"
     -e EZSDR_MEASUREMENT_OUTPUT=/bench/measurement.json
     -e "EZSDR_MEASUREMENT_MBOARD=$MBOARD"

@@ -702,7 +702,7 @@
   "new": "        let _ = origin;\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin"
+  "filter": "ur_21_an_untimed_burst_after_a_cold_change_starts_no_earlier_than_its_clock_s_origin"
  },
  {
   "id": "J35",
@@ -6258,7 +6258,7 @@
    "new": "            None => self.plan.get(self.at + 1).cloned().map(|to| Switch { cut: i64::MIN, to: Some(to) }),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_25_tx_channels_from_zero_transmits_the_next_burst_on_time"
+   "filter": "ur_25_tx_channels_from_zero_transmits_the_next_burst"
   },
   {
    "id": "P255",
@@ -11495,8 +11495,8 @@
    "id": "P807",
    "name": "queue classification treats the stall threshold as blocked",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "call.duration_ns > stall_limit_ns",
-   "new": "call.duration_ns >= stall_limit_ns",
+   "old": "let stalled: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.duration_ns > stall_limit_ns).collect();",
+   "new": "let stalled: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.duration_ns >= stall_limit_ns).collect();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
@@ -11505,8 +11505,8 @@
    "id": "P808",
    "name": "queue classification accepts a missing blocked-call host timestamp",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "blocked_bounds.is_none_or(|(lower, _)| lower < first_at)",
-   "new": "blocked_bounds.is_some_and(|(lower, _)| lower < first_at)",
+   "old": "let Some((lower, upper)) = blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)) else {\n        return QueueTrialClass::Incomplete { reason: \"the blocked apply has no device-time bounds\" };\n    };",
+   "new": "let (lower, upper) = match blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)) {\n        Some(bounds) => bounds,\n        None => (first_at, first_at),\n    };",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
@@ -11715,7 +11715,7 @@
    "id": "P829",
    "name": "queue call limit defaults below the configured maximum",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_max_calls: 64,",
+   "old": "queue_max_calls: 512,",
    "new": "queue_max_calls: 32,",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -11843,10 +11843,10 @@
   },
   {
    "id": "P842",
-   "name": "queue classification accepts a blocked return one tick before the first command time",
+   "name": "queue classification takes a blocked return one tick before the first command time for a success",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "is_none_or(|(lower, _)| lower < first_at)",
-   "new": "is_none_or(|(lower, _)| lower < first_at - 1)",
+   "old": "    if lower < first_at {",
+   "new": "    if lower < first_at - 1 {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
@@ -11855,8 +11855,8 @@
    "id": "P843",
    "name": "queue classification rejects an upper device-time bound exactly at the return limit",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "blocked_bounds.is_some_and(|(_, upper)| upper > latest_return_tick)",
-   "new": "blocked_bounds.is_some_and(|(_, upper)| upper >= latest_return_tick)",
+   "old": "    if upper > latest_return_tick {",
+   "new": "    if upper >= latest_return_tick {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
@@ -12685,10 +12685,10 @@
   },
   {
    "id": "P926",
-   "name": "a duplex stage is planned with no transmit channel",
+   "name": "a throughput stage runs both directions",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
-   "old": "if channels >= 1 && other_channels >= 1 {",
-   "new": "if channels >= 1 {",
+   "old": "if direction == Direction::Rx { (streams, Vec::new()) } else { (Vec::new(), streams) }",
+   "new": "(streams.clone(), streams)",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "stage_lists_follow_the_layout"
@@ -13392,5 +13392,235 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P999",
+   "name": "a queue trial whose interval straddles the first command time is a success (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    if lower < first_at {\n        return QueueTrialClass::Ambiguous { depth };\n    }\n",
+   "new": "",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_twelve_historical_blocked_returns_are_classified_by_their_interval"
+  },
+  {
+   "id": "P1000",
+   "name": "a blocked call that returned before the first command time is not incomplete (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    if upper < first_at {\n        return QueueTrialClass::Incomplete",
+   "new": "    if false && upper < first_at {\n        return QueueTrialClass::Incomplete",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_twelve_historical_blocked_returns_are_classified_by_their_interval"
+  },
+  {
+   "id": "P1001",
+   "name": "the blocked call's number of an ambiguous trial is not compared across the delays (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "Some(\"success\" | \"ambiguous\")",
+   "new": "Some(\"success\")",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_blocked_call_s_number_is_compared_across_two_target_delays"
+  },
+  {
+   "id": "P1002",
+   "name": "every queue trial waits the plan's delay (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "let ahead_ns = if trial % 2 == 0 { plan.queue_ahead_ns / 3 * 2 } else { plan.queue_ahead_ns };",
+   "new": "let ahead_ns = plan.queue_ahead_ns;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number"
+  },
+  {
+   "id": "P1003",
+   "name": "the capacity's condition is the first that passed at T, not the stopper's own family (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "{ *named = stage.condition.clone(); }",
+   "new": "{ }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_capacity_names_a_condition_that_passed_and_the_blocker_apart"
+  },
+  {
+   "id": "P1004",
+   "name": "a failed stage does not end its direction's climb (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "            Err(error) => {\n                stopped = true;",
+   "new": "            Err(error) => {\n                stopped = false;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_that_fails_ends_the_climb_and_keeps_the_stages_before_it"
+  },
+  {
+   "id": "P1005",
+   "name": "a panicking stage is not caught (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "            Err(payload) => Err(GroupRun::panic_text(payload)),",
+   "new": "            Err(payload) => std::panic::resume_unwind(payload),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_that_fails_ends_the_climb_and_keeps_the_stages_before_it"
+  },
+  {
+   "id": "P1006",
+   "name": "a failed stage is recorded as a passed one (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "extra.stages.push(FamilyStage { condition: stage.id.clone(), family: format!(\"{name}-{}\", stage.family), bytes, class: None });\n                json!(",
+   "new": "extra.stages.push(FamilyStage { condition: stage.id.clone(), family: format!(\"{name}-{}\", stage.family), bytes, class: Some(TrialClass::Success) });\n                json!(",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_stage_that_fails_ends_the_climb_and_keeps_the_stages_before_it"
+  },
+  {
+   "id": "P1007",
+   "name": "the duplex pair runs each direction on the other's streams (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "rx: limits.rx.clone(), tx: limits.tx.clone() };",
+   "new": "rx: limits.tx.clone(), tx: limits.rx.clone() };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_duplex_pair_runs_the_two_measured_limits_together_once_and_decides_no_value"
+  },
+  {
+   "id": "P1008",
+   "name": "the duplex pair says the values held whatever its class (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "    let shown = class == Some(TrialClass::Success);",
+   "new": "    let shown = true;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "a_duplex_pair_that_does_not_flow_says_the_two_values_were_not_shown_to_hold"
+  },
+  {
+   "id": "P1009",
+   "name": "the duplex pair is run on a latched record (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "        self.run(\"duplex_at_the_measured_limits\", &[], || match record_latch_reason() {",
+   "new": "        self.run(\"duplex_at_the_measured_limits\", &[], || match None::<String> {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_pll_retries_used_up_latch_the_record_and_nothing_more_is_opened"
+  },
+  {
+   "id": "P1010",
+   "name": "the pair of limits keeps no reason for an unmeasured value (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "        (rx, tx) => Err([rx.err(), tx.err()].into_iter().flatten().collect::<Vec<_>>().join(\"; \")),",
+   "new": "        (_, _) => Err(String::new()),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_duplex_pair_runs_each_direction_on_the_streams_that_held_its_value"
+  },
+  {
+   "id": "P1011",
+   "name": "the PLL retries used up latch for any error (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "    if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) { return; }",
+   "new": "    if false { return; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_pll_retries_used_up_latch_the_record_and_nothing_more_is_opened"
+  },
+  {
+   "id": "P1012",
+   "name": "the PLL retries used up latch nothing (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "    if let Err(error) = &opened { measurement::latch_record_on_pll_failure(error); }",
+   "new": "    if let Err(error) = &opened { let _ = error; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_pll_retries_used_up_latch_the_record_and_nothing_more_is_opened"
+  },
+  {
+   "id": "P1013",
+   "name": "a probe's set_sources text is not turned into the retried one (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/mod.rs",
+   "old": "format!(\"{} ({e})\", ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK)",
+   "new": "format!(\"UR-7: {e}\")",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_pll_retries_used_up_latch_the_record_and_nothing_more_is_opened"
+  },
+  {
+   "id": "P1014",
+   "name": "the overlap of the duplex pair ends where it begins (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "        Some((end - start).max(0))",
+   "new": "        Some((start - end).max(0))",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_duplex_pair_runs_the_two_measured_limits_together_once_and_decides_no_value"
+  },
+  {
+   "id": "P1015",
+   "name": "a receive stream's SampleClock end is its origin in the stage's evidence (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "\"sample_clock_end_tick\": span.map(|(_, end)| end)",
+   "new": "\"sample_clock_end_tick\": span.map(|(origin, _)| origin)",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_duplex_pair_runs_the_two_measured_limits_together_once_and_decides_no_value"
+  },
+  {
+   "id": "P1016",
+   "name": "the MA-1 probe's phase is always 0 (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "Some(BurstPhase { deg: im.atan2(re).to_degrees(), halves_deg",
+   "new": "Some(BurstPhase { deg: 0.0, halves_deg",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_ma1_phase_is_read_against_the_waveform_and_a_weak_or_unsteady_loop_is_inconclusive"
+  },
+  {
+   "id": "P1017",
+   "name": "the MA-1 probe accepts an unsteady phase (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "<= 15.0",
+   "new": "<= 1.0e9",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_ma1_phase_is_read_against_the_waveform_and_a_weak_or_unsteady_loop_is_inconclusive"
+  },
+  {
+   "id": "P1018",
+   "name": "the capacity's stopper is matched to every family (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "stage.family == stopper.family &&",
+   "new": "true &&",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_capacity_names_a_condition_that_passed_and_the_blocker_apart"
+  },
+  {
+   "id": "P1019",
+   "name": "the pair of limits is built from an unmeasured value and run (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "        (rx, tx) => Err([rx.err(), tx.err()].into_iter().flatten().collect::<Vec<_>>().join(\"; \")),",
+   "new": "        (rx, tx) => Ok(DuplexLimits { rx_condition: String::new(), rx: rx.map(|row| row.1).unwrap_or_default(), tx_condition: String::new(), tx: tx.map(|row| row.1).unwrap_or_default() }),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_duplex_pair_runs_each_direction_on_the_streams_that_held_its_value"
+  },
+  {
+   "id": "P1020",
+   "name": "the MA-1 probe reads a phase from a loop too weak to read (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "if phase.gain < 0.002 {",
+   "new": "if phase.gain < 0.0 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_ma1_phase_is_read_against_the_waveform_and_a_weak_or_unsteady_loop_is_inconclusive"
+  },
+  {
+   "id": "P1021",
+   "name": "a transmit throughput observation drops its bursts' block counts (stage 3e)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "row[\"blocks\"].as_u64()",
+   "new": "row[\"blok\"].as_u64()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   }
  ]

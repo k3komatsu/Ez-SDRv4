@@ -588,7 +588,7 @@
   "old": "            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS),\n        );\n        let outcome = match decided {",
   "new": "            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS + crate::profile::DELIVERY_ALLOWANCE_NS),\n        );\n        let outcome = match decided {",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_21_an_untimed_send_is_on_time_after_its_delivery"
  },
  {
@@ -1290,7 +1290,7 @@
   "old": "        let was_open = !first || continuing;\n",
   "new": "        let was_open = !first || continuing;\n        self.tail = tail.clone();\n",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took",
   "old2": "        self.tail = None;\n        if device_open && !self.core.is_lost() {\n            self.close_device_burst(None);",
   "new2": "        let tail = self.tail.take();\n        if device_open && !self.core.is_lost() {\n            self.close_device_burst(tail);"
@@ -1302,7 +1302,7 @@
    "old": "                return self.abandon(was_open || sent > 0, sent);",
    "new": "                return self.abandon(was_open, sent);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
  },
  {
@@ -1362,7 +1362,7 @@
   "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(true, sending);",
   "new": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(was_open, sending);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
+  "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
  },
  {

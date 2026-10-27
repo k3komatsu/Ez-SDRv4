@@ -321,7 +321,7 @@ const TICKS_PER_MS: i64 = 200_000;
 /// The device with its time set to zero on the internal reference.
 fn raw() -> Arc<dyn Device> {
     let device = usrp();
-    device.set_sources("internal", "internal").unwrap();
+    set_sources_with_pll_retries(&*device, "internal", "internal").unwrap();
     device.set_time_zero(false).unwrap();
     std::thread::sleep(Wall::from_millis(100));
     device
@@ -741,13 +741,6 @@ fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
 
 // ---------------------------------------------------------------- B8 through the Module
 
-/// The transmit sample `lead` root ticks from now, on the running transmit clock.
-fn tx_at(run: &ezsdr_kernel::coordinator::RunHandle, lead: i64) -> TimePoint {
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
-    let n = clock.root_ticks_per_tick.num() as i64;
-    TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))
-}
-
 fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
     let envelope = bench_envelope(&*device);
     let mut run = session(&bench_profile(&*device, dir, serde_json::json!({}), envelope, true), device);
@@ -884,13 +877,49 @@ fn hw_b8_raw_timed_retune() {
     }
 }
 
+// ---------------------------------------------------------------- MA-1: the LO phase after an untimed receive tune
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_ma1_phase_after_a_pre_start_tune() {
+    // MA-1 (UR-24's Ceiling, KL-32): the receive frequency a Session sets before T0 is applied untimed, so the loopback's phase
+    // has no timed tune's guarantee; set again with `at` while the stream runs, it should. `EZSDR_MA1_SESSIONS` Sessions (5 by default)
+    // per way, each with its own device open; the two ways' spreads are the observation. A loopback measures the two LOs'
+    // relative phase only, so this says nothing of which one varies, and N Sessions are an observation, not a proof of a guarantee.
+    // No value is made. RF as bench.md says: slot A, 0 dB (the envelope), amplitude at most 0.5 (`transmit_samples`), the
+    // frequency inside SAFE_TX_HZ, into the 30 dB loopback (the attenuator is confirmed by run-record.sh, which names slot A for a preflight test).
+    let sessions: usize = std::env::var("EZSDR_MA1_SESSIONS").ok().map_or(5, |text| text.parse().expect("EZSDR_MA1_SESSIONS is a count"));
+    assert!((2..=50).contains(&sessions), "2 to 50 Sessions");
+    let wave = transmit_samples(1_000);
+    let (bytes, _) = waveform_of(&wave);
+    let mut ways = Vec::new();
+    for (name, timed_after_start) in [("set_before_t0", false), ("set_again_with_at_while_streaming", true)] {
+        let mut phases = Vec::new();
+        let mut inconclusive = Vec::new();
+        for session in 0..sessions {
+            match ma1_run(usrp(), timed_after_start, &wave, &bytes) {
+                Ok(phase) => { println!("MA-1 {name}, Session {session}: phase {phase:.1}°"); phases.push(phase); }
+                Err(reason) => { println!("MA-1 {name}, Session {session}: INCONCLUSIVE: {reason}"); inconclusive.push(reason); }
+            }
+        }
+        let spread = common::tone::circular_spread_deg(&phases);
+        println!("MA-1 {name}: {} phases {phases:.1?}, largest difference {spread:?}°, {} INCONCLUSIVE", phases.len(), inconclusive.len());
+        ways.push(serde_json::json!({ "way": name, "phases_deg": phases, "spread_deg": spread, "inconclusive": inconclusive }));
+    }
+    // Printed only: this probe is not one of the record's raw probes, so nothing collects an observation.
+    println!("MA-1 result: {}", serde_json::json!({
+        "ways": ways, "sessions_per_way": sessions,
+        "note": "a loopback measures the two LOs' relative phase; N Sessions are an observation, not a proof of a guarantee; a way with fewer than two readings has no spread; no value is made",
+    }));
+}
+
 // ---------------------------------------------------------------- design note 39: DDC/DUC timed commands
 // The probes of plan/phase8/39-dsp-timed-commands.md §3; run as plan/phase7/bench.md says.
 
 /// `raw`, as the concrete device: the probes also set the DDC/DUC shift alone (`tune_dsp`).
 fn raw_uhd() -> Arc<ezsdr_radio_uhd::UhdDevice> {
     let device = Arc::new(ezsdr_radio_uhd::UhdDevice::open(&args()).expect("the USRP opens"));
-    device.set_sources("internal", "internal").unwrap();
+    set_sources_with_pll_retries(&*device, "internal", "internal").unwrap();
     device.set_time_zero(false).unwrap();
     std::thread::sleep(Wall::from_millis(100));
     device
@@ -2496,6 +2525,10 @@ fn hw_measurements_record() {
                 });
                 guard.latch_if_streamers_open(name);
             }
+            // Both throughput values are decided: the two limits are tried together once (a value that is `unmeasured` is not).
+            let wire_bytes = u64::try_from(description.performance.wire_bytes_per_sample).expect("the profile's wire bytes per sample");
+            groups.run_duplex_pair(&plan, wire_bytes, || lease.device());
+            guard.latch_if_streamers_open("duplex_at_the_measured_limits");
             match measurement::record_latch_reason() {
                 Some(reason) => {
                     let skipped = format!("not run: the device handle is latched ({reason}); nothing is sent to it, which may need a power cycle");

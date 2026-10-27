@@ -4757,6 +4757,57 @@ mod tests {
     }
 
     #[test]
+    fn ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took() {
+        // Review P, NB-1: a send that comes up short abandons the burst. The device burst is
+        // closed with an empty end-of-burst (one zero sample) straight after the samples the
+        // device took; the burst's held last sample is not sent there. The 6 000-sample case
+        // cuts the final data buffer (the 31st device send); the last sample is held inside the
+        // in-flight window (D3). A send that fails after taking half is ended the same way
+        // (Review Q, NB-Q1). The steps are placed by hand on the manual clock, so the first
+        // buffer's size does not depend on when a thread ran (design note 37).
+        let cases = [(crate::device::FakeFault::ShortSend(0), 1_000usize), (crate::device::FakeFault::ShortSend(1), 3_000), (crate::device::FakeFault::ShortSend(30), 6_000), (crate::device::FakeFault::FailSend(0), 1_000)];
+        for (fault, len) in cases {
+            let nth = format!("{fault:?}");
+            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults: vec![fault], ..FakeConfig::default() };
+            let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
+            let _frozen = crate::provider::test_support::Frozen::of(&device);
+            device_at(&core, &time, &device, 0);
+            device.tx_open(0, &[0]).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            let clock = core.register(Dir::Tx, 200, 0).unwrap();
+            let (_to_tx, cmds) = std::sync::mpsc::channel();
+            std::mem::forget(_to_tx);
+            let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+            let wave: Vec<[f32; 2]> = (0..len).map(|i| [0.25 + i as f32 / 40_000.0, -0.125]).collect();
+            let mut burst = held(&clock, 40_000, len, LatePolicy::DropAndFlag);
+            burst.samples = Arc::new(vec![wave.clone()]);
+            lock(&core.held).insert((clock.domain, 40_000));
+            tx.command(TxCmd::Burst(burst));
+            // The first buffer is 100 samples (the window reaches 100 samples past the start),
+            // then one 200-sample buffer per 200 us step: the 31st device send is the final
+            // data buffer of the 6 000-sample case, whose last sample is held.
+            let mut at = 30_100_000;
+            for _ in 0..80 {
+                device_at(&core, &time, &device, core.ticks(at));
+                tx.step();
+                at += 200_000;
+                if tx.open.is_none() { break; }
+            }
+            let sends = sends(&device);
+            assert!(tx.open.is_none(), "{nth}: the device burst was not ended: {:?}", device.calls());
+            let rejected = lock(&core.rec).rejected.clone();
+            assert!(rejected.iter().any(|r| r["reason"].as_str().unwrap_or("").contains("UR-22: a send did not complete") || r["reason"].as_str().unwrap_or("").contains("fake: the send failed")), "{nth}: {rejected:?} {sends:?}");
+            let sent = device.transmitted(clock.instant(40_000), len + 1);
+            let took = sent.iter().zip(&wave).take_while(|(s, w)| **s == Some(**w)).count();
+            assert!(took < len - 1, "nth {nth}: {took} of {len} {sends:?}");
+            assert_eq!(sent[took], Some([0.0, 0.0]), "nth {nth}: after {took} {sends:?}");
+            assert!(sent[took + 1..].iter().all(Option::is_none), "nth {nth}: {sends:?}");
+            assert_eq!(sends.iter().filter(|s| s.2).count(), 1, "nth {nth}: {sends:?}");
+            if len == 6_000 { assert!(took > 5_000, "nth {nth}: the cut was not in the final buffer: {took} {sends:?}"); }
+        }
+    }
+
+    #[test]
     fn ur_23_abandoned_send_preserves_the_accepted_cursor() {
         let a_samples = vec![[0.25, 0.0]; 2_000];
         let (a_wave, a_bytes) = waveform_input("abandoned_repeat", &a_samples);

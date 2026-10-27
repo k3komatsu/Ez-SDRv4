@@ -97,3 +97,57 @@ pub fn tone_verdict(report: &ToneReport) -> String {
         format!("INCONCLUSIVE: no usable signal windows (before e {} of {}, after e {} of {}, noise coherence {:?}, threshold {:.2})", report.before, report.before_of, report.after, report.after_of, report.floor, report.threshold)
     }
 }
+
+/// The loop's phase for a burst of `wave` that starts at `offset` in `samples` (a cabled loop turns it by its two LOs' relative
+/// phase): the degrees over the whole burst and over each half of it, and the loop's gain as a fraction of the waveform's
+/// energy. `None` when the capture does not hold the burst or the waveform has no energy.
+#[derive(Debug, PartialEq)]
+pub struct BurstPhase {
+    pub deg: f64,
+    pub halves_deg: [f64; 2],
+    pub gain: f64,
+}
+
+pub fn burst_phase(samples: &[(f32, f32)], wave: &[(f32, f32)], offset: usize) -> Option<BurstPhase> {
+    let held = samples.get(offset..offset.checked_add(wave.len())?)?;
+    let correlate = |range: std::ops::Range<usize>| {
+        let (mut re, mut im, mut energy) = (0.0f64, 0.0f64, 0.0f64);
+        for ((wr, wi), (sr, si)) in wave[range.clone()].iter().zip(&held[range]) {
+            let (wr, wi, sr, si) = (f64::from(*wr), f64::from(*wi), f64::from(*sr), f64::from(*si));
+            re += wr * sr + wi * si;
+            im += wr * si - wi * sr;
+            energy += wr * wr + wi * wi;
+        }
+        (re, im, energy)
+    };
+    let half = wave.len() / 2;
+    let (re, im, energy) = correlate(0..wave.len());
+    if energy <= 0.0 || half == 0 { return None; }
+    let (first, second) = (correlate(0..half), correlate(half..wave.len()));
+    let deg = |(re, im, _): (f64, f64, f64)| im.atan2(re).to_degrees();
+    Some(BurstPhase { deg: im.atan2(re).to_degrees(), halves_deg: [deg(first), deg(second)], gain: re.hypot(im) / energy })
+}
+
+/// The probe's verdict on a burst's phase: the degrees, or why none can be read (INFERRED INCONCLUSIVE): a loop too weak
+/// (gain under 0.002 of the waveform's energy; the bench's 30 dB loop gives about 0.015) or a phase that moves across the burst.
+pub fn phase_verdict(phase: &BurstPhase) -> Result<f64, String> {
+    if phase.gain < 0.002 { return Err(format!("the loop's gain {:.4} is too weak to read a phase", phase.gain)); }
+    if !phase_is_steady(phase) { return Err(format!("the phase is not steady across the burst ({:.1} and {:.1} degrees)", phase.halves_deg[0], phase.halves_deg[1])); }
+    Ok(phase.deg)
+}
+
+/// Whether the phase holds across the burst: its two halves within 15 degrees of each other.
+pub fn phase_is_steady(phase: &BurstPhase) -> bool {
+    angle_difference_deg(phase.halves_deg[0], phase.halves_deg[1]) <= 15.0
+}
+
+/// The difference of two angles in degrees, 0 to 180.
+pub fn angle_difference_deg(a: f64, b: f64) -> f64 {
+    ((a - b + 540.0).rem_euclid(360.0) - 180.0).abs()
+}
+
+/// The largest difference between any two of `phases` (degrees); `None` for fewer than two.
+pub fn circular_spread_deg(phases: &[f64]) -> Option<f64> {
+    if phases.len() < 2 { return None; }
+    Some(phases.iter().flat_map(|a| phases.iter().map(move |b| angle_difference_deg(*a, *b))).fold(0.0, f64::max))
+}

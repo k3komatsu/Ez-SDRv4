@@ -2359,6 +2359,89 @@ mod tests {
     }
 
     #[test]
+    fn ur_21_an_untimed_send_is_on_time_after_its_delivery() {
+        // KG-8 (spike K6), on the controlled clock: the Kernel stamps an untimed send at its receipt plus the profile's 5 ms lead
+        // (the 2 ms device lead and the 3 ms delivery allowance), and uhd-control books it when it next reads it. Read within
+        // the allowance it is on time; read so late that less than the device lead is left it is late, and dropped under
+        // `drop_and_flag`. The fake's thread timing cannot move either: the test sets the instants.
+        let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let lead = core.ticks(crate::profile::DEVICE_LEAD_NS + crate::profile::DELIVERY_ALLOWANCE_NS);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        // (milliseconds from receipt to uhd-control's read, whether the burst is late): 1 ms is a poll, 3 ms leaves exactly the device lead.
+        for (n, (read_after, late)) in [(1, false), (3, false), (4, true)].into_iter().enumerate() {
+            let receipt = ms(100 * (n as i64 + 1));
+            time.advance_to(core.at(receipt)).unwrap();
+            let target = TimePoint::new(clock.domain, clock.at_or_after(receipt + lead));
+            time.advance_to(core.at(receipt + ms(read_after))).unwrap();
+            control.book(Dispatched::new(ActionId(n as u64 + 1), Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform: waveform.clone(),
+                repeat: false,
+                at: AbsoluteDeadline::new(target),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                metadata: BTreeMap::new(),
+            }, Some(core.tx_id.clone())));
+            let errors: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).collect();
+            assert_eq!(errors.len(), usize::from(late), "read {read_after} ms after receipt: {errors:?}");
+            assert_eq!(to_tx.try_recv().is_ok(), !late, "read {read_after} ms after receipt: a late `drop_and_flag` burst is not handed to uhd-tx");
+            if late { assert_eq!(errors[0].payload["outcome"], "drop", "{errors:?}"); }
+        }
+    }
+
+    #[test]
+    fn ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin() {
+        // RS-19, on the controlled clock: with no `at`, a burst after a cold rate change is stamped at the new transmit clock's
+        // origin, a 50 ms start lead after the change. uhd-control reads it a poll later and it is on time at the origin; read
+        // 49 ms after the change, with less than the 2 ms device lead left, it is late.
+        let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
+        let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        for (read_after_ms, late) in [(1, false), (49, true)] {
+            let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash.clone(), Arc::<[u8]>::from(bytes.clone()))]));
+            let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+            control.book_cold(ActionId(1), key("radio.tx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), None);
+            let plan = plan_of(&core, Dir::Tx);
+            let clock = plan[1].clock.expect("the change's clock");
+            assert_eq!(plan[1].segment.origin, core.ticks(50_000_000), "the new clock's origin");
+            time.advance_to(core.at(core.ticks(read_after_ms * 1_000_000))).unwrap();
+            events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+            control.book(Dispatched::new(ActionId(2), Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform: waveform.clone(),
+                repeat: false,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                metadata: BTreeMap::new(),
+            }, Some(core.tx_id.clone())));
+            let errors = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).count();
+            assert_eq!(errors, usize::from(late), "read {read_after_ms} ms after the change");
+            match to_tx.try_recv() {
+                Ok(TxCmd::Burst(held)) => assert!(!late && held.k == 0, "the burst starts at the origin: {}", held.k),
+                _ => assert!(late, "an on-time burst is handed to uhd-tx"),
+            }
+        }
+    }
+
+    #[test]
     fn ur_30_the_recorded_plan_has_no_refused_segment() {
         // UR-30, RM-25: a refusal the owner booked is in the one plan `Provider::stop` records,
         // which has no segment for it.

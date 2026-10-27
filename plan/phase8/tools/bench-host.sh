@@ -12,7 +12,9 @@ Usage: bench-host.sh --nic X710-NIC [--subnet OCTET] [--apply]
 
 Read-only verification is the default. --apply changes the named X710 NIC,
 its PCIe-link ASPM controls, and three host-wide sysctls; it requires root.
-EZSDR_BENCH_NIC and EZSDR_BENCH_SUBNET may supply the values.
+EZSDR_BENCH_NIC and EZSDR_BENCH_SUBNET may supply the values. The summary line
+also prints the CPU governors, CPU 0's C-states, the NIC's interrupt
+affinity and its interrupt coalescing; they are reported only, never a shortage, and --apply leaves them.
 EOF
 }
 
@@ -49,7 +51,7 @@ need() {
 
 if [[ ! -d /sys/class/net/$NIC ]]; then
     printf 'missing: NIC %s is not present\n' "$NIC" >&2
-    printf '%s nic=%s subnet=192.168.%s.0/24 carrier=unavailable mtu=unavailable addr=unavailable aspm=unavailable rx_ring=unavailable tx_ring=unavailable wmem_max=unavailable rmem_max=unavailable backlog=unavailable nm_managed=unavailable\n' \
+    printf '%s nic=%s subnet=192.168.%s.0/24 carrier=unavailable mtu=unavailable addr=unavailable aspm=unavailable rx_ring=unavailable tx_ring=unavailable wmem_max=unavailable rmem_max=unavailable backlog=unavailable nm_managed=unavailable governor=unavailable cstates=unavailable nic_irq_affinity=unavailable coalesce=unavailable\n' \
         "$VERSION" "$NIC" "$SUBNET"
     exit 1
 fi
@@ -103,6 +105,30 @@ done <<<"$ALL_MATCHES"
 ASPM_VALUES=()
 for path in "${ASPM_PATHS[@]}"; do ASPM_VALUES+=("$(cat "$path" 2>/dev/null || printf unavailable)"); done
 ASPM=$(IFS=,; printf '%s' "${ASPM_VALUES[*]:-unavailable}")
+
+# Read only and never a shortage: the CPU governors (count per governor), the C-states of CPU 0 (name:disabled) and the CPUs each
+# interrupt of the NIC is steered to (irq:affinity list), printed so that the record of a run keeps them. --apply does not change them.
+GOVERNOR=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort | uniq -c | awk '{printf "%s%s:%s", (NR>1?";":""), $2, $1}')
+GOVERNOR=${GOVERNOR:-unavailable}
+CSTATES=''
+for state in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+    [[ -d $state ]] || continue
+    CSTATES+="${CSTATES:+;}$(cat "$state/name" 2>/dev/null || printf '?'):$(cat "$state/disable" 2>/dev/null || printf '?')"
+done
+CSTATES=${CSTATES:-unavailable}
+NIC_IRQS=''
+if [[ -r /proc/interrupts ]]; then
+    while read -r irq; do
+        [[ -n $irq ]] || continue
+        NIC_IRQS+="${NIC_IRQS:+;}$irq:$(cat "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || printf '?')"
+    done < <(awk -v nic="$NIC" 'index($0, nic) { sub(":", "", $1); print $1 }' /proc/interrupts 2>/dev/null)
+fi
+NIC_IRQS=${NIC_IRQS:-unavailable}
+COALESCE=''
+if command -v ethtool >/dev/null 2>&1; then
+    COALESCE=$(ethtool -c "$NIC" 2>/dev/null | awk '/^Adaptive RX:/{a=$3"/"$5} /^rx-usecs:/{r=$2} /^tx-usecs:/{t=$2} END{if (a r t != "") printf "adaptive_rx_tx=%s;rx-usecs=%s;tx-usecs=%s", a, r, t}')
+fi
+COALESCE=${COALESCE:-unavailable}
 
 if ((APPLY)); then
     BLOCKED=0
@@ -163,6 +189,6 @@ else
     for value in "${ASPM_VALUES[@]}"; do need "$value" 0 'PCIe ASPM'; done
 fi
 
-printf '%s nic=%s subnet=192.168.%s.0/24 addr=%s carrier=%s mtu=%s aspm=%s rx_ring=%s/%s tx_ring=%s/%s wmem_max=%s rmem_max=%s backlog=%s nm_managed=%s\n' \
-    "$VERSION" "$NIC" "$SUBNET" "$ADDR" "${CARRIER:-unavailable}" "$MTU" "$ASPM" "$RX_RING" "$RX_MAX" "$TX_RING" "$TX_MAX" "$WMEM" "$RMEM" "$BACKLOG" "$NM_MANAGED"
+printf '%s nic=%s subnet=192.168.%s.0/24 addr=%s carrier=%s mtu=%s aspm=%s rx_ring=%s/%s tx_ring=%s/%s wmem_max=%s rmem_max=%s backlog=%s nm_managed=%s governor=%s cstates=%s nic_irq_affinity=%s coalesce=%s\n' \
+    "$VERSION" "$NIC" "$SUBNET" "$ADDR" "${CARRIER:-unavailable}" "$MTU" "$ASPM" "$RX_RING" "$RX_MAX" "$TX_RING" "$TX_MAX" "$WMEM" "$RMEM" "$BACKLOG" "$NM_MANAGED" "$GOVERNOR" "$CSTATES" "$NIC_IRQS" "$COALESCE"
 exit "$MISSING"

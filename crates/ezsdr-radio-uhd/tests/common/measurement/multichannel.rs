@@ -391,11 +391,12 @@ fn rate_tag(rate_hz: u64) -> String {
 }
 
 /// The stages of `direction`'s throughput beyond the one-channel sweep, over the rate grid `rates` (ascending), for a
-/// layout with `channels` channels in that direction and `other_channels` in the other: with two or more channels,
-/// (a) one stream of all channels, (b) one stream each at one rate, (c) one stream each, channel 0 at a grid rate and
-/// channel 1 at the next lower (BP4b; channel k the k-th lower); and, when both directions have a channel, (d) a stream each way at one rate.
-/// Each family runs its rates in ascending order of bytes per second, as the one-channel sweep does.
-pub fn throughput_stages(direction: Direction, channels: usize, other_channels: usize, rates: &[u64]) -> Vec<Stage> {
+/// layout with `channels` channels in that direction: with two or more channels, (a) one stream of all channels,
+/// (b) one stream each at one rate, (c) one stream each, channel 0 at a grid rate and channel 1 at the next lower
+/// (BP4b; channel k the k-th lower). Each family runs its rates in ascending order of bytes per second, as the
+/// one-channel sweep does. No stage runs the other direction too: a value is one direction's alone (RM-32 budgets
+/// each direction), and the two values are tried together once, afterwards (`measure_duplex_at_limits`, stage 3e).
+pub fn throughput_stages(direction: Direction, channels: usize, rates: &[u64]) -> Vec<Stage> {
     let prefix = if direction == Direction::Rx { "rx" } else { "tx" };
     let mut stages = Vec::new();
     let one = |channels: Vec<usize>, rate_hz: u64| StreamPlan { channels, rate_hz };
@@ -418,14 +419,6 @@ pub fn throughput_stages(direction: Direction, channels: usize, other_channels: 
             stages.push(Stage { id: format!("{prefix}-mixed-{}", tags.join("-")), family: "mixed", rx, tx });
         }
     }
-    if channels >= 1 && other_channels >= 1 {
-        for rate in rates {
-            stages.push(Stage {
-                id: format!("{prefix}-duplex-{}", rate_tag(*rate)), family: "duplex",
-                rx: vec![one(vec![0], *rate)], tx: vec![one(vec![0], *rate)],
-            });
-        }
-    }
     stages
 }
 
@@ -434,6 +427,9 @@ pub fn throughput_stages(direction: Direction, channels: usize, other_channels: 
 #[derive(Clone, Debug)]
 pub struct FamilyStage {
     pub condition: String,
+    /// The condition's family and layout without its rate (`rx-grouped`, `rx-sweep`), by which a stopper is matched to its own
+    /// earlier stages.
+    pub family: String,
     pub bytes: u64,
     pub class: Option<TrialClass>,
 }
@@ -452,13 +448,20 @@ pub fn capacity_over_conditions(stages: &[FamilyStage]) -> Capacity {
     let totals: BTreeSet<u64> = stages.iter().map(|stage| stage.bytes).collect();
     let mut best = None;
     let mut blocker: Option<String> = None;
+    let mut blocked: Option<(&FamilyStage, u64)> = None;
     for total in &totals {
         let at: Vec<&FamilyStage> = stages.iter().filter(|stage| stage.bytes == *total).collect();
         if let Some(stage) = at.iter().find(|stage| stage.class != Some(TrialClass::Success)) {
             blocker = Some(format!("condition `{}` at {} bytes/s is {}", stage.condition, total, stage.class.map_or("not run", trial_class_name)));
+            blocked = Some((stage, *total));
             break;
         }
         best = Some((*total, at[0].condition.clone()));
+    }
+    // The value names a condition that succeeded at its T: the stage of the stopper's own family and layout that passed at T
+    // (its actual id, whatever its rate), else the first that passed there. The stopper is the blocker, recorded apart.
+    if let (Some((total, named)), Some((stopper, _))) = (best.as_mut(), blocked) {
+        if let Some(stage) = stages.iter().find(|stage| stage.bytes == *total && stage.family == stopper.family && stage.class == Some(TrialClass::Success)) { *named = stage.condition.clone(); }
     }
     let reason = best.is_none().then(|| match &blocker {
         Some(blocker) => format!("No bytes-per-second step passed in every applicable condition: {blocker}."),
@@ -478,7 +481,7 @@ pub fn capacity_over_conditions(stages: &[FamilyStage]) -> Capacity {
         observation: json!({
             "rule": "the capacity is the largest T such that every condition that has a stage at a T' <= T succeeded at every such stage; a condition with no stage at a T does not judge it",
             "capacity_bytes_per_s": best.as_ref().map(|(bytes, _)| bytes), "deciding_condition": best.as_ref().map(|(_, id)| id),
-            "first_blocker": blocker, "conditions": conditions, "applicable_conditions_by_bytes_per_s": applicable,
+            "first_blocker": blocker, "blocker_condition": blocked.map(|(stage, _)| stage.condition.as_str()), "blocker_bytes_per_s": blocked.map(|(_, total)| total), "conditions": conditions, "applicable_conditions_by_bytes_per_s": applicable,
         }),
         best, reason,
     }
@@ -663,14 +666,16 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     for (k, stream) in stage.rx.iter().enumerate() {
         let suffix = format!("usrp/rx/s{k}");
         let mut clocks = manifest.clocks.sample_clocks.iter().filter(|clock| clock.stream.to_string().ends_with(&suffix));
-        let interval = clocks.next().and_then(|clock| if clocks.next().is_some() { None } else { expected_rx_samples(clock, stream.rate_hz, master) });
+        let first_clock = clocks.next();
+        let interval = first_clock.and_then(|clock| if clocks.next().is_some() { None } else { expected_rx_samples(clock, stream.rate_hz, master) });
+        let span = first_clock.filter(|_| interval.is_some()).and_then(|clock| Some((clock.origin.ticks_in(clock.root).ok()?, clock.ended_at?.ticks_in(clock.root).ok()?)));
         let actual = counted.rx_samples(k);
         // The device returned the samples of each `rx_recv` whole, so the count passes the cut by up to one request (the block length).
         let slack = packets[k].max(u64::from(ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN));
         let class = throughput_trial_class(actual, interval.map(|(_, samples)| samples), slack, overflow);
         streams.push(StreamEvidence { direction: Direction::Rx, stream: k, class, detail: json!({
             "direction": "rx", "stream": k, "channels": stream.channels, "rate_hz": stream.rate_hz, "expected_samples": interval.map(|(_, samples)| samples),
-            "sample_clock_interval_ticks": interval.map(|(ticks, _)| ticks), "actual_samples": actual, "packet_samples": packets[k], "tolerance_samples": slack,
+            "sample_clock_interval_ticks": interval.map(|(ticks, _)| ticks), "sample_clock_origin_tick": span.map(|(origin, _)| origin), "sample_clock_end_tick": span.map(|(_, end)| end), "actual_samples": actual, "packet_samples": packets[k], "tolerance_samples": slack,
             "rx_overflow": overflow, "class": trial_class_name(class),
         }) });
     }
@@ -701,7 +706,7 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
         let class = if short > 0 { worse(evidence.class, TrialClass::DeviceFailure) } else { evidence.class };
         streams.push(StreamEvidence { direction: Direction::Tx, stream: k, class, detail: json!({
             "direction": "tx", "stream": k, "channels": stream.channels, "rate_hz": stream.rate_hz, "scheduled_burst_target": target,
-            "burst_count": evidence.burst_count, "burst_acks_found": acks.len(), "burst_acks_expected": stream.channels.len(), "burst_ack_tick": evidence.burst_ack_tick,
+            "burst_count": evidence.burst_count, "burst_blocks": evidence.burst_blocks, "burst_start_tick": evidence.burst_start_tick, "burst_acks_found": acks.len(), "burst_acks_expected": stream.channels.len(), "burst_ack_tick": evidence.burst_ack_tick,
             "minimum_ack_tick": evidence.minimum_ack_tick, "minimum_samples": evidence.minimum_samples, "actual_samples": accepted,
             "short_sends": short, "tx_underflow_events": evidence.underflow_events, "async_failures": evidence.async_failures,
             "class": trial_class_name(class),
@@ -773,27 +778,145 @@ pub struct ExtraThroughput {
     pub stages: Vec<FamilyStage>,
 }
 
-/// Runs `throughput_stages` of `direction` and returns their rows. An error stops the group (a later stage
-/// would use the handle a failed one may have wedged).
-pub fn extra_throughput(device: &Arc<dyn Device>, plan: &MeasurementPlan, direction: Direction, channels: usize, other_channels: usize, wire_bytes: u64) -> Result<ExtraThroughput, String> {
+/// Runs `throughput_stages` of `direction` and returns their rows. A stage that fails (its `Err` or a panic) is that stage's
+/// failure, with an observation, and ends the climb: the stages before it keep their rows and the stages after it are `not run`.
+pub fn extra_throughput(device: &Arc<dyn Device>, plan: &MeasurementPlan, direction: Direction, channels: usize, wire_bytes: u64) -> Result<ExtraThroughput, String> {
     let rates = if direction == Direction::Rx { &plan.rx_rates_hz } else { &plan.tx_throughput_rates_hz };
+    run_stages(direction, throughput_stages(direction, channels, rates), wire_bytes, |stage| run_stage(device.clone(), plan, stage, wire_bytes))
+}
+
+/// `extra_throughput` over `stages`, each run by `run`.
+fn run_stages(direction: Direction, stages: Vec<Stage>, wire_bytes: u64, mut run: impl FnMut(&Stage) -> Result<StageResult, String>) -> Result<ExtraThroughput, String> {
     let mut extra = ExtraThroughput::default();
     let name = if direction == Direction::Rx { "rx" } else { "tx" };
     let mut stopped = false;
-    for stage in throughput_stages(direction, channels, other_channels, rates) {
+    for stage in stages {
         let bytes = stage.bytes(direction, wire_bytes).ok_or("stage bytes per second overflow")?;
         extra.conditions.push(stage.condition());
-        // After a stage that wedged the handle nothing more runs: the stages left are `not run`, which blocks the capacity.
+        // After a stage that wedged the handle or failed nothing more runs: the stages left are `not run`, which blocks the capacity.
         if stopped || record_latch_reason().is_some() {
-            extra.stages.push(FamilyStage { condition: stage.id.clone(), bytes, class: None });
+            extra.stages.push(FamilyStage { condition: stage.id.clone(), family: format!("{name}-{}", stage.family), bytes, class: None });
             continue;
         }
-        let result = run_stage(device.clone(), plan, &stage, wire_bytes)?;
-        stopped = result.left_open;
-        extra.stages.push(FamilyStage { condition: stage.id.clone(), bytes, class: Some(result.class) });
-        extra.observations.push(observation(format!("provider_{name}_throughput_{}", stage.id), TEST, Some(stage.id.clone()), 1, result.observation)?);
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&stage))) {
+            Ok(outcome) => outcome,
+            Err(payload) => Err(GroupRun::panic_text(payload)),
+        };
+        let observed = match outcome {
+            Ok(result) => {
+                stopped = result.left_open;
+                extra.stages.push(FamilyStage { condition: stage.id.clone(), family: format!("{name}-{}", stage.family), bytes, class: Some(result.class) });
+                result.observation
+            }
+            Err(error) => {
+                stopped = true;
+                extra.stages.push(FamilyStage { condition: stage.id.clone(), family: format!("{name}-{}", stage.family), bytes, class: None });
+                json!({ "family": stage.family, "stage_failed": error, "note": "the stage failed before it could be judged: it is `not run`, and no later stage of this direction runs" })
+            }
+        };
+        extra.observations.push(observation(format!("provider_{name}_throughput_{}", stage.id), TEST, Some(stage.id.clone()), 1, observed)?);
     }
     Ok(extra)
+}
+
+/// The condition id of the pair of the two measured limits run at once (stage 3e).
+pub const DUPLEX_PAIR: &str = "duplex-at-the-measured-limits";
+
+/// What the pair runs: each direction's streams, as the condition that held that direction's throughput value had them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplexLimits {
+    pub rx_condition: String,
+    pub rx: Vec<StreamPlan>,
+    pub tx_condition: String,
+    pub tx: Vec<StreamPlan>,
+}
+
+fn limit_streams(measured: &MeasurementGroup, key: &str, direction: Direction) -> Result<(String, Vec<StreamPlan>), String> {
+    let condition = measured.values.iter().find_map(|row| match row {
+        ValueRecord::Measured { key: found, condition, .. } if found.as_str() == key => Some(Ok(condition.clone())),
+        ValueRecord::Unmeasured { key: found, reason } if found.as_str() == key => Some(Err(format!("{key} is unmeasured ({reason})"))),
+        _ => None,
+    }).unwrap_or_else(|| Err(format!("{key} was not decided")))?;
+    let row = measured.conditions.iter().find(|row| row.id == condition).ok_or_else(|| format!("{key}'s condition `{condition}` has no condition row"))?;
+    let mut streams: Vec<_> = row.streams.iter().filter(|stream| stream.direction == direction).collect();
+    streams.sort_by_key(|stream| stream.stream);
+    if streams.is_empty() { return Err(format!("{key}'s condition `{condition}` has no stream in its direction")); }
+    let plans = streams.iter().map(|stream| StreamPlan { channels: stream.channels.iter().map(|chan| *chan as usize).collect(), rate_hz: stream.sample_rate_hz as u64 }).collect();
+    Ok((condition, plans))
+}
+
+/// The streams the receive and the transmit throughput values held at, or why one of them cannot be tried (a value is
+/// `unmeasured`). The pair is run only once both are decided.
+pub fn duplex_limits(measured: &MeasurementGroup) -> Result<DuplexLimits, String> {
+    match (limit_streams(measured, "radio.perf.rx_bytes_per_s", Direction::Rx), limit_streams(measured, "radio.perf.tx_bytes_per_s", Direction::Tx)) {
+        (Ok((rx_condition, rx)), Ok((tx_condition, tx))) => Ok(DuplexLimits { rx_condition, rx, tx_condition, tx }),
+        (rx, tx) => Err([rx.err(), tx.err()].into_iter().flatten().collect::<Vec<_>>().join("; ")),
+    }
+}
+
+/// The measured limits of both directions tried together once, for `plan.throughput_seconds` (stage 3e, owner 2026-10-28):
+/// each direction on the streams and rates that held its own value, the receive streams and the transmit streams at the
+/// same time. It decides no value. The observation says whether the two values were shown at once or not, with each
+/// stream's evidence, how much of the time transmit flowed and the stretch in which the two overlapped. With no limits
+/// (a value is `unmeasured`) nothing runs and the observation says why.
+pub fn measure_duplex_at_limits(device: Arc<dyn Device>, plan: &MeasurementPlan, limits: Result<DuplexLimits, String>, wire_bytes: u64) -> Result<MeasurementGroup, String> {
+    let name = "provider_duplex_at_the_measured_limits";
+    let note = "one confirmation of the two measured limits at once, for the duration given; it is no value, and no evidence for every pair the profile admits or for a longer run";
+    let limits = match limits {
+        Ok(limits) => limits,
+        Err(reason) => {
+            let result = json!({ "ran": false, "reason": format!("not run: {reason}"), "verdict": "the two values were not shown to hold at once: they were not both measured", "note": note });
+            return Ok(MeasurementGroup { observations: vec![observation(name, TEST, None, 1, result)?], ..MeasurementGroup::default() });
+        }
+    };
+    let stage = Stage { id: DUPLEX_PAIR.to_owned(), family: "duplex_at_the_measured_limits", rx: limits.rx.clone(), tx: limits.tx.clone() };
+    let condition = stage.condition();
+    let outcome = run_stage(device, plan, &stage, wire_bytes);
+    let mut result = match &outcome {
+        Ok(result) => result.observation.clone(),
+        Err(error) => json!({ "stage_failed": error }),
+    };
+    let class = outcome.as_ref().ok().map(|result| result.class);
+    let shown = class == Some(TrialClass::Success);
+    let fields = result.as_object_mut().ok_or("the duplex pair's observation is not an object")?;
+    fields.insert("ran".to_owned(), json!(outcome.is_ok()));
+    fields.insert("rx_limit_condition".to_owned(), json!(limits.rx_condition));
+    fields.insert("tx_limit_condition".to_owned(), json!(limits.tx_condition));
+    fields.insert("class".to_owned(), json!(class.map_or("not_judged", trial_class_name)));
+    fields.insert("verdict".to_owned(), json!(if shown { "the two values held at once for the duration given" } else { "the two values were not shown to hold at once" }));
+    fields.insert("note".to_owned(), json!(note));
+    fields.insert("overlap".to_owned(), duplex_overlap(fields.get("streams"), plan.throughput_seconds));
+    let group = MeasurementGroup { conditions: vec![condition], observations: vec![observation(name, TEST, Some(DUPLEX_PAIR.to_owned()), 1, result)?], ..MeasurementGroup::default() };
+    Ok(group)
+}
+
+/// How much of the run the two directions flowed together: each transmit stream's samples against the duration's, and the
+/// root ticks in which the receive streams' SampleClocks and the transmit bursts overlapped (null where a bound is unknown).
+fn duplex_overlap(streams: Option<&Json>, seconds: u64) -> Json {
+    let rows: Vec<&Json> = streams.and_then(Json::as_array).into_iter().flatten().collect();
+    let of = |direction: &str| rows.iter().filter(|row| row["direction"] == direction).copied().collect::<Vec<_>>();
+    let tx_fraction: Vec<Json> = of("tx").iter().map(|row| {
+        let expected = row["rate_hz"].as_u64().and_then(|rate| rate.checked_mul(seconds));
+        json!({ "stream": row["stream"], "samples_accepted_over_samples_of_the_duration": row["actual_samples"].as_u64().zip(expected).map(|(actual, expected)| actual as f64 / expected as f64) })
+    }).collect();
+    let rx_span = of("rx").iter().map(|row| row["sample_clock_origin_tick"].as_i64().zip(row["sample_clock_end_tick"].as_i64())).collect::<Option<Vec<_>>>();
+    let tx_span = of("tx").iter().map(|row| row["burst_start_tick"].as_i64().zip(row["burst_ack_tick"].as_i64())).collect::<Option<Vec<_>>>();
+    let overlap_ticks = rx_span.zip(tx_span).and_then(|(rx, tx)| {
+        let start = rx.iter().chain(&tx).map(|(origin, _)| *origin).max()?;
+        let end = rx.iter().chain(&tx).map(|(_, end)| *end).min()?;
+        Some((end - start).max(0))
+    });
+    json!({ "tx_flow": tx_fraction, "overlap_root_ticks": overlap_ticks })
+}
+
+/// UR-7 inside a record (stage 3e): the reference clock's PLL did not lock and the retries are used up, so it will not lock
+/// for the next open either (it stayed unlocked until a power cycle on 2026-10-27). The record's latch is set, every later
+/// probe and group is `not run`, and the record is written early. Does nothing outside a record or for any other error.
+pub fn latch_record_on_pll_failure(error: &str) {
+    if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) { return; }
+    RECORD_LATCH.with(|cell| if let Some(latch) = cell.borrow().as_ref() {
+        latch.set(format!("the reference clock's PLL did not lock after the UR-7 retries: {error}; it needs a power cycle"));
+    });
 }
 
 #[cfg(all(test, not(feature = "uhd")))]
@@ -801,29 +924,184 @@ mod tests {
     use super::*;
 
     fn stage(condition: &str, bytes: u64, class: Option<TrialClass>) -> FamilyStage {
-        FamilyStage { condition: condition.to_owned(), bytes, class }
+        FamilyStage { condition: condition.to_owned(), family: condition.to_owned(), bytes, class }
     }
 
     #[test]
     fn stage_lists_follow_the_layout() {
         let rates = [100_000_000, 200_000_000];
-        assert_eq!(throughput_stages(Direction::Rx, 1, 1, &rates).iter().map(|stage| stage.family).collect::<Vec<_>>(), ["duplex", "duplex"], "one channel each way has only the duplex stages");
-        let two = throughput_stages(Direction::Rx, 2, 0, &rates);
+        assert!(throughput_stages(Direction::Rx, 1, &rates).is_empty(), "one channel has only the one-channel sweep, and no stage runs both directions");
+        let two = throughput_stages(Direction::Rx, 2, &rates);
         let ids: Vec<_> = two.iter().map(|stage| stage.id.as_str()).collect();
         assert_eq!(ids, ["rx-grouped-100m", "rx-grouped-200m", "rx-split-100m", "rx-split-200m", "rx-mixed-200m-100m"]);
+        assert!(two.iter().all(|stage| stage.tx.is_empty()), "a receive stage has no transmit stream");
         let mixed = two.last().unwrap();
         assert_eq!(mixed.rx, [StreamPlan { channels: vec![0], rate_hz: 200_000_000 }, StreamPlan { channels: vec![1], rate_hz: 100_000_000 }], "channel 0 at the higher grid rate, channel 1 at the next lower");
         assert_eq!(mixed.bytes(Direction::Rx, 4), Some(1_200_000_000));
         assert_eq!(two[1].bytes(Direction::Rx, 4), Some(1_600_000_000), "one stream of both channels at 200 MS/s");
         assert_eq!(two[1].rx.len(), 1);
         assert_eq!(two[3].rx.len(), 2);
-        let duplex = throughput_stages(Direction::Tx, 1, 1, &rates);
-        assert_eq!(duplex.len(), 2);
-        assert_eq!((duplex[0].rx.len(), duplex[0].tx.len(), duplex[0].family), (1, 1, "duplex"));
-        assert!(throughput_stages(Direction::Rx, 1, 0, &rates).is_empty(), "no transmit channel, no duplex stage");
-        let condition = duplex[0].condition();
-        assert_eq!(condition.concurrent.len(), 2);
-        assert_eq!(condition.streams.len(), 2);
+        let tx = throughput_stages(Direction::Tx, 2, &rates);
+        assert!(tx.iter().all(|stage| stage.rx.is_empty() && !stage.tx.is_empty()));
+    }
+
+    fn measured_row(key: &str, condition: &str) -> ValueRecord {
+        ValueRecord::Measured { key: Key::parse(key).unwrap(), worst: model::Worst::Number(1.0), trials: 1, condition: condition.to_owned(), test: TEST.to_owned() }
+    }
+
+    #[test]
+    fn the_duplex_pair_runs_each_direction_on_the_streams_that_held_its_value() {
+        // A 2-channel receive limit held by one stream of both channels at 100 MS/s; a transmit limit by two streams at 200 and 100.
+        let mut measured = MeasurementGroup::default();
+        measured.conditions.push(throughput_stages(Direction::Rx, 2, &[100_000_000, 200_000_000])[0].condition());
+        measured.conditions.push(throughput_stages(Direction::Tx, 2, &[100_000_000, 200_000_000]).last().unwrap().condition());
+        assert!(duplex_limits(&measured).unwrap_err().contains("was not decided"), "no value row, no pair");
+        measured.values.push(measured_row("radio.perf.rx_bytes_per_s", "rx-grouped-100m"));
+        measured.values.push(measured_row("radio.perf.tx_bytes_per_s", "tx-mixed-200m-100m"));
+        let limits = duplex_limits(&measured).unwrap();
+        assert_eq!(limits.rx, [StreamPlan { channels: vec![0, 1], rate_hz: 100_000_000 }], "the multi-channel capacity is not shrunk to channel 0's rate");
+        assert_eq!(limits.tx, [StreamPlan { channels: vec![0], rate_hz: 200_000_000 }, StreamPlan { channels: vec![1], rate_hz: 100_000_000 }]);
+        assert_eq!((limits.rx_condition.as_str(), limits.tx_condition.as_str()), ("rx-grouped-100m", "tx-mixed-200m-100m"));
+        // Either value `unmeasured`: no pair, and the reason says which.
+        measured.values[1] = ValueRecord::Unmeasured { key: Key::parse("radio.perf.tx_bytes_per_s").unwrap(), reason: "no step passed".to_owned() };
+        let error = duplex_limits(&measured).unwrap_err();
+        assert!(error.contains("radio.perf.tx_bytes_per_s is unmeasured") && !error.contains("rx_bytes_per_s"), "{error}");
+        // An unmeasured value starts no pair: the Run is not made and no call reaches the device.
+        let fake = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let group = measure_duplex_at_limits(fake.clone(), &MeasurementPlan::rehearsal(), duplex_limits(&measured), 4).unwrap();
+        assert!(group.conditions.is_empty() && group.observations[0].result["ran"] == false, "{:?}", group.observations[0].result);
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    #[test]
+    fn the_duplex_pair_is_not_run_without_both_values_and_says_so() {
+        let fake = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let device: Arc<dyn Device> = fake.clone();
+        let group = measure_duplex_at_limits(device, &MeasurementPlan::rehearsal(), Err("radio.perf.rx_bytes_per_s is unmeasured (x)".to_owned()), 4).unwrap();
+        assert!(group.values.is_empty() && group.conditions.is_empty(), "the pair decides no value");
+        let row = &group.observations[0];
+        assert_eq!(row.name, "provider_duplex_at_the_measured_limits");
+        assert_eq!(row.result["ran"], false);
+        assert!(row.result["reason"].as_str().unwrap().starts_with("not run: radio.perf.rx_bytes_per_s is unmeasured"));
+        assert!(row.result["verdict"].as_str().unwrap().contains("not shown"));
+        assert!(fake.calls().is_empty(), "no call reached the device: {:?}", fake.calls());
+    }
+
+    /// The sweep's stages and `throughput_stages`' grouped and split ones for two channels, with their real ids and families, at
+    /// 4 wire bytes per sample.
+    fn real_stages(rates: &[u64], class: impl Fn(&Stage) -> Option<TrialClass>) -> Vec<FamilyStage> {
+        let mut stages: Vec<FamilyStage> = rates.iter().map(|rate| FamilyStage { condition: format!("rx-{}msps", rate / 1_000_000), family: "rx-sweep".to_owned(), bytes: rate * 4, class: Some(TrialClass::Success) }).collect();
+        stages.extend(throughput_stages(Direction::Rx, 2, rates).iter().filter(|stage| stage.family != "mixed").map(|stage| FamilyStage {
+            condition: stage.id.clone(), family: format!("rx-{}", stage.family), bytes: stage.bytes(Direction::Rx, 4).unwrap(), class: class(stage),
+        }));
+        stages
+    }
+
+    #[test]
+    fn the_capacity_names_a_condition_that_passed_and_the_blocker_apart() {
+        use TrialClass::*;
+        let rates = [100_000_000, 200_000_000];
+        // Grouped passes at 100 MS/s (800 MB/s) and fails at 200 MS/s: the climb stops at 800 MB/s, where the sweep's 200 MS/s is the
+        // first stage listed. The value names grouped's own passing stage, with its real id, not the sweep's and not the failed one's.
+        let capacity = capacity_over_conditions(&real_stages(&rates, |stage| Some(if stage.id == "rx-grouped-200m" { DeviceFailure } else { Success })));
+        assert_eq!(capacity.best, Some((800_000_000, "rx-grouped-100m".to_owned())), "{capacity:?}");
+        assert_eq!((capacity.observation["blocker_condition"].as_str(), capacity.observation["blocker_bytes_per_s"].as_u64()), (Some("rx-grouped-200m"), Some(1_600_000_000)));
+        // The split family stopping it is named by its own stage instead.
+        let split = capacity_over_conditions(&real_stages(&rates, |stage| Some(if stage.id == "rx-split-200m" { DeviceFailure } else { Success })));
+        assert_eq!(split.best.map(|(_, id)| id), Some("rx-split-100m".to_owned()));
+        // With no stage of the stopper's family passing at the capacity, the first that passed is named, never the failed one.
+        let mixed = capacity_over_conditions(&[
+            FamilyStage { condition: "rx-100msps".to_owned(), family: "rx-sweep".to_owned(), bytes: 400, class: Some(Success) },
+            FamilyStage { condition: "rx-split-100m".to_owned(), family: "rx-split".to_owned(), bytes: 800, class: Some(Success) },
+            FamilyStage { condition: "rx-grouped-200m".to_owned(), family: "rx-grouped".to_owned(), bytes: 1_600, class: Some(DeviceFailure) },
+        ]);
+        assert_eq!(mixed.best, Some((800, "rx-split-100m".to_owned())));
+    }
+
+    fn result_of(class: TrialClass) -> StageResult { StageResult { class, left_open: false, observation: json!({ "family": "split" }) } }
+
+    #[test]
+    fn a_stage_that_fails_ends_the_climb_and_keeps_the_stages_before_it() {
+        let rates = [100_000_000, 200_000_000];
+        let stages = || throughput_stages(Direction::Rx, 2, &rates);
+        for panics in [false, true] {
+            let mut ran = Vec::new();
+            let extra = run_stages(Direction::Rx, stages(), 4, |stage| {
+                ran.push(stage.id.clone());
+                match ran.len() {
+                    1 | 2 => Ok(result_of(TrialClass::Success)),
+                    _ if panics => panic!("a stage panicked"),
+                    _ => Err("no active transmit stream-1 SampleClock".to_owned()),
+                }
+            }).unwrap();
+            assert_eq!(ran.len(), 3, "the stage after the failed one is not run");
+            let classes: Vec<_> = extra.stages.iter().map(|stage| stage.class).collect();
+            assert_eq!(classes, [Some(TrialClass::Success), Some(TrialClass::Success), None, None, None], "the stages before keep their class, the failed and the later are `not run`");
+            assert_eq!(extra.observations.len(), 3);
+            assert!(extra.observations[0].result["family"] == "split" && extra.observations[1].result["family"] == "split", "the earlier stages' observations stay");
+            let failed = extra.observations[2].result["stage_failed"].as_str().unwrap();
+            assert!(failed.contains(if panics { "a stage panicked" } else { "no active transmit" }), "{failed}");
+            assert_eq!(extra.conditions.len(), 5, "every stage still has its condition row");
+        }
+    }
+
+    #[test]
+    fn the_pll_retries_used_up_latch_the_record_and_nothing_more_is_opened() {
+        let pll = || Err::<(), String>(format!("{} to its internal source", ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK));
+        let latch = Latch::new();
+        install_record_latch(Some(latch.clone()));
+        // A retry that succeeds latches nothing.
+        let mut calls = 0;
+        assert!(common::open_with_pll_retries(|| { calls += 1; if calls < 3 { pll() } else { Ok(()) } }, 3, Wall::ZERO).is_ok());
+        assert_eq!((calls, latch.reason()), (3, None));
+        // An error that is not the PLL's is not retried and does not latch.
+        let mut calls = 0;
+        assert!(common::open_with_pll_retries(|| { calls += 1; Err::<(), _>("UR-7: set_sources failed".to_owned()) }, 3, Wall::ZERO).is_err());
+        assert_eq!((calls, latch.reason()), (1, None));
+        // A PLL that stays unlocked: the retries are used up, the latch is set, and no later opener is called.
+        let mut calls = 0;
+        assert!(common::open_with_pll_retries(|| { calls += 1; pll() }, 3, Wall::ZERO).is_err());
+        assert_eq!(calls, 4, "the open and three retries");
+        assert!(latch.reason().is_some_and(|reason| reason.contains("PLL did not lock") && reason.contains("power cycle")));
+        let mut opened = 0;
+        let later = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let _ = open_record_guard(|| { opened += 1; Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default())) }); }));
+        assert!(later.is_err() && opened == 0, "a latched record opens nothing");
+        // The failed group and the groups after it are in the record, as failures and `not run`.
+        let mut groups = GroupRun::new(None);
+        let key = |name: &str| vec![name.to_owned()];
+        groups.run("first", &key("radio.timing.tx_in_flight_ns"), || Err("the group failed".to_owned()));
+        groups.run("second", &key("radio.timing.rx_start_lead_ns"), || match record_latch_reason() {
+            Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
+            None => Ok(MeasurementGroup::default()),
+        });
+        groups.probe("a probe", || { let _ = open_record_guard(|| unreachable!("a latched record opens nothing")); });
+        let names: Vec<_> = groups.failed().iter().map(|(name, error)| (name.as_str(), error.starts_with("not run"))).collect();
+        assert_eq!(names, [("first", false), ("second", true), ("a probe", false)]);
+        assert!(groups.failed()[2].1.contains("not opening the device"));
+        let record = groups.take();
+        assert_eq!(record.values.len(), 2, "each failed group's key is `unmeasured` in the record");
+        // The pair is a group of its own: with the latch set it is `not run` and its device is not asked for.
+        let mut pair_groups = GroupRun::new(None);
+        pair_groups.run_duplex_pair(&MeasurementPlan::rehearsal(), 4, || unreachable!("a latched record asks for no device"));
+        assert!(pair_groups.failed()[0].1.starts_with("not run: the device handle is latched"), "{:?}", pair_groups.failed());
+        install_record_latch(None);
+        // A probe's `set_sources` is retried and latches the same way, with UHD's text turned into the retried one.
+        let latch = Latch::new();
+        install_record_latch(Some(latch.clone()));
+        let fake = ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig { faults: vec![ezsdr_radio_uhd::FakeFault::ReferenceDoesNotLock], ..ezsdr_radio_uhd::FakeConfig::default() });
+        let error = common::set_sources_with_pll_retries_every(&fake, "internal", "internal", Wall::ZERO).unwrap_err();
+        assert!(error.starts_with(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK), "{error}");
+        assert_eq!(fake.calls().iter().filter(|call| call.starts_with("set_sources")).count(), 4, "the call and three retries");
+        assert!(latch.reason().is_some());
+        let healthy = ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default());
+        install_record_latch(Some(Latch::new()));
+        assert!(common::set_sources_with_pll_retries_every(&healthy, "internal", "internal", Wall::ZERO).is_ok());
+        assert_eq!(record_latch_reason(), None, "a lock that comes needs no latch");
+        install_record_latch(None);
+        // Outside a record the same exhaustion latches nothing.
+        let mut calls = 0;
+        assert!(common::open_with_pll_retries(|| { calls += 1; pll() }, 1, Wall::ZERO).is_err());
+        assert_eq!(record_latch_reason(), None);
     }
 
     #[test]

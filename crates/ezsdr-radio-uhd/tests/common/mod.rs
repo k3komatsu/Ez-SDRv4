@@ -325,9 +325,14 @@ pub fn waveform_of(samples: &[(f32, f32)]) -> (Vec<u8>, ArtifactRef) {
 /// A waveform for the transmissions added in stage 3c-3a (duplex stages and companions): `pn` scaled so that every sample's complex
 /// magnitude is within bench.md's 0.5; the bound is asserted before anything is sent. (The earlier steps keep sending `pn` itself.)
 pub fn transmit_waveform(n: usize) -> (Vec<u8>, ArtifactRef) {
+    waveform_of(&transmit_samples(n))
+}
+
+/// The samples of `transmit_waveform`, for a probe that compares what it receives with them.
+pub fn transmit_samples(n: usize) -> Vec<(f32, f32)> {
     let samples: Vec<(f32, f32)> = pn(n).into_iter().map(|(re, im)| (re * 0.875, im * 0.875)).collect();
     assert!(samples.iter().all(|(re, im)| re.hypot(*im) <= 0.5), "bench.md RF safety: a transmit waveform's magnitude is at most 0.5");
-    waveform_of(&samples)
+    samples
 }
 
 pub fn tone(n: usize) -> Vec<(f32, f32)> {
@@ -407,7 +412,22 @@ pub fn open_with_pll_retries<T>(mut open: impl FnMut() -> Result<T, String>, ret
         std::thread::sleep(pause);
         opened = open();
     }
+    // The retries used up on a PLL that stays unlocked: inside a record, nothing after this can use the device (stage 3e).
+    if let Err(error) = &opened { measurement::latch_record_on_pll_failure(error); }
     opened
+}
+
+/// `set_sources` for a probe that opens the device itself, with the same UR-7 retries as an Authority's open: UHD's PLL text is
+/// turned into `REFERENCE_DID_NOT_LOCK` as `DeviceAuthority::new` does (authority.rs), so the retry helper recognises it.
+pub fn set_sources_with_pll_retries(device: &dyn Device, clock: &str, time: &str) -> Result<(), String> {
+    set_sources_with_pll_retries_every(device, clock, time, Wall::from_secs(1))
+}
+
+/// `set_sources_with_pll_retries` with the retries `pause` apart.
+pub fn set_sources_with_pll_retries_every(device: &dyn Device, clock: &str, time: &str, pause: Wall) -> Result<(), String> {
+    open_with_pll_retries(|| device.set_sources(clock, time).map_err(|e| {
+        if e.message.contains("Reference Clock PLL failed to lock") { format!("{} ({e})", ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) } else { format!("UR-7: {e}") }
+    }), 3, pause)
 }
 
 pub fn fake(config: FakeConfig) -> Arc<FakeDevice> {
@@ -830,4 +850,69 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
 pub fn after_ticks(run: &RunHandle, ticks: i64) -> TimePoint {
     let now = run.now();
     TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + ticks)
+}
+
+/// The transmit sample `lead` root ticks from now, on the running transmit clock.
+pub fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
+    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
+    let n = clock.root_ticks_per_tick.num() as i64;
+    TimePoint::new(clock.domain, (run.now().ticks_in(clock.root).unwrap() + lead - clock.origin.ticks_in(clock.root).unwrap() + n - 1).div_euclid(n))
+}
+
+/// The phase of the one 1 ms burst of `wave` in the `rec` capture of `manifest`, in degrees, or why none was read (INCONCLUSIVE):
+/// a gap, a late burst, a missing or mistimed waveform, a weak loop or a phase that moves across the burst. The capture is
+/// 10 000 samples and the burst begins 5 000 samples into it, the loop's delay (35 to 44 samples, B6) later, give or take the instants' rounding.
+pub fn ma1_phase(manifest: &Manifest, wave: &[(f32, f32)]) -> Result<f64, String> {
+    let artifact = capture_of(manifest, "rec");
+    if artifact.continuity.len() != 1 { return Err(format!("the capture has {} stretches, not one (a gap)", artifact.continuity.len())); }
+    if !events_of(manifest, "radio.TIME_ERROR").is_empty() { return Err("the burst was late (TIME_ERROR)".to_owned()); }
+    let samples = read_capture(&artifact, 1).remove(0);
+    if samples.len() < 10_000 { return Err(format!("the capture holds {} of 10 000 samples", samples.len())); }
+    let offset = correlate(&samples, wave).ok_or("no waveform peak in the capture (the loopback is weak or the burst is missing)")?;
+    if !(4_950..5_150).contains(&offset) { return Err(format!("the waveform is at sample {offset}, not at the burst's time (4 950 to 5 150)")); }
+    let phase = tone::burst_phase(&samples, wave, offset).ok_or("the capture does not hold the whole burst")?;
+    tone::phase_verdict(&phase)
+}
+
+/// One run of the MA-1 probe: the receive and the transmit frequency are changed to the bench frequency plus 300 kHz (the LO
+/// is rewritten), then one 1 ms burst is sent and captured, and its phase against the known waveform is returned (`ma1_phase`).
+/// `timed_after_start` false: a Session sets both before T0, where the receive one is applied untimed (UR-24, D9a) and the
+/// transmit one by the enable's configuration. True: a Spec Run sets both again at one instant, 100 ms in, while the
+/// receive stream runs (the receive one timed, as D9a's covering rule gives it; the transmit one between bursts, away from
+/// F3′), and its burst begins 10 ms after it. The two measure one thing, the burst's phase, by two harnesses, because a Session
+/// action has no `at` of its own.
+pub fn ma1_run(device: Arc<dyn Device>, timed_after_start: bool, wave: &[(f32, f32)], bytes: &[u8]) -> Result<f64, String> {
+    let dir = TempDir::new();
+    let hz = bench_hz(&*device);
+    let f_new = hz + 300e3;
+    assert!(SAFE_TX_HZ.contains(&f_new), "bench.md RF safety: {f_new} Hz is outside SAFE_TX_HZ (the probe is for slot A's OBX or UBX at 1 GHz)");
+    let envelope = bench_envelope(&*device);
+    let manifest = if timed_after_start {
+        let (_, waveform) = waveform_of(wave);
+        let mut spec = with_burst(with_tx(receive_spec(1, 1e6, hz, None), 1e6), &waveform, false, "send_asap_and_flag", 110_000);
+        let at = |offset: i64| json!({ "clock": "radio", "offset_ticks": offset });
+        let update = |direction: &str| json!({ "at": at(100_000), "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
+            "key": format!("radio.{direction}.c0.frequency_hz"), "value": f_new } });
+        spec["schedule"].as_array_mut().expect("the burst's schedule").extend([update("rx"), update("tx"), json!({ "at": at(105_000), "action": {
+            "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(), "key": "sink.capture_samples", "value": 10_000 } })]);
+        let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.to_vec())]);
+        captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), envelope, false), device, inputs))
+    } else {
+        let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
+        for direction in ["rx", "tx"] {
+            let entry = run.submit(set(&format!("radio.{direction}.c0.frequency_hz"), Value::num(f_new).unwrap()), None).unwrap();
+            assert!(admitted(&entry), "{entry:?}");
+        }
+        past_t0(&mut run, ms(1));
+        assert!(admitted(&run.submit(set("radio.tx.c0.stream", Value::from(0)), None).unwrap()));
+        past_tx_origin(&mut run);
+        // Both instants are read before either is submitted, so that a slow submit does not move the burst in the capture.
+        let (at, capture_at) = (tx_at(&run, ms(30)), after_ticks(&run, ms(25)));
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(bytes)).unwrap()));
+        assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", Value::from(10_000))]), None).unwrap()));
+        let horizon = after_ticks(&run, ms(3_000));
+        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
+        run.finish()
+    };
+    ma1_phase(&manifest, wave)
 }

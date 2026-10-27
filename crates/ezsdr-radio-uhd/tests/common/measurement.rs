@@ -713,7 +713,7 @@ impl Default for MeasurementPlan {
             interval_ns: 20_000_000,
             queue_trials: 5,
             queue_ahead_ns: 3_000_000_000,
-            queue_max_calls: 64,
+            queue_max_calls: 512,
             raw_group_limit_ms: 300_000,
             frequency_points: 200,
             nics: Vec::new(),
@@ -844,6 +844,9 @@ const QUEUE_TEST: &str = "tests/hardware.rs::hw_measurements_record";
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum QueueTrialClass {
     Success { depth: usize },
+    /// The blocked call's device-time interval straddles the first command time: it may have
+    /// waited for the queue or may not. Never a success, never a failure of the trial's kind.
+    Ambiguous { depth: usize },
     Incomplete { reason: &'static str },
     DeviceFailure { reason: String },
 }
@@ -899,12 +902,17 @@ fn classify_queue_trial(
     let Some(latest_return_tick) = first_at.checked_add(return_limit_ticks) else {
         return QueueTrialClass::Incomplete { reason: "the blocked apply return-time limit overflowed" };
     };
-    let blocked_bounds = blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz));
-    if blocked_bounds.is_none_or(|(lower, _)| lower < first_at) {
-        return QueueTrialClass::Incomplete { reason: "the blocked apply has a lower device-time bound before the first command time" };
+    let Some((lower, upper)) = blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)) else {
+        return QueueTrialClass::Incomplete { reason: "the blocked apply has no device-time bounds" };
+    };
+    if upper < first_at {
+        return QueueTrialClass::Incomplete { reason: "the blocked apply returned before the first command time (its upper device-time bound is before it)" };
     }
-    if blocked_bounds.is_some_and(|(_, upper)| upper > latest_return_tick) {
+    if upper > latest_return_tick {
         return QueueTrialClass::Incomplete { reason: "the blocked apply has an upper device-time bound too long after the first command time" };
+    }
+    if lower < first_at {
+        return QueueTrialClass::Ambiguous { depth };
     }
     QueueTrialClass::Success { depth }
 }
@@ -1205,7 +1213,10 @@ fn queue_trial_calls(
     raw: &RawGroup,
     rx: Option<&RxProgress>,
 ) -> Result<(QueueTrialClass, Json), String> {
-    let ahead_ticks = ticks_for_ns(plan.queue_ahead_ns, device.master_clock_rate())?;
+    // Every second trial waits for a shorter target (2/3 of the first's), so the blocked call's
+    // number can be compared across two delays: a queue's depth does not move with the delay.
+    let ahead_ns = if trial % 2 == 0 { plan.queue_ahead_ns / 3 * 2 } else { plan.queue_ahead_ns };
+    let ahead_ticks = ticks_for_ns(ahead_ns, device.master_clock_rate())?;
     let spacing_ticks = ticks_for_ns(QUEUE_SPACING_NS, device.master_clock_rate())?;
     let margin_ticks = ticks_for_ns(QUEUE_DRAIN_MARGIN_NS, device.master_clock_rate())?;
     let return_limit_ticks = ticks_for_ns(QUEUE_CALL_TIME_LIMIT_NS, device.master_clock_rate())?;
@@ -1225,7 +1236,7 @@ fn queue_trial_calls(
         Some(at) => at,
         None => return Ok(queue_failed(trial, raw, label, "queue target tick overflow".to_owned())),
     };
-    let stall_limit_ns = plan.queue_ahead_ns / 2;
+    let stall_limit_ns = ahead_ns / 2;
     if device.channels(Dir::Tx) == 0 {
         return Ok(queue_failed(trial, raw, label, "queue probe requires transmit channel 0".to_owned()));
     }
@@ -1285,7 +1296,7 @@ fn queue_trial_calls(
     // After an error nothing more goes to the handle: no clock read, no untimed reset.
     if let Some(last_at) = last_accepted_at.filter(|_| operational_error.is_none()) {
         let target = last_at.checked_add(margin_ticks).ok_or("queue drain time overflow")?;
-        let timeout = Wall::from_nanos(plan.queue_ahead_ns.checked_add(QUEUE_DRAIN_MARGIN_NS + 2_000_000_000).ok_or("queue drain timeout overflow")?);
+        let timeout = Wall::from_nanos(ahead_ns.checked_add(QUEUE_DRAIN_MARGIN_NS + 2_000_000_000).ok_or("queue drain timeout overflow")?);
         let waited = match rx {
             // The received samples must pass the last command (their ticks are device ticks).
             Some(progress) => wait_for_rx_end(raw, progress, target, timeout),
@@ -1305,18 +1316,22 @@ fn queue_trial_calls(
     };
     let class = finish_queue_trial(queue_class, operational_error, untimed_error.clone());
     let depth = match &class { QueueTrialClass::Success { depth } => Some(*depth), _ => None };
+    let blocked_index = match &class { QueueTrialClass::Success { depth } | QueueTrialClass::Ambiguous { depth } => Some(*depth), _ => None };
     let class_name = match &class {
         QueueTrialClass::Success { .. } => "success",
+        QueueTrialClass::Ambiguous { .. } => "ambiguous",
         QueueTrialClass::Incomplete { .. } => "incomplete",
         QueueTrialClass::DeviceFailure { .. } => "device_failure",
     };
     let class_reason = match &class {
         QueueTrialClass::Incomplete { reason } => Some((*reason).to_owned()),
         QueueTrialClass::DeviceFailure { reason } => Some(reason.clone()),
-        QueueTrialClass::Success { .. } => None,
+        QueueTrialClass::Success { .. } | QueueTrialClass::Ambiguous { .. } => None,
     };
     Ok((class, json!({
         "trial": trial,
+        "ahead_ns": ahead_ns,
+        "blocked_index": blocked_index,
         "d0_tick": clock.d0_tick,
         "h_before_ns": clock.h_before_ns,
         "h_after_ns": clock.h_after_ns,
@@ -1336,8 +1351,26 @@ fn summarize_queue_depth(conditions: &[(String, Vec<QueueTrialClass>)], required
     }
     conditions.iter().flat_map(|(condition, trials)| trials.iter().filter_map(move |trial| match trial {
         QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.iter().filter(|row| matches!(row, QueueTrialClass::Success { .. })).count())),
-        QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
+        QueueTrialClass::Ambiguous { .. } | QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
     })).min_by_key(|(depth, _, _)| *depth)
+}
+
+/// The blocked call's number per target delay, from the trials that stalled once in the window
+/// (`success` and `ambiguous`): `agree` is whether one number holds for every delay, null when
+/// fewer than two delays gave one. A queue's depth does not move with the delay; a stall for
+/// another reason (a slow host) would (INFERRED).
+fn queue_index_agreement(trials: &[Json]) -> Json {
+    let mut by_ahead: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for row in trials.iter().filter(|row| matches!(row["classification"].as_str(), Some("success" | "ambiguous"))) {
+        if let (Some(ahead), Some(index)) = (row["ahead_ns"].as_u64(), row["blocked_index"].as_u64()) {
+            by_ahead.entry(ahead).or_default().push(index);
+        }
+    }
+    let mut all: Vec<u64> = by_ahead.values().flatten().copied().collect();
+    all.sort_unstable();
+    all.dedup();
+    let agree = (by_ahead.len() >= 2).then_some(all.len() == 1);
+    json!({ "by_ahead_ns": by_ahead.iter().map(|(ahead, indexes)| (ahead.to_string(), json!(indexes))).collect::<serde_json::Map<_, _>>(), "agree": agree })
 }
 
 fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize) -> Result<ValueRecord, String> {
@@ -1349,7 +1382,7 @@ fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_tri
         },
         None => ValueRecord::Unmeasured {
             key,
-            reason: format!("Phase 8 stage 3c-2a did not obtain {required_trials} successful back-pressure trials in every queue condition."),
+            reason: format!("Phase 8 stage 3e did not obtain {required_trials} successful back-pressure trials in every queue condition."),
         },
     })
 }
@@ -1374,7 +1407,7 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
             total_trials += 1;
         }
         if !trials.is_empty() || raw.failure().is_none() {
-            observed_conditions.push(json!({ "id": condition.id.clone(), "trials": trials }));
+            observed_conditions.push(json!({ "id": condition.id.clone(), "blocked_index_across_ahead": queue_index_agreement(&trials), "trials": trials }));
             condition_trials.push((condition.id.clone(), classes));
             group.conditions.push(condition);
         }
@@ -1387,7 +1420,7 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
     group.observations.push(observation("raw_command_queue_depth", QUEUE_TEST, None, observation_trials(total_trials.max(1))?, json!({
         "ahead_ns": plan.queue_ahead_ns,
         "spacing_ns": QUEUE_SPACING_NS,
-        "stall_limit_ns": plan.queue_ahead_ns / 2,
+        "stall_limit_ns": "half of each trial's own ahead_ns (the trial rows give ahead_ns and every call's duration_ns)",
         "call_time_limit_ns": QUEUE_CALL_TIME_LIMIT_NS,
         "host_time_origin": "h_before_ns; all host timestamps are offsets from h_before",
         "clock_rate_assumption": "device and host clocks advance at the same rate; drift is ignored (INFERRED)",
@@ -1403,6 +1436,9 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
         "halted": raw.failure(),
         "power_cycle_note": raw.failure().map(|_| "a wedged DDC or DUC control port needs a power cycle of the device; the group sent nothing more after the first error"),
         "max_calls": plan.queue_max_calls,
+        "classification": "success: the blocked call's device-time interval lies wholly at or after the first command time; ambiguous: it straddles that time (never a success, never counted in the value); incomplete: the call returned before that time or too long after it, or the trial did not stall exactly once",
+        "ambiguous_trials": condition_trials.iter().flat_map(|(_, classes)| classes).filter(|class| matches!(class, QueueTrialClass::Ambiguous { .. })).count(),
+        "trial_ahead_ns": "odd trials wait ahead_ns; even trials wait two thirds of it, to compare the blocked call's number across two delays",
         "conditions": observed_conditions,
     }))?);
     Ok(group)
@@ -2098,6 +2134,16 @@ impl GroupRun {
             Err(payload) => self.fail(name, keys, Self::panic_text(payload)),
         }
         self.write_partial();
+    }
+
+    /// The pair of the two measured throughput limits, run once both values are decided (stage 3e): a group of its own with no
+    /// value key, so its failure is its own. A latched record does not run it.
+    pub fn run_duplex_pair(&mut self, plan: &MeasurementPlan, wire_bytes: u64, device: impl FnOnce() -> Arc<dyn Device>) {
+        let limits = duplex_limits(&self.measured);
+        self.run("duplex_at_the_measured_limits", &[], || match record_latch_reason() {
+            Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
+            None => measure_duplex_at_limits(device(), plan, limits, wire_bytes),
+        });
     }
 
     /// Runs one raw hardware probe, which pushes its observation on this thread; a panic is a failed probe.
@@ -3131,10 +3177,10 @@ pub fn measure_rx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
         )?);
     }
     // The layout's other conditions (two or more channels, a stream each way) are added to the one-channel sweep.
-    let extra = extra_throughput(&device, plan, Direction::Rx, description.rx.len(), description.tx.len(), wire_bytes)?;
+    let extra = extra_throughput(&device, plan, Direction::Rx, description.rx.len(), wire_bytes)?;
     if !extra.stages.is_empty() {
         let mut family: Vec<FamilyStage> = plan.rx_rates_hz.iter().zip(&stages)
-            .map(|(rate, stage)| FamilyStage { condition: rate_condition(*rate), bytes: stage.value, class: stage.trials.first().copied() }).collect();
+            .map(|(rate, stage)| FamilyStage { condition: rate_condition(*rate), family: "rx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() }).collect();
         family.extend(extra.stages);
         let (row, capacity) = throughput_value("radio.perf.rx_bytes_per_s", &family)?;
         conditions.extend(extra.conditions);
@@ -3197,6 +3243,8 @@ struct TxThroughputEvidence {
     class: TrialClass,
     actual_samples: Option<u64>,
     burst_count: usize,
+    /// The `blocks` of each burst row: how many device sends the Provider made in it (SC-28).
+    burst_blocks: Vec<u64>,
     burst_target: Option<TimePoint>,
     burst_start_tick: Option<i64>,
     burst_target_matches_schedule: bool,
@@ -3239,6 +3287,7 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
         .or_else(|| stats.get("tx_samples").and_then(Json::as_i64).and_then(|samples| u64::try_from(samples).ok()));
     let burst_rows = bursts.as_array().cloned().unwrap_or_default();
     let burst_count = burst_rows.len();
+    let burst_blocks: Vec<u64> = burst_rows.iter().filter_map(|row| row["blocks"].as_u64()).collect();
     let burst = (burst_count == 1).then(|| &burst_rows[0]);
     let burst_target = burst.and_then(|row| serde_json::from_value::<TimePoint>(row["target"].clone()).ok());
     let tx_suffix = format!("usrp/tx/s{stream}");
@@ -3280,7 +3329,7 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
         else if !complete_burst || !enough_samples || !ack_after_minimum { TrialClass::Incomplete }
         else { TrialClass::Success };
     TxThroughputEvidence {
-        class, actual_samples, burst_count, burst_target, burst_start_tick, burst_target_matches_schedule,
+        class, actual_samples, burst_count, burst_blocks, burst_target, burst_start_tick, burst_target_matches_schedule,
         burst_ack_count, burst_ack_tick, minimum_ack_tick, ack_elapsed_ticks, ack_elapsed_samples,
         minimum_samples, tx_samples_minus_ack_elapsed_samples, underflow_events, async_failures, short_send_rejections,
     }
@@ -3352,15 +3401,15 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
                 "ack_elapsed_ticks": evidence.ack_elapsed_ticks, "ack_elapsed_samples": evidence.ack_elapsed_samples,
                 "minimum_samples": evidence.minimum_samples, "actual_samples": evidence.actual_samples,
                 "tx_samples_minus_ack_elapsed_samples": evidence.tx_samples_minus_ack_elapsed_samples,
-                "burst_count": evidence.burst_count, "tx_underflow_events": evidence.underflow_events,
+                "burst_count": evidence.burst_count, "burst_blocks": evidence.burst_blocks, "tx_underflow_events": evidence.underflow_events,
                 "async_failures": evidence.async_failures, "short_send_rejections": evidence.short_send_rejections,
                 "stage": stage }),
         )?);
     }
-    let extra = extra_throughput(&device, plan, Direction::Tx, tx_description.tx.len(), tx_description.rx.len(), wire_bytes)?;
+    let extra = extra_throughput(&device, plan, Direction::Tx, tx_description.tx.len(), wire_bytes)?;
     if !extra.stages.is_empty() {
         let mut family: Vec<FamilyStage> = plan.tx_throughput_rates_hz.iter().zip(&stages)
-            .map(|(rate, stage)| FamilyStage { condition: tx_rate_id(*rate), bytes: stage.value, class: stage.trials.first().copied() }).collect();
+            .map(|(rate, stage)| FamilyStage { condition: tx_rate_id(*rate), family: "tx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() }).collect();
         family.extend(extra.stages);
         let (row, capacity) = throughput_value("radio.perf.tx_bytes_per_s", &family)?;
         conditions.extend(extra.conditions);
@@ -3854,7 +3903,9 @@ mod tests {
         assert!(matches!(classify(&[call(stall_limit, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&vec![call(1_000_000, Some(99), None); 4], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(100_000_001, Some(99), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(stall_limit + 1, Some(109), None)], clock), QueueTrialClass::Incomplete { .. }));
+        // A return whose interval straddles the first command time is ambiguous, not a success.
+        assert_eq!(classify(&[call(stall_limit + 1, Some(109), None)], clock), QueueTrialClass::Ambiguous { depth: 0 });
+        assert!(matches!(classify(&[call(stall_limit + 1, Some(99), None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(stall_limit + 1, Some(210), None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(stall_limit + 1, None, None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(1_000_000, Some(100), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
@@ -3881,6 +3932,49 @@ mod tests {
         ];
         assert!(summarize_queue_depth(&incomplete, 2).is_none());
         assert!(matches!(queue_depth_value(&incomplete, 2).unwrap(), ValueRecord::Unmeasured { reason, .. } if reason.contains("2 successful back-pressure trials in every queue condition")));
+    }
+
+    #[test]
+    fn the_twelve_historical_blocked_returns_are_classified_by_their_interval() {
+        // Stage 3e, F1: the 12 raw-probe returns of the 2026-10-20 and 10-27 benches, in ms
+        // after the 3 s target (+0.17 ... -2.42), against a 50 us device-time read. The lower
+        // bound is the return less the read, the upper the return: at or after the target is
+        // a success, a straddle ambiguous, an upper bound before the target incomplete.
+        let first_at = 3_000_000_000i64;
+        let read_ns = 50_000u64;
+        let clock = QueueClock { d0_tick: 0, h_before_ns: 0, h_after_ns: read_ns };
+        let stall_limit = 1_500_000_000;
+        let classify = |delta_us: i64| {
+            let h_i = (first_at + delta_us * 1_000) as u64;
+            let calls = [QueueCall { duration_ns: 1_000_000, h_i_ns: Some(first_at as u64 - 100_000_000), error: None },
+                QueueCall { duration_ns: stall_limit + 1, h_i_ns: Some(h_i), error: None }];
+            classify_queue_trial(&calls, clock, first_at, stall_limit, 100_000_000, 1_000_000_000)
+        };
+        let readings = [170, 120, 110, 110, 70, 50, 40, 30, 10, -10, -1_400, -2_420];
+        let classes: Vec<_> = readings.iter().map(|us| classify(*us)).collect();
+        assert_eq!(classes.iter().filter(|class| matches!(class, QueueTrialClass::Success { depth: 1 })).count(), 6, "{classes:?}");
+        assert_eq!(classes.iter().filter(|class| matches!(class, QueueTrialClass::Ambiguous { depth: 1 })).count(), 3, "{classes:?}");
+        assert_eq!(classes.iter().filter(|class| matches!(class, QueueTrialClass::Incomplete { .. })).count(), 3, "{classes:?}");
+        // A slow call that is no queue block returns well before the target: never a success.
+        assert!(matches!(classify(-1_000_000), QueueTrialClass::Incomplete { reason } if reason.contains("returned before")));
+        // One that returns long after it is incomplete too.
+        assert!(matches!(classify(150_000), QueueTrialClass::Incomplete { reason } if reason.contains("too long after")));
+        // Ambiguous trials never count: three of five successes do not make five.
+        let mixed = [("a".to_owned(), vec![QueueTrialClass::Success { depth: 8 }, QueueTrialClass::Ambiguous { depth: 2 }, QueueTrialClass::Success { depth: 9 }])];
+        assert_eq!(summarize_queue_depth(&mixed, 2), Some((8, "a".to_owned(), 2)));
+        assert!(summarize_queue_depth(&mixed, 3).is_none());
+    }
+
+    #[test]
+    fn the_blocked_call_s_number_is_compared_across_two_target_delays() {
+        let row = |class: &str, ahead: u64, index: Option<u64>| json!({ "classification": class, "ahead_ns": ahead, "blocked_index": index });
+        let same = queue_index_agreement(&[row("success", 3, Some(8)), row("ambiguous", 2, Some(8)), row("success", 3, Some(8))]);
+        assert_eq!(same["agree"], json!(true));
+        assert_eq!(same["by_ahead_ns"]["2"], json!([8]));
+        // A number that moves with the delay is no queue depth.
+        assert_eq!(queue_index_agreement(&[row("success", 3, Some(8)), row("success", 2, Some(5))])["agree"], json!(false));
+        // Incomplete trials say nothing; one delay alone has nothing to compare.
+        assert_eq!(queue_index_agreement(&[row("success", 3, Some(8)), row("incomplete", 2, Some(5))])["agree"], json!(null));
     }
 
     #[test]
@@ -4762,7 +4856,7 @@ mod tests {
         assert_eq!(MeasurementPlan::default().queue_trials, 5);
         let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
         assert_eq!((defaults.step_trials, defaults.overflow_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 5, 60, 20));
-        assert_eq!((defaults.queue_trials, defaults.queue_ahead_ns, defaults.queue_max_calls), (5, 3_000_000_000, 64));
+        assert_eq!((defaults.queue_trials, defaults.queue_ahead_ns, defaults.queue_max_calls), (5, 3_000_000_000, 512));
         assert_eq!(defaults.tx_start_leads_ns, defaults.rx_start_leads_ns);
         assert_eq!(defaults.overflow_rates_hz, [1_000_000, 10_000_000, 25_000_000, 50_000_000]);
         assert_eq!(defaults.overflow_stall_ms.len(), defaults.overflow_rates_hz.len());
