@@ -1810,6 +1810,7 @@ impl Device for RefuseRxOpenOnce {
     fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 fn move_open_refusal_recovery(failed_stream: usize) {
@@ -3903,6 +3904,7 @@ impl Device for Watched {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 fn watched() -> (Arc<Watched>, Arc<Mutex<Option<String>>>) {
@@ -4120,6 +4122,7 @@ impl Device for Descheduled {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
 }
 
@@ -4250,6 +4253,7 @@ impl Device for LostAtShutdown {
     fn tx_close(&self, s: usize) { self.call("tx_close"); self.inner.tx_close(s) }
     fn close_streams(&self) { self.call("close_streams"); self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
 }
 
@@ -4543,6 +4547,7 @@ impl Device for Gated {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
 }
 
@@ -4711,11 +4716,18 @@ fn ur_05_a_layout_out_of_uhd_s_default_order_is_accepted() {
 struct Recording {
     inner: FakeDevice,
     log: Mutex<Vec<String>>,
+    /// What `raise_thread_priority` answers: UHD's EPERM when a test sets it (UR-23).
+    priority: Mutex<Option<ezsdr_radio_uhd::DeviceError>>,
 }
 
 impl Recording {
     fn new(config: FakeConfig) -> Recording {
-        Recording { inner: FakeDevice::new(config), log: Mutex::new(Vec::new()) }
+        Recording { inner: FakeDevice::new(config), log: Mutex::new(Vec::new()), priority: Mutex::new(None) }
+    }
+
+    /// The names of the threads that asked for a real-time priority, in order.
+    fn raisers(&self) -> Vec<String> {
+        self.log().iter().filter_map(|line| line.strip_prefix("raise_thread_priority ").map(str::to_owned)).collect()
     }
 
     fn log(&self) -> Vec<String> {
@@ -4769,6 +4781,10 @@ impl Device for Recording {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.record(|| format!("raise_thread_priority {}", std::thread::current().name().unwrap_or("")));
+        self.priority.lock().unwrap().clone().map_or(Ok(()), Err)
+    }
 }
 
 #[test]
@@ -4876,6 +4892,7 @@ impl Device for Mislabelled {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 #[test]
@@ -5020,6 +5037,7 @@ impl Device for SerialFails {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 #[test]
@@ -5112,6 +5130,7 @@ impl Device for RatesMisreported {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 /// The profile's grid with one middle value moved off it: another device whose rates are
@@ -7256,6 +7275,7 @@ fn ur_16_a_panicking_later_stream_ends_the_run() {
         fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
         fn close_streams(&self) { self.inner.close_streams() }
         fn mark_lost(&self) { self.inner.mark_lost() }
+        fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
         fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
     }
     let inner = fake(FakeConfig::default());
@@ -7337,6 +7357,7 @@ impl ezsdr_radio_uhd::Device for HoldAfterApply {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
 }
 
@@ -7594,6 +7615,7 @@ impl ezsdr_radio_uhd::Device for OnceFails {
     fn tx_close(&self, s: usize) { self.inner.tx_close(s) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> ezsdr_radio_uhd::HostClock { self.inner.host() }
 }
 
@@ -8504,4 +8526,70 @@ fn the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation() {
     assert!(tone::continuation_in_loopback(&[], start, queued_end, next).is_err());
     // The capture stops before the continuation's interval.
     assert!(tone::continuation_in_loopback(&make(true, 0, 20_500), start, queued_end, next).unwrap_err().contains("captured"));
+}
+
+// ------------------------------------------------ TXP: the transmit owner's real-time priority (UR-23)
+
+/// `Recording` as a `Device` the Provider and a wrapper can share, and the same value for the test to read.
+fn recording(clock: ClockMode) -> Arc<Recording> {
+    Arc::new(Recording::new(FakeConfig { clock, ..FakeConfig::default() }))
+}
+
+#[test]
+fn ur_23_p1b_a_provider_run_raises_the_priority_of_each_transmit_thread_once() {
+    let device = recording(ClockMode::Manual);
+    let (mut run, _dir) = tx_session_on(device.clone());
+    let at = tx_at(&run, ms(20));
+    assert!(admitted(&send_at(&mut run, "start_repeat", Some(at), &tone(30_000))));
+    wait(&mut run, ms(15));
+    let manifest = run.finish();
+    assert_eq!(device.raisers(), ["uhd-tx-s0"], "{:?}", device.log());
+    assert_eq!(section(&manifest, "stats")["tx_realtime"], 1);
+}
+
+/// A refused priority behind the measurement's guard: no latch, the burst plays, one row in `rejected`.
+#[test]
+fn ur_23_g1_a_refused_priority_does_not_latch_the_measurement_guard() {
+    let device = recording(ClockMode::Manual);
+    *device.priority.lock().unwrap() = Some(ezsdr_radio_uhd::DeviceError { lost: true, message: "uhd_set_thread_priority: UHD error 31: EPERM".to_owned() });
+    let guard = Arc::new(measurement::GuardedDevice::new(device.clone(), measurement::Latch::new()));
+    let (mut run, _dir) = tx_session_on(guard.clone());
+    let at = tx_at(&run, ms(20));
+    assert!(admitted(&send_at(&mut run, "start_repeat", Some(at), &tone(30_000))));
+    wait(&mut run, ms(15));
+    let manifest = run.finish();
+    assert_eq!(guard.latched(), None, "the refusal latched the guard");
+    assert!(device.inner.calls().iter().any(|call| call.starts_with("tx_send ") && call.contains("sob=true")), "the burst reached the device: {:?}", device.inner.calls());
+    let rows: Vec<_> = section(&manifest, "rejected").as_array().unwrap().iter().filter(|row| row["call"] == "set_thread_priority").cloned().collect();
+    assert_eq!(rows.len(), 1, "{:?}", section(&manifest, "rejected"));
+    assert!(rows[0]["error"].as_str().unwrap().contains("EPERM"), "{rows:?}");
+    assert!(section(&manifest, "stats").get("tx_realtime").is_none());
+    assert!(guard.serial().is_ok(), "a later call is not refused");
+}
+
+/// Each wrapper forwards the call to the device behind it, on the calling thread.
+#[test]
+fn ur_23_g2_every_wrapper_forwards_the_priority_call() {
+    fn raised_through(wrap: impl FnOnce(Arc<Recording>) -> Arc<dyn Device> + Send + 'static) -> Vec<String> {
+        let device = recording(ClockMode::Real);
+        let wrapper = wrap(device.clone());
+        std::thread::Builder::new().name("uhd-tx-probe".to_owned()).spawn(move || wrapper.raise_thread_priority().unwrap()).unwrap().join().unwrap();
+        device.raisers()
+    }
+    let expected = ["uhd-tx-probe".to_owned()];
+    assert_eq!(raised_through(|inner| Arc::new(measurement::GuardedDevice::new(inner, measurement::Latch::new()))), expected, "GuardedDevice");
+    assert_eq!(raised_through(|inner| Arc::new(measurement::CountingDevice::new(inner))), expected, "CountingDevice");
+    assert_eq!(raised_through(|inner| Arc::new(probe_device::ProbeDevice::new(inner))), expected, "ProbeDevice");
+}
+
+/// A latched guard refuses the call like every other and the device sees nothing.
+#[test]
+fn ur_23_g3_a_latched_guard_refuses_the_priority_call() {
+    let device = recording(ClockMode::Real);
+    let latch = measurement::Latch::new();
+    let guard = measurement::GuardedDevice::new(device.clone(), latch.clone());
+    latch.set("an earlier loss");
+    let error = guard.raise_thread_priority().unwrap_err();
+    assert!(error.message.starts_with("latched ("), "{error:?}");
+    assert!(device.raisers().is_empty());
 }

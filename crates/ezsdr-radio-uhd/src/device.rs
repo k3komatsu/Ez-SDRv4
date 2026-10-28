@@ -229,6 +229,10 @@ pub trait Device: Send + Sync {
     /// nor its streamers are freed, since UHD's teardown of an unreachable X300 ends the
     /// process (design-notes §17, F4).
     fn mark_lost(&self);
+    /// Puts the calling thread at a real-time priority, so that the transmit owner is not
+    /// preempted while the device's buffer drains (UR-23). A refusal is an error the caller
+    /// records and survives: it is not a loss of the device.
+    fn raise_thread_priority(&self) -> Result<(), DeviceError>;
 }
 
 /// The one real host clock per process: `Device::host`'s default and a `ClockMode::Real`
@@ -1961,6 +1965,10 @@ impl Device for FakeDevice {
 
     fn mark_lost(&self) {
         self.lock().calls.push("mark_lost".to_owned());
+    }
+
+    fn raise_thread_priority(&self) -> Result<(), DeviceError> {
+        Ok(())
     }
 }
 

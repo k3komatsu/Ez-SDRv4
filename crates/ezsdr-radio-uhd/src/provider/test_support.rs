@@ -398,6 +398,7 @@ impl Device for LockSpy {
     fn tx_close(&self, stream: usize) { self.call("tx_close", || self.inner.tx_close(stream)) }
     fn close_streams(&self) { self.call("close_streams", || self.inner.close_streams()) }
     fn mark_lost(&self) { self.call("mark_lost", || self.inner.mark_lost()) }
+    fn raise_thread_priority(&self) -> Result<(), DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> HostClock {
         // Only once the rig has watched: `Control::new` reads the clock before the test does.
         if self.core.lock().unwrap().upgrade().is_some() {
@@ -494,6 +495,7 @@ impl Device for ApplyFails {
     fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> HostClock { self.inner.host() }
 }
 
@@ -565,6 +567,7 @@ impl Device for HoldApply {
     fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> HostClock { self.inner.host() }
 }
 
@@ -628,6 +631,7 @@ impl Device for ReportFeed {
     fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
     fn host(&self) -> HostClock { self.inner.host() }
 }
 
@@ -675,5 +679,125 @@ impl EventSink for SectionWitness {
     fn emit_control(&self, event: Event) -> Result<(), RunError> {
         self.observe(&event.kind);
         self.inner.emit_control(event)
+    }
+}
+
+/// One call `TxSpy` saw: its place in the common order, the host clock when it was made and the calling thread's name.
+#[derive(Clone, Debug)]
+pub(super) struct TxRec {
+    pub what: &'static str,
+    pub host: Wall,
+    pub thread: String,
+    pub n: usize,
+    pub eob: bool,
+}
+
+/// Where `TxSpy` holds an owner: its `nth` `tx_async` after `after_sends` sends (an idle one: nothing was sent since). The
+/// snapshot is taken on the owner's own thread and the owner waits on `release` — an ordinary channel wait, so the manual clock
+/// stands still — until the test lets it go (design note 37).
+struct IdleTrap {
+    after_sends: usize,
+    nth: usize,
+    snapshot: Sender<Vec<TxRec>>,
+    release: Receiver<()>,
+}
+
+/// A `FakeDevice` behind a recorder of the transmit calls and of `raise_thread_priority`, whose answer a test sets (UR-23).
+pub(super) struct TxSpy {
+    inner: Arc<FakeDevice>,
+    refusal: Mutex<Option<(DeviceError, Option<String>)>>,
+    log: Mutex<Vec<TxRec>>,
+    idle: Mutex<usize>,
+    trap: Mutex<Option<IdleTrap>>,
+}
+
+impl TxSpy {
+    pub fn new(inner: Arc<FakeDevice>) -> TxSpy {
+        TxSpy { inner, refusal: Mutex::new(None), log: Mutex::new(Vec::new()), idle: Mutex::new(0), trap: Mutex::new(None) }
+    }
+
+    /// `raise_thread_priority` answers `Err(refusal)` from now on, to the thread named `only` alone when given.
+    pub fn refuse_priority(&self, refusal: DeviceError, only: Option<&str>) {
+        *self.refusal.lock().unwrap() = Some((refusal, only.map(str::to_owned)));
+    }
+
+    pub fn recs(&self) -> Vec<TxRec> {
+        self.log.lock().unwrap().clone()
+    }
+
+    /// Holds the owner at its `nth` idle `tx_async` after `after_sends` sends; the snapshot comes on the returned receiver, the
+    /// owner goes on when the sender is used or dropped.
+    pub fn trap_idle(&self, after_sends: usize, nth: usize) -> (Receiver<Vec<TxRec>>, Sender<()>) {
+        let (snapshot, snapshots) = channel();
+        let (release, released) = channel();
+        *self.trap.lock().unwrap() = Some(IdleTrap { after_sends, nth, snapshot, release: released });
+        (snapshots, release)
+    }
+
+    fn record(&self, what: &'static str, n: usize, eob: bool) {
+        let rec = TxRec { what, host: self.inner.host().now(), thread: std::thread::current().name().unwrap_or("").to_owned(), n, eob };
+        self.log.lock().unwrap().push(rec);
+    }
+}
+
+impl Device for TxSpy {
+    fn describe(&self) -> serde_json::Value { self.inner.describe() }
+    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
+    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
+    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
+    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
+    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, s, at) }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.record("tx_open", 0, false);
+        self.inner.tx_open(stream, channels)
+    }
+    fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
+        self.record("tx_send", samples.first().map_or(0, |ch| ch.len()), eob);
+        self.inner.tx_send(stream, samples, at, sob, eob, timeout)
+    }
+    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> {
+        self.record("tx_async", 0, false);
+        let sends = self.log.lock().unwrap().iter().filter(|rec| rec.what == "tx_send").count();
+        // No lock is held across the owner's waits: a thread blocked on one would hold the manual clock still.
+        let held = {
+            let mut trap = self.trap.lock().unwrap();
+            let fire = trap.as_ref().is_some_and(|held| {
+                if sends < held.after_sends { return false; }
+                let mut idle = self.idle.lock().unwrap();
+                *idle += 1;
+                *idle == held.nth
+            });
+            if fire { trap.take() } else { None }
+        };
+        if let Some(held) = held {
+            let _ = held.snapshot.send(self.recs());
+            let _ = held.release.recv();
+        }
+        self.inner.tx_async(stream, timeout)
+    }
+    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
+    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
+    fn close_streams(&self) { self.inner.close_streams() }
+    fn mark_lost(&self) { self.inner.mark_lost() }
+    fn host(&self) -> HostClock { self.inner.host() }
+    fn raise_thread_priority(&self) -> Result<(), DeviceError> {
+        self.record("raise_thread_priority", 0, false);
+        let me = std::thread::current().name().unwrap_or("").to_owned();
+        match self.refusal.lock().unwrap().clone() {
+            Some((refusal, only)) if only.as_ref().is_none_or(|name| *name == me) => Err(refusal),
+            _ => Ok(()),
+        }
     }
 }

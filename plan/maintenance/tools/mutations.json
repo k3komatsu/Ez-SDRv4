@@ -9863,8 +9863,8 @@
   "id": "P637",
   "name": "uhd-tx never hands a payload sample at or beyond the strict window edge (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        count = count.min(window_cut - open.next);",
-  "new": "        count = count.min(i64::MAX);",
+  "old": "        let count = wanted.min(avail);",
+  "new": "        let count = wanted.min(i64::MAX);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_send_does_not_cross_the_in_flight_window"
@@ -14182,5 +14182,249 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_transmit_move_after_a_refused_source_change_begins_the_destination_as_if_not_refused"
+  },
+  {
+   "id": "P1100",
+   "name": "uhd-tx never asks for a real-time priority (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        match self.core.device.raise_thread_priority() {",
+   "new": "        match Ok::<(), crate::DeviceError>(()) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p1_p2_each_owner_raises_its_own_thread_once_before_its_first_send"
+  },
+  {
+   "id": "P1101",
+   "name": "uhd-tx asks for the priority on every pass instead of once (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            if !self.pass() {\n                self.host.sleep(IDLE);",
+   "new": "            let _ = self.core.device.raise_thread_priority();\n            if !self.pass() {\n                self.host.sleep(IDLE);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p1_p2_each_owner_raises_its_own_thread_once_before_its_first_send"
+  },
+  {
+   "id": "P1102",
+   "name": "the priority is asked for on the constructing thread, not the owner's (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        match self.core.device.raise_thread_priority() {",
+   "new": "        match Ok::<(), crate::DeviceError>(()) {",
+   "old2": "        let host = core.device.host();\n        // The streamer this owner starts on",
+   "new2": "        let host = core.device.host();\n        let _ = core.device.raise_thread_priority();\n        // The streamer this owner starts on",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p1_p2_each_owner_raises_its_own_thread_once_before_its_first_send"
+  },
+  {
+   "id": "P1103",
+   "name": "a refused priority is a device failure (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            Err(error) => self.core.reject_note(json!({ \"call\": \"set_thread_priority\", \"stream\": self.k, \"error\": error.message })),",
+   "new": "            Err(error) => self.core.device_failed(None, \"set_thread_priority\", &error),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p4_a_refused_priority_is_recorded_and_the_burst_still_goes_out"
+  },
+  {
+   "id": "P1104",
+   "name": "a refused priority ends the owner (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            Err(error) => self.core.reject_note(json!({ \"call\": \"set_thread_priority\", \"stream\": self.k, \"error\": error.message })),",
+   "new": "            Err(error) => { self.core.reject_note(json!({ \"call\": \"set_thread_priority\", \"stream\": self.k, \"error\": error.message })); return; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p4_a_refused_priority_is_recorded_and_the_burst_still_goes_out"
+  },
+  {
+   "id": "P1105",
+   "name": "a refused priority leaves no row (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            Err(error) => self.core.reject_note(json!({ \"call\": \"set_thread_priority\", \"stream\": self.k, \"error\": error.message })),",
+   "new": "            Err(error) => { let _ = error; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p4_a_refused_priority_is_recorded_and_the_burst_still_goes_out"
+  },
+  {
+   "id": "P1106",
+   "name": "a refused priority is counted as realtime (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            Err(error) => self.core.reject_note(json!({ \"call\": \"set_thread_priority\", \"stream\": self.k, \"error\": error.message })),",
+   "new": "            Err(error) => { self.core.stat(\"tx_realtime\", 1); self.core.reject_note(json!({ \"call\": \"set_thread_priority\", \"stream\": self.k, \"error\": error.message })) }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p5_p6_the_success_is_counted_per_owner"
+  },
+  {
+   "id": "P1107",
+   "name": "a granted priority is not counted (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            Ok(()) => self.core.stat(\"tx_realtime\", 1),",
+   "new": "            Ok(()) => {}",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_p5_p6_the_success_is_counted_per_owner"
+  },
+  {
+   "id": "P1108",
+   "name": "uhd-tx hands a short buffer at a window edge it cannot fill (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if avail < wanted && !device_sob {",
+   "new": "        if avail < wanted && !device_sob && false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill"
+  },
+  {
+   "id": "P1109",
+   "name": "a buffer waits when the window takes exactly all of it (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if avail < wanted && !device_sob {",
+   "new": "        if avail <= wanted && !device_sob {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill"
+  },
+  {
+   "id": "P1110",
+   "name": "the wanted size ignores the waveform's end (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        let mut wanted = chunk.min(len - offset);",
+   "new": "        let mut wanted = chunk;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m2_the_last_part_of_a_burst_is_not_split_by_the_window"
+  },
+  {
+   "id": "P1111",
+   "name": "the wanted size ignores the next held burst's start (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        let cut = [held_cut, switch_cut].into_iter().flatten().min();",
+   "new": "        let cut = [None, switch_cut].into_iter().flatten().min();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m4b_the_buffer_before_a_held_start_is_not_split"
+  },
+  {
+   "id": "P1112",
+   "name": "the wanted size ignores a cold change's cut (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        let cut = [held_cut, switch_cut].into_iter().flatten().min();",
+   "new": "        let cut = [held_cut, None].into_iter().flatten().min();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m14_a_cold_cut_is_not_waited_past_or_crossed"
+  },
+  {
+   "id": "P1113",
+   "name": "the first timed buffer waits for a whole buffer too (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if avail < wanted && !device_sob {",
+   "new": "        if avail < wanted {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m5_the_first_timed_buffer_takes_what_fits"
+  },
+  {
+   "id": "P1114",
+   "name": "the first timed buffer is not cut to the window (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        let count = wanted.min(avail);",
+   "new": "        let count = wanted;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m5_the_first_timed_buffer_takes_what_fits"
+  },
+  {
+   "id": "P1115",
+   "name": "a continuation's first buffer is exempt from the wait (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if avail < wanted && !device_sob {",
+   "new": "        if avail < wanted && !open.first {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
+  },
+  {
+   "id": "P1116",
+   "name": "the wait comes after the held tail's send (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "        if avail < wanted && !device_sob {\n            return false;\n        }\n        let count = wanted.min(avail);",
+   "new": "        let count = wanted.min(avail);",
+   "old2": "        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();",
+   "new2": "        if avail < wanted && !device_sob { return false; }\n        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m9_a_waiting_continuation_leaves_the_held_tail_alone"
+  },
+  {
+   "id": "P1117",
+   "name": "a held burst opened for the first time reports a wait as work (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "                let held_cut = self.held.keys().next().copied();\n                return self.send(clock, held_cut, cut_k, window_cut);",
+   "new": "                let held_cut = self.held.keys().next().copied();\n                self.send(clock, held_cut, cut_k, window_cut);\n                return true;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
+  },
+  {
+   "id": "P1118",
+   "name": "the idle wait sleeps until a buffer would fit (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "            if !self.pass() {\n                self.host.sleep(IDLE);",
+   "new": "            if !self.pass() {\n                self.host.sleep(IDLE * 60);",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_m6_a_waiting_owner_wakes_for_a_stop_within_an_idle_period"
+  },
+  {
+   "id": "P1119",
+   "name": "the measurement guard latches on a refused priority (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "        if let Some(error) = self.refusal() { return Err(error); }\n        self.inner().raise_thread_priority()\n    }",
+   "new": "        refuse_or!(self, self.inner().raise_thread_priority())\n    }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_23_g1_a_refused_priority_does_not_latch_the_measurement_guard"
+  },
+  {
+   "id": "P1120",
+   "name": "the measurement guard does not forward the priority call (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "        if let Some(error) = self.refusal() { return Err(error); }\n        self.inner().raise_thread_priority()\n    }",
+   "new": "        if let Some(error) = self.refusal() { return Err(error); }\n        Ok(())\n    }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_23_g2_every_wrapper_forwards_the_priority_call"
+  },
+  {
+   "id": "P1121",
+   "name": "the counting wrapper does not forward the priority call (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }",
+   "new": "    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { Ok(()) }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_23_g2_every_wrapper_forwards_the_priority_call"
+  },
+  {
+   "id": "P1122",
+   "name": "the probe wrapper does not forward the priority call (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }",
+   "new": "    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { Ok(()) }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_23_g2_every_wrapper_forwards_the_priority_call"
+  },
+  {
+   "id": "P1123",
+   "name": "a latched guard still passes the priority call on (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+   "old": "        if let Some(error) = self.refusal() { return Err(error); }\n        self.inner().raise_thread_priority()\n    }",
+   "new": "        self.inner().raise_thread_priority()\n    }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "ur_23_g3_a_latched_guard_refuses_the_priority_call"
   }
 ]

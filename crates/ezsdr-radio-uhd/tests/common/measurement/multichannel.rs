@@ -213,6 +213,12 @@ impl Device for GuardedDevice {
     }
     fn host(&self) -> HostClock { self.inner().host() }
     fn mark_lost(&self) { self.inner().mark_lost() }
+    // Not through `refuse_or!`: a refused priority (EPERM is UHD's OS error, which `note` latches as lost) must not poison the guard
+    // (UR-23). A latched guard still refuses, like every other call.
+    fn raise_thread_priority(&self) -> Result<(), DeviceError> {
+        if let Some(error) = self.refusal() { return Err(error); }
+        self.inner().raise_thread_priority()
+    }
 }
 
 /// A `GuardedDevice` on the installed record latch over the device `opener` opens. A latched record opens nothing: `opener` is
@@ -342,6 +348,7 @@ impl Device for CountingDevice {
     }
     fn host(&self) -> HostClock { self.inner.host() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 /// One stream of a stage: the layout's channels it carries and its rate.

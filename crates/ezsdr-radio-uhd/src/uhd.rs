@@ -133,6 +133,7 @@ mod ffi {
     unsafe extern "C" {
         pub fn uhd_get_last_error(error_out: *mut c_char, strbuffer_len: usize) -> uhd_error;
         pub fn uhd_get_version_string(version_out: *mut c_char, buffer_len: usize) -> uhd_error;
+        pub fn uhd_set_thread_priority(priority: f32, realtime: bool) -> uhd_error;
 
         pub fn uhd_string_vector_make(h: *mut uhd_string_vector_handle) -> uhd_error;
         pub fn uhd_string_vector_free(h: *mut uhd_string_vector_handle) -> uhd_error;
@@ -1158,6 +1159,12 @@ impl Device for UhdDevice {
         self.lost.store(true, Ordering::Release);
     }
 
+    fn raise_thread_priority(&self) -> Result<(), DeviceError> {
+        // SAFETY: no handle; acts on the calling thread. UHD's number is the verdict; its text is the process's last error.
+        // A refusal (EPERM is `UHD_ERROR_OS`, which `check` takes for a loss) is never the device's loss.
+        check("uhd_set_thread_priority", unsafe { uhd_set_thread_priority(0.5, true) }, false).map_err(|error| DeviceError { lost: false, ..error })
+    }
+
     fn rx_close(&self, stream: usize) {
         let _control = lock(&self.control);
         #[cfg(test)]
@@ -1197,6 +1204,9 @@ mod ffi_tests {
     static ENTERED: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
     static RX_STREAM_FREES: AtomicUsize = AtomicUsize::new(0);
     static OPEN_STREAM_FAILS: AtomicBool = AtomicBool::new(false);
+    static PRIORITY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static PRIORITY_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    static PRIORITY_ARGS: Mutex<Option<(f32, bool)>> = Mutex::new(None);
 
     fn native_entry() {
         if !PROBE.load(Ordering::SeqCst) { return; }
@@ -1332,6 +1342,36 @@ mod ffi_tests {
     ) -> c_int {
         native_entry();
         UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_set_thread_priority(priority: f32, realtime: bool) -> uhd_error {
+        PRIORITY_CALLS.fetch_add(1, Ordering::SeqCst);
+        *lock(&PRIORITY_ARGS) = Some((priority, realtime));
+        PRIORITY_CODE.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn ur_23_f1_the_priority_call_is_uhd_s_realtime_half() {
+        let _test = lock(&TEST_LOCK);
+        PRIORITY_CALLS.store(0, Ordering::SeqCst);
+        PRIORITY_CODE.store(UHD_ERROR_NONE, Ordering::SeqCst);
+        dummy(1).raise_thread_priority().unwrap();
+        assert_eq!(PRIORITY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(*lock(&PRIORITY_ARGS), Some((0.5f32, true)));
+    }
+
+    #[test]
+    fn ur_23_f2_every_refusal_is_an_error_naming_the_call_and_the_code() {
+        let _test = lock(&TEST_LOCK);
+        for code in [UHD_ERROR_OS, 20, UHD_ERROR_RUNTIME] {
+            PRIORITY_CODE.store(code, Ordering::SeqCst);
+            let error = dummy(1).raise_thread_priority().unwrap_err();
+            assert!(error.message.contains("uhd_set_thread_priority"), "{}", error.message);
+            assert!(error.message.contains(&format!("UHD error {code}")), "{}", error.message);
+            assert!(!error.lost, "a refused priority is not a lost device: {}", error.message);
+        }
+        PRIORITY_CODE.store(UHD_ERROR_NONE, Ordering::SeqCst);
     }
 
     #[unsafe(no_mangle)]

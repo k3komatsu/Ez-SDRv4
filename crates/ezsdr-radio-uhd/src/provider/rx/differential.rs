@@ -712,6 +712,7 @@ impl Device for Scripted {
     fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
     fn close_streams(&self) { self.inner.close_streams() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 /// Runs a sequence's receive plans on uhd-rx: each command booked `lag` after its receipt, the

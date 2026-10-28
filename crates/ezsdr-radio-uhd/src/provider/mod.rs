@@ -1055,6 +1055,7 @@ mod tests {
             }
         }
         fn host(&self) -> crate::host::HostClock { self.inner.host() }
+        fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
     }
 
     #[test]

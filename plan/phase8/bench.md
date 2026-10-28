@@ -208,6 +208,26 @@ EZSDR_MEASUREMENT_SELECTOR='{"rx":["0:A:ubx:0","0:B:cbx:0"],"tx":["0:A:ubx:0","0
 - 時間：2 channel の向きで 27 段（約 25 段が走る．約 26 分）× 2 向き，同時運転の 1 組，companion．
 - 確認：`measurement.json` の 2 channel の throughput 条件（stream 全 channel 1 本 / channel ごと 1 本 / rate 違い），容量の行の condition（値を持ちこたえた条件）と `provider_*_throughput_capacity` の `blocker_condition`，同時運転の 1 組の `rx_limit_condition` と `tx_limit_condition`，`not run` の群（latch が立った印）．stop は (b) と同じ．XG と 10 GbE 2 本（BP4c）はこの日の範囲外．
 
+### (f) 送信の実時間の優先度と窓の端の最小の send（段階 TXP の受け入れ B0〜B4．#1＋OBX，TX あり．約 30 分，estimate）
+
+コードの段階は FakeDevice の試験までで，優先度が実機で効くかは**未確認（INFERRED）**．`tx_realtime` は「`uhd_set_thread_priority` が成功した」であって「実時間になった」ではない（UHD が `HAVE_THREAD_PRIO_DUMMY` で build されていると何もせず成功する）ので，policy は `/proc` で読む．**送信するので，他の送信の手順と同じに，owner が att（TX/RX → ≥30 dB → RX2）を確認してから**．毎回，記録するもの：Manifest の `stats`（`tx_realtime`，`tx_samples`，`tx_errors`），`rejected`，`events` の `TX_UNDERFLOW`／`TIME_ERROR`，`bursts[].blocks`；uhd-tx／uhd-rx／uhd-control の各 thread の `/proc/<pid>/task/<tid>/stat`（第 41 欄 policy，RR = 2；第 18 欄 priority）；`/proc/sys/kernel/sched_rt_runtime_us`・`sched_rt_period_us`（container の中と host）；uhd-rx の `rx_blocks`・overflow；timed 命令の `applied` の遅れ；Stop の完了までの時間．
+
+- **B0 低い rate（窓が律速）**：1 MS/s と 5 MS/s，repeat の waveform **31 000 sample**，60 s．**1 回ごとの send の大きさは Manifest に無い**（`bursts[].blocks` は block の数 u32 で，列ではない：`kernel stream/burst.rs`，`provider/tx.rs` の `record`）。大きさの分類は別の**有限の診断 run**（1 MS/s と 5 MS/s で各約 5 s）で，専用の `#[ignore]` 試験 `hw_txp_b0_send_sizes`（`tests/hardware.rs`）が device を `ProbeDevice` で包んで走らせ，block 2 000 で 31 000 sample の repeat（振幅 ≤ 0.5，gain 0 dB）の `tx_send` の行の `sample_counts[0]` を空の end-of-burst（0）を除いて `B0 sizes rate <hz>: …` と印字する。**送信するので先に owner が att を確認してから**，(c) の probe と同じ形で：
+
+```sh
+docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,size=4g \
+  -v "$PWD:/work" -v "$HOME/ezsdr-bench:/bench" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
+  -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS=addr=192.168.40.36 ezsdr-v4-dev:uhd4.10 \
+  cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware hw_txp_b0_send_sizes -- --exact --ignored --nocapture \
+  > ~/.cache/ezsdr-bench/$(date +%F)/hw_txp_b0_send_sizes.log 2>&1
+```
+その列を累積 offset で分類する：(i) 最初の block（SOB）は ≤ chunk（2 000）；(ii) 累積が 31 000 の倍数になる block（wrap で終わる）は ≤ `min(chunk, 31 000 − 直前までの offset)`；(iii) それ以外の block は chunk に等しい．(iii) に違反があれば失敗．blocks/s は 60 s の run の Manifest の `bursts[].blocks` の総数（block 数）を 60 で割る（production に send ごとの保存は足さない）．基準の run（`d0a0e64` の build，同じ設定）と比べ，uhd-tx の `blocks`／s が `rate / chunk × 1.1` 以下に減り，uhd-tx の CPU 時間（`/proc/<tid>/stat` の utime + stime を 60 s で割る）と自発的でない context switch（`/proc/<tid>/status`）が基準より減ることを**記録**する（割合の閾値は INFERRED で gate にしない）．underrun 0．
+- **B1 100 MS/s**・**B2 200 MS/s**：60 s，`--cap-add=SYS_NICE --ulimit rtprio=99` つき．`tx_realtime` = owner 数，uhd-tx の policy = 2．underrun を `benchmark_rate --priority high`（(d) の記録）と比べる．
+- **B3 同時運転**：送信 100 MS/s + 受信 + timed の control 更新（frequency／gain）+ burst 途中の Stop．uhd-rx の overflow 0，timed 命令の遅れが release 窓内，Stop が 1 s 以内に完了．uhd-rx／uhd-control の runnable 待ちを `/proc/<tid>/schedstat` で記録（実時間の uhd-tx が同じ core の通常 thread を飢えさせる兆候）．
+- **B4 cap 無し**：`--ulimit rtprio=0` で cap なし（と host の通常 user）：`rejected` に `set_thread_priority` の行が 1 本出て run が完走し，DEVICE_LOST にならない．
+
+結果は bench-results.md へ（orchestrator）．KL-5（50 MS/s を超える送信の失敗）の書き換えは B1〜B3 の結果を見てから．
+
 ### 流した後
 
 - repo へ写すのは**完了した最終の BP2/BP3 の `measurement.json` だけ**：`crates/ezsdr-radio/measurements/<日付>-<serial>-<構成>.json`（41 §2）．shake-out，`.partial.json`，P4〜P7・MA-1・benchmark_rate の log は写さない．写す前に owner と確認．

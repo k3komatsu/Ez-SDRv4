@@ -360,6 +360,7 @@ impl Device for ProbeDevice {
     fn close_streams(&self) { self.inner.close_streams() }
     fn host(&self) -> HostClock { self.inner.host() }
     fn mark_lost(&self) { self.inner.mark_lost() }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
 }
 
 #[cfg(all(test, not(feature = "uhd")))]

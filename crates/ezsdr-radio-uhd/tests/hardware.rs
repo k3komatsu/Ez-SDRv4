@@ -2100,6 +2100,37 @@ fn wait_for_tx_eob(probe: &probe_device::ProbeDevice, eob_count: usize, timeout:
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_txp_b0_send_sizes() {
+    // TXP B0 (diagnostic, about 5 s a rate): the size of each send a 31 000-sample repeat makes at 1 and 5 MS/s with the
+    // 2 000-sample block, empty end-of-burst calls left out. Printed as `B0 sizes rate <hz>: [..]`, classified by hand from the
+    // cumulative offset (bench.md (f)). Not the 60 s performance run: ProbeDevice records every call.
+    assert_eq!(ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, 2_000, "the block is 2 000 samples");
+    for rate in [1e6, 5e6] {
+        let inner = usrp();
+        let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+        let dir = TempDir::new();
+        let mut run = tx_session(probe.clone(), &dir);
+        assert!(admitted(&run.submit(set("radio.tx.c0.gain_db", ezsdr_kernel::spec::Value::num(0.0).unwrap()), None).unwrap()), "gain 0 dB");
+        assert!(admitted(&run.submit(set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(rate).unwrap()), None).unwrap()));
+        past_tx_origin(&mut run);
+        let wave: Vec<_> = pn(31_000).into_iter().map(|(re, im)| (re * 0.7, im * 0.7)).collect();
+        assert!(wave.iter().all(|(re, im)| f64::from(*re).hypot(f64::from(*im)) <= 0.5), "bench RF safety");
+        let (bytes, _) = waveform_of(&wave);
+        let baseline = probe.count("tx_send");
+        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&bytes)).unwrap()));
+        wait(&mut run, ms(5_000));
+        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+        wait(&mut run, ms(200));
+        let _ = run.finish();
+        let sizes: Vec<u64> = tx_send_rows_since(&probe, baseline).iter()
+            .filter_map(|row| row["sample_counts"][0].as_u64()).filter(|n| *n > 0).collect();
+        println!("B0 sizes rate {rate}: {} sends, sizes {sizes:?}", sizes.len());
+        assert!(!sizes.is_empty(), "the repeat sent nothing at {rate}");
+    }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_h5_held_last_sample() {
     // Prebooked adjacent and positive-gap controls, then isolated bursts with no queued successor.
     let inner = usrp();
