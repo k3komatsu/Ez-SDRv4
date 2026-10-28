@@ -1,11 +1,13 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::module_api::Fidelity;
-use ezsdr_radio_uhd::{Applied, Device, DeviceError, Dir, HostClock, Iq, RxRecv, Settings, TxReport};
+use ezsdr_radio_uhd::{Applied, Device, DeviceError, Dir, HostClock, Iq, RxRecv, Settings, TxCode, TxReport};
 use serde_json::{Value as Json, json};
+
+pub const PROBE_ROW_LIMIT: usize = 65_536;
 
 type TimedApplyHook = Box<dyn FnMut(usize) + Send>;
 type RxScript = Box<dyn FnMut(usize) -> RxRecv + Send>;
@@ -21,6 +23,7 @@ pub struct ProbeDevice {
     inner: Arc<dyn Device>,
     origin: Instant,
     rows: Mutex<Vec<Json>>,
+    dropped_rows: AtomicUsize,
     tx_eob_count: AtomicUsize,
     /// The calls in order: `apply`, `apply_timed`, `apply_failed`, `apply_timed_failed`, `time_now`, `rx_open`, `tx_open`, `rx_recv`, `rx_stop`, `rx_close` and `drop`.
     control_log: Arc<Mutex<Vec<&'static str>>>,
@@ -37,6 +40,9 @@ pub struct ProbeDevice {
     fail_timed_apply: Mutex<Option<usize>>,
     /// The untimed `apply` (1-based) that fails, once counted down to 1.
     fail_untimed_apply: Mutex<Option<usize>>,
+    tx_generations: Mutex<BTreeMap<usize, u64>>,
+    tx_underflow_after_send: AtomicBool,
+    tx_underflow_ready: AtomicBool,
     gate: Mutex<ReceiveGate>,
     ready: Condvar,
 }
@@ -72,6 +78,7 @@ impl ProbeDevice {
             inner,
             origin: Instant::now(),
             rows: Mutex::new(Vec::new()),
+            dropped_rows: AtomicUsize::new(0),
             tx_eob_count: AtomicUsize::new(0),
             control_log: Arc::new(Mutex::new(Vec::new())),
             rx_script: Mutex::new(None),
@@ -83,6 +90,9 @@ impl ProbeDevice {
             fail_rx_stop: AtomicBool::new(false),
             fail_timed_apply: Mutex::new(None),
             fail_untimed_apply: Mutex::new(None),
+            tx_generations: Mutex::new(BTreeMap::new()),
+            tx_underflow_after_send: AtomicBool::new(false),
+            tx_underflow_ready: AtomicBool::new(false),
             gate: Mutex::new(ReceiveGate { paused: false, active: 0 }),
             ready: Condvar::new(),
         }
@@ -94,6 +104,15 @@ impl ProbeDevice {
 
     pub fn rows(&self) -> Vec<Json> {
         self.rows.lock().unwrap().clone()
+    }
+
+    pub fn dropped_rows(&self) -> usize {
+        self.dropped_rows.load(Ordering::Acquire)
+    }
+
+    pub fn matching_timed_apply(&self, e: i64) -> Option<Json> {
+        self.rows.lock().unwrap().iter().rev()
+            .find(|row| row["call"] == "apply_timed" && row["e"].as_i64() == Some(e)).cloned()
     }
 
     pub fn count(&self, call: &str) -> usize {
@@ -155,6 +174,20 @@ impl ProbeDevice {
         self.tx_eob_count.load(Ordering::Acquire)
     }
 
+    /// Injects one underflow report after the first successful nonempty TX send.
+    pub fn underflow_after_tx_send(&self) {
+        self.tx_underflow_after_send.store(true, Ordering::Release);
+    }
+
+    pub fn timed_apply_count(&self) -> usize {
+        self.timed_applies.load(Ordering::Acquire)
+    }
+
+    /// A bracketed device-time sample for the H4 dispatch observation.
+    pub fn clock_anchor(&self) -> Result<(i64, u64, u64), DeviceError> {
+        self.read_time_now("h4_anchor")
+    }
+
     pub fn inner(&self) -> &dyn Device {
         &*self.inner
     }
@@ -191,7 +224,7 @@ impl ProbeDevice {
                 "host_before_ns": before, "host_after_ns": after,
                 "outcome": outcome,
             });
-            self.rows.lock().unwrap().push(row.clone());
+            self.record(row.clone());
             drained.push(row);
         }
         drained
@@ -199,8 +232,38 @@ impl ProbeDevice {
 
     fn record(&self, row: Json) {
         let eob = row["call"] == "tx_send" && row["eob"].as_bool().unwrap_or(false);
-        self.rows.lock().unwrap().push(row);
+        let mut rows = self.rows.lock().unwrap();
+        if rows.len() < PROBE_ROW_LIMIT { rows.push(row); }
+        else { self.dropped_rows.fetch_add(1, Ordering::Release); }
+        drop(rows);
         if eob { self.tx_eob_count.fetch_add(1, Ordering::Release); }
+    }
+
+    fn read_time_now(&self, purpose: &str) -> Result<(i64, u64, u64), DeviceError> {
+        let host_before_ns = self.host_ns();
+        let result = self.inner.time_now();
+        let host_after_ns = self.host_ns();
+        let value = match &result {
+            Ok(tick) => json!({ "value": tick }),
+            Err(error) => json!({ "error": error.message, "lost": error.lost }),
+        };
+        self.record(json!({ "call": "time_now", "purpose": purpose, "host_before_ns": host_before_ns,
+            "host_after_ns": host_after_ns, "result": value }));
+        result.map(|tick| (tick, host_before_ns, host_after_ns))
+    }
+
+    fn record_timed_apply(&self, dir: Dir, chan: usize, settings: &Settings, at: i64, host_entry_ns: u64, result: &Result<Applied, DeviceError>) {
+        let result = match result {
+            Ok(applied) => json!({ "rate": applied.rate, "freq": applied.freq, "gain": applied.gain, "antenna": applied.antenna }),
+            Err(error) => json!({ "error": error.message, "lost": error.lost }),
+        };
+        self.record(json!({
+            "call": "apply_timed", "direction": if dir == Dir::Rx { "rx" } else { "tx" }, "channel": chan,
+            "e": at, "host_entry_ns": host_entry_ns, "host_return_ns": self.host_ns(),
+            "settings": { "rate": settings.rate, "freq": settings.freq, "gain": settings.gain, "antenna": settings.antenna },
+            "gain_only": settings.gain.is_some() && settings.rate.is_none() && settings.freq.is_none() && settings.antenna.is_none(),
+            "result": result,
+        }));
     }
 }
 
@@ -232,10 +295,11 @@ impl Device for ProbeDevice {
     fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
     fn time_now(&self) -> Result<i64, DeviceError> {
         self.control_log.lock().unwrap().push("time_now");
-        self.inner.time_now()
+        self.read_time_now("device_call").map(|(tick, _, _)| tick)
     }
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
     fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        let host_entry_ns = self.host_ns();
         if at.is_some() {
             let count = self.timed_applies.fetch_add(1, Ordering::AcqRel) + 1;
             let hook = self.before_timed_apply.lock().unwrap().take();
@@ -244,18 +308,19 @@ impl Device for ProbeDevice {
                 *self.before_timed_apply.lock().unwrap() = Some(hook);
             }
         }
-        let mut failing = self.fail_timed_apply.lock().unwrap();
-        if at.is_some() {
+        if let Some(at) = at {
+            let mut failing = self.fail_timed_apply.lock().unwrap();
             if let Some(remaining) = failing.as_mut() {
                 *remaining -= 1;
                 if *remaining == 0 {
                     *failing = None;
                     self.control_log.lock().unwrap().push("apply_timed_failed");
-                    return Err(DeviceError::failed("probe: scripted timed apply failure"));
+                    let error = DeviceError::failed("probe: scripted timed apply failure");
+                    self.record_timed_apply(dir, chan, settings, at, host_entry_ns, &Err(error.clone()));
+                    return Err(error);
                 }
             }
         }
-        drop(failing);
         if at.is_none() && self.fail_restoring_apply.load(Ordering::Acquire)
             && settings.rate.is_some() && settings.freq.is_some() && settings.gain.is_some() && settings.antenna.is_some() {
             self.control_log.lock().unwrap().push("apply_failed");
@@ -273,7 +338,9 @@ impl Device for ProbeDevice {
             }
         }
         self.control_log.lock().unwrap().push(if at.is_some() { "apply_timed" } else { "apply" });
-        self.inner.apply(dir, chan, settings, at)
+        let result = self.inner.apply(dir, chan, settings, at);
+        if let Some(at) = at { self.record_timed_apply(dir, chan, settings, at, host_entry_ns, &result); }
+        result
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("rx_open");
@@ -334,9 +401,19 @@ impl Device for ProbeDevice {
     }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("tx_open");
-        self.inner.tx_open(stream, channels)
+        let result = self.inner.tx_open(stream, channels);
+        let generation = if result.is_ok() {
+            let mut generations = self.tx_generations.lock().unwrap();
+            let generation = generations.entry(stream).or_default();
+            *generation += 1;
+            *generation
+        } else { self.tx_generations.lock().unwrap().get(&stream).copied().unwrap_or(0) };
+        self.record(json!({ "call": "tx_open", "stream": stream, "channels": channels, "generation": generation,
+            "result": result.as_ref().err().map(|error| error.message.clone()) }));
+        result
     }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
+        let generation = self.tx_generations.lock().unwrap().get(&stream).copied().unwrap_or(0);
         let before = self.host_ns();
         let result = self.inner.tx_send(stream, samples, at, sob, eob, timeout);
         let after = self.host_ns();
@@ -345,13 +422,22 @@ impl Device for ProbeDevice {
             Err(error) => json!({ "error": error.message }),
         };
         self.record(json!({
-            "call": "tx_send", "stream": stream, "host_before_ns": before, "host_after_ns": after,
+            "call": "tx_send", "stream": stream, "generation": generation, "host_before_ns": before, "host_after_ns": after,
             "sample_counts": samples.iter().map(|channel| channel.len()).collect::<Vec<_>>(),
             "at": at, "sob": sob, "eob": eob, "timeout_ns": timeout.as_nanos(), "result": result_row,
         }));
+        if result.as_ref().is_ok_and(|accepted| *accepted > 0)
+            && self.tx_underflow_after_send.swap(false, Ordering::AcqRel) {
+            self.tx_underflow_ready.store(true, Ordering::Release);
+        }
         result
     }
-    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
+    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> {
+        if self.tx_underflow_ready.swap(false, Ordering::AcqRel) {
+            return self.inner.time_now().map(|tick| Some(TxReport { code: TxCode::Underflow, tick: Some(tick), channel: 0 }));
+        }
+        self.inner.tx_async(stream, timeout)
+    }
     fn rx_close(&self, stream: usize) {
         self.control_log.lock().unwrap().push("rx_close");
         self.inner.rx_close(stream)
@@ -388,6 +474,15 @@ mod tests {
         probe.record(json!({"call":"tx_send","eob":true}));
         assert_eq!(probe.tx_eob_count(), 1);
         assert_eq!(probe.rows().len(), 3);
+    }
+
+    #[test]
+    fn probe_rows_stop_at_the_limit_and_count_dropped_rows() {
+        let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
+        let probe = ProbeDevice::new(inner);
+        for index in 0..=PROBE_ROW_LIMIT { probe.record(json!({ "index": index })); }
+        assert_eq!(probe.rows().len(), PROBE_ROW_LIMIT);
+        assert_eq!(probe.dropped_rows(), 1);
     }
 
     #[test]

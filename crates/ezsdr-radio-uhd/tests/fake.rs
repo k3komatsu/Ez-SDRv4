@@ -7795,6 +7795,17 @@ fn two_channel_receive_throughput_runs_the_grouped_split_and_mixed_conditions() 
 }
 
 #[test]
+fn reopened_receive_throughput_repeats_only_the_single_channel_sweep() {
+    let device = fake(obx_and_cbx());
+    let mut plan = two_rate_plan();
+    plan.rx_rates_hz.truncate(1);
+    let group = with_selector(two_channel_selector(), || measurement::measure_reopened_rx_throughput(device, &plan).unwrap());
+    assert_eq!(group.conditions.len(), 1, "the reopen pass omits multichannel families");
+    assert_eq!(group.conditions[0].streams.len(), 1);
+    assert_eq!(group.conditions[0].streams[0].channels, vec![0]);
+}
+
+#[test]
 fn two_channel_transmit_throughput_runs_the_grouped_split_and_mixed_conditions() {
     rehearse_two_channel_group("tx", &["grouped-390625hz", "grouped-781250hz", "split-390625hz", "split-781250hz", "mixed-781250hz-390625hz"], false, 6_250_000.0);
 }
@@ -8248,6 +8259,303 @@ fn a_latched_record_calls_no_opener() {
     measurement::install_record_latch(None);
     assert!(refused.is_err() && typed.is_err(), "a latched record opens no device");
     assert_eq!(opened.get(), 2, "the opener was not called");
+}
+
+#[test]
+fn record_reopen_requires_a_clear_latch_clean_lease_and_exclusive_owner() {
+    let latch = measurement::Latch::new();
+    measurement::install_record_latch(Some(latch.clone()));
+    let opened = std::cell::Cell::new(0);
+    let opener = || {
+        let opened = &opened;
+        move || -> Arc<dyn Device> { opened.set(opened.get() + 1); fake(one_obx()) }
+    };
+
+    let latched = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), latch.clone()));
+    let mut latched_lease = measurement::DeviceLease::new(latched.clone());
+    latched_lease.mark_clean();
+    latch.set("a raw probe failed");
+    assert!(latched_lease.reopen(latched, opener()).err().unwrap().contains("record latch"));
+    assert_eq!(opened.get(), 0, "a latched record never calls its opener");
+
+    measurement::install_record_latch(Some(measurement::Latch::new()));
+    let unclean = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), measurement::Latch::new()));
+    let unclean_lease = measurement::DeviceLease::new(unclean.clone());
+    assert!(!unclean_lease.is_clean());
+    assert!(unclean_lease.reopen(unclean, opener()).err().unwrap().contains("not clean"));
+    assert_eq!(opened.get(), 0, "an unclean lease never calls its opener");
+
+    let extra_latch = measurement::Latch::new();
+    measurement::install_record_latch(Some(extra_latch.clone()));
+    let held = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), extra_latch));
+    let weak = Arc::downgrade(&held);
+    let extra = held.clone();
+    let mut held_lease = measurement::DeviceLease::new(held.clone());
+    held_lease.mark_clean();
+    assert_eq!(held_lease.strong_count(), 3);
+    assert!(held_lease.reopen(held, opener()).err().unwrap().contains("2 strong owners"));
+    assert_eq!(opened.get(), 0, "a residual Arc owner prevents reopening");
+    assert!(weak.upgrade().is_some(), "the unforced owner is not closed");
+    drop(extra);
+    assert!(weak.upgrade().is_none());
+
+    let clean_latch = measurement::Latch::new();
+    measurement::install_record_latch(Some(clean_latch.clone()));
+    let clean = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), clean_latch.clone()));
+    let old = Arc::downgrade(&clean);
+    let mut lease = measurement::DeviceLease::new(clean.clone());
+    lease.mark_clean();
+    let reopened = lease.reopen(clean, || {
+        opened.set(opened.get() + 1);
+        assert!(old.upgrade().is_none(), "the prior GuardedDevice is dropped before open");
+        fake(one_obx())
+    }).unwrap();
+    assert_eq!(opened.get(), 1);
+    clean_latch.set("shared latch");
+    assert!(reopened.latched().is_some(), "the reopened handle uses the record latch");
+    drop(reopened);
+
+    let lease_device = fake(one_obx());
+    let mismatch_latch = measurement::Latch::new();
+    measurement::install_record_latch(Some(mismatch_latch.clone()));
+    let unrelated_guard = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), mismatch_latch));
+    let mut mismatched_lease = measurement::DeviceLease::new(lease_device);
+    mismatched_lease.mark_clean();
+    assert!(mismatched_lease.reopen(unrelated_guard, opener()).err().unwrap().contains("does not belong"));
+    assert_eq!(opened.get(), 1, "a different guarded handle never opens another device");
+    measurement::install_record_latch(None);
+}
+
+#[test]
+fn restore_failure_and_unwound_group_refuse_reopen_without_opening_again() {
+    for restore_fails in [true, false] {
+        let latch = measurement::Latch::new();
+        measurement::install_record_latch(Some(latch.clone()));
+        let (device, description, plan) = raw_group_fixture(one_obx());
+        let probe = Arc::new(probe_device::ProbeDevice::new(device));
+        if restore_fails { probe.fail_restoring_apply(); }
+        let guard = Arc::new(measurement::GuardedDevice::new(probe, latch.clone()));
+        let mut lease = measurement::DeviceLease::new(guard.clone());
+        let mut groups = measurement::GroupRun::new(None);
+        if !restore_fails {
+            groups.run("unwound_group", &[], || panic!("scripted group unwind"));
+        }
+        let (stopped, restored) = measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan);
+        if restore_fails {
+            assert!(restored.as_deref().is_some_and(|reason| reason.contains("scripted restore failure")));
+            assert!(stopped.as_deref().is_some_and(|reason| reason.contains("scripted restore failure")));
+            assert!(latch.reason().is_some(), "restore failure latches the handle");
+        } else {
+            assert!(groups.failed().iter().any(|(name, reason)| name == "unwound_group" && reason.contains("scripted group unwind")));
+            assert_eq!((stopped, restored), (None, None));
+            assert!(latch.reason().is_none());
+        }
+        assert!(!lease.is_clean(), "restore failure or a group unwind keeps the lease unclean");
+        let opened = std::cell::Cell::new(0);
+        let result = lease.reopen(guard, || { opened.set(opened.get() + 1); fake(one_obx()) });
+        assert!(result.is_err());
+        assert_eq!(opened.get(), 0, "a failed or unclean run never calls the reopen opener");
+    }
+    measurement::install_record_latch(None);
+}
+
+#[test]
+fn reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values() {
+    use ezsdr_radio::measurement::{Condition, ValueRecord, Worst};
+    let group = |id: &str, key: &str, value: f64| {
+        let condition = Condition {
+            id: id.to_owned(),
+            streams: vec![measurement::stream_condition(ezsdr_kernel::stream::Direction::Rx, 0, vec![0], 10e6)],
+            concurrent: vec![], reopened: false,
+        };
+        let measured = ValueRecord::Measured {
+            key: Key::parse(key).unwrap(), worst: Worst::Number(value), trials: 1,
+            condition: id.to_owned(), test: "tests/fake.rs::reopened_values".to_owned(),
+        };
+        let row = measurement::observation("reopen_test", "tests/fake.rs::reopened_values", Some(id.to_owned()), 1,
+            json!({ "condition_id": id })).unwrap();
+        measurement::MeasurementGroup { conditions: vec![condition], values: vec![measured], observations: vec![row] }
+    };
+    let rx_key = "radio.perf.rx_bytes_per_s".to_owned();
+    let lead_key = "radio.timing.rx_start_lead_ns".to_owned();
+    let mut groups = measurement::GroupRun::new(None);
+    groups.run("base", &[], || {
+        let mut base = group("base-rx-throughput", &rx_key, 900.0);
+        base.append(group("base-rx-lead", &lead_key, 5.0)).unwrap();
+        Ok(base)
+    });
+    groups.run_reopened("reopened_rx_throughput", std::slice::from_ref(&rx_key), measurement::ReopenedMerge::Minimum,
+        || Ok(group("rx-throughput", &rx_key, 800.0)));
+    groups.run_reopened("reopened_rx_start_lead", std::slice::from_ref(&lead_key), measurement::ReopenedMerge::Maximum,
+        || Ok(group("rx-lead", &lead_key, 10.0)));
+    let measured = groups.take();
+    assert_eq!(measured.values.len(), 2, "reopened values replace rather than duplicate keys");
+    let numeric = |key: &str| measured.values.iter().find_map(|value| match value {
+        ValueRecord::Measured { key: found, worst: Worst::Number(value), condition, .. } if found.as_str() == key => Some((*value, condition.as_str())),
+        _ => None,
+    }).unwrap();
+    assert_eq!(numeric(&rx_key), (800.0, "reopened-rx-throughput"));
+    assert_eq!(numeric(&lead_key), (10.0, "reopened-rx-lead"));
+    assert_eq!(measured.conditions.iter().filter(|condition| condition.reopened).count(), 2);
+    assert!(measured.observations.iter().any(|row| row.name == "reopened_reopen_test"
+        && row.condition.as_deref() == Some("reopened-rx-throughput")
+        && row.result.iter().any(|(name, value)| name == "condition_id" && value.as_str() == Some("reopened-rx-throughput"))));
+
+    let mut failed = measurement::GroupRun::new(None);
+    failed.run("base", &[], || Ok(group("base-rx-throughput", &rx_key, 900.0)));
+    failed.run_reopened("reopened_rx_throughput", std::slice::from_ref(&rx_key), measurement::ReopenedMerge::Minimum,
+        || Err("reopened run failed".to_owned()));
+    let values = failed.take().values;
+    assert_eq!(values.len(), 1);
+    assert!(matches!(&values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("reopened group")));
+
+    let mut unmeasured = measurement::GroupRun::new(None);
+    unmeasured.run("base", &[], || Ok(group("base-rx-throughput", &rx_key, 900.0)));
+    unmeasured.run_reopened("reopened_rx_throughput", std::slice::from_ref(&rx_key), measurement::ReopenedMerge::Minimum,
+        || Ok(measurement::MeasurementGroup { conditions: vec![], values: vec![ValueRecord::Unmeasured {
+            key: Key::parse(&rx_key).unwrap(), reason: "no successful reopened candidate".to_owned(),
+        }], observations: vec![] }));
+    assert!(matches!(&unmeasured.take().values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("no successful reopened candidate")));
+
+    let mut missing = measurement::GroupRun::new(None);
+    missing.run("base", &[], || Ok(group("base-rx-throughput", &rx_key, 900.0)));
+    missing.run_reopened("reopened_rx_throughput", std::slice::from_ref(&rx_key), measurement::ReopenedMerge::Minimum,
+        || Ok(measurement::MeasurementGroup::default()));
+    assert!(matches!(&missing.take().values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("exactly one")));
+
+    let mut skipped = measurement::GroupRun::new(None);
+    skipped.run("base", &[], || Ok(group("base-rx-throughput", &rx_key, 900.0)));
+    skipped.skip_reopened(std::slice::from_ref(&rx_key), "the device still has 2 strong owners");
+    let skipped = skipped.take();
+    assert!(matches!(&skipped.values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("2 strong owners")));
+    assert!(skipped.observations.iter().any(|row| row.name == "provider_reopen"
+        && row.result.iter().any(|(name, value)| name == "status" && value.as_str() == Some("skipped"))));
+
+    let mut base_unmeasured = measurement::GroupRun::new(None);
+    base_unmeasured.run("base", &[], || {
+        let mut base = group("base-rx-throughput", &rx_key, 900.0);
+        base.values[0] = ValueRecord::Unmeasured { key: Key::parse(&rx_key).unwrap(), reason: "base trial incomplete".to_owned() };
+        Ok(base)
+    });
+    base_unmeasured.run_reopened("reopened_rx_throughput", std::slice::from_ref(&rx_key), measurement::ReopenedMerge::Minimum,
+        || Ok(group("rx-throughput", &rx_key, 800.0)));
+    assert!(matches!(&base_unmeasured.take().values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("base measurement is unmeasured")));
+
+    let mut base_non_numeric = measurement::GroupRun::new(None);
+    base_non_numeric.run("base", &[], || {
+        let mut base = group("base-rx-throughput", &rx_key, 900.0);
+        base.values[0] = ValueRecord::Measured {
+            key: Key::parse(&rx_key).unwrap(), worst: Worst::Text("not numeric".to_owned()), trials: 1,
+            condition: "base-rx-throughput".to_owned(), test: "tests/fake.rs::reopened_values".to_owned(),
+        };
+        Ok(base)
+    });
+    base_non_numeric.run_reopened("reopened_rx_throughput", std::slice::from_ref(&rx_key), measurement::ReopenedMerge::Minimum,
+        || Ok(group("rx-throughput", &rx_key, 800.0)));
+    assert!(matches!(&base_non_numeric.take().values[0], ValueRecord::Unmeasured { reason, .. } if reason.contains("both be measured numeric values")));
+}
+
+#[test]
+fn h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies() {
+    let selector = json!({ "rx": ["0:B:cbx:0"], "tx": ["0:B:cbx:0"] });
+    assert!(measurement::raw_probes_applicable(Some(&selector)).is_err(), "raw probes exclude slot B");
+    let guard = Arc::new(measurement::GuardedDevice::new(fake_real(obx_and_cbx()), measurement::Latch::new()));
+    let device: Arc<dyn Device> = guard.clone();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
+    let group = with_selector(selector, || measurement::measure_h4_dispatch(probe.clone(), 2).unwrap());
+    assert_eq!(guard.latch_if_streamers_open("H4 rehearsal"), None, "the Session closed its streamers");
+    assert!(group.values.is_empty(), "H4 produces observations, not profile values");
+    assert_eq!(group.conditions.len(), 1);
+    assert_eq!(group.conditions[0].concurrent.len(), 2);
+    let result = Json::Object(group.observations[0].result.clone().into_iter().collect());
+    let updates = result["timed_updates"].as_array().unwrap();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(result["accepted_count"].as_u64(), Some(2));
+    assert_eq!(result["status"], "complete", "{result}");
+    assert_eq!(result["master_clock_hz"].as_u64(), Some(200_000_000));
+    assert_eq!(result["release_window_ticks"].as_i64(), Some(600_000));
+    assert_eq!(result["apply_called_count"].as_u64(), Some(2));
+    assert_eq!(result["submit_error_count"].as_u64(), Some(0));
+    assert!(updates.iter().all(|row| row["direction"] == "rx" && row["channel"] == 0
+        && row["setting"] == "gain_db" && row["session_action"] == "ezsdr.h4.set_rx_gain"
+        && row["apply"]["gain_only"] == true));
+    let first = &updates[0];
+    assert_eq!(first["apply"]["e"], first["e"]);
+    assert!(first["apply"]["host_entry_ns"].as_u64().is_some());
+    assert_eq!(first["clock_mapping"]["status"], "mapped");
+    let delay = &first["dispatch_delay_ns"];
+    assert!(delay["lower"].as_i64().unwrap() <= delay["upper"].as_i64().unwrap());
+    assert_eq!(result["dispatch_delay_proxy"].as_str(), Some("uhd-control timed-apply entry minus the host-mapped release-window instant; not scheduler wake-up latency"));
+    assert_eq!(result["tx_headroom_proxy"].as_str(), Some("nominal next-sample submission margin; not RF execution time"));
+    assert!(!result["tx_send_records"].as_array().unwrap().is_empty());
+    let headroom = result["tx_headroom"].as_array().unwrap();
+    let mapped_headroom: Vec<_> = headroom.iter().filter(|row| row["headroom_ns"].is_object()).collect();
+    assert!(!mapped_headroom.is_empty(), "the Session rehearsal exposes computed TX submission headroom: {headroom:?}");
+    assert!(mapped_headroom.iter().all(|row| row["headroom_ns"]["lower"].as_i64().unwrap() <= row["headroom_ns"]["upper"].as_i64().unwrap()
+        && row["proxy"].as_str().is_some_and(|text| text.contains("not RF execution time"))), "{mapped_headroom:?}");
+    let anchors = result["time_now_records"].as_array().unwrap();
+    assert!(anchors.iter().any(|row| row["purpose"] == "h4_anchor" && row["result"]["value"].is_i64()));
+    assert!(anchors.iter().all(|row| row["host_before_ns"].as_u64().unwrap() <= row["host_after_ns"].as_u64().unwrap()));
+    assert_eq!(probe.timed_apply_count(), 2);
+}
+
+#[test]
+fn h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates() {
+    let guard = Arc::new(measurement::GuardedDevice::new(fake_real(one_obx()), measurement::Latch::new()));
+    let device: Arc<dyn Device> = guard;
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
+    probe.underflow_after_tx_send();
+    let group = measurement::measure_h4_dispatch(probe, 4).unwrap();
+    let result = Json::Object(group.observations[0].result.clone().into_iter().collect());
+    let updates = result["timed_updates"].as_array().unwrap();
+    assert_eq!(result["accepted_count"].as_u64(), Some(4));
+    assert_eq!(result["apply_called_count"].as_u64(), Some(4));
+    assert_eq!(result["apply_error_count"].as_u64(), Some(0), "gain updates continue after the TX report");
+    assert!(result["tx_underflow_events"].as_u64().unwrap() > 0);
+    assert!(result["tx_underflow_sample_clock_events"].as_u64().unwrap() > 0, "the TX event must carry its SampleClock domain");
+    assert!(result["tx_underflow_converted_events"].as_u64().unwrap() > 0, "the TX SampleClock report was converted to root time");
+    assert_eq!(result["tx_underflow_unconvertible_events"].as_u64(), Some(0));
+    assert_ne!(result["status"], "complete", "an underflow-terminated repeat cannot be complete");
+    assert!(result["dispatch_updates_after_tx_end_count"].as_u64().unwrap() > 0, "updates after TX ended are excluded from the concurrent distribution: {updates:?}");
+    assert!(updates.iter().all(|row| row["apply_called"] == true && !row["apply"]["result"]["error"].is_string()));
+    assert!(result["dispatch_delay_lower_ns"]["count"].as_u64().unwrap() < 4);
+}
+
+#[test]
+fn h4_not_submitted_updates_keep_their_direction_channel_setting_and_instant() {
+    let guard = Arc::new(measurement::GuardedDevice::new(fake(one_obx()), measurement::Latch::new()));
+    let device: Arc<dyn Device> = guard;
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
+    probe.fail_timed_apply(1);
+    let group = measurement::measure_h4_dispatch(probe, 2).unwrap();
+    let result = Json::Object(group.observations[0].result.clone().into_iter().collect());
+    let not_submitted = result["timed_updates"].as_array().unwrap().iter().find(|row| row["status"] == "not_submitted").unwrap();
+    assert_eq!(not_submitted["direction"], "rx");
+    assert_eq!(not_submitted["channel"], 0);
+    assert_eq!(not_submitted["setting"], "gain_db");
+    assert!(not_submitted["e"].as_i64().is_some());
+}
+
+#[test]
+fn h4_load_self_test_reaps_pid_owned_workers_and_checks_the_memory_budget() {
+    let script = format!("{}/../../plan/phase8/tools/h4-load.sh", env!("CARGO_MANIFEST_DIR"));
+    let record_script = format!("{}/../../plan/phase8/tools/run-record.sh", env!("CARGO_MANIFEST_DIR"));
+    for path in [&script, &record_script] {
+        let syntax = std::process::Command::new("bash").args(["-n", path]).output().unwrap();
+        assert!(syntax.status.success(), "bash -n {path}: {}", String::from_utf8_lossy(&syntax.stderr));
+    }
+    let self_test = std::process::Command::new("bash").arg(&script).arg("--self-test").output().unwrap();
+    assert!(self_test.status.success(), "{}", String::from_utf8_lossy(&self_test.stderr));
+    assert!(String::from_utf8_lossy(&self_test.stdout).contains("one-second load stopped and reaped PIDs"));
+    let rejected = std::process::Command::new("bash").arg(&script).args(["--cpu", "1", "--mem", "10", "--duration", "1"]).output().unwrap();
+    assert!(!rejected.status.success(), "a memory request over the cap must be refused before workers start");
+    assert!(!String::from_utf8_lossy(&rejected.stdout).contains("H4_READY"));
+    let help = std::process::Command::new("bash").arg(&record_script).arg("--help").output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for variable in ["EZSDR_MEASUREMENT_H4_CPU", "EZSDR_MEASUREMENT_H4_MEM", "EZSDR_MEASUREMENT_H4_DURATION"] {
+        assert!(help.contains(variable), "run-record --help omits {variable}");
+    }
 }
 
 #[test]

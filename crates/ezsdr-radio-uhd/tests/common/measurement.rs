@@ -31,6 +31,8 @@ use super::SAFE_TX_HZ;
 
 mod multichannel;
 pub use multichannel::*;
+mod h4;
+pub use h4::*;
 
 /// The optional environment variable that names the layout and link of the record's device.
 pub const SELECTOR_ENV: &str = "EZSDR_MEASUREMENT_SELECTOR";
@@ -693,6 +695,8 @@ pub struct MeasurementPlan {
     pub frequency_points: usize,
     /// The network interfaces whose byte counters each throughput trial reads (`EZSDR_MEASUREMENT_NICS`).
     pub nics: Vec<String>,
+    /// Complex samples of the TX throughput trials' repeating waveform, the whole artifact (`EZSDR_TX_WAVEFORM_SAMPLES`).
+    pub tx_waveform_samples: usize,
 }
 
 impl Default for MeasurementPlan {
@@ -722,11 +726,21 @@ impl Default for MeasurementPlan {
             raw_group_limit_ms: 300_000,
             frequency_points: 200,
             nics: Vec::new(),
+            tx_waveform_samples: 1_000,
         }
     }
 }
 
 impl MeasurementPlan {
+    /// A bounded reopen pass: half of each base count/duration, rounded up and never zero.
+    pub fn reopened_plan(&self) -> MeasurementPlan {
+        MeasurementPlan {
+            step_trials: self.step_trials.div_ceil(2).max(1),
+            throughput_seconds: self.throughput_seconds.div_ceil(2).max(1),
+            ..self.clone()
+        }
+    }
+
     /// Small, deterministic-stage inputs for the FakeDevice record rehearsal.
     pub fn rehearsal() -> MeasurementPlan {
         MeasurementPlan {
@@ -751,6 +765,7 @@ impl MeasurementPlan {
             raw_group_limit_ms: 300_000,
             frequency_points: 20,
             nics: Vec::new(),
+            tx_waveform_samples: 1_000,
         }
     }
 
@@ -830,6 +845,7 @@ impl MeasurementPlan {
             queue_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_QUEUE_TRIALS is too large".to_owned())?,
             queue_max_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_MAX_TRIALS", 15)?).map_err(|_| "EZSDR_MEASURE_QUEUE_MAX_TRIALS is too large".to_owned())?,
             nics: values.get("EZSDR_MEASUREMENT_NICS").or(values.get("EZSDR_BENCH_NIC")).map(|text| text.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
+            tx_waveform_samples: usize::try_from(count(values, "EZSDR_TX_WAVEFORM_SAMPLES", 1_000)?).ok().filter(|samples| *samples > 0).ok_or_else(|| "EZSDR_TX_WAVEFORM_SAMPLES must be a positive count".to_owned())?,
             ..MeasurementPlan::default()
         };
         plan.validate()?;
@@ -1934,6 +1950,38 @@ impl DeviceLease {
     pub fn mark_clean(&mut self) {
         self.failed = false;
     }
+
+    pub fn is_clean(&self) -> bool { !self.failed }
+
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(self.device.as_ref().expect("the lease holds its device until dropped"))
+    }
+
+    /// Drops the old guarded handle and opens again only when no record owner can still use it.
+    pub fn reopen(self, guard: Arc<GuardedDevice>, opener: impl FnOnce() -> Arc<dyn Device>) -> Result<Arc<GuardedDevice>, String> {
+        let guard_device: Arc<dyn Device> = guard.clone();
+        let same_device = Arc::ptr_eq(self.device.as_ref().expect("the lease holds its device until dropped"), &guard_device);
+        drop(guard_device);
+        if !same_device {
+            drop(guard);
+            return Err("the guarded handle does not belong to this device lease".to_owned());
+        }
+        if let Some(reason) = record_latch_reason() {
+            drop(guard);
+            return Err(format!("the record latch is set ({reason})"));
+        }
+        if !self.is_clean() {
+            drop(guard);
+            return Err("the device lease is not clean".to_owned());
+        }
+        drop(guard);
+        let owners = self.strong_count();
+        if owners != 1 {
+            return Err(format!("the device still has {owners} strong owners; expected only the lease"));
+        }
+        drop(self);
+        Ok(open_record_guard(opener))
+    }
 }
 
 impl Drop for DeviceLease {
@@ -2159,6 +2207,44 @@ impl GroupRun {
         self.write_partial();
     }
 
+    /// Reopened measurements replace the base row with a conservative combination, never a duplicate key.
+    pub fn run_reopened(&mut self, name: &str, keys: &[String], mode: ReopenedMerge, measure: impl FnOnce() -> Result<MeasurementGroup, String>) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(measure));
+        let result = match outcome {
+            Ok(result) => result,
+            Err(payload) => Err(Self::panic_text(payload)),
+        };
+        match result {
+            Ok(group) => match self.measured.merge_reopened(group, keys, mode) {
+                Ok(()) => self.completed.push(name.to_owned()),
+                Err(error) => self.record_reopened_failure(name, keys, error),
+            },
+            Err(error) => self.record_reopened_failure(name, keys, error),
+        }
+        self.write_partial();
+    }
+
+    /// A skipped reopen cannot leave the earlier value as if it were the complete evidence.
+    pub fn skip_reopened(&mut self, keys: &[String], reason: &str) {
+        self.measured.invalidate_values(keys, reason);
+        self.measured.observations.push(observation("provider_reopen", "tests/hardware.rs::hw_measurements_record", None, 1,
+            json!({ "status": "skipped", "reason": reason })).expect("the reopen observation is valid"));
+        self.write_partial();
+    }
+
+    pub fn fail_reopened(&mut self, name: &str, keys: &[String], error: String) {
+        self.record_reopened_failure(name, keys, error);
+        self.write_partial();
+    }
+
+    fn record_reopened_failure(&mut self, name: &str, keys: &[String], error: String) {
+        self.measured.invalidate_values(keys, &format!("reopened group `{name}` failed: {error}"));
+        if let Ok(row) = observation(format!("group_failure_{name}"), QUEUE_TEST, None, 1, json!({ "group": name, "error": error })) {
+            self.measured.observations.push(row);
+        }
+        self.failed.push((name.to_owned(), error));
+    }
+
     /// The pair of the two measured throughput limits, run once both values are decided (stage 3e): a group of its own with no
     /// value key, so its failure is its own. A latched record does not run it.
     pub fn run_duplex_pair(&mut self, plan: &MeasurementPlan, wire_bytes: u64, device: impl FnOnce() -> Arc<dyn Device>) {
@@ -2231,6 +2317,111 @@ impl MeasurementGroup {
         self.values.append(&mut other.values);
         self.observations.append(&mut other.observations);
         Ok(())
+    }
+
+    fn invalidate_values(&mut self, keys: &[String], reason: &str) {
+        for key in keys {
+            let parsed = Key::parse(key).expect("a reopened key is valid");
+            let mut found = false;
+            for value in &mut self.values {
+                if record_key(value) == &parsed {
+                    *value = ValueRecord::Unmeasured { key: parsed.clone(), reason: reason.to_owned() };
+                    found = true;
+                }
+            }
+            if !found { self.values.push(ValueRecord::Unmeasured { key: parsed, reason: reason.to_owned() }); }
+        }
+    }
+
+    fn merge_reopened(&mut self, mut reopened: MeasurementGroup, keys: &[String], mode: ReopenedMerge) -> Result<(), String> {
+        reopened.mark_reopened();
+        for (index, condition) in reopened.conditions.iter().enumerate() {
+            if reopened.conditions[..index].iter().any(|previous| previous.id == condition.id)
+                || self.conditions.iter().any(|previous| previous.id == condition.id) {
+                return Err(format!("reopened condition `{}` is duplicated", condition.id));
+            }
+        }
+        for key in keys {
+            if reopened.values.iter().filter(|value| record_key(value).as_str() == key).count() != 1 {
+                return Err(format!("reopened measurement must provide exactly one `{key}` value"));
+            }
+            if self.values.iter().filter(|value| record_key(value).as_str() == key).count() != 1 {
+                return Err(format!("base measurement must provide exactly one `{key}` value"));
+            }
+        }
+        let replacements: Vec<_> = keys.iter().map(|key| {
+            let base = self.values.iter().find(|value| record_key(value).as_str() == key).expect("validated base value");
+            let reopened = reopened.values.iter().find(|value| record_key(value).as_str() == key).expect("validated reopened value");
+            combine_reopened_value(base, reopened, key, mode)
+        }).collect();
+        let additions = MeasurementGroup { conditions: reopened.conditions, values: Vec::new(), observations: reopened.observations };
+        self.append(additions)?;
+        for (key, replacement) in keys.iter().zip(replacements) {
+            let parsed = Key::parse(key).map_err(|error| error.to_string())?;
+            *self.values.iter_mut().find(|value| record_key(value) == &parsed).expect("validated base value") = replacement;
+        }
+        Ok(())
+    }
+
+    fn mark_reopened(&mut self) {
+        let ids: BTreeMap<String, String> = self.conditions.iter().map(|condition| (condition.id.clone(), format!("reopened-{}", condition.id))).collect();
+        for condition in &mut self.conditions {
+            condition.id = ids[&condition.id].clone();
+            condition.reopened = true;
+        }
+        for value in &mut self.values {
+            if let ValueRecord::Measured { condition, .. } = value {
+                if let Some(reopened) = ids.get(condition) { *condition = reopened.clone(); }
+            }
+        }
+        for row in &mut self.observations {
+            row.name = format!("reopened_{}", row.name);
+            if let Some(condition) = row.condition.as_mut() {
+                if let Some(reopened) = ids.get(condition) { *condition = reopened.clone(); }
+            }
+            let mut result = Json::Object(std::mem::take(&mut row.result).into_iter().collect());
+            rewrite_condition_ids(&mut result, &ids);
+            if let Json::Object(result) = result { row.result = result.into_iter().collect(); }
+        }
+    }
+}
+
+fn record_key(value: &ValueRecord) -> &Key {
+    match value {
+        ValueRecord::Measured { key, .. } | ValueRecord::Unmeasured { key, .. } => key,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReopenedMerge { Minimum, Maximum }
+
+fn combine_reopened_value(base: &ValueRecord, reopened: &ValueRecord, key: &str, mode: ReopenedMerge) -> ValueRecord {
+    let parsed = Key::parse(key).expect("the reopened key is valid");
+    if let ValueRecord::Unmeasured { reason, .. } = reopened {
+        return ValueRecord::Unmeasured { key: parsed, reason: format!("reopened measurement is unmeasured: {reason}") };
+    }
+    if let ValueRecord::Unmeasured { reason, .. } = base {
+        return ValueRecord::Unmeasured { key: parsed, reason: format!("base measurement is unmeasured: {reason}") };
+    }
+    let (ValueRecord::Measured { worst: model::Worst::Number(base_worst), .. }, ValueRecord::Measured { worst: model::Worst::Number(reopened_worst), .. }) = (base, reopened) else {
+        return ValueRecord::Unmeasured { key: parsed, reason: "base and reopened measurements must both be measured numeric values".to_owned() };
+    };
+    if !base_worst.is_finite() || !reopened_worst.is_finite() {
+        return ValueRecord::Unmeasured { key: parsed, reason: "base and reopened measurements must be finite".to_owned() };
+    }
+    match mode {
+        ReopenedMerge::Minimum if base_worst <= reopened_worst => base.clone(),
+        ReopenedMerge::Maximum if base_worst >= reopened_worst => base.clone(),
+        _ => reopened.clone(),
+    }
+}
+
+fn rewrite_condition_ids(value: &mut Json, ids: &BTreeMap<String, String>) {
+    match value {
+        Json::String(text) => if let Some(reopened) = ids.get(text) { *text = reopened.clone(); },
+        Json::Array(rows) => for row in rows { rewrite_condition_ids(row, ids); },
+        Json::Object(fields) => for field in fields.values_mut() { rewrite_condition_ids(field, ids); },
+        _ => {}
     }
 }
 
@@ -3146,6 +3337,15 @@ fn rate_condition(rate_hz: u64) -> String {
 
 /// Provider-path receive capacity sweep over duration-sized Runs (UR-34).
 pub fn measure_rx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    rx_throughput_group(device, plan, true)
+}
+
+/// The reopen pass repeats only the single-stream receive sweep, not multi-channel families.
+pub fn measure_reopened_rx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    rx_throughput_group(device, plan, false)
+}
+
+fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_multichannel: bool) -> Result<MeasurementGroup, String> {
     plan.validate()?;
     let mut stages = Vec::new();
     let mut observations = Vec::new();
@@ -3201,7 +3401,7 @@ pub fn measure_rx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
         )?);
     }
     // The layout's other conditions (two or more channels, a stream each way) are added to the one-channel sweep.
-    let extra = extra_throughput(&device, plan, Direction::Rx, description.rx.len(), wire_bytes)?;
+    let extra = if include_multichannel { extra_throughput(&device, plan, Direction::Rx, description.rx.len(), wire_bytes)? } else { ExtraThroughput::default() };
     if !extra.stages.is_empty() {
         let mut family: Vec<FamilyStage> = plan.rx_rates_hz.iter().zip(&stages)
             .map(|(rate, stage)| FamilyStage { condition: rate_condition(*rate), family: "rx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() }).collect();
@@ -3371,7 +3571,7 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
     let wire_bytes = u64::try_from(tx_description.performance.wire_bytes_per_sample).map_err(|_| "wire bytes per sample is negative".to_owned())?;
     for rate in &plan.tx_throughput_rates_hz {
         let id = tx_rate_id(*rate);
-        let (bytes, waveform) = super::waveform_of(&super::pn(1_000));
+        let (bytes, waveform) = super::waveform_of(&super::pn(plan.tx_waveform_samples));
         let run_dir = super::TempDir::new();
         let profile = super::bench_profile(&*device, &run_dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
         let spec = tx_at_channel_zero_frequency(super::with_burst(
@@ -3909,6 +4109,17 @@ fn numeric_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopened_plan_halves_counts_rounding_up_and_never_zero() {
+        let mut plan = MeasurementPlan { step_trials: 3, throughput_seconds: 5, ..MeasurementPlan::default() };
+        let reopened = plan.reopened_plan();
+        assert_eq!((reopened.step_trials, reopened.throughput_seconds), (2, 3));
+        plan.step_trials = 0;
+        plan.throughput_seconds = 0;
+        let reopened = plan.reopened_plan();
+        assert_eq!((reopened.step_trials, reopened.throughput_seconds), (1, 1));
+    }
 
     #[test]
     fn command_queue_depth_requires_backpressure_timing_and_success_in_every_condition() {

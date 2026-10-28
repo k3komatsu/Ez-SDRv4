@@ -624,7 +624,7 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     let described = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())?;
     let link_gbps = doc["bindings"]["radio"]["selector"]["link_gbps"][0].as_i64().unwrap_or(10);
     let performance = candidate_performance(&described.performance, link_gbps);
-    let (waveform_bytes, waveform) = common::transmit_waveform(1_000);
+    let (waveform_bytes, waveform) = common::transmit_waveform(plan.tx_waveform_samples);
     let spec = stage_spec(&*device, stage, &waveform);
     let inputs = BTreeMap::from([(waveform.hash.clone(), waveform_bytes)]);
     let nics_before = nic_counters(&plan.nics);

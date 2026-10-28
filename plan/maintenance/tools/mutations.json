@@ -14425,6 +14425,346 @@
    "new": "        self.inner().raise_thread_priority()\n    }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "ur_23_g3_a_latched_guard_refuses_the_priority_call"
-  }
-]
+    "filter": "ur_23_g3_a_latched_guard_refuses_the_priority_call"
+   },
+   {
+    "id": "P1124",
+    "name": "the reopened guard must belong to its lease",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        if !same_device {\n            drop(guard);\n            return Err(\"the guarded handle does not belong to this device lease\".to_owned());\n        }",
+    "new": "        if same_device {\n            drop(guard);\n            return Err(\"the guarded handle does not belong to this device lease\".to_owned());\n        }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "record_reopen_requires_a_clear_latch_clean_lease_and_exclusive_owner"
+   },
+   {
+    "id": "P1125",
+    "name": "a latched record does not reopen its device",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        if let Some(reason) = record_latch_reason() {\n            drop(guard);\n            return Err(format!(\"the record latch is set ({reason})\"));\n        }",
+    "new": "        if record_latch_reason().is_some() {\n            let _ = &guard;\n        }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "record_reopen_requires_a_clear_latch_clean_lease_and_exclusive_owner"
+   },
+   {
+    "id": "P1126",
+    "name": "an unclean lease does not reopen its device",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        if !self.is_clean() {\n            drop(guard);\n            return Err(\"the device lease is not clean\".to_owned());\n        }",
+    "new": "        if self.is_clean() {\n            drop(guard);\n            return Err(\"the device lease is not clean\".to_owned());\n        }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "record_reopen_requires_a_clear_latch_clean_lease_and_exclusive_owner"
+   },
+   {
+    "id": "P1127",
+    "name": "a leftover strong owner blocks reopening",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        if owners != 1 {\n            return Err(format!(\"the device still has {owners} strong owners; expected only the lease\"));\n        }",
+    "new": "        if owners == 1 {\n            return Err(format!(\"the device still has {owners} strong owners; expected only the lease\"));\n        }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "record_reopen_requires_a_clear_latch_clean_lease_and_exclusive_owner"
+   },
+   {
+    "id": "P1128",
+    "name": "RX throughput uses the lower base or reopened value",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        ReopenedMerge::Minimum if base_worst <= reopened_worst => base.clone(),",
+    "new": "        ReopenedMerge::Minimum if base_worst >= reopened_worst => base.clone(),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+   },
+   {
+    "id": "P1129",
+    "name": "start lead uses the higher base or reopened value",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        ReopenedMerge::Maximum if base_worst >= reopened_worst => base.clone(),",
+    "new": "        ReopenedMerge::Maximum if base_worst <= reopened_worst => base.clone(),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+   },
+   {
+    "id": "P1130",
+    "name": "a failed reopened group invalidates the earlier value",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        self.measured.invalidate_values(keys, &format!(\"reopened group `{name}` failed: {error}\"));",
+    "new": "        let _ = keys;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+   },
+   {
+    "id": "P1131",
+    "name": "a skipped reopen invalidates the earlier value",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        self.measured.invalidate_values(keys, reason);",
+    "new": "        let _ = keys;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+   },
+   {
+    "id": "P1132",
+    "name": "an unmeasured reopen retains its specific reason",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "        return ValueRecord::Unmeasured { key: parsed, reason: format!(\"reopened measurement is unmeasured: {reason}\") };",
+    "new": "        return ValueRecord::Unmeasured { key: parsed, reason: \"reopened measurement is unmeasured\".to_owned() };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+   },
+   {
+    "id": "P1133",
+    "name": "dispatch delay keeps its ordered signed interval",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "    let lower = i64::try_from(entry - i128::from(mapped.upper_ns)).map_err(|_| \"dispatch delay underflow\".to_owned())?;\n    let upper = i64::try_from(entry - i128::from(mapped.lower_ns)).map_err(|_| \"dispatch delay overflow\".to_owned())?;",
+    "new": "    let lower = i64::try_from(entry - i128::from(mapped.lower_ns)).map_err(|_| \"dispatch delay underflow\".to_owned())?;\n    let upper = i64::try_from(entry - i128::from(mapped.upper_ns)).map_err(|_| \"dispatch delay overflow\".to_owned())?;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_dispatch_maps_signed_intervals_and_refuses_bad_anchors"
+   },
+   {
+    "id": "P1135",
+    "name": "TX headroom discards zero-accepted sends",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "        if accepted == 0 || sample_counts.contains(&0) {",
+    "new": "        if sample_counts.contains(&0) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_zero_sample_send_breaks_the_headroom_segment"
+   },
+   {
+    "id": "P1136",
+    "name": "the H4 self-test rejects a surviving worker PID",
+    "file": "plan/phase8/tools/h4-load.sh",
+    "old": "        if kill -0 \"$pid\" 2>/dev/null; then fail \"worker PID $pid survived the self-test\"; fi",
+    "new": "        if ! kill -0 \"$pid\" 2>/dev/null; then fail \"worker PID $pid survived the self-test\"; fi",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_load_self_test_reaps_pid_owned_workers_and_checks_the_memory_budget"
+   },
+   {
+    "id": "P1137",
+    "name": "the reopen plan halves counts with upward rounding and a floor",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+    "old": "            step_trials: self.step_trials.div_ceil(2).max(1),",
+    "new": "            step_trials: self.step_trials / 2,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "reopened_plan_halves_counts_rounding_up_and_never_zero"
+   },
+  {
+   "id": "P1138",
+   "name": "the reopened RX pass omits multichannel conditions",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    let extra = if include_multichannel { extra_throughput(&device, plan, Direction::Rx, description.rx.len(), wire_bytes)? } else { ExtraThroughput::default() };",
+   "new": "    let extra = if true { extra_throughput(&device, plan, Direction::Rx, description.rx.len(), wire_bytes)? } else { ExtraThroughput::default() };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "reopened_receive_throughput_repeats_only_the_single_channel_sweep"
+  },
+  {
+   "id": "P1139",
+   "name": "the H4 gain Session update keeps its requested device instant",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+   "old": "        at: Some(at),",
+   "new": "        at: None,",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+  },
+  {
+   "id": "P1140",
+   "name": "an EOB breaks the TX headroom segment",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+   "old": "        if row[\"eob\"].as_bool() == Some(true) { segment = None; }",
+   "new": "        if row[\"eob\"].as_bool() == Some(false) { segment = None; }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_tx_headroom_restarts_after_an_error_and_eob"
+  },
+  {
+   "id": "P1141",
+   "name": "an errored send breaks the TX headroom segment",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+   "old": "        if row[\"result\"][\"error\"].is_string() || sample_counts.is_empty() {",
+   "new": "        if sample_counts.is_empty() {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_tx_headroom_restarts_after_an_error_and_eob"
+  },
+  {
+   "id": "P1142",
+   "name": "timed apply records its host entry for the dispatch mapping",
+   "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+   "old": "            \"e\": at, \"host_entry_ns\": host_entry_ns, \"host_return_ns\": self.host_ns(),",
+   "new": "            \"e\": at, \"host_entry\": host_entry_ns, \"host_return_ns\": self.host_ns(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+  },
+  {
+   "id": "P1143",
+   "name": "the H4 observation includes computed TX headroom rows",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "        \"tx_send_count\": tx_send_count, \"tx_send_records\": tx_rows, \"tx_headroom\": headroom_rows,",
+    "new": "        \"tx_send_count\": tx_send_count, \"tx_send_records\": tx_rows, \"tx_headroom\": Vec::<Json>::new(),",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+  },
+  {
+   "id": "P1144",
+   "name": "not-submitted H4 updates retain their setting identity",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+   "old": "        if let Some(reason) = &stop_after {\n            dispatch_rows.push(json!({ \"index\": index, \"direction\": \"rx\", \"channel\": 0, \"setting\": \"gain_db\", \"e\": e,\n                \"requested_gain_db\": gain, \"status\": \"not_submitted\", \"reason\": reason }));\n            continue;\n        }",
+   "new": "        if let Some(reason) = &stop_after {\n            dispatch_rows.push(json!({ \"index\": index, \"requested_gain_db\": gain, \"status\": \"not_submitted\", \"reason\": reason }));\n            continue;\n        }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_not_submitted_updates_keep_their_direction_channel_setting_and_instant"
+  },
+  {
+   "id": "P1145",
+   "name": "an unmeasured base value stays unmeasured after a reopened success",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "        return ValueRecord::Unmeasured { key: parsed, reason: format!(\"base measurement is unmeasured: {reason}\") };",
+   "new": "        return ValueRecord::Measured { key: parsed, worst: model::Worst::Number(0.0), trials: 1, condition: String::new(), test: String::new() };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+  },
+  {
+   "id": "P1146",
+   "name": "reopened values reject nonnumeric base measurements",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "        return ValueRecord::Unmeasured { key: parsed, reason: \"base and reopened measurements must both be measured numeric values\".to_owned() };",
+   "new": "        return ValueRecord::Measured { key: parsed, worst: model::Worst::Number(0.0), trials: 1, condition: String::new(), test: String::new() };",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "reopened_values_use_the_conservative_pair_and_failures_invalidate_base_values"
+  },
+  {
+   "id": "P1147",
+   "name": "a prior group failure prevents the raw lease becoming clean",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    if stopped.is_none() && restored.is_none() && groups.failed().is_empty() { lease.mark_clean(); }",
+   "new": "    if stopped.is_none() && restored.is_none() { lease.mark_clean(); }",
+   "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "restore_failure_and_unwound_group_refuse_reopen_without_opening_again"
+   },
+   {
+    "id": "P1148",
+    "name": "TX underflow report time converts through its SampleClock",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "match super::point_root_tick(event.time, &manifest.clocks.sample_clocks) {",
+    "new": "match event.time.ticks_in(root).map_err(|error| error.to_string()) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1149",
+    "name": "H4 counts TX underflow events",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "        \"tx_underflow_events\": tx_underflows.len(), \"tx_underflow_converted_events\": underflow_ticks.len(),",
+    "new": "        \"tx_underflow_events\": 0, \"tx_underflow_converted_events\": underflow_ticks.len(),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1150",
+    "name": "an underflow-ended H4 repeat is not complete",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "        \"status\": if partial { \"partial\" } else { \"complete\" },",
+    "new": "        \"status\": \"complete\",",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1151",
+    "name": "dispatch updates after TX end are excluded",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "            (false, true, Some(apply), Some(_), Some(end)) if apply < end => \"concurrent\",",
+    "new": "            (false, true, Some(apply), Some(_), Some(end)) if apply <= end || apply > end => \"concurrent\",",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1152",
+    "name": "H4 rejects a monotonic forward clock jump",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "    if !clock_rate_matches(anchors, master_clock_hz) {",
+    "new": "    if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_mapping_rejects_a_monotonic_forward_clock_jump"
+   },
+   {
+    "id": "P1153",
+    "name": "ProbeDevice retains no more than its row limit",
+    "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+    "old": "        if rows.len() < PROBE_ROW_LIMIT { rows.push(row); }",
+    "new": "        if true { rows.push(row); }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "probe_rows_stop_at_the_limit_and_count_dropped_rows"
+   },
+   {
+    "id": "P1154",
+    "name": "timed-apply polling looks up only its matching row",
+    "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+    "old": "row[\"call\"] == \"apply_timed\" && row[\"e\"].as_i64() == Some(e)",
+    "new": "row[\"call\"] == \"tx_send\" && row[\"e\"].as_i64() == Some(e)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+   },
+   {
+    "id": "P1155",
+    "name": "H4 identifies TX SampleClock underflow events",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": "clock.domain == event.time.domain()",
+    "new": "clock.domain != event.time.domain()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1156",
+    "name": "the H4 probe delivers its armed TX underflow after a send",
+    "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+    "old": "if self.tx_underflow_ready.swap(false, Ordering::AcqRel) {",
+   "new": "if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1157",
+    "name": "the H4 probe arms its TX underflow after accepted samples",
+    "file": "crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+    "old": "&& self.tx_underflow_after_send.swap(false, Ordering::AcqRel)",
+    "new": "&& false",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+   },
+   {
+    "id": "P1158",
+    "name": "H4 does not count the repeat's empty end-of-burst as an incomplete send",
+    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+    "old": ".filter(|row| !(row[\"eob\"] == true && !row[\"result\"][\"error\"].is_string() && row[\"sample_counts\"].as_array().is_some_and(|counts| counts.iter().all(|count| count.as_u64() == Some(0)))))",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+   }
+ ]

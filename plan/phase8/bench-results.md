@@ -194,3 +194,34 @@ X300 #2（serial 347D541，FPGA 39.3 / d375d68），NIC `enp1s0f0np0`（#1 と�
 - 送信は #2 では 10 MS/s で止まり，#1（50 MS/s）よりかなり低い．原因（board，2 channel の構成，uhd-tx の優先度）は未確認．uhd-tx の実時間の優先度の段階の後に見直す．
 - queue の深さは #1 の 7 と #2 の 8 の両方が profile の 16 より小さい（Mock が実機より緩い：段階 4）．受信の利得の条件で 1 試行が成功でなかった（6 試行で成功 5）．
 - 同時運転の 1 組（受信 200＋100 MS/s と送信 10 MS/s，60 s）：成功，overflow なし．装置の詰まり・PLL のはずれは無し．
+
+### 2 channel の記録，uhd-tx の優先度の後（X300 #2，同じ配線，commit `98b0d9a`，約 83 分）
+
+出力は `~/ezsdr-bench/2026-10-28/98b0d9a919c9-154746201756884/`．`measurement.json` は書けた．test の失敗は profile との比較の違反 3 件だけ（受信 600 MB/s，送信 260 MB/s，queue の深さ 8，いずれも profile 1 GB/s・16 より小さい）．
+
+| 条件 | 結果 |
+|---|---|
+| 送信 1 channel | 100 MS/s まで成功，200 MS/s は DeviceFailure |
+| 送信 split（streamer 2 本） | 100 MS/s × 2（800 MB/s）まで成功，200 MS/s は admission で拒否 |
+| 送信 mixed | 100＋50 MS/s（600 MB/s）まで成功，200＋100 MS/s は DeviceFailure |
+| 送信 grouped（1 streamer に 2 channel） | 25 MS/s × 2 まで成功，**40 MS/s × 2（320 MB/s）から DeviceFailure** |
+| 受信 1 channel | 100 MS/s まで成功，**200 MS/s は DeviceFailure** |
+| 受信 grouped | 50 MS/s × 2 まで成功，100 MS/s × 2 は DeviceFailure |
+| 受信 split / mixed | split 100 MS/s × 2，mixed 200＋100 MS/s まで成功 |
+
+- 送信は前回（`afbb125`）の 10 MS/s から，1 channel で 100 MS/s，streamer 2 本で計 800 MB/s まで上がった．uhd-tx の実時間の優先度（段階 TXP）の効果と読む（INFERRED：変えたのは commit だけで，配線と NIC は同じ）．記録の値 260 MB/s は grouped の失敗で決まる（`tx-grouped-40m` が止めた条件）．1 streamer に 2 channel を束ねた送信が弱い理由は未調査．
+- 受信の値は前回の 1.2 GB/s から 600 MB/s に下がった．`rx-200msps` と `rx-grouped-100m` が今回だけ DeviceFailure．受信の経路は TXP で変えていないので，試行ごとのばらつきと読む（INFERRED）．失敗の詳細は log に残っていない．
+
+### D9 P5〜P7 の再実行，2 サンプルの終わりの burst（X300 #2，UBX slot A，30 dB loopback，作業 tree＝`98b0d9a`＋`untimed_end_of_burst` を 0 の 2 サンプル・SOB＋EOB・時刻なしに変更）
+
+log は `~/.cache/ezsdr-bench/2026-10-28/rerun2/`．3 本とも test は成功．
+
+| probe | 結果 |
+|---|---|
+| P5 C（時刻つきで終えた burst の後，reopen してから 2 サンプルの burst） | DUC の移動は e＋25 µs（中央値 99 950 → 149 984 Hz）．古い時刻の header は 2 サンプルの burst で消える：**F7 の回避策 VERIFIED** |
+| P6（全 chunk に時刻） | 移動は e＋25 µs（tune を burst の前に出しても，e の 3 ms 前に出しても同じ） |
+| P6 starvation | 過ぎた時刻の続き（2000 サンプル）は送れたが，Underflow の後は TimeError が並び，続きのサンプルは loopback に 0（捨てられた）．tx の回復は観測した：**R4 の挙動 VERIFIED（遅れた続きは送られない）** |
+| P7（今の uhd-tx の形：最初の send だけ時刻つき，後は時刻なし） | **DUC の移動が e＋40 ms まで起きない**（tone は前後とも約 99 950 Hz，信号の窓は全部あり）：**F3′ VERIFIED**（#2，UBX） |
+
+- 前回 P5 C・P6・P7 で tone が見えなかったのは，1 サンプルの burst（EOB だけの send）で次の burst の時刻が失われたためと読める（P5 C と P6 は今回見えた）．P7 は tone が見えたうえで動かないので，前回とは別の結果．
+- P7 の原因は，時刻なしの packet しか来ない間は DUC の時刻つき command が実行されない，と読む（INFERRED：P6 との違いは続きの send の時刻の有無だけ）．本番の uhd-tx は P7 の形なので，送信中の時刻つきの送信周波数の変更は，次の時刻つき burst まで効かない（issue #72，D9b で直す）．

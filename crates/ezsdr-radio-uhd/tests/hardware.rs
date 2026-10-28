@@ -965,8 +965,11 @@ fn first_steps(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, n: usize) -> V
 /// D9 F7: an untimed end-of-burst. UHD sends it as one zero sample (`tx_streamer_impl.hpp:266-276`), and that burst's only
 /// header has no time (`axi_rate_change.v:403-406`), so the DUC's stale header no longer takes a timed value at once.
 fn untimed_end_of_burst(device: &dyn Device) -> Vec<String> {
-    let empty: Vec<ezsdr_radio_uhd::Iq> = Vec::new();
-    device.tx_send(0, &[&empty], None, false, true, Wall::from_secs(1)).unwrap();
+    // Two zero samples with SOB and EOB, untimed: an EOB-only send is a one-sample burst, which
+    // the X3x0 DUC's rate change takes for a burst still open, so the next burst loses its time
+    // (2026-10-28 rerun, probe-analysis-1028b).
+    let zeros = vec![ezsdr_radio_uhd::Iq::default(); 2];
+    device.tx_send(0, &[&zeros], None, true, true, Wall::from_secs(1)).unwrap();
     std::thread::sleep(Wall::from_millis(10));
     flush_tx(device)
 }
@@ -2510,6 +2513,34 @@ fn hw_ur17_receive_call_duration() {
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_h4_dispatch() {
+    let guard = measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"));
+    if guard.channels(Dir::Rx) == 0 || guard.channels(Dir::Tx) == 0 {
+        measurement::push_raw_observation("hw_h4_dispatch", 1, serde_json::json!({
+            "status": "skipped_no_rx_tx_pair", "rx_channels": guard.channels(Dir::Rx), "tx_channels": guard.channels(Dir::Tx),
+        }));
+        return;
+    }
+    let device: Arc<dyn Device> = guard.clone();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        measurement::measure_h4_dispatch(probe, measurement::H4_DISPATCH_UPDATES)));
+    let open_streamers = guard.latch_if_streamers_open("hw_h4_dispatch");
+    let group = match outcome {
+        Ok(Ok(group)) => group,
+        Ok(Err(error)) => panic!("H4 dispatch probe failed: {error}"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
+    let condition = group.conditions.into_iter().next().expect("H4 measurement describes its stream condition");
+    let row = group.observations.into_iter().next().expect("H4 measurement returns its observation");
+    let mut result = Json::Object(row.result.into_iter().collect());
+    result["measurement_condition"] = serde_json::to_value(condition).expect("H4 condition serializes");
+    result["open_streamers_after_run"] = serde_json::to_value(open_streamers).expect("streamer status serializes");
+    measurement::push_raw_observation("hw_h4_dispatch", row.trials, result);
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_measurements_record() {
     let metadata = measurement::process_metadata().expect("all EZSDR_MEASUREMENT_* values are valid before opening the USRP");
     let plan = measurement::MeasurementPlan::process_env().expect("measurement trial counts are valid before opening the USRP");
@@ -2559,7 +2590,10 @@ fn hw_measurements_record() {
         }
     };
     measurement::run_raw_probes(&mut groups, &raw_probes, measurement::raw_probes_applicable(metadata.selector.as_ref()));
-    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned()).collect();
+    // H4 uses the selected profile's channel 0, not the raw probes' slot-A 1 GHz assumption.
+    groups.probe("hw_h4_dispatch", hw_h4_dispatch);
+    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned())
+        .chain(std::iter::once("hw_h4_dispatch".to_owned())).collect();
     assert_eq!(groups.probes(), &expected, "every raw probe either ran or failed");
 
     // The groups run on a device opened again, unless a probe latched the record: then none is opened and every group is not run.
@@ -2582,14 +2616,50 @@ fn hw_measurements_record() {
             let wire_bytes = u64::try_from(description.performance.wire_bytes_per_sample).expect("the profile's wire bytes per sample");
             groups.run_duplex_pair(&plan, wire_bytes, || lease.device());
             guard.latch_if_streamers_open("duplex_at_the_measured_limits");
-            match measurement::record_latch_reason() {
+            let (stopped, restored) = match measurement::record_latch_reason() {
                 Some(reason) => {
                     let skipped = format!("not run: the device handle is latched ({reason}); nothing is sent to it, which may need a power cycle");
                     groups.run("raw_queue_depth_and_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
                     (Some(skipped), None)
                 }
-                None => measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan),
+                None => {
+                    let outcome = measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan);
+                    guard.latch_if_streamers_open("raw_queue_depth_and_coercion");
+                    outcome
+                }
+            };
+            let reopen_keys = ["radio.perf.rx_bytes_per_s", "radio.timing.rx_start_lead_ns", "radio.timing.tx_start_lead_ns"]
+                .into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let reopened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                lease.reopen(guard, || ezsdr_radio_uhd::open(&args()).expect("the USRP reopens"))
+            }));
+            match reopened {
+                Ok(Ok(reopened_guard)) => {
+                    let mut reopened_lease = measurement::DeviceLease::new(reopened_guard.clone());
+                    let reopened_plan = plan.reopened_plan();
+                    for (name, measure, key, mode) in [
+                        ("reopened_rx_throughput", measurement::measure_reopened_rx_throughput as measurement::ProviderMeasure,
+                            "radio.perf.rx_bytes_per_s", measurement::ReopenedMerge::Minimum),
+                        ("reopened_rx_start_lead", measurement::measure_rx_start_lead,
+                            "radio.timing.rx_start_lead_ns", measurement::ReopenedMerge::Maximum),
+                        ("reopened_tx_start_lead", measurement::measure_tx_start_lead,
+                            "radio.timing.tx_start_lead_ns", measurement::ReopenedMerge::Maximum),
+                    ] {
+                        let keys = [key.to_owned()];
+                        groups.run_reopened(name, &keys, mode, || match measurement::record_latch_reason() {
+                            Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
+                            None => measure(reopened_lease.device(), &reopened_plan),
+                        });
+                        reopened_guard.latch_if_streamers_open(name);
+                    }
+                    if measurement::record_latch_reason().is_none() && groups.failed().is_empty() { reopened_lease.mark_clean(); }
+                    drop(reopened_guard);
+                    drop(reopened_lease);
+                }
+                Ok(Err(reason)) => groups.skip_reopened(&reopen_keys, &reason),
+                Err(payload) => groups.fail_reopened("provider_reopen", &reopen_keys, measurement::GroupRun::panic_text(payload)),
             }
+            (stopped, restored)
         }
         Err(payload) => {
             let reason = measurement::GroupRun::panic_text(payload);
@@ -2622,4 +2692,105 @@ fn hw_measurements_record() {
     assert!(restored.is_none(), "restoring the unstreamed bench settings after the raw group: {restored:?}");
     assert!(violations.is_empty(), "measurement record comparison: {violations:?}");
     println!("Wrote hardware measurement record to {}", path.display());
+}
+
+/// The waveform lengths of `hw_tx200_hot_path_probe` (`EZSDR_TX200_LENGTHS`, comma-separated complex samples).
+fn tx200_lengths() -> Vec<usize> {
+    match std::env::var("EZSDR_TX200_LENGTHS") {
+        Ok(text) => text.split(',').map(|part| {
+            let samples = part.trim().parse::<usize>().unwrap_or_else(|error| panic!("EZSDR_TX200_LENGTHS must be comma-separated complex-sample counts, got {part:?}: {error}"));
+            assert!(samples > 0, "EZSDR_TX200_LENGTHS must be positive, got {samples}");
+            samples
+        }).collect(),
+        Err(std::env::VarError::NotPresent) => vec![1_000, 2_000, 20_000, 200_000],
+        Err(error) => panic!("EZSDR_TX200_LENGTHS is not readable: {error}"),
+    }
+}
+
+/// The seconds each `hw_tx200_hot_path_probe` trial sends (`EZSDR_TX200_SECONDS`, 30).
+fn tx200_seconds() -> u64 {
+    let seconds = match std::env::var("EZSDR_TX200_SECONDS") {
+        Ok(text) => text.trim().parse::<u64>().unwrap_or_else(|error| panic!("EZSDR_TX200_SECONDS must be whole seconds, got {text:?}: {error}")),
+        Err(std::env::VarError::NotPresent) => 30,
+        Err(error) => panic!("EZSDR_TX200_SECONDS is not readable: {error}"),
+    };
+    assert!(seconds > 0, "EZSDR_TX200_SECONDS must be positive, got {seconds}");
+    seconds
+}
+
+/// One `TX200` line of the probe: what the stage's observation holds of the trial, plus that observation where the line
+/// cannot fill a field (a `-`) or where a stream failed (`first_failure` carries the code alone: the tick and channel of a
+/// failure are not in the observation).
+fn tx200_line(length: usize, shape: &str, rate_hz: u64, result: &measurement::StageResult) -> String {
+    let observation = &result.observation;
+    let tx: Vec<&Json> = observation["streams"].as_array().into_iter().flatten().filter(|row| row["direction"] == "tx").collect();
+    let present = !tx.is_empty();
+    let sum = |leaf: &str| tx.iter().map(|row| row[leaf].as_u64()).try_fold(0u64, |total, value| total.checked_add(value?));
+    // `burst_blocks` is one count for each burst row: how many device sends the Provider made in it.
+    let sends = if present { tx.iter().map(|row| match row.get("burst_blocks") {
+        Some(Json::Array(blocks)) => blocks.iter().map(Json::as_u64).try_fold(0u64, |total, count| total.checked_add(count?)),
+        Some(value) => value.as_u64(),
+        None => None,
+    }).try_fold(0u64, |total, count| total.checked_add(count?)) } else { None };
+    let samples: Option<Vec<u64>> = if present { tx.iter().map(|row| row["actual_samples"].as_u64()).collect() } else { None };
+    let underflows = observation["tx_underflow_events"].as_u64().or_else(|| if present { sum("tx_underflow_events") } else { None });
+    let failure = tx.iter().flat_map(|row| row["async_failures"].as_array().into_iter().flatten()).filter_map(Json::as_str).next();
+    let line = format!("TX200 len={length} shape={shape} rate={rate_hz} class={:?} underflows={} sends={} samples={} first_failure={}",
+        result.class,
+        underflows.map_or_else(|| "-".to_owned(), |count| count.to_string()),
+        sends.map_or_else(|| "-".to_owned(), |count| count.to_string()),
+        samples.as_ref().map_or_else(|| "-".to_owned(), |samples| samples.iter().map(u64::to_string).collect::<Vec<_>>().join(",")),
+        failure.unwrap_or("none"));
+    if failure.is_some() || sends.is_none() || samples.is_none() || underflows.is_none() { format!("{line} json={observation}") } else { line }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_tx200_hot_path_probe() {
+    // Diagnostic (stage TX200; it asserts only that each trial ran, and writes no record): does the length of the repeat
+    // waveform remove the 200 MS/s transmit underflow? Each trial runs through the throughput group's own stage runner
+    // (`run_stage`: the same Spec and Run construction, the same waveform whose every magnitude is within 0.5), so the only
+    // difference between the lengths is the plan's `tx_waveform_samples`. The three shapes are single 200 MS/s, and, only when
+    // the selector names two transmit channels, grouped 40 MS/s a channel and split 100 MS/s a channel.
+    let selector = std::env::var(measurement::SELECTOR_ENV).ok().map(|text| parse_selector(&text).expect("EZSDR_MEASUREMENT_SELECTOR holds a selector"));
+    if let Some(selector) = &selector { set_selector_override(Some(selector.clone())); }
+    let device = usrp();
+    let (_, tx) = effective_layout(&*device);
+    let two = tx.as_array().map_or(0, Vec::len) >= 2;
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+    let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
+    let described = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).expect("the bound layout");
+    let wire_bytes = u64::try_from(described.performance.wire_bytes_per_sample).expect("wire bytes per sample is positive");
+    // Only the three shapes the probe compares: single 200 MS/s, and with two transmit channels grouped 40 MS/s a channel
+    // and split 100 MS/s a channel. The plan carries only their rates (the whole sweep is the record's, not this probe's).
+    let mut stages: Vec<(&str, measurement::Stage)> = vec![
+        ("single", measurement::Stage { id: "tx200-single".to_owned(), family: "tx200", rx: Vec::new(),
+            tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 200_000_000 }] }),
+    ];
+    if two {
+        stages.push(("grouped", measurement::Stage { id: "tx200-grouped".to_owned(), family: "tx200", rx: Vec::new(),
+            tx: vec![measurement::StreamPlan { channels: vec![0, 1], rate_hz: 40_000_000 }] }));
+        stages.push(("split", measurement::Stage { id: "tx200-split".to_owned(), family: "tx200", rx: Vec::new(),
+            tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 100_000_000 }, measurement::StreamPlan { channels: vec![1], rate_hz: 100_000_000 }] }));
+    }
+    let lengths = tx200_lengths();
+    let mut rates: Vec<u64> = stages.iter().flat_map(|(_, stage)| stage.tx.iter().map(|stream| stream.rate_hz)).collect();
+    rates.sort_unstable();
+    rates.dedup();
+    let mut plan = measurement::MeasurementPlan { throughput_seconds: tx200_seconds(), tx_throughput_rates_hz: rates, ..measurement::MeasurementPlan::default() };
+    println!("TX200 probe: {} transmit channels, lengths {lengths:?}, {} s a trial, {} trials", tx.as_array().map_or(0, Vec::len), plan.throughput_seconds, lengths.len() * stages.len());
+    let mut ran = 0;
+    for length in &lengths {
+        plan.tx_waveform_samples = *length;
+        for (shape, stage) in &stages {
+            let rate_hz = stage.tx.first().map_or(0, |stream| stream.rate_hz);
+            match measurement::run_stage(device.clone(), &plan, stage, wire_bytes) {
+                Ok(result) => println!("{}", tx200_line(*length, shape, rate_hz, &result)),
+                Err(error) => println!("TX200 len={length} shape={shape} rate={rate_hz} class=Error error={error}"),
+            }
+            ran += 1;
+        }
+    }
+    assert_eq!(ran, lengths.len() * stages.len(), "every TX200 trial ran");
 }
