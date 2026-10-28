@@ -458,8 +458,8 @@
   "id": "J01",
   "name": "VH-7 (spec 22, H01): the timeline keeps a receive segment with no sample",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "        if cut > 0 || stream.direction != Direction::Rx {",
-  "new": "        if true {",
+  "old": "        if !refused && (cut > 0 || stream.direction != Direction::Rx) {",
+  "new": "        if !refused && true {",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_26_the_timeline_cases"
@@ -663,16 +663,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_17_a_cut_is_never_before_what_was_delivered"
- },
- {
-  "id": "J25",
-  "name": "RM-25 (spec 22, step 3; note 23): a refused segment counts as begun, so a replanned segment at its origin is skipped",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "                if !refused {\n                    self.from = origin.saturating_add(1);\n                }",
-   "new": "                let _ = refused;\n                self.from = origin.saturating_add(1);",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_25_a_refused_segment_is_booked_by_uhd_rx"
  },
  {
   "id": "J32",
@@ -4492,8 +4482,8 @@
   "id": "P68",
   "name": "RM-29: the ideal description's command queue is empty",
   "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "                    command_queue_depth: i64::from(u32::MAX),",
-  "new": "                    command_queue_depth: 0,",
+  "old": "                command_queue_depth: i64::from(u32::MAX),",
+  "new": "                command_queue_depth: 0,",
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_29_the_ideal_layout_builds_its_tree_and_defaults"
@@ -4836,7 +4826,7 @@
   "new": "        if !next.line_mut(stream).refuse(seq)? {\n            return Ok(false);\n        }\n",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
-   "filter": "rm_34_a_source_first_prune_keeps_move_dependencies_until_both_lines_pass"
+   "filter": "rm_34_a_refusal_before_a_stop_or_in_a_chain_does_not_change_a_release"
  },
  {
   "id": "P103",
@@ -7585,8 +7575,8 @@
   "id": "P460",
   "name": "a successful cold change leaves the stream halted (UR-25, D3)",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "                Kind::Cold(next) => {\n                    self.cut(stream, item, false)?;\n                    self.refusal = None;\n                    self.config = next;\n                    self.halted = item.refused;",
-  "new": "                Kind::Cold(next) => {\n                    self.cut(stream, item, false)?;\n                    self.refusal = None;\n                    self.config = next;\n                    self.halted = true;",
+  "old": "                    self.refusal = None;\n                    self.config = next;\n                    self.halted = item.refused;",
+  "new": "                    self.refusal = None;\n                    self.config = next;\n                    self.halted = true;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_successful_change_clears_a_later_stream_s_halt"
@@ -9434,8 +9424,8 @@
   "old": "            self.lines.refuse(stream_key(line.0, line.1), order).map_err(rm25)?;",
   "new": "            let _ = line;",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_20_the_next_cold_change_resumes_a_refused_stream"
+  "test_bin": "mock_layout",
+  "filter": "mr_20_a_start_rx_resumes_a_refused_stream"
  },
  {
   "id": "P609",
@@ -9763,8 +9753,8 @@
   "id": "P626",
   "name": "the ideal layout publishes no TX in-flight window (RM-29)",
   "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "                    tx_in_flight_ns: 0,",
-  "new": "                    tx_in_flight_ns: 10_000_000,",
+  "old": "                tx_in_flight_ns: 0,",
+  "new": "                tx_in_flight_ns: 10_000_000,",
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_29_the_ideal_layout_builds_its_tree_and_defaults"
@@ -13912,5 +13902,285 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation"
+  },
+  {
+   "id": "P1052",
+   "name": "a refused receive change begins no segment for planning (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.running = Some(self.begin(stream, item, next)?);\n                        self.refused_running = item.refused && receive;",
+   "new": "                        if !(item.refused && receive) { self.running = Some(self.begin(stream, item, next)?); }",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_change_cuts_it"
+  },
+  {
+   "id": "P1053",
+   "name": "a refused receive change begins no segment for planning: the generated origins move (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.running = Some(self.begin(stream, item, next)?);\n                        self.refused_running = item.refused && receive;",
+   "new": "                        if !(item.refused && receive) { self.running = Some(self.begin(stream, item, next)?); }",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_refusal_does_not_move_a_later_origin"
+  },
+  {
+   "id": "P1054",
+   "name": "a refused receive change begins no segment for planning: the Mock's next origin moves (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.running = Some(self.begin(stream, item, next)?);\n                        self.refused_running = item.refused && receive;",
+   "new": "                        if !(item.refused && receive) { self.running = Some(self.begin(stream, item, next)?); }",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_a_refusal_does_not_move_the_next_segment_s_origin"
+  },
+  {
+   "id": "P1055",
+   "name": "a refused receive change begins no segment for planning: the UHD Module's deferred value is lost (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.running = Some(self.begin(stream, item, next)?);\n                        self.refused_running = item.refused && receive;",
+   "new": "                        if !(item.refused && receive) { self.running = Some(self.begin(stream, item, next)?); }",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_refusal_booked_after_a_release_leaves_the_pending_segments_value_to_its_configure"
+  },
+  {
+   "id": "P1056",
+   "name": "a refused segment's cut goes into the plan (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        if !refused && (cut > 0 || stream.direction != Direction::Rx) {",
+   "new": "        if cut > 0 || stream.direction != Direction::Rx {",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_refused_receive_segment_is_not_in_the_plan"
+  },
+  {
+   "id": "P1057",
+   "name": "a refused segment's cut goes into the plan: the Mock's segment table (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        if !refused && (cut > 0 || stream.direction != Direction::Rx) {",
+   "new": "        if cut > 0 || stream.direction != Direction::Rx {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_34_a_layout_a_refusal_does_not_move_the_next_segment_s_origin"
+  },
+  {
+   "id": "P1058",
+   "name": "a refused segment's cut goes into the plan: the UHD Module's release (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        if !refused && (cut > 0 || stream.direction != Direction::Rx) {",
+   "new": "        if cut > 0 || stream.direction != Direction::Rx {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_move_after_a_refused_source_change_configures_the_destination_at_the_unchanged_origin"
+  },
+  {
+   "id": "P1059",
+   "name": "a halted stream's start_rx does not cut the refused segment first (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                    self.cut(stream, item, false)?;\n                    self.on = true;\n                    self.halted = item.refused;",
+   "new": "                    self.on = true;\n                    self.halted = item.refused;",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_start_after_a_refusal_begins_from_the_refused_segment_s_cut"
+  },
+  {
+   "id": "P1060",
+   "name": "a move's release does not read the segments left out of the plan (RM-34, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        for (by, config, end) in planned.chain(omitted) {",
+   "new": "        for (by, config, end) in planned {",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_34_a_refused_source_change_does_not_move_the_destination"
+  },
+  {
+   "id": "P1061",
+   "name": "a move's release does not read the segments left out of the plan: the Mock's destination (RM-34, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        for (by, config, end) in planned.chain(omitted) {",
+   "new": "        for (by, config, end) in planned {",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_18_a_layout_a_move_after_a_refused_source_change_waits_the_refused_segments_end"
+  },
+  {
+   "id": "P1062",
+   "name": "a move's release does not read the segments left out of the plan: the UHD Module's destination (RM-34, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        for (by, config, end) in planned.chain(omitted) {",
+   "new": "        for (by, config, end) in planned {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_move_after_a_refused_source_change_configures_the_destination_at_the_unchanged_origin"
+  },
+  {
+   "id": "P1063",
+   "name": "a prune does not carry the refused segment's mark into the state (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        self.start.replay(&self.stream, &order).expect(\"the plan made these cuts already\");",
+   "new": "        self.start.replay(&self.stream, &order).expect(\"the plan made these cuts already\");\n        self.start.refused_running = false;",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_pruned_line_with_a_refused_segment_plans_as_one_that_keeps_every_item"
+  },
+  {
+   "id": "P1064",
+   "name": "a refused segment's cut reads the item's delivered index (RM-25, RM-16, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "            _ if refused => segment.sample_at_or_after(item.e)?,\n",
+   "new": "",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_virtual_segment_ignores_a_stale_delivered_index"
+  },
+  {
+   "id": "P1065",
+   "name": "a transmit change after a refusal starts from the refused clock's origin (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.previous = Some((instant, clock.config));\n",
+   "new": "",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_transmit_change_after_a_refusal_begins_as_if_not_refused"
+  },
+  {
+   "id": "P1066",
+   "name": "a transmit change after a refusal starts from the refused clock's origin: the Mock's clock (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.previous = Some((instant, clock.config));\n",
+   "new": "",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_20_a_transmit_change_after_a_refusal_begins_as_if_not_refused"
+  },
+  {
+   "id": "P1067",
+   "name": "a transmit change after a refusal starts from the refused clock's origin: the UHD Module's clock (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.previous = Some((instant, clock.config));\n",
+   "new": "",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_transmit_change_after_a_refusal_begins_as_if_not_refused"
+  },
+  {
+   "id": "P1068",
+   "name": "a refused segment no cut ever ended stays in the plan (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        if !self.refused_running {\n            self.out.extend(self.running);\n        }",
+   "new": "        self.out.extend(self.running);",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_refusal_does_not_move_a_later_origin"
+  },
+  {
+   "id": "P1069",
+   "name": "a refused segment no cut ever ended stays in the plan: a refused start_rx (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "        if !self.refused_running {\n            self.out.extend(self.running);\n        }",
+   "new": "        self.out.extend(self.running);",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_26_the_timeline_cases"
+  },
+  {
+   "id": "P1070",
+   "name": "the start-lead check accepts a lead equal to the window (RM-6, design 43)",
+   "file": "crates/ezsdr-radio/src/lib.rs",
+   "old": "        if self.rx_start_lead_ns < self.release_window_ns {",
+   "new": "        if self.rx_start_lead_ns <= self.release_window_ns {",
+   "crate": "ezsdr-radio",
+   "test_bin": "channels",
+   "filter": "rm_6_the_start_lead_check_cases"
+  },
+  {
+   "id": "P1071",
+   "name": "the start-lead check refuses a lead above the window (RM-6, design 43)",
+   "file": "crates/ezsdr-radio/src/lib.rs",
+   "old": "        if self.rx_start_lead_ns < self.release_window_ns {",
+   "new": "        if self.rx_start_lead_ns > self.release_window_ns {",
+   "crate": "ezsdr-radio",
+   "test_bin": "channels",
+   "filter": "rm_6_the_start_lead_check_cases"
+  },
+  {
+   "id": "P1072",
+   "name": "building a Description does not check the start lead (RM-6, design 43)",
+   "file": "crates/ezsdr-radio/src/channels.rs",
+   "old": "        timing.check_start_lead().unwrap_or_else(|error| panic!(\"{error}\"));\n",
+   "new": "",
+   "crate": "ezsdr-radio",
+   "test_bin": "lib",
+   "filter": "rm_6_building_a_description_refuses_a_lead_below_the_window_x3xx"
+  },
+  {
+   "id": "P1073",
+   "name": "a measurement timing is not checked against RM-6 (design 43)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+   "old": "        timing.check_start_lead().unwrap_or_else(|error| panic!(\"{error}\"));\n",
+   "new": "",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "rm_6_a_measurement_timing_with_a_start_lead_below_the_window_is_refused"
+  },
+  {
+   "id": "P1074",
+   "name": "a candidate timing is not checked against RM-6 (design 43)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+   "old": "    timing.check_start_lead()?;\n",
+   "new": "",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
+  },
+  {
+   "id": "P1075",
+   "name": "a frequency's segment is the next one whatever channel it holds (UR-24, design 43)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "old": "        let holds = |planned: &&Planned| !planned.refused && planned.segment.config.channels.contains(chan as u32);",
+   "new": "        let holds = |planned: &&Planned| !planned.refused;",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_24_a_frequency_waits_for_the_next_segment_that_holds_its_channel"
+  },
+  {
+   "id": "P1076",
+   "name": "a refused transmit clock's record is cut where its successor would have cut it (RM-25, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                self.refused_clock = self.running;\n                self.end_at_origin(stream)?;",
+   "new": "                self.refused_clock = self.running;\n                self.cut(stream, item, false)?;",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_25_a_transmit_change_after_a_refusal_begins_as_if_not_refused"
+  },
+  {
+   "id": "P1079",
+   "name": "a move waits the refused transmit clock's record end, not the cut it would have had (RM-34, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.omitted.push(Omitted { by: clock.by, config: clock.config, end: instant });\n",
+   "new": "",
+   "crate": "ezsdr-radio",
+   "test_bin": "timeline",
+   "filter": "rm_34_a_transmit_move_after_a_refused_source_change_waits_the_cut_the_clock_would_have_had"
+  },
+  {
+   "id": "P1080",
+   "name": "a move waits the refused transmit clock's record end: the Mock's destination (RM-34, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.omitted.push(Omitted { by: clock.by, config: clock.config, end: instant });\n",
+   "new": "",
+   "crate": "ezsdr-mock-radio",
+   "test_bin": "mock_layout",
+   "filter": "mr_20_a_transmit_move_after_a_refused_source_change_begins_as_if_not_refused"
+  },
+  {
+   "id": "P1081",
+   "name": "a move waits the refused transmit clock's record end: the UHD Module's destination (RM-34, design 43)",
+   "file": "crates/ezsdr-radio/src/timeline.rs",
+   "old": "                        self.omitted.push(Omitted { by: clock.by, config: clock.config, end: instant });\n",
+   "new": "",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_25_a_transmit_move_after_a_refused_source_change_begins_the_destination_as_if_not_refused"
   }
- ]
+]

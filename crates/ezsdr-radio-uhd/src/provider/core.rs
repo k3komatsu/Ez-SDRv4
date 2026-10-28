@@ -1855,6 +1855,45 @@ mod tests {
     }
 
     #[test]
+    fn ur_25_a_transmit_move_after_a_refused_source_change_begins_the_destination_as_if_not_refused() {
+        // RM-25, RM-34 (design 43): the source's change C (2 MS/s, due 100 ms, origin 150 ms) is
+        // refused, and a move of channel 0 into the empty destination, due at 300 ms, is booked at
+        // 100 ms. The destination's clock is registered for 350 ms (a lead after the cut C would
+        // have had), whether or not C is refused; C's own clock ends at its origin, 150 ms.
+        let run = |refuse: bool| {
+            let core = two_by_two();
+            let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
+            let ms = |n: i64| core.ticks(n * 1_000_000);
+            let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: Config { channels, ratio: Rational::new(200, 1).unwrap() }, lead: ms(50), call: 0, allowance: 0 });
+            let mut streams = lock(&core.streams);
+            streams.lines.insert(from, line(Channels::first(1)));
+            streams.lines.insert(to, line(Channels::first(0)));
+            let seq = streams.next_seq();
+            assert!(streams.book(&core, from, Item { e: ms(100), seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() }) }));
+            if refuse {
+                assert!(streams.refuse(&core, from, seq));
+            }
+            let moved = streams.next_seq();
+            streams.lines.book_move(from, to, 0, Some(ms(300)), ms(100), moved, ms(100)).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+            let destination = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(moved)).expect("the destination's segment");
+            let source = streams.planned(from);
+            drop(streams);
+            let records = core.clocks.sample_clock_records();
+            let ended = |clock: Clock| records.iter().find(|record| record.domain == clock.domain).and_then(|record| record.ended_at.map(|at| at.ticks_in(record.root).unwrap()));
+            let (clock, c_clock) = (destination.clock.expect("the destination's clock"), source[1].clock.expect("C's clock"));
+            (destination.segment.origin, clock.origin, ended(c_clock), ms(350), ms(150), ms(300))
+        };
+        let (plain, plain_clock, plain_end, expected, origin, cut) = run(false);
+        let (refused, refused_clock, refused_end, ..) = run(true);
+        assert_eq!((plain, plain_clock), (expected, expected));
+        assert_eq!((refused, refused_clock), (expected, expected), "the destination begins a lead after the cut C would have had");
+        assert_eq!(plain_end, Some(cut));
+        assert_eq!(refused_end, Some(origin), "the refused clock's record ends at its origin");
+    }
+
+    #[test]
     fn ur_34_a_refused_move_reconciles_both_transmit_clocks() {
         let core = two_by_two();
         let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));

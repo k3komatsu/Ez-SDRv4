@@ -700,7 +700,8 @@ impl Default for MeasurementPlan {
         MeasurementPlan {
             timed_command_leads_ns: vec![500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
             in_flight_windows_ns: vec![250_000, 500_000, 1_000_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
-            rx_start_leads_ns: vec![1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
+            // RM-6: a receive start lead below the release window (3 ms) cannot be a description.
+            rx_start_leads_ns: vec![3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
             tx_start_leads_ns: vec![1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
             rx_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
             tx_throughput_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
@@ -731,7 +732,7 @@ impl MeasurementPlan {
         MeasurementPlan {
             timed_command_leads_ns: vec![1_000_000, 2_000_000],
             in_flight_windows_ns: vec![1_000_000, 2_000_000],
-            rx_start_leads_ns: vec![1_000_000, 2_000_000],
+            rx_start_leads_ns: vec![3_000_000, 5_000_000],
             tx_start_leads_ns: vec![1_000_000],
             rx_rates_hz: vec![390_625],
             tx_throughput_rates_hz: vec![390_625],
@@ -2264,6 +2265,7 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
         "tx_start_lead_ns" => timing.tx_start_lead_ns = value,
         _ => return Err(format!("unsupported candidate timing field `{field}`")),
     }
+    timing.check_start_lead()?;
     Ok(timing)
 }
 
@@ -4909,7 +4911,18 @@ mod tests {
         let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
         assert_eq!((defaults.step_trials, defaults.overflow_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 5, 60, 20));
         assert_eq!((defaults.queue_trials, defaults.queue_ahead_ns, defaults.queue_max_calls), (5, 3_000_000_000, 512));
-        assert_eq!(defaults.tx_start_leads_ns, defaults.rx_start_leads_ns);
+        // RM-6 holds the receive candidates to the release window; the transmit ones are free of it.
+        assert_eq!(defaults.rx_start_leads_ns, [3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]);
+        assert_eq!(defaults.tx_start_leads_ns, [1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]);
+        assert_eq!(MeasurementPlan::rehearsal().rx_start_leads_ns, [3_000_000, 5_000_000]);
+        assert_eq!(MeasurementPlan::rehearsal().tx_start_leads_ns, [1_000_000]);
+        for plan in [MeasurementPlan::default(), MeasurementPlan::rehearsal()] {
+            assert!(plan.rx_start_leads_ns.iter().all(|lead| *lead >= default_timing().release_window_ns as u64), "{:?}", plan.rx_start_leads_ns);
+            assert!(plan.rx_start_leads_ns.iter().all(|lead| candidate_timing("rx_start_lead_ns", *lead).is_ok()));
+        }
+        assert!(candidate_timing("rx_start_lead_ns", 1_000_000).unwrap_err().contains("RM-6"), "below the window");
+        assert!(candidate_timing("rx_start_lead_ns", default_timing().release_window_ns as u64).is_ok(), "equal to the window");
+        assert!(candidate_timing("tx_start_lead_ns", 1_000_000).is_ok(), "transmit is not held to the window");
         assert_eq!(defaults.overflow_rates_hz, [1_000_000, 10_000_000, 25_000_000, 50_000_000]);
         assert_eq!(defaults.overflow_stall_ms.len(), defaults.overflow_rates_hz.len());
         assert_eq!(defaults.tx_throughput_rates_hz, defaults.rx_rates_hz);

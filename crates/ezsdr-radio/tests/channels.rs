@@ -1001,3 +1001,53 @@ fn rm_33_rm_19_per_channel_cases() {
     );
     assert_eq!(violation_keys(&violations), ["radio.tx.c0.frequency_hz"]);
 }
+
+/// RM-6: the check's cases: the lead below the window is refused, at the window and above it,
+/// and for the ideal description's 0 against 0, it passes.
+#[test]
+fn rm_6_the_start_lead_check_cases() {
+    let base = x3xx::timing(&terms());
+    let with = |lead: i64, window: i64| ezsdr_radio::TimingEnvelope { rx_start_lead_ns: lead, release_window_ns: window, ..base };
+    assert!(with(1_000_000, 3_000_000).check_start_lead().unwrap_err().contains("RM-6"));
+    assert!(with(2_999_999, 3_000_000).check_start_lead().is_err(), "one nanosecond below");
+    assert!(with(3_000_000, 3_000_000).check_start_lead().is_ok(), "equal");
+    assert!(with(3_000_001, 3_000_000).check_start_lead().is_ok());
+    assert!(with(50_000_000, 3_000_000).check_start_lead().is_ok());
+    assert!(with(0, 0).check_start_lead().is_ok(), "the ideal description's 0 against 0");
+    // Only the receive lead is held to the window.
+    assert!(ezsdr_radio::TimingEnvelope { tx_start_lead_ns: 1, ..with(3_000_000, 3_000_000) }.check_start_lead().is_ok());
+}
+
+/// RM-6: every description a Provider can publish keeps the receive start lead at least the
+/// release window: the `x3xx` layouts (both images, both link speeds, receive and transmit
+/// element sets) and the ideal description.
+#[test]
+fn rm_6_every_published_description_keeps_the_start_lead_at_or_above_the_release_window() {
+    let mut layouts = vec![channels::Layout::Ideal { rx: 0, tx: 0 }, channels::Layout::Ideal { rx: 4, tx: 2 }];
+    for image in ["hg", "xg"] {
+        for link_gbps in [1, 10] {
+            for (rx, tx) in [
+                (vec!["0:A:ubx:0"], vec!["0:A:ubx:0"]),
+                (vec!["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"], vec!["0:A:ubx:0", "0:B:lf_tx:0"]),
+                (vec!["0:A:ubx:0", "0:A:ubx:1"], vec![]),
+            ] {
+                let mut pairs = layout_selector(&rx, &tx);
+                pairs.insert(ident("image"), strings(&[image]));
+                pairs.insert(ident("link_gbps"), ints(&[link_gbps]));
+                if let Ok(layout) = channels::from_selector(&pairs) {
+                    layouts.push(layout);
+                }
+            }
+        }
+    }
+    assert!(layouts.len() > 4, "the x3xx layouts are built: {}", layouts.len());
+    for layout in &layouts {
+        for block_len in [1, 2_000] {
+            let timing = Description::new(layout, block_len, &terms()).timing;
+            assert!(timing.rx_start_lead_ns >= timing.release_window_ns, "{layout:?}: {timing:?}");
+            timing.check_start_lead().unwrap();
+        }
+    }
+    let ideal = Description::new(&channels::Layout::Ideal { rx: 1, tx: 1 }, 2_000, &terms()).timing;
+    assert_eq!((ideal.rx_start_lead_ns, ideal.release_window_ns), (0, 0), "the ideal description's equality");
+}

@@ -525,6 +525,42 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(section_of(instance, "device")["fake"], true);
 }
 
+/// RM-6: the published `radio.timing.rx_start_lead_ns` is at least `release_window_ns`, on the
+/// profile's own values and on the measurement path (`with_measurement_timing`); a lead below the
+/// window is refused there, as `Description::new` refuses it.
+#[test]
+fn rm_6_a_measurement_timing_keeps_the_start_lead_at_or_above_the_window() {
+    let published = |radio: &UhdRadio| {
+        let int = |name: &str| match &radio.instance().tree.capabilities[&Key::parse(name).unwrap()] {
+            ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::Int(value) } => *value,
+            other => panic!("{name}: {other:?}"),
+        };
+        (int("radio.timing.rx_start_lead_ns"), int("radio.timing.release_window_ns"))
+    };
+    let (lead, window) = published(&provider());
+    assert!(lead >= window, "{lead} {window}");
+    let base = ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms());
+    let at_window = provider().with_measurement_timing(ezsdr_radio::TimingEnvelope { rx_start_lead_ns: base.release_window_ns, ..base });
+    assert_eq!(published(&at_window), (3_000_000, 3_000_000), "equality is allowed");
+    let candidate = ezsdr_radio::TimingEnvelope { release_window_ns: 13_000_003, rx_start_lead_ns: 19_000_005, ..base };
+    let (lead, window) = published(&provider().with_measurement_timing(candidate));
+    assert!(lead >= window, "{lead} {window}");
+}
+
+#[test]
+#[should_panic(expected = "RM-6")]
+fn rm_6_a_measurement_timing_with_a_start_lead_below_the_window_is_refused() {
+    let base = ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms());
+    provider().with_measurement_timing(ezsdr_radio::TimingEnvelope { rx_start_lead_ns: 1_000_000, ..base });
+}
+
+#[test]
+#[should_panic(expected = "RM-6")]
+fn rm_6_a_measurement_timing_with_a_start_lead_one_nanosecond_below_the_window_is_refused() {
+    let base = ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms());
+    provider().with_measurement_timing(ezsdr_radio::TimingEnvelope { rx_start_lead_ns: base.release_window_ns - 1, ..base });
+}
+
 #[test]
 fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
     let candidate = ezsdr_radio::TimingEnvelope {

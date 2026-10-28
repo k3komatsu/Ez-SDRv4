@@ -526,6 +526,8 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], gap);
         assert!(envelope["timing"].get("stop_tail_ns").is_none() && envelope["timing"].get("restart_lead_ns").is_none());
         assert_eq!(envelope["timing"]["rx_start_lead_ns"], start_lead);
+        // RM-6: the published receive start lead is at least the release window.
+        assert!(envelope["timing"]["rx_start_lead_ns"].as_i64() >= envelope["timing"]["release_window_ns"].as_i64(), "{name}");
         assert_eq!(envelope["timing"]["tx_start_lead_ns"], start_lead);
         assert_eq!(envelope["timing"]["tx_in_flight_ns"], in_flight);
         assert_eq!(envelope["performance"]["rx_bytes_per_s"], bytes_per_s);
@@ -3244,10 +3246,11 @@ fn mr_20_a_cold_change_refused_fault_halts_the_stream() {
 
 #[test]
 fn mr_20_the_next_cold_change_resumes_a_refused_stream() {
-    // MR-25: a halted stream has no segment until its next `cold` change or `start_rx`; the
-    // change resumes it from the refused value (2 Msps, #64) after the cut and the profile's
-    // lead, the receipt (e + 10 ms) plus the 50 ms start lead, and the receive call at the cut
-    // with its allowance.
+    // MR-25, RM-25: a halted stream has no segment until its next `cold` change or `start_rx`; the
+    // change resumes it from the refused value (2 Msps, #64). The refused segment would have begun
+    // at e + 55 ms and runs for planning until this change cuts it, with no sample, at that origin;
+    // the new one begins after the call in progress there (2 000 samples at 2 MS/s, 1 ms), the
+    // 3 ms allowance and the 50 ms lead: e + 109 ms.
     let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
     let mut harness = Harness::new(
         "x3xx",
@@ -3264,11 +3267,11 @@ fn mr_20_the_next_cold_change_resumes_a_refused_stream() {
     // The channel leaves the stream, a change that starts a segment again.
     harness.actions.push(update_action("radio.rx.c1.stream", Value::from(-1), UpdateClass::Cold, Some(TimePoint::new(ROOT, e + 10_000_000))));
     harness.step(e + 10_000_000).unwrap();
-    harness.step(e + 100_000_000).unwrap();
+    harness.step(e + 130_000_000).unwrap();
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e)));
-    assert_eq!(records[1].origin, TimePoint::new(ROOT, e + 60_000_000));
+    assert_eq!(records[1].origin, TimePoint::new(ROOT, e + 109_000_000));
     // The rate of record is the refused one: 2 Msps on a 1 GHz root is 500 ticks a sample.
     assert_eq!(records[1].root_ticks_per_tick, Rational::new(500, 1).unwrap());
     let segments = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()];
@@ -3285,9 +3288,11 @@ fn mr_20_the_next_cold_change_resumes_a_refused_stream() {
 
 #[test]
 fn mr_20_only_the_first_cold_change_is_refused() {
-    // MR-20: the fault is spent on one change. The second change then applies, and the plan it
-    // is booked in gives its clock the later origin: with the first change refused there is no
-    // segment to wait a cut and a receive call for.
+    // MR-20, RM-25: the fault is spent on one change. The second change then applies, and the
+    // refused segment runs for planning until it cuts it: the first change's segment (2 MS/s)
+    // would begin at 58 ms (the cut at 3 ms, the call and allowance, the lead), and the second
+    // change at 200 ms cuts it at 200 ms, so the second clock begins at 254 ms: the cut, the call
+    // in progress (2 000 samples at 2 MS/s, 1 ms), the 3 ms allowance and the 50 ms lead.
     let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
     let mut harness = Harness::new("x3xx", &[("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap()))], &[], &env, Some((BackPressure::DropOldest, 64)));
     let t0 = 2_000_000_000;
@@ -3302,11 +3307,11 @@ fn mr_20_only_the_first_cold_change_is_refused() {
     assert!(applied_rows(&harness, "radio.rx.s0.sample_rate_hz").is_empty());
     harness.step(e1).unwrap();
     harness.step(e2).unwrap();
-    harness.step(e2 + 10_000_000).unwrap();
+    harness.step(e2 + 60_000_000).unwrap();
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e1)));
-    assert_eq!(records[1].origin, TimePoint::new(ROOT, e2), "the second change's clock kept the unrefused plan's origin");
+    assert_eq!(records[1].origin, TimePoint::new(ROOT, e2 + 54_000_000), "the second change's clock begins where the unrefused plan puts it");
     assert_eq!(records[1].root_ticks_per_tick, Rational::new(250, 1).unwrap());
     assert_eq!(rejected_rows(&harness), [("update_parameter".to_owned(), REFUSED.to_owned(), e1)]);
     assert_eq!(applied_rows(&harness, "radio.rx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e1), (serde_json::json!(4_000_000.0), e2)]);
@@ -3458,9 +3463,10 @@ fn mr_20_a_change_the_plan_drops_is_no_candidate() {
     assert_eq!(harness.clocks.sample_clock_records().iter().filter(|record| record.stream == rid("mock/rx/s0")).count(), 1, "the stream is not running");
     assert!(applied_rows(&harness, "radio.rx.s0.sample_rate_hz").is_empty(), "a change applied at its receipt");
     harness.step(e).unwrap();
-    harness.step(e + 100_000_000).unwrap();
+    // 200 ms: past the origin (e + 109 ms) the first change's refused segment would give the second.
+    harness.step(e + 200_000_000).unwrap();
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
-    assert_eq!(records.len(), 1, "the plan's other change was refused: {records:?}");
+    assert_eq!(records.len(), 1, "the plan's other change was refused, so no second clock begins: {records:?}");
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e)));
     assert_eq!(rejected_rows(&harness), [("update_parameter".to_owned(), REFUSED.to_owned(), e)]);
     assert_eq!(applied_rows(&harness, "radio.rx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e), (serde_json::json!(4_000_000.0), e)]);

@@ -836,3 +836,43 @@ fn mr_34_a_scheduled_receive_retune_inside_a_running_segment_is_a_timed_tune() {
     assert_eq!(last["at"]["ticks"], T0 + 5_000_000);
     assert_eq!(last["basis"], "timed_tune");
 }
+
+#[test]
+fn mr_34_a_scheduled_receive_update_inside_a_refused_change_span_is_untimed() {
+    // RM-25 (design 43), KC-17, MR-34: a Spec Run's timed entries reach the Provider before T0, so
+    // no receive time is fixed. C1 (rate, due T0 + 10 ms) is refused by the first `cold_change_refused`
+    // fault, C2 (due T0 + 70 ms) begins S3 behind the refused segment's cut at T0 + 124 ms (not at
+    // T0 + 70 ms, as before the refusal kept S3's origin), and a retune due T0 + 75 ms, before S3
+    // and covered by no segment, is an untimed tune: S3's entry row has no coherent basis and no
+    // timed row follows it. The refused segment has no row.
+    let temp = rig::TempDir::new("mr-34-refused-span");
+    let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
+    let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
+    for (offset_ticks, key, value) in [(10_000, "radio.rx.s0.sample_rate_hz", 2.0e6), (70_000, "radio.rx.s0.sample_rate_hz", 1.0e6), (75_000, "radio.rx.c0.frequency_hz", 1.0e9)] {
+        spec["schedule"].as_array_mut().unwrap().push(json!({
+            "at": { "clock": "radio", "offset_ticks": offset_ticks },
+            "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": key, "value": value }
+        }));
+    }
+    let environment = json!({
+        "sim.seed": 7,
+        "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0, "delay_ns": 0 }] },
+        "sim.faults": [{ "at_ns": 1_000_000, "fault": "cold_change_refused", "target": "radio" }]
+    });
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, environment);
+    let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let clock = root(&run);
+    let manifest = finish_at(run, clock, T0 + 300_000_000);
+    let segments = section(&manifest, "mock", "ezsdr.radio.mock.segments").as_array().unwrap();
+    let rx: Vec<&serde_json::Value> = segments.iter().filter(|row| row["direction"] == "rx" && row["stream"] == 0).collect();
+    let origins: Vec<i64> = rx.iter().map(|row| row["origin"]["ticks"].as_i64().unwrap()).collect();
+    assert_eq!(origins, [T0, T0 + 124_000_000], "S2, the refused segment, has no row");
+    let s3 = rx[1]["coherence"].as_array().unwrap();
+    assert_eq!(s3.len(), 1, "no timed row: {s3:?}");
+    assert_eq!(s3[0]["basis"], "none");
+    assert_eq!(s3[0]["valid"], false);
+    let rejected = section(&manifest, "mock", "ezsdr.radio.mock.rejected").as_array().unwrap();
+    assert_eq!(rejected.iter().filter(|row| row["reason"] == "MR-18: the cold change was refused").count(), 1, "{rejected:?}");
+    let applied = section(&manifest, "mock", "ezsdr.radio.mock.applied").as_array().unwrap();
+    assert!(applied.iter().any(|row| row["key"] == "radio.rx.c0.frequency_hz" && row["at"]["ticks"] == T0 + 75_000_000), "{applied:?}");
+}

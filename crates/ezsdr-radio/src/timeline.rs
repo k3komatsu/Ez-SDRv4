@@ -864,16 +864,17 @@ pub fn lattice(t: i64, ratio: Rational) -> Result<i64, TimeError> {
     narrow(ceil_div(i128::from(t), num) * num)
 }
 
-/// RM-34: a receive segment RM-25 leaves out of the plan, cut with no sample: the item that
-/// began it, the configuration it runs and the instant it ends at, which is its origin. A move
-/// reads the release of the channel it moves from where such a segment ends too.
+/// RM-34: a receive segment RM-25 leaves out of the plan: the item that began it, the
+/// configuration it runs and the instant it ends at, which is its origin when it was cut with no
+/// sample and its cut when a refused change or `start_rx` would have begun it. A move reads the
+/// release of the channel it moves from where such a segment ends too.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Omitted {
     /// The arrival order of the command that began it; none for the stream's first segment.
     by: Option<u64>,
     /// The configuration it runs.
     config: Config,
-    /// The instant it ends at: the instant of its cut, which its origin is.
+    /// The instant it ends at: the instant of its cut.
     end: i64,
 }
 
@@ -919,13 +920,19 @@ struct State {
     over: bool,
     /// RM-34: the segments RM-25 leaves out of the plan, as [`Line::omitted`] holds them.
     omitted: Vec<Omitted>,
+    /// RM-25: `running` is the receive segment a refused change or `start_rx` would have begun:
+    /// planned from as one that runs, never in the plan.
+    refused_running: bool,
+    /// Transmit only: the clock a refusal ended at its origin, until the next change cuts it as
+    /// it would have, so that the segment after it begins as if the change had not been refused.
+    refused_clock: Option<Segment>,
 }
 
 impl State {
     fn new(stream: &Stream) -> State {
         let config = stream.config;
         let running = (!config.channels.is_empty()).then_some(Segment { origin: stream.origin, cut: None, config, by: None });
-        State { out: Vec::new(), running, previous: None, config, on: true, halted: false, ended: None, refusal: None, over: false, omitted: Vec::new() }
+        State { out: Vec::new(), running, previous: None, config, on: true, halted: false, ended: None, refusal: None, over: false, omitted: Vec::new(), refused_running: false, refused_clock: None }
     }
 
     /// The items, sorted with their effective instants, take effect in turn.
@@ -936,6 +943,7 @@ impl State {
                 break;
             }
             if self.refusal.is_some_and(|refused| item.ready >= refused) {
+                self.refused_clock = self.running;
                 self.end_at_origin(stream)?;
                 self.refusal = None;
             }
@@ -955,25 +963,33 @@ impl State {
                     self.cut(stream, item, false)?;
                 }
                 Kind::Start if receive && (!self.on || self.halted) => {
+                    // RM-25: the segment a refusal left running ends here, before this one begins.
+                    self.cut(stream, item, false)?;
                     self.on = true;
                     self.halted = item.refused;
-                    if !self.halted && !self.config.channels.is_empty() {
+                    if !self.config.channels.is_empty() {
                         self.running = Some(self.begin(stream, item, self.config)?);
+                        self.refused_running = item.refused;
                     }
                 }
                 Kind::Stop | Kind::Start => {}
                 Kind::Cold(next) => {
                     self.cut(stream, item, false)?;
+                    // RM-25: the clock a refusal ended is cut where this change would have cut it.
+                    if let Some(clock) = self.refused_clock.take() {
+                        let instant = clock.instant(clock.sample_at_or_after(item.e)?)?;
+                        self.previous = Some((instant, clock.config));
+                        // RM-34: a move of the clock's channel waits that cut too; the clock's record, which ends at its origin, stays.
+                        self.omitted.push(Omitted { by: clock.by, config: clock.config, end: instant });
+                    }
                     self.refusal = None;
                     self.config = next;
                     self.halted = item.refused;
                     if self.on && !next.channels.is_empty() {
-                        let segment = self.begin(stream, item, next)?;
-                        // RM-25: a refused change has no receive segment; the transmit clock
-                        // registered for it ends at its origin.
-                        if !item.refused || !receive {
-                            self.running = Some(segment);
-                        }
+                        // RM-25: a refused receive change begins a segment for planning only; the
+                        // transmit clock registered for it ends at its origin.
+                        self.running = Some(self.begin(stream, item, next)?);
+                        self.refused_running = item.refused && receive;
                         if item.refused && !receive {
                             self.refusal = Some(item.e);
                         }
@@ -991,7 +1007,9 @@ impl State {
             // VH-2: a transmit clock orphaned by a loss, `Provider::stop` or a refusal.
             self.end_at_origin(stream)?;
         }
-        self.out.extend(self.running);
+        if !self.refused_running {
+            self.out.extend(self.running);
+        }
         Ok((self.out, self.omitted, self.ended))
     }
 
@@ -1000,18 +1018,22 @@ impl State {
     /// that sample itself when the Provider knows it, never before sample 0.
     fn cut(&mut self, stream: &Stream, item: &Item, abort: bool) -> Result<(), TimeError> {
         let Some(mut segment) = self.running.take() else { return Ok(()) };
+        // RM-25: a segment a refusal left running has delivered nothing, so `delivered` is not its.
+        let refused = std::mem::take(&mut self.refused_running);
         let cut = match (abort, item.delivered) {
+            _ if refused => segment.sample_at_or_after(item.e)?,
             (true, Some(delivered)) => delivered.max(0),
             (_, delivered) => segment.sample_at_or_after(item.e)?.max(delivered.unwrap_or(i64::MIN)),
         };
         segment.cut = Some(cut);
         let instant = segment.instant(cut)?;
         self.previous = Some((instant, segment.config));
-        if cut > 0 || stream.direction != Direction::Rx {
+        if !refused && (cut > 0 || stream.direction != Direction::Rx) {
             self.out.push(segment);
         } else {
-            // RM-25: a receive segment cut with no sample has no SampleClock and is left out of
-            // the plan; RM-34 still reads the channel's release from where it ends.
+            // RM-25: a receive segment cut with no sample, or one a refusal left running, has no
+            // SampleClock and is left out of the plan; RM-34 still reads the channel's release
+            // from where it ends.
             self.omitted.push(Omitted { by: segment.by, config: segment.config, end: instant });
         }
         Ok(())

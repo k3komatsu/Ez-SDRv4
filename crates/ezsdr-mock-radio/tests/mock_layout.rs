@@ -2651,14 +2651,148 @@ fn mr_20_a_refused_transmit_change_ends_its_clock_and_cancels_its_bursts() {
     harness.step(e).unwrap();
     let clocks = harness.clocks_of("mock/tx/s0");
     assert_eq!(clocks.len(), 3, "{clocks:?}");
+    // RM-25: the refused clock is cut where this change cuts it, `later`, so the new clock begins
+    // a lead after that, 50 ms; sample 16 000 at 4 MS/s is 4 ms after that.
+    assert_eq!(clocks[2].origin, TimePoint::new(ROOT, later + 50_000_000));
     harness.push(burst("mock/tx/s0", clocks[1].domain, 0, 100));
     harness.push(burst("mock/tx/s0", clocks[2].domain, 16_000, 100));
     harness.step(later).unwrap();
-    harness.step(later + 10_000_000).unwrap();
+    harness.step(later + 60_000_000).unwrap();
     assert_eq!(harness.rejected().last(), Some(&"MR-16: target, clock, waveform size, channel count or metadata is invalid".to_owned()), "{:?}", harness.rejected());
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
     assert_eq!(bursts.len(), 2, "{bursts:?}");
     assert_eq!((bursts[1].target, bursts[1].samples, bursts[1].end), (TimePoint::new(clocks[2].domain, 16_000), 100, ezsdr_kernel::stream::BurstEnd::Eob));
+}
+
+/// One transmit stream at 1 MS/s whose cold changes the first `refusals` fault lines refuse.
+fn transmit_refusal_harness(refusals: usize) -> Harness {
+    let env = [("sim.faults", serde_json::Value::Array((0..refusals).map(|_| cold_change_refused_at(1_000_000)).collect()))];
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+    ];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &[] });
+    harness.arm_start(T0).unwrap();
+    harness
+}
+
+fn tx_rate(rate: f64, e: i64) -> Action {
+    update("radio.tx.s0.sample_rate_hz", Value::num(rate).unwrap(), UpdateClass::Cold, Some(e))
+}
+
+/// The origin of the transmit clocks in the harness's `segments` section.
+fn tx_segment_origins(harness: &Harness) -> Vec<i64> {
+    harness.section("segments").iter().filter(|row| row["direction"] == "tx").map(|row| row["origin"]["ticks"].as_i64().unwrap()).collect()
+}
+
+#[test]
+fn mr_20_a_transmit_change_after_a_refusal_begins_as_if_not_refused() {
+    // RM-25 (design 43): C (2 MS/s) due at T0 + 100 ms is refused, N (4 MS/s) is due at T0 + 300 ms.
+    // N begins where it would had C not been refused: C is cut at 300 ms (C's clock begins at
+    // 150 ms, so sample 300 000 at 2 MS/s), and N begins a lead (50 ms) after that, at 350 ms.
+    // Booked before the refusal, N cuts C's clock at 300 ms and the clock's record keeps that cut;
+    // booked after it, the refused clock ends at its own origin, 150 ms. A burst at sample 16 000
+    // of N's clock plays 4 ms after N's origin, at 354 ms.
+    let (ea, eb) = (T0 + 100_000_000, T0 + 300_000_000);
+    let (origin, start) = (T0 + 350_000_000, T0 + 354_000_000);
+    for before in [true, false] {
+        let mut harness = transmit_refusal_harness(1);
+        harness.push(tx_rate(2_000_000.0, ea));
+        if before { harness.push(tx_rate(4_000_000.0, eb)); }
+        harness.step(0).unwrap();
+        harness.step(ea).unwrap();
+        if !before {
+            harness.push(tx_rate(4_000_000.0, eb));
+            harness.step(ea).unwrap();
+        }
+        assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned()], "booked before {before}");
+        let clocks = harness.clocks_of("mock/tx/s0");
+        assert_eq!(clocks.len(), 3, "booked before {before}: {clocks:?}");
+        assert_eq!(clocks[1].origin, TimePoint::new(ROOT, T0 + 150_000_000), "booked before {before}");
+        let end = if before { eb } else { T0 + 150_000_000 };
+        assert_eq!(clocks[1].ended_at, Some(TimePoint::new(ROOT, end)), "booked before {before}: the refused clock's record");
+        assert_eq!(clocks[2].origin, TimePoint::new(ROOT, origin), "booked before {before}");
+        harness.push(burst("mock/tx/s0", clocks[2].domain, 16_000, 100));
+        harness.step(ea).unwrap();
+        harness.step(start - 1_000_000).unwrap();
+        assert!(harness.section("bursts").is_empty(), "booked before {before}: the burst played before {start}");
+        harness.step(start + 20_000_000).unwrap();
+        let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+        assert_eq!(bursts.len(), 1, "booked before {before}: {bursts:?}");
+        assert_eq!(bursts[0].target, TimePoint::new(clocks[2].domain, 16_000));
+        assert_eq!(harness.clocks_of("mock/tx/s0")[2].origin, TimePoint::new(ROOT, origin), "booked before {before}: the origin did not move");
+        assert_eq!(tx_segment_origins(&harness).last(), Some(&origin), "booked before {before}: the plan's origin");
+    }
+}
+
+#[test]
+fn mr_20_a_transmit_move_after_a_refused_source_change_begins_as_if_not_refused() {
+    // RM-25, RM-34 (design 43): the source's change C (2 MS/s, due T0 + 100 ms, origin 150 ms) is
+    // refused and, received at 100 ms, a move of channel 0 into the empty stream 1 is due at 300 ms.
+    // C's clock ends at its own origin, 150 ms (not at the move's cut, 300 ms), but the destination
+    // begins where it would had C not been refused: 350 ms, a lead after the cut C would have had.
+    // A burst at sample 4 000 of the destination's clock (1 MS/s) plays at 354 ms.
+    let (ea, em) = (T0 + 100_000_000, T0 + 300_000_000);
+    let run = |refused: bool| {
+        let faults = if refused { serde_json::json!([cold_change_refused_at(1_000_000)]) } else { serde_json::json!([]) };
+        let env = [("sim.faults", faults)];
+        let constraints = [
+            ("radio.tx.c0.stream", eq(Scalar::from(0))),
+            ("radio.tx.c1.stream", eq(Scalar::from(-1))),
+            ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+            ("radio.tx.s1.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap())),
+        ];
+        let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:ubx:0"]), tx: two(), selector: &[], constraints: &constraints, env: &env, ports: &[] });
+        harness.arm_start(T0).unwrap();
+        harness.push(tx_rate(2_000_000.0, ea));
+        harness.step(0).unwrap();
+        harness.step(ea).unwrap();
+        harness.push(update("radio.tx.c0.stream", Value::from(1), UpdateClass::Cold, Some(em)));
+        harness.step(ea).unwrap();
+        let destination = harness.clocks_of("mock/tx/s1");
+        assert_eq!(destination.len(), 1, "refused {refused}: {destination:?}");
+        harness.push(burst("mock/tx/s1", destination[0].domain, 4_000, 100));
+        harness.step(ea).unwrap();
+        harness.step(T0 + 353_000_000).unwrap();
+        assert!(harness.section("bursts").is_empty(), "refused {refused}: the burst played before 354 ms");
+        harness.step(T0 + 360_000_000).unwrap();
+        let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(serde_json::Value::Array(harness.section("bursts"))).unwrap();
+        assert_eq!(bursts.len(), 1, "refused {refused}: {bursts:?}");
+        assert_eq!(bursts[0].target, TimePoint::new(destination[0].domain, 4_000), "refused {refused}: not late");
+        (destination[0].origin, harness.clocks_of("mock/tx/s0")[1].ended_at, harness.rejected())
+    };
+    let (plain_origin, plain_end, plain_rejected) = run(false);
+    let (refused_origin, refused_end, refused_rejected) = run(true);
+    assert!(plain_rejected.is_empty(), "{plain_rejected:?}");
+    assert_eq!(refused_rejected, [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(plain_origin, TimePoint::new(ROOT, T0 + 350_000_000));
+    assert_eq!(refused_origin, plain_origin, "the destination does not begin a lead early");
+    assert_eq!(plain_end, Some(TimePoint::new(ROOT, em)));
+    assert_eq!(refused_end, Some(TimePoint::new(ROOT, T0 + 150_000_000)), "the refused clock's record is unchanged");
+}
+
+#[test]
+fn mr_20_a_transmit_change_after_repeated_refusals_begins_as_if_none_were_refused() {
+    // RM-25 (design 43): C1 (2 MS/s, T0 + 100 ms) and C2 (4 MS/s, T0 + 200 ms) are refused, each
+    // booked once the one before it was refused; N (1 MS/s, T0 + 500 ms) begins at 550 ms, as it
+    // would with no refusal: C1 is cut at 200, C2 begins at 250 and is cut at 500. Each refused
+    // clock ends at its own origin, 150 and 250 ms.
+    let (e1, e2, e3) = (T0 + 100_000_000, T0 + 200_000_000, T0 + 500_000_000);
+    let mut harness = transmit_refusal_harness(2);
+    harness.push(tx_rate(2_000_000.0, e1));
+    harness.step(0).unwrap();
+    harness.step(e1).unwrap();
+    harness.push(tx_rate(4_000_000.0, e2));
+    harness.step(e1).unwrap();
+    harness.step(e2).unwrap();
+    harness.push(tx_rate(1_000_000.0, e3));
+    harness.step(e2).unwrap();
+    assert_eq!(harness.rejected(), [REFUSED_CHANGE.to_owned(), REFUSED_CHANGE.to_owned()]);
+    let clocks = harness.clocks_of("mock/tx/s0");
+    assert_eq!(clocks.len(), 4, "{clocks:?}");
+    assert_eq!((clocks[1].origin, clocks[1].ended_at), (TimePoint::new(ROOT, T0 + 150_000_000), Some(TimePoint::new(ROOT, T0 + 150_000_000))));
+    assert_eq!((clocks[2].origin, clocks[2].ended_at), (TimePoint::new(ROOT, T0 + 250_000_000), Some(TimePoint::new(ROOT, T0 + 250_000_000))));
+    assert_eq!(clocks[3].origin, TimePoint::new(ROOT, T0 + 550_000_000));
 }
 
 #[test]
@@ -2691,6 +2825,9 @@ fn mr_20_a_burst_on_a_clock_booked_after_a_refusal_plays() {
     harness.step(eb - 10_000_000).unwrap();
     let clocks = harness.clocks_of("mock/tx/s0");
     assert_eq!(clocks.len(), 3, "{clocks:?}");
+    // RM-25 (design 43): B, booked at 290 ms after the refusal, cuts the refused clock at its own
+    // instant (300 ms), so its clock begins a lead after that, 350 ms, not at 340 ms.
+    assert_eq!(clocks[2].origin, TimePoint::new(ROOT, eb + 50_000_000));
     assert!(harness.section("bursts").is_empty(), "a burst played in the halt");
     // A burst on B's clock, received before B's instant: the halt takes it (UR-21's `book_burst`).
     harness.push(burst_with_waveform("mock/tx/s0", clocks[2].domain, 16_000, waveform));
@@ -2800,6 +2937,41 @@ fn mr_20_a_refused_transmit_burst_leaves_the_channel_silent() {
 }
 
 #[test]
+fn mr_18_a_layout_a_move_after_a_refused_source_change_waits_the_refused_segments_end() {
+    // RM-25, RM-34 (design 43): the source's rate change (due at T0 + 10 ms; its segment would
+    // begin at 65 ms) is refused, and a move of its channel c1 to the other stream is due at
+    // T0 + 100 ms. The refused segment runs for planning until the move cuts it, so the
+    // destination begins where it would had the change not been refused: s0 and s1 begin at the
+    // same instants in both runs, and the destination a lead after the source's release.
+    let run = |refused: bool| {
+        let faults = if refused { serde_json::json!([cold_change_refused_at(1_000_000)]) } else { serde_json::json!([]) };
+        let env = [("sim.faults", faults)];
+        let constraints = [("radio.rx.c1.stream", eq(Scalar::from(0)))];
+        let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: two(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0", "rx1"] });
+        harness.arm_start(T0).unwrap();
+        harness.step(T0 + 2_000_000).unwrap();
+        let e = T0 + 10_000_000;
+        harness.push(update("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(e)));
+        harness.push(update("radio.rx.c1.stream", Value::from(1), UpdateClass::Cold, Some(T0 + 100_000_000)));
+        harness.step(T0 + 2_000_000).unwrap();
+        harness.step(T0 + 100_000_000).unwrap();
+        harness.step(T0 + 400_000_000).unwrap();
+        let origins = |path: &str| harness.clocks_of(path).iter().map(|clock| clock.origin.ticks_in(ROOT).unwrap()).collect::<Vec<_>>();
+        (origins("mock/rx/s0"), origins("mock/rx/s1"), harness.rejected())
+    };
+    let (plain_s0, plain_s1, plain_rejected) = run(false);
+    let (refused_s0, refused_s1, refused_rejected) = run(true);
+    assert!(plain_rejected.is_empty(), "{plain_rejected:?}");
+    assert_eq!(refused_rejected, [REFUSED_CHANGE.to_owned()]);
+    assert_eq!(plain_s1.len(), 1, "the destination begins: {plain_s1:?}");
+    assert!(plain_s1[0] >= T0 + 100_000_000 + 50_000_000, "the destination waits the source's release: {plain_s1:?}");
+    assert_eq!(refused_s1, plain_s1, "the destination's origin does not move");
+    assert_eq!(plain_s0.len(), 3, "{plain_s0:?}");
+    assert_eq!(plain_s0[1], T0 + 65_000_000, "the change's segment, which the refusal leaves out");
+    assert_eq!(refused_s0, [plain_s0[0], plain_s0[2]], "the source's other origins do not move");
+}
+
+#[test]
 fn mr_20_a_refused_move_halts_both_lines() {
     // MR-34, MR-20: a move refused at its instant halts both lines, as RM-34's `refuse_move`
     // does; the destination starts again on its own `start_rx`, from the refused move's set.
@@ -2828,10 +3000,13 @@ fn mr_20_a_refused_move_halts_both_lines() {
     let started = e + 110_000_000;
     harness.push(start_rx("mock/rx/s1", Some(started)));
     harness.step(started).unwrap();
-    harness.step(started + 60_000_000).unwrap();
+    harness.step(started + 70_000_000).unwrap();
     let s1 = harness.clocks_of("mock/rx/s1");
     assert_eq!(s1.len(), 1, "{s1:?}");
-    assert_eq!(s1[0].origin, TimePoint::new(ROOT, started + 50_000_000));
+    // RM-25: the refused move's segment ran for planning until this `start_rx` cut it at `started`,
+    // so the segment waits the receive call in progress there (2 000 samples at 1 MS/s, 2 ms), the
+    // allowance (3 ms) and the lead: 55 ms.
+    assert_eq!(s1[0].origin, TimePoint::new(ROOT, started + 55_000_000));
     let begun = harness.section("segments").into_iter().find(|row| row["stream"] == 1).expect("the destination's segment");
     assert_eq!(begun["channels"], serde_json::json!([1]), "{begun}");
     let first = harness.headers("rx1").into_iter().next().expect("the destination published");
@@ -3595,57 +3770,75 @@ fn mr_34_a_layout_an_update_at_a_cold_instant_is_timed_whatever_the_refusal_orde
     }
 }
 
-/// The origins the refusal scene's second segment has with C1 refused (S3') and, without the
-/// fault, S2 and S3.
-fn refusal_origins() -> (i64, i64, i64) {
-    let plain = origins(&refusal_run(false, true, None));
-    let refused = origins(&refusal_run(true, true, None));
-    assert_eq!((plain.len(), refused.len()), (3, 2), "{plain:?} {refused:?}");
-    (plain[1], plain[2], refused[1])
+/// The origins of the refusal scene, in nanoseconds after T0, measured on the tree before RM-25
+/// kept a refusal from moving a later origin (design 43): S2 with C1 not refused, S3 after it, and
+/// the earlier origin S3 had with C1 refused. A refused C1 now leaves S3 at the second.
+const REFUSAL_O2: i64 = 65_000_000;
+const REFUSAL_O3: i64 = 124_000_000;
+const REFUSAL_EARLY: i64 = 70_000_000;
+
+/// The origins the refusal scene's segments have without the fault and with C1 refused.
+fn refusal_origins() -> (Vec<i64>, Vec<i64>) {
+    (origins(&refusal_run(false, true, None)), origins(&refusal_run(true, true, None)))
 }
 
 #[test]
-fn mr_34_a_layout_an_update_due_in_a_refusal_advanced_segment_is_timed() {
-    // C1 (refused) would begin S2; C2, booked after it, begins S3 at o3 behind S2's cut. With
-    // C1 refused S3 begins earlier, at o3'. An update received before o3' (nothing runs: S1 is
-    // cut at C1) and due 5 ms after o3', before o3: S3' has run the release window when it
-    // applies, so it is a timed tune, however the refusal and the update were ordered. S3''s
-    // entry tune is draw 0; the update takes none.
-    let (o2, o3, early) = refusal_origins();
-    assert!(early < o3 && E_C2 > o2, "{o2} {o3} {early}");
-    let (r, e) = (early - 5_000_000, early + 5_000_000);
-    assert!(r > E_C1 && e < o3);
-    let m = refusal_run(true, true, Some((r, e)));
+fn mr_34_a_layout_a_refusal_does_not_move_the_next_segment_s_origin() {
+    // RM-25 (design 43): C1 is refused, so S2 never runs, but S3 begins where it would have
+    // behind S2's cut: the origins match the fault-free scene's S1 and S3, and the measured ones.
+    let (plain, refused) = refusal_origins();
+    assert_eq!(plain, [T0, T0 + REFUSAL_O2, T0 + REFUSAL_O3]);
+    assert_eq!(refused, [T0, T0 + REFUSAL_O3]);
+    assert_eq!(refused[1], plain[2]);
+}
+
+/// The refusal scene with an update `r` received and due at `e`, both before S3 begins at `o3`:
+/// no segment covers `e`, so the update is untimed, takes the first retune draw, and S3's own
+/// origin tune takes the second.
+fn assert_an_update_in_a_refused_span_is_untimed(r: i64, e: i64) {
+    let o3 = T0 + REFUSAL_O3;
+    assert!(r > E_C1 && e < o3 && e >= r + 2_000_000, "{r} {e}");
+    let mut m = refusal_run(true, true, Some((r, e)));
     assert_eq!(m.h.rejected(), [REFUSED_CHANGE.to_owned()]);
-    assert_eq!(origins(&m), [T0, early]);
-    assert!(m.h.section("segments").iter().all(|row| row["origin"]["ticks"] != o2), "the refused segment left a row");
+    assert_eq!(origins(&m), [T0, o3]);
+    // S1 is cut at C1, S2 is not a segment and S3 begins at o3: nothing covers e.
+    let rows = m.h.section("segments");
+    assert!(rows.iter().all(|row| row["direction"] != "rx" || row["origin"]["ticks"] == T0 || row["origin"]["ticks"] == o3), "a refused segment left a row: {rows:?}");
+    assert!(
+        rows.iter().all(|row| row["direction"] != "rx" || row["origin"]["ticks"].as_i64().unwrap() > e || row["ended_at"]["ticks"].as_i64().is_some_and(|end| end <= e)),
+        "a segment covers {e}: {rows:?}",
+    );
+    assert!(m.h.applied().iter().any(|(key, at)| key == FREQ0 && *at == e), "{:?}", m.h.applied());
+    // The update is untimed: S3's entry row says no coherent basis, and no timed row follows it.
+    let coherence = m.coherence(0, o3);
+    assert_eq!(coherence.len(), 1, "{coherence:?}");
+    assert_eq!(coherence[0]["basis"], "none");
+    assert_eq!(coherence[0]["valid"], false);
+    // Draw 0 is the update, draw 1 is S3's origin tune; a timed tune would leave draw 0 to S3.
     let (s3, origin) = m.last_clock("mock/rx/s0");
-    let [_, tx_phase, rx_timed, _] = lo_draws();
-    assert_near(m.ear(&s3, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
-    assert_near(m.ear(&s3, e + 5_000_000), rotated(0.5, tx_phase - rx_timed));
-    let coherence = m.coherence(0, origin);
-    assert_eq!(coherence.last().unwrap()["at"]["ticks"], e);
-    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
-    assert_eq!(coherence.last().unwrap()["valid"], true);
+    assert_eq!(origin, o3);
+    let tx_phase = lo_draws()[1];
+    assert_near(m.ear(&s3, origin + 100_000), rotated(0.5, tx_phase - retune_draw(1)));
+    assert_near(m.ear(&s3, origin + 5_000_000), rotated(0.5, tx_phase - retune_draw(1)));
+    // Restarting takes the third draw: no other tune was taken.
+    let (restarted, restart_origin) = m.restart("mock/rx/s0", T0 + 260_000_000);
+    m.go(restart_origin + 10_000_000);
+    assert_near(m.ear(&restarted, restart_origin + 100_000), rotated(0.5, tx_phase - retune_draw(2)));
 }
 
 #[test]
-fn mr_34_a_layout_an_update_received_after_a_refusal_advanced_segment_began_is_timed() {
-    // As above, but received after S3' began: timed, no draw.
-    // The rule assumes the owner starts S3' in time (MR-34's Ceiling): the Mock does not model a host delay.
-    let (_, o3, early) = refusal_origins();
-    let (r, e) = (early + 5_000_000, early + 10_000_000);
-    assert!(e < o3);
-    let m = refusal_run(true, true, Some((r, e)));
-    assert_eq!(origins(&m), [T0, early]);
-    let (s3, origin) = m.last_clock("mock/rx/s0");
-    let [_, tx_phase, rx_timed, _] = lo_draws();
-    assert_near(m.ear(&s3, origin + 100_000), rotated(0.5, tx_phase - retune_draw(0)));
-    assert_near(m.ear(&s3, e + 5_000_000), rotated(0.5, tx_phase - rx_timed));
-    let coherence = m.coherence(0, origin);
-    assert_eq!(coherence.last().unwrap()["at"]["ticks"], e);
-    assert_eq!(coherence.last().unwrap()["basis"], "timed_tune");
-    assert_eq!(coherence.last().unwrap()["valid"], true);
+fn mr_34_a_layout_an_update_in_the_span_a_refusal_once_advanced_is_untimed() {
+    // C1 (refused) would begin S2; C2, booked after it, begins S3 at o3. An update received
+    // before the origin S3 had when a refusal moved it (T0 + 70 ms) and due 5 ms after that origin,
+    // before o3, is untimed, however the refusal and the update were ordered: nothing runs there.
+    assert_an_update_in_a_refused_span_is_untimed(T0 + REFUSAL_EARLY - 5_000_000, T0 + REFUSAL_EARLY + 5_000_000);
+}
+
+#[test]
+fn mr_34_a_layout_an_update_received_after_the_origin_a_refusal_once_gave_is_untimed() {
+    // As above, but received after T0 + 70 ms, the origin S3 had on the old rule, and due 5 ms
+    // later: S3 has not begun, so it is untimed all the same.
+    assert_an_update_in_a_refused_span_is_untimed(T0 + REFUSAL_EARLY + 5_000_000, T0 + REFUSAL_EARLY + 10_000_000);
 }
 
 #[test]

@@ -258,17 +258,18 @@ fn rm_26_the_timeline_cases() {
         &[item(1_000 * MS, 0, 500 * MS, fast), item(1_010 * MS, 1, 600 * MS, Kind::Cold(config(1, 1_000_000)))],
         &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (1_100 * MS, None)]);
 
-    // VH-2: a refused change is removed and what follows replanned; it halts the stream
-    // until the next cold change, and a transmit clock booked for it ends at its origin.
+    // VH-2, RM-25: a refused change is removed from the plan and halts the stream until the next
+    // cold change; a receive segment it would have begun runs for planning until that change cuts
+    // it, and a transmit clock booked for it ends at its origin.
     case("a refused receive change halts the stream until the next change", &rx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (2_000 * MS, None)]);
+        &[(0, Some(1_000 * MS)), (2_050 * MS, None)]);
     case("a refused transmit change ends its clock at its origin", &tx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (2_000 * MS, None)]);
-    case("a change within one lead of a refused one counts from the cut made, not the refused origin", &rx,
+        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (2_050 * MS, None)]);
+    case("a change within one lead of a refused one counts from the refused segment's cut", &rx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_010 * MS, 1, 1_005 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_055 * MS, None)]);
+        &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
     case("start_rx resumes a stream a refused change halted", &rx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_500 * MS, 1, 1_500 * MS, Kind::Start)],
         &[(0, Some(1_000 * MS)), (1_550 * MS, None)]);
@@ -280,6 +281,8 @@ fn rm_26_the_timeline_cases() {
         &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)),
           item(3_000 * MS, 2, 3_000 * MS, Kind::Start)],
         &[(0, Some(1_000 * MS)), (3_050 * MS, None)]);
+    case("a start_rx on a running stream does nothing", &rx,
+        &[item(1_500 * MS, 0, 1_500 * MS, Kind::Start)], &[(0, None)]);
     case("a refused start_rx leaves the stream halted", &rx,
         &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))],
         &[(0, Some(1_000 * MS))]);
@@ -835,11 +838,11 @@ fn pruned_move_order(source_first: bool) {
     assert!(pruned.refuse(FROM, 1).unwrap());
     assert!(unpruned.refuse(FROM, 1).unwrap());
     let release_after = released(&pruned, FROM, 1, 2).expect("the refused move still has a source release");
-    assert!(release_after < release_before, "refusing the Start changes the release");
+    assert_eq!(release_after, release_before, "the refused Start's segment is cut at its origin, as the real one was");
     assert_eq!(release_after, released(&unpruned, FROM, 1, 2).unwrap());
     let destination_after = by(&pruned, TO, 2).origin;
     assert_eq!(destination_after, by(&unpruned, TO, 2).origin, "the refused Start updates the destination release");
-    assert!(destination_after < destination_before, "the destination's planned move segment follows the changed release");
+    assert_eq!(destination_after, destination_before, "the destination's planned move segment keeps its release");
     assert_eq!(planned_at(&pruned, FROM), planned_at(&unpruned, FROM));
     assert_eq!(planned_at(&pruned, TO), planned_at(&unpruned, TO));
 
@@ -1077,11 +1080,11 @@ fn rm_34_a_move_resumes_a_halted_stream() {
     assert_eq!(by(&lines, TO, 1).origin, 1_050 * MS, "{:?}", lanes(&lines, TO));
 }
 
-/// RM-34: the dependence is held after a refusal too: refusing the change the source's
-/// release came from removes that release, and the destination's segment moves back to what
-/// the source's plan still releases then.
+/// RM-34, RM-25: the dependence is held after a refusal too: refusing the change the source's
+/// release came from leaves that release, because the refused segment counts as one the source
+/// holds until its cut, and the destination's segment does not begin earlier.
 #[test]
-fn rm_34_a_refused_source_change_moves_the_destination() {
+fn rm_34_a_refused_source_change_does_not_move_the_destination() {
     let mut lines = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[], 1_000_000));
     lines.book(FROM, item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(set_config(&[0, 1], 2_000_000)))).unwrap();
     let (e, _) = lines.book_move(FROM, TO, 1, Some(1_000 * MS), 500 * MS, 1, 500 * MS).unwrap();
@@ -1089,10 +1092,11 @@ fn rm_34_a_refused_source_change_moves_the_destination() {
     assert_eq!(released(&lines, FROM, 1, 1), Some(1_050 * MS));
     assert_eq!(by(&lines, TO, 1).origin, 1_100 * MS, "the destination waits the source's release: {:?}", lanes(&lines, TO));
     assert!(lines.refuse(FROM, 0).unwrap());
-    // The refused change begins no segment, so the source's release is the cut the refusal
-    // still made of the segment that ran before it: 1 000 ms.
-    assert_eq!(released(&lines, FROM, 1, 1), Some(1_000 * MS), "the refused change already cut the source at its instant");
-    assert_eq!(by(&lines, TO, 1).origin, 1_050 * MS, "the destination moves back to the release left: {:?}", lanes(&lines, TO));
+    // The refused change is no segment of the plan, but it runs for planning until the move cuts
+    // it at its origin: the release is 1 050 ms still.
+    assert_eq!(released(&lines, FROM, 1, 1), Some(1_050 * MS), "the refused segment is cut at its origin");
+    assert_eq!(by(&lines, TO, 1).origin, 1_100 * MS, "the destination keeps waiting the release: {:?}", lanes(&lines, TO));
+    assert!(lines.line(FROM).unwrap().plan.iter().all(|segment| segment.by != Some(0)), "the refused segment is not planned");
 }
 
 /// RM-34: the source may release the moved channel before the move's item takes effect — a
@@ -1149,18 +1153,20 @@ fn rm_34_a_pruned_stopped_source_keeps_its_release() {
 }
 
 /// RM-34: only the segments that hold the moved channel say when the source releases it. A
-/// source that holds it as the configuration of record of a change it refused never ran it, so
-/// a segment that runs another channel alone does not floor the destination.
+/// stopped source that holds it as the configuration of record of a change it refused never ran
+/// it, so a segment that runs another channel alone does not floor the destination.
 #[test]
 fn rm_34_a_move_does_not_wait_a_segment_of_another_channel() {
     let mut lines = lines_of(rx_stream(&[1], 1_000_000), rx_stream(&[], 1_000_000));
     // The refused change leaves channel 0 as the source's configuration of record, without ever
-    // running it; the move of channel 0 is booked from that one.
+    // running it (the stream is stopped, so no refused segment either); the move of channel 0 is
+    // booked from that one.
+    lines.book(FROM, item(50 * MS, 2, 50 * MS, Kind::Stop)).unwrap();
     lines.book(FROM, refused(item(100 * MS, 0, 100 * MS, Kind::Cold(set_config(&[0, 1], 1_000_000))))).unwrap();
-    let (e, _) = lines.book_move(FROM, TO, 0, Some(100 * MS), 50 * MS, 1, 50 * MS).unwrap();
+    let (e, _) = lines.book_move(FROM, TO, 0, Some(100 * MS), 50 * MS, 3, 50 * MS).unwrap();
     assert_eq!(e, 100 * MS);
-    assert_eq!(released(&lines, FROM, 0, 1), None, "the source never ran channel 0, so nothing released it");
-    assert_eq!(by(&lines, TO, 1).origin, 100 * MS, "the segment that runs channel 1 alone does not floor it: {:?}", lanes(&lines, TO));
+    assert_eq!(released(&lines, FROM, 0, 3), None, "the source never ran channel 0, so nothing released it");
+    assert_eq!(by(&lines, TO, 3).origin, 100 * MS, "the segment that runs channel 1 alone does not floor it: {:?}", lanes(&lines, TO));
 }
 
 /// RM-34: the release is the source's plan, not the arrival order of its items. A `start_rx`
@@ -1587,4 +1593,620 @@ fn rm_36_covering_boundaries() {
     assert_eq!(covering([&first, &second], 0, 40 * MS), Some(&second));
     assert_eq!(covering([&first, &second], 0, 2_000), Some(&first));
     assert_eq!(covering([&first, &second], 0, 20 * MS), None);
+}
+
+/// RM-25 (design 43): a transmit change booked after a refusal at or after the refused change's
+/// instant begins no earlier than it would had the change not been refused; the refused clock's
+/// record stands (it ends at its origin).
+#[test]
+fn rm_25_a_transmit_change_after_a_refusal_begins_as_if_not_refused() {
+    let tx = stream(Direction::Tx, 1);
+    let two = Kind::Cold(config(1, 2_000_000));
+    let one = Kind::Cold(config(1, 1_000_000));
+    // The refused clock is cut where N would have cut it, 1 200 ms: N begins a lead after that.
+    let refused_c = [refused(item(1_000 * MS, 0, 500 * MS, two)), item(1_200 * MS, 1, 1_005 * MS, one)];
+    assert_eq!(segments(&tx, &refused_c), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (1_250 * MS, None)]);
+    let plain = [item(1_000 * MS, 0, 500 * MS, two), item(1_200 * MS, 1, 1_005 * MS, one)];
+    assert_eq!(segments(&tx, &plain), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_200 * MS)), (1_250 * MS, None)], "the same origin without the refusal");
+    // A refusal recorded after the booking plans the same.
+    let mut line = Line::new(tx);
+    for booked in plain {
+        line.book(booked).unwrap();
+    }
+    assert!(line.refuse(0).unwrap());
+    assert_eq!(line.plan, plan(&tx, &refused_c).unwrap());
+}
+
+/// RM-25 (design 43): the plan of a receive stream whose C is refused when the stale delivered
+/// index of an item says nothing of the segment the refusal left out: a virtual segment is cut
+/// at the item's instant, whatever `delivered` holds.
+#[test]
+fn rm_25_a_virtual_segment_ignores_a_stale_delivered_index() {
+    let rx = rx_stream(&[0, 1], 1_000_000);
+    let to = rx_stream(&[2], 1_000_000);
+    let changed = Kind::Cold(set_config(&[0, 1], 2_000_000));
+    let refused_c = refused(item(1_000 * MS, 0, 500 * MS, changed));
+    for stale in [None, Some(700_000), Some(2_000_000)] {
+        // An aborting End: it stops the stream for good, so no Start after it begins a segment.
+        let end = Item { delivered: stale, ..item(1_500 * MS, 3, 1_500 * MS, Kind::End { abort: true }) };
+        let mut lines = lines_of(rx, to);
+        lines.book(FROM, refused_c).unwrap();
+        lines.book(FROM, end).unwrap();
+        let before = planned_at(&lines, FROM);
+        lines.book(FROM, item(1_600 * MS, 4, 1_600 * MS, Kind::Start)).unwrap();
+        assert_eq!(planned_at(&lines, FROM), before, "{stale:?}: an End stops the stream for good");
+        // The move at the End's instant comes after it: the virtual segment, origin 1 050 ms,
+        // ends at sample 900 000, 1 500 ms, and that is the release.
+        lines.book_move(FROM, TO, 1, Some(1_500 * MS), 1_500 * MS, 5, 1_500 * MS).unwrap();
+        assert_eq!(released(&lines, FROM, 1, 5), Some(1_500 * MS), "{stale:?}");
+
+        // A Stop: the stream begins again a lead after the Stop's cut.
+        let stop = Item { delivered: stale, ..item(1_500 * MS, 3, 1_500 * MS, Kind::Stop) };
+        let mut line = Line::new(rx);
+        for booked in [refused_c, stop, item(1_600 * MS, 4, 1_600 * MS, Kind::Start)] {
+            line.book(booked).unwrap();
+        }
+        assert_eq!(planned(&line), [(0, Some(1_000 * MS)), (1_650 * MS, None)], "{stale:?}");
+        let mut lines = lines_of(rx, to);
+        lines.book(FROM, refused_c).unwrap();
+        lines.book(FROM, stop).unwrap();
+        lines.book_move(FROM, TO, 1, Some(1_500 * MS), 1_500 * MS, 5, 1_500 * MS).unwrap();
+        assert_eq!(released(&lines, FROM, 1, 5), Some(1_500 * MS), "{stale:?}");
+    }
+}
+
+/// The items in the order they take effect, each with its effective instant (RM-25).
+fn in_order(items: &[Item]) -> Vec<Item> {
+    let mut order: Vec<Item> = items.iter().map(|item| Item { e: ezsdr_radio::timeline::effective(items, item), ..*item }).collect();
+    order.sort_by_key(|item| (item.e, item.seq));
+    order
+}
+
+/// Whether the next item to take effect after the item `seq` is a `start_rx`: it resumes a
+/// stream the refusal of `seq` halted and does nothing to one it did not (the one way a refusal
+/// changes a later segment besides the refused one). Any other item ends the question.
+fn start_follows(items: &[Item], seq: u64) -> bool {
+    let order = in_order(items);
+    let at = order.iter().position(|item| item.seq == seq).expect("the item is booked");
+    order.get(at + 1).is_some_and(|item| item.kind == Kind::Start)
+}
+
+/// The streams the generated refusal tests run: the 50 ms lead of the others, and a 5 ms one,
+/// so that a refusal overlaps a lead.
+fn refusal_streams(direction: Direction) -> [Stream; 2] {
+    let base = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..stream(direction, 1) };
+    [base, Stream { lead: 5 * MS, ..base }]
+}
+
+/// RM-25 (design 43), O-eq: on a generated sequence, refusing one change or `start_rx` changes
+/// no segment that a later item begins (origin and cut), and leaves the refused one out of the
+/// plan; the refusal booked with the item and recorded after it plan the same. A `start_rx`
+/// that follows the refused item before any change resumes the halted stream, which is the one
+/// segment a refusal does add, so those sequences are not compared.
+#[test]
+fn rm_25_a_refusal_does_not_move_a_later_origin() {
+    let (mut compared, mut skipped) = (0, 0);
+    for seed in 0..1_000 {
+        let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
+        for stream in refusal_streams(Direction::Rx) {
+            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream };
+            let mut items = sequence.items(&terms);
+            items.sort_by_key(|item| (item.ready, item.seq));
+            let candidates: Vec<u64> = items.iter().filter(|item| matches!(item.kind, Kind::Cold(_) | Kind::Start)).map(|item| item.seq).collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            let k = candidates[seed as usize % candidates.len()];
+            if start_follows(&items, k) {
+                skipped += 1;
+                continue;
+            }
+            let plain = plan(&stream, &items).unwrap();
+            let marked: Vec<Item> = items.iter().map(|item| Item { refused: item.refused || item.seq == k, ..*item }).collect();
+            let booked = plan(&stream, &marked).unwrap();
+            // The refused one is not in the plan, and every other segment is where it was.
+            assert!(booked.iter().all(|segment| segment.by != Some(k)), "seed {seed}: the refused segment is planned: {booked:?}");
+            let others: Vec<Segment> = plain.iter().filter(|segment| segment.by != Some(k)).copied().collect();
+            assert_eq!(booked, others, "seed {seed}: refusing {k} moves a later segment");
+            check(&stream, &booked, seed);
+            // Recorded after the booking, the refusal plans the same, and so does `halted`.
+            let (mut full, mut after) = (Line::new(stream), Line::new(stream));
+            let mut direct = Line::new(stream);
+            for item in &items {
+                full.book(*item).unwrap();
+                after.book(*item).unwrap();
+                direct.book(Item { refused: item.seq == k, ..*item }).unwrap();
+            }
+            assert!(after.refuse(k).unwrap());
+            assert_eq!(after.plan, direct.plan, "seed {seed}: a refusal recorded after the booking plans differently");
+            for item in &in_order(&items) {
+                assert_eq!(after.halted(item.e), direct.halted(item.e), "seed {seed}, t {}", item.e);
+            }
+            compared += 1;
+        }
+    }
+    assert!(compared > 500, "{compared} compared, {skipped} skipped");
+}
+
+/// RM-25 (design 43): a refused receive change or `start_rx` is no segment of the plan, however
+/// the line learned of the refusal.
+#[test]
+fn rm_25_a_refused_receive_segment_is_not_in_the_plan() {
+    let rx = stream(Direction::Rx, 1);
+    let fast = Kind::Cold(config(1, 2_000_000));
+    for items in [
+        vec![refused(item(1_000 * MS, 0, 500 * MS, fast))],
+        vec![item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))],
+        vec![refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, Kind::Cold(config(1, 1_000_000)))],
+    ] {
+        let booked = {
+            let mut line = Line::new(rx);
+            for item in &items {
+                line.book(*item).unwrap();
+            }
+            line
+        };
+        let after = {
+            let mut line = Line::new(rx);
+            for item in &items {
+                line.book(Item { refused: false, ..*item }).unwrap();
+            }
+            for item in items.iter().filter(|item| item.refused) {
+                assert!(line.refuse(item.seq).unwrap());
+            }
+            line
+        };
+        for line in [&booked, &after] {
+            for item in items.iter().filter(|item| item.refused) {
+                assert!(line.plan.iter().all(|segment| segment.by != Some(item.seq)), "{:?}", line.plan);
+            }
+            assert!(line.plan.iter().all(|segment| segment.cut != Some(0)), "{:?}", line.plan);
+        }
+        assert_eq!(booked.plan, after.plan);
+        for item in &items {
+            assert_eq!(booked.halted(item.e), after.halted(item.e));
+            assert_eq!(booked.released(0, item.seq), after.released(0, item.seq));
+        }
+    }
+}
+
+/// RM-25 (design 43), the exact values: S1, C1 refused, C2, and the rest of the refusal's
+/// overlaps. Lead 50 ms, no receive call; 2 MS/s is the refused rate.
+#[test]
+fn rm_25_a_refused_segment_runs_for_planning_until_the_next_change_cuts_it() {
+    let rx = stream(Direction::Rx, 1);
+    let fast = Kind::Cold(config(1, 2_000_000));
+    let one = Kind::Cold(config(1, 1_000_000));
+    let case = |name: &str, items: &[Item], expected: &[(i64, Option<i64>)]| {
+        let mut line = Line::new(rx);
+        for item in items {
+            line.book(*item).unwrap();
+        }
+        assert_eq!(planned(&line), expected, "{name}");
+        assert_eq!(segments(&rx, items), expected, "{name}");
+        line
+    };
+    // C2 cuts C1's virtual segment at its own instant (cut 2 000 ms): S3 begins a lead later.
+    let line = case("S1, C1 refused, C2", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, one)], &[(0, Some(1_000 * MS)), (2_050 * MS, None)]);
+    assert!(line.halted(1_999 * MS) && !line.halted(2_000 * MS), "halted until C2 takes effect");
+    case("C2 inside C1's lead", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_010 * MS, 1, 1_005 * MS, one)], &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
+    case("two refusals", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), refused(item(2_000 * MS, 1, 1_500 * MS, one)), item(3_000 * MS, 2, 2_500 * MS, fast)],
+        &[(0, Some(1_000 * MS)), (3_050 * MS, None)]);
+    case("C2 at C1's instant", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_000 * MS, 1, 1_000 * MS, one)], &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
+}
+
+/// RM-25 (design 43), `start_rx` after a refusal: the refused segment is cut where the `start_rx`
+/// is, and the new one begins a lead (and, with a receive call, the call) after that cut.
+#[test]
+fn rm_25_a_start_after_a_refusal_begins_from_the_refused_segment_s_cut() {
+    let rx = stream(Direction::Rx, 1);
+    let fast = Kind::Cold(config(1, 2_000_000));
+    let case = |stream: &Stream, items: &[Item], expected: &[(i64, Option<i64>)]| {
+        assert_eq!(segments(stream, items), expected);
+        let mut line = Line::new(*stream);
+        for item in items {
+            line.book(*item).unwrap();
+        }
+        assert_eq!(planned(&line), expected);
+    };
+    case(&rx, &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_500 * MS, 1, 1_500 * MS, Kind::Start)], &[(0, Some(1_000 * MS)), (1_550 * MS, None)]);
+    // A start before the refused segment's origin cuts it with no sample, at that origin.
+    case(&rx, &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_010 * MS, 1, 1_010 * MS, Kind::Start)], &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
+    // A refused start_rx is cut by the next one.
+    case(&rx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(2_500 * MS, 2, 2_500 * MS, Kind::Start)],
+        &[(0, Some(1_000 * MS)), (2_550 * MS, None)]);
+    // With a receive call of 2 000 samples and 3 ms: the refused segment (2 MS/s) begins at 1 055
+    // ms (S1's 1 MS/s call ends at 1 005), is cut at 1 500, and the call it had in progress is
+    // 1 ms and the allowance 3: the new segment begins at 1 554 ms.
+    let call = Stream { call: 2_000, allowance: 3 * MS, ..rx };
+    case(&call, &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_500 * MS, 1, 1_500 * MS, Kind::Start)], &[(0, Some(1_000 * MS)), (1_554 * MS, None)]);
+}
+
+/// RM-25 (design 43), `Lines`: a refusal recorded after a move into the stream changes no
+/// move's release and no segment a later item begins, on either stream, and a later `Stop` that
+/// shortens the source's release shortens it the same.
+#[test]
+fn rm_34_a_refusal_does_not_change_a_move_release() {
+    let (mut moved, mut compared) = (0, 0);
+    for seed in 0..500 {
+        let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
+        let from = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..rx_stream(&[0, 1], 1_000_000) };
+        let to = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..rx_stream(&[2], 2_000_000) };
+        let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream: from };
+        let items = sequence.items(&terms);
+        let half = items.len() / 2;
+        let mut plain = lines_of(from, to);
+        for booked in &items[..half] {
+            plain.book(FROM, *booked).unwrap();
+        }
+        let candidates: Vec<u64> = items[..half].iter().filter(|item| matches!(item.kind, Kind::Cold(_) | Kind::Start)).map(|item| item.seq).collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let k = candidates[seed as usize % candidates.len()];
+        let at = 1_000 * MS + 100 * MS * (seed % 5) as i64;
+        let seq = 1_000_000 + seed;
+        if plain.book_move(FROM, TO, 1, Some(at), at, seq, at).is_err() {
+            continue;
+        }
+        moved += 1;
+        let mut refused = plain.clone();
+        assert!(refused.refuse(FROM, k).unwrap());
+        // After each phase, the two lines agree on everything but the refused segment.
+        let agree = |plain: &Lines, refused: &Lines, phase: &str| {
+            let items: Vec<Item> = plain.line(FROM).unwrap().items.clone();
+            if start_follows(&items, k) {
+                return false;
+            }
+            assert_eq!(released(plain, FROM, 1, seq), released(refused, FROM, 1, seq), "seed {seed}, {phase}: the move's release");
+            let others: Vec<Segment> = plain.line(FROM).unwrap().plan.iter().filter(|segment| segment.by != Some(k)).copied().collect();
+            assert_eq!(refused.line(FROM).unwrap().plan, others, "seed {seed}, {phase}: the source's plan");
+            assert_eq!(refused.line(TO).unwrap().plan, plain.line(TO).unwrap().plan, "seed {seed}, {phase}: the destination's plan");
+            true
+        };
+        compared += usize::from(agree(&plain, &refused, "after the refusal"));
+        for booked in &items[half..] {
+            for lines in [&mut plain, &mut refused] {
+                lines.book(FROM, Item { seq: booked.seq + 2_000_000, ..*booked }).unwrap();
+                lines.book(TO, Item { seq: booked.seq + 3_000_000, ..*booked }).unwrap();
+            }
+        }
+        compared += usize::from(agree(&plain, &refused, "after later items"));
+    }
+    assert!(moved > 100 && compared > 100, "{moved} moves, {compared} comparisons");
+}
+
+/// RM-25, RM-34 (design 43), fixed cases: a later `Stop` between the refused segment and a booked move shortens the
+/// source's release as it did, a refusal changes neither value; and a chain A to B to C keeps
+/// B's release and C's origin when A's change is refused.
+#[test]
+fn rm_34_a_refusal_before_a_stop_or_in_a_chain_does_not_change_a_release() {
+    let changed = Kind::Cold(set_config(&[0, 1], 2_000_000));
+    // FROM: C (refused) at 1 000 ms, its segment beginning at 1 050 ms; a move of channel 1 booked
+    // for 1 200 ms; a later `Stop` for 1 100 ms, strictly between the segment's origin and the move.
+    // The Stop cuts the segment (1 100 ms) before the move does, so it really shortens the release.
+    let build = |refuse: bool, stop: bool| {
+        let mut lines = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[], 1_000_000));
+        lines.book(FROM, item(1_000 * MS, 0, 1_000 * MS, changed)).unwrap();
+        lines.book_move(FROM, TO, 1, Some(1_200 * MS), 1_000 * MS, 1, 1_000 * MS).unwrap();
+        if stop {
+            lines.book(FROM, item(1_100 * MS, 2, 1_100 * MS, Kind::Stop)).unwrap();
+        }
+        if refuse {
+            assert!(lines.refuse(FROM, 0).unwrap());
+        }
+        lines
+    };
+    assert_eq!(released(&build(false, false), FROM, 1, 1), Some(1_200 * MS), "without the Stop the move cuts the segment");
+    assert_eq!(released(&build(false, true), FROM, 1, 1), Some(1_100 * MS), "the Stop really shortens the release");
+    for stop in [false, true] {
+        let (plain, refused) = (build(false, stop), build(true, stop));
+        assert_eq!(released(&refused, FROM, 1, 1), released(&plain, FROM, 1, 1), "stop {stop}");
+        assert_eq!(by(&refused, TO, 1).origin, by(&plain, TO, 1).origin, "stop {stop}");
+    }
+    assert_eq!(by(&build(true, false), TO, 1).origin, 1_250 * MS, "a lead after the move's cut of the refused segment");
+    assert_eq!(by(&build(true, true), TO, 1).origin, 1_200 * MS, "the shortened release lets the destination begin at the move's own instant");
+
+    // A refusal that does change the release: a `start_rx` booked before the move resumes the halted
+    // stream at 1 100 ms (a lead after the refused segment's origin, 1 050 ms), the move at 1 060 ms
+    // cuts that segment at its origin, and the release and the destination follow the refusal
+    // recorded after the booking exactly as they follow one booked with the item.
+    let build = |booked_refused: bool, refuse_after: bool| {
+        let mut lines = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[], 1_000_000));
+        lines.book(FROM, Item { refused: booked_refused, ..item(1_000 * MS, 0, 1_000 * MS, changed) }).unwrap();
+        lines.book(FROM, item(1_020 * MS, 2, 1_020 * MS, Kind::Start)).unwrap();
+        lines.book_move(FROM, TO, 1, Some(1_060 * MS), 1_060 * MS, 3, 1_060 * MS).unwrap();
+        if refuse_after {
+            assert!(lines.refuse(FROM, 0).unwrap());
+        }
+        lines
+    };
+    let (plain, direct, after) = (build(false, false), build(true, false), build(false, true));
+    assert_eq!(released(&plain, FROM, 1, 3), Some(1_060 * MS));
+    assert_eq!(released(&direct, FROM, 1, 3), Some(1_100 * MS));
+    assert_eq!(released(&after, FROM, 1, 3), Some(1_100 * MS), "the refusal recorded later settles the release");
+    assert_eq!(by(&after, TO, 3).origin, 1_150 * MS);
+    assert_eq!(by(&after, TO, 3).origin, by(&direct, TO, 3).origin);
+
+    // A to B to C: refusing A's change moves neither B's release nor C's origin.
+    let (a, b, c) = ((Direction::Rx, 0), (Direction::Rx, 1), (Direction::Rx, 2));
+    let chain = |refuse: bool| {
+        let mut lines = Lines::new();
+        lines.insert(a, Line::new(rx_stream(&[0], 1_000_000)));
+        lines.insert(b, Line::new(rx_stream(&[], 1_000_000)));
+        lines.insert(c, Line::new(rx_stream(&[], 1_000_000)));
+        lines.book(a, item(10 * MS, 0, 10 * MS, Kind::Cold(set_config(&[0], 2_000_000)))).unwrap();
+        lines.book_move(a, b, 0, Some(10 * MS), 10 * MS, 1, 10 * MS).unwrap();
+        lines.book_move(b, c, 0, Some(20 * MS), 20 * MS, 2, 20 * MS).unwrap();
+        if refuse {
+            assert!(lines.refuse(a, 0).unwrap());
+        }
+        lines
+    };
+    let (plain, refused) = (chain(false), chain(true));
+    // Before pruning: the plans and the two releases; after it the plans again.
+    for stream in [a, b, c] {
+        assert_eq!(planned_at(&refused, stream), planned_at(&plain, stream), "{stream:?}");
+    }
+    assert_eq!(released(&refused, a, 0, 1), released(&plain, a, 0, 1));
+    assert_eq!(released(&refused, b, 0, 2), released(&plain, b, 0, 2));
+    let (mut plain_pruned, mut refused_pruned) = (plain.clone(), refused.clone());
+    plain_pruned.prune(30 * MS);
+    refused_pruned.prune(30 * MS);
+    for stream in [a, b, c] {
+        assert_eq!(planned_at(&refused_pruned, stream), planned_at(&refused, stream), "{stream:?}: pruning changes the refused plan");
+        assert_eq!(planned_at(&refused_pruned, stream), planned_at(&plain_pruned, stream), "{stream:?}");
+    }
+}
+
+/// RM-25 (design 43): a booking at `b` adds no coverage before `b` plus its stream's start lead,
+/// on any stream of an instance, whether or not some of the items are refused: it begins no
+/// segment that early and moves no origin earlier. The boundaries tested are every origin and
+/// cut instant of the plan before and after, and the ones around `b` and `b + lead`.
+#[test]
+fn rm_25_a_booking_adds_no_coverage_before_its_start_lead() {
+    let mut booked_total = 0;
+    for seed in 0..400 {
+        let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
+        let from = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..rx_stream(&[0, 1], 1_000_000) };
+        let to = Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..rx_stream(&[2], 2_000_000) };
+        let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream: from };
+        let mut items = sequence.items(&terms);
+        items.sort_by_key(|item| (item.ready, item.seq));
+        let mut lines = lines_of(from, to);
+        let half = items.len() / 2;
+        for (index, booked) in items.iter().enumerate() {
+            let streams = if index == half { vec![None] } else if index % 2 == 0 { vec![Some(FROM)] } else { vec![Some(TO), Some(FROM)] };
+            for stream in streams {
+                let b = booked.ready;
+                let before = lines.clone();
+                let next = match stream {
+                    // The move of channel 1 at the middle of the sequence, when it can be made.
+                    None => lines.book_move(FROM, TO, 1, Some(b), b, 1_000_000 + seed, b).is_ok().then_some(b),
+                    Some(key) => {
+                        // An item booked after the move arrives after it, whichever line it is for.
+                        let offset = match (key == TO, index > half) { (false, false) => 0, (true, false) => 500_000, (false, true) => 2_000_000, (true, true) => 3_000_000 };
+                        let item = Item { refused: booked.seq % 5 == 4, seq: booked.seq + offset, ..*booked };
+                        lines.book(key, item).unwrap();
+                        Some(b)
+                    }
+                };
+                if next.is_none() {
+                    continue;
+                }
+                booked_total += 1;
+                let mut boundaries: Vec<i64> = Vec::new();
+                for lines in [&before, &lines] {
+                    for key in [FROM, TO] {
+                        for segment in &lines.line(key).unwrap().plan {
+                            boundaries.push(segment.origin);
+                            if let Some(cut) = segment.cut {
+                                boundaries.push(segment.instant(cut).unwrap());
+                            }
+                        }
+                    }
+                }
+                for key in [FROM, TO] {
+                    let lead = lines.line(key).unwrap().stream.lead;
+                    let mut instants: Vec<i64> = boundaries.iter().flat_map(|x| [x - 1, *x, x + 1]).collect();
+                    instants.extend([b - 1, b, b + lead - 1]);
+                    for t in instants.into_iter().filter(|t| *t < b + lead) {
+                        for channel in 0..3 {
+                            let (was, now) = (&before.line(key).unwrap().plan, &lines.line(key).unwrap().plan);
+                            assert!(
+                                covering(now, channel, t).is_none() || covering(was, channel, t).is_some(),
+                                "seed {seed}: booking {stream:?} {booked:?} at {b} added coverage of channel {channel} at {t} on {key:?}: {was:?} -> {now:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(booked_total > 1_000, "{booked_total} bookings");
+}
+
+/// RM-16, RM-25 (design 43): a real segment keeps its delivered floor; a virtual one has none.
+#[test]
+fn rm_16_a_real_segment_keeps_its_delivered_floor() {
+    let rx = stream(Direction::Rx, 1);
+    let fast = Kind::Cold(config(1, 2_000_000));
+    // C runs from 1 050 ms (2 MS/s); an abort at 1 500 ms that knows 1 000 000 samples delivered
+    // cuts there, not at 900 000; a Stop's cut is floored at what was delivered.
+    let run = |end: Item| segments(&rx, &[item(1_000 * MS, 0, 500 * MS, fast), end]);
+    assert_eq!(run(delivered(1_000_000, item(1_500 * MS, 1, 1_500 * MS, Kind::End { abort: true }))), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_550 * MS))]);
+    assert_eq!(run(delivered(1_000_000, item(1_500 * MS, 1, 1_500 * MS, Kind::Stop))), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_550 * MS))]);
+    assert_eq!(run(delivered(100_000, item(1_500 * MS, 1, 1_500 * MS, Kind::Stop))), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_500 * MS))]);
+}
+
+/// RM-25 (design 43): a pruned line plans, releases and halts as one that keeps every item,
+/// with the refused segment pending (before its origin) or running (after it) at the prune.
+#[test]
+fn rm_25_a_pruned_line_with_a_refused_segment_plans_as_one_that_keeps_every_item() {
+    let fast = Kind::Cold(set_config(&[0, 1], 2_000_000));
+    for prune_at in [1_020 * MS, 1_200 * MS] {
+        for step in 0..4 {
+            let mut full = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[], 1_000_000));
+            full.book(FROM, refused(item(1_000 * MS, 0, 500 * MS, fast))).unwrap();
+            let mut pruned = full.clone();
+            pruned.prune_stream(FROM, prune_at);
+            assert!(pruned.line(FROM).unwrap().items.is_empty(), "the refused item is folded away at {prune_at}");
+            let next = match step {
+                0 => item(1_500 * MS, 1, 1_500 * MS, Kind::Stop),
+                1 => item(1_500 * MS, 1, 1_500 * MS, Kind::Start),
+                2 => item(1_500 * MS, 1, 1_500 * MS, Kind::Cold(set_config(&[0, 1], 1_000_000))),
+                _ => item(1_500 * MS, 1, 1_500 * MS, Kind::Stop),
+            };
+            for lines in [&mut full, &mut pruned] {
+                lines.book(FROM, next).unwrap();
+                if step == 3 {
+                    lines.book(FROM, item(1_600 * MS, 2, 1_600 * MS, Kind::Start)).unwrap();
+                }
+            }
+            let (moving, at) = if step >= 2 { (true, 1_700 * MS) } else { (false, 0) };
+            if moving {
+                for lines in [&mut full, &mut pruned] {
+                    lines.book_move(FROM, TO, 1, Some(at), at, 9, at).unwrap();
+                }
+            }
+            for t in [1_000 * MS, 1_050 * MS, 1_400 * MS, 1_500 * MS, 1_700 * MS, 2_000 * MS] {
+                assert_eq!(line_halted(&pruned, FROM, t), line_halted(&full, FROM, t), "prune {prune_at}, step {step}, t {t}");
+            }
+            assert_eq!(planned_at(&pruned, FROM), planned_at(&full, FROM), "prune {prune_at}, step {step}");
+            assert_eq!(planned_at(&pruned, TO), planned_at(&full, TO), "prune {prune_at}, step {step}");
+            if moving {
+                assert_eq!(released(&pruned, FROM, 1, 9), released(&full, FROM, 1, 9), "prune {prune_at}, step {step}");
+            }
+        }
+    }
+}
+
+/// RM-34, RM-25 (design 43): a move after a refused move waits the end of the refused segments,
+/// a refused segment that began after the move is no release of it, and one whose configuration
+/// holds no moved channel is none either.
+#[test]
+fn rm_34_a_refused_segment_is_a_release_only_for_a_channel_it_holds_and_that_began_before() {
+    // The refused move halts both lines; the next move waits its virtual segments' end (their
+    // origin, 1 050 ms, since the next move cuts them at 1 010 ms).
+    let mut lines = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[2], 1_000_000));
+    lines.book_move(FROM, TO, 1, Some(1_000 * MS), 500 * MS, 0, 500 * MS).unwrap();
+    assert!(lines.refuse_move(0).unwrap());
+    assert!(line_halted(&lines, FROM, 1_000 * MS) && line_halted(&lines, TO, 1_000 * MS));
+    lines.book_move(FROM, TO, 0, Some(1_010 * MS), 1_010 * MS, 1, 1_010 * MS).unwrap();
+    assert_eq!(released(&lines, FROM, 0, 1), Some(1_050 * MS));
+    assert_eq!(by(&lines, TO, 1).origin, 1_100 * MS, "{:?}", lanes(&lines, TO));
+
+    // A refused segment that begins after the move does not floor it.
+    let mut lines = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[2], 1_000_000));
+    lines.book_move(FROM, TO, 1, Some(1_000 * MS), 500 * MS, 0, 500 * MS).unwrap();
+    lines.book(FROM, refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Cold(set_config(&[0, 1], 1_000_000))))).unwrap();
+    assert_eq!(released(&lines, FROM, 1, 0), Some(1_000 * MS), "the refused change began after the move");
+
+    // A refused segment whose configuration lacks the channel does not hold it, though the
+    // stream's record gains it later: it ends at 2 000 ms, the initial segment's end is 500 ms.
+    let mut lines = lines_of(rx_stream(&[0, 1], 1_000_000), rx_stream(&[2], 1_000_000));
+    lines.book(FROM, refused(item(500 * MS, 0, 500 * MS, Kind::Cold(set_config(&[0], 1_000_000))))).unwrap();
+    lines.book(FROM, item(2_000 * MS, 1, 2_000 * MS, Kind::Stop)).unwrap();
+    lines.book(FROM, item(2_100 * MS, 2, 2_100 * MS, Kind::Cold(set_config(&[0, 1], 1_000_000)))).unwrap();
+    lines.book_move(FROM, TO, 1, Some(2_200 * MS), 2_200 * MS, 3, 2_200 * MS).unwrap();
+    assert_eq!(released(&lines, FROM, 1, 3), Some(500 * MS));
+    assert_eq!(by(&lines, TO, 3).origin, 2_250 * MS);
+}
+
+/// RM-25 (design 43), transmit, the same rule at the generated sequences: a change booked after a
+/// refusal begins where it would had the change not been refused, and the refused clock's own
+/// record is the only thing a refusal changes.
+#[test]
+fn rm_25_a_transmit_refusal_does_not_move_a_later_origin() {
+    let mut compared = 0;
+    for seed in 0..1_000 {
+        let sequence = generator::sequence(seed, &generator::FRACTIONAL_RATES);
+        for stream in refusal_streams(Direction::Tx) {
+            let terms = Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, timed_lead: 2 * MS, release_window: 3 * MS, stream };
+            let mut items = sequence.items(&terms);
+            items.sort_by_key(|item| (item.ready, item.seq));
+            let candidates: Vec<u64> = items.iter().filter(|item| matches!(item.kind, Kind::Cold(_))).map(|item| item.seq).collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            let k = candidates[seed as usize % candidates.len()];
+            let plain = plan(&stream, &items).unwrap();
+            let marked: Vec<Item> = items.iter().map(|item| Item { refused: item.seq == k, ..*item }).collect();
+            let booked = plan(&stream, &marked).unwrap();
+            let origins = |planned: &[Segment]| planned.iter().filter(|segment| segment.by != Some(k)).map(|segment| (segment.by, segment.origin)).collect::<Vec<_>>();
+            assert_eq!(origins(&booked), origins(&plain), "seed {seed}: refusing {k} moves a later clock's origin");
+            compared += 1;
+        }
+    }
+    assert!(compared > 500, "{compared}");
+}
+
+/// RM-25 (design 43), transmit: repeated refusals, and a refusal followed by an item that is no
+/// change, each leave the next change where it would have been without them; a loss after the
+/// refusal still ends the clock at its origin.
+#[test]
+fn rm_25_a_transmit_refusal_followed_by_other_items_keeps_the_next_origin() {
+    let tx = stream(Direction::Tx, 1);
+    let two = Kind::Cold(config(1, 2_000_000));
+    let one = Kind::Cold(config(1, 1_000_000));
+    // C1 refused (origin 1 050 ms), C2 refused (begins at 1 250 ms behind C1's virtual cut at
+    // 1 200), N at 1 500 ms: begins at 1 550 ms, as with no refusal at all.
+    let repeated = [
+        refused(item(1_000 * MS, 0, 500 * MS, two)),
+        refused(item(1_200 * MS, 1, 1_005 * MS, two)),
+        item(1_500 * MS, 2, 1_300 * MS, one),
+    ];
+    let plain = [item(1_000 * MS, 0, 500 * MS, two), item(1_200 * MS, 1, 1_005 * MS, two), item(1_500 * MS, 2, 1_300 * MS, one)];
+    let last = |items: &[Item]| segments(&tx, items).last().copied().unwrap();
+    assert_eq!(last(&repeated), (1_550 * MS, None));
+    assert_eq!(last(&plain), (1_550 * MS, None));
+    // Each refused clock ends at its origin: the records are as before.
+    assert_eq!(segments(&tx, &repeated), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (1_250 * MS, Some(1_250 * MS)), (1_550 * MS, None)]);
+    // A Stop between the refusal and N is a no-op on transmit.
+    let stopped = [refused(item(1_000 * MS, 0, 500 * MS, two)), item(1_100 * MS, 1, 1_100 * MS, Kind::Stop), item(1_200 * MS, 2, 1_005 * MS, one)];
+    assert_eq!(segments(&tx, &stopped), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (1_250 * MS, None)]);
+    // A loss after the refusal: the clock ends at its origin and nothing after the loss begins.
+    let lost = [refused(item(1_000 * MS, 0, 500 * MS, two)), item(1_020 * MS, 1, 1_020 * MS, Kind::End { abort: false }), item(1_200 * MS, 2, 1_100 * MS, one)];
+    assert_eq!(segments(&tx, &lost), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS))]);
+    // Pruned between the refusal and N: the plan is the same.
+    let (mut full, mut pruned) = (Line::new(tx), Line::new(tx));
+    for line in [&mut full, &mut pruned] {
+        line.book(repeated[0]).unwrap();
+    }
+    pruned.prune(1_100 * MS);
+    assert!(pruned.items.is_empty(), "the refused change is folded away");
+    for line in [&mut full, &mut pruned] {
+        line.book(plain[1]).unwrap();
+    }
+    assert_eq!(pruned.plan, full.plan);
+    assert_eq!(full.plan.last().map(|segment| segment.origin), Some(1_250 * MS));
+}
+
+/// RM-25, RM-34 (design 43), transmit: a move of a channel of a refused clock's line waits the cut the
+/// refused change's clock would have had, though the clock's record ends at its origin. Source holds
+/// channel 0 at 1 MS/s, the destination is empty, both leads 50 ms: C (2 MS/s, due 100 ms, origin
+/// 150 ms) is refused and a move due at 300 ms is received at 100 ms.
+#[test]
+fn rm_34_a_transmit_move_after_a_refused_source_change_waits_the_cut_the_clock_would_have_had() {
+    let tx = |numbers: &[u32]| Stream { direction: Direction::Tx, ..rx_stream(numbers, 1_000_000) };
+    let build = |refused_c: bool, booked_after: bool| {
+        let mut lines = lines_of(tx(&[0]), tx(&[]));
+        let c = item(100 * MS, 0, 0, Kind::Cold(set_config(&[0], 2_000_000)));
+        lines.book(FROM, Item { refused: refused_c && !booked_after, ..c }).unwrap();
+        lines.book_move(FROM, TO, 0, Some(300 * MS), 100 * MS, 1, 100 * MS).unwrap();
+        if refused_c && booked_after {
+            assert!(lines.refuse(FROM, 0).unwrap());
+        }
+        lines
+    };
+    let plain = build(false, false);
+    assert_eq!(released(&plain, FROM, 0, 1), Some(300 * MS));
+    assert_eq!(by(&plain, TO, 1).origin, 350 * MS);
+    for booked_after in [false, true] {
+        let refused = build(true, booked_after);
+        assert_eq!(released(&refused, FROM, 0, 1), Some(300 * MS), "booked_after {booked_after}");
+        assert_eq!(by(&refused, TO, 1).origin, 350 * MS, "booked_after {booked_after}: the destination does not start a lead early");
+        // The refused clock's record is unchanged: it ends at its own origin.
+        assert_eq!(planned_at(&refused, FROM)[1], (150 * MS, Some(150 * MS)), "booked_after {booked_after}");
+    }
 }

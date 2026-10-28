@@ -282,7 +282,7 @@ impl Rx {
     /// channel set changed, the direction configured with the configuration in effect at its
     /// origin — unless uhd-control did both for an enable from no stream — and a timed start
     /// issued there. A configuration the device refuses halts the stream: uhd-rx books the
-    /// refusal, and the plan it then reads may begin the next segment earlier (RM-25).
+    /// refusal, and the plan it then reads keeps the next segment where it was (RM-25).
     pub(super) fn begin(&mut self) -> bool {
         let key = stream_key(Dir::Rx, self.k);
         let next: Option<Planned> = {
@@ -2109,8 +2109,10 @@ mod tests {
     fn ur_25_a_refused_segment_is_booked_by_uhd_rx() {
         // RM-25: when the device refuses a segment's configuration, uhd-rx books the change as
         // refused itself, which halts the stream, and reads the plan made so at once: a
-        // `start_rx` that was a no-op resumes the stream, at the refused segment's own origin,
-        // which the refusal does not count as begun.
+        // `start_rx` that was a no-op resumes the stream. The refused segment (origin 65 ms) runs
+        // for planning until that `start_rx` cuts it, with no sample, at its origin, so the new one
+        // begins after the call in progress there (1 ms at 2 MS/s), the allowance (3 ms) and the
+        // lead (50 ms): 119 ms.
         let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
         let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
@@ -2131,13 +2133,13 @@ mod tests {
         assert!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, [format!("rx_start 0 {}", ms(65))]);
+        assert_eq!(starts, [format!("rx_start 0 {}", ms(119))]);
         assert_eq!(rx.stream.as_ref().map(|stream| stream.config.ratio.num()), Some(100), "the refused rate is the stream's (KC-27)");
         let streams = lock(&core.streams);
         let active = streams.active(stream_key(Dir::Rx, 0)).expect("the resumed segment");
-        assert_eq!((active.0, active.2), (ms(65), Some(2)), "the command that began the resumed segment is the Start's");
+        assert_eq!((active.0, active.2), (ms(119), Some(2)), "the command that began the resumed segment is the Start's");
         assert_eq!(active.1.ratio.num(), 100);
-        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(65), active.1, 0)));
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(119), active.1, 0)));
     }
 
     #[test]

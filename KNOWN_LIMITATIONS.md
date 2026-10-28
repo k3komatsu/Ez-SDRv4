@@ -59,11 +59,11 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 ## UHD Module: receive
 
 ### KL-7 A `cold` change interrupts the stream
-- **Symptom:** changing a stream's sample rate, or a channel's antenna or stream membership, ends the stream's SampleClock at the change's instant; a new SampleClock starts later and nothing is delivered in between (not a gap: a new clock). On receive the pause is about 53 ms plus one receive call at the old rate (53.0 ms measured; about 55 ms at 1 MS/s with the default 2 000-sample block, derived; 220.8 ms measured at 390.625 kS/s with 65 536-sample blocks). On transmit, bursts booked on the old clock at or after the cut are cancelled (`radio.COMMAND_REJECTED`, "cancelled by a cold change"), and the new clock starts at least 50 ms later, so bursts aimed earlier are late.
+- **Symptom:** changing a stream's sample rate, or a channel's antenna or stream membership, ends the stream's SampleClock at the change's instant; a new SampleClock starts later and nothing is delivered in between (not a gap: a new clock). On receive the pause is about 53 ms plus one receive call at the old rate (53.0 ms measured; about 55 ms at 1 MS/s with the default 2 000-sample block, derived; 220.8 ms measured at 390.625 kS/s with 65 536-sample blocks). After a change the device refuses, the next change or `start_rx` begins its segment when it would have had the refused change run (RM-25): the pause is that change's own, once for each transition, so a refused change followed by another costs the pause of both. On transmit, bursts booked on the old clock at or after the cut are cancelled (`radio.COMMAND_REJECTED`, "cancelled by a cold change"), and the new clock starts at least 50 ms later, so bursts aimed earlier are late.
 - **When:** every `cold` change, on MockRadio's `x3xx` profile and on the USRP alike; also a receive restart after `stop()` and the first transmit enable from no channel.
 - **Workaround:** make `cold` changes outside capture windows; set rates and channel sets in the BindingProfile or Spec before the Run; capture each configuration separately (KL-21).
 - **Evidence:** RM-21, RM-25 (`design/07-radio-model.md`); UR-23, UR-25 (`design/18-uhd-radio.md`); MR-3 (`design/09-mock-radio.md`); `plan/phase7/bench-results.md:915–926, 1020`.
-- **Status:** Ceiling (the pause is one receive call at the old rate, plus 3 ms, plus the 50 ms start lead). The start leads are INFERRED (shake-out candidate 1 ms; Phase 8 stage 4).
+- **Status:** Ceiling (the pause is one receive call at the old rate, plus 3 ms, plus the 50 ms start lead). The start leads are INFERRED (shake-out candidate 1 ms; Phase 8 stage 4); the receive start lead is at least the release window, 3 ms (RM-6).
 
 ### KL-8 After a receive overflow, sample times are rounded
 - **Symptom:** after `radio.RX_OVERFLOW { cause: overrun }`, blocks arrive with timestamps off the stream's sample lattice; the Module rounds each to the nearest sample and counts it in `stats.rx_off_lattice` (2 174–2 179 blocks in a 10 MS/s test).
@@ -88,10 +88,10 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 
 ### KL-33 A receive frequency set while the channel does not receive can be lost after a refused change
 - **Symptom:** a timed receive frequency (`radio.rx.c<n>.frequency_hz` with `at`) never reaches the device: the samples after its instant keep the old frequency, while the configuration of record shows the new one.
-- **When:** the frequency's instant falls where no receive segment of the channel runs, and a `cold` change or start before it is then refused so that the next segment begins earlier than planned, before the frequency's instant (RM-25 removes the refused segment and advances later origins). It needs the refusal to be booked after the frequency's release, so it is rare (INFERRED).
+- **When:** the frequency's instant falls where no receive segment of the channel runs, and a `cold` change or start before it is then refused so that the next segment begins earlier than planned, before the frequency's instant (RM-25 then removed the refused segment and advanced later origins). It needs the refusal to be booked after the frequency's release, so it is rare (INFERRED).
 - **Workaround:** set the frequency again with `at` after the receive stream has begun.
 - **Evidence:** design note 43 (`plan/phase8/43-refusal-keeps-origins.md`); the code path was verified by review (`plan/phase8/reviews/ma1-opus.md` §4).
-- **Status:** known defect, to be fixed in stage 43a: a refused receive segment no longer advances later origins (RM-25), and the receive start lead must be at least the release window (RM-6).
+- **Status:** Fixed in stage 43a (2026-10-28): a refused receive segment no longer advances later origins (RM-25), and the receive start lead must be at least the release window (RM-6), so a value deferred at its release is carried by the configure of the segment it was for. The cost is the longer pause after a refused change (KL-7).
 
 ## UHD Module: transmit
 
@@ -142,7 +142,7 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 | Value | Profile | Seen on the bench so far |
 |---|---|---|
 | `min_timed_command_lead_ns` | 5 ms (USRP), 2 ms (MockRadio) | through the Module a burst 3 ms after submission is played and one 2 ms after is dropped as late; the raw device needs only 0.3–0.5 ms |
-| `rx_start_lead_ns`, `tx_start_lead_ns` | 50 ms each | the device restarts on time 1 ms ahead; shake-out candidate 1 ms |
+| `rx_start_lead_ns`, `tx_start_lead_ns` | 50 ms each | the device restarts on time 1 ms ahead; shake-out candidate 1 ms (the receive lead must be at least the 3 ms release window, RM-6, so stage 4 measures receive candidates from 3 ms) |
 | `tx_in_flight_ns` | 10 ms | no underflow from 0.5 ms at 2 MS/s; shake-out candidate 3 ms |
 | `release_window_ns` | 3 ms | enough in one 1 MS/s probe (`plan/phase8/42-d9-production-fix.md:17`) |
 | `command_queue_depth` | 16 | the X300 queued 7 timed OBX tunes and the 8th call blocked until the queue drained, so more than about 7 timed updates due within 3 ms can stall the control thread (INFERRED) |

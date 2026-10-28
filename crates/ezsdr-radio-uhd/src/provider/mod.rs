@@ -364,7 +364,12 @@ impl UhdRadio {
 
     /// Rebuilds this measurement instance with candidate timing values; the ordinary
     /// construction path continues to use the profile's terms.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `timing` breaks RM-6, as a description built by `Description::new` would.
     pub fn with_measurement_timing(mut self, timing: ezsdr_radio::TimingEnvelope) -> UhdRadio {
+        timing.check_start_lead().unwrap_or_else(|error| panic!("{error}"));
         self.description.timing = timing;
         let (tree, min_command_lead, envelope) = description_surfaces(&self.description, &self.instance.id);
         self.instance.tree = tree;

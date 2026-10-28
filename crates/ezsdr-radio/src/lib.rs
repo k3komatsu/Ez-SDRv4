@@ -738,6 +738,21 @@ pub struct TimingEnvelope {
     pub tx_in_flight_ns: i64,
 }
 
+impl TimingEnvelope {
+    /// RM-6: the receive start lead is at least the release window, so that a booking made once
+    /// a timed command is released cannot begin a segment before the command's instant. The one
+    /// place the rule is read; the places that build a description call it.
+    pub fn check_start_lead(&self) -> Result<(), String> {
+        if self.rx_start_lead_ns < self.release_window_ns {
+            return Err(format!(
+                "RM-6: radio.timing.rx_start_lead_ns {} is below radio.timing.release_window_ns {}",
+                self.rx_start_lead_ns, self.release_window_ns
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Throughput values recorded in a radio Provider's Manifest (RM-20).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
