@@ -13345,9 +13345,9 @@
   },
   {
    "id": "P994",
-   "name": "the tone threshold ignores the noise floor and the 0.5 minimum (probe classifier)",
+   "name": "the tone threshold ignores the noise power floor (probe classifier)",
    "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
-   "old": "(2.0 * floor).max(0.5)",
+   "old": "4.0 * floor",
    "new": "0.0",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -13387,7 +13387,7 @@
    "id": "P998",
    "name": "a hole between the last base window and the first shifted one is not a gap (probe classifier)",
    "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
-   "old": "first_shifted.is_some_and(|i| i == 0 || signal[i].0 - (signal[i - 1].0 + SPAN) > 0)",
+   "old": "signal[i].0 - (signal[i - 1].0 + SPAN) > 0",
    "new": "false",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -13852,5 +13852,65 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
+  },
+  {
+   "id": "P1045",
+   "name": "a move already in the burst's first window is a gap, not a move at or before it (stage 3g)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "signal[0].0 != inside[0].0",
+   "new": "true",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P1047",
+   "name": "a move from the first window is printed as an exact one (stage 3g fix 1)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "if report.at_or_before { \"at or before\" } else { \"at\" }",
+   "new": "\"at\"",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
+  },
+  {
+   "id": "P1048",
+   "name": "a queued part of under 10 000 samples is a baseline (stage 3g fix 1)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "queued.len() < 10_000 ||",
+   "new": "queued.len() < 0 ||",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation"
+  },
+  {
+   "id": "P1049",
+   "name": "a zero median is a baseline (stage 3g fix 1)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "|| median <= 0.0 {",
+   "new": "|| false {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation"
+  },
+  {
+   "id": "P1050",
+   "name": "an uncaptured continuation interval is counted as 0 (stage 3g fix 1)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "if covered < 1_500 {",
+   "new": "if covered < 0 {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation"
+  },
+  {
+   "id": "P1051",
+   "name": "any sample over 0 counts as the continuation (stage 3g fix 1)",
+   "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+   "old": "s[0].abs() + s[1].abs() > median / 2.0).count()",
+   "new": "s[0].abs() + s[1].abs() > 0.0).count()",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation"
   }
  ]

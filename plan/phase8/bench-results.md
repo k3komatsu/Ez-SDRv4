@@ -141,3 +141,56 @@ raw queue と coercion を一時的に外して実行．測定 suite は最後�
 | `hw_d9_p3_duc_entries_between_bursts` | burst 間の時刻つき +50 kHz は次の burst に当たった．時刻つき +80 kHz の直後に untimed 0 を渡しても，次の burst は約+80 kHz（median 約179.9 kHz）となり，時刻つき値が残った（F4）．|
 
 3回目までの失敗理由・修正は上表のとおり．4回目も profile 比較で失敗しており，完全に成功した measurement suite はまだ無い．queue/coercion の再測定，profile 値の見直し，overflow restart gap の扱いは段階4で判断する．shake-out と D9 の log / JSON は `~/.cache/ezsdr-bench/2026-10-27/` に保存し，`measurements/` へは置かない．
+
+## 2026-10-28：最初の記録 suite（X300 #1＋OBX，commit `afbb125`）
+
+### 機材と配線
+
+X300 #1（serial 347D545，FPGA 39.3 / d375d68，HG），slot A OBX．OBX の TX/RX → 40 dB attenuator → RX2（同軸．owner が送信の前に確認）．host の設定は `bench-host.sh` がすべて揃っていると判定（MTU 9000，ring 8160，governor performance）．`ref_locked` は true（`hw_b1_probe`）．出力は `~/ezsdr-bench/2026-10-28/afbb125c704e-094947966920515/` と `~/.cache/ezsdr-bench/2026-10-28/`（repo の外）．
+
+### UHD 付属の `benchmark_rate`（送信 200 MS/s，60 s）
+
+| 実行 | underrun | 送った sample | spp |
+|---|---|---|---|
+| 普通の優先度 | 8 | 11 999 989 924 | 1996 |
+| `--priority high` | 0 | 12 000 047 808 | 1996 |
+| `--tx_spb 1000` | 8 | 11 999 987 000 | 1996 |
+
+UHD 自身でも普通の優先度では 200 MS/s の送信に underrun が出て，thread の優先度を上げると消える．send を小さくしても変わらない．送信の throughput の調査（uhd-tx の preemption と X300 の小さな送信 buffer）と合う．owner の決め（2026-10-28）：この結果を受けて uhd-tx を実時間の優先度にする段階を立てる．
+
+### 記録（`hw_measurements_record`，約 48 分）
+
+`measurement.json` は書けた．最後の profile との比較で 3 件の違反（段階 4 の材料．bench 中は直さない）：
+
+| key | 実機 | profile |
+|---|---|---|
+| `radio.perf.rx_bytes_per_s` | 800 000 000（`rx-200msps`） | 1 000 000 000 |
+| `radio.perf.tx_bytes_per_s` | 200 000 000（`tx-50msps`） | 1 000 000 000 |
+| `radio.timing.command_queue_depth` | **7**（`queue-rx-frequency`） | **16** |
+
+- queue の深さ（段階 3e・3f の規則）：3 条件とも 5 回すべて成功，あいまい 0，2 s と 3 s の遅れで止まった呼び出しの番号が一致（受信の周波数 7，受信の利得 28，送信の利得 86 の timed `apply`）．**profile の 16 は実機より緩い**（Mock が実機より緩い：段階 4 で直す）．
+- 送信の throughput：100 MS/s は 60 s の約 57 s 分で underflow，200 MS/s は約 10 s 分．send は 1 回約 1000 sample（`burst_blocks`）．
+- 同時運転の 1 組（受信 200 MS/s と送信 50 MS/s，60 s）：成功，overflow なし．
+- overflow の読み直しから再開まで：最大 78.3 ms（1 MS/s）．
+- そのほかの値（lead，in-flight，coercion の格子，利得の段 0.5 dB，周波数 10 MHz〜8.4 GHz）は `measurement.json`．
+
+### D9 の probe と MA-1
+
+- **MA-1**（`hw_ma1_phase_after_a_pre_start_tune`）：T0 より前に設定 → 5 Session の位相のばらつき 164.5°．流れている間に `at` で設定し直す → 2.3°．UR-24 の Ceiling と KL-32 を支える観測（2 つの LO の相対位相で，受信だけの寄与は分けられない）．
+- **P5〜P7**：音の判定がすべて INCONCLUSIVE（判定の閾値が 1 を超えて通らない．受信 gain 0 dB で雑音が約 1 LSB のため雑音の床の coherence が高い）．周波数の中央値から：P6「burst の前に渡す」と P7 で e より前に新しい周波数が出たのは実機の早い適用で F7（直前の process が DUC に残した時刻つきの header が新しい e より後，機構は source で VERIFIED，原因は INFERRED）．P5 は F7 の前提を作れず INCONCLUSIVE．
+- **P4**：100 ms の音の send が送信 buffer で詰まり，stop が e の約 20 ms 後になった（probe の時刻の bug）．R2 は未決．
+- 分析：`~/.cache/ezsdr-fixes/2026-10-26-stage3/probe-analysis-1028.md`（repo の外）．probe と判定の直し（段階 3g）の後に 2026-10-29 に再実行する．
+
+### 2 channel の記録（X300 #2，UBX-160 v2 slot A＋CBX slot B，commit `afbb125`，約 85 分）
+
+X300 #2（serial 347D541，FPGA 39.3 / d375d68），NIC `enp1s0f0np0`（#1 と同じ port に挿し替え），selector `{"rx":["0:A:ubx:0","0:B:cbx:0"],"tx":["0:A:ubx:0","0:B:cbx:0"]}`．UBX と CBX それぞれ TX/RX → 30 dB attenuator → 同じ board の RX2（同軸，owner が確認）．出力は `~/ezsdr-bench/2026-10-28/afbb125c704e-112734601394077/`．`measurement.json` は書けた．profile との比較の違反は 2 件（段階 4 の材料）：
+
+| key | 実機（#2） | profile | #1（OBX，1 channel） |
+|---|---|---|---|
+| `radio.perf.rx_bytes_per_s` | 1 200 000 000（`rx-mixed-200m-100m`．止めた条件 `rx-grouped-200m`，1 600 000 000） | 1 000 000 000 | 800 000 000 |
+| `radio.perf.tx_bytes_per_s` | **40 000 000**（`tx-10msps`．止めた条件 `tx-20msps`） | 1 000 000 000 | 200 000 000 |
+| `radio.timing.command_queue_depth` | **8**（`queue-rx-frequency`．受信の利得 28，送信の利得 86） | 16 | 7 |
+
+- 送信は #2 では 10 MS/s で止まり，#1（50 MS/s）よりかなり低い．原因（board，2 channel の構成，uhd-tx の優先度）は未確認．uhd-tx の実時間の優先度の段階の後に見直す．
+- queue の深さは #1 の 7 と #2 の 8 の両方が profile の 16 より小さい（Mock が実機より緩い：段階 4）．受信の利得の条件で 1 試行が成功でなかった（6 試行で成功 5）．
+- 同時運転の 1 組（受信 200＋100 MS/s と送信 10 MS/s，60 s）：成功，overflow なし．装置の詰まり・PLL のはずれは無し．

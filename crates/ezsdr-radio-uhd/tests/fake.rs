@@ -8410,7 +8410,62 @@ fn the_tone_classifier_finds_an_attenuated_shift_in_noise() {
     // A hole well after the shift does not hide it.
     let elsewhere = tone::classify_tone(&holed(40, 50, 20), start, end, e, 100e3);
     assert!(!elsewhere.gapped && elsewhere.moves_at.is_some_and(|t| (t as f64 / 200.0).abs() < 1_500.0), "{elsewhere:?}");
+    // The bench's 0 dB receive gain: noise rounded to the sc16 LSB (a window's coherence is then anywhere from 0 to 1) under a
+    // tone of 0.002. A move from the burst's first window is "at or before it" (D9 F7), not a gap.
+    let make_lsb = |shift_ms: Option<i64>, tone: bool| -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let mut phase = 0.0f64;
+        (0..70_000i64).map(|i| {
+            let t = start - 5 * 200_000 + i * 200;
+            let in_burst = t >= start && t < start + 60 * 200_000;
+            let hz = if shift_ms.is_some_and(|ms| t >= start + ms * 200_000) { 150e3 } else { 100e3 };
+            phase += 2.0 * std::f64::consts::PI * hz / 1e6;
+            let amplitude = if tone && in_burst { 0.002 } else { 0.0 };
+            (t, [((amplitude * phase.cos() + (1.2 * noise()).round() / 32768.0) as f32), ((amplitude * phase.sin() + (1.2 * noise()).round() / 32768.0) as f32)])
+        }).collect()
+    };
+    let lsb_on_time = tone::classify_tone(&make_lsb(Some(20), true), start, end, e, 100e3);
+    assert!(lsb_on_time.usable() && lsb_on_time.moves_at.is_some_and(|t| (t as f64 / 200.0).abs() < 1_500.0), "{lsb_on_time:?}");
+    let lsb_f7 = tone::classify_tone(&make_lsb(Some(0), true), start, end, e, 100e3);
+    assert!(lsb_f7.usable() && !lsb_f7.gapped && lsb_f7.moves_at.is_some_and(|t| (t as f64 / 200.0 + 19_000.0).abs() < 1_500.0), "{lsb_f7:?}");
+    assert!(lsb_f7.at_or_before && tone::tone_verdict(&lsb_f7).contains("at or before"), "{}", tone::tone_verdict(&lsb_f7));
+    assert!(!lsb_on_time.at_or_before && !tone::tone_verdict(&lsb_on_time).contains("at or before"));
+    let lsb_silent = tone::classify_tone(&make_lsb(Some(2), false), start, end, e, 100e3);
+    assert!(!lsb_silent.usable() && lsb_silent.before * 2 < lsb_silent.before_of, "{lsb_silent:?}");
     // A capture with no windows before the burst has no floor.
     let short: Vec<_> = make(Some(2), true).into_iter().filter(|(t, _)| *t >= start).collect();
     assert!(!tone::classify_tone(&short, start, end, e, 100e3).usable());
+    // Five quiet windows are too few to measure a floor.
+    let few: Vec<_> = make(Some(2), true).into_iter().filter(|(t, _)| *t >= start - 625 * 200).collect();
+    assert!(tone::classify_tone(&few, start, end, e, 100e3).floor.is_none());
+}
+
+#[test]
+fn the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation() {
+    // No hardware: queued tone 0.002 from `start` to `queued_end`, a continuation after `next`, 1 sample per 200 ticks.
+    let (start, queued_end) = (0i64, 20_000 * 200);
+    let next = queued_end;
+    let make = |continuation: bool, from: i64, to: i64| -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        (from..to).map(|i| {
+            let t = i * 200;
+            let on = t < queued_end || (continuation && t >= next + 44 * 200 && t < next + 2_044 * 200);
+            (t, [if on { 0.002 } else { 0.00003 }, 0.0])
+        }).collect()
+    };
+    assert_eq!(tone::continuation_in_loopback(&make(true, 0, 23_000), start, queued_end, next), Ok(1_900));
+    assert_eq!(tone::continuation_in_loopback(&make(false, 0, 23_000), start, queued_end, next), Ok(0));
+    // The receive lost the queued part: no baseline, so a 0 would say nothing.
+    assert!(tone::continuation_in_loopback(&make(true, 20_000, 23_000), start, queued_end, next).unwrap_err().contains("baseline"));
+    assert!(tone::continuation_in_loopback(&make(true, 15_000, 23_000), start, queued_end, next).unwrap_err().contains("baseline"), "5 000 queued samples are too few");
+    let silent_queue: Vec<_> = make(true, 0, 23_000).into_iter().map(|(t, s)| if t < queued_end { (t, [0.0, 0.0]) } else { (t, s) }).collect();
+    assert!(tone::continuation_in_loopback(&silent_queue, start, queued_end, next).unwrap_err().contains("baseline"), "a zero median is no baseline");
+    assert!(tone::continuation_in_loopback(&[], start, queued_end, next).is_err());
+    // The capture stops before the continuation's interval.
+    assert!(tone::continuation_in_loopback(&make(true, 0, 20_500), start, queued_end, next).unwrap_err().contains("captured"));
 }

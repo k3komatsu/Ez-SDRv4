@@ -17,7 +17,7 @@ use ezsdr_radio_uhd::{Device, DeviceAuthority, Dir, Settings, UhdRadio};
 use serde_json::Value as Json;
 
 use common::*;
-use common::tone::{classify_tone, tone_verdict};
+use common::tone::{classify_tone, continuation_in_loopback, tone_verdict};
 
 fn args() -> String {
     std::env::var("EZSDR_UHD_ARGS").expect("EZSDR_UHD_ARGS names the device, e.g. addr=192.168.40.2")
@@ -962,6 +962,15 @@ fn first_steps(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, n: usize) -> V
     }).collect()
 }
 
+/// D9 F7: an untimed end-of-burst. UHD sends it as one zero sample (`tx_streamer_impl.hpp:266-276`), and that burst's only
+/// header has no time (`axi_rate_change.v:403-406`), so the DUC's stale header no longer takes a timed value at once.
+fn untimed_end_of_burst(device: &dyn Device) -> Vec<String> {
+    let empty: Vec<ezsdr_radio_uhd::Iq> = Vec::new();
+    device.tx_send(0, &[&empty], None, false, true, Wall::from_secs(1)).unwrap();
+    std::thread::sleep(Wall::from_millis(10));
+    flush_tx(device)
+}
+
 fn flush_tx(device: &dyn Device) -> Vec<String> {
     let mut reports = Vec::new();
     while let Some(report) = device.tx_async(0, Wall::from_millis(10)).unwrap() {
@@ -1109,8 +1118,8 @@ fn read_tail(device: &dyn Device) -> Read {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p4_ddc_entry_after_an_early_stop() {
-    // R2: a timed receive tune at e, then an untimed stop 2 ms before e, then a restart after
-    // e. Does the stop wait behind the radio's timed command, and does the DDC's entry survive
+    // R2: a timed receive tune at e, then an untimed stop at the device's time e − 5 ms (the first tone is 30 ms, so
+    // the send does not block behind the transmit buffer past e), then a restart after e. Does the stop wait behind the radio's timed command, and does the DDC's entry survive
     // to the restart's first sample? A: the DSP shift alone (`tune_dsp`). B: the production's
     // AUTO/AUTO tune (`tune_auto`), which counts only when the tune's DSP value differs from the
     // baseline's, else it is INCONCLUSIVE. C: the stop is followed by a close and a reopen of
@@ -1132,7 +1141,7 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
         let start = (device.time_now().unwrap() / 200 + 100_000) * 200;
         let e = start + 20 * TICKS_PER_MS;
         device.rx_start(0, start).unwrap();
-        device.tx_send(0, &[&tone], Some(start), true, true, Wall::from_secs(2)).unwrap();
+        device.tx_send(0, &[&tone[..30_000]], Some(start), true, true, Wall::from_secs(2)).unwrap();
         let mut valid = true;
         if case.starts_with('B') {
             valid = false;
@@ -1150,7 +1159,7 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
             let dsp = device.tune_dsp(Dir::Rx, 0, 50e3, Some(e)).unwrap();
             log.push(format!("tune_dsp {dsp} (call {before}..{})", device.time_now().unwrap()));
         }
-        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= e - 2 * TICKS_PER_MS));
+        let got = read(&*device, Wall::from_secs(2), Some(200), |_| device.time_now().unwrap() >= e - 5 * TICKS_PER_MS);
         let stopping = device.time_now().unwrap();
         device.rx_stop(0, None).unwrap();
         let stopped = device.time_now().unwrap();
@@ -1173,7 +1182,7 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
         let unconsumed = last.is_some_and(|t| t < e) && stopped < e;
         let seen = classify_tone(&after.samples, again, again + 100 * TICKS_PER_MS, again + 5 * TICKS_PER_MS, 100e3);
         println!(
-            "D9 P4 {case}{}: e = start + 20 ms; unconsumed entry before the restart: {unconsumed}; tone windows after the restart {} (noise coherence {:?}, threshold {:.2}; the frequencies below mean something only where the tone is seen); stop called at {stopping}, returned {stopped} (e − stop call {:.0} µs); last sample before the restart at {last:?} ({:?} µs from e); restart at {again}: first windows {:?}; median 1–10 ms after {:?} Hz; first steps {:?}; {log:?}; tx {reports:?}",
+            "D9 P4 {case}{}: e = start + 20 ms; unconsumed entry before the restart: {unconsumed}; tone windows after the restart {} (noise power {:?}, threshold {:.1e}; the frequencies below mean something only where the tone is seen); stop called at {stopping}, returned {stopped} (e − stop call {:.0} µs); last sample before the restart at {last:?} ({:?} µs from e); restart at {again}: first windows {:?}; median 1–10 ms after {:?} Hz; first steps {:?}; first stream's median e − 7..e − 5 ms {:?} Hz; {log:?}; tx {reports:?}",
             if valid { "" } else { " — INCONCLUSIVE: the tune's DSP value did not change" },
             seen.after,
             seen.floor,
@@ -1183,6 +1192,7 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
             freqs.iter().take(3).map(|(t, f)| format!("{:+.0} µs {f:.0}", (t - again) as f64 / 200.0)).collect::<Vec<_>>(),
             median_freq(&freqs, again + TICKS_PER_MS, again + 10 * TICKS_PER_MS),
             first_steps(&after.samples, again, 6),
+            median_freq(&tone_freqs(&got.samples), e - 7 * TICKS_PER_MS, e - 5 * TICKS_PER_MS),
         );
     }
     device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
@@ -1195,16 +1205,19 @@ fn hw_d9_p5_a_stale_timed_header_after_a_reopen() {
     // F7: after a burst ended by a send with a time, a reopened device (time back at 0) is given a
     // timed DUC shift before the next burst: does it take effect before the burst's first sample?
     // Compared with a burst ended without a time. The stale header takes effect only when its
-    // timestamp is at or after the new command's instant (`axi_tag_time.v`), so the priming send
-    // is timed far ahead (400 ms after the burst's start) and the inequality is established and
-    // printed; when it does not hold the case is INCONCLUSIVE. The device is opened again inside
+    // timestamp is at or after the new command's instant (`axi_tag_time.v`). The DUC counts a burst's time from its first
+    // header (`axi_rate_change.v`) and UHD sends the empty end-of-burst as one zero sample after the burst, so the stale
+    // time is the burst's start plus its length: the priming burst starts 400 ms ahead, the inequality is printed, and
+    // when it does not hold the case is INCONCLUSIVE. A third case ends with a time and then sends an untimed empty
+    // end-of-burst after the reopen (owner's decision 5), which should leave no stale header. The device is opened again inside
     // this process; if that does not reproduce what P2 saw across processes (INFERRED), run the
     // cases in two processes (EZSDR_D9_P5_CASE=timed|untimed runs one). Movement is looked for
     // only in windows that carry the tone, after the burst begins.
     let cases: Vec<&str> = match std::env::var("EZSDR_D9_P5_CASE").as_deref() {
         Ok("timed") => vec!["ended with a time"],
         Ok("untimed") => vec!["ended without a time"],
-        _ => vec!["ended with a time", "ended without a time"],
+        Ok("reopen") => vec!["ended with a time, then an untimed end-of-burst after the reopen"],
+        _ => vec!["ended with a time", "ended without a time", "ended with a time, then an untimed end-of-burst after the reopen"],
     };
     assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 - 50e3 + 100e3)));
     let tone = tone_1msps(10_000);
@@ -1214,12 +1227,13 @@ fn hw_d9_p5_a_stale_timed_header_after_a_reopen() {
             let device = raw_uhd();
             raw_rx(&*device, 1e6, 1e9);
             raw_tx(&*device, 1e6, 1e9);
-            let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
+            let start = (device.time_now().unwrap() / 200 + 400_000) * 200;
             device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
             // The burst: timed first send, then its end with or without a time (an empty end-of-burst).
             device.tx_send(0, &[&tone], Some(start), true, false, Wall::from_secs(2)).unwrap();
             let empty: Vec<ezsdr_radio_uhd::Iq> = Vec::new();
-            let at = case.starts_with("ended with a time").then_some(start + 400 * TICKS_PER_MS);
+            // The time the DUC counts the end-of-burst's sample at: the burst's start plus its length.
+            let at = case.starts_with("ended with a time").then_some(start + tone.len() as i64 * 200);
             device.tx_send(0, &[&empty], at, false, true, Wall::from_secs(2)).unwrap();
             let _ = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|end| end >= start + 15 * TICKS_PER_MS));
             device.rx_stop(0, None).unwrap();
@@ -1232,6 +1246,7 @@ fn hw_d9_p5_a_stale_timed_header_after_a_reopen() {
         raw_tx(&*device, 1e6, 1e9);
         device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
         device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+        let cleared = case.contains("untimed end-of-burst after").then(|| untimed_end_of_burst(&*device));
         let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
         let e = start + 20 * TICKS_PER_MS;
         device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
@@ -1250,11 +1265,12 @@ fn hw_d9_p5_a_stale_timed_header_after_a_reopen() {
         let verdict = match established {
             Some(false) => "INCONCLUSIVE: the previous timed header's timestamp is before the new command's instant",
             _ if !report.usable() => "INCONCLUSIVE: no usable signal windows",
+            Some(true) if cleared.is_some() => "a stale header was left and then cleared by an untimed end-of-burst: the move should be at e, not before",
             Some(true) => "stale-header prerequisite established",
             None => "no timed header was left (the control case)",
         };
         println!(
-            "D9 P5 first burst {case}: previous timed header {old_header:?}, new instant e = {e} (header ≥ e: {established:?}) — {verdict}; the DUC shift {dsp} given at {given} (burst at {start}, e = start + 20 ms); {moves}; median before e {:?}, after e + 5 ms {:?} Hz; tx {reports:?}",
+            "D9 P5 first burst {case}: previous timed header {old_header:?}, new instant e = {e} (header ≥ e: {established:?}) — {verdict}; the DUC shift {dsp} given at {given} (burst at {start}, e = start + 20 ms); untimed end-of-burst after the reopen: {cleared:?}; {moves}; median before e {:?}, after e + 5 ms {:?} Hz; tx {reports:?}",
             median_freq(&freqs, start + TICKS_PER_MS, e),
             median_freq(&freqs, e + 5 * TICKS_PER_MS, start + 60 * TICKS_PER_MS),
         );
@@ -1293,10 +1309,10 @@ fn hw_d9_p6_every_chunk_timed() {
     for case in ["given before the burst", "given 3 ms before e"] {
         device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
         device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+        let mut log = vec![format!("untimed end-of-burst {:?}", untimed_end_of_burst(&*device))];
         let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
         let e = start + 20 * TICKS_PER_MS;
         device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
-        let mut log = Vec::new();
         if case.starts_with("given before") {
             log.push(format!("dsp {} at {}", device.tune_dsp(Dir::Tx, 0, 50e3, Some(e)).unwrap(), device.time_now().unwrap()));
             timed_chunks(&*device, start, &tone, 0..60_000, true, true);
@@ -1324,6 +1340,7 @@ fn hw_d9_p6_every_chunk_timed() {
     device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
     let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
     device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
+    // The loop's tone is about 0.002, so the threshold is half the median of |I| + |Q| over the queued part itself.
     let queued_end = timed_chunks(&*device, start, &tone, 0..20_000, true, false);
     while device.time_now().unwrap() < queued_end + 5 * TICKS_PER_MS {
         std::thread::sleep(Wall::from_micros(200));
@@ -1337,9 +1354,13 @@ fn hw_d9_p6_every_chunk_timed() {
     let _ = drain(&*device);
     let reports = flush_tx(&*device);
     let recovery = if reports.iter().any(|r| r.contains("Underflow")) { "observed" } else { "UNVERIFIED: no Underflow was reported" };
+    let loopback = match continuation_in_loopback(&got.samples, start, queued_end, next) {
+        Ok(n) => format!("{n} samples over half the queued part's median |I| + |Q|, from 100 samples after {next}"),
+        Err(why) => why,
+    };
     println!(
-        "D9 P6 starvation: the last queued sample ended at {queued_end}; the continuation (timed at {next}) was sent after the device's time passed it, at {resumed_at}: {resumed:?}; tx {reports:?}; recovery {recovery}; the continuation's samples in the loopback: {}",
-        got.samples.iter().filter(|(t, s)| *t >= next && (s[0].abs() + s[1].abs()) > 0.05).count(),
+        "D9 P6 starvation: the last queued sample ended at {queued_end}; the continuation (timed at {next}) was sent after the device's time passed it, at {resumed_at}: {resumed:?}; tx {reports:?}; tx recovery {recovery}; receive errors {:?}; the continuation's samples in the loopback: {loopback}",
+        got.other,
     );
     device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
 }
@@ -1356,6 +1377,7 @@ fn hw_d9_p7_the_current_transmit_shape() {
     let tone = tone_1msps(60_000);
     device.tune_dsp(Dir::Rx, 0, 0.0, None).unwrap();
     device.tune_dsp(Dir::Tx, 0, 0.0, None).unwrap();
+    let cleared = untimed_end_of_burst(&*device);
     let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
     let e = start + 20 * TICKS_PER_MS;
     device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
@@ -1374,7 +1396,7 @@ fn hw_d9_p7_the_current_transmit_shape() {
     let freqs = tone_freqs(&got.samples);
     let moves = tone_verdict(&classify_tone(&got.samples, start, start + 60 * TICKS_PER_MS, e, 100e3));
     println!(
-        "D9 P7 current shape: dsp {dsp}; e = start + 20 ms; {moves}; median before e {:?}, after e + 5 ms {:?} Hz; tx {reports:?}",
+        "D9 P7 current shape: dsp {dsp}; untimed end-of-burst {cleared:?}; e = start + 20 ms; {moves}; median before e {:?}, after e + 5 ms {:?} Hz; tx {reports:?}",
         median_freq(&freqs, start + TICKS_PER_MS, e),
         median_freq(&freqs, e + 5 * TICKS_PER_MS, start + 60 * TICKS_PER_MS),
     );

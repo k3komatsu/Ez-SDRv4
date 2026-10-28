@@ -111,7 +111,7 @@ EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=40 \
 | FPGA | UHD 4.10 HG（39.3，git d375d68） | 同じ（2026-10-20 に書き換え済み） |
 
 - 2 台は同時につながない（owner）．一台ずつ．#1 から #2 へ替えるとき，旧 NIC に `192.168.40.10/24` が残っていたら `sudo ip addr del 192.168.40.10/24 dev enp1s0f0np0` で外してから #2 の NIC を check/apply（BP3）．
-- attenuator：30 dB 以上・18 GHz 定格．10-27 は 40 dB を使用．**型番と最大入力電力は未記録．送信の前に銘板で確認して記録する**．アンテナは付けない．gain 0，振幅 0.5 以下，loopback は 1 GHz．TX する board ごとに「TX/RX → att → 同じ board の RX2」を 1 組（#2 で 2 channel なら UBX 用と CBX 用の 2 組．10-27 時点で CBX は未配線）．
+- attenuator：30 dB 以上・18 GHz 定格．10-27・10-28 は #1 で 40 dB，#2 で 30 dB を 2 つ（同軸）．定格の電力は記録しない（OBX・UBX・CBX の最大出力は +20 dBm 前後（INFERRED：data sheet の記憶）で，一般的な固定 attenuator の定格（1〜2 W）より小さい．owner，2026-10-28）．アンテナは付けない．gain 0，振幅 0.5 以下，loopback は 1 GHz．TX する board ごとに「TX/RX → att → 同じ board の RX2」を 1 組（#2 で 2 channel なら UBX 用と CBX 用の 2 組．10-27 時点で CBX は未配線）．
 - 電源 cycle の規則：`Control operation timed out waiting for space in command buffer`（DDC 詰まり）か UR-7 `Reference Clock PLL failed to lock` が出たら，再試行・reset・coercion を続けず，log と `.partial.json` を保存して止め，X300 の電源を切って入れ直す．戻ったら `uhd_usrp_probe` と `ref_locked=true` を確かめ直す．HG/XG image の書き換えは owner の許可なしにしない．
 - host UHD は 4.9 で FPGA 4.10 と合わない．UHD のコマンドは image `ezsdr-v4-dev:uhd4.10` の中で使う．
 - 出力：`run-record.sh` は `~/ezsdr-bench/<日付>/<commit12>-<時刻>/` に書く（host の確認の出力 `bench-host.txt` も：CPU governor，C-state，NIC の割り込みの向き先を含む）．手で流すものの log は `~/.cache/ezsdr-bench/<日付>/` に置く．**最初に `mkdir -p ~/.cache/ezsdr-bench/$(date +%F)`**（`tee` と redirect は dir を作らない）．同じ volume を使う旧 `~/ezsdr-bench/run-bench.sh` と同時に流さない．
@@ -149,7 +149,7 @@ EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=40 \
 
 ### (c) D9 probe P4〜P7 と MA-1 の位相の probe（#1＋OBX，TX あり．各 5〜10 分，estimate）
 
-test 名（`hardware.rs`）：`hw_d9_p4_ddc_entry_after_an_early_stop`（A 対照 / B AUTO/AUTO / C close-reopen．B は `dsp1 != dsp0` を作れないと INCONCLUSIVE），`hw_d9_p5_a_stale_timed_header_after_a_reopen`（case A 時刻つき終了 / case B 時刻なし終了．同一 process で再現しなければ別 process：`EZSDR_D9_P5_CASE=timed` か `untimed` で 1 case ずつ），`hw_d9_p6_every_chunk_timed`（2 ms chunk 全部に時刻，e=start+20 ms と e の 3 ms 前，途中 starvation），`hw_d9_p7_the_current_transmit_shape`（任意），`hw_ma1_phase_after_a_pre_start_tune`（MA-1，UR-24 の Ceiling．Session（T0 より前に設定）と Spec Run（`at` つきで設定し直す．Session の `set` には時刻が無い）を N 回（`EZSDR_MA1_SESSIONS`，既定 5）ずつ流し，T0 より前に受信と送信の周波数を設定した場合と，受信が流れている間に同じ instant で設定し直した場合の，loopback の位相のばらつきを出す．値は作らない．loopback は 2 つの LO の相対の位相しか測れず，N 回は観測であって保証の証明ではない．欠け・弱い tone・不安定な位相は INCONCLUSIVE と理由が出る）．
+test 名（`hardware.rs`）：`hw_d9_p4_ddc_entry_after_an_early_stop`（A 対照 / B AUTO/AUTO / C close-reopen．最初の tone は 30 ms で，stop は device の時刻 e − 5 ms に出す．B は `dsp1 != dsp0` を作れないと INCONCLUSIVE），`hw_d9_p5_a_stale_timed_header_after_a_reopen`（case A 時刻つき終了（priming の burst は 400 ms 先．stale = burst の start＋長さ）/ case B 時刻なし終了 / case C 時刻つき終了のあと reopen 後に時刻なしの空 EOB．同一 process で再現しなければ別 process：`EZSDR_D9_P5_CASE=timed`，`untimed`，`reopen` で 1 case ずつ），`hw_d9_p6_every_chunk_timed`（各 case の前に時刻なしの空 EOB で F7 を消す．2 ms chunk 全部に時刻，e=start+20 ms と e の 3 ms 前，途中 starvation．starvation の判定は burst 自身の信号の大きさの半分を閾値にする），`hw_d9_p7_the_current_transmit_shape`（任意），`hw_ma1_phase_after_a_pre_start_tune`（MA-1，UR-24 の Ceiling．Session（T0 より前に設定）と Spec Run（`at` つきで設定し直す．Session の `set` には時刻が無い）を N 回（`EZSDR_MA1_SESSIONS`，既定 5）ずつ流し，T0 より前に受信と送信の周波数を設定した場合と，受信が流れている間に同じ instant で設定し直した場合の，loopback の位相のばらつきを出す．値は作らない．loopback は 2 つの LO の相対の位相しか測れず，N 回は観測であって保証の証明ではない．欠け・弱い tone・不安定な位相は INCONCLUSIVE と理由が出る）．
 
 wiring は (b) と同じ．**送信するので owner が att を確認してから**．`run-record.sh` は record suite を必ず流すので，probe 単体は次の形で流す（main tree の target volume．`ezsdr-v4-bench-target` と混ぜず，同時に流さない．作業ツリーが他の agent に編集されていないことを確認）：
 
@@ -165,7 +165,7 @@ for t in hw_d9_p4_ddc_entry_after_an_early_stop hw_d9_p5_a_stale_timed_header_af
     > ~/.cache/ezsdr-bench/$(date +%F)/$t.log 2>&1
 done
 ```
-見る点：P4 は各呼び出しの前後の device 時刻，`dsp0`/`dsp1`，最後の RX sample の tick，再開後の最初の sample の周波数（R2）．P5 は tone が動き始める µs（e 基準）を case A と B で（F7）．P6 は tone の移る位置，Underflow と継続 packet の drop（Underflow が出なければ回復は「未検証」，R4）．P7 は F3′．MA-1 は 2 通りの `phases_deg` と `spread_deg`，INCONCLUSIVE の数．stop：control timeout（P4 は sample の流れない chain に timed を積む）→ 電源 cycle．
+見る点：音の判定は雑音の**電力**（`noise power`，閾値は床の 4 倍，coherence > 0.5 も要る）．`moves_at` が burst の最初の窓（約 −19 000 µs）なら「e より前に動いた」（F7）で欠けではない．P4 は各呼び出しの前後の device 時刻，`dsp0`/`dsp1`，最後の RX sample の tick，最初の stream の e−7〜e−5 ms の median，再開後の最初の sample の周波数（R2）．P5 は tone が動き始める µs（e 基準）を case A・B・C で（A で前に動けば F7 VERIFIED，B・C で e なら決め 5 の直しが効く．A の `header ≥ e` が false なら INCONCLUSIVE）．P6 は tone の移る位置，Underflow と継続 packet の drop（Underflow が出なければ回復は「未検証」，R4）．P7 は F3′．MA-1 は 2 通りの `phases_deg` と `spread_deg`，INCONCLUSIVE の数．stop：control timeout（P4 は sample の流れない chain に timed を積む）→ 電源 cycle．
 
 ### (d) UHD 付属の benchmark_rate（Module と切り分ける．送信の 200 MS/s を 3 通り，約 10 分，estimate）
 
