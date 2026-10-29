@@ -2136,3 +2136,99 @@ fn vh_8_tx_stream_stop_leaves_the_other_stream_held() {
     assert!(!tx_send_calls(&pair.uhd.device, 0).is_empty(), "stream 0's future burst is sent");
     assert!(tx_send_calls(&pair.uhd.device, 1).is_empty(), "stream 1's held burst is cancelled");
 }
+
+#[test]
+fn vh_8_tx_repeat_records_match_at_a_common_explicit_cut() {
+    use ezsdr_kernel::module_api::UpdateClass::Cold;
+    use ezsdr_kernel::stream::{BurstEnd, BurstRecord, LatePolicy};
+
+    let samples: Vec<[f32; 2]> = (0..998).map(|i| [i as f32 / 2_000.0, -(i as f32) / 3_000.0]).collect();
+    let bytes: Vec<u8> = samples.iter().flat_map(|sample| [sample[0].to_le_bytes(), sample[1].to_le_bytes()].concat()).collect();
+    let hash = ContentHash::of_bytes(&bytes);
+    let waveform = ezsdr_kernel::manifest::ingest_input(
+        Ident::parse("waveform").unwrap(), Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes,
+    );
+    let inputs = BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]);
+    let mut selector = selector(&[], &["0:A:ubx:0"]);
+    selector.insert(Ident::parse("link_gbps").unwrap(), Value::List(vec![Scalar::from(10)]));
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(200e6).unwrap())),
+    ];
+    let mut mock = MockRig::with_run(selector.clone(), &constraints, &[], inputs.clone(), BTreeMap::new());
+    let mut uhd = UhdRig::with_run(selector, &constraints, FakeConfig::default(), &[], inputs).unwrap();
+    let mock_t0 = ms(2_001);
+    mock.arm_start(mock_t0);
+    uhd.arm().unwrap();
+    let uhd_now = uhd.time.now(uhd.root).unwrap().ticks_in(uhd.root).unwrap();
+    let uhd_t0 = uhd_now + ms(2_001);
+    uhd.start(uhd_t0).unwrap();
+
+    let mock_target_root = mock_t0 + ms(100);
+    let mock_cut_root = mock_target_root + 60_000;
+    let uhd_target_root = uhd_t0 + ms(100);
+    let uhd_cut_root = uhd_target_root + 60_000;
+    let mock_target = tx_sample_time(&mock.clocks, 0, 0, mock_target_root);
+    let uhd_target = tx_sample_time(&uhd.clocks, 0, 0, uhd_target_root);
+    let burst = |at: TimePoint| Action::TxBurst {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: "tx/s0".to_owned() },
+        waveform: waveform.clone(),
+        repeat: true,
+        at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
+        requested_at: None,
+        late_policy: LatePolicy::DropAndFlag,
+        metadata: BTreeMap::new(),
+    };
+    mock.push(burst(mock_target));
+    mock.update("radio.tx.s0.sample_rate_hz", Value::num(100e6).unwrap(), Cold, Some(mock_cut_root));
+    uhd.push(burst(uhd_target));
+    uhd.update("radio.tx.s0.sample_rate_hz", Value::num(100e6).unwrap(), Cold, Some(uhd_cut_root));
+
+    mock.step(mock_target_root - ms(5));
+    uhd.wait_until(uhd_target_root - ms(5));
+    uhd.settle(Wall::from_millis(10));
+    mock.step(mock_cut_root + 1);
+    uhd.wait_until(uhd_cut_root + 1);
+    uhd.settle(Wall::from_millis(10));
+    let uhd_calls = tx_send_calls(&uhd.device, 0);
+    let uhd_payload_sizes: Vec<usize> = uhd_calls.iter()
+        .filter(|call| call.ends_with("eob=false"))
+        .filter_map(|call| call.split(" n=").nth(1)?.split_whitespace().next()?.parse().ok())
+        .collect();
+    let mock_clocks = mock.clocks.clone();
+    let uhd_clocks = uhd.clocks.clone();
+    let mock_events = mock.events();
+    let mock = mock.finish();
+    let uhd = uhd.finish();
+
+    let records = |instance: &ProviderInstance, namespace: &str| -> Vec<BurstRecord> {
+        serde_json::from_value(serde_json::Value::Array(manifest_rows(instance, namespace))).unwrap()
+    };
+    let mock_records = records(&mock, "ezsdr.radio.mock.bursts");
+    let uhd_records = records(&uhd, "ezsdr.radio.uhd.bursts");
+    assert!((3..=4).contains(&uhd_payload_sizes.len()), "the timed SOB may take only the available window: {uhd_calls:?}");
+    assert!(uhd_payload_sizes.iter().all(|size| (1..=20_000).contains(size)), "each payload send respects the TX cap: {uhd_payload_sizes:?}");
+    assert_eq!(uhd_payload_sizes.iter().sum::<usize>(), 60_000, "UHD payload ends at the common cut: {uhd_calls:?}, target {uhd_target:?}");
+    assert!(uhd_calls[0].contains("sob=true eob=false"), "the first payload is the timed SOB: {uhd_calls:?}");
+    assert!(uhd_payload_sizes[1..uhd_payload_sizes.len() - 1].iter().all(|size| *size == 20_000), "continuation buffers use the cap: {uhd_payload_sizes:?}");
+    assert_eq!(mock_records.len(), 1, "{mock_records:?}; events: {mock_events:?}; rejected: {:?}", manifest_rows(&mock, "ezsdr.radio.mock.rejected"));
+    assert_eq!(uhd_records.len(), 1, "{uhd_records:?}");
+    let (mock_record, uhd_record) = (&mock_records[0], &uhd_records[0]);
+    assert_eq!((mock_record.samples, mock_record.wraps, mock_record.end), (60_000, 60, BurstEnd::Stop));
+    assert_eq!((uhd_record.samples, uhd_record.wraps, uhd_record.end), (60_000, 60, BurstEnd::Stop));
+    assert_eq!(mock_record.requested_target, None);
+    assert_eq!(uhd_record.requested_target, None);
+    let root_tick = |record: &BurstRecord, clocks: &ClockRegistry| {
+        let clock = clocks.sample_clock_records().into_iter().find(|clock| clock.domain == record.target.domain()).unwrap();
+        let origin = clock.origin.ticks_in(clock.root).unwrap();
+        let sample = record.target.ticks_in(record.target.domain()).unwrap();
+        let ratio = clock.root_ticks_per_tick;
+        origin + i64::try_from(i128::from(sample) * i128::from(ratio.num()) / i128::from(ratio.den())).unwrap()
+    };
+    assert_eq!(root_tick(mock_record, &mock_clocks) - mock_t0, ms(100));
+    assert_eq!(root_tick(uhd_record, &uhd_clocks) - uhd_t0, ms(100));
+    assert_eq!(mock_record.samples, uhd_record.samples, "same total handed samples at the explicit cut");
+    assert_eq!(mock_tx_blocks(&mock), 61, "MR-15 keeps its provider-local simulation blocks");
+    assert_eq!(mock_record.blocks, 61);
+    assert_eq!(uhd_record.blocks, uhd_payload_sizes.len() as u32, "provider-local block accounting follows UHD's native sends");
+}

@@ -60,3 +60,41 @@ probe は `crates/ezsdr-radio-uhd/tests/hardware.rs` の `hw_d9_p1_ddc_entries_w
 
 1. 先に P1〜P3 を X300 #1＋OBX で流す（推奨）．壊れない範囲（FIFO 8 個以下）で，所要は準備を入れて半日の見込み．
 2. probe の後，§3 の規則で D9 の 4 を改める（規則を UHD Module に置く）．
+
+## 6. 三振（2026-10-29）：装置に残る状態
+
+owner 2026-10-29：「設計のやり直しをしましょう」．D9b（設計メモ [42](42-d9-production-fix.md) の R4・R2・F7）を直す前に，AGENTS.md §6 の三振の問いに答える．
+
+### 6.1 同じ仕組みの不具合
+
+仕組み `mech:device-state-outlives-call`：X3x0 は chain ごとに状態を持ち越す（DDC/DUC の時刻つきの値，DUC が最後に見た header の時刻，閉じていない burst）．UHD Module の送受信の各経路は，呼び出しごとにその状態を初期状態とみなし，burst の始め方・終わり方・時刻の付け方をそれぞれの場所で決めている．
+
+| 件 | 残る状態 | 経路 | 実機 |
+|---|---|---|---|
+| R2 | 使われなかった DDC の値 | 受信の早い stop（close／reopen を越える） | P4 A/C，UBX と OBX で VERIFIED |
+| F7 | DUC の最後の header の時刻 | 前の Run／process の時刻つきの終わり | P5 A，19 ms 早い．UBX と OBX で VERIFIED |
+| #70 | 閉じていない burst | 1 sample の burst（`tx.rs:434-437`），失敗した send の後の EOB（`tx.rs:478-486`） | `hw_d70_*`：次の時刻つき burst が約 150 ms 早い．VERIFIED |
+| #72（F3′） | DUC の時刻つきの値 | burst の時刻なしの続き（UR-22） | P7，UBX と OBX で VERIFIED（e＋40 ms まで当たらない） |
+| F1 | DDC の値が溜まる | 流れていない chain への時刻つきの周波数 | D9a の R1 で直した |
+
+### 6.2 三つの問い
+
+1. **概念を消すか一つにできるか**：できる．送信は「device burst の始まり・続き・終わり」の形を `Tx` の 1 か所の規則にまとめ，形の種類を減らす．
+   - **T1**：sample を運ぶ send はすべて，その位置の時刻を付ける（R4）．時刻なしの続きは無くなる（#72，F3′）．
+   - **T2**：device burst を閉じるのは，EOB を付けた 2 sample 以上の send だけ．中身の無い EOB や 1 sample の burst は送らない．閉じる sample が足りないときは 0 を足して 2 にする（#70）．
+   - **T3**：送信の streamer を開いたら，最初に時刻なしの 0 の 2 sample の burst を送り，残った header を消す（F7）．
+   - 受信は一つの不変条件にする．**R2′**：装置に渡した DDC の値は，その chain を止める前に必ず sample で消費させる．つまり装置の stop は，渡した値のうち最も遅い instant より後にする．cut より後の sample は Module が捨てる．
+2. **規則が二つの実装に書かれているか**：Radio Model の規則としては書かれていない．これは装置の事実で，MockRadio は TX_UNDERFLOW も出さない（RM-10）．代わりの第二の写しは FakeDevice の DSP の FIFO の model（設計メモ 42 R5）である．それが実機とずれないよう，実機の probe の系列（P4〜P7，D70）を FakeDevice でも流し，同じ判定になることを試験で固める（差分の harness）．
+3. **spec の文が複雑すぎるか**：はい．UR-22 は repeat の時刻なしの続き，空の EOB の詰め物，次の安全な開始（`H + 2`）を別々に書いている．T1〜T3 と R2′ に置き換えれば，送信と受信それぞれ 1 つの規則で済む．
+
+### 6.3 見える振る舞いの変化と owner の決め
+
+T1 で，間に合わなかった続きは装置が捨てる（P6 の starvation：TimeError が並び，続きの sample は出ない）．今は時刻なしで遅れて出る．どちらも `radio.TX_UNDERFLOW` を出す．Mock は TX_UNDERFLOW を出さないので，parity は変わらない．
+
+owner の決め（2026-10-29）：**(a)**．underflow の後の burst の残りを
+- **(a) 採用**：今の device burst を T2 で閉じ，残りの Kernel burst は次の時刻つきの位置から新しい device burst で続ける．途中の時刻の飛びは `radio.TX_UNDERFLOW` の `cause: starved` と記録の gap で表す（Stream Contract：burst の中の時刻の飛びは埋めない）．
+- (b) 採らない：残りを捨て，次の Kernel burst まで送らない．長い repeat が一度の途切れで終わる．
+
+### 6.4 順番
+
+TXS（送信の send の大きさ，進行中）→ D9b（T1〜T3，R2′，FakeDevice の差分の harness）．T1 は TXS の send の大きさと同じ場所を変えるので，TXS の後にする．D9b は risky（試験計画 → Sol → 実装）．

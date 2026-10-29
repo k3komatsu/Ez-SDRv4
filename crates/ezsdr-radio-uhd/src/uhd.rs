@@ -333,6 +333,8 @@ struct TxStream {
     h: uhd_tx_streamer_handle,
     call: Mutex<()>,
     md: uhd_async_metadata_handle,
+    continuation_md: uhd_tx_metadata_handle,
+    pointers: Mutex<Vec<*const c_void>>,
     /// As for `RxStream`.
     lost: Arc<AtomicBool>,
     channels: usize,
@@ -361,6 +363,7 @@ impl Drop for TxStream {
         // SAFETY: as for `RxStream`.
         unsafe {
             uhd_async_metadata_free(&mut self.md);
+            uhd_tx_metadata_free(&mut self.continuation_md);
             uhd_tx_streamer_free(&mut self.h);
         }
     }
@@ -388,10 +391,20 @@ impl TxStream {
         let mut h: uhd_tx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_tx_streamer_make", uhd_tx_streamer_make(&mut h), true)? };
-        let mut stream = TxStream { h, call: Mutex::new(()), md: std::ptr::null_mut(), lost, channels };
+        let mut stream = TxStream {
+            h,
+            call: Mutex::new(()),
+            md: std::ptr::null_mut(),
+            continuation_md: std::ptr::null_mut(),
+            pointers: Mutex::new(vec![std::ptr::null(); channels]),
+            lost,
+            channels,
+        };
         attach(stream.h)?;
         // SAFETY: as above.
         unsafe { check("uhd_async_metadata_make", uhd_async_metadata_make(&mut stream.md), true)? };
+        // SAFETY: this immutable metadata covers the hot-path untimed continuation send.
+        unsafe { check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut stream.continuation_md, false, 0, 0.0, false, false), true)? };
         Ok(stream)
     }
 }
@@ -1111,14 +1124,21 @@ impl Device for UhdDevice {
         }
         let _call = lock(&streamer.call);
         let (full, frac) = at.map_or((0, 0.0), |t| to_time_spec(t, self.mcr));
-        let mut pointers: Vec<*const c_void> = samples.iter().map(|s| s.as_ptr() as *const c_void).collect();
-        let mut md: uhd_tx_metadata_handle = std::ptr::null_mut();
+        let mut pointers = lock(&streamer.pointers);
+        for (pointer, samples) in pointers.iter_mut().zip(samples) {
+            *pointer = samples.as_ptr().cast();
+        }
+        let reuse_metadata = at.is_none() && !sob && !eob;
+        let mut md = if reuse_metadata { streamer.continuation_md } else { std::ptr::null_mut() };
         let mut sent = 0usize;
-        // SAFETY: the metadata is made and freed here; each buffer holds `n` samples.
+        // SAFETY: the cached handle is immutable; other combinations are made and freed here.
+        // Pointer storage and native calls are serialized by the streamer's call mutex.
         unsafe {
-            check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut md, at.is_some(), full, frac, sob, eob), true)?;
+            if !reuse_metadata {
+                check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut md, at.is_some(), full, frac, sob, eob), true)?;
+            }
             let result = check_tx(streamer.h, "uhd_tx_streamer_send", uhd_tx_streamer_send(streamer.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), &mut sent));
-            uhd_tx_metadata_free(&mut md);
+            if !reuse_metadata { uhd_tx_metadata_free(&mut md); }
             result?;
         }
         Ok(sent)
@@ -1207,6 +1227,30 @@ mod ffi_tests {
     static PRIORITY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static PRIORITY_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
     static PRIORITY_ARGS: Mutex<Option<(f32, bool)>> = Mutex::new(None);
+    static TX_CAPTURE: AtomicBool = AtomicBool::new(false);
+    static TX_CAPTURE_CHANNELS: AtomicUsize = AtomicUsize::new(0);
+    static TX_METADATA_MAKES: AtomicUsize = AtomicUsize::new(0);
+    static TX_METADATA_FREES: AtomicUsize = AtomicUsize::new(0);
+    static TX_ASYNC_METADATA_FREES: AtomicUsize = AtomicUsize::new(0);
+    static TX_STREAMER_FREES: AtomicUsize = AtomicUsize::new(0);
+    static TX_SEND_OBSERVATIONS: Mutex<Vec<TxSendObservation>> = Mutex::new(Vec::new());
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct TxMetadata {
+        has_time_spec: bool,
+        full_secs: i64,
+        frac_secs: f64,
+        start_of_burst: bool,
+        end_of_burst: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct TxSendObservation {
+        vector: usize,
+        channels: Vec<usize>,
+        metadata_handle: usize,
+        metadata: TxMetadata,
+    }
 
     fn native_entry() {
         if !PROBE.load(Ordering::SeqCst) { return; }
@@ -1246,27 +1290,155 @@ mod ffi_tests {
 
     #[unsafe(no_mangle)]
     extern "C" fn uhd_tx_streamer_send(
-        _h: uhd_tx_streamer_handle, _buffs: *mut *const c_void,
-        n: usize, _md: *mut uhd_tx_metadata_handle, _timeout: f64, sent: *mut usize,
+        _h: uhd_tx_streamer_handle, buffs: *mut *const c_void,
+        n: usize, md: *mut uhd_tx_metadata_handle, _timeout: f64, sent: *mut usize,
     ) -> c_int {
         native_entry();
         SEND_CALLS.fetch_add(1, Ordering::SeqCst);
-        // SAFETY: tx_send supplies a live local output slot. Sample pointers and
-        // dummy streamer handles are never read by this test replacement.
-        unsafe { *sent = n; }
+        // SAFETY: tx_send supplies live output, metadata and pointer-array slots. The
+        // pointer array has the configured number of channels and metadata is test-owned.
+        unsafe {
+            *sent = n;
+            if TX_CAPTURE.load(Ordering::SeqCst) {
+                let channel_count = TX_CAPTURE_CHANNELS.load(Ordering::SeqCst);
+                let metadata_handle = *md;
+                let metadata = *metadata_handle.cast::<TxMetadata>();
+                let channels = std::slice::from_raw_parts(buffs, channel_count).iter().map(|pointer| *pointer as usize).collect();
+                lock(&TX_SEND_OBSERVATIONS).push(TxSendObservation {
+                    vector: buffs as usize,
+                    channels,
+                    metadata_handle: metadata_handle as usize,
+                    metadata,
+                });
+            }
+        }
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_tx_metadata_make(
+        handle: *mut uhd_tx_metadata_handle, has_time_spec: bool, full_secs: i64,
+        frac_secs: f64, start_of_burst: bool, end_of_burst: bool,
+    ) -> c_int {
+        if handle.is_null() { return UHD_ERROR_NONE; }
+        let metadata = Box::new(TxMetadata { has_time_spec, full_secs, frac_secs, start_of_burst, end_of_burst });
+        // SAFETY: the caller supplies a live output slot and frees the returned handle once.
+        unsafe { *handle = Box::into_raw(metadata).cast(); }
+        TX_METADATA_MAKES.fetch_add(1, Ordering::SeqCst);
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn uhd_tx_metadata_free(handle: *mut uhd_tx_metadata_handle) -> c_int {
+        if handle.is_null() { return UHD_ERROR_NONE; }
+        // SAFETY: every non-null test handle was allocated by `uhd_tx_metadata_make`.
+        unsafe {
+            if !(*handle).is_null() {
+                drop(Box::from_raw((*handle).cast::<TxMetadata>()));
+                *handle = std::ptr::null_mut();
+                TX_METADATA_FREES.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_async_metadata_free(handle: *mut uhd_async_metadata_handle) -> c_int {
+        TX_ASYNC_METADATA_FREES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the caller supplies a live handle slot; the stub does not inspect the opaque handle.
+        unsafe { *handle = std::ptr::null_mut(); }
+        UHD_ERROR_NONE
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn uhd_tx_streamer_free(handle: *mut uhd_tx_streamer_handle) -> c_int {
+        TX_STREAMER_FREES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the caller supplies a live handle slot; the stub does not inspect the opaque handle.
+        unsafe { *handle = std::ptr::null_mut(); }
         UHD_ERROR_NONE
     }
 
     fn dummy(channels: usize) -> Arc<UhdDevice> {
+        dummy_with_continuation(channels, std::ptr::null_mut())
+    }
+
+    fn dummy_with_continuation(channels: usize, continuation_md: uhd_tx_metadata_handle) -> Arc<UhdDevice> {
         let lost = Arc::new(AtomicBool::new(true));
         let mut tx = BTreeMap::new();
         tx.insert(0, Arc::new(TxStream {
-            h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(), channels, lost: lost.clone(),
+            h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(),
+            continuation_md, pointers: Mutex::new(vec![std::ptr::null(); channels]), channels, lost: lost.clone(),
         }));
         Arc::new(UhdDevice {
             usrp: std::ptr::null_mut(), args: "ffi-test-no-device".to_owned(), mcr: 200_000_000,
             control: Mutex::new(()), rx: Mutex::new(BTreeMap::new()), tx: Mutex::new(tx), lost,
         })
+    }
+
+    #[test]
+    fn uhd_tx_send_reuses_continuation_metadata_and_pointer_vector() {
+        let _test = lock(&TEST_LOCK);
+        TX_METADATA_MAKES.store(0, Ordering::SeqCst);
+        TX_METADATA_FREES.store(0, Ordering::SeqCst);
+        lock(&TX_SEND_OBSERVATIONS).clear();
+        let mut continuation_md = std::ptr::null_mut();
+        // The test stub allocates the immutable continuation handle for this test.
+        assert_eq!(uhd_tx_metadata_make(&mut continuation_md, false, 0, 0.0, false, false), UHD_ERROR_NONE);
+        let device = dummy_with_continuation(2, continuation_md);
+        let (timed_0, timed_1) = ([[1.0, 0.0], [2.0, 0.0]], [[11.0, 0.0], [12.0, 0.0]]);
+        let (continued_0, continued_1) = ([[3.0, 0.0], [4.0, 0.0]], [[13.0, 0.0], [14.0, 0.0]]);
+        let (tail_0, tail_1) = ([[5.0, 0.0]], [[15.0, 0.0]]);
+        TX_CAPTURE_CHANNELS.store(2, Ordering::SeqCst);
+        TX_CAPTURE.store(true, Ordering::SeqCst);
+        let timed = device.tx_send(0, &[&timed_0, &timed_1], Some(200_000_000), true, false, Duration::from_millis(1));
+        let continued = device.tx_send(0, &[&continued_0, &continued_1], None, false, false, Duration::from_millis(1));
+        let eob = device.tx_send(0, &[&tail_0, &tail_1], None, false, true, Duration::from_millis(1));
+        TX_CAPTURE.store(false, Ordering::SeqCst);
+        assert_eq!((timed.unwrap(), continued.unwrap(), eob.unwrap()), (2, 2, 1));
+        let observations = lock(&TX_SEND_OBSERVATIONS).clone();
+        assert_eq!(observations.len(), 3);
+        assert!(observations.iter().all(|send| send.vector == observations[0].vector), "pointer-vector storage changed: {observations:?}");
+        assert_eq!(observations.iter().map(|send| send.channels.clone()).collect::<Vec<_>>(), [
+            vec![timed_0.as_ptr() as usize, timed_1.as_ptr() as usize],
+            vec![continued_0.as_ptr() as usize, continued_1.as_ptr() as usize],
+            vec![tail_0.as_ptr() as usize, tail_1.as_ptr() as usize],
+        ], "the reusable vector preserves logical channel order");
+        assert_eq!(observations[0].metadata, TxMetadata { has_time_spec: true, full_secs: 1, frac_secs: 0.0, start_of_burst: true, end_of_burst: false });
+        assert_eq!(observations[1].metadata, TxMetadata { has_time_spec: false, full_secs: 0, frac_secs: 0.0, start_of_burst: false, end_of_burst: false });
+        assert_eq!(observations[2].metadata, TxMetadata { has_time_spec: false, full_secs: 0, frac_secs: 0.0, start_of_burst: false, end_of_burst: true });
+        assert_ne!(observations[0].metadata_handle, continuation_md as usize);
+        assert_eq!(observations[1].metadata_handle, continuation_md as usize);
+        assert_ne!(observations[2].metadata_handle, continuation_md as usize);
+        assert_eq!(TX_METADATA_MAKES.load(Ordering::SeqCst), 3, "one cached handle and two fresh metadata combinations");
+        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 2, "the per-send handles are each freed once");
+        // The cached handle remains live and is freed here; the dummy device is marked lost.
+        assert_eq!(uhd_tx_metadata_free(&mut continuation_md), UHD_ERROR_NONE);
+        assert!(continuation_md.is_null());
+        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 3, "the test-owned cached handle is freed once");
+    }
+
+    #[test]
+    fn uhd_tx_stream_drop_frees_each_owned_handle() {
+        let _test = lock(&TEST_LOCK);
+        TX_METADATA_MAKES.store(0, Ordering::SeqCst);
+        TX_METADATA_FREES.store(0, Ordering::SeqCst);
+        TX_ASYNC_METADATA_FREES.store(0, Ordering::SeqCst);
+        TX_STREAMER_FREES.store(0, Ordering::SeqCst);
+        let mut continuation_md = std::ptr::null_mut();
+        assert_eq!(uhd_tx_metadata_make(&mut continuation_md, false, 0, 0.0, false, false), UHD_ERROR_NONE);
+        let stream = TxStream {
+            h: 1usize as uhd_tx_streamer_handle,
+            call: Mutex::new(()),
+            md: 1usize as uhd_async_metadata_handle,
+            continuation_md,
+            pointers: Mutex::new(vec![std::ptr::null()]),
+            lost: Arc::new(AtomicBool::new(false)),
+            channels: 1,
+        };
+        drop(stream);
+        assert_eq!(TX_ASYNC_METADATA_FREES.load(Ordering::SeqCst), 1);
+        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 1, "Drop frees the cached TX metadata");
+        assert_eq!(TX_STREAMER_FREES.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1306,7 +1478,8 @@ mod ffi_tests {
         assert!(device.tx_send(1, &[&wave], None, false, false, Duration::from_millis(1)).is_err(), "no transmit streamer 1");
         assert!(device.tx_async(1, Duration::ZERO).unwrap().is_none());
         lock(&device.tx).insert(1, Arc::new(TxStream {
-            h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(), channels: 2, lost: device.lost.clone(),
+            h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(),
+            continuation_md: std::ptr::null_mut(), pointers: Mutex::new(vec![std::ptr::null(); 2]), channels: 2, lost: device.lost.clone(),
         }));
         assert!(device.tx_send(0, &[&wave, &wave], None, false, false, Duration::from_millis(1)).is_err(), "stream 0 has one channel");
         assert!(device.tx_send(1, &[&wave, &wave], None, false, false, Duration::from_millis(1)).is_ok(), "stream 1 has two");

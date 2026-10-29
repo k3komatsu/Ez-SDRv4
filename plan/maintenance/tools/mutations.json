@@ -9913,7 +9913,7 @@
   "id": "P643",
   "name": "the finite burst's held last sample is sent only once at continuation (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let sending = if hold { count - 1 } else { count } as usize;",
+   "old": "        let sending = (if hold { count - 1 } else { count }) as usize;",
   "new": "        let sending = count as usize;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -10585,7 +10585,7 @@
    "id": "P714",
    "name": "TX chunks ignore the candidate in-flight window",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, self.core.block_len as i64);",
+    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, TX_SEND_CAP);",
    "new": "let chunk = self.core.block_len as i64;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -12791,7 +12791,7 @@
    "new": "stopped = false;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "a_stage_that_wedges_the_handle_stops_the_group"
+    "filter": "a_stage_with_an_open_streamer_stops_later_stages"
   },
   {
    "id": "P938",
@@ -14289,7 +14289,7 @@
    "id": "P1110",
    "name": "the wanted size ignores the waveform's end (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        let mut wanted = chunk.min(len - offset);",
+    "old": "        let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };",
    "new": "        let mut wanted = chunk;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -14351,8 +14351,8 @@
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
    "old": "        if avail < wanted && !device_sob {\n            return false;\n        }\n        let count = wanted.min(avail);",
    "new": "        let count = wanted.min(avail);",
-   "old2": "        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();",
-   "new2": "        if avail < wanted && !device_sob { return false; }\n        let sent: Vec<&[Iq]> = slices.iter().map(|ch| &ch[..sending]).collect();",
+    "old2": "        let mut sent = [&[][..]; TX_CHANNELS_MAX];\n        for (slice, channel) in sent[..channels].iter_mut().zip(slices[..channels].iter()) {\n            *slice = &channel[..sending];\n        }",
+    "new2": "        if avail < wanted && !device_sob { return false; }\n        let mut sent = [&[][..]; TX_CHANNELS_MAX];\n        for (slice, channel) in sent[..channels].iter_mut().zip(slices[..channels].iter()) {\n            *slice = &channel[..sending];\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m9_a_waiting_continuation_leaves_the_held_tail_alone"
@@ -14766,5 +14766,115 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
-   }
- ]
+   },
+   {
+    "id": "P1159",
+    "name": "TX sends use the proposed 20,000-sample cap",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "const TX_SEND_CAP: i64 = 20_000;",
+    "new": "const TX_SEND_CAP: i64 = 2_000;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
+   },
+   {
+    "id": "P1160",
+    "name": "the quarter-window still limits the TX chunk",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, TX_SEND_CAP);",
+    "new": "let chunk = self.core.block_len as i64;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "measurement_candidate_in_flight_window_sets_the_tx_chunk_size"
+   },
+   {
+    "id": "P1161",
+    "name": "short repeats tile far enough for the maximum original phase",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let tiled_len = ((cap + 2 * len - 2) / len) * len;",
+    "new": "let tiled_len = ((cap + len - 1) / len) * len;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
+   },
+   {
+    "id": "P1162",
+    "name": "tiled repeats may cross original-waveform wraps",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };",
+    "new": "let mut wanted = chunk.min(len - offset);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
+   },
+   {
+    "id": "P1163",
+    "name": "repeat phase and accounting use the original waveform length",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let len = open.held.waveform_len as i64;",
+    "new": "let len = open.held.samples[0].len() as i64;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_tiles_a_short_repeat_across_original_wraps_at_high_rate"
+   },
+   {
+    "id": "P1164",
+    "name": "a short repeat sends every grouped channel",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "for (slice, channel) in slices.iter_mut().zip(open.held.samples.iter()) {",
+    "new": "for (slice, channel) in slices.iter_mut().zip(open.held.samples.iter().take(1)) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_grouped_short_repeats_keep_channel_phase_aligned"
+   },
+   {
+    "id": "P1165",
+    "name": "a payload is cut at the next held burst's start",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "wanted = wanted.min(cut - open.next);",
+    "new": "wanted = wanted;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_a_held_cut_splits_a_high_rate_repeat_at_the_target"
+   },
+   {
+    "id": "P1166",
+    "name": "preemption at the handed frontier is adjacent and on time",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if h <= next && cut_k.is_none_or(|cut| h < cut) {",
+    "new": "if h < next && cut_k.is_none_or(|cut| h < cut) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_txs_late_preemption_uses_the_handed_frontier"
+   },
+   {
+    "id": "P1167",
+    "name": "per-channel held tails retain their own sample",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "for (sample, channel) in samples[..channels].iter_mut().zip(slices[..channels].iter()) {",
+    "new": "for (sample, channel) in samples[..channels].iter_mut().zip(slices[..channels].iter().take(1)) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_held_tails_keep_each_channel_sample"
+   },
+    {
+     "id": "P1168",
+     "name": "a partial tiled send is abandoned without replaying its suffix",
+     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+     "old": "return self.abandon(was_open || sent > 0, sent);",
+     "new": "return self.abandon(was_open || sent > 0, 0);",
+     "crate": "ezsdr-radio-uhd",
+     "test_bin": "lib",
+     "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
+    },
+    {
+     "id": "P1169",
+     "name": "TX blocks retain the cf32 data contract",
+     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+     "old": "            contract: Some(DataContractId::parse(\"ezsdr.stream.cf32\").expect(\"cf32\")),",
+     "new": "            contract: Some(DataContractId::parse(\"ezsdr.stream.sc16\").expect(\"sc16\")),",
+     "crate": "ezsdr-radio-uhd",
+     "test_bin": "lib",
+     "filter": "ur_25_a_same_size_membership_swap_sends_the_new_segment_on_its_own_channel"
+    }
+  ]

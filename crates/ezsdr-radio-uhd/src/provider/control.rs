@@ -1258,6 +1258,7 @@ impl Control {
             k: start,
             domain: clock.domain,
             samples: Arc::new(samples),
+            waveform_len: len,
             repeat,
             open,
             policy: late_policy,
@@ -2225,6 +2226,37 @@ mod tests {
         assert_ne!(moved, requested.ticks_in(clock.domain).unwrap(), "the receipt move was not applied");
         assert!(clock.instant(moved) >= core.ticks(10_000_000) + core.ticks(DEVICE_LEAD_NS), "the moved start is not the device lead past the booking instant: {}", clock.instant(moved));
         assert_eq!(lock(&core.held).iter().copied().collect::<Vec<_>>(), vec![(clock.domain, moved)], "the moved start is reserved before the hand-over");
+    }
+
+    #[test]
+    fn ur_21_production_booking_preserves_the_original_repeat_length() {
+        let samples: Vec<[f32; 2]> = (0..997).map(|i| [i as f32 / 1_000.0, 0.25]).collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|sample| [sample[0].to_le_bytes(), sample[1].to_le_bytes()].concat()).collect();
+        let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
+        let waveform = ezsdr_kernel::manifest::ingest_input(
+            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
+            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
+            format!("mem:{hash}"),
+            &bytes,
+        );
+        let (core, _device, time, _) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
+        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
+        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
+            target: super::super::test_support::target_of(&core.tx_id),
+            waveform,
+            repeat: true,
+            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 20_000)),
+            requested_at: None,
+            late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+            metadata: BTreeMap::new(),
+        }, Some(core.tx_id.clone())));
+        let TxCmd::Burst(held) = to_tx.try_recv().expect("production booking hands the repeat to uhd-tx") else { panic!("not a burst") };
+        assert_eq!(held.waveform_len, 997);
+        assert_eq!(held.open.waveform_len, Some(997));
+        assert_eq!(held.samples[0].len(), 997, "booking stores the untiled waveform");
+        assert!(held.repeat);
     }
 
     #[test]

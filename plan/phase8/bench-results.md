@@ -225,3 +225,51 @@ log は `~/.cache/ezsdr-bench/2026-10-28/rerun2/`．3 本とも test は成功�
 
 - 前回 P5 C・P6・P7 で tone が見えなかったのは，1 サンプルの burst（EOB だけの send）で次の burst の時刻が失われたためと読める（P5 C と P6 は今回見えた）．P7 は tone が見えたうえで動かないので，前回とは別の結果．
 - P7 の原因は，時刻なしの packet しか来ない間は DUC の時刻つき command が実行されない，と読む（INFERRED：P6 との違いは続きの send の時刻の有無だけ）．本番の uhd-tx は P7 の形なので，送信中の時刻つきの送信周波数の変更は，次の時刻つき burst まで効かない（issue #72，D9b で直す）．
+
+## 2026-10-29：2 台を同時に接続（#1＝X300 347D545＋OBX，192.168.40.36，`enp1s0f1np1`；#2＝X300 347D541＋UBX/CBX，`ip-addr3` を 192.168.47.37 に変更，`enp1s0f0np0`）
+
+両方とも FPGA 39.3，frame 8000 byte．att は #1 OBX 40 dB，#2 UBX・CBX 各 30 dB（owner が確認）．#1 から #2 へ PPS と 10 MHz を配線済み（今日の測定はすべて `internal`）．log は `~/.cache/ezsdr-bench/2026-10-29/`．commit は `e10afa5`．
+
+### 200 MS/s の送信の切り分け（#2，UBX slot A，`--priority high`／uhd-tx は実時間の優先度）
+
+| 送るもの | 1 回の send | 時間 | 結果 |
+|---|---|---|---|
+| `benchmark_rate` | 約 2000（既定） | 300 s | underrun 0 |
+| `benchmark_rate` | 10 000 | 300 s | underrun 0 |
+| `benchmark_rate` | 1000 | 60 s／300 s | underrun 6／5 |
+| `benchmark_rate` 送受信同時（各 200 MS/s） | 1000 | 60 s | underrun 2，overrun 0 |
+| Module 1 channel（`hw_tx200_hot_path_probe`），波形 1000 | 1000 | 30 s／300 s | 成功／**約 26 s で underflow** |
+| Module 1 channel，波形 20 000 | 2000 | 300 s（2 回） | **約 150 s と約 122 s で underflow** |
+| Module grouped 40 MS/s × 2，波形 20 000 | 1000／channel | 300 s | 成功 |
+| Module split 100 MS/s × 2（800 MB/s），波形 20 000 | 2000 | 300 s | 成功 |
+
+- send が大きいほど途切れにくい（UHD と Module の両方）．同じ send の大きさでは Module の方が途切れやすい（INFERRED：send ごとの確保・metadata・parse・lock，Sol の読み〈[reviews/tx200-investigation-sol](reviews/tx200-investigation-sol.md)〉）．
+- 30 s の試行（前日の `hw_tx200_hot_path_probe` 初回，12 試行すべて成功）は短すぎて，数分に 1 回の途切れを捉えない．記録の suite の失敗（1 channel 200 MS/s，grouped 40 MS/s）は，この稀な途切れに当たったと読む（INFERRED）．
+- 直し（段階 TXS）：送信の send の上限を受信の block（2000）から切り離して大きくし，短い繰り返し波形は burst ごとに一度だけ並べて送り，send ごとの確保などを減らす．
+
+### D9 probe，#1 OBX（P4〜P7）
+
+#2 UBX（前日）と同じ：P4 A／C で使われなかった DDC の設定が停止・close／reopen を越えて残り，再開の最初の sample が拾う（R2 VERIFIED on OBX）；P4 B（AUTO）は残らない；P5 A は 19 ms 早く移る（F7），P5 C（2 サンプルの burst）と P6 は e＋25 µs；P6 の遅れた続きは捨てられる（R4）；**P7 は移らない（#72 VERIFIED on OBX）**．
+
+### #1 → #2 の 10 MHz と PPS（UHD だけ，Module は未使用）
+
+`uhd_usrp_probe` と `test_pps_input`（`--args addr=192.168.47.37,clock_source=external --source external`）は #2 を外部の基準で開けた．`test_pps_input` は「Attempt to detect the PPS and set the time... Success!」：#1 の背面の PPS が #2 に届く（VERIFIED）．10 MHz は，X300 が基準の lock に失敗すると開く時に error を返す（UR-7 と同じ経路）ので lock したと読む（INFERRED：`ref_locked` の値は読んでいない）．UHD Module の外部基準の経路（UR-7）は未実行（8b）．
+
+### TXP B4（実時間の優先度の権限なし：`--ulimit rtprio=0`，`SYS_NICE` なし）
+
+`hw_tx200_hot_path_probe`（1 channel 200 MS/s，波形 20 000，10 s）：Run は終わりまで走り（test 成功，DEVICE_LOST なし），underflow 4 回，約 0.2 s 分（39 846 000 sample）で burst が止まった．実時間の優先度ありの約 122〜150 s と比べ，TXP の効果は大きい（INFERRED：別の build が並行して走っていた）．`set_thread_priority` の拒否の行が Manifest に出たかは，この probe の出力からは見えない（未確認）．
+
+### #70 の直接の probe（`hw_d70_one_sample_burst_then_timed_burst`，#2 UBX slot A）
+
+1 サンプルの burst（SOB＋EOB，時刻なし）の後の時刻つき burst：tone は時刻より **約 150 ms 早く**（送った時点で）出た．1 サンプルの burst には BurstAck が返らない．対照（0 の 2 サンプルの burst の後）：時刻の ＋34 µs．**#70 VERIFIED**（1 サンプルの burst は装置の中で閉じず，次の burst の時刻を失わせる）．CBX（slot B）では流していない：raw probe の送信の安全範囲（1 GHz ± 0.5 MHz）が CBX の範囲（1.2–6 GHz）の外．DDC/DUC は motherboard の FPGA にあるので結果は同じと読む（INFERRED）．
+
+### TXS の後の 200 MS/s（#2 UBX，2026-10-29 14:28〜14:38）
+
+TXS（send は最大 20 000 sample，短い repeat は tile）の worktree で `hw_tx200_hot_path_probe`（`EZSDR_TX200_LENGTHS=1000,20000`，`EZSDR_TX200_SECONDS=300`，1 channel，att 30 dB は owner が確認）．log は `~/.cache/ezsdr-bench/2026-10-29/tx200-probe-txs.log`．
+
+| 波形 | send の数 | 1 send あたり | 結果 |
+|---|---:|---:|---|
+| 1 000 | 3 000 021 | 約 20 000 | Success，underflow 0（TXS の前は約 26 s で underflow） |
+| 20 000 | 3 000 019 | 約 20 000 | Success，underflow 0（TXS の前は約 150 s で underflow） |
+
+1 channel 200 MS/s の送信は 300 s を通った（VERIFIED，2 試行）．cap 20 000 はこの rate で足りる．より長い時間と RX 同時運転は段階 4 の throughput で測る．

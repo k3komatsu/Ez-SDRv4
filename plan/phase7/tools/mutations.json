@@ -608,8 +608,8 @@
   "old": "        let first = open.first;\n",
   "new": "        let first = open.first || (open.held.repeat && offset == 0);\n",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_22_repeat_is_continuous_across_the_wrap"
+   "test_bin": "lib",
+   "filter": "ur_22_repeat_wrap_is_not_a_new_burst_start"
  },
  {
   "id": "U17",
@@ -1237,8 +1237,8 @@
   "id": "B14",
   "name": "an empty end-of-burst instead of the held sample (Review O, O-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let buffers: Vec<&[Iq]> = match &tail {\n            Some(tail) => tail.iter().map(Vec::as_slice).collect(),\n            None => vec![&empty; self.channels.count().max(1) as usize],\n        };",
-  "new": "        let _ = &tail;\n        let buffers: Vec<&[Iq]> = vec![&empty; self.channels.count().max(1) as usize];",
+  "old": "        let buffers = tail_buffers.as_ref().map_or(&empty_buffers[..count], |buffers| &buffers[..count]);",
+  "new": "        let buffers = &empty_buffers[..count];",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "rehearsal_b6_txrx_and_repeat"
@@ -1379,8 +1379,8 @@
   "id": "B28",
   "name": "the held sample's send ahead of a continuation unchecked (Review Q, NB-Q2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT) {",
-  "new": "match self.core.device.tx_send(self.k, &tail, None, false, false, SEND_TIMEOUT).map(|_| 1) {",
+  "old": "match self.core.device.tx_send(self.k, &buffers[..tail.channels], None, false, false, SEND_TIMEOUT) {",
+  "new": "match self.core.device.tx_send(self.k, &buffers[..tail.channels], None, false, false, SEND_TIMEOUT).map(|_| 1) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
@@ -1509,8 +1509,8 @@
   "id": "B41",
   "name": "a device burst closed with an empty end-of-burst at a Kernel burst's end, one padded sample past it (Review O, O-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let buffers: Vec<&[Iq]> = match &tail {\n            Some(tail) => tail.iter().map(Vec::as_slice).collect(),\n            None => vec![&empty; self.channels.count().max(1) as usize],\n        };",
-  "new": "        let _ = tail;\n        let buffers: Vec<&[Iq]> = vec![&empty; self.channels.count().max(1) as usize];",
+  "old": "        let buffers = tail_buffers.as_ref().map_or(&empty_buffers[..count], |buffers| &buffers[..count]);",
+  "new": "        let buffers = &empty_buffers[..count];",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_burst_one_sample_after_a_burst_is_played"

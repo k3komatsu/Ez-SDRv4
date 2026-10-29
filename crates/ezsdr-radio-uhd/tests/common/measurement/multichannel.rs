@@ -1053,6 +1053,18 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_with_an_open_streamer_stops_later_stages() {
+        let stages = throughput_stages(Direction::Rx, 2, &[100_000_000, 200_000_000]);
+        let mut ran = Vec::new();
+        let extra = run_stages(Direction::Rx, stages.into_iter().take(2).collect(), 4, |stage| {
+            ran.push(stage.id.clone());
+            Ok(StageResult { class: TrialClass::DeviceFailure, left_open: true, observation: json!({}) })
+        }).unwrap();
+        assert_eq!(ran.len(), 1, "the stage after the open streamer is not run");
+        assert_eq!(extra.stages.iter().map(|stage| stage.class).collect::<Vec<_>>(), [Some(TrialClass::DeviceFailure), None]);
+    }
+
+    #[test]
     fn the_pll_retries_used_up_latch_the_record_and_nothing_more_is_opened() {
         let pll = || Err::<(), String>(format!("{} to its internal source", ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK));
         let latch = Latch::new();
