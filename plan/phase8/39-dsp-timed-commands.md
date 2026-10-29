@@ -98,3 +98,18 @@ owner の決め（2026-10-29）：**(a)**．underflow の後の burst の残り�
 ### 6.4 順番
 
 TXS（送信の send の大きさ，進行中）→ D9b（T1〜T3，R2′，FakeDevice の差分の harness）．T1 は TXS の send の大きさと同じ場所を変えるので，TXS の後にする．D9b は risky（試験計画 → Sol → 実装）．
+
+### 6.5 Sol の事前確認と owner の決め（2026-10-29）
+
+Sol が UHD 4.10 と X300 の FPGA の source で確かめた（[reviews/d9b-precheck-sol](reviews/d9b-precheck-sol.md)）：
+
+- radio は送信中，続きの packet の時刻を見ない．時刻を見るのは idle から始めるときだけで，遅れた packet は既定（packet policy）でその packet だけ捨て，TimeError を packet ごとに返す（`radio_tx_core.v:100-136,337-409`）．DUC は最初の時刻から sample を数える（`axi_rate_change.v:396-433`）．VERIFIED．
+- underflow の後，radio は次の受け入れられる packet で再開するが，DUC の数える時刻は戻らない．だから host が sample を飛ばすなら，device burst を閉じて新しい時刻つきの burst で始める．owner の (a) はこの形で実現する．
+- #70：DUC で最初の sample が EOB を兼ねると，終わりの語数が出ず EOB が失われる（`axi_rate_change.v:225-269,327-384`）．2 sample で避けられる（D70 の対照）．VERIFIED．
+- T3 は stale な header の時刻を消すが，DUC の command の FIFO は消さない．host の送る順は data と control の間で保証されないので，T3 の BurstAck を待ってから configure する．
+- #71：DUC の FIFO は時刻 32＋2，値 32＋1．満杯でも止まらず，時刻と値の対応が壊れる（`axi_tag_time.v:157-189`，`axi_setting_reg.v:64-87`）．「流れている chain にだけ渡す」だけでは，渡した後で burst が先に終わると値が残る．
+- 受信：DDC の値は sample が流れて初めて消費される．X300 は時刻つきの STOP を持たない（`radio_rx_core.v:171-183`）．
+
+owner の決め（2026-10-29）：#71 を D9b に入れる．**R2′ を送受信の両方に広げる**：装置に渡した時刻つきの DSP の値は，その chain を止める・閉じる前に sample で消費させる．送信は device burst を閉じる EOB を渡した最も遅い instant より後に置き，足りない分は 0 で埋める．受信は渡した最も遅い instant 以後の sample が届くまで流し，cut より後の sample は捨ててから stop する．stop と burst の終わりは最大で release window だけ遅れる．
+
+段階：D9b-1a（送信 T1〜T3，FakeDevice の送信の model を Sol の事実に合わせ，P5〜P7・D70 を差分の harness で再現），D9b-1b（送信の R1〈#71〉と R2′，underflow の後の (a)），D9b-2（受信の R2′，P4 の再現）．各段階の後に実機で probe を流し直す．
