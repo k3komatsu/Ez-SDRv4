@@ -1419,7 +1419,8 @@ fn assert_mock_barriers(events: &[ezsdr_kernel::event::Event], expected: usize) 
 }
 
 fn tx_send_calls(device: &FakeDevice, stream: usize) -> Vec<String> {
-    device.calls().into_iter().filter(|call| call.starts_with(&format!("tx_send {stream} "))).collect()
+    device.calls().into_iter().filter(|call| call.starts_with(&format!("tx_send {stream} "))
+        && !call.contains(" at=- sob=true eob=true")).collect()
 }
 
 #[test]

@@ -174,7 +174,7 @@ impl ProbeDevice {
         self.tx_eob_count.load(Ordering::Acquire)
     }
 
-    /// Injects one underflow report after the first successful nonempty TX send.
+    /// Injects one underflow report after the first successful experiment TX send.
     pub fn underflow_after_tx_send(&self) {
         self.tx_underflow_after_send.store(true, Ordering::Release);
     }
@@ -417,6 +417,8 @@ impl Device for ProbeDevice {
         let before = self.host_ns();
         let result = self.inner.tx_send(stream, samples, at, sob, eob, timeout);
         let after = self.host_ns();
+        let tx_flush = at.is_none() && sob && eob && !samples.is_empty()
+            && samples.iter().all(|channel| channel.len() == 2 && channel.iter().all(|sample| *sample == Iq::default()));
         let result_row = match &result {
             Ok(accepted_samples) => json!({ "accepted_samples": accepted_samples }),
             Err(error) => json!({ "error": error.message }),
@@ -424,9 +426,9 @@ impl Device for ProbeDevice {
         self.record(json!({
             "call": "tx_send", "stream": stream, "generation": generation, "host_before_ns": before, "host_after_ns": after,
             "sample_counts": samples.iter().map(|channel| channel.len()).collect::<Vec<_>>(),
-            "at": at, "sob": sob, "eob": eob, "timeout_ns": timeout.as_nanos(), "result": result_row,
+            "at": at, "sob": sob, "eob": eob, "tx_flush": tx_flush, "timeout_ns": timeout.as_nanos(), "result": result_row,
         }));
-        if result.as_ref().is_ok_and(|accepted| *accepted > 0)
+        if !tx_flush && result.as_ref().is_ok_and(|accepted| *accepted > 0)
             && self.tx_underflow_after_send.swap(false, Ordering::AcqRel) {
             self.tx_underflow_ready.store(true, Ordering::Release);
         }

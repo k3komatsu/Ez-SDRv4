@@ -5759,11 +5759,11 @@
    "filter": "ur_33_two_receive_streamers_keep_their_own_channels"
   },
   {
-   "id": "P205",
+      "id": "P205",
    "name": "a transmit report read from stream 0's queue whatever stream was asked (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "                let streamer = st.tx.get_mut(&stream).expect(\"checked\");",
-   "new": "                let streamer = st.tx.get_mut(&0).expect(\"checked\");",
+      "old": "            let streamer = st.tx.get_mut(&stream).expect(\"checked\");",
+      "new": "            let streamer = st.tx.get_mut(&0).expect(\"checked\");",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_two_transmit_streamers_keep_their_own_reports"
@@ -5832,8 +5832,8 @@
    "id": "P212",
    "name": "a rate read of a channel the device has not accepted (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        if chan >= st.spec[dir as usize].len() {\n            return Err(DeviceError::failed(format!(\"fake: no {} channel {chan}\", dir.name())));\n        }\n        if self.config.rates_before_open && !st.opened[dir as usize].contains(&chan) {",
-   "new": "        if false {\n            return Err(DeviceError::failed(format!(\"fake: no {} channel {chan}\", dir.name())));\n        }\n        if self.config.rates_before_open && !st.opened[dir as usize].contains(&chan) {",
+  "old": "        if chan >= st.spec[dir as usize].len() {\n            return Err(DeviceError::failed(format!(\"fake: no {} channel {chan}\", dir.name())));\n        }\n        let nth = st.rate_reads;\n        st.rate_reads += 1;",
+  "new": "        if false {\n            return Err(DeviceError::failed(format!(\"fake: no {} channel {chan}\", dir.name())));\n        }\n        let nth = st.rate_reads;\n        st.rate_reads += 1;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_rates_report_the_grid_and_the_pre_chain_one"
@@ -5932,8 +5932,8 @@
    "id": "P222",
    "name": "a refused transmit reopen leaves the stream's old streamer open (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-    "old": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        st.tx.remove(&stream);",
-    "new": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).",
+   "old": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        if let Some(old) = st.tx.remove(&stream) {\n            stale_tx_header(&mut st, &old.channels);\n        }",
+   "new": "        // As on the receive side, this stream's old streamer goes before the new one is\n        // made, and the graph refuses a second streamer on one front end: \"Attempting to\n        // reconnect input port!\" (`graph.cpp:188-197`; UR-33).\n        if let Some(channels) = st.tx.get(&stream).map(|old| old.channels.clone()) {\n            stale_tx_header(&mut st, &channels);\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
@@ -5952,8 +5952,8 @@
    "id": "P224",
    "name": "close_streams leaves the transmit streamers (UR-33, UR-2)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        st.rx.clear();\n        st.tx.clear();",
-   "new": "        st.rx.clear();",
+   "old": "        st.tx.clear();",
+   "new": "        // st.tx.clear();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_33_one_channel_is_opened_by_one_streamer"
@@ -6101,11 +6101,11 @@
    "filter": "ur_33_a_recv_on_a_stream_with_no_streamer_waits_its_10_ms"
   },
   {
-   "id": "P239",
+      "id": "P239",
    "name": "a report read on a stream with no streamer returns without waiting (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        if !timeout.is_zero() {\n            self.host.sleep(timeout);\n        }\n        Ok(None)",
-   "new": "        Ok(None)",
+      "old": "            if !st.tx.contains_key(&stream) {\n                drop(st);\n                if !timeout.is_zero() { self.host.sleep(timeout); }\n                return Ok(None);\n            }",
+      "new": "            if !st.tx.contains_key(&stream) {\n                drop(st);\n                return Ok(None);\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_a_report_read_on_a_stream_with_no_streamer_waits_its_timeout"
@@ -6121,11 +6121,11 @@
    "filter": "ur_33_a_recv_on_a_stream_with_no_streamer_waits_its_10_ms"
   },
   {
-   "id": "P241",
+      "id": "P241",
    "name": "a report read on a stream with no streamer waits 10 ms instead of its timeout (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "        if !timeout.is_zero() {\n            self.host.sleep(timeout);\n        }\n        Ok(None)",
-   "new": "        self.host.sleep(timeout.min(Duration::from_millis(10)));\n        Ok(None)",
+      "old": "            if !st.tx.contains_key(&stream) {\n                drop(st);\n                if !timeout.is_zero() { self.host.sleep(timeout); }\n                return Ok(None);\n            }",
+      "new": "            if !st.tx.contains_key(&stream) {\n                drop(st);\n                self.host.sleep(timeout.min(Duration::from_millis(10)));\n                return Ok(None);\n            }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_a_report_read_on_a_stream_with_no_streamer_waits_its_timeout"
@@ -6564,8 +6564,8 @@
    "id": "P296",
    "name": "the rates are read before the receive streamer opens (UR-13, H3)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };",
-   "new": "        let checked = self.check_opened(dir, set);\n        let opened = self.open_device(dir, k, set);",
+   "old": "        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };",
+   "new": "        let checked = Ok(());",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_arm_compares_the_rate_set_after_the_streamer_opens"
@@ -7194,8 +7194,8 @@
    "id": "P403",
    "name": "the owner's open is recorded before the device call (UR-25, S13b)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        let stream = stream_key(dir, k);\n        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
-   "new": "        let stream = stream_key(dir, k);\n        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = self.open_device(dir, k, set);\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "old": "        let stream = stream_key(dir, k);\n        let opened = if dir == Dir::Tx { self.open_tx_device(k, set).map(|_| ()) } else { self.open_device(dir, k, set) };\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
+   "new": "        let stream = stream_key(dir, k);\n        lock(&self.streams).record_opened(stream, set, &Ok(()), &Ok(()));\n        let opened = if dir == Dir::Tx { self.open_tx_device(k, set).map(|_| ()) } else { self.open_device(dir, k, set) };\n        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }\n        lock(&self.streams).record_opened(stream, set, &opened, &checked);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_an_open_is_recorded_only_after_the_device_returns"
@@ -7922,11 +7922,11 @@
    "filter": "ur_34_a_rate_check_refusal_closes_the_streamer_before_a_later_move"
   },
   {
-   "id": "P500",
+      "id": "P500",
    "name": "an owner leaves its streamer open after a refused rate comparison (UR-13, UR-36)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-   "old": "        if opened.is_ok() && checked.is_err() && !self.is_lost() {",
-   "new": "        if false {",
+      "old": "        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if opened.is_ok() && checked.is_err() && !self.is_lost() {\n            self.close_device(dir, k);\n        }",
+      "new": "        let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };\n        if false {\n            self.close_device(dir, k);\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "ur_13_arm_refuses_a_pre_chain_rate_set_after_the_open"
@@ -7995,8 +7995,8 @@
    "id": "P509",
    "name": "a transmit cold switch discards its held last sample (UR-23, RM-34)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "            self.close_device_burst(tail);\n            if !self.core.is_lost() {",
-   "new": "            self.close_device_burst(None);\n            if !self.core.is_lost() {",
+   "old": "                if self.close_device_burst(tail, cursor, clock) {",
+   "new": "                if self.close_device_burst(None, cursor, clock) {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_34_a_transmit_move_ends_the_old_burst_and_sends_the_new_burst_on_its_stream"
@@ -9883,18 +9883,18 @@
    "id": "P640",
   "name": "UHD leaves one sample between an EOB with the last payload and its restart (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "            let safe_gap = if tail.is_some() { 1 } else { 2 };",
-  "new": "            let safe_gap = if tail.is_some() { 0 } else { 2 };",
+   "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
+   "new": "                    self.remember_front(clock.domain, close_start.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
  } ,
- {
-  "id": "P641",
-  "name": "an empty Stop EOB needs the gap after its padded zero sample (UR-23)",
+  {
+   "id": "P641",
+   "name": "an empty Stop EOB needs the gap after its two closing samples (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "            let safe_gap = if tail.is_some() { 1 } else { 2 };",
-  "new": "            let safe_gap = 1;",
+   "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
+   "new": "                    self.remember_front(clock.domain, close_start.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
@@ -9903,8 +9903,8 @@
   "id": "P642",
   "name": "Stop retains the UHD cursor as a front for a later burst (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                    self.remember_front(clock.domain, cursor.saturating_add(safe_gap));",
-  "new": "                    let _ = safe_gap;\n                    self.remember_front(clock.domain, cursor);",
+   "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
+   "new": "                    self.remember_front(clock.domain, close_start);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
@@ -10053,8 +10053,8 @@
   "id": "P657",
   "name": "an abandoned send keeps two safe samples after its accepted cursor (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                    self.remember_front(clock.domain, cursor.saturating_add(2));",
-  "new": "                    self.remember_front(clock.domain, cursor.saturating_add(1));",
+   "old": "                    self.remember_front(clock.domain, cursor.saturating_add(3));",
+   "new": "                    self.remember_front(clock.domain, cursor.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -10100,21 +10100,21 @@
   "filter": "mr_25_repeated_stop_preserves_handed_samples"
  },
  {
-  "id": "P663",
+      "id": "P663",
   "name": "a short send advances recovery by the samples accepted (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                return self.abandon(was_open || sent > 0, sent);",
-  "new": "                return self.abandon(was_open || sent > 0, 0);",
+      "old": "                let result = self.abandon(was_open || accepted > 0, accepted, !device_eob);",
+      "new": "                let result = self.abandon(was_open || accepted > 0, 0, !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
  },
  {
-  "id": "P664",
+      "id": "P664",
   "name": "a failed send conservatively advances recovery by the attempted samples (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                return self.abandon(true, sending);",
-  "new": "                return self.abandon(true, 0);",
+      "old": "                let result = self.abandon(true, device_count, !device_eob);",
+      "new": "                let result = self.abandon(true, 0, !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -10130,11 +10130,11 @@
   "filter": "ur_23_a_continuation_tail_is_counted_at_recovery"
  },
  {
-  "id": "P666",
+      "id": "P666",
   "name": "a failed continuation-tail send does not advance past B's cursor (UR-23)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 0);\n                    }",
-  "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 1);\n                    }",
+      "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 0, true);\n                    }",
+      "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 1, true);\n                    }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_continuation_tail_is_counted_at_recovery"
@@ -13207,21 +13207,21 @@
    "id": "P981",
    "name": "a DDC takes a command before the stream flows (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "                    let tick = want.max(*start);",
-   "new": "                    let tick = want;",
+   "old": "                    let logical_tick = want.max(*logical);",
+   "new": "                    let logical_tick = want;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_33_a_ddc_takes_one_entry_per_radio_rate_tick"
   },
   {
    "id": "P982",
-   "name": "a DDC takes every due command at one tick (UR-33)",
+    "name": "a stale TX header advances the DSP FIFO on logical ticks (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "                chain.cursor = tick + 1;",
-   "new": "                chain.cursor = tick;",
+   "old": "                chain.cursor = logical_tick.saturating_add(1);",
+   "new": "                chain.cursor = tick.saturating_add(1);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_33_a_ddc_takes_one_entry_per_radio_rate_tick"
+    "filter": "ur_33_a_stale_tx_header_advances_the_dsp_fifo_on_logical_ticks"
   },
   {
    "id": "P983",
@@ -13244,24 +13244,24 @@
    "filter": "ur_33_a_timed_ddc_value_waits_for_an_input_sample_at_or_after_its_time"
   },
   {
-   "id": "P985",
-   "name": "a send without a time does not end a burst's time (UR-33)",
+      "id": "P985",
+   "name": "an untimed continuation does not consume a timed DUC value (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "            if !sob && at.is_none() {\n                streamer.timed = false;\n            }",
-   "new": "            if false {\n                streamer.timed = false;\n            }",
+       "old": "        if at.is_none() {",
+       "new": "        if false && at.is_none() {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_33_a_timed_duc_value_is_taken_only_while_has_time_holds"
+    "filter": "ur_33_a_timed_duc_value_is_taken_only_while_has_time_holds"
   },
   {
-   "id": "P986",
+      "id": "P986",
    "name": "a burst that starts without a time has one (UR-33)",
    "file": "crates/ezsdr-radio-uhd/src/device.rs",
-   "old": "                streamer.timed = at.is_some();",
-   "new": "                streamer.timed = true;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_33_an_untimed_burst_takes_no_duc_entry"
+      "old": "            self.has_time = radio_time.is_some();",
+      "new": "            self.has_time = true;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_33_an_untimed_burst_takes_no_duc_entry"
   },
   {
    "id": "P987",
@@ -14351,8 +14351,8 @@
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
    "old": "        if avail < wanted && !device_sob {\n            return false;\n        }\n        let count = wanted.min(avail);",
    "new": "        let count = wanted.min(avail);",
-    "old2": "        let mut sent = [&[][..]; TX_CHANNELS_MAX];\n        for (slice, channel) in sent[..channels].iter_mut().zip(slices[..channels].iter()) {\n            *slice = &channel[..sending];\n        }",
-    "new2": "        if avail < wanted && !device_sob { return false; }\n        let mut sent = [&[][..]; TX_CHANNELS_MAX];\n        for (slice, channel) in sent[..channels].iter_mut().zip(slices[..channels].iter()) {\n            *slice = &channel[..sending];\n        }",
+   "old2": "        let padded_eob = device_eob && sending == 1;",
+   "new2": "        if avail < wanted && !device_sob { return false; }\n        let padded_eob = device_eob && sending == 1;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m9_a_waiting_continuation_leaves_the_held_tail_alone"
@@ -14611,8 +14611,8 @@
    "id": "P1143",
    "name": "the H4 observation includes computed TX headroom rows",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
-    "old": "        \"tx_send_count\": tx_send_count, \"tx_send_records\": tx_rows, \"tx_headroom\": headroom_rows,",
-    "new": "        \"tx_send_count\": tx_send_count, \"tx_send_records\": tx_rows, \"tx_headroom\": Vec::<Json>::new(),",
+     "old": "        \"tx_send_records\": tx_send_rows, \"tx_headroom\": headroom_rows,",
+     "new": "        \"tx_send_records\": tx_send_rows, \"tx_headroom\": Vec::<Json>::new(),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
@@ -14757,15 +14757,16 @@
     "test_bin": "fake",
     "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
    },
-   {
-    "id": "P1158",
-    "name": "H4 does not count the repeat's empty end-of-burst as an incomplete send",
-    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
-    "old": ".filter(|row| !(row[\"eob\"] == true && !row[\"result\"][\"error\"].is_string() && row[\"sample_counts\"].as_array().is_some_and(|counts| counts.iter().all(|count| count.as_u64() == Some(0)))))",
-    "new": "",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
-    "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+  {
+   "id": "P1158",
+   "name": "retired: H4's repeat-stop empty EOB is no longer emitted",
+   "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+   "old": ".filter(|row| !(row[\"eob\"] == true && !row[\"result\"][\"error\"].is_string() && row[\"sample_counts\"].as_array().is_some_and(|counts| counts.iter().all(|count| count.as_u64() == Some(0)))))",
+   "new": "",
+   "equivalent": "Retired: T2 closes with payload/two-zero EOB sends, so H4 no longer observes the repeat-stop empty EOB this filter guarded.",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "fake",
+   "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
    },
    {
     "id": "P1159",
@@ -14858,11 +14859,11 @@
     "filter": "ur_23_a_held_tails_keep_each_channel_sample"
    },
     {
-     "id": "P1168",
+      "id": "P1168",
      "name": "a partial tiled send is abandoned without replaying its suffix",
      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-     "old": "return self.abandon(was_open || sent > 0, sent);",
-     "new": "return self.abandon(was_open || sent > 0, 0);",
+      "old": "let result = self.abandon(was_open || accepted > 0, accepted, !device_eob);",
+      "new": "let result = self.abandon(was_open || accepted > 0, 0, !device_eob);",
      "crate": "ezsdr-radio-uhd",
      "test_bin": "lib",
      "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
@@ -14876,5 +14877,415 @@
      "crate": "ezsdr-radio-uhd",
      "test_bin": "lib",
      "filter": "ur_25_a_same_size_membership_swap_sends_the_new_segment_on_its_own_channel"
-    }
+     },
+     {
+      "id": "P1170",
+      "name": "payload continuations keep their sample time (D9b-1a T1)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "        let at = Some(clock.instant(open.next));",
+      "new": "        let at = device_sob.then(|| clock.instant(open.next));",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "ur_24_a_transmit_frequency_inside_a_burst_is_taken_at_its_time"
+     },
+     {
+      "id": "P1171",
+      "name": "a one-sample payload close gets its second sample (D9b-1a T2)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "        let padded_eob = device_eob && sending == 1;",
+      "new": "        let padded_eob = false;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_one_sample_burst_has_a_one_sample_safe_restart"
+     },
+     {
+      "id": "P1172",
+      "name": "an uncertain EOB close is recovered before later timed data (D9b-1a T2/T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "        if self.reopen_needed {\n            return self.reopen_streamer();\n        }",
+      "new": "        if false && self.reopen_needed {\n            return self.reopen_streamer();\n        }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_failed_eob_close_recovers_with_flush_before_the_next_timed_burst"
+     },
+     {
+      "id": "P1173",
+      "name": "the T3 open flush contains two samples (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let zeros = [Iq::default(); 2];",
+      "new": "        let zeros = [Iq::default(); 1];",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_13_arm_radiates_nothing"
+     },
+     {
+      "id": "P1174",
+      "name": "T3 waits for every channel-position acknowledgement (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let expected: BTreeSet<usize> = (0..channels.len()).collect();",
+      "new": "        let expected: BTreeSet<usize> = (0..channels.len()).take(1).collect();",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
+     },
+     {
+      "id": "P1175",
+      "name": "arm holds the timed-DSP gate through the flush ack (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
+      "new": "        let channels = channel_list(set);\n        let _dsp = ();\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp"
+     },
+     {
+      "id": "P1176",
+      "name": "from-none enable holds the timed-DSP gate through the flush ack (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
+      "new": "        let channels = channel_list(set);\n        let _dsp = ();\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_from_none_open_waits_for_t3_flush_ack_before_timed_tx_dsp"
+     },
+     {
+      "id": "P1177",
+      "name": "the TX owner holds the timed-DSP gate through the flush ack (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.close_device(Dir::Tx, k);",
+      "new": "        let channels = channel_list(set);\n        let _dsp = ();\n        let _reports = self.lock_tx_reports(k);\n        self.close_device(Dir::Tx, k);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_tx_owner_reopen_waits_for_t3_flush_ack_before_timed_tx_dsp"
+     },
+     {
+      "id": "P1178",
+      "name": "shutdown cannot steal the open flush acknowledgement (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
+      "new": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = ();\n        self.open_tx_device_locked(k, set, &channels)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_t3_flush_ack_is_a_timed_dsp_barrier"
+     },
+     {
+      "id": "P1179",
+      "name": "T3 missing acknowledgements use one 100 ms deadline (D9b-1a T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "        let until = host.now() + Wall::from_millis(100);",
+      "new": "        let until = host.now();",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_t3_missing_ack_is_bounded_and_read_faults_keep_progressing"
+     },
+     {
+      "id": "P1180",
+      "name": "ambiguous TimeErrors claim no pending target (D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "        let target = targets.next()?;\n        if tick.is_some() && targets.next().is_some() { None } else { Some(target) }",
+      "new": "        let target = targets.next()?;\n        Some(target)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_28_ambiguous_time_errors_leave_each_channel_pending"
+     },
+     {
+      "id": "P1181",
+      "name": "an untimed two-zero EOB clears the stale DUC header (D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/device.rs",
+      "old": "        if clear_header {",
+      "new": "        if false && clear_header {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_33_an_untimed_two_zero_eob_clears_the_stale_duc_header"
+     },
+     {
+      "id": "P1182",
+      "name": "the fake loses the one-sample EOB acknowledgement (D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        let lost_eob = eob && n == 1 && (sob || !was_burst);",
+      "new": "            let lost_eob = false;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_33_a_one_sample_eob_has_no_burst_ack"
+     },
+     {
+      "id": "P1183",
+      "name": "the T3 flush does not drain the timed DUC FIFO (D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/device.rs",
+      "old": "            chain.tx_header = None;",
+      "new": "            chain.tx_header = None;\n            chain.fifo.clear();",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_t3_flush_clears_the_header_but_does_not_drain_timed_dsp_fifo"
+     },
+      {
+      "id": "P1184",
+       "name": "a TimeError after abandonment cannot claim the next burst (D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "        let target = targets.next()?;\n        if tick.is_some() && targets.next().is_some() { None } else { Some(target) }",
+      "new": "        let target = targets.next()?;\n        Some(target)",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_28_time_error_after_abandoned_burst_does_not_claim_the_next_burst"
+      },
+      {
+       "id": "P1185",
+       "name": "a burst acknowledgement waits until its last sample plays (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/device.rs",
+       "old": "            let tick = Some(self.cursor.saturating_sub(packet.ratio));",
+       "new": "            let tick = Some(start);",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played"
+      },
+      {
+       "id": "P1186",
+       "name": "a held-tail EOB rejects the sample before its safe start (UR-23)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
+       "new": "                    self.remember_front(clock.domain, close_start.saturating_add(2));",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
+      },
+      {
+      "id": "P1187",
+      "name": "a one-sample EOB drops the next timed header (D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        if lost_eob {\n            self.eob_lost = true;",
+  "new": "        if lost_eob {\n            self.eob_lost = false;",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+      "filter": "ur_33_a_one_sample_eob_loses_the_next_timed_header"
+      },
+      {
+       "id": "P1188",
+       "name": "a ticked BurstAck does not retire a future burst (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "(pending.channels.contains(&channel) && root_tick <= tick).then_some(index)",
+       "new": "pending.channels.contains(&channel).then_some(index)",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_28_a_ticked_ack_does_not_retire_a_future_burst"
+      },
+      {
+       "id": "P1189",
+       "name": "a tickless BurstAck retires only the first pending burst (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "self.unacked.iter().position(|pending| pending.channels.contains(&channel)).into_iter().collect()",
+       "new": "self.unacked.iter().enumerate().filter_map(|(index, pending)| pending.channels.contains(&channel).then_some(index)).collect()",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_28_a_tickless_burst_ack_retires_only_the_first_pending_target"
+      },
+      {
+       "id": "P1190",
+       "name": "T3 rejects an acknowledgement returned after its deadline (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+       "old": "                    if host.now() >= until {\n                        self.stash_tx_report(stream, report);\n                        break;\n                    }",
+       "new": "                    if false && host.now() >= until {\n                        self.stash_tx_report(stream, report);\n                        break;\n                    }",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_22_t3_ack_read_returned_after_deadline_is_not_a_flush_success"
+      },
+      {
+       "id": "P1191",
+       "name": "an incomplete EOB close is recorded as tx_close (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "self.core.reject_note(json!({ \"call\": \"tx_close\", \"stream\": self.k, \"error\": format!(\"EOB close accepted {n} of 2 samples\") }));",
+       "new": "self.core.reject_note(json!({ \"call\": \"tx_send\", \"stream\": self.k, \"error\": format!(\"EOB close accepted {n} of 2 samples\") }));",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_22_a_failed_eob_close_recovers_with_flush_before_the_next_timed_burst"
+      },
+      {
+       "id": "P1192",
+       "name": "radio underflow preserves the DUC sample-count timeline (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        if timed {\n            self.time = logical_start.map(|t| t.saturating_add(n as i64 * ratio));\n        }",
+  "new": "        if timed {\n            self.time = None;\n        }",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_33_a_duc_timeline_survives_radio_underflow"
+      },
+      {
+       "id": "P1193",
+       "name": "a held owner claim defers streamer reopen to an idle turn (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "let Some(claim) = streams.claim_owner(key, None) else { return false };",
+       "new": "let Some(claim) = streams.claim_owner(key, None) else { return true };",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
+      },
+      {
+       "id": "P1194",
+       "name": "Stop or device loss ends an uncertain streamer reopen (D9b-1a)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "            if streams.stop.is_some() || core.is_lost() {\n                self.reopen_needed = false;\n                return false;\n            }",
+       "new": "            if streams.stop.is_some() || core.is_lost() {\n                self.reopen_needed = false;\n                return true;\n            }",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
+      },
+      {
+       "id": "P1195",
+       "name": "repeat payload sends remain timed (D9b-1a T1)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "let at = Some(clock.instant(open.next));",
+       "new": "let at = device_sob.then(|| clock.instant(open.next));",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "fake",
+       "filter": "ur_22_repeat_is_continuous_across_the_wrap"
+      },
+      {
+       "id": "P1196",
+       "name": "a burst at the next start uses timed payload sends (D9b-1a T1)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "let at = Some(clock.instant(open.next));",
+       "new": "let at = device_sob.then(|| clock.instant(open.next));",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "fake",
+       "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
+      },
+      {
+        "id": "P1197",
+        "name": "back-to-back burst payload sends remain timed (D9b-1a T1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "let at = Some(clock.instant(open.next));",
+        "new": "let at = device_sob.then(|| clock.instant(open.next));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "fake",
+        "filter": "ur_23_two_bursts_back_to_back_loop_back_whole"
+      },
+      {
+        "id": "P1198",
+        "name": "payload waits while TX streamer recovery is pending (D9b-1a fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "if self.reopen_needed { return false; }",
+        "new": "if false { return false; }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+      },
+      {
+        "id": "P1199",
+        "name": "ordinary TX Stop preserves pending recovery (D9b-1a fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        self.end_open(true);\n        let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();",
+        "new": "        self.end_open(true);\n        self.reopen_needed = false;\n        let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_tx_stop_preserves_recovery_for_later_bursts"
+      },
+      {
+        "id": "P1200",
+        "name": "idle radio checks the DUC-generated timestamp (D9b-1a fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/device.rs",
+  "old": "        let radio_time = if ignored_header { None } else if was_burst { self.time } else { at };",
+  "new": "        let radio_time = if ignored_header { None } else { at };",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_33_a_duc_timeline_survives_radio_underflow"
+      },
+      {
+        "id": "P1201",
+        "name": "active SOB does not restart the DUC timeline (D9b-1a fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/device.rs",
+        "old": "        } else if !self.burst {\n            self.burst = true;\n            self.has_time = radio_time.is_some();\n            self.time = radio_time.map(|t| t.max(stale_header.unwrap_or(t)));\n        }",
+        "new": "        } else if !self.burst {\n            self.burst = true;\n            self.has_time = radio_time.is_some();\n            self.time = radio_time.map(|t| t.max(stale_header.unwrap_or(t)));\n        } else if sob {\n            self.has_time = at.is_some();\n            self.time = at;\n        }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_33_an_active_timed_sob_keeps_the_duc_sample_timeline"
+      },
+      {
+        "id": "P1202",
+        "name": "streamer generation clears TimeError deduplication (D9b-1a fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "if streamer != self.streamer {\n            self.unacked.clear();\n            self.late_reported.clear();\n        }",
+        "new": "if streamer != self.streamer {\n            self.unacked.clear();\n        }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_28_streamer_generation_clears_late_report_deduplication"
+      },
+      {
+        "id": "P1203",
+        "name": "a radio-dropped packet still advances DUC sample flow (D9b-1a fix 3)",
+        "file": "crates/ezsdr-radio-uhd/src/device.rs",
+        "old": "            let passing = (packet.timed && n > 0).then(|| {",
+        "new": "            let passing = (packet.timed && n > 0 && radio_interval.is_some()).then(|| {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_33_a_late_continuation_without_eob_advances_the_duc_before_radio_drops_the_next_packet"
+      },
+      {
+        "id": "P1204",
+        "name": "a radio-dropped EOB still ends the DUC burst (D9b-1a fix 3)",
+        "file": "crates/ezsdr-radio-uhd/src/device.rs",
+        "old": "        } else if eob {",
+        "new": "        } else if false && eob {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_33_a_late_eob_ends_the_duc_before_a_future_timed_burst"
+      },
+      {
+        "id": "P1205",
+        "name": "a failed reopen skips the initial TX segment (D9b-1a fix 3)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        self.clock = None;",
+        "new": "        self.clock = self.clock;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts"
+      },
+      {
+        "id": "P1206",
+        "name": "a failed reopen drains held initial bursts (D9b-1a fix 3)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "            for held in std::mem::take(&mut self.held).into_values() {",
+        "new": "            for held in self.held.values() {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts"
+      },
+      {
+      "id": "P1207",
+        "name": "failed reopen leaves no active TX phase without a later segment (D9b-1a fix 3)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "streams.plan_read(key, false, self.plan.get(self.at).is_some(), None);",
+        "new": "streams.plan_read(key, false, true, None);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+      "filter": "ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts"
+      },
+      {
+       "id": "P1208",
+       "name": "a failed reopen settles the open burst's reservation and cancellation (D9b-1a fix 4)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "        if let Some(open) = self.open.take() {\n            self.forget(&open.held);\n            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ColdChange);\n        }",
+       "new": "        let _ = self.open.take();",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+      },
+      {
+       "id": "P1209",
+       "name": "a failed reopen finishes the in-flight burst record (D9b-1a fix 4)",
+       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+       "old": "            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ColdChange);\n        }\n        if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {\n            lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect(\"a record\"));\n        }",
+       "new": "            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ColdChange);\n        }\n        let _ = self.tracker.as_mut();",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+      },
+      {
+       "id": "P1210",
+       "name": "an untimed SOB clears DUC timed-sample consumption (D9b-1a fix 4)",
+       "file": "crates/ezsdr-radio-uhd/src/device.rs",
+       "old": "        if at.is_none() {\n            self.has_time = false;\n            self.time = None;\n        }",
+       "new": "        if false && at.is_none() {\n            self.has_time = false;\n            self.time = None;\n        }",
+       "crate": "ezsdr-radio-uhd",
+       "test_bin": "lib",
+       "filter": "ur_33_an_untimed_sob_clears_duc_time_until_a_fresh_burst"
+      }
   ]

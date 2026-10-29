@@ -113,3 +113,14 @@ Sol が UHD 4.10 と X300 の FPGA の source で確かめた（[reviews/d9b-pre
 owner の決め（2026-10-29）：#71 を D9b に入れる．**R2′ を送受信の両方に広げる**：装置に渡した時刻つきの DSP の値は，その chain を止める・閉じる前に sample で消費させる．送信は device burst を閉じる EOB を渡した最も遅い instant より後に置き，足りない分は 0 で埋める．受信は渡した最も遅い instant 以後の sample が届くまで流し，cut より後の sample は捨ててから stop する．stop と burst の終わりは最大で release window だけ遅れる．
 
 段階：D9b-1a（送信 T1〜T3，FakeDevice の送信の model を Sol の事実に合わせ，P5〜P7・D70 を差分の harness で再現），D9b-1b（送信の R1〈#71〉と R2′，underflow の後の (a)），D9b-2（受信の R2′，P4 の再現）．各段階の後に実機で probe を流し直す．
+
+### 6.6 送信の報告の持ち主（2026-10-29，三振：`mech:correlation-by-partial-key` の 5・6 件目）
+
+D9b-1a のコード review で，同じ仕組みの指摘が二つ出た．(1) T3 の flush の ACK を channel だけの「借り」で見分けたため，実験の burst の ACK を飲み込む，または flush の完了と取り違える（Sol，`plan/phase8/reviews/d9b1a-sol.md` M1）．(2) TimeError の後に ACK の来ない burst（packet policy で末尾まで捨てられた burst）が報告待ちの列に残り，次の ACK がそれを片付ける（orchestrator）．どちらも報告を列の位置か channel だけで持ち主に結んでいる．
+
+問いへの答え：
+- 概念を消せるか：消せる．送信中の flush（`recover_flush`）と flush の借り（`tx_flush_debt`）をやめる．EOB の送りが失敗・不足して装置の状態が分からなくなったら，owner が streamer を閉じて開き直す．開き直しは streamer の世代を進め，報告の持ち主の対応を捨て（UR-28），開くときの T3 を新しい報告の列で待つ．回復は稀な道なので，開き直しの時間は問題にならない．
+- 持ち主は channel と tick で決める．X3x0 の報告が持つのは channel と tick だけなので，これが手に入る完全な鍵である．BurstAck(channel, t) は，その channel の報告待ちのうち最初の instant が t 以前の burst を古い順にすべて片付ける（burst は順に終わるので，t の ACK より前の burst はもう終わっている）．t より後に始まる burst には触れない．どれにも当たらない ACK は raw のまま残す．TimeError(channel, t) の t は radio の現在時刻なので，持ち主は最初の instant が t 以前の報告待ちのうち一つだけのときに限り，片付けずに名指す．
+- 規則の二重実装：ない．FakeDevice は ACK の tick を EOB の最後の sample が出る instant に置き（ハードの ACK と同じ意味），flush の ACK を再生より前に返さない．
+
+採らない案：送信中の flush を残して ACK を tick で見分ける案．flush は時刻なしで送るので，直前の閉じの ACK と tick で分けられない．

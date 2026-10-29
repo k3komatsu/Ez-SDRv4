@@ -1220,8 +1220,8 @@
   "old": ".clamp(1_000_000, RECV_TIMEOUT.as_nanos() as i128);",
   "new": ".min(RECV_TIMEOUT.as_nanos() as i128);",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
+  "test_bin": "lib",
+  "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
  },
  {
   "id": "B13",
@@ -1237,8 +1237,8 @@
   "id": "B14",
   "name": "an empty end-of-burst instead of the held sample (Review O, O-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let buffers = tail_buffers.as_ref().map_or(&empty_buffers[..count], |buffers| &buffers[..count]);",
-  "new": "        let buffers = &empty_buffers[..count];",
+   "old": "            for (samples, held) in close[..count].iter_mut().zip(tail.samples[..count].iter()) {\n                samples[0] = *held;\n            }",
+   "new": "            for (samples, held) in close[..count].iter_mut().zip(tail.samples[..count].iter()) {\n                samples[0] = Iq::default();\n            }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "rehearsal_b6_txrx_and_repeat"
@@ -1274,23 +1274,21 @@
   "filter": "ur_33_an_empty_end_of_burst_is_one_zero_sample"
  },
  {
-  "id": "B18",
-  "name": "the held sample kept after a send cut short, then sent with end-of-burst (Review P, NB-1)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let was_open = !first || continuing;\n",
-  "new": "        let was_open = !first || continuing;\n        self.tail = tail.clone();\n",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took",
-  "old2": "        self.tail = None;\n        if device_open && !self.core.is_lost() {\n            self.close_device_burst(None);",
-  "new2": "        let tail = self.tail.take();\n        if device_open && !self.core.is_lost() {\n            self.close_device_burst(tail);"
+   "id": "B18",
+   "name": "a short send's open device burst is not closed (D9b-1a)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "                if self.close_device_burst(None, cursor, clock) {",
+   "new": "                if false && self.close_device_burst(None, cursor, clock) {",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
  },
  {
-  "id": "B19",
+      "id": "B19",
   "name": "a device burst begun by a first send cut short not ended (Review P, NB-1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                return self.abandon(was_open || sent > 0, sent);",
-   "new": "                return self.abandon(was_open, sent);",
+      "old": "                let result = self.abandon(was_open || accepted > 0, accepted, !device_eob);",
+      "new": "                let result = self.abandon(was_open, accepted, !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
@@ -1305,13 +1303,13 @@
   "test_bin": "lib",
   "filter": "ur_23_a_burst_booked_at_a_sent_burst_s_end_continues_it"
  },
- {
-  "id": "B21",
-  "name": "a one-sample burst's only buffer held back, its start and time not sent (Review P, TG-2)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
-  "new": "let hold = eob && !ends_at_held && open_ended;",
-  "crate": "ezsdr-radio-uhd",
+  {
+   "id": "B21",
+   "name": "a one-sample burst is sent timed rather than held to its deadline (D9b-1a fix 4)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "old": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
+   "new": "let hold = eob && !ends_at_held && open_ended;",
+   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_one_sample_burst_booked_ahead_starts_at_its_time"
  },
@@ -1346,11 +1344,11 @@
   "filter": "ur_07_no_device_read_follows_the_authority_s_drop"
  },
  {
-  "id": "B25",
+      "id": "B25",
   "name": "a first send that fails taken for no device burst (Review Q, NB-Q1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(true, sending);",
-  "new": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(was_open, sending);",
+      "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                let old_front = self.front;\n                let result = self.abandon(true, device_count, !device_eob);",
+      "new": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                let old_front = self.front;\n                let result = self.abandon(was_open, device_count, !device_eob);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_send_cut_short_ends_the_device_burst_after_what_it_took"
@@ -1359,8 +1357,8 @@
   "id": "B26",
   "name": "a first send that fails not counted for its report (Review Q, NB-Q1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                return self.abandon(true, sending);",
-  "new": "                return self.abandon(true, sending);",
+   "old": "                if device_sob {\n                    self.remember_burst(TimePoint::new(clock.domain, start));\n                }\n                let old_front = self.front;",
+   "new": "                let old_front = self.front;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
@@ -1369,8 +1367,8 @@
   "id": "B27",
   "name": "a first send cut short not counted for its report (Review Q, TG-Q1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "if device_sob && sent > 0 {",
-  "new": "if false && device_sob && sent > 0 {",
+   "old": "if device_sob && accepted > 0 {",
+   "new": "if false && device_sob && accepted > 0 {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_22_a_first_send_cut_short_keeps_the_reports_paired"
@@ -1379,8 +1377,8 @@
   "id": "B28",
   "name": "the held sample's send ahead of a continuation unchecked (Review Q, NB-Q2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "match self.core.device.tx_send(self.k, &buffers[..tail.channels], None, false, false, SEND_TIMEOUT) {",
-  "new": "match self.core.device.tx_send(self.k, &buffers[..tail.channels], None, false, false, SEND_TIMEOUT).map(|_| 1) {",
+   "old": "match self.core.device.tx_send(self.k, &buffers[..tail.channels], at, false, false, SEND_TIMEOUT) {",
+   "new": "match self.core.device.tx_send(self.k, &buffers[..tail.channels], at, false, false, SEND_TIMEOUT).map(|_| 1) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
@@ -1396,21 +1394,21 @@
   "filter": "ur_23_a_continuation_s_first_send_that_takes_nothing_ends_the_device_burst"
  },
  {
-  "id": "B30",
+      "id": "B30",
   "name": "the fake acknowledges a burst at once (Review Q, TG-Q1)",
   "file": "crates/ezsdr-radio-uhd/src/device.rs",
-  "old": "let due = streamer.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now));",
-  "new": "let due = streamer.reports.front().is_some();",
+  "old": "            if streamer.radio.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now)) {",
+  "new": "            if streamer.radio.reports.front().is_some() {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played"
  },
  {
-  "id": "B31",
+      "id": "B31",
   "name": "a held sample's failed send ahead of a continuation not abandoned (Review R, TG-R1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 0);\n                    }",
-  "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return true;\n                    }",
+      "old": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return self.abandon(true, 0, true);\n                    }",
+      "new": "                    Err(error) => {\n                        self.core.device_failed(None, \"tx_burst\", &error);\n                        return true;\n                    }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_a_continuation_whose_held_sample_is_not_taken_is_abandoned"
@@ -1507,13 +1505,13 @@
  },
  {
   "id": "B41",
-  "name": "a device burst closed with an empty end-of-burst at a Kernel burst's end, one padded sample past it (Review O, O-B1)",
+   "name": "a held-tail sample is included in the two-sample EOB close (Review O, O-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let buffers = tail_buffers.as_ref().map_or(&empty_buffers[..count], |buffers| &buffers[..count]);",
-  "new": "        let buffers = &empty_buffers[..count];",
+   "old": "            for (samples, held) in close[..count].iter_mut().zip(tail.samples[..count].iter()) {\n                samples[0] = *held;\n            }",
+   "new": "            for (samples, held) in close[..count].iter_mut().zip(tail.samples[..count].iter()) {\n                samples[0] = Iq::default();\n            }",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_23_a_burst_one_sample_after_a_burst_is_played"
+  "test_bin": "fake",
+  "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
  },
  {
   "id": "C04",

@@ -766,6 +766,7 @@ impl Control {
         // Order a timed issuance against configure.
         assert_line_free("a timed command's release");
         let updates: Vec<_> = projections.iter().map(|cold| cold.updates.lock()).collect();
+        let _tx_dsp = if timed.dir == Dir::Tx { self.core.lock_tx_dsp(chans) } else { Vec::new() };
         let mut handed_at = None;
         for chan in chans {
             self.core.probe("before_timed_apply", None);
@@ -1054,7 +1055,11 @@ impl Control {
             let mut checked: Option<Result<(), DeviceError>> = None;
             let mut configured: Option<Result<i64, DeviceError>> = None;
             if may_call {
-                let open = self.core.open_device(dir, k, channels);
+                let open = if dir == Dir::Tx {
+                    self.core.open_tx_device(k, channels).map(|_| ())
+                } else {
+                    self.core.open_device(dir, k, channels)
+                };
                 let check = if open.is_ok() && !self.core.is_lost() { self.core.check_opened(dir, channels) } else { Ok(()) };
                 if open.is_ok() && check.is_err() && !self.core.is_lost() {
                     self.core.close_device(dir, k);
@@ -1425,7 +1430,7 @@ mod tests {
         // behind it. The refusal is the stored transmit comparison `check_rates` keeps for
         // every open of the direction; the controlled clock fixes both bookings.
         let (core, device, time, events) = manual_rig_events();
-        let _frozen = hold(&core, &time, &device);
+        let frozen = hold(&core, &time, &device);
         assert!(core.check_rates(Dir::Tx, 99).is_err(), "the transmit comparison refuses");
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.tx.c0.stream"), Value::from(-1));
@@ -1435,6 +1440,7 @@ mod tests {
         let (_to_tx, cmds) = channel();
         let mut tx = super::super::tx::Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
         assert!(tx.read(None));
+        drop(frozen);
         control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(0), at(200));
         assert!(device.calls().iter().any(|call| call == "tx_open 0 [0]"), "the enable's open: {:?}", device.calls());
         assert!(!device.calls().iter().any(|call| call.starts_with("apply")), "a refused enable applies nothing: {:?}", device.calls());
@@ -1455,7 +1461,68 @@ mod tests {
         assert!(rejected.iter().all(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.starts_with("UR-13:"))), "{rejected:?}");
         assert!(rejected.iter().all(|event| event.time.ticks_in(core.root).unwrap() < ms(200)), "an enable was processed at or after the refused origin: {rejected:?}");
         assert!(lock(&core.streams).is_idle(stream_key(Dir::Tx, 0)), "a refused enable adopted a clock");
-        assert!(!device.calls().iter().any(|call| call.starts_with("tx_send")), "a refused segment sent: {:?}", device.calls());
+        let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
+        assert_eq!(sends, ["tx_send 0 n=2 at=- sob=true eob=true", "tx_send 0 n=2 at=- sob=true eob=true"],
+            "each refused streamer generation gets its own T3 flush: {:?}", sends);
+    }
+
+    #[test]
+    fn ur_22_from_none_open_waits_for_t3_flush_ack_before_timed_tx_dsp() {
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
+        }));
+        let (core, _, _) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
+        spy.watch(&core);
+        let (mut control, _tx) = control(&core, &[]);
+        control.config.insert(key("radio.tx.c0.stream"), Value::from(-1));
+        control.book(Dispatched::new(ActionId(1), Action::Stop {
+            target: Some(super::super::test_support::target_of(&core.tx_id)),
+        }, Some(core.tx_id.clone())));
+        lock(&core.streams).search(booked_stream(Dir::Tx), false);
+        let at = AbsoluteDeadline::new(core.at(core.ticks(100_000_000)));
+        super::super::core::assert_tx_open_flush_barrier(core, spy, move || {
+            control.book_cold(ActionId(2), key("radio.tx.c0.stream"), Value::from(0), Some(at));
+        });
+    }
+
+    #[test]
+    fn ur_22_timed_control_give_waits_for_t3_flush_ack() {
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
+        }));
+        let (core, _, _) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
+        spy.watch(&core);
+        let gate = spy.stop_before("tx_async");
+        let (open_done, opened) = std::sync::mpsc::channel();
+        let opener = core.device.host().spawn("control-tx-flush", {
+            let core = core.clone();
+            move || { let _ = open_done.send(core.open_tx_device(0, Channels::first(1))); }
+        }).unwrap();
+        gate.wait();
+
+        let (mut control, _tx) = control(&core, &[]);
+        let timed = Timed { key: key("radio.tx.c0.gain_db"), dir: Dir::Tx, value: 1.0, chan: 0 };
+        let (release_done, released) = std::sync::mpsc::channel();
+        let release = core.device.host().spawn("control-timed-give", move || {
+            let _ = release_done.send(control.give(10_000, timed, &[0]));
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.tx_dsp_waiters(0) == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(core.tx_dsp_waiters(0) > 0, "Control::give did not wait on the flush's DSP gate");
+        assert_eq!(spy.seen("apply"), 0, "the real timed release crossed the flush ack barrier");
+
+        gate.release();
+        opener.join().unwrap();
+        release.join().unwrap();
+        assert!(opened.recv().unwrap().unwrap().acknowledged, "the open flush ack was not consumed");
+        assert!(matches!(released.recv().unwrap(), Handed::Given(_)));
+        let order = spy.order();
+        let flush = order.iter().position(|call| *call == "tx_send").unwrap();
+        let ack = order.iter().position(|call| *call == "tx_async").unwrap();
+        let apply = order.iter().position(|call| *call == "apply").unwrap();
+        assert!(flush < ack && ack < apply, "flush -> ack read -> Control::give: {order:?}");
     }
 
     #[test]
@@ -4871,7 +4938,7 @@ mod tests {
         // The transmit sibling: the same one-channel count change `{0}` → `{1}` on its own
         // streamer, which a count comparison would leave serving device channel 0.
         let (core, device, time, events) = both_rig();
-        let _frozen = hold(&core, &time, &device);
+        let frozen = hold(&core, &time, &device);
         let mut values = core.description.defaults();
         values.insert(key("radio.tx.c0.stream"), Value::from(0));
         values.insert(key("radio.tx.c1.stream"), Value::from(-1));
@@ -4887,6 +4954,7 @@ mod tests {
             streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
             streams.record_configured(stream_key(Dir::Tx, 0), None);
         }
+        drop(frozen);
         assert!(core.owner_configure(Dir::Tx, 0, plan.last().unwrap()).unwrap(), "the owner begins the new transmit segment");
         let calls = device.calls();
         let opened: Vec<&String> = calls.iter().filter(|call| call.starts_with("tx_open 0 ")).collect();
@@ -5134,7 +5202,7 @@ mod tests {
         // the value nor the instant in the floor. On the controlled clock the raised instant
         // is 50 ms and the judge's configuration cannot move.
         let (core, device, time, events) = manual_rig_events();
-        let _frozen = hold(&core, &time, &device);
+        let frozen = hold(&core, &time, &device);
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
@@ -5150,6 +5218,7 @@ mod tests {
         // The refusal left neither the value nor its instant behind: the antenna change back is
         // booked at its own instant, and the same join after it is taken.
         control.book_cold(ActionId(3), antenna.clone(), Value::from("RX2"), at(60));
+        drop(frozen);
         control.book_cold(ActionId(4), key("radio.tx.c0.stream"), Value::from(0), at(120));
         assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 0, "the later join is taken: {:?}", device.calls());
         let changes = timing_of(&core, "cold_change");
@@ -6895,7 +6964,7 @@ mod tests {
         // first sample takes V1, which was never taken: the device ends on V1 and the record says
         // V2. The test pins that (the fake's FIFO outlives the streamer, INFERRED; KNOWN_LIMITATIONS.md).
         let (core, device, time, _events) = manual_rig_events();
-        let _frozen = hold(&core, &time, &device);
+        let frozen = hold(&core, &time, &device);
         let (mut control, _tx) = control(&core, &[Dir::Tx]);
         device.tx_open(0, &[0]).unwrap();
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -6915,7 +6984,9 @@ mod tests {
         // It returns at 100 ms; the enable's own configuration writes the record's V2.
         lock(&core.streams).search(stream_key(Dir::Tx, 0), false);
         time.advance_to(core.at(ms(90))).unwrap();
+        drop(frozen);
         control.book_cold(ActionId(13), key("radio.tx.c0.stream"), Value::from(0), at(100));
+        let _frozen_after_open = crate::provider::test_support::Frozen::of(&device);
         assert!(device.calls().iter().any(|call| call.starts_with("apply tx 0") && call.contains("freq=2200000000") && call.ends_with("at=-")), "{:?}", device.calls());
         // The first timed burst after the return takes V1.
         device_at(&core, &time, &device, ms(195));

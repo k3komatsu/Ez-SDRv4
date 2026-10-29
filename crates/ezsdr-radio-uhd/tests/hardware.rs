@@ -999,18 +999,6 @@ fn tone_start(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, floor: f64) -> 
     windows.windows(3).find(|run| run.iter().all(|(_, tone)| *tone) && run[2].0 - run[0].0 == 50 * 200).map(|run| run[0].0)
 }
 
-/// D9 F7: an untimed end-of-burst. UHD sends it as one zero sample (`tx_streamer_impl.hpp:266-276`), and that burst's only
-/// header has no time (`axi_rate_change.v:403-406`), so the DUC's stale header no longer takes a timed value at once.
-fn untimed_end_of_burst(device: &dyn Device) -> Vec<String> {
-    // Two zero samples with SOB and EOB, untimed: an EOB-only send is a one-sample burst, which
-    // the X3x0 DUC's rate change takes for a burst still open, so the next burst loses its time
-    // (2026-10-28 rerun, probe-analysis-1028b).
-    let zeros = vec![ezsdr_radio_uhd::Iq::default(); 2];
-    device.tx_send(0, &[&zeros], None, true, true, Wall::from_secs(1)).unwrap();
-    std::thread::sleep(Wall::from_millis(10));
-    flush_tx(device)
-}
-
 fn flush_tx(device: &dyn Device) -> Vec<String> {
     let mut reports = Vec::new();
     while let Some(report) = device.tx_async(0, Wall::from_millis(10)).unwrap() {
@@ -1246,257 +1234,77 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p5_a_stale_timed_header_after_a_reopen() {
-    // F7: after a burst ended by a send with a time, a reopened device (time back at 0) is given a
-    // timed DUC shift before the next burst: does it take effect before the burst's first sample?
-    // Compared with a burst ended without a time. The stale header takes effect only when its
-    // timestamp is at or after the new command's instant (`axi_tag_time.v`). The DUC counts a burst's time from its first
-    // header (`axi_rate_change.v`) and UHD sends the empty end-of-burst as one zero sample after the burst, so the stale
-    // time is the burst's start plus its length: the priming burst starts 400 ms ahead, the inequality is printed, and
-    // when it does not hold the case is INCONCLUSIVE. A third case ends with a time and then sends an untimed empty
-    // end-of-burst after the reopen (owner's decision 5), which should leave no stale header. The device is opened again inside
-    // this process; if that does not reproduce what P2 saw across processes (INFERRED), run the
-    // cases in two processes (EZSDR_D9_P5_CASE=timed|untimed runs one). Movement is looked for
-    // only in windows that carry the tone, after the burst begins.
-    let cases: Vec<&str> = match std::env::var("EZSDR_D9_P5_CASE").as_deref() {
-        Ok("timed") => vec!["ended with a time"],
-        Ok("untimed") => vec!["ended without a time"],
-        Ok("reopen") => vec!["ended with a time, then an untimed end-of-burst after the reopen"],
-        _ => vec!["ended with a time", "ended without a time", "ended with a time, then an untimed end-of-burst after the reopen"],
+    // F7: compare the stale-header case, its no-header control and the two-zero reset after reopen.
+    let cases: Vec<_> = match std::env::var("EZSDR_D9_P5_CASE").as_deref() {
+        Ok("timed") => vec![common::d9::P5Case::StaleHeader],
+        Ok("untimed") => vec![common::d9::P5Case::NoStaleHeader],
+        Ok("reopen") => vec![common::d9::P5Case::FlushAfterReopen],
+        _ => vec![common::d9::P5Case::StaleHeader, common::d9::P5Case::NoStaleHeader, common::d9::P5Case::FlushAfterReopen],
     };
     assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 - 50e3 + 100e3)));
+    let device = raw_uhd();
     let chan = d9_channel();
-    let tone = tone_1msps(10_000);
-    for case in cases {
-        // The previous process's last timed header, as a device time of that process.
-        let old_header = {
-            let device = raw_uhd();
-            raw_rx(&*device, 1e6, 1e9);
-            raw_tx(&*device, 1e6, 1e9);
-            let start = (device.time_now().unwrap() / 200 + 400_000) * 200;
-            device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
-            // The burst: timed first send, then its end with or without a time (an empty end-of-burst).
-            device.tx_send(0, &[&tone], Some(start), true, false, Wall::from_secs(2)).unwrap();
-            let empty: Vec<ezsdr_radio_uhd::Iq> = Vec::new();
-            // The time the DUC counts the end-of-burst's sample at: the burst's start plus its length.
-            let at = case.starts_with("ended with a time").then_some(start + tone.len() as i64 * 200);
-            device.tx_send(0, &[&empty], at, false, true, Wall::from_secs(2)).unwrap();
-            let _ = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|end| end >= start + 15 * TICKS_PER_MS));
-            device.rx_stop(0, None).unwrap();
-            let _ = drain(&*device);
-            let _ = flush_tx(&*device);
-            at
-        };
-        let device = raw_uhd();
-        raw_rx(&*device, 1e6, 1e9);
-        raw_tx(&*device, 1e6, 1e9);
-        device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
-        device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
-        let cleared = case.contains("untimed end-of-burst after").then(|| untimed_end_of_burst(&*device));
-        let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
-        let e = start + 20 * TICKS_PER_MS;
-        device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
-        let dsp = device.tune_dsp(Dir::Tx, chan, 50e3, Some(e)).unwrap();
-        let given = device.time_now().unwrap();
-        let burst = tone_1msps(60_000);
-        device.tx_send(0, &[&burst], Some(start), true, true, Wall::from_secs(2)).unwrap();
-        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= start + 60 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
-        let _ = drain(&*device);
-        let reports = flush_tx(&*device);
-        let freqs = tone_freqs(&got.samples);
-        let report = classify_tone(&got.samples, start, start + 60 * TICKS_PER_MS, e, 100e3);
-        let moves = tone_verdict(&report);
-        let established = old_header.map(|header| header >= e);
+    let mut tune = |dir, channel, hz, at| device.tune_dsp(dir, channel, hz, at);
+    for result in common::d9::p5_stale_header(&*device, chan, &mut tune, &cases) {
+        let report = classify_tone(&result.capture.samples, result.start, result.start + 60 * TICKS_PER_MS, result.e, 100e3);
+        let established = result.old_header.map(|header| header >= result.e);
         let verdict = match established {
             Some(false) => "INCONCLUSIVE: the previous timed header's timestamp is before the new command's instant",
             _ if !report.usable() => "INCONCLUSIVE: no usable signal windows",
-            Some(true) if cleared.is_some() => "a stale header was left and then cleared by an untimed end-of-burst: the move should be at e, not before",
+            Some(true) if !result.flush_reports.is_empty() => "stale header cleared by the acknowledged two-zero flush; the move should be at e, not before",
             Some(true) => "stale-header prerequisite established",
             None => "no timed header was left (the control case)",
         };
-        println!(
-            "D9 P5 first burst {case}: previous timed header {old_header:?}, new instant e = {e} (header ≥ e: {established:?}) — {verdict}; the DUC shift {dsp} given at {given} (burst at {start}, e = start + 20 ms); untimed end-of-burst after the reopen: {cleared:?}; {moves}; median before e {:?}, after e + 5 ms {:?} Hz; tx {reports:?}",
-            median_freq(&freqs, start + TICKS_PER_MS, e),
-            median_freq(&freqs, e + 5 * TICKS_PER_MS, start + 60 * TICKS_PER_MS),
-        );
-        device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
+        println!("D9 P5 first burst {}: previous timed header {:?}, new instant e = {} (header ≥ e: {established:?}) — {verdict}; DUC shift {}; flush tx {:?}; {}; tx {:?}",
+            result.case.label(), result.old_header, result.e, result.dsp, result.flush_reports,
+            tone_verdict(&report), result.reports);
     }
-}
-
-/// The samples `range` of a transmit burst that began at `start`, in 2 000-sample (2 ms) sends
-/// each timed at its own first sample, as design note 42's R4 would send them; `first` starts the
-/// burst with the first send and `last` ends it with the last; returns the tick after the last
-/// queued sample.
-fn timed_chunks(device: &dyn Device, start: i64, tone: &[ezsdr_radio_uhd::Iq], range: std::ops::Range<usize>, first: bool, last: bool) -> i64 {
-    let (mut k, to) = (range.start, range.end);
-    while k < to {
-        let n = 2_000.min(to - k);
-        let eob = last && k + n == to;
-        device.tx_send(0, &[&tone[k..k + n]], Some(start + k as i64 * 200), first && k == 0, eob, Wall::from_secs(2)).unwrap();
-        k += n;
-    }
-    start + to as i64 * 200
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p6_every_chunk_timed() {
-    // R4: a 60 ms burst in 2 ms sends, every send timed, a DUC shift due 20 ms in (given before
-    // the burst, and given 3 ms before it). Where does the tone move, and what do the reports say?
-    // Then the burst is starved on purpose: the last queued sample's end is recorded, the device's
-    // time is waited past it, and the continuation is sent timed; an Underflow in the reports
-    // makes the recovery observed, otherwise it is unverified.
-    let device = raw_uhd();
-    raw_rx(&*device, 1e6, 1e9);
-    raw_tx(&*device, 1e6, 1e9);
     assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 - 50e3 + 100e3)));
+    let device = raw_uhd();
     let chan = d9_channel();
-    let tone = tone_1msps(60_000);
-    for case in ["given before the burst", "given 3 ms before e"] {
-        device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
-        device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
-        let mut log = vec![format!("untimed end-of-burst {:?}", untimed_end_of_burst(&*device))];
-        let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
-        let e = start + 20 * TICKS_PER_MS;
-        device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
-        if case.starts_with("given before") {
-            log.push(format!("dsp {} at {}", device.tune_dsp(Dir::Tx, chan, 50e3, Some(e)).unwrap(), device.time_now().unwrap()));
-            timed_chunks(&*device, start, &tone, 0..60_000, true, true);
-        } else {
-            timed_chunks(&*device, start, &tone, 0..25_000, true, false);
-            while device.time_now().unwrap() < e - 3 * TICKS_PER_MS {
-                std::thread::sleep(Wall::from_micros(200));
-            }
-            log.push(format!("dsp {} at {}", device.tune_dsp(Dir::Tx, chan, 50e3, Some(e)).unwrap(), device.time_now().unwrap()));
-            timed_chunks(&*device, start, &tone, 25_000..60_000, false, true);
-        }
-        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= start + 60 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
-        let _ = drain(&*device);
-        let reports = flush_tx(&*device);
-        let freqs = tone_freqs(&got.samples);
-        let moves = tone_verdict(&classify_tone(&got.samples, start, start + 60 * TICKS_PER_MS, e, 100e3));
-        println!(
-            "D9 P6 {case}: e = start + 20 ms; {moves}; median before e {:?}, after e + 5 ms {:?} Hz; {log:?}; tx {reports:?}",
-            median_freq(&freqs, start + TICKS_PER_MS, e),
-            median_freq(&freqs, e + 5 * TICKS_PER_MS, start + 60 * TICKS_PER_MS),
-        );
+    let mut tune = |dir, channel, hz, at| device.tune_dsp(dir, channel, hz, at);
+    let (results, starvation) = common::d9::p6_every_chunk_timed(&*device, chan, &mut tune);
+    for result in results {
+        let report = classify_tone(&result.capture.samples, result.start, result.start + 60 * TICKS_PER_MS, result.e, 100e3);
+        println!("D9 P6 {}: e = start + 20 ms; {}; DUC {}; tx {:?}", result.case, tone_verdict(&report), result.dsp, result.reports);
     }
-    // Starvation: 20 ms queued, nothing sent until the device's time passes their end, then the rest timed.
-    device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
-    let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
-    device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
-    // The loop's tone is about 0.002, so the threshold is half the median of |I| + |Q| over the queued part itself.
-    let queued_end = timed_chunks(&*device, start, &tone, 0..20_000, true, false);
-    while device.time_now().unwrap() < queued_end + 5 * TICKS_PER_MS {
-        std::thread::sleep(Wall::from_micros(200));
-    }
-    let resumed_at = device.time_now().unwrap();
-    // The continuation is timed at the sample after the last queued one, which the device's time has passed.
-    let next = queued_end;
-    let resumed = device.tx_send(0, &[&tone[20_000..22_000]], Some(next), false, true, Wall::from_secs(2));
-    let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= resumed_at + 5 * TICKS_PER_MS));
-    device.rx_stop(0, None).unwrap();
-    let _ = drain(&*device);
-    let reports = flush_tx(&*device);
-    let recovery = if reports.iter().any(|r| r.contains("Underflow")) { "observed" } else { "UNVERIFIED: no Underflow was reported" };
-    let loopback = match continuation_in_loopback(&got.samples, start, queued_end, next) {
-        Ok(n) => format!("{n} samples over half the queued part's median |I| + |Q|, from 100 samples after {next}"),
-        Err(why) => why,
-    };
-    println!(
-        "D9 P6 starvation: the last queued sample ended at {queued_end}; the continuation (timed at {next}) was sent after the device's time passed it, at {resumed_at}: {resumed:?}; tx {reports:?}; tx recovery {recovery}; receive errors {:?}; the continuation's samples in the loopback: {loopback}",
-        got.other,
-    );
-    device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
+    let loopback = continuation_in_loopback(&starvation.capture.samples, starvation.start, starvation.queued_end, starvation.queued_end)
+        .map_or_else(|why| why, |n| format!("{n} samples over half the queued part's median |I| + |Q|"));
+    println!("D9 P6 starvation: queued end {}; timed continuation at {} sent at {}: {:?}; tx {:?}; continuation loopback: {loopback}; receive errors {:?}",
+        starvation.queued_end, starvation.queued_end, starvation.resumed_at, starvation.send, starvation.reports, starvation.capture.other);
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p7_the_current_transmit_shape() {
-    // F3': uhd-tx's shape today — the first send of a device burst timed, the following 2 ms
-    // sends not — with the same DUC shift due 20 ms in. For comparison with P6.
     let device = raw_uhd();
-    raw_rx(&*device, 1e6, 1e9);
-    raw_tx(&*device, 1e6, 1e9);
     assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 - 50e3 + 100e3)));
     let chan = d9_channel();
-    let tone = tone_1msps(60_000);
-    device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
-    device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
-    let cleared = untimed_end_of_burst(&*device);
-    let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
-    let e = start + 20 * TICKS_PER_MS;
-    device.rx_start(0, start - 5 * TICKS_PER_MS).unwrap();
-    let dsp = device.tune_dsp(Dir::Tx, chan, 50e3, Some(e)).unwrap();
-    device.tx_send(0, &[&tone[..2_000]], Some(start), true, false, Wall::from_secs(2)).unwrap();
-    let mut k = 2_000;
-    while k < 60_000 {
-        let n = 2_000.min(60_000 - k);
-        device.tx_send(0, &[&tone[k..k + n]], None, false, k + n == 60_000, Wall::from_secs(2)).unwrap();
-        k += n;
-    }
-    let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= start + 60 * TICKS_PER_MS));
-    device.rx_stop(0, None).unwrap();
-    let _ = drain(&*device);
-    let reports = flush_tx(&*device);
-    let freqs = tone_freqs(&got.samples);
-    let moves = tone_verdict(&classify_tone(&got.samples, start, start + 60 * TICKS_PER_MS, e, 100e3));
-    println!(
-        "D9 P7 current shape: dsp {dsp}; untimed end-of-burst {cleared:?}; e = start + 20 ms; {moves}; median before e {:?}, after e + 5 ms {:?} Hz; tx {reports:?}",
-        median_freq(&freqs, start + TICKS_PER_MS, e),
-        median_freq(&freqs, e + 5 * TICKS_PER_MS, start + 60 * TICKS_PER_MS),
-    );
-    device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
+    let mut tune = |dir, channel, hz, at| device.tune_dsp(dir, channel, hz, at);
+    let result = common::d9::p7_untimed_continuations(&*device, chan, &mut tune);
+    let report = classify_tone(&result.capture.samples, result.start, result.start + 60 * TICKS_PER_MS, result.e, 100e3);
+    println!("D9 P7 current shape: DUC {}; e = start + 20 ms; {}; tx {:?}", result.dsp, tone_verdict(&report), result.reports);
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d70_one_sample_burst_then_timed_burst() {
-    // #70's direct probe: an untimed one-sample burst (SOB and EOB in one send), then a 30 ms tone
-    // burst timed at `start`. If the X3x0 DUC takes the one sample for a burst still open, the tone
-    // loses its time and plays as soon as it is queued, about the lead before `start`; the control
-    // primes with `untimed_end_of_burst`'s two zero samples instead. Diagnostic: both cases run and
-    // print the tone's start and the reports, and no time is asserted.
     let device = raw_uhd();
-    raw_rx(&*device, 1e6, 1e9);
-    raw_tx(&*device, 1e6, 1e9);
     assert!(SAFE_TX_HZ.contains(&(1e9 + 100e3)));
     let chan = d9_channel();
-    let tone = tone_1msps(30_000);
-    for case in ["one-sample burst", "two-zero-sample end burst"] {
-        device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
-        device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
-        let rx_at = (device.time_now().unwrap() / 200 + 20_000) * 200;
-        device.rx_start(0, rx_at).unwrap();
-        while device.time_now().unwrap() < rx_at + TICKS_PER_MS {
-            std::thread::sleep(Wall::from_micros(200));
-        }
-        // The priming burst: the one zero sample #70 names, or the two of `untimed_end_of_burst`.
-        let primed = if case.starts_with("one") {
-            let zero = [ezsdr_radio_uhd::Iq::default()];
-            device.tx_send(0, &[&zero], None, true, true, Wall::from_secs(1)).unwrap();
-            std::thread::sleep(Wall::from_millis(10));
-            flush_tx(&*device)
-        } else {
-            untimed_end_of_burst(&*device)
-        };
-        let start = (device.time_now().unwrap() / 200 + 150_000) * 200;
-        device.tx_send(0, &[&tone], Some(start), true, true, Wall::from_secs(2)).unwrap();
-        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= start + 40 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
-        let _ = drain(&*device);
-        let reports = flush_tx(&*device);
-        // The noise before the priming send, and the first tone window after it: its ticks from the time
-        // the tone burst carries, which an early start makes negative by about the lead.
-        let floor = window_power(&got.samples, rx_at + TICKS_PER_MS, rx_at + 8 * TICKS_PER_MS);
-        let starts = floor.and_then(|floor| tone_start(&got.samples, rx_at, floor)).map(|t| (t - start) as f64 / 200.0);
-        println!(
-            "D70 {case}: tone starts at {starts:?} µs from its timed start; priming tx {primed:?}; tx {reports:?}; receive errors {:?}",
-            got.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>(),
-        );
+    let mut tune = |dir, channel, hz, at| device.tune_dsp(dir, channel, hz, at);
+    for result in common::d9::d70_one_sample_then_two(&*device, chan, &mut tune) {
+        let floor = window_power(&result.capture.samples, result.rx_at + TICKS_PER_MS, result.rx_at + 8 * TICKS_PER_MS);
+        let starts = floor.and_then(|floor| tone_start(&result.capture.samples, result.rx_at, floor)).map(|t| (t - result.start) as f64 / common::d9::SAMPLE_TICKS as f64);
+        println!("D70 {}: tone starts at {starts:?} µs from its timed start; priming tx {:?}; tx {:?}; receive errors {:?}",
+            result.case, result.priming_reports, result.reports,
+            result.capture.other.iter().filter(|(_, outcome)| outcome != "Timeout").collect::<Vec<_>>());
     }
-    device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
 }
 
 // ---------------------------------------------------------------- beyond bench.md: rates, delay, endurance

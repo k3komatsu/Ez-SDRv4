@@ -838,9 +838,8 @@ mod tests {
 
     #[test]
     fn ur_13_arm_radiates_nothing() {
-        // UR-13 (MA-13): `arm` opens the transmit streamer and radiates nothing — no first
-        // buffer, no start of burst and no empty end of burst; the device's own log holds the
-        // open alone.
+        // UR-13 (MA-13): `arm` sends only T3's two-zero flush and consumes its BurstAck; it
+        // does not send any sample-bearing experiment burst.
         let binding: Binding = serde_json::from_value(json!({
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
@@ -850,7 +849,7 @@ mod tests {
         let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
         radio.prepared = Some(Prepared {
-            core,
+            core: core.clone(),
             actions: Arc::new(NoActions),
             config: BTreeMap::new(),
             rx: Vec::new(),
@@ -858,8 +857,35 @@ mod tests {
         });
         radio.arm().expect("arm");
         let calls = device.calls();
-        assert!(!calls.iter().any(|call| call.starts_with("tx_send")), "arm radiated: {calls:?}");
+        let sends: Vec<_> = calls.iter().filter(|call| call.starts_with("tx_send")).collect();
+        assert_eq!(sends, [&"tx_send 0 n=2 at=- sob=true eob=true"], "arm sends only its untimed T3 flush: {calls:?}");
+        assert!(calls.iter().position(|call| call.starts_with("tx_open")).unwrap()
+            < calls.iter().position(|call| call.starts_with("tx_send")).unwrap());
+        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] == true).count(), 1,
+            "the opener consumes the flush acknowledgement");
         assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the transmit streamer's open: {calls:?}");
+    }
+
+    #[test]
+    fn ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp() {
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig {
+            clock: ClockMode::Manual, ..FakeConfig::default()
+        }));
+        let (core, _, _) = test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
+        })).unwrap();
+        let mut radio = UhdRadio::from_binding(&binding, spy.clone()).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root,
+            ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
+        radio.prepared = Some(Prepared {
+            core: core.clone(), actions: Arc::new(NoActions), config: BTreeMap::new(), rx: Vec::new(),
+            tx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }],
+        });
+        super::core::assert_tx_open_flush_barrier(core, spy, move || { radio.arm().unwrap(); });
     }
 
     #[test]

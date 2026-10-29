@@ -294,12 +294,14 @@ pub enum FakeFault {
     RxPanic(Duration),
     /// `rx_recv` returns only `Timeout`.
     Silence(Duration),
-    /// Every `tx_send` blocks forever.
+    /// Every timed `tx_send` blocks forever.
     TxBlocks,
     /// Every `tx_send` takes this long before the device sees it.
     SlowSend(Duration),
     /// An asynchronous transmit report.
     TxReport(Duration, TxCode),
+    /// Suppress every TX BurstAck, to exercise the bounded open-time flush.
+    DropBurstAck,
     /// Every call fails with `lost: true`.
     Lost(Duration),
     /// `time_now` fails without the device being lost.
@@ -358,6 +360,10 @@ pub enum FakeFault {
     /// The first `rx_open` is refused, once: uhd-control's enable from no stream fails at its
     /// open, before any rate comparison (UR-25).
     RxOpenFails,
+    /// The `nth` `tx_open` (0-based) is refused, once (UR-22 reopen failure).
+    TxOpenFails(usize),
+    /// The `nth` device `rates` read (0-based) reports a non-profile set, once (UR-13 post-open check).
+    RatesMismatch(usize),
     /// The first receive `apply` is refused, once: uhd-control's configuration of an enable
     /// from no stream fails after its open (UR-13).
     RxApplyFails,
@@ -527,14 +533,20 @@ struct Dsp {
     log: Vec<(i64, f64, bool)>,
     /// The device ticks at which samples pass the chain, as `(start, end)`, `end` none while
     /// the stream runs: radio rate for a DDC, after interpolation for a DUC.
-    flows: Vec<(i64, Option<i64>)>,
+    flows: Vec<(i64, Option<i64>, i64)>,
     /// Ticks before it have been looked at.
     cursor: i64,
+    /// Last DUC header time, retained across streamer close/reopen (F7).
+    tx_header: Option<i64>,
+    tx_header_stale: bool,
 }
 
 impl Dsp {
     fn new(initial: f64) -> Dsp {
-        Dsp { initial, fifo: VecDeque::new(), log: Vec::new(), flows: Vec::new(), cursor: i64::MIN }
+        Dsp {
+            initial, fifo: VecDeque::new(), log: Vec::new(), flows: Vec::new(), cursor: i64::MIN,
+            tx_header: None, tx_header_stale: false,
+        }
     }
 }
 
@@ -568,7 +580,7 @@ fn freq_constant(st: &Fake, dir: Dir, chan: usize, from: i64, to: i64) -> Option
 fn open_flow(st: &mut Fake, dir: Dir, channels: &[usize], at: i64) {
     for chan in channels {
         if let Some(chain) = dsp_of(st, dir, *chan) {
-            chain.flows.push((at, None));
+            chain.flows.push((at, None, at));
         }
     }
 }
@@ -578,33 +590,178 @@ fn open_flow(st: &mut Fake, dir: Dir, channels: &[usize], at: i64) {
 fn close_flow(st: &mut Fake, dir: Dir, channels: &[usize], now: i64) {
     for chan in channels {
         if let Some(chain) = dsp_of(st, dir, *chan) {
-            chain.flows = std::mem::take(&mut chain.flows).into_iter().filter_map(|(start, end)| match end {
+            chain.flows = std::mem::take(&mut chain.flows).into_iter().filter_map(|(start, end, logical)| match end {
                 None if start >= now => None,
-                None => Some((start, Some(now))),
-                end => Some((start, end)),
+                None => Some((start, Some(now), logical)),
+                end => Some((start, end, logical)),
             }).collect();
         }
     }
 }
 
-/// One open transmit streamer of the fake (UR-33): its own channel list, timeline and
-/// report queue (UHD's asynchronous reports are per streamer).
+fn stale_tx_header(st: &mut Fake, channels: &[usize]) {
+    for chan in channels {
+        if let Some(chain) = dsp_of(st, Dir::Tx, *chan) {
+            chain.tx_header_stale |= chain.tx_header.is_some();
+        }
+    }
+}
+
+fn clear_tx_header(st: &mut Fake, channels: &[usize]) {
+    for chan in channels {
+        if let Some(chain) = dsp_of(st, Dir::Tx, *chan) {
+            chain.tx_header = None;
+            chain.tx_header_stale = false;
+            chain.cursor = i64::MIN;
+        }
+    }
+}
+
+/// The DUC consumes input packets and their EOBs before the downstream radio sees them.
+struct Duc {
+    burst: bool,
+    has_time: bool,
+    time: Option<i64>,
+    /// A one-sample EOB can be lost by the X3x0 DUC, leaving its next timed header ignored.
+    eob_lost: bool,
+}
+
+impl Duc {
+    fn packet(&mut self, at: Option<i64>, sob: bool, eob: bool, n: usize, ratio: i64, stale_header: Option<i64>) -> DucPacket {
+        let was_burst = self.burst;
+        let ignored_header = self.eob_lost;
+        let radio_time = if ignored_header { None } else if was_burst { self.time } else { at };
+        let lost_eob = eob && n == 1 && (sob || !was_burst);
+
+        if ignored_header {
+            if sob {
+                self.has_time = false;
+                self.time = None;
+            }
+        } else if !self.burst {
+            self.burst = true;
+            self.has_time = radio_time.is_some();
+            self.time = radio_time.map(|t| t.max(stale_header.unwrap_or(t)));
+        }
+
+        let logical_start = self.time;
+        let timed = self.has_time && n > 0;
+        if timed {
+            self.time = logical_start.map(|t| t.saturating_add(n as i64 * ratio));
+        }
+        if at.is_none() {
+            self.has_time = false;
+            self.time = None;
+        }
+        if lost_eob {
+            self.eob_lost = true;
+        } else if eob {
+            self.burst = false;
+            self.has_time = false;
+            self.time = None;
+            self.eob_lost = false;
+        }
+
+        DucPacket { radio_time, logical_start, timed, was_burst, ignored_header, lost_eob,
+            clear_header: eob && !lost_eob && at.is_none(), n, ratio, sob, eob }
+    }
+}
+
+/// One open transmit streamer of the fake (UR-33): the DUC and downstream radio have
+/// independent state; the radio owns UHD's per-stream asynchronous report queue.
 struct TxStreamer {
     channels: Vec<usize>,
-    cursor: i64,
-    /// Whether the open burst's samples still carry a time (the DUC's `has_time`): it starts
-    /// with a timed send and a send without a time ends it until the burst's end (UR-33).
+    duc: Duc,
+    radio: Radio,
+}
+
+struct DucPacket {
+    radio_time: Option<i64>,
+    logical_start: Option<i64>,
     timed: bool,
-    in_burst: bool,
-    dropped: bool,
-    /// The open burst ran out of samples and was reported (UR-33: an underflow).
-    starved: bool,
+    was_burst: bool,
+    ignored_header: bool,
+    lost_eob: bool,
+    clear_header: bool,
+    n: usize,
+    ratio: i64,
+    sob: bool,
+    eob: bool,
+}
+
+struct Radio {
+    cursor: i64,
+    active: bool,
     reports: VecDeque<TxReport>,
+}
+
+impl Radio {
+    fn packet(
+        &mut self,
+        packet: &DucPacket,
+        now: i64,
+        channel_count: usize,
+        drop_ack: bool,
+        unended: &mut u64,
+        restarts: &mut u64,
+    ) -> Option<(i64, i64)> {
+        if self.active && packet.n > 0 && now > self.cursor {
+            self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(self.cursor), channel: 0 });
+            self.active = false;
+        }
+        if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {
+            let tick = packet.radio_time.map(|t| t.max(now));
+            for channel in 0..channel_count {
+                self.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });
+            }
+            return None;
+        }
+        if !self.active {
+            self.cursor = packet.radio_time.unwrap_or(self.cursor.max(now));
+        }
+        if packet.sob {
+            if packet.radio_time.is_some() && self.active && packet.was_burst && !packet.ignored_header {
+                *unended += 1;
+            }
+            if packet.ignored_header {
+                self.cursor = self.cursor.max(now);
+                self.active = true;
+            } else {
+                match packet.radio_time {
+                    Some(_) => {}
+                    None if self.active => *restarts += 1,
+                    None => {}
+                }
+                self.active = true;
+            }
+        } else {
+            self.active = true;
+        }
+        if packet.n > 0 {
+            self.cursor = self.cursor.max(now);
+        }
+        let start = self.cursor;
+        self.cursor = start + packet.n as i64 * packet.ratio;
+        if packet.eob && !packet.lost_eob {
+            let tick = Some(self.cursor.saturating_sub(packet.ratio));
+            if !drop_ack {
+                for channel in 0..channel_count {
+                    self.reports.push_back(TxReport { code: TxCode::BurstAck, tick, channel });
+                }
+            }
+            self.active = false;
+        }
+        Some((start, self.cursor))
+    }
 }
 
 impl TxStreamer {
     fn new(channels: Vec<usize>) -> TxStreamer {
-        TxStreamer { channels, cursor: i64::MIN, timed: false, in_burst: false, dropped: false, starved: false, reports: VecDeque::new() }
+        TxStreamer {
+            channels,
+            duc: Duc { burst: false, has_time: false, time: None, eob_lost: false },
+            radio: Radio { cursor: i64::MIN, active: false, reports: VecDeque::new() },
+        }
     }
 }
 
@@ -636,6 +793,8 @@ struct Fake {
     tx_samples: BTreeMap<usize, BTreeMap<i64, (i64, Vec<Iq>)>>,
     /// The `tx_send` calls carrying samples so far (`FakeFault::ShortSend`).
     tx_sends: usize,
+    tx_opens: usize,
+    rate_reads: usize,
     restarts: u64,
     unended: u64,
     fired: Vec<bool>,
@@ -707,6 +866,8 @@ impl FakeDevice {
                 rx_min_timeout: Duration::MAX,
                 tx_samples: BTreeMap::new(),
                 tx_sends: 0,
+                tx_opens: 0,
+                rate_reads: 0,
                 restarts: 0,
                 unended: 0,
                 fired,
@@ -910,27 +1071,28 @@ impl FakeDevice {
             while let Some(&(instant, freq)) = chain.fifo.front() {
                 let want = instant.max(chain.cursor);
                 let mut at = None;
-                for (start, end) in &chain.flows {
-                    let tick = want.max(*start);
+                for (start, end, logical) in &chain.flows {
+                    let logical_tick = want.max(*logical);
+                    let tick = start.saturating_add(logical_tick.saturating_sub(*logical));
                     if end.is_some_and(|end| tick >= end) {
                         continue;
                     }
                     if tick <= now {
-                        at = Some(tick);
+                        at = Some((logical_tick, tick));
                     }
                     break;
                 }
-                let Some(tick) = at else { break };
+                let Some((logical_tick, tick)) = at else { break };
                 chain.fifo.pop_front();
                 chain.log.push((tick, freq, true));
-                chain.cursor = tick + 1;
+                chain.cursor = logical_tick.saturating_add(1);
                 if let Some(chan) = spec[*dir].iter().position(|entry| entry == dest) {
                     settings[*dir][chan].freq = freq;
                 }
             }
             // Intervals wholly past are no longer needed: a command given from now on is due no
             // earlier than now.
-            chain.flows.retain(|(_, end)| end.is_none_or(|end| end > now));
+            chain.flows.retain(|(_, end, _)| end.is_none_or(|end| end > now));
         }
     }
 
@@ -1119,6 +1281,12 @@ impl Device for FakeDevice {
         if chan >= st.spec[dir as usize].len() {
             return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
         }
+        let nth = st.rate_reads;
+        st.rate_reads += 1;
+        if let Some(index) = self.config.faults.iter().position(|fault| *fault == FakeFault::RatesMismatch(nth)).filter(|index| !st.fired[*index]) {
+            st.fired[index] = true;
+            return Ok(vec![(1.0, 1.0, 0.0)]);
+        }
         if self.config.rates_before_open && !st.opened[dir as usize].contains(&chan) {
             // INFERRED (design 33 D5): UHD's X3x0 reports `[1.0, 1.0, 0.0]` before the
             // DDC's chain is connected; BP0 measures the hardware.
@@ -1156,9 +1324,12 @@ impl Device for FakeDevice {
         st.commands.clear();
         st.last_command = i64::MIN;
         for streamer in st.tx.values_mut() {
-            streamer.cursor = i64::MIN;
-            streamer.in_burst = false;
-            streamer.dropped = false;
+            streamer.radio.cursor = i64::MIN;
+            streamer.radio.active = false;
+            streamer.duc.burst = false;
+            streamer.duc.has_time = false;
+            streamer.duc.time = None;
+            streamer.duc.eob_lost = false;
         }
         st.tx_samples.clear();
         for streamer in st.rx.values_mut() {
@@ -1667,12 +1838,20 @@ impl Device for FakeDevice {
         let mut st = self.lock();
         self.lost(&st)?;
         st.calls.push(format!("tx_open {stream} {channels:?}"));
+        let nth = st.tx_opens;
+        st.tx_opens += 1;
         // As on the receive side: an empty channel list is channel 0 (UR-33).
         let channels: &[usize] = if channels.is_empty() { &[0] } else { channels };
         // As on the receive side, this stream's old streamer goes before the new one is
         // made, and the graph refuses a second streamer on one front end: "Attempting to
         // reconnect input port!" (`graph.cpp:188-197`; UR-33).
-        st.tx.remove(&stream);
+        if let Some(old) = st.tx.remove(&stream) {
+            stale_tx_header(&mut st, &old.channels);
+        }
+        if let Some(index) = self.config.faults.iter().position(|fault| *fault == FakeFault::TxOpenFails(nth)).filter(|index| !st.fired[*index]) {
+            st.fired[index] = true;
+            return Err(DeviceError::failed("fake: scripted refusal of transmit open"));
+        }
         let mut seen: Vec<usize> = Vec::new();
         for chan in channels {
             if chan >= &st.spec[Dir::Tx as usize].len() {
@@ -1709,7 +1888,7 @@ impl Device for FakeDevice {
             self.host.sleep(timeout.min(Duration::from_millis(100)));
             return Ok(0);
         }
-        if self.config.faults.contains(&FakeFault::TxBlocks) {
+        if at.is_some() && self.config.faults.contains(&FakeFault::TxBlocks) {
             loop {
                 // A permanent host stop, not a clock wait: the participant stays busy and
                 // the manual clock stays frozen (the wedged test keeps the real clock).
@@ -1780,6 +1959,18 @@ impl Device for FakeDevice {
                 .and_then(|streamer| streamer.channels.first().copied())
                 .and_then(|chan| st.settings[1].get(chan))
                 .map_or(1, |channel| self.ratio(channel.rate));
+            let channels = st.tx.get(&stream).map(|streamer| streamer.channels.clone())
+                .ok_or_else(|| DeviceError::failed(format!("fake: transmit stream {stream} is not open")))?;
+            let mut stale_header = None;
+            if sob && at.is_some() {
+                for chan in &channels {
+                    if let Some(chain) = dsp_of(&mut st, Dir::Tx, *chan) {
+                        if chain.tx_header_stale {
+                            stale_header = chain.tx_header.max(stale_header);
+                        }
+                    }
+                }
+            }
             let Fake { tx, tx_samples, restarts, unended, calls, .. } = &mut *st;
             calls.push(format!(
                 "tx_send {stream} n={n} at={} sob={sob} eob={eob}",
@@ -1788,83 +1979,49 @@ impl Device for FakeDevice {
             let Some(streamer) = tx.get_mut(&stream) else {
                 return Err(DeviceError::failed(format!("fake: transmit stream {stream} is not open")));
             };
-            if sob {
-                if at.is_some() && streamer.in_burst {
-                    *unended += 1;
-                }
-                match at {
-                    // At the end of the samples queued is late too: the X300 reports a
-                    // timed start-of-burst at the tick its previous burst ended as late
-                    // and drops it (design-notes §11 F3).
-                    Some(t) if t < now || t <= streamer.cursor => {
-                        // The X300 reports a tick at or after the late start (Review N, N2).
-                        let tick = Some(t.max(now));
-                        for channel in 0..streamer.channels.len() {
-                            streamer.reports.push_back(TxReport { code: TxCode::TimeError, tick, channel });
+            // The DUC consumes samples and its EOB before the downstream radio applies packet
+            // policy. A rejected packet still advances or ends this upstream burst.
+            let packet = streamer.duc.packet(at, sob, eob, n, ratio, stale_header);
+            let radio_interval = streamer.radio.packet(
+                &packet, now, channels.len(),
+                self.config.faults.contains(&FakeFault::DropBurstAck), unended, restarts,
+            );
+            if let Some((start, _)) = radio_interval {
+                if n > 0 {
+                    for (position, chan) in channels.iter().enumerate() {
+                        if let Some(samples) = samples.get(position) {
+                            tx_samples.entry(*chan).or_default().insert(start, (ratio, samples.to_vec()));
                         }
-                        streamer.dropped = true;
-                        streamer.in_burst = false;
-                        return Ok(n);
-                    }
-                    Some(t) => streamer.cursor = t,
-                    None if streamer.in_burst => *restarts += 1,
-                    None => streamer.cursor = streamer.cursor.max(now),
-                }
-                streamer.in_burst = true;
-                streamer.dropped = false;
-                streamer.starved = false;
-                // The DUC's `has_time` begins with the burst's first send (UR-33).
-                streamer.timed = at.is_some();
-            } else if streamer.dropped {
-                return Ok(n);
-            } else if !streamer.in_burst {
-                streamer.cursor = streamer.cursor.max(now);
-                streamer.in_burst = true;
-            }
-            // A send without a time ends it until the burst's end, and a later timed send does
-            // not bring it back (`axi_rate_change.v:396-433`).
-            if !sob && at.is_none() {
-                streamer.timed = false;
-            }
-            if streamer.in_burst && n > 0 && now > streamer.cursor && !streamer.starved {
-                // The burst ran dry before these samples came (UR-33: an underflow).
-                let tick = Some(streamer.cursor);
-                streamer.reports.push_back(TxReport { code: TxCode::Underflow, tick, channel: 0 });
-            }
-            if n > 0 && streamer.in_burst {
-                streamer.cursor = streamer.cursor.max(now);
-                streamer.starved = false;
-            }
-            let start = streamer.cursor;
-            if n > 0 {
-                for (position, chan) in streamer.channels.iter().enumerate() {
-                    if let Some(samples) = samples.get(position) {
-                        tx_samples.entry(*chan).or_default().insert(start, (ratio, samples.to_vec()));
                     }
                 }
             }
-            streamer.cursor = start + n as i64 * ratio;
-            let passing = (streamer.timed && n > 0).then(|| (start, streamer.cursor, streamer.channels.clone()));
-            if eob {
-                let tick = Some(streamer.cursor);
-                for channel in 0..streamer.channels.len() {
-                    streamer.reports.push_back(TxReport { code: TxCode::BurstAck, tick, channel });
-                }
-                streamer.in_burst = false;
-                streamer.timed = false;
-            }
-            let cursor = streamer.cursor;
-            // UR-33: a timed burst's samples pass each DUC at their own ticks, where a command
-            // given for them is taken.
-            if let Some((from, to, channels)) = passing {
-                for chan in channels {
-                    if let Some(chain) = dsp_of(&mut st, Dir::Tx, chan) {
-                        chain.flows.push((from, Some(to)));
-                    }
-                }
-            }
-            cursor
+            let passing = (packet.timed && n > 0).then(|| {
+                let (from, to) = radio_interval.unwrap_or_else(|| {
+                    let from = packet.radio_time.unwrap_or(now);
+                    (from, from + n as i64 * ratio)
+                });
+                (from, to, packet.logical_start.unwrap_or(from), channels.clone())
+            });
+            (streamer.radio.cursor, passing, packet.clear_header, channels, radio_interval.is_some())
         };
+        let (cursor, passing, clear_header, channels, accepted) = cursor;
+        // Record DUC sample flow even when radio policy drops its packet.
+        if let Some((from, to, logical, channels)) = passing {
+            let mut st = self.lock();
+            for chan in channels {
+                if let Some(chain) = dsp_of(&mut st, Dir::Tx, chan) {
+                    chain.flows.push((from, Some(to), logical));
+                    chain.tx_header = Some(logical.saturating_add(to.saturating_sub(from)));
+                    chain.tx_header_stale = false;
+                }
+            }
+        }
+        if clear_header {
+            clear_tx_header(&mut self.lock(), &channels);
+        }
+        if !accepted {
+            return Ok(n);
+        }
         // Flow control: at most 50 ms ahead of the device's time (UR-33).
         let deadline = self.host.now() + timeout;
         loop {
@@ -1885,57 +2042,64 @@ impl Device for FakeDevice {
     }
 
     fn tx_async(&self, stream: usize, timeout: Duration) -> Result<Option<TxReport>, DeviceError> {
-        {
+        let deadline = self.host.now() + timeout;
+        loop {
+            let wait = {
             let mut st = self.lock();
             // As on `UhdDevice`, no streamer means no call, and no call fails; its queue is
             // the streamer's, so there is none to read (UR-33).
-            if st.tx.contains_key(&stream) {
-                self.lost(&st)?;
-                let now = self.now(&st);
-                for fault in &self.config.faults {
-                    if let FakeFault::TxAsyncFails(at, lost) = fault {
-                        if now >= self.ticks_of(*at) {
-                            return Err(DeviceError { lost: *lost, message: "fake: uhd_tx_streamer_recv_async_msg failed".to_owned() });
-                        }
+            if !st.tx.contains_key(&stream) {
+                drop(st);
+                if !timeout.is_zero() { self.host.sleep(timeout); }
+                return Ok(None);
+            }
+            self.lost(&st)?;
+            let now = self.now(&st);
+            for fault in &self.config.faults {
+                if let FakeFault::TxAsyncFails(at, lost) = fault {
+                    if now >= self.ticks_of(*at) {
+                        return Err(DeviceError { lost: *lost, message: "fake: uhd_tx_streamer_recv_async_msg failed".to_owned() });
                     }
-                }
-                let mut scripted = Vec::new();
-                for (index, fault) in self.config.faults.iter().enumerate() {
-                    if let FakeFault::TxReport(at, code) = fault {
-                        if self.due(&st, index, *at) {
-                            st.fired[index] = true;
-                            scripted.push(*code);
-                        }
-                    }
-                }
-                let now = self.now(&st);
-                let streamer = st.tx.get_mut(&stream).expect("checked");
-                for code in scripted {
-                    streamer.reports.push_back(TxReport { code, tick: Some(now), channel: 0 });
-                }
-                if streamer.in_burst && !streamer.dropped && !streamer.starved && now > streamer.cursor {
-                    // The open burst ran out of samples before its end-of-burst (UR-33).
-                    streamer.starved = true;
-                    let tick = Some(streamer.cursor);
-                    streamer.reports.push_back(TxReport { code: TxCode::Underflow, tick, channel: 0 });
-                }
-                // In order, and a burst's acknowledgement only once its end has played: the
-                // device sends it then, and judges a later burst only after it
-                // (`radio_tx_core.v:348–374`), so that burst's report waits behind (Review Q,
-                // TG-Q1).
-                let due = streamer.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now));
-                if due {
-                    return Ok(streamer.reports.pop_front());
                 }
             }
+            let mut scripted = Vec::new();
+            for (index, fault) in self.config.faults.iter().enumerate() {
+                if let FakeFault::TxReport(at, code) = fault {
+                    if self.due(&st, index, *at) {
+                        st.fired[index] = true;
+                        scripted.push(*code);
+                    }
+                }
+            }
+            let now = self.now(&st);
+            let streamer = st.tx.get_mut(&stream).expect("checked");
+            for code in scripted {
+                streamer.radio.reports.push_back(TxReport { code, tick: Some(now), channel: 0 });
+            }
+            if streamer.radio.active && now > streamer.radio.cursor {
+                // The radio went idle at the underflow; the DUC's burst timeline remains live.
+                streamer.radio.active = false;
+                let tick = Some(streamer.radio.cursor);
+                streamer.radio.reports.push_back(TxReport { code: TxCode::Underflow, tick, channel: 0 });
+            }
+            // The EOB ack is timestamped at the last sample's strobe and cannot precede it.
+            if streamer.radio.reports.front().is_some_and(|r| r.code != TxCode::BurstAck || r.tick.is_none_or(|t| t <= now)) {
+                return Ok(streamer.radio.reports.pop_front());
+            }
+            let remaining = deadline.saturating_sub(self.host.now());
+            if remaining.is_zero() { return Ok(None); }
+            let until_ack = streamer.radio.reports.front().and_then(|report| report.tick).filter(|tick| *tick > now)
+                .map(|tick| {
+                    let ticks = (tick - now) as i128;
+                    let nanos = (ticks * 1_000_000_000 + i128::from(self.config.master_clock_rate) - 1)
+                        / i128::from(self.config.master_clock_rate);
+                    Duration::from_nanos(nanos.max(1).min(u64::MAX as i128) as u64)
+                });
+            until_ack.map_or(remaining, |duration| duration.min(remaining))
+            };
+            // A read with no report waits its bound; the open flush's clock can expire it.
+            self.host.sleep(wait);
         }
-        // A read that finds no report waits its timeout, the shutdown's ACK window's
-        // (`Tx::shutdown`): no streamer is no reason for a caller to spin (UR-33, plan 30
-        // §4.7; `Tx::reports`' failed read does the same).
-        if !timeout.is_zero() {
-            self.host.sleep(timeout);
-        }
-        Ok(None)
     }
 
     fn rx_close(&self, stream: usize) {
@@ -1948,7 +2112,9 @@ impl Device for FakeDevice {
     fn tx_close(&self, stream: usize) {
         let mut st = self.lock();
         st.calls.push(format!("tx_close {stream}"));
-        st.tx.remove(&stream);
+        if let Some(old) = st.tx.remove(&stream) {
+            stale_tx_header(&mut st, &old.channels);
+        }
     }
 
     fn close_streams(&self) {
@@ -1960,6 +2126,10 @@ impl Device for FakeDevice {
             self.end_rx_flow(&mut st, stream);
         }
         st.rx.clear();
+        let tx_channels: Vec<Vec<usize>> = st.tx.values().map(|streamer| streamer.channels.clone()).collect();
+        for channels in tx_channels {
+            stale_tx_header(&mut st, &channels);
+        }
         st.tx.clear();
     }
 
@@ -2512,13 +2682,15 @@ mod tests {
             let wave = vec![[0.1f32, 0.0]; 100];
             let now = device.time_now().unwrap();
             device.tx_send(0, &[&wave], Some(now + ms(10)), true, false, Duration::from_secs(1)).unwrap();
-            // A timed start before the queued samples' end is late and dropped.
+            // A timed SOB met while playback is active is not time-checked by the radio core.
             device.tx_send(0, &[&wave], Some(now + ms(10) + 1), true, true, Duration::from_secs(1)).unwrap();
             let mut codes = Vec::new();
             while let Some(report) = device.tx_async(0, Duration::ZERO).unwrap() {
                 codes.push(report.code);
             }
-            assert!(codes.contains(&TxCode::TimeError), "{codes:?}");
+            assert!(!codes.contains(&TxCode::TimeError), "an active burst's timed SOB was checked: {codes:?}");
+            assert_eq!(device.unended_bursts(), 1, "the active device burst was not restarted by SOB");
+            assert_eq!(device.transmitted(now + ms(10), 200), vec![Some(wave[0]); 200], "the active radio timeline continues contiguously");
             // In-order commands: one before a queued one takes effect after it.
             let settings = Settings { freq: Some(2e9), ..Settings::default() };
             device.apply(Dir::Rx, 0, &settings, Some(now + ms(100))).unwrap();
@@ -2617,6 +2789,61 @@ mod tests {
     }
 
     #[test]
+    fn ur_33_a_one_sample_eob_loses_the_next_timed_header() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let zero = [Iq::default()];
+            let first = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            assert_eq!(device.tx_send(0, &[&zero], Some(first), true, true, Duration::from_secs(1)).unwrap(), 1);
+            assert_eq!(device.tx_async(0, Duration::ZERO).unwrap(), None, "the one-sample EOB has no acknowledgement");
+
+            device.set_time(first + 200);
+            device.apply(Dir::Tx, 0, &freq(2e9), Some(first + 200)).unwrap();
+            let target = (device.time_now().unwrap() / 200 + 150_000) * 200;
+            let wave = [[0.25f32, 0.0]; 100];
+            device.tx_send(0, &[&wave], Some(target), true, true, Duration::from_secs(1)).unwrap();
+            let ack = device.tx_async(0, Duration::from_millis(1)).unwrap().expect("the timed packet's EOB is acknowledged");
+            assert_eq!(ack.code, TxCode::BurstAck);
+            let start = ack.tick.unwrap() - (wave.len() as i64 - 1) * 200;
+            assert!(start < target - ms(100), "the lost DUC header made the next timed packet start early: {start} vs {target}");
+            assert_eq!(device.transmitted(start, 1), [Some(wave[0])]);
+            assert_eq!(device.transmitted(target, 1), [None]);
+            assert_eq!(device.dsp_log(Dir::Tx, 0), [], "the lost header keeps the next packet off the old DUC timeline");
+            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "the one-sample EOB must not consume a later timed DUC value");
+        });
+    }
+
+    #[test]
+    fn ur_33_idle_checks_each_tx_packet_and_accepts_a_future_continuation() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = [[0.25f32, 0.0]; 2];
+            let late = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.host().sleep(Duration::from_millis(30));
+            assert!(device.time_now().unwrap() > late + 200);
+
+            device.tx_send(0, &[&wave], Some(late), true, false, Duration::from_secs(1)).unwrap();
+            // The dropped continuation still reaches its DUC EOB; the next no-SOB packet gets a fresh timed header.
+            device.tx_send(0, &[&wave], Some(late + 200), false, true, Duration::from_secs(1)).unwrap();
+            let future = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.tx_send(0, &[&wave], Some(future), false, true, Duration::from_secs(1)).unwrap();
+            while device.time_now().unwrap() < future + 2_000 * 200 {
+                device.host().sleep(Duration::from_millis(1));
+            }
+
+            let mut reports = Vec::new();
+            while let Some(report) = device.tx_async(0, Duration::ZERO).unwrap() { reports.push(report); }
+            assert_eq!(reports.iter().filter(|report| report.code == TxCode::TimeError).count(), 2, "each idle packet has its own late report: {reports:?}");
+            assert_eq!(reports.iter().filter(|report| report.code == TxCode::BurstAck).count(), 1, "the future no-SOB packet starts and closes playback: {reports:?}");
+            assert_eq!(device.transmitted(future, wave.len()), wave.map(Some), "the acceptable future continuation is played");
+        });
+    }
+
+    #[test]
     fn ur_33_a_burst_that_runs_dry_underflows() {
         // The X300 reports an underflow when an open burst runs out of samples before its
         // end-of-burst.
@@ -2637,35 +2864,110 @@ mod tests {
     }
 
     #[test]
-    fn ur_33_a_burst_resumed_after_an_underflow_plays_late() {
-        // UHD 4.10's `radio_tx_core.v`: a burst that runs dry between packets goes idle
-        // (`:359–370`), its next untimed packet plays at once (`:341`, `:347`), and a timed one
-        // whose time has passed is late (`:348–355`). So the rest of the burst is late by the
-        // gap, and a timed start at its scheduled end + 1 sample, before its actual end, is
-        // late. The ticks are the fake's. A host stall only widens the gap.
+    fn ur_33_a_late_continuation_without_eob_advances_the_duc_before_radio_drops_the_next_packet() {
+        // The DUC consumes a late continuation even when radio policy drops it; without its EOB,
+        // the next packet still carries the old sample-count timeline.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
             device.tx_open(0, &[0]).unwrap();
-            let wave = vec![[0.1f32, 0.0]; 1_000];
-            let rest = vec![[0.2f32, 0.0]; 20_000];
-            let t0 = (device.time_now().unwrap() / 200 + 100_000) * 200;
-            let dry = t0 + 1_000 * 200;
+            let first = [[0.1f32, 0.0]; 2];
+            let rest = [[0.2f32, 0.0]; 2];
+            let next = [[0.3f32, 0.0]; 2];
+            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            let dry = t0 + first.len() as i64 * 200;
+            device.apply(Dir::Tx, 0, &freq(2e9), Some(dry + 200)).unwrap();
+            device.tx_send(0, &[&first], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+            device.set_time(dry + ms(5));
+            assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().unwrap().code, TxCode::Underflow);
+
+            let resumed = device.time_now().unwrap();
+            device.tx_send(0, &[&rest], Some(resumed), false, false, Duration::from_secs(1)).unwrap();
+            let future = (resumed / 200 + 5_000) * 200;
+            device.tx_send(0, &[&next], Some(future), false, true, Duration::from_secs(1)).unwrap();
+            let reports: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).collect();
+            let codes: Vec<_> = reports.iter().map(|r| r.code).collect();
+            assert_eq!(codes, [TxCode::TimeError, TxCode::TimeError], "{reports:?}");
+            assert!(reports.iter().all(|report| report.tick.is_some_and(|tick| tick >= resumed)), "{reports:?}");
+            assert_eq!(device.transmitted(dry, rest.len() + next.len()), vec![None; rest.len() + next.len()]);
+            assert_eq!(device.dsp_log(Dir::Tx, 0), vec![(dry + 200, 2e9, true)], "the rejected DUC continuation consumes its timed value");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_late_eob_ends_the_duc_before_a_future_timed_burst() {
+        // The DUC consumes the late continuation's EOB even though the idle radio drops it;
+        // that boundary lets a later timed SOB establish a new timeline.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = [[0.1f32, 0.0]; 100];
+            let rest = [[0.2f32, 0.0]; 20];
+            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            let dry = t0 + wave.len() as i64 * 200;
             device.tx_send(0, &[&wave], Some(t0), true, false, Duration::from_secs(1)).unwrap();
-            while device.time_now().unwrap() < dry + ms(5) {
-                device.host().sleep(Duration::from_millis(1));
-            }
+            device.set_time(dry + ms(5));
+            assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().unwrap().code, TxCode::Underflow);
+
             device.tx_send(0, &[&rest], None, false, true, Duration::from_secs(1)).unwrap();
             let resumed = device.time_now().unwrap();
-            let scheduled_end = dry + 20_000 * 200;
-            let b = scheduled_end + 200;
-            device.tx_send(0, &[&wave], Some(b), true, true, Duration::from_secs(1)).unwrap();
-            let reports = reports_until(&device, resumed + ms(60));
-            let codes: Vec<_> = reports.iter().map(|r| r.code).collect();
-            assert_eq!(codes, [TxCode::Underflow, TxCode::BurstAck, TxCode::TimeError], "{reports:?}");
-            assert_eq!(reports[0].tick, Some(dry), "it ran dry at the end of what it had");
-            assert!(reports[1].tick.unwrap() >= scheduled_end + ms(5), "the rest played late: {reports:?}");
-            assert!(reports[2].tick.unwrap() >= b, "{reports:?}");
+            let future = (resumed / 200 + 10_000) * 200;
+            device.tx_send(0, &[&wave], Some(future), true, true, Duration::from_secs(1)).unwrap();
+            device.set_time(future + wave.len() as i64 * 200);
+
+            let reports: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).collect();
+            assert_eq!(reports.iter().map(|report| report.code).collect::<Vec<_>>(), [TxCode::TimeError, TxCode::BurstAck], "{reports:?}");
+            assert!(reports[0].tick.is_some_and(|tick| tick >= resumed), "{reports:?}");
+            assert_eq!(reports[1].tick, Some(future + (wave.len() as i64 - 1) * 200));
+            assert_eq!(device.transmitted(dry, rest.len()), vec![None; rest.len()], "the late continuation was radio-dropped");
+            assert_eq!(device.transmitted(future, wave.len()), vec![Some(wave[0]); wave.len()], "the new DUC burst plays at its requested time");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_duc_timeline_survives_radio_underflow() {
+        // Underflow idles the radio but does not restart the DUC's sample-count timeline.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let first = [[0.1f32, 0.0]; 2];
+            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.tx_send(0, &[&first], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+
+            let dry = t0 + first.len() as i64 * 200;
+            device.set_time(dry + ms(5));
+            assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().unwrap().code, TxCode::Underflow);
+
+            let resume = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.apply(Dir::Tx, 0, &freq(2e9), Some(resume)).unwrap();
+            let rest = [[0.2f32, 0.0]; 2];
+            device.tx_send(0, &[&rest], Some(resume), false, true, Duration::from_secs(1)).unwrap();
+            let late = device.tx_async(0, Duration::ZERO).unwrap().expect("the idle radio rejects the stale DUC timestamp");
+            assert_eq!(late.code, TxCode::TimeError);
+            assert!(late.tick.unwrap() < resume, "the report is radio-current-time, not the host header: {late:?}");
+            device.set_time(resume + 200);
+            assert_eq!(device.transmitted(resume, rest.len()), [None, None], "the late continuation was dropped");
+            assert_eq!(device.dsp_log(Dir::Tx, 0), [], "the DUC command is still ahead of its surviving timeline");
+            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "underflow did not reset DUC sample time");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_active_timed_sob_keeps_the_duc_sample_timeline() {
+        let device = manual(wide());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            send(&device, Some(t0), 2, true, false);
+            let taken = t0 + 3 * 200;
+            device.apply(Dir::Tx, 0, &freq(2e9), Some(taken)).unwrap();
+            send(&device, Some(t0 + ms(2)), 2, true, true);
+            device.set_time(t0 + ms(1));
+            assert_eq!(device.dsp_log(Dir::Tx, 0), vec![(taken, 2e9, true)],
+                "an active timed SOB did not reset the DUC's sample-count timeline");
         });
     }
 
@@ -2682,9 +2984,14 @@ mod tests {
             device.tx_send(0, &[&wave], Some(t0), true, true, Duration::from_secs(1)).unwrap();
             device.tx_send(0, &[&wave], Some(t0 + 100 * 200), true, true, Duration::from_secs(1)).unwrap();
             assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "an acknowledgement before the burst played");
-            let codes: Vec<_> = reports_until(&device, t0 + 100 * 200).into_iter().map(|r| r.code).collect();
-            assert_eq!(codes.first(), Some(&TxCode::BurstAck), "{codes:?}");
-            assert!(codes.contains(&TxCode::TimeError), "the second burst's report behind the first's: {codes:?}");
+            device.set_time(t0 + 50 * 200);
+            assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "the EOB ack waits through the middle of playback");
+            device.set_time(t0 + 99 * 200);
+            let ack = device.tx_async(0, Duration::ZERO).unwrap().expect("the last sample's instant acknowledges the first burst");
+            assert_eq!((ack.code, ack.tick), (TxCode::BurstAck, Some(t0 + 99 * 200)));
+            device.set_time(t0 + 100 * 200);
+            assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().map(|report| report.code), Some(TxCode::TimeError),
+                "the second burst's report follows the first's acknowledgement");
         });
     }
 
@@ -2737,6 +3044,38 @@ mod tests {
             }
             device.host().sleep(Duration::from_millis(20));
             assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(start, 2e9, true), (start + 1, 3e9, true), (start + 2, 4e9, true)]);
+        });
+    }
+
+    #[test]
+    fn ur_33_a_stale_tx_header_advances_the_dsp_fifo_on_logical_ticks() {
+        // A surviving DUC header shifts the logical sample clock past radio time. Several
+        // already-due commands still take on consecutive logical ticks, not one radio tick.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let old_start = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            let first = [BURST; 2];
+            assert_eq!(device.tx_send(0, &[&first], Some(old_start), true, true, Duration::from_secs(1)).unwrap(), 2);
+            let stale_header = old_start + 2 * 200;
+            device.tx_close(0);
+            device.host().sleep(Duration::from_millis(10));
+            let _ = device.dsp_log(Dir::Tx, 0); // settle and retire the old physical flow
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            assert!(start < stale_header);
+            for (offset, hz) in [2e9, 3e9, 4e9].into_iter().enumerate() {
+                device.apply(Dir::Tx, 0, &freq(hz), Some(stale_header - 3 + offset as i64)).unwrap();
+            }
+            let second = [BURST; 2];
+            assert_eq!(device.tx_send(0, &[&second], Some(start), true, true, Duration::from_secs(1)).unwrap(), 2);
+            device.host().sleep(Duration::from_millis(10));
+            let taken: Vec<_> = device.dsp_log(Dir::Tx, 0).into_iter()
+                .filter(|(_, hz, timed)| *timed && [2e9, 3e9, 4e9].contains(hz))
+                .map(|(tick, hz, _)| (tick, hz)).collect();
+            assert_eq!(taken, [(start, 2e9), (start + 1, 3e9), (start + 2, 4e9)]);
         });
     }
 
@@ -2893,6 +3232,68 @@ mod tests {
     }
 
     #[test]
+    fn ur_33_an_untimed_sob_clears_duc_time_until_a_fresh_burst() {
+        let device = manual(wide());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let t0 = device.time_now().unwrap();
+            let ratio = 200;
+            let command = t0 + 5 * ratio;
+            send(&device, Some(t0), 2, true, false);
+            device.apply(Dir::Tx, 0, &freq(2e9), Some(command)).unwrap();
+            send(&device, None, 2, true, false);
+            send(&device, Some(command), 2, false, false);
+            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "the untimed SOB and timed continuation do not take the command");
+            assert!(device.dsp_log(Dir::Tx, 0).is_empty());
+
+            send(&device, None, 2, false, true);
+            let next = command + 5 * ratio;
+            device.set_time(next);
+            send(&device, Some(next), 2, true, false);
+            device.set_time(next + 2 * ratio);
+            assert_eq!(device.dsp_log(Dir::Tx, 0), [(next, 2e9, true)], "the fresh timed burst takes the pending command");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_untimed_two_zero_eob_clears_the_stale_duc_header() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let start = device.time_now().unwrap();
+            send(&device, Some(start), 2, true, false);
+            device.tx_close(0);
+            {
+                let st = device.lock();
+                let chain = st.dsp.get(&(Dir::Tx as usize, (0, 0))).unwrap();
+                assert!(chain.tx_header.is_some() && chain.tx_header_stale);
+            }
+
+            device.tx_open(0, &[0]).unwrap();
+            send(&device, None, 2, true, true);
+            let st = device.lock();
+            let chain = st.dsp.get(&(Dir::Tx as usize, (0, 0))).unwrap();
+            assert_eq!(chain.tx_header, None);
+            assert!(!chain.tx_header_stale);
+        });
+    }
+
+    #[test]
+    fn ur_33_a_one_sample_eob_has_no_burst_ack() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let start = device.time_now().unwrap();
+            send(&device, Some(start), 1, true, true);
+            device.set_time(start);
+            assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "the one-sample EOB loses its acknowledgement");
+        });
+    }
+
+    #[test]
     fn ur_33_a_timed_duc_value_is_taken_only_while_has_time_holds() {
         // UR-33 (R5, H4): a burst's samples carry a time from its first timed send until a send
         // without one; a timed send after that does not bring it back, so a command whose instant
@@ -2936,8 +3337,8 @@ mod tests {
             device.set_time_zero(false).unwrap();
             device.tx_open(0, &[0]).unwrap();
             let now = device.time_now().unwrap();
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(now + ms(1))).unwrap();
-            send(&device, None, 2_000, true, true);
+            device.apply(Dir::Tx, 0, &freq(2e9), Some(now)).unwrap();
+            send(&device, None, 2_000, false, true);
             device.host().sleep(Duration::from_millis(15));
             assert_eq!((device.dsp_pending(Dir::Tx, 0), device.dsp_log(Dir::Tx, 0).len()), (1, 0));
         });

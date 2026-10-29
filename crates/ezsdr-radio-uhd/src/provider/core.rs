@@ -1,6 +1,6 @@
 //! What the Provider's three threads share (UR-14…UR-30).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration as Wall;
@@ -20,6 +20,8 @@ use serde_json::{Value as Json, json};
 use super::control::{ColdConfig, Planned};
 use super::mode::{DescriptionExt, channel_list};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
+use crate::device::{Iq, TxCode, TxReport};
+use crate::host::{ClockGuard, ClockMutex};
 
 const POLL: Wall = Wall::from_millis(1);
 
@@ -792,6 +794,11 @@ pub(crate) struct Core {
     pub device: Arc<dyn Device>,
     /// Serializes streamer open/close admission with publishing device loss (UR-29).
     device_gate: Mutex<()>,
+    /// A timed TX DSP write and the open-time flush share each channel's gate (D9b-1a).
+    tx_dsp_gates: Vec<ClockMutex<()>>,
+    /// Every tx_async reader, including shutdown, shares one per-stream gate.
+    tx_report_gates: Vec<ClockMutex<()>>,
+    tx_report_stash: Vec<Mutex<VecDeque<TxReport>>>,
     pub id: ResourceId,
     /// Stream 0's node of each direction (tests).
     #[cfg(test)]
@@ -826,6 +833,12 @@ pub(crate) struct Core {
     pub probes: Mutex<BTreeMap<&'static str, Probe>>,
 }
 
+pub(crate) struct TxFlushResult {
+    pub acknowledged: bool,
+    pub ack_tick: Option<i64>,
+    pub stopped: bool,
+}
+
 impl Core {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -845,6 +858,8 @@ impl Core {
         let tx_id = description.stream_node(&id, Dir::Tx, 0);
         let rx_count = description.stream_count(Dir::Rx);
         let tx_count = description.stream_count(Dir::Tx);
+        let tx_channel_count = device.channels(Dir::Tx);
+        let host = device.host();
         links.resize_with(rx_count, Vec::new);
         // UR-12, UR-20: every receive stream's node is below the instance root the Kernel
         // handed this instance, so the bound view resolves it; a refusal is a Module error,
@@ -863,6 +878,9 @@ impl Core {
             block_len: description.block_len as usize,
             device,
             device_gate: Mutex::new(()),
+            tx_dsp_gates: (0..tx_channel_count).map(|_| host.clock_mutex(())).collect(),
+            tx_report_gates: (0..tx_count).map(|_| host.clock_mutex(())).collect(),
+            tx_report_stash: (0..tx_count).map(|_| Mutex::new(VecDeque::new())).collect(),
             id,
             #[cfg(test)]
             rx_id,
@@ -1125,7 +1143,178 @@ impl Core {
     /// UR-13, UR-36: the device's open of `k`'s streamer of `dir` on `set`; the record is the
     /// caller's (see `record_opened`), so that an enable from no stream records its open in the
     /// line-lock section it already takes (UR-25).
+    pub fn lock_tx_dsp(&self, channels: &[usize]) -> Vec<ClockGuard<'_, ()>> {
+        let mut channels = channels.to_vec();
+        channels.sort_unstable();
+        channels.dedup();
+        channels.into_iter().filter_map(|channel| self.tx_dsp_gates.get(channel)).map(ClockMutex::lock).collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn tx_dsp_waiters(&self, channel: usize) -> usize {
+        self.tx_dsp_gates.get(channel).map_or(0, ClockMutex::waiters)
+    }
+
+    pub fn lock_tx_reports(&self, stream: usize) -> ClockGuard<'_, ()> {
+        self.tx_report_gates[stream].lock()
+    }
+
+    pub fn take_stashed_tx_report(&self, stream: usize) -> Option<TxReport> {
+        lock(&self.tx_report_stash[stream]).pop_front()
+    }
+
+    pub fn stash_tx_report(&self, stream: usize, report: TxReport) {
+        lock(&self.tx_report_stash[stream]).push_back(report);
+    }
+
+    fn record_tx_async(&self, stream: usize, report: TxReport) {
+        lock(&self.rec).device_async.push(json!({
+            "code": format!("{:?}", report.code), "tick": report.tick, "channel": report.channel, "stream": stream, "tx_flush": true,
+        }));
+    }
+
+    /// The open-time two-zero burst clears stale TX header state. One device-clock deadline
+    /// bounds both report waits and immediate-error/unrelated-report progress.
+    #[cfg(test)]
+    pub fn tx_flush(&self, stream: usize, channels: &[usize]) -> TxFlushResult {
+        if channels.is_empty() || self.is_lost() {
+            return TxFlushResult { acknowledged: channels.is_empty(), ack_tick: None, stopped: self.is_lost() };
+        }
+        let _dsp = self.lock_tx_dsp(channels);
+        let _reports = self.lock_tx_reports(stream);
+        self.tx_flush_locked(stream, channels)
+    }
+
+    fn tx_flush_locked(&self, stream: usize, channels: &[usize]) -> TxFlushResult {
+        let expected: BTreeSet<usize> = (0..channels.len()).collect();
+        let mut acknowledged = BTreeSet::new();
+        let mut ack_tick: Option<i64> = None;
+        let mut problem = None;
+        let zeros = [Iq::default(); 2];
+        let buffers: Vec<&[Iq]> = channels.iter().map(|_| &zeros[..]).collect();
+        let host = self.device.host();
+        let until = host.now() + Wall::from_millis(100);
+        let send_timeout = until.saturating_sub(host.now());
+        match self.device.tx_send(stream, &buffers, None, true, true, send_timeout) {
+            Ok(2) => {}
+            Ok(n) => problem = Some(format!("flush send accepted {n} of 2 samples")),
+            Err(error) => {
+                self.device_failed(None, "tx_flush", &error);
+                problem = Some(format!("flush send failed: {}", error.message));
+                if error.lost {
+                    self.reject_note(json!({ "call": "tx_flush", "stream": stream, "error": problem }));
+                    return TxFlushResult { acknowledged: false, ack_tick: None, stopped: true };
+                }
+            }
+        }
+
+        let mut stopped = false;
+        while acknowledged != expected {
+            if self.is_lost() || lock(&self.streams).stop.is_some() {
+                stopped = true;
+                break;
+            }
+            let remaining = until.saturating_sub(host.now());
+            if remaining.is_zero() { break; }
+            match self.device.tx_async(stream, remaining) {
+                Ok(Some(report)) => {
+                    if host.now() >= until {
+                        self.stash_tx_report(stream, report);
+                        break;
+                    }
+                    if report.code == TxCode::BurstAck
+                        && expected.contains(&report.channel)
+                        && acknowledged.insert(report.channel)
+                    {
+                        ack_tick = match (ack_tick, report.tick) {
+                            (Some(old), Some(tick)) => Some(old.max(tick)),
+                            (None, tick) => tick,
+                            (old, None) => old,
+                        };
+                        self.record_tx_async(stream, report);
+                    } else {
+                        self.stash_tx_report(stream, report);
+                        host.sleep(until.saturating_sub(host.now()).min(Wall::from_millis(1)));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) if error.lost => {
+                    self.device_lost(&error.message);
+                    stopped = true;
+                    break;
+                }
+                Err(error) => {
+                    let first = lock(&self.rec).stats.get("tx_errors").is_none_or(|n| *n == 0);
+                    self.stat("tx_errors", 1);
+                    if first { self.reject_note(json!({ "call": "tx_async", "error": error.message })); }
+                    host.sleep(until.saturating_sub(host.now()).min(Wall::from_millis(1)));
+                }
+            }
+        }
+        // A Stop may be published while the final blocking read is in flight. Do not let
+        // that last ack turn an already-stopped open into a successful initialization.
+        stopped |= !self.is_lost() && lock(&self.streams).stop.is_some();
+
+        let missing: Vec<usize> = expected.difference(&acknowledged).copied().collect();
+        if !missing.is_empty() && !stopped {
+            let detail = format!("BurstAck missing on channel positions {missing:?} before the 100 ms deadline");
+            problem = Some(problem.map_or(detail.clone(), |old| format!("{old}; {detail}")));
+        }
+        if let Some(error) = problem {
+            self.reject_note(json!({ "call": "tx_flush", "stream": stream, "error": error }));
+        }
+        TxFlushResult { acknowledged: acknowledged == expected, ack_tick, stopped }
+    }
+
+    /// Opens TX and completes its flush while the same DSP and report gates remain held, so
+    /// neither a timed tune nor another async reader can cross the open/flush boundary.
+    pub fn open_tx_device(&self, k: usize, set: Channels) -> Result<TxFlushResult, DeviceError> {
+        let channels = channel_list(set);
+        let _dsp = self.lock_tx_dsp(&channels);
+        let _reports = self.lock_tx_reports(k);
+        self.open_tx_device_locked(k, set, &channels)
+    }
+
+    /// Replaces an uncertain TX streamer and runs its open-time flush without allowing a
+    /// concurrent reader to take reports from the old generation.
+    pub fn reopen_tx_streamer(&self, k: usize, set: Channels) -> Result<TxFlushResult, DeviceError> {
+        let stream = stream_key(Dir::Tx, k);
+        let channels = channel_list(set);
+        let _dsp = self.lock_tx_dsp(&channels);
+        let _reports = self.lock_tx_reports(k);
+        self.close_device(Dir::Tx, k);
+        lock(&self.streams).record_open(stream, None);
+        let opened = self.open_tx_device_locked(k, set, &channels);
+        let checked = if opened.is_ok() { self.check_opened(Dir::Tx, set) } else { Ok(()) };
+        if opened.is_ok() && checked.is_err() && !self.is_lost() {
+            self.close_device(Dir::Tx, k);
+        }
+        let opened_for_record: Result<(), DeviceError> = opened.as_ref().map(|_| ()).map_err(Clone::clone);
+        lock(&self.streams).record_opened(stream, set, &opened_for_record, &checked);
+        match opened {
+            Ok(flush) => checked.map(|()| flush),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_tx_device_locked(&self, k: usize, set: Channels, channels: &[usize]) -> Result<TxFlushResult, DeviceError> {
+        self.open_device_locked(Dir::Tx, k, set)?;
+        let flush = self.tx_flush_locked(k, channels);
+        if self.is_lost() {
+            return Err(DeviceError { lost: true, message: "UR-29: device lost during TX open flush".to_owned() });
+        }
+        if flush.stopped {
+            return Err(DeviceError::failed("UR-25: Provider::stop during TX open flush"));
+        }
+        Ok(flush)
+    }
+
     pub fn open_device(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
+        let _reports = (dir == Dir::Tx).then(|| self.lock_tx_reports(k));
+        self.open_device_locked(dir, k, set)
+    }
+
+    fn open_device_locked(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         self.probe("open", None);
         let device_gate = self.lock_device_gate();
         if self.is_lost() {
@@ -1136,6 +1325,9 @@ impl Core {
             Dir::Rx => self.device.rx_open(k, &list),
             Dir::Tx => self.device.tx_open(k, &list),
         };
+        if dir == Dir::Tx && opened.is_ok() {
+            lock(&self.tx_report_stash[k]).clear();
+        }
         drop(device_gate);
         self.probe("open_returned", None);
         opened
@@ -1152,7 +1344,7 @@ impl Core {
     /// uses `open_device` and `check_opened` itself, and records the outcome in its own section.
     pub fn open_streamer(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         let stream = stream_key(dir, k);
-        let opened = self.open_device(dir, k, set);
+        let opened = if dir == Dir::Tx { self.open_tx_device(k, set).map(|_| ()) } else { self.open_device(dir, k, set) };
         let checked = if opened.is_ok() { self.check_opened(dir, set) } else { Ok(()) };
         if opened.is_ok() && checked.is_err() && !self.is_lost() {
             self.close_device(dir, k);
@@ -1306,9 +1498,257 @@ impl Core {
 }
 
 #[cfg(test)]
+pub(super) fn assert_tx_open_flush_barrier(
+    core: Arc<Core>,
+    spy: Arc<super::test_support::LockSpy>,
+    open: impl FnOnce() + Send + 'static,
+) {
+    let gate = spy.stop_after("tx_send");
+    let host = core.device.host();
+    let opener = host.spawn("tx-open-route", open).unwrap();
+    gate.wait();
+    assert!(core.tx_dsp_gates[0].is_held(), "the opener must hold the timed-DSP gate through its flush acknowledgement");
+
+    let core_ = core.clone();
+    let timed = host.spawn("timed-tx-dsp", move || {
+        let _dsp = core_.lock_tx_dsp(&[0]);
+        core_.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
+    }).unwrap();
+    let deadline = std::time::Instant::now() + Wall::from_secs(10);
+    while core.tx_dsp_gates[0].waiters() == 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(core.tx_dsp_gates[0].waiters() > 0, "timed DSP did not reach the flush's channel gate");
+    assert_eq!(spy.seen("apply"), 0, "timed TX DSP crossed the flush-ack barrier");
+
+    gate.release();
+    opener.join().unwrap();
+    timed.join().unwrap();
+    let order = spy.order();
+    let flush = order.iter().position(|call| *call == "tx_send").unwrap();
+    let ack = order.iter().enumerate().skip(flush + 1).find_map(|(i, call)| (*call == "tx_async").then_some(i)).unwrap();
+    let apply = order.iter().position(|call| *call == "apply").unwrap();
+    assert!(flush < ack && ack < apply, "flush -> ack read -> timed DSP: {order:?}");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ezsdr_kernel::time::Rational;
+
+    #[test]
+    fn ur_22_t3_flush_ack_is_a_timed_dsp_barrier() {
+        use crate::device::{Dir, FakeConfig, Settings};
+        use crate::provider::test_support::LockSpy;
+        use std::sync::Arc;
+
+        let spy = Arc::new(LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual, ..FakeConfig::default()
+        }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        let gate = spy.stop_before("tx_async");
+        let opener = core.device.host().spawn("tx-flush-open", {
+            let core = core.clone();
+            move || { core.open_tx_device(0, Channels::first(1)).unwrap(); }
+        }).unwrap();
+        gate.wait();
+        assert!(core.tx_report_gates[0].is_held(), "the opener must own async reports through its flush acknowledgement");
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let timed = core.device.host().spawn("timed-tx-dsp", {
+            let core = core.clone();
+            move || {
+                let _dsp = core.lock_tx_dsp(&[0]);
+                core.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
+                let _ = done.send(());
+            }
+        }).unwrap();
+        let shutdown_stream = stream_key(Dir::Tx, 0);
+        let (shutdown_started, shutdown_start) = std::sync::mpsc::channel();
+        lock(&core.streams).begin_shutdown_read(shutdown_stream);
+        let (shutdown_done, shutdown_report) = std::sync::mpsc::channel();
+        let shutdown = core.device.host().spawn("shutdown-tx-report", {
+            let core = core.clone();
+            move || {
+                let _ = shutdown_started.send(());
+                let _reports = core.lock_tx_reports(0);
+                let report = core.device.tx_async(0, Wall::ZERO).unwrap();
+                lock(&core.streams).end_read(shutdown_stream);
+                let _ = shutdown_done.send(report);
+            }
+        }).unwrap();
+        shutdown_start.recv_timeout(Wall::from_secs(2)).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(2);
+        while core.tx_report_gates[0].waiters() == 0 && spy.seen("tx_async") == 1 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let shutdown_waited_for_report = core.tx_report_gates[0].waiters() > 0;
+        let reads_before_flush_ack = spy.seen("tx_async");
+        assert!(finished.try_recv().is_err(), "timed TX DSP crossed the open-time flush wait");
+        assert_eq!(spy.seen("apply"), 0, "no timed write reached the device before the flush ack");
+
+        gate.release();
+        opener.join().unwrap();
+        timed.join().unwrap();
+        shutdown.join().unwrap();
+        assert!(shutdown_waited_for_report, "shutdown's reader did not wait behind the opener's report ownership");
+        assert_eq!(reads_before_flush_ack, 1, "shutdown read an async report before the opener consumed the flush ack");
+        assert!(shutdown_report.recv().unwrap().is_none());
+        assert!(finished.try_recv().is_ok());
+        let order = spy.order();
+        let flush = order.iter().position(|call| *call == "tx_send").unwrap();
+        let ack = order.iter().position(|call| *call == "tx_async").unwrap();
+        let apply = order.iter().position(|call| *call == "apply").unwrap();
+        assert!(flush < ack && ack < apply, "flush -> ack read -> timed DSP: {order:?}");
+        assert_eq!(spy.log().iter().filter(|call| call.starts_with("tx_send")).count(), 1);
+        assert_eq!(spy.seen("tx_async"), 2, "shutdown owns the next read after the flush");
+    }
+
+    #[test]
+    fn ur_22_t3_missing_ack_is_bounded_and_read_faults_keep_progressing() {
+        use crate::device::{FakeConfig, FakeFault, TxCode};
+
+        for (faults, expect_read_error, expect_other) in [
+            (vec![FakeFault::DropBurstAck], false, false),
+            (vec![FakeFault::TxAsyncFails(Wall::ZERO, false)], true, false),
+            (vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Other(77))], false, true),
+        ] {
+            let config = FakeConfig { clock: crate::ClockMode::Manual, faults, ..FakeConfig::default() };
+            let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
+            device.tx_open(0, &[0]).unwrap();
+            let before = device.host().now();
+            let result = core.tx_flush(0, &[0]);
+            let elapsed = device.host().now().saturating_sub(before);
+            let rejected: Vec<_> = lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").cloned().collect();
+            assert!(!result.acknowledged, "a missing flush ack was treated as success");
+            assert!(elapsed >= Wall::from_millis(100), "flush did not use its total device-clock deadline: {elapsed:?}");
+            assert_eq!(rejected.len(), 1, "{rejected:?}");
+            assert!(!core.is_lost(), "a missing acknowledgement is not device loss");
+            assert_eq!(lock(&core.rec).stats.get("tx_errors").copied().unwrap_or_default() > 0, expect_read_error);
+            assert_eq!(core.take_stashed_tx_report(0).is_some_and(|report| report.code == TxCode::Other(77)), expect_other);
+        }
+    }
+
+    #[test]
+    fn ur_22_t3_flush_send_faults_record_a_missing_ack() {
+        use crate::device::{FakeConfig, FakeFault};
+
+        for fault in [FakeFault::ShortSend(0), FakeFault::StalledSend(0), FakeFault::FailSend(0)] {
+            let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault.clone()], ..FakeConfig::default() };
+            let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
+            device.tx_open(0, &[0]).unwrap();
+            let result = core.tx_flush(0, &[0]);
+            assert!(!result.acknowledged, "{fault:?}: incomplete flush was treated as success");
+            assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1, "{fault:?}");
+            assert!(device.calls().iter().any(|call| call.starts_with("tx_send")), "{fault:?}: {:?}", device.calls());
+        }
+    }
+
+    #[test]
+    fn ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct() {
+        use crate::device::{FakeConfig, FakeFault};
+
+        let (core, device, _time, _events) = super::super::test_support::rig_with(
+            FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }, Vec::new());
+        device.tx_open(0, &[0, 1]).unwrap();
+        let result = core.tx_flush(0, &[0, 1]);
+        assert!(result.acknowledged, "both channel-position acks are required: {:?}", lock(&core.rec).device_async);
+        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] == true).map(|row| row["channel"].as_u64()).collect::<Vec<_>>(), [Some(0), Some(1)]);
+
+        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![FakeFault::TxAsyncFails(Wall::ZERO, true)], ..FakeConfig::default() };
+        let (lost_core, lost_device, _time, events) = super::super::test_support::rig_with(config, Vec::new());
+        lost_device.tx_open(0, &[0]).unwrap();
+        let result = lost_core.tx_flush(0, &[0]);
+        assert!(result.stopped && lost_core.is_lost());
+        assert_eq!(events.drain(lost_core.at(lost_core.now())).iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1);
+        assert!(lock(&lost_core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "loss is not a missing ack: {:?}", lock(&lost_core.rec).rejected);
+    }
+
+    #[test]
+    fn ur_22_t3_ack_read_returned_after_deadline_is_not_a_flush_success() {
+        use crate::device::FakeConfig;
+        use crate::provider::test_support::LockSpy;
+        use std::sync::Arc;
+
+        let spy = Arc::new(LockSpy::new(FakeConfig { clock: crate::ClockMode::Real, ..FakeConfig::default() }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        let gate = spy.stop_after("tx_async");
+        let (done, finished) = std::sync::mpsc::channel();
+        let opener = core.device.host().spawn("late-tx-flush-ack", {
+            let core = core.clone();
+            move || { let _ = done.send(core.open_tx_device(0, Channels::first(1))); }
+        }).unwrap();
+        gate.wait();
+        std::thread::sleep(Wall::from_millis(120));
+        gate.release();
+        opener.join().unwrap();
+
+        let flush = finished.recv().unwrap().unwrap();
+        assert!(!flush.acknowledged, "an ack read returned after the total deadline completed T3");
+        assert!(core.take_stashed_tx_report(0).is_some_and(|report| report.code == TxCode::BurstAck),
+            "the late ack remains available to the report owner");
+        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1);
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true),
+            "a late ack is not recorded as a timely flush ack");
+    }
+
+    #[test]
+    fn ur_22_t3_stop_interrupts_an_open_flush_wait() {
+        use crate::device::FakeConfig;
+        use crate::provider::test_support::LockSpy;
+        use std::sync::Arc;
+
+        let spy = Arc::new(LockSpy::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        let gate = spy.stop_before("tx_async");
+        let (done, result_rx) = std::sync::mpsc::channel();
+        let opener = core.device.host().spawn("tx-flush-stop", {
+            let core = core.clone();
+            move || { let _ = done.send(core.open_tx_device(0, Channels::first(1))); }
+        }).unwrap();
+        gate.wait();
+        lock(&core.streams).stop = Some((core.now(), StopMode::Orderly));
+        gate.release();
+        opener.join().unwrap();
+        let error = match result_rx.recv().unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("Provider::stop let streamer open complete"),
+        };
+        assert!(!error.lost && error.message.contains("Provider::stop"), "{error:?}");
+        assert!(!core.is_lost());
+        assert!(lock(&core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "Stop is distinct from a missing ack");
+    }
+
+    #[test]
+    fn ur_22_t3_flush_clears_the_header_but_does_not_drain_timed_dsp_fifo() {
+        use crate::device::{Dir, FakeConfig, Settings};
+        use ezsdr_radio::timeline::Channels;
+
+        let config = FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() };
+        let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), freq: Some(1e9), ..Settings::default() }, None).unwrap();
+        let old_start = 4_000_000;
+        device.apply(Dir::Tx, 0, &Settings { freq: Some(1.00005e9), ..Settings::default() }, Some(old_start + 600)).unwrap();
+        let old_burst = [[0.25, 0.0]; 2];
+        device.tx_open(0, &[0]).unwrap();
+        device.tx_send(0, &[&old_burst], Some(old_start), true, true, Wall::ZERO).unwrap();
+        device.tx_close(0);
+        assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "the command lies beyond the old burst");
+
+        let flush = core.open_tx_device(0, Channels::first(1)).unwrap();
+        assert!(flush.acknowledged, "T3 consumed its flush BurstAck");
+        assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "an untimed flush is not a DUC FIFO drain");
+        assert!(device.dsp_log(Dir::Tx, 0).iter().all(|(_, _, timed)| !timed), "the queued timed value is not taken by the flush");
+
+        let next_start = 6_000_000;
+        device.tx_send(0, &[&old_burst], Some(next_start), true, true, Wall::ZERO).unwrap();
+        device.set_time(next_start);
+        assert_eq!(device.dsp_log(Dir::Tx, 0).last(), Some(&(next_start, 1.00005e9, true)),
+            "the old timed value later overrides the new configuration on the next timed burst");
+    }
 
     fn cfg(channels: u32) -> Config {
         Config { channels: Channels::first(channels), ratio: Rational::new(200, 1).unwrap() }

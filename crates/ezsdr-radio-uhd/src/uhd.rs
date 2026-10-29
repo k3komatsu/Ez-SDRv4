@@ -333,7 +333,6 @@ struct TxStream {
     h: uhd_tx_streamer_handle,
     call: Mutex<()>,
     md: uhd_async_metadata_handle,
-    continuation_md: uhd_tx_metadata_handle,
     pointers: Mutex<Vec<*const c_void>>,
     /// As for `RxStream`.
     lost: Arc<AtomicBool>,
@@ -363,7 +362,6 @@ impl Drop for TxStream {
         // SAFETY: as for `RxStream`.
         unsafe {
             uhd_async_metadata_free(&mut self.md);
-            uhd_tx_metadata_free(&mut self.continuation_md);
             uhd_tx_streamer_free(&mut self.h);
         }
     }
@@ -395,7 +393,6 @@ impl TxStream {
             h,
             call: Mutex::new(()),
             md: std::ptr::null_mut(),
-            continuation_md: std::ptr::null_mut(),
             pointers: Mutex::new(vec![std::ptr::null(); channels]),
             lost,
             channels,
@@ -403,8 +400,6 @@ impl TxStream {
         attach(stream.h)?;
         // SAFETY: as above.
         unsafe { check("uhd_async_metadata_make", uhd_async_metadata_make(&mut stream.md), true)? };
-        // SAFETY: this immutable metadata covers the hot-path untimed continuation send.
-        unsafe { check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut stream.continuation_md, false, 0, 0.0, false, false), true)? };
         Ok(stream)
     }
 }
@@ -1128,17 +1123,14 @@ impl Device for UhdDevice {
         for (pointer, samples) in pointers.iter_mut().zip(samples) {
             *pointer = samples.as_ptr().cast();
         }
-        let reuse_metadata = at.is_none() && !sob && !eob;
-        let mut md = if reuse_metadata { streamer.continuation_md } else { std::ptr::null_mut() };
+        let mut md = std::ptr::null_mut();
         let mut sent = 0usize;
-        // SAFETY: the cached handle is immutable; other combinations are made and freed here.
-        // Pointer storage and native calls are serialized by the streamer's call mutex.
+        // SAFETY: metadata is made for this packet and freed after the send; pointer storage
+        // and native calls are serialized by the streamer's call mutex.
         unsafe {
-            if !reuse_metadata {
-                check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut md, at.is_some(), full, frac, sob, eob), true)?;
-            }
+            check("uhd_tx_metadata_make", uhd_tx_metadata_make(&mut md, at.is_some(), full, frac, sob, eob), true)?;
             let result = check_tx(streamer.h, "uhd_tx_streamer_send", uhd_tx_streamer_send(streamer.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), &mut sent));
-            if !reuse_metadata { uhd_tx_metadata_free(&mut md); }
+            uhd_tx_metadata_free(&mut md);
             result?;
         }
         Ok(sent)
@@ -1248,7 +1240,6 @@ mod ffi_tests {
     struct TxSendObservation {
         vector: usize,
         channels: Vec<usize>,
-        metadata_handle: usize,
         metadata: TxMetadata,
     }
 
@@ -1307,7 +1298,6 @@ mod ffi_tests {
                 lock(&TX_SEND_OBSERVATIONS).push(TxSendObservation {
                     vector: buffs as usize,
                     channels,
-                    metadata_handle: metadata_handle as usize,
                     metadata,
                 });
             }
@@ -1359,15 +1349,11 @@ mod ffi_tests {
     }
 
     fn dummy(channels: usize) -> Arc<UhdDevice> {
-        dummy_with_continuation(channels, std::ptr::null_mut())
-    }
-
-    fn dummy_with_continuation(channels: usize, continuation_md: uhd_tx_metadata_handle) -> Arc<UhdDevice> {
         let lost = Arc::new(AtomicBool::new(true));
         let mut tx = BTreeMap::new();
         tx.insert(0, Arc::new(TxStream {
             h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(),
-            continuation_md, pointers: Mutex::new(vec![std::ptr::null(); channels]), channels, lost: lost.clone(),
+            pointers: Mutex::new(vec![std::ptr::null(); channels]), channels, lost: lost.clone(),
         }));
         Arc::new(UhdDevice {
             usrp: std::ptr::null_mut(), args: "ffi-test-no-device".to_owned(), mcr: 200_000_000,
@@ -1376,15 +1362,12 @@ mod ffi_tests {
     }
 
     #[test]
-    fn uhd_tx_send_reuses_continuation_metadata_and_pointer_vector() {
+    fn uhd_tx_send_makes_metadata_per_call_and_reuses_pointer_vector() {
         let _test = lock(&TEST_LOCK);
         TX_METADATA_MAKES.store(0, Ordering::SeqCst);
         TX_METADATA_FREES.store(0, Ordering::SeqCst);
         lock(&TX_SEND_OBSERVATIONS).clear();
-        let mut continuation_md = std::ptr::null_mut();
-        // The test stub allocates the immutable continuation handle for this test.
-        assert_eq!(uhd_tx_metadata_make(&mut continuation_md, false, 0, 0.0, false, false), UHD_ERROR_NONE);
-        let device = dummy_with_continuation(2, continuation_md);
+        let device = dummy(2);
         let (timed_0, timed_1) = ([[1.0, 0.0], [2.0, 0.0]], [[11.0, 0.0], [12.0, 0.0]]);
         let (continued_0, continued_1) = ([[3.0, 0.0], [4.0, 0.0]], [[13.0, 0.0], [14.0, 0.0]]);
         let (tail_0, tail_1) = ([[5.0, 0.0]], [[15.0, 0.0]]);
@@ -1406,38 +1389,28 @@ mod ffi_tests {
         assert_eq!(observations[0].metadata, TxMetadata { has_time_spec: true, full_secs: 1, frac_secs: 0.0, start_of_burst: true, end_of_burst: false });
         assert_eq!(observations[1].metadata, TxMetadata { has_time_spec: false, full_secs: 0, frac_secs: 0.0, start_of_burst: false, end_of_burst: false });
         assert_eq!(observations[2].metadata, TxMetadata { has_time_spec: false, full_secs: 0, frac_secs: 0.0, start_of_burst: false, end_of_burst: true });
-        assert_ne!(observations[0].metadata_handle, continuation_md as usize);
-        assert_eq!(observations[1].metadata_handle, continuation_md as usize);
-        assert_ne!(observations[2].metadata_handle, continuation_md as usize);
-        assert_eq!(TX_METADATA_MAKES.load(Ordering::SeqCst), 3, "one cached handle and two fresh metadata combinations");
-        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 2, "the per-send handles are each freed once");
-        // The cached handle remains live and is freed here; the dummy device is marked lost.
-        assert_eq!(uhd_tx_metadata_free(&mut continuation_md), UHD_ERROR_NONE);
-        assert!(continuation_md.is_null());
-        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 3, "the test-owned cached handle is freed once");
+        assert_eq!(TX_METADATA_MAKES.load(Ordering::SeqCst), 3);
+        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 3, "each packet's metadata is freed once");
     }
 
     #[test]
-    fn uhd_tx_stream_drop_frees_each_owned_handle() {
+    fn uhd_tx_stream_drop_frees_its_async_metadata_and_streamer() {
         let _test = lock(&TEST_LOCK);
         TX_METADATA_MAKES.store(0, Ordering::SeqCst);
         TX_METADATA_FREES.store(0, Ordering::SeqCst);
         TX_ASYNC_METADATA_FREES.store(0, Ordering::SeqCst);
         TX_STREAMER_FREES.store(0, Ordering::SeqCst);
-        let mut continuation_md = std::ptr::null_mut();
-        assert_eq!(uhd_tx_metadata_make(&mut continuation_md, false, 0, 0.0, false, false), UHD_ERROR_NONE);
         let stream = TxStream {
             h: 1usize as uhd_tx_streamer_handle,
             call: Mutex::new(()),
             md: 1usize as uhd_async_metadata_handle,
-            continuation_md,
             pointers: Mutex::new(vec![std::ptr::null()]),
             lost: Arc::new(AtomicBool::new(false)),
             channels: 1,
         };
         drop(stream);
         assert_eq!(TX_ASYNC_METADATA_FREES.load(Ordering::SeqCst), 1);
-        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 1, "Drop frees the cached TX metadata");
+        assert_eq!(TX_METADATA_FREES.load(Ordering::SeqCst), 0);
         assert_eq!(TX_STREAMER_FREES.load(Ordering::SeqCst), 1);
     }
 
@@ -1479,7 +1452,7 @@ mod ffi_tests {
         assert!(device.tx_async(1, Duration::ZERO).unwrap().is_none());
         lock(&device.tx).insert(1, Arc::new(TxStream {
             h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(),
-            continuation_md: std::ptr::null_mut(), pointers: Mutex::new(vec![std::ptr::null(); 2]), channels: 2, lost: device.lost.clone(),
+            pointers: Mutex::new(vec![std::ptr::null(); 2]), channels: 2, lost: device.lost.clone(),
         }));
         assert!(device.tx_send(0, &[&wave, &wave], None, false, false, Duration::from_millis(1)).is_err(), "stream 0 has one channel");
         assert!(device.tx_send(1, &[&wave, &wave], None, false, false, Duration::from_millis(1)).is_ok(), "stream 1 has two");

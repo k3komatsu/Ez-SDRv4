@@ -694,7 +694,7 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
         let stream_rows: Vec<&Json> = async_all.as_array().into_iter().flatten().filter(|row| row["stream"].as_u64().is_none_or(|found| found == k as u64)).collect();
         // A stream of m channels is acknowledged once per channel: exactly one `BurstAck` of each of m channels is the one
         // acknowledgement the evidence reads (the first channel's); any other count leaves it with none.
-        let acks: Vec<&Json> = stream_rows.iter().copied().filter(|row| row["code"] == "BurstAck").collect();
+        let acks: Vec<&Json> = stream_rows.iter().copied().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true).collect();
         let ack_channels: BTreeSet<u64> = acks.iter().filter_map(|row| row["channel"].as_u64()).collect();
         let acknowledged = acks.len() == stream.channels.len() && ack_channels.len() == stream.channels.len();
         let first_ack_channel = ack_channels.iter().next().copied();

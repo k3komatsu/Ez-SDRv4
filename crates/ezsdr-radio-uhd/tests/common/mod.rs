@@ -35,6 +35,7 @@ use serde_json::{Value as Json, json};
 
 mod watchdog;
 pub use watchdog::watch;
+pub mod d9;
 pub mod measurement;
 pub mod observations;
 pub mod probe_device;
@@ -586,6 +587,11 @@ pub fn bursts(manifest: &Manifest) -> Vec<BurstRecord> {
 
 pub fn calls(device: &FakeDevice, prefix: &str) -> Vec<String> {
     device.calls().into_iter().filter(|c| c.starts_with(prefix)).collect()
+}
+
+/// T3's untimed two-zero SOB/EOB send is setup, not experiment traffic.
+pub fn tx_experiment_sends(device: &FakeDevice, prefix: &str) -> Vec<String> {
+    calls(device, prefix).into_iter().filter(|call| !call.contains(" at=- sob=true eob=true")).collect()
 }
 
 pub fn tx_clock_origin(manifest: &Manifest, nth: usize) -> i64 {

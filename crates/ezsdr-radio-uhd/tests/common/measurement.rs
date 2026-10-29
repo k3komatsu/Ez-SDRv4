@@ -3527,7 +3527,7 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
     });
     let minimum_samples = duration_secs.checked_mul(rate_hz);
     let burst_acks: Vec<_> = async_reports.as_array().into_iter().flatten()
-        .filter(|report| report["code"] == "BurstAck")
+        .filter(|report| report["code"] == "BurstAck" && report["tx_flush"] != true)
         .map(|report| report["tick"].as_i64()).collect();
     let burst_ack_count = burst_acks.len();
     let burst_ack_tick = (burst_ack_count == 1).then(|| burst_acks[0]).flatten();

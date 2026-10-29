@@ -412,7 +412,8 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     let headroom_after = probe.clock_anchor().ok().map(|(device_tick, host_before_ns, host_after_ns)| ClockAnchor { device_tick, host_before_ns, host_after_ns });
     let probe_rows = probe.rows();
     let probe_rows_dropped = probe.dropped_rows();
-    let tx_rows: Vec<Json> = probe_rows.iter().filter(|row| row["call"] == "tx_send").cloned().collect();
+    let tx_send_rows: Vec<Json> = probe_rows.iter().filter(|row| row["call"] == "tx_send").cloned().collect();
+    let tx_rows: Vec<Json> = tx_send_rows.iter().filter(|row| row["tx_flush"] != true).cloned().collect();
     let time_now_rows: Vec<Json> = probe_rows.iter().filter(|row| row["call"] == "time_now").cloned().collect();
     let tx_underflows: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == "radio.TX_UNDERFLOW").collect();
     let mut underflow_ticks = Vec::new();
@@ -518,7 +519,7 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     let apply_not_called_count = dispatch_rows.iter().filter(|row| row["accepted"] == true && row["apply_called"] == false).count();
     let not_submitted_count = dispatch_rows.iter().filter(|row| row["status"] == "not_submitted").count();
     let apply_error_count = dispatch_rows.iter().filter(|row| row["apply"]["result"]["error"].is_string()).count();
-    let tx_send_count = tx_rows.len();
+    let tx_send_count = tx_send_rows.len();
     let tx_end_reason = if !underflow_unconvertible.is_empty() { "unconvertible_tx_underflow" }
         else if !underflow_ticks.is_empty() { "tx_underflow" }
         else if incomplete_tx_sends > 0 { "incomplete_tx_send" }
@@ -543,7 +544,9 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         "dispatch_updates_before_tx_start_count": before_tx_count,
         "dispatch_updates_overlap_ambiguous_count": overlap_ambiguous_count,
         "dispatch_delay_proxy": "uhd-control timed-apply entry minus the host-mapped release-window instant; not scheduler wake-up latency",
-        "tx_send_count": tx_send_count, "tx_send_records": tx_rows, "tx_headroom": headroom_rows,
+        "tx_send_count": tx_send_count, "tx_payload_send_count": tx_rows.len(),
+        "tx_flush_send_count": tx_send_rows.iter().filter(|row| row["tx_flush"] == true).count(),
+        "tx_send_records": tx_send_rows, "tx_headroom": headroom_rows,
         "probe_rows_retained_count": probe_rows.len(), "probe_rows_dropped_count": probe_rows_dropped,
         "time_now_records": time_now_rows,
         "tx_headroom_lower_ns": distribution(&headroom_lower), "tx_headroom_upper_ns": distribution(&headroom_upper),
