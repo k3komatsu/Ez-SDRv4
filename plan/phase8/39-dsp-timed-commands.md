@@ -124,3 +124,16 @@ D9b-1a のコード review で，同じ仕組みの指摘が二つ出た．(1) T
 - 規則の二重実装：ない．FakeDevice は ACK の tick を EOB の最後の sample が出る instant に置き（ハードの ACK と同じ意味），flush の ACK を再生より前に返さない．
 
 採らない案：送信中の flush を残して ACK を tick で見分ける案．flush は時刻なしで送るので，直前の閉じの ACK と tick で分けられない．
+
+### 6.7 受信の R2′ と次の区間（owner の決め，2026-10-30）
+
+D9b-2 の実装前の確認で，受信の stop を渡した DDC の値の消費まで遅らせると（最大で release window），同じ streamer の次の区間の lead を食うと分かった（1 MS/s，packet 20 000 sample，release window 3 ms のとき，lead の最小 3 ms は 0 になる）．owner の決め：**cut の後の受信の区間は，cut＋release window＋受信 1 回＋allowance から lead を数える**（RM-25 の始まりの規則，VH-4）．MockRadio も同じ timeline を使うので parity は保たれる．代わりに，cut の後の受信の区間は値が無いときも release window だけ遅く始まる．採らない案：値があるときだけ遅らせる（計画は Run の前に決まる），lead の最小を release window＋device lead に上げて drain に lead を食わせる（再開に要る時間は INFERRED のまま削られる）．
+
+### 6.8 D9b-2 実装記録（2026-10-30）
+
+- uhd-control は成功した timed RX frequency handover を stream/channel ごとの obligation として記録し，uhd-rx の最終 stop と同じ per-stream lock で順序を決める．DDC の消費は，apply の受理後に観測した同じ channel の sample が command instant と受理時刻の両方を越えたときだけ認める．equal-time の entry は別々の sample を要する．raw P4 A/C の測定系列と既存 assertion は維持し，FakeDevice で同じ stop/reopen 後の残留を確かめる（RF-tone の判定は hardware-only）．
+- cut 後は logical cut を変えず，drain sample の cut 以後を publish しない．hard deadline は `max(latest e + one old-rate receive call + delivery allowance, cut + quiet_span)` のまま保つ．その allowance 前の packet-duration boundary（`max(latest e + one old-rate receive call, cut + one block duration)`）で残りがあれば stop → UHD `stream_now` の `rx_start_now` → bounded read → stop を一度行い，hard deadline までの残りだけを使う．残り1 ms未満では receive call を始めない．こうして flush は共有 post-cut readiness floor を越えず，消費を示せなかった entry を `rejected` の `rx_drain` に列挙する．stop failure も pending entry を列挙し，device が stopped と記録しない．device loss 後は device call を始めない．
+- `Provider::stop` では drain/flush と成功した RX stop の後，S より後に効きうる handed value がある channel だけを，初期 config と S までの effective/booking 順の RX frequency history から復元する．pending entry が残る channel と RX stop failure 時は restoration を行わず，`applied` row と `rx_restore` rejection に skipped attempt を記録する．成功した restore も `applied` に記録し，loss 後は後続 channel を呼ばない．failed flush の chain を追跡・隔離する仕組みは追加しない；KL-9 に残る ceiling とする．
+- 共有 RM-25 timeline の receive successor floor は，すべての post-cut RX segment（DDC obligation が無い場合も含む）に `cut + release window + old-rate receive call + allowance` を適用し，方向別 start lead をその後に足す．first segment と TX successor は不変．
+- Sol のコードレビュー（FAIL）と 3 回の再レビューで足したこと：cut 以後の読み出し（drain と flush）はすべて UHD の `one_packet` の受信（`Device::rx_recv` の引数．UHD は `one_packet=false` だと packet ごとに timeout を使い直す，`rx_streamer_impl.hpp:154–182`，VERIFIED）．cut より前の読み出しは今までどおり．残った obligation の始末は 1 か所で，owner のすべての出口（停止，loss，次の区間なし，`await_release` の取り消し，構成・開始の拒否，移動元の拒否による移動先，streamer の無い shutdown）がそこを通ってから claim を返し streamer を閉じる．始末は obligation ごとに一度だけ報告し，「始末した」というフラグは持たない．
+- 試験系列と観測点：[reviews/d9b2-test-plan.md](reviews/d9b2-test-plan.md)．経過と指摘：[reviews/d9b2-sol.md](reviews/d9b2-sol.md)．

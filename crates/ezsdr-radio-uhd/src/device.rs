@@ -189,14 +189,16 @@ pub trait Device: Send + Sync {
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError>;
     /// A timed continuous start of receive stream `stream`.
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError>;
+    /// Starts receive immediately (`stream_now`), without a timed start at a sampled current time.
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError>;
     /// Samples a receive packet of stream `stream` carries (UHD's `max_num_samps`); 0 when
     /// that streamer is not open or packets are not known (UR-25: a stop's delivery waits
     /// for the packet holding the cut).
     fn rx_packet_samples(&self, stream: usize) -> usize;
     /// Stops stream `stream`'s continuous stream, at a device tick when given.
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError>;
-    /// Receives up to `n` samples per channel on stream `stream`.
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Duration) -> RxRecv;
+    /// Receives up to `n` samples per channel; `one_packet` returns after the first packet.
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Duration, one_packet: bool) -> RxRecv;
     /// Opens transmit stream `stream` for the device channels `channels`.
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError>;
     /// Sends one buffer per channel of stream `stream`; returns the samples accepted per
@@ -294,6 +296,8 @@ pub enum FakeFault {
     RxPanic(Duration),
     /// `rx_recv` returns only `Timeout`.
     Silence(Duration),
+    /// The receive chain stops transferring samples at this instant until it is started again.
+    RxFlowStall(Duration),
     /// Every timed `tx_send` blocks forever.
     TxBlocks,
     /// Every `tx_send` takes this long before the device sees it.
@@ -1190,6 +1194,53 @@ impl FakeDevice {
         }
         [((t / rx_ratio).rem_euclid(65_536)) as f32 / 65_536.0, 0.0]
     }
+
+    fn start_rx(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        if self.unreachable() {
+            return Err(self.timed_out());
+        }
+        let mut st = self.lock();
+        self.lost(&st)?;
+        st.calls.push(match at {
+            Some(at) => format!("rx_start {stream} {at}"),
+            None => format!("rx_start_now {stream}"),
+        });
+        if !st.rx.contains_key(&stream) {
+            return Err(DeviceError::failed(format!("fake: receive stream {stream} is not open")));
+        }
+        let now = self.now(&st);
+        let timed = at.is_some();
+        let at = at.unwrap_or(now);
+        let ratio = st.rx[&stream]
+            .channels
+            .first()
+            .and_then(|chan| st.settings[0].get(*chan))
+            .map_or(1, |channel| self.ratio(channel.rate));
+        // A stream-now start cannot become a late timed command.
+        let scripted = timed.then(|| self.config.faults.iter().position(|f| *f == FakeFault::LateStart).filter(|i| !st.fired[*i])).flatten();
+        self.settle(&mut st);
+        let channels: Vec<usize> = st.rx[&stream].channels.clone();
+        match scripted {
+            Some(index) => {
+                st.fired[index] = true;
+                st.rx.get_mut(&stream).expect("checked").late = Some(at);
+            }
+            None if at < now => st.rx.get_mut(&stream).expect("checked").late = Some(at),
+            None if st.rx[&stream].end.is_some() => {
+                // Behind the stopped stream's tail, which is delivered first.
+                st.rx.get_mut(&stream).expect("checked").then = Some(at);
+                open_flow(&mut st, Dir::Rx, &channels, at);
+            }
+            None => {
+                let streamer = st.rx.get_mut(&stream).expect("checked");
+                streamer.next = Some(at);
+                streamer.origin = at;
+                streamer.ratio = ratio;
+                open_flow(&mut st, Dir::Rx, &channels, at);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Device for FakeDevice {
@@ -1548,46 +1599,11 @@ impl Device for FakeDevice {
     }
 
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
-        if self.unreachable() {
-            return Err(self.timed_out());
-        }
-        let mut st = self.lock();
-        self.lost(&st)?;
-        st.calls.push(format!("rx_start {stream} {at}"));
-        if !st.rx.contains_key(&stream) {
-            return Err(DeviceError::failed(format!("fake: receive stream {stream} is not open")));
-        }
-        let now = self.now(&st);
-        // The running stream's ratio: its first channel's rate (UHD's one rate per streamer).
-        let ratio = st.rx[&stream]
-            .channels
-            .first()
-            .and_then(|chan| st.settings[0].get(*chan))
-            .map_or(1, |channel| self.ratio(channel.rate));
-        let scripted = self.config.faults.iter().position(|f| *f == FakeFault::LateStart).filter(|i| !st.fired[*i]);
-        self.settle(&mut st);
-        let channels: Vec<usize> = st.rx[&stream].channels.clone();
-        // The device reports a late start once its time reaches the start (UR-33).
-        match scripted {
-            Some(index) => {
-                st.fired[index] = true;
-                st.rx.get_mut(&stream).expect("checked").late = Some(at);
-            }
-            None if at < now => st.rx.get_mut(&stream).expect("checked").late = Some(at),
-            None if st.rx[&stream].end.is_some() => {
-                // Behind the stopped stream's tail, which is delivered first.
-                st.rx.get_mut(&stream).expect("checked").then = Some(at);
-                open_flow(&mut st, Dir::Rx, &channels, at);
-            }
-            None => {
-                let streamer = st.rx.get_mut(&stream).expect("checked");
-                streamer.next = Some(at);
-                streamer.origin = at;
-                streamer.ratio = ratio;
-                open_flow(&mut st, Dir::Rx, &channels, at);
-            }
-        }
-        Ok(())
+        self.start_rx(stream, Some(at))
+    }
+
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.start_rx(stream, None)
     }
 
     fn rx_packet_samples(&self, stream: usize) -> usize {
@@ -1627,7 +1643,7 @@ impl Device for FakeDevice {
         Ok(())
     }
 
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Duration) -> RxRecv {
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Duration, one_packet: bool) -> RxRecv {
         if self.unreachable() {
             self.host.sleep(timeout);
             return RxRecv::Timeout;
@@ -1693,7 +1709,8 @@ impl Device for FakeDevice {
                 | FakeFault::Jump(at)
                 | FakeFault::Repeat(at)
                 | FakeFault::RxPanic(at)
-                | FakeFault::Silence(at) => self.ticks_of(*at),
+                | FakeFault::Silence(at)
+                | FakeFault::RxFlowStall(at) => self.ticks_of(*at),
                 _ => continue,
             };
             let silent = matches!(fault, FakeFault::Silence(_));
@@ -1727,6 +1744,14 @@ impl Device for FakeDevice {
                 }
                 FakeFault::RxPanic(_) => panic!("fake: rx_recv panics"),
                 FakeFault::Silence(_) => {
+                    drop(st);
+                    self.host.sleep(timeout);
+                    return RxRecv::Timeout;
+                }
+                FakeFault::RxFlowStall(at) => {
+                    let channels = st.rx[&stream].channels.clone();
+                    close_flow(&mut st, Dir::Rx, &channels, self.ticks_of(*at));
+                    st.rx.get_mut(&stream).expect("checked").next = None;
                     drop(st);
                     self.host.sleep(timeout);
                     return RxRecv::Timeout;
@@ -1799,6 +1824,7 @@ impl Device for FakeDevice {
                 self.sleep_ticks((ready - now).min(self.ticks_of(Duration::from_millis(5))));
             }
             got += take;
+            if one_packet { break; }
         }
         let mut st = self.lock();
         if let Some(stop) = st.rx.get(&stream).and_then(|streamer| streamer.end) {
@@ -2230,7 +2256,7 @@ mod tests {
         let mut blocks = Vec::new();
         let mut timeouts = 0;
         while timeouts < 2 && !until(&blocks) {
-            match device.rx_recv(0, 2_000, Duration::from_millis(50)) {
+            match device.rx_recv(0, 2_000, Duration::from_millis(50), false) {
                 RxRecv::Samples { first_tick, samples } => {
                     timeouts = 0;
                     blocks.push((first_tick, samples[0].len()));
@@ -2297,7 +2323,7 @@ mod tests {
             device.rx_stop(0, None).unwrap();
             let _ = blocks_until(&device, |_| false);
             let begun = device.host().now();
-            let got = device.rx_recv(0, 2_000, Duration::from_millis(60));
+            let got = device.rx_recv(0, 2_000, Duration::from_millis(60), false);
             (got, device.host().now() - begun)
         });
         assert_eq!(got, RxRecv::Timeout);
@@ -2323,10 +2349,10 @@ mod tests {
                 clock.sleep(Duration::from_millis(8));
                 stopper.rx_stop(0, None).unwrap();
             }).unwrap();
-            let cut = device.rx_recv(0, 20_000, Duration::from_millis(5));
+            let cut = device.rx_recv(0, 20_000, Duration::from_millis(5), false);
             stopping.join().unwrap();
             let begun = device.host().now();
-            let next = device.rx_recv(0, 2_000, Duration::from_millis(50));
+            let next = device.rx_recv(0, 2_000, Duration::from_millis(50), false);
             (from, stop, cut, next, device.host().now() - begun)
         });
         let RxRecv::Samples { first_tick, samples } = cut else { panic!("the request cut short returned {cut:?}") };
@@ -2383,7 +2409,7 @@ mod tests {
         let device = manual(FakeConfig::default());
         let (got, waited) = participant(&device, |device| {
             let begun = device.host().now();
-            let got = device.rx_recv(0, 2_000, Duration::from_millis(60));
+            let got = device.rx_recv(0, 2_000, Duration::from_millis(60), false);
             (got, device.host().now() - begun)
         });
         assert!(matches!(got, RxRecv::Failed(_)), "{got:?}");
@@ -2444,7 +2470,7 @@ mod tests {
             device.rx_start(0, start).unwrap();
             let mut got = Vec::new();
             while got.len() < 500 {
-                if let RxRecv::Samples { samples, first_tick } = device.rx_recv(0, 100, Duration::from_millis(100)) {
+                if let RxRecv::Samples { samples, first_tick } = device.rx_recv(0, 100, Duration::from_millis(100), false) {
                     assert_eq!(first_tick, start + got.len() as i64 * 200);
                     got.extend(samples[0].clone());
                 }
@@ -2467,7 +2493,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             let mut saw_overflow = false;
             while !saw_overflow {
-                saw_overflow = matches!(device.rx_recv(0, 1_000, Duration::from_millis(100)), RxRecv::Overflow { out_of_sequence: false });
+                saw_overflow = matches!(device.rx_recv(0, 1_000, Duration::from_millis(100), false), RxRecv::Overflow { out_of_sequence: false });
             }
             device.host().sleep(Duration::from_millis(10));
             assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().map(|r| r.code), Some(TxCode::Underflow));
@@ -2499,7 +2525,7 @@ mod tests {
                 let mut got: Vec<Iq> = Vec::new();
                 let mut timeouts = 0;
                 while got.len() < n && timeouts < 3 {
-                    match device.rx_recv(stream, 100, Duration::from_millis(100)) {
+                    match device.rx_recv(stream, 100, Duration::from_millis(100), false) {
                         RxRecv::Samples { samples, .. } => {
                             timeouts = 0;
                             assert_eq!(samples.len(), 1, "stream {stream} carries one channel");
@@ -2525,7 +2551,7 @@ mod tests {
             let mut blocks = 0usize;
             while reached < past && blocks < 2_000 {
                 blocks += 1;
-                match device.rx_recv(0, 100, Duration::from_millis(100)) {
+                match device.rx_recv(0, 100, Duration::from_millis(100), false) {
                     RxRecv::Samples { first_tick, samples } => reached = first_tick + samples[0].len() as i64 * 200,
                     RxRecv::Overflow { .. } => {}
                     other => panic!("stream 0 after the stop: {other:?}"),
@@ -2539,7 +2565,7 @@ mod tests {
             let mut calls = 0usize;
             while calls < 2_000 && !timed_out {
                 calls += 1;
-                match device.rx_recv(1, 100, Duration::from_millis(2)) {
+                match device.rx_recv(1, 100, Duration::from_millis(2), false) {
                     RxRecv::Samples { first_tick, samples } => {
                         let last = first_tick + (samples[0].len() as i64 - 1) * 200;
                         assert!(last < stopped, "stream 1 delivered a sample at or after its stop at {stopped}: tick {last}");
@@ -2595,7 +2621,7 @@ mod tests {
             device.set_time_zero(false).unwrap();
             device.rx_open(0, &[]).unwrap();
             device.rx_start(0, device.time_now().unwrap() + ms(1)).unwrap();
-            match device.rx_recv(0, 100, Duration::from_millis(100)) {
+            match device.rx_recv(0, 100, Duration::from_millis(100), false) {
                 RxRecv::Samples { samples, .. } => assert_eq!(samples.len(), 1, "the streamer's one channel is channel 0"),
                 other => panic!("{other:?}"),
             }
@@ -3093,7 +3119,7 @@ mod tests {
             for (k, hz) in [2e9, 3e9, 4e9].into_iter().enumerate() {
                 device.apply(Dir::Rx, 0, &freq(hz), Some(start - ms(3) + ms(k as i64))).unwrap();
             }
-            let RxRecv::Samples { first_tick, samples } = device.rx_recv(0, 4, Duration::from_millis(50)) else { panic!("samples") };
+            let RxRecv::Samples { first_tick, samples } = device.rx_recv(0, 4, Duration::from_millis(50), false) else { panic!("samples") };
             assert_eq!(first_tick, start);
             assert_eq!(device.dsp_log(Dir::Rx, 0).iter().map(|(tick, ..)| *tick).collect::<Vec<_>>(), [start, start + 1, start + 2]);
             assert_eq!((device.freq_at(Dir::Rx, 0, start), device.freq_at(Dir::Rx, 0, start + 1), device.freq_at(Dir::Rx, 0, start + 2)), (2e9, 3e9, 4e9));
@@ -3138,7 +3164,7 @@ mod tests {
             device.host().sleep(Duration::from_millis(9));
             device.apply(Dir::Rx, 0, &freq(1e9), None).unwrap();
             device.host().sleep(Duration::from_millis(2));
-            let RxRecv::Samples { samples, .. } = device.rx_recv(0, 5_000, Duration::from_millis(50)) else { panic!("samples") };
+            let RxRecv::Samples { samples, .. } = device.rx_recv(0, 5_000, Duration::from_millis(50), false) else { panic!("samples") };
             assert_eq!(samples[0][100], BURST, "before the timed command");
             assert_ne!(samples[0][3_000], BURST, "between the timed command and the untimed write");
             assert_eq!(samples[0][4_500], BURST, "after the untimed write");

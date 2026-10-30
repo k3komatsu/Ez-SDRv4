@@ -31,12 +31,12 @@ fn set_config(numbers: &[u32], rate: u64) -> Config {
 
 /// A stream at 1 MS/s from 0 with a 50 ms lead and no receive call (Appendix C's terms).
 fn stream(direction: Direction, channels: u16) -> Stream {
-    Stream { direction, origin: 0, config: config(channels, 1_000_000), lead: 50 * MS, call: 0, allowance: 0 }
+    Stream { direction, origin: 0, config: config(channels, 1_000_000), lead: 50 * MS, call: 0, release_window: 0, allowance: 0 }
 }
 
 /// A receive stream of `numbers` at `rate`, from 0, with a 50 ms lead and no call.
 fn rx_stream(numbers: &[u32], rate: u64) -> Stream {
-    Stream { direction: Direction::Rx, origin: 0, config: set_config(numbers, rate), lead: 50 * MS, call: 0, allowance: 0 }
+    Stream { direction: Direction::Rx, origin: 0, config: set_config(numbers, rate), lead: 50 * MS, call: 0, release_window: 0, allowance: 0 }
 }
 
 /// A receive stream of `numbers` at `rate` from 0 with no lead: the source of the 1 Hz cases,
@@ -129,6 +129,7 @@ fn rm_26_each_stream_takes_its_own_directions_start_lead() {
             config: config(1, 1_000_000),
             lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction),
             call: 0,
+            release_window: 0,
             allowance: 0,
         };
         assert_eq!(
@@ -147,6 +148,25 @@ fn rm_15_later_bound_combines_the_current_and_handed_front() {
     assert_eq!(later_bound(10, Some(9)), 10);
     assert_eq!(later_bound(10, Some(10)), 10);
     assert_eq!(later_bound(10, Some(11)), 11);
+}
+
+#[test]
+fn rm_25_a_receive_successor_adds_release_window_before_call_and_lead() {
+    let cut = 10 * MS;
+    for (lead, expected) in [(3 * MS, cut + 29 * MS), (50 * MS, cut + 76 * MS)] {
+        let stream = Stream {
+            lead,
+            call: 20_000,
+            release_window: 3 * MS,
+            allowance: 3 * MS,
+            ..rx_stream(&[0], 1_000_000)
+        };
+        assert_eq!(
+            segments(&stream, &[item(cut, 1, cut, Kind::Cold(config(1, 1_000_000)))]),
+            [(0, Some(cut)), (expected, None)],
+            "lead {lead}"
+        );
+    }
 }
 
 #[test]

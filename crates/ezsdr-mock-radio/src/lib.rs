@@ -1541,6 +1541,7 @@ impl MockRadio {
             config: timeline::Config { channels, ratio },
             lead: ticks(timeline::start_lead_ns(&self.profile.timing(), direction))?,
             call: self.profile.rx_call_samples(),
+            release_window: if direction == Direction::Rx { ticks(self.profile.timing().release_window_ns)? } else { 0 },
             allowance: ticks(self.profile.delivery_allowance_ns())?,
         }))
     }

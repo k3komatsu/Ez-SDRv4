@@ -655,7 +655,7 @@ fn vh_8_the_same_receive_membership_join_leaves_the_same_clocks() {
     let mock_gap = mock_records[1].2 - mock_records[0].3.expect("the Mock cuts the first segment");
     let uhd_gap = uhd_records[1].2 - uhd_records[0].3.expect("the UHD cuts the first segment");
     for gap in [mock_gap, uhd_gap] {
-        assert!(gap >= ms(55) && gap < ms(55) + 200, "the ready gap: the receive call, the allowance and the lead (RM-25): {gap}");
+        assert!(gap >= ms(58) && gap < ms(58) + 200, "the ready gap: release window, receive call, allowance and lead (RM-25): {gap}");
     }
     assert!((mock_gap - uhd_gap).abs() < 200, "the gaps differ by more than the lattice: {mock_gap} vs {uhd_gap}");
     let rejected: Vec<_> = mock.events().iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).cloned().collect();
@@ -1450,7 +1450,7 @@ fn vh_8_two_streams_each_prepare_alike() {
 #[test]
 fn vh_8_a_stream_one_rate_change_cuts_that_stream_alone() {
     // Design 33 §6: stream 1's `cold` rate change cuts stream 1's clock and starts its next
-    // segment a receive call, the allowance and the lead later; stream 0's clock is not cut.
+    // segment a release window, receive call, allowance and lead later; stream 0's clock is not cut.
     // Both Providers' rows agree, relative to their own T0 (RM-25, UR-25).
     let mut pair = Started::new(selector(&["0:A:ubx:0", "0:B:ubx:0"], &[]), &rx_two(), &["rx0", "rx1"]);
     pair.cold("radio.rx.s1.sample_rate_hz", Value::num(4e6).unwrap(), 10, Some(100), 400);
@@ -1461,17 +1461,17 @@ fn vh_8_a_stream_one_rate_change_cuts_that_stream_alone() {
         mock,
         [
             ("radio/rx/s0".to_owned(), (100, 1), 0, None),
-            ("radio/rx/s1".to_owned(), (50, 1), ms(155), None),
+            ("radio/rx/s1".to_owned(), (50, 1), ms(158), None),
             ("radio/rx/s1".to_owned(), (200, 1), 0, Some(ms(100))),
         ],
-        "stream 0 is not cut; stream 1's new clock begins 55 ms after its cut"
+        "stream 0 is not cut; stream 1's new clock begins 58 ms after its cut"
     );
 }
 
 #[test]
 fn vh_8_a_stream_one_join_leaves_the_same_ready_gap() {
     // Design 33 §6: a channel entering stream 1 from no stream cuts stream 1 and starts the
-    // next segment after the receive call, the allowance and the lead (RM-25); both
+    // next segment after the release window, receive call, allowance and lead (RM-25); both
     // Providers' gaps from the cut to the new origin agree.
     let constraints = [
         ("radio.rx.c0.stream", eq(Scalar::from(1))),
@@ -1487,9 +1487,9 @@ fn vh_8_a_stream_one_join_leaves_the_same_ready_gap() {
         mock,
         [
             ("radio/rx/s1".to_owned(), (200, 1), 0, Some(ms(100))),
-            ("radio/rx/s1".to_owned(), (200, 1), ms(155), None),
+            ("radio/rx/s1".to_owned(), (200, 1), ms(158), None),
         ],
-        "the join's gap is the 2 ms call, the 3 ms allowance and the 50 ms lead"
+        "the join's gap is the 3 ms release window, 2 ms call, 3 ms allowance and 50 ms lead"
     );
 }
 
@@ -1560,14 +1560,14 @@ fn vh_8_the_instance_floor_crosses_streams() {
     let mock = pair.mock_rows();
     let uhd = pair.uhd_rows();
     assert_eq!(mock, uhd, "both streams' rows, from each T0");
-    // Stream 0 (2 Msps: 1 ms call) begins 54 ms after the floor; stream 1 (1 Msps: 2 ms)
-    // 55 ms after it.
+    // Stream 0 (2 Msps: 1 ms call) begins 57 ms after the floor; stream 1 (1 Msps: 2 ms)
+    // 58 ms after it, including each stream's release window.
     assert_eq!(
         mock,
         [
-            ("radio/rx/s0".to_owned(), (50, 1), ms(204), None),
+            ("radio/rx/s0".to_owned(), (50, 1), ms(207), None),
             ("radio/rx/s0".to_owned(), (100, 1), 0, Some(ms(150))),
-            ("radio/rx/s1".to_owned(), (100, 1), ms(205), None),
+            ("radio/rx/s1".to_owned(), (100, 1), ms(208), None),
             ("radio/rx/s1".to_owned(), (200, 1), 0, Some(ms(150))),
         ]
     );
@@ -1650,7 +1650,7 @@ fn vh_8_the_same_manifest_plan_rows() {
         [
             ("rx".to_owned(), 0, 0, vec![0]),
             ("rx".to_owned(), 1, 0, vec![1]),
-            ("rx".to_owned(), 1, ms(155), vec![1]),
+            ("rx".to_owned(), 1, ms(158), vec![1]),
             ("tx".to_owned(), 1, ms(300), vec![1]),
             ("tx".to_owned(), 1, ms(550), vec![1]),
         ]

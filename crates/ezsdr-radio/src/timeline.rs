@@ -104,6 +104,9 @@ pub struct Stream {
     /// One receive call, in samples: the longer of `block_len` and the device's packet; 0
     /// for a Provider whose ready instant is the receipt alone (VH-4).
     pub call: i64,
+    /// The receive release window, in root ticks; 0 for transmit streams and Providers whose
+    /// description has no release window (RM-6, VH-4).
+    pub release_window: i64,
     /// The delivery allowance after that call, in root ticks.
     pub allowance: i64,
 }
@@ -1051,8 +1054,8 @@ impl State {
     /// adds the instant the item's stream released the moved channel, so that the segment of
     /// a move's destination, or of a stream the destination's Provider starts again after
     /// the move, waits the source's release the same way. After a cut, a receive segment is
-    /// ready no earlier than that cut plus one receive call at the old rate and the
-    /// allowance, the call the Provider has in progress there (VH-4).
+    /// ready no earlier than that cut plus the release window, one receive call at the old
+    /// rate and the allowance, the call the Provider has in progress there (VH-4).
     fn begin(&self, stream: &Stream, item: &Item, config: Config) -> Result<Segment, TimeError> {
         let lead = i128::from(stream.lead);
         let mut earliest = i128::from(item.e);
@@ -1066,7 +1069,7 @@ impl State {
             if stream.direction == Direction::Rx {
                 let (num, den) = parts(old.ratio);
                 let call = i128::from(stream.call).checked_mul(num).ok_or(TimeError::Overflow)?;
-                ready = ready.max(cut + ceil_div(call, den) + i128::from(stream.allowance));
+                ready = ready.max(cut + i128::from(stream.release_window) + ceil_div(call, den) + i128::from(stream.allowance));
             }
         }
         earliest = earliest.max(ready + lead);

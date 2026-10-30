@@ -1018,6 +1018,10 @@ impl Device for UhdDevice {
         self.stream_cmd(stream, true, Some(at))
     }
 
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.stream_cmd(stream, true, None)
+    }
+
     fn rx_packet_samples(&self, stream: usize) -> usize {
         lock(&self.rx).get(&stream).map_or(0, |stream| stream.spp)
     }
@@ -1026,7 +1030,7 @@ impl Device for UhdDevice {
         self.stream_cmd(stream, false, at)
     }
 
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Duration) -> RxRecv {
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Duration, one_packet: bool) -> RxRecv {
         let Some(stream) = lock(&self.rx).get(&stream).cloned() else {
             return RxRecv::Failed(DeviceError::failed("UR-3: the receive streamer is not open"));
         };
@@ -1038,7 +1042,7 @@ impl Device for UhdDevice {
         let mut md = stream.md;
         let mut received = 0usize;
         // SAFETY: each buffer holds `n` samples per channel; the Arc keeps the streamer.
-        let code = unsafe { uhd_rx_streamer_recv(stream.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), false, &mut received) };
+        let code = unsafe { uhd_rx_streamer_recv(stream.h, pointers.as_mut_ptr(), n, &mut md, timeout.as_secs_f64(), one_packet, &mut received) };
         if let Err(error) = check_rx(stream.h, "uhd_rx_streamer_recv", code) {
             return RxRecv::Failed(error);
         }
@@ -1226,6 +1230,7 @@ mod ffi_tests {
     static TX_ASYNC_METADATA_FREES: AtomicUsize = AtomicUsize::new(0);
     static TX_STREAMER_FREES: AtomicUsize = AtomicUsize::new(0);
     static TX_SEND_OBSERVATIONS: Mutex<Vec<TxSendObservation>> = Mutex::new(Vec::new());
+    static STREAM_CMD: Mutex<Option<(c_int, bool, i64, f64)>> = Mutex::new(None);
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     struct TxMetadata {
@@ -1465,10 +1470,22 @@ mod ffi_tests {
         }));
         assert_eq!(device.rx_packet_samples(1), 7);
         assert_eq!(device.rx_packet_samples(0), 0, "stream 0 has no receive streamer");
-        assert!(matches!(device.rx_recv(0, 1, Duration::from_millis(1)), RxRecv::Failed(_)));
-        assert!(matches!(device.rx_recv(1, 1, Duration::from_millis(1)), RxRecv::Timeout));
+        assert!(matches!(device.rx_recv(0, 1, Duration::from_millis(1), false), RxRecv::Failed(_)));
+        assert!(matches!(device.rx_recv(1, 1, Duration::from_millis(1), false), RxRecv::Timeout));
         // SAFETY: nothing else holds this metadata; the dummy streamer's Drop is skipped.
         unsafe { uhd_rx_metadata_free(&mut md); }
+    }
+
+    #[test]
+    fn ur_24_rx_recovery_start_uses_uhd_stream_now() {
+        let _test = lock(&TEST_LOCK);
+        *lock(&STREAM_CMD) = None;
+        let device = rx_dummy(false);
+        device.rx_open(0, &[0]).unwrap();
+        device.rx_start_now(0).unwrap();
+        assert_eq!(*lock(&STREAM_CMD), Some((UHD_STREAM_MODE_START_CONTINUOUS, true, 0, 0.0)));
+        device.rx_close(0);
+        std::mem::forget(device);
     }
 
     #[unsafe(no_mangle)]
@@ -1484,9 +1501,12 @@ mod ffi_tests {
 
     #[unsafe(no_mangle)]
     extern "C" fn uhd_rx_streamer_issue_stream_cmd(
-        _h: uhd_rx_streamer_handle, _cmd: *const uhd_stream_cmd_t,
+        _h: uhd_rx_streamer_handle, cmd: *const uhd_stream_cmd_t,
     ) -> c_int {
         native_entry();
+        // SAFETY: `stream_cmd` passes its live stack command for this call.
+        let cmd = unsafe { &*cmd };
+        *lock(&STREAM_CMD) = Some((cmd.stream_mode, cmd.stream_now, cmd.time_spec_full_secs, cmd.time_spec_frac_secs));
         UHD_ERROR_NONE
     }
 
@@ -1555,7 +1575,7 @@ mod ffi_tests {
     }
 
     fn receive(device: &UhdDevice) {
-        assert!(matches!(device.rx_recv(0, 1, Duration::from_secs(1)), RxRecv::Timeout));
+        assert!(matches!(device.rx_recv(0, 1, Duration::from_secs(1), false), RxRecv::Timeout));
     }
     fn start(device: &UhdDevice) { device.rx_start(0, 0).unwrap(); }
     fn report(device: &UhdDevice) { assert!(device.tx_async(0, Duration::from_secs(1)).unwrap().is_none()); }

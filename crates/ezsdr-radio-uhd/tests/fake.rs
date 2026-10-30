@@ -1800,9 +1800,10 @@ impl Device for RefuseRxOpenOnce {
         self.inner.rx_open(stream, channels)
     }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(stream) }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(stream, channels) }
     fn tx_send(&self, stream: usize, samples: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(stream, samples, at, sob, eob, timeout) }
     fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(stream, timeout) }
@@ -3222,7 +3223,7 @@ fn ur_33_one_channel_is_opened_by_one_streamer() {
     assert!(error.contains("Attempting to reconnect output port!"), "{error}");
     let error = device.rx_open(0, &[0, 0]).err().unwrap().message;
     assert!(error.contains("Attempting to reconnect output port!"), "the same channel twice: {error}");
-    assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)), "a refused reopen leaves the stream with none");
+    assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Failed(_)), "a refused reopen leaves the stream with none");
     device.rx_open(0, &[0]).unwrap();
     assert!(device.rx_open(0, &[2]).is_err(), "a channel the device has not");
     device.rx_open(0, &[0]).unwrap();
@@ -3263,7 +3264,7 @@ fn ur_33_setting_a_spec_disconnects_that_direction_s_streamers() {
     device.rx_open(0, &[0]).unwrap();
     device.tx_open(0, &[0]).unwrap();
     device.set_subdev_spec(ezsdr_radio_uhd::Dir::Rx, "A:0").unwrap();
-    assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)), "the receive streamer went with the map");
+    assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Failed(_)), "the receive streamer went with the map");
     let out = [[0.0f32, 0.0]; 4];
     assert!(device.tx_send(0, &[&out], None, false, false, Wall::from_millis(1)).is_ok(), "the transmit streamer stays");
     // The transmit side the same: its streamer goes with its map, the receive one stays.
@@ -3272,7 +3273,7 @@ fn ur_33_setting_a_spec_disconnects_that_direction_s_streamers() {
     device.tx_open(0, &[0]).unwrap();
     device.set_subdev_spec(ezsdr_radio_uhd::Dir::Tx, "A:0").unwrap();
     assert!(device.tx_send(0, &[&out], None, false, false, Wall::from_millis(1)).is_err(), "the transmit streamer went with its map");
-    assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Timeout), "the receive streamer stays: its call waits, not fails");
+    assert!(matches!(device.rx_recv(0, 1, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Timeout), "the receive streamer stays: its call waits, not fails");
 }
 
 #[test]
@@ -3903,9 +3904,10 @@ impl Device for Watched {
     fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -4109,13 +4111,14 @@ impl Device for Descheduled {
     fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         use std::sync::atomic::Ordering::SeqCst;
         let after_block = self.after_block.swap(false, SeqCst);
         self.hold(Step::RxRecv, after_block);
-        let got = self.inner.rx_recv(s, n, t);
+        let got = self.inner.rx_recv(s, n, t, one_packet);
         if matches!(got, ezsdr_radio_uhd::RxRecv::Samples { .. }) {
             self.after_block.store(true, SeqCst);
         }
@@ -4263,9 +4266,10 @@ impl Device for LostAtShutdown {
     fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_open"); self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_start"); self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_start_now"); self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("rx_stop"); self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.call("rx_recv"); self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.call("rx_recv"); self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.call("tx_open"); self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
         self.call("tx_send");
@@ -4561,11 +4565,12 @@ impl Device for Gated {
     fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.hold_call(s, "rx_recv");
-        self.inner.rx_recv(s, n, t)
+        self.inner.rx_recv(s, n, t, one_packet)
     }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> {
@@ -4806,9 +4811,10 @@ impl Device for Recording {
     fn rates(&self, d: ezsdr_radio_uhd::Dir, c: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> { self.inner.rates(d, c) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -4917,9 +4923,10 @@ impl Device for Mislabelled {
     fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -5062,9 +5069,10 @@ impl Device for SerialFails {
     fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -5155,9 +5163,10 @@ impl Device for RatesMisreported {
     }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -5600,7 +5609,7 @@ fn ur_24_a_timed_update_for_a_channel_out_of_its_stream_waits_for_its_segment() 
 fn ur_25_a_channel_s_antenna_change_cuts_its_stream() {
     // UR-25, D16: a channel's antenna is a `cold` change: the stream is cut, the new
     // segment applies antenna untimed and its read-back is recorded; the ready instant is
-    // the cut plus the receive call, the allowance and the lead.
+    // the cut plus the release window, receive call, allowance and lead.
     use ezsdr_kernel::module_api::UpdateClass::Cold;
     let mut direct = Direct::build(FakeConfig::default(), &[], vec![attached_on("rx0", ezsdr_kernel::stream::BackPressure::DropOldest)], layout_selector());
     direct.update("radio.rx.c0.antenna", Value::from("TX/RX"), Cold, None);
@@ -5614,8 +5623,8 @@ fn ur_25_a_channel_s_antenna_change_cuts_its_stream() {
     assert_eq!(records.len(), 2, "{records:?}");
     assert!(records[0].ended_at.is_some(), "{records:?}");
     let (end, origin) = (records[0].ended_at.unwrap().ticks_in(records[0].root).unwrap(), records[1].origin.ticks_in(records[1].root).unwrap());
-    assert!(origin >= end + ms(55), "the receive call, the allowance and the lead (RM-25): {origin} vs {end}");
-    assert!(origin - (end + ms(55)) < 200, "the origin is the next lattice instant (RM-25): {origin} vs {end}");
+    assert!(origin >= end + ms(58), "the release window, receive call, allowance and lead (RM-25): {origin} vs {end}");
+    assert!(origin - (end + ms(58)) < 200, "the origin is the next lattice instant (RM-25): {origin} vs {end}");
     assert_eq!(records[1].stream.path(), "usrp/rx/s0");
     assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
     let instance = direct.finish();
@@ -5719,7 +5728,7 @@ fn ur_25_a_layout_rate_change_cuts_its_stream_and_configures_every_channel() {
     assert!(rx[0].ended_at.is_some());
     assert_eq!(rx[1].root_ticks_per_tick, ezsdr_kernel::time::Rational::new(100, 1).unwrap());
     let (end, origin) = (rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap(), rx[1].origin.ticks_in(rx[1].root).unwrap());
-    assert!(origin >= end + ms(55), "{origin} vs {end}");
+    assert!(origin >= end + ms(58), "{origin} vs {end}");
     // The transmit side is untouched.
     let tx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/tx/s0").collect();
     assert_eq!(tx.len(), 1, "{records:?}");
@@ -5826,7 +5835,7 @@ fn ur_25_a_receive_membership_join_opens_the_streamer_with_the_new_set() {
     let rx: Vec<_> = records.iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
     assert_eq!(rx.len(), 2, "{records:?}");
     let (end, origin) = (rx[0].ended_at.unwrap().ticks_in(rx[0].root).unwrap(), rx[1].origin.ticks_in(rx[1].root).unwrap());
-    assert!(origin >= end + ms(55) && origin - (end + ms(55)) < 200, "{origin} vs {end}");
+    assert!(origin >= end + ms(58) && origin - (end + ms(58)) < 200, "{origin} vs {end}");
     let instance = direct.finish();
     let timing = section_of(&instance, "timing");
     let plan = plan_row(&timing);
@@ -7297,11 +7306,12 @@ fn ur_16_a_panicking_later_stream_ends_the_run() {
         fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> { self.inner.apply(d, c, s, at) }
         fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
         fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+        fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
         fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
         fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-        fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+        fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
             assert_ne!(s, 1, "fake: rx_recv panics");
-            self.inner.rx_recv(s, n, t)
+            self.inner.rx_recv(s, n, t, one_packet)
         }
         fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
         fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
@@ -7382,9 +7392,10 @@ impl ezsdr_radio_uhd::Device for HoldAfterApply {
     }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_open(s, c) }
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start(s, at) }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t) }
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv { self.inner.rx_recv(s, n, t, one_packet) }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
     fn tx_async(&self, s: usize, t: Wall) -> Result<Option<ezsdr_radio_uhd::TxReport>, ezsdr_radio_uhd::DeviceError> { self.inner.tx_async(s, t) }
@@ -7445,7 +7456,7 @@ fn ur_25_a_receive_cut_counts_its_own_stream_s_packet_size() {
     let rx = plan["rx"].as_array().unwrap();
     assert_eq!(rx.len(), 2, "{plan}");
     let gap = rx[1]["origin"].as_i64().unwrap() - rx[0]["end"].as_i64().unwrap();
-    assert!((11_400_000..11_400_400).contains(&gap), "4000 samples at 200 ticks + 3 ms + 50 ms, rounded to the lattice: {gap} in {plan}");
+    assert!((12_000_000..12_000_400).contains(&gap), "4000 samples at 200 ticks + 3 ms release window + 3 ms allowance + 50 ms lead, rounded to the lattice: {gap} in {plan}");
     let rows = &section_of(&instance, "applied");
     assert_eq!(rows.as_array().unwrap().iter().filter(|row| row["key"] == "radio.rx.s1.sample_rate_hz").count(), 2, "{rows}");
 }
@@ -7634,14 +7645,15 @@ impl ezsdr_radio_uhd::Device for OnceFails {
         }
         self.inner.rx_start(s, at)
     }
+    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_start_now(s) }
     fn rx_packet_samples(&self, s: usize) -> usize { self.inner.rx_packet_samples(s) }
     fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.rx_stop(s, at) }
-    fn rx_recv(&self, s: usize, n: usize, t: Wall) -> ezsdr_radio_uhd::RxRecv {
+    fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         if s == 0 {
             self.recv0.store(true, std::sync::atomic::Ordering::SeqCst);
             self.recv0_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        self.inner.rx_recv(s, n, t)
+        self.inner.rx_recv(s, n, t, one_packet)
     }
     fn tx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.tx_open(s, c) }
     fn tx_send(&self, s: usize, b: &[&[ezsdr_radio_uhd::Iq]], at: Option<i64>, sob: bool, eob: bool, t: Wall) -> Result<usize, ezsdr_radio_uhd::DeviceError> { self.inner.tx_send(s, b, at, sob, eob, t) }
@@ -8158,7 +8170,7 @@ fn assert_refused_without_reaching(guard: &measurement::GuardedDevice, device: &
     assert!(guard.rx_open(0, &[0]).is_err() && guard.tx_open(0, &[0]).is_err());
     assert!(guard.time_now().is_err() && guard.serial().is_err() && guard.front_end(Dir::Rx, 0).is_err());
     assert!(guard.set_sources("internal", "internal").is_err() && guard.rx_start(0, 0).is_err() && guard.rx_stop(0, None).is_err());
-    assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)));
+    assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Failed(_)));
     guard.rx_close(0);
     guard.tx_close(0);
     guard.close_streams();
@@ -8642,10 +8654,10 @@ fn a_forwarded_receive_timeout_or_loss_latches_and_blocks_later_calls() {
         let failed = ezsdr_radio_uhd::RxRecv::Failed(ezsdr_radio_uhd::DeviceError { lost, message: message.to_owned() });
         probe.script_rx(vec![failed]);
         let guard = measurement::GuardedDevice::new(probe.clone(), measurement::Latch::new());
-        assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)));
+        assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Failed(_)));
         assert!(guard.latched().is_some_and(|reason| reason.contains(message)), "{message}: {:?}", guard.latched());
         let rows = probe.control_log().len();
-        assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1)), ezsdr_radio_uhd::RxRecv::Failed(_)));
+        assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Failed(_)));
         assert_eq!(probe.control_log().len(), rows, "the second receive did not reach the device");
         assert_refused_without_reaching(&guard, &inner);
     }
@@ -8654,7 +8666,7 @@ fn a_forwarded_receive_timeout_or_loss_latches_and_blocks_later_calls() {
     let probe = Arc::new(common::probe_device::ProbeDevice::new(inner));
     probe.script_rx(vec![ezsdr_radio_uhd::RxRecv::Failed(ezsdr_radio_uhd::DeviceError::failed("a bad packet"))]);
     let guard = measurement::GuardedDevice::new(probe, measurement::Latch::new());
-    let _ = guard.rx_recv(0, 100, Wall::from_millis(1));
+    let _ = guard.rx_recv(0, 100, Wall::from_millis(1), false);
     assert_eq!(guard.latched(), None);
 }
 
@@ -8669,6 +8681,28 @@ fn the_waveforms_of_the_added_transmissions_stay_within_half_a_unit() {
 }
 
 // ---------------------------------------------------------------- D9a: a frequency and the DDC/DUC FIFOs (UR-24, UR-33)
+
+#[test]
+fn ur_24_d9_p4_a_and_c_keep_a_pre_stop_ddc_entry_until_restart_samples() {
+    // Bench-results.md 2026-10-29 §P4 A/C measured a stale DDC entry on UBX and OBX;
+    // this test checks only FakeDevice's FIFO and sample-time model, not the RF tone verdict.
+    let device = fake(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
+    let mut tune = |dir, chan, offset, at| {
+        device.apply(dir, chan, &ezsdr_radio_uhd::Settings { freq: Some(1e9 + offset), ..Default::default() }, at).map(|_| offset)
+    };
+    common::d9::open_raw(&*device, 0);
+    for case in [common::d9::P4Case::DspOnly, common::d9::P4Case::DspOnlyReopen] {
+        let before = device.dsp_log(Dir::Rx, 0).len();
+        let result = common::d9::p4_dsp_only(&*device, 0, &mut tune, case);
+        assert_eq!(result.log.iter().any(|row| row == "closed and reopened the streamer"), case == common::d9::P4Case::DspOnlyReopen, "the C case must actually close and reopen the streamer: {result:?}");
+        assert!(result.last.is_some_and(|tick| tick < result.e) && result.stopped < result.e, "the raw stop preceded the timed DDC entry: {result:?}");
+        let consumed: Vec<_> = device.dsp_log(Dir::Rx, 0).into_iter().skip(before)
+            .filter(|(_, freq, timed)| *timed && *freq == 1e9 + 50e3).collect();
+        assert_eq!(consumed, [(result.again, 1e9 + 50e3, true)], "P4 {case:?}: the old entry was consumed by the restart's first sample");
+        assert_eq!(device.freq_at(Dir::Rx, 0, result.again), 1e9 + 50e3, "P4 {case:?}: the next stream starts on the stale value");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "P4 {case:?}: the restart consumed the DDC entry");
+    }
+}
 
 #[test]
 fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {

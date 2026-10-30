@@ -1,4 +1,4 @@
-# Ez-SDR v4 — Handoff (2026-10-19)
+# Ez-SDR v4 — Handoff (2026-10-30)
 
 次のセッション（人間・AI どちらでも）が最初に読む現状メモ．**今のことだけ**を書く：どこに何があるか，何が未解決か，owner の判断待ち，次に何をするか．終わった作業の記録はその置き場（`plan/phaseN/00-overview.md` か各計画ファイル）に書き，ここには1行の参照だけ残す（AGENTS.md §9．`rules.py` が 300 行・40 000 byte を超えると落ちる）．2026-10-14 までここにあった記録も同じ日に各置き場へ移した．
 
@@ -12,11 +12,11 @@
 - **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
 - **Phase 8 の段階 1（channel と stream，1a〜1b-7b），設計メモ 35〜43，段階 3（測定と実機の準備：3a〜3g，D9a，MA1，43a，TXP，3c-3b，TXS）は完了**（2026-10-17〜29）．各段階の記録は [計画](plan/phase8/00-overview.md) §8 の判断ログ，レビューは `plan/phase8/reviews/`，実機の結果は [bench-results.md](plan/phase8/bench-results.md)．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
-- open issue は5件：#56，#67（§3），#70，#71，#72（D9b で直す，§2）．
+- open issue は5件：#56・#67（§3），#70・#72（D9b-1a の実機再確認後に閉じる），#71（D9b-1b，§2）．
 
 ## 2. 次にすること
 
-1. **D9b**（設計メモ [39](plan/phase8/39-dsp-timed-commands.md) §6，§6.6，risky）．**D9b-1a は完了**（2026-10-30，T1〜T3，開き直しによる回復，channel と tick による報告の持ち主，FakeDevice の DUC→radio の二段．[00-overview](plan/phase8/00-overview.md) の D9b-1a の行）．**次**：実機で D9b-1a を確かめる（電源と **att の確認を owner に**，#1 OBX 192.168.40.36 と #2 UBX 192.168.47.37 で P5〜P7 と D70 を production のコードで，TX200 も一度：T1 で送るたびに metadata を作るようになった）．#70・#72 は実機で確かめてから閉じる．その後 **D9b-1b**（送信の R1〈#71〉と R2′：EOB は release した最も遅い instant の後に 0 で埋めて，underflow の後の (a)），**D9b-2**（受信の R2′，P4 の再現），各段階の後に実機．
+1. **D9b-1a と D9b-2 は完了**（2026-10-30．[00-overview](plan/phase8/00-overview.md) の各行，設計メモ [39](plan/phase8/39-dsp-timed-commands.md) §6.6〜§6.8）．実機では未確認．**次の順番**（owner 2026-10-30）：(1) **stream のライフサイクルの設計メモ**（D9b-2 だけで `mech:stream-lifecycle-scattered` が 6 件．受信 owner の出口と DSP の obligation は設計メモ 35 の `Streams` の状態の外にある．owner の寿命・出口・obligation を一つの明示的な状態にするか．Opus が書き，Sol が確かめ，owner が決める．コストを惜しまない）→ (2) 構造の作り直し（動作を変えない，risky）→ (3) **実機**（owner に att の確認．#1 OBX 192.168.40.36 と #2 UBX 192.168.47.37 で D9b-1a の P5〜P7・D70・TX200，D9b-2 の P4 を production のコードで．送信中に ssh を切って送信が止まるか．#70・#72 は確かめてから閉じる）→ (4) **D9b-1b**（送信の R1〈#71〉と R2′，underflow 後の (a)）．
 2. **その後**：TXP の B3（コマンドを用意して実機），段階 4（profile の値：queue の深さ 7／8，throughput，受信の start lead．送信 1 channel 200 MS/s は TXS で 300 s 通った，`tx_in_flight_ns` 10 ms は INFERRED のまま），H3 は段階 4．**owner に（最初の bench の後）**：`overflow_restart_gap_ns` は `unmeasured` のままで，読み直しから再開までの推定を値とするか（基準は設計メモ 41 §8 の末尾）．**owner に（段階 4 の前後）**：今の UHD Module は流れていない chain にも時刻つきの周波数を渡しうり，DDC/DUC に残った設定が後の構成を上書きする（D9 で確認．設計メモ 39 §3 の推奨は `src/` の仕事，D9b と重なる所は D9b で）．段階 1 の後の crate ごとの冗長の棚卸しを 1 回（ponytail の audit と Opus のレビュー，owner 2026-10-19）．
    - **持ち越し**：[1b-4a の修正の報告](plan/phase8/reviews/1b4a-fix-reports.md) §9，[1b4e2-opus](plan/phase8/reviews/1b4e2-opus.md) §1（待ちが origin を越える場合，close の時点で読めない TX の report，`effective != e` の到達性），4d-3 の 2 件（`rx_segment` の timing 行の `channels` は数のまま，plan の e2e は Manifest ファイルまで通さない）．
    - **進め方**：AGENTS.md §9．実装役は Luna fast（`openai/gpt-6-luna-fast#max`），セルフレビューは free の DeepSeek（上限なら Go）．1 段階は本体とテストで約 1,500 行，テストの繰り返しは helper に，テスト計画は順序ごとに assert 1〜2 個．セルフレビューは 1 回，checklist 4 項目，`timeout 2400`，mutation を流さないと明記．指示書には「orchestrator のファイルは読むだけ，到達できる系列のテストを代わりなしで消さない，消した名前を `new` に持つ行と消したテストを `filter` に持つ行を grep する，実時間に頼るテストを足さない」を入れる．`mutation_watchdog.py` は削除の mutant と `new` がよくある語の行で誤報を出す．

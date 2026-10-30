@@ -214,7 +214,7 @@ impl ProbeDevice {
         while begun.elapsed() < limit && idle < 2 {
             let before = self.host_ns();
             let packet_samples = self.inner.rx_packet_samples(stream);
-            let result = self.inner.rx_recv(stream, request, timeout);
+            let result = self.inner.rx_recv(stream, request, timeout, false);
             let after = self.host_ns();
             let outcome = rx_outcome(&result);
             if outcome["kind"] == "timeout" { idle += 1; } else { idle = 0; }
@@ -353,6 +353,14 @@ impl Device for ProbeDevice {
         self.record(json!({ "call": "rx_start", "stream": stream, "at": at, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result
     }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.control_log.lock().unwrap().push("rx_start_now");
+        let before = self.host_ns();
+        let result = self.inner.rx_start_now(stream);
+        let after = self.host_ns();
+        self.record(json!({ "call": "rx_start_now", "stream": stream, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
+        result
+    }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("rx_stop");
@@ -370,7 +378,7 @@ impl Device for ProbeDevice {
         self.record(json!({ "call": "rx_stop", "stream": stream, "at": at, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result
     }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> RxRecv {
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         self.control_log.lock().unwrap().push("rx_recv");
         let count = self.rx_calls.fetch_add(1, Ordering::AcqRel) + 1;
         let script = self.rx_script.lock().unwrap().take();
@@ -387,7 +395,7 @@ impl Device for ProbeDevice {
         }
         let before = self.host_ns();
         let packet_samples = self.inner.rx_packet_samples(stream);
-        let result = self.inner.rx_recv(stream, n, timeout);
+        let result = self.inner.rx_recv(stream, n, timeout, one_packet);
         let after = self.host_ns();
         self.record(json!({
             "call": "rx_recv", "stream": stream, "request_samples": n, "timeout_ns": timeout.as_nanos(),

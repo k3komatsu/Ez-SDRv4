@@ -1266,6 +1266,7 @@ mod tests {
             config: ezsdr_radio::timeline::Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: 0,
             allowance: 0,
         });
         spy.tx_open(0, &[0]).unwrap();
@@ -1382,6 +1383,7 @@ mod tests {
                     config: to.segment.config,
                     lead: 0,
                     call: 0,
+                    release_window: 0,
                     allowance: 0,
                 });
                 line.plan = vec![to.segment];
@@ -1696,7 +1698,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stream_mut(key).clocks = vec![(c0, false)];
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+            streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
             streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
             assert!(streams.book(&core, key, Item { e: core.ticks(100_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: true, kind: Kind::Cold(config(100)) }));
         }
@@ -1824,7 +1826,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stream_mut(key).clocks = vec![(c0, false), (c1, false)];
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            let mut line = Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 });
+            let mut line = Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 });
             line.plan = vec![
                 Segment { origin: 0, cut: Some(c0.at_or_after(e)), config: config(200), by: None },
                 Segment { origin: e, cut: None, config: config(100), by: Some(1) },
@@ -2031,7 +2033,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![(c0, false)];
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
         }
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
@@ -2086,7 +2088,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
             streams.lines.insert(key, ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream {
-                direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config, lead, call: 0, allowance: 0,
+                direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config, lead, call: 0, release_window: 0, allowance: 0,
             }));
         }
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -2117,7 +2119,7 @@ mod tests {
         let key = stream_key(Dir::Tx, 0);
         streams.stream_mut(key).clocks = vec![(c0, false)];
         let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-        streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+        streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
         streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
         assert!(streams.book(&core, key, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
         let c1 = streams.stream(key).clocks[1].0;
@@ -2145,7 +2147,7 @@ mod tests {
                 let key = stream_key(Dir::Tx, 0);
                 streams.stream_mut(key).clocks = vec![(c0, false)];
                 let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-                streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+                streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
                 for (seq, e, n) in [(1, s(1), 100), (2, s(2), 200), (3, s(3), 100)] {
                     streams.stream_mut(key).configs.insert(seq, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
                     assert!(streams.book(&core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
@@ -3872,7 +3874,7 @@ mod tests {
                 for key in [tx_key, rx_key] {
                     let direction = key.0;
                     let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction));
-                    streams.lines.insert(key, Line::new(Stream { direction, origin: 0, config: config(200), lead, call: 0, allowance: 0 }));
+                    streams.lines.insert(key, Line::new(Stream { direction, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
                     streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
                     let item = Item { e: s(1), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) };
                     assert!(streams.book(&core, key, item), "{key:?}");
@@ -4409,6 +4411,7 @@ mod tests {
                 config: ezsdr_radio::timeline::Config { channels: Channels::first(0), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() },
                 lead: 0,
                 call: 2_000,
+                release_window: 0,
                 allowance: 0,
             }));
             streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
@@ -4869,7 +4872,7 @@ mod tests {
         assert_eq!(sends(&device), [(2, true, true), (5_000, true, false), (2, false, true)]);
         assert_eq!(device.unended_bursts(), 0, "{:?}", device.calls());
         device_at(&core, &time, &device, destination_clock.origin + ms(8));
-        let got = match device.rx_recv(1, wave.len(), Wall::from_millis(100)) {
+        let got = match device.rx_recv(1, wave.len(), Wall::from_millis(100), false) {
             crate::device::RxRecv::Samples { samples, .. } => samples,
             other => panic!("the loopback of the new segment's burst: {other:?}"),
         };
@@ -5990,7 +5993,7 @@ mod tests {
         assert!(tx.step());
         assert_eq!(sends(&device), [(20_000, true, false), (20_000, false, false)]);
         device_at(&core, &time, &device, clock.instant(start + 40_000));
-        let crate::device::RxRecv::Samples { samples, first_tick } = device.rx_recv(1, 40_000, Wall::from_millis(10)) else { panic!("both channels loop back") };
+        let crate::device::RxRecv::Samples { samples, first_tick } = device.rx_recv(1, 40_000, Wall::from_millis(10), false) else { panic!("both channels loop back") };
         assert_eq!(first_tick, clock.instant(start));
         assert_eq!(samples.len(), 2);
         for channel in 0..2 {
@@ -6228,7 +6231,7 @@ mod tests {
         assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "Stop ends on the next burst's held tail and one zero");
 
         device_at(&core, &time, &device, clock.instant(start + 6));
-        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 6, Wall::from_millis(10)) else { panic!("the loopback contains both channel tails") };
+        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 6, Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
         assert_eq!(samples, [
             [a[0][0], a[0][1], a[0][2], b[0][0], b[0][1], [0.0, 0.0]].to_vec(),
             [a[1][0], a[1][1], a[1][2], b[1][0], b[1][1], [0.0, 0.0]].to_vec(),

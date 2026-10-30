@@ -1095,7 +1095,7 @@ impl RxProgress {
 /// Reads the receive stream until `stop` or the group stops, recording its progress (stage 3c-2c).
 fn drain_receiver(device: &dyn Device, raw: &RawGroup, stop: &AtomicBool, progress: &RxProgress, ticks_per_sample: i64) {
     while !stop.load(Ordering::Acquire) && !raw.halted() {
-        match device.rx_recv(0, 1_000, Wall::from_millis(100)) {
+        match device.rx_recv(0, 1_000, Wall::from_millis(100), false) {
             RxRecv::Samples { first_tick, samples } => {
                 let count = samples.first().map_or(0, Vec::len) as i64;
                 progress.advance(first_tick, first_tick.saturating_add(count.saturating_mul(ticks_per_sample)));

@@ -379,7 +379,7 @@ fn read_on(device: &dyn Device, k: usize, limit: Wall, keep: Option<i64>, until:
     let mut out = Read::default();
     let begun = Instant::now();
     while begun.elapsed() < limit && !until(&out) {
-        match device.rx_recv(k, 2_000, Wall::from_millis(100)) {
+        match device.rx_recv(k, 2_000, Wall::from_millis(100), false) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
                 if let Some(per) = keep {
@@ -1146,87 +1146,95 @@ fn read_tail(device: &dyn Device) -> Read {
     read(device, Wall::from_secs(3), Some(200), |r| r.other.len() >= 2 && r.other[r.other.len() - 2..].iter().all(|(_, o)| o == "Timeout"))
 }
 
+fn report_d9_p4(result: common::d9::P4Result) {
+    let freqs = tone_freqs(&result.after.samples);
+    let seen = classify_tone(&result.after.samples, result.again, result.again + 100 * TICKS_PER_MS, result.again + 5 * TICKS_PER_MS, 100e3);
+    println!(
+        "D9 P4 {}: e = start + 20 ms; unconsumed entry before the restart: {}; tone windows after the restart {} (noise power {:?}, threshold {:.1e}; the frequencies below mean something only where the tone is seen); stop called at {}, returned {} (e − stop call {:.0} µs); last sample before the restart at {:?} ({:?} µs from e); restart at {}: first windows {:?}; median 1–10 ms after {:?} Hz; first steps {:?}; first stream's median e − 7..e − 5 ms {:?} Hz; {:?}; tx {:?}",
+        result.case.label(),
+        result.last.is_some_and(|tick| tick < result.e) && result.stopped < result.e,
+        seen.after,
+        seen.floor,
+        seen.threshold,
+        result.stopping,
+        result.stopped,
+        (result.e - result.stopping) as f64 / 200.0,
+        result.last,
+        result.last.map(|tick| (tick - result.e) as f64 / 200.0),
+        result.again,
+        freqs.iter().take(3).map(|(tick, freq)| format!("{:+.0} µs {freq:.0}", (tick - result.again) as f64 / 200.0)).collect::<Vec<_>>(),
+        median_freq(&freqs, result.again + TICKS_PER_MS, result.again + 10 * TICKS_PER_MS),
+        first_steps(&result.after.samples, result.again, 6),
+        median_freq(&tone_freqs(&result.before.samples), result.e - 7 * TICKS_PER_MS, result.e - 5 * TICKS_PER_MS),
+        result.log,
+        result.reports,
+    );
+}
+
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p4_ddc_entry_after_an_early_stop() {
-    // R2: a timed receive tune at e, then an untimed stop at the device's time e − 5 ms (the first tone is 30 ms, so
-    // the send does not block behind the transmit buffer past e), then a restart after e. Does the stop wait behind the radio's timed command, and does the DDC's entry survive
-    // to the restart's first sample? A: the DSP shift alone (`tune_dsp`). B: the production's
-    // AUTO/AUTO tune (`tune_auto`), which counts only when the tune's DSP value differs from the
-    // baseline's, else it is INCONCLUSIVE. C: the stop is followed by a close and a reopen of
-    // the streamer, which tells whether the FIFO survives it (the fake's assumption).
+    // R2: the shared A/C device sequence is model-checked on FakeDevice; this raw probe retains
+    // the RF-tone verdict. B remains hardware-only because it characterizes AUTO/AUTO tuning.
     let device = raw_uhd();
-    raw_rx(&*device, 1e6, 1e9);
-    raw_tx(&*device, 1e6, 1e9);
-    assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 + 100e3)));
     let chan = d9_channel();
+    common::d9::open_raw(&*device, chan);
+    assert!(SAFE_TX_HZ.contains(&(1e9 + 50e3 + 100e3)) && SAFE_TX_HZ.contains(&(1e9 + 100e3)));
+    let mut tune = |dir, channel, offset, at| device.tune_dsp(dir, channel, offset, at);
+    let a = common::d9::p4_dsp_only(&*device, chan, &mut tune, common::d9::P4Case::DspOnly);
+    report_d9_p4(a);
+
     let tone = tone_1msps(100_000);
-    for case in ["A: DSP only", "B: AUTO/AUTO", "C: DSP only, then close and reopen"] {
-        device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
-        device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
-        let mut log = Vec::new();
-        let mut baseline = None;
-        if case.starts_with('B') {
-            baseline = Some(device.tune_auto(Dir::Rx, chan, 1e9, None).unwrap());
-            log.push(format!("baseline rf/dsp {baseline:?}"));
+    device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
+    device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
+    let baseline = device.tune_auto(Dir::Rx, chan, 1e9, None).unwrap();
+    let mut log = vec![format!("baseline rf/dsp {baseline:?}")];
+    let start = (device.time_now().unwrap() / 200 + 100_000) * 200;
+    let e = start + 20 * TICKS_PER_MS;
+    device.rx_start(0, start).unwrap();
+    device.tx_send(0, &[&tone[..30_000]], Some(start), true, true, Wall::from_secs(2)).unwrap();
+    let mut valid = false;
+    for delta in [7.0, 37.0, 191.0, 1_001.0] {
+        let before = device.time_now().unwrap();
+        let (rf, dsp) = device.tune_auto(Dir::Rx, chan, 1e9 + delta, Some(e)).unwrap();
+        log.push(format!("tune_auto +{delta} Hz: rf {rf} dsp {dsp} (call {before}..{})", device.time_now().unwrap()));
+        if dsp != baseline.1 {
+            valid = true;
+            break;
         }
-        let start = (device.time_now().unwrap() / 200 + 100_000) * 200;
-        let e = start + 20 * TICKS_PER_MS;
-        device.rx_start(0, start).unwrap();
-        device.tx_send(0, &[&tone[..30_000]], Some(start), true, true, Wall::from_secs(2)).unwrap();
-        let mut valid = true;
-        if case.starts_with('B') {
-            valid = false;
-            for delta in [7.0, 37.0, 191.0, 1_001.0] {
-                let before = device.time_now().unwrap();
-                let (rf, dsp) = device.tune_auto(Dir::Rx, chan, 1e9 + delta, Some(e)).unwrap();
-                log.push(format!("tune_auto +{delta} Hz: rf {rf} dsp {dsp} (call {before}..{})", device.time_now().unwrap()));
-                if Some(dsp) != baseline.map(|(_, dsp0)| dsp0) {
-                    valid = true;
-                    break;
-                }
-            }
-        } else {
-            let before = device.time_now().unwrap();
-            let dsp = device.tune_dsp(Dir::Rx, chan, 50e3, Some(e)).unwrap();
-            log.push(format!("tune_dsp {dsp} (call {before}..{})", device.time_now().unwrap()));
-        }
-        let got = read(&*device, Wall::from_secs(2), Some(200), |_| device.time_now().unwrap() >= e - 5 * TICKS_PER_MS);
-        let stopping = device.time_now().unwrap();
-        device.rx_stop(0, None).unwrap();
-        let stopped = device.time_now().unwrap();
-        let tail = read_tail(&*device);
-        let last = tail.samples.last().or(got.samples.last()).map(|(t, _)| *t);
-        if case.starts_with('C') {
-            device.rx_close(0);
-            device.rx_open(0, &[chan]).unwrap();
-            log.push("closed and reopened the streamer".to_owned());
-        }
-        let again = (device.time_now().unwrap() / 200 + 20_000) * 200;
-        device.rx_start(0, again).unwrap();
-        device.tx_send(0, &[&tone], Some(again), true, true, Wall::from_secs(2)).unwrap();
-        let after = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= again + 20 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
-        let _ = drain(&*device);
-        let reports = flush_tx(&*device);
-        let freqs = tone_freqs(&after.samples);
-        // The entry is unconsumed when the stream's last sample and the stop both came before e.
-        let unconsumed = last.is_some_and(|t| t < e) && stopped < e;
-        let seen = classify_tone(&after.samples, again, again + 100 * TICKS_PER_MS, again + 5 * TICKS_PER_MS, 100e3);
-        println!(
-            "D9 P4 {case}{}: e = start + 20 ms; unconsumed entry before the restart: {unconsumed}; tone windows after the restart {} (noise power {:?}, threshold {:.1e}; the frequencies below mean something only where the tone is seen); stop called at {stopping}, returned {stopped} (e − stop call {:.0} µs); last sample before the restart at {last:?} ({:?} µs from e); restart at {again}: first windows {:?}; median 1–10 ms after {:?} Hz; first steps {:?}; first stream's median e − 7..e − 5 ms {:?} Hz; {log:?}; tx {reports:?}",
-            if valid { "" } else { " — INCONCLUSIVE: the tune's DSP value did not change" },
-            seen.after,
-            seen.floor,
-            seen.threshold,
-            (e - stopping) as f64 / 200.0,
-            last.map(|t| (t - e) as f64 / 200.0),
-            freqs.iter().take(3).map(|(t, f)| format!("{:+.0} µs {f:.0}", (t - again) as f64 / 200.0)).collect::<Vec<_>>(),
-            median_freq(&freqs, again + TICKS_PER_MS, again + 10 * TICKS_PER_MS),
-            first_steps(&after.samples, again, 6),
-            median_freq(&tone_freqs(&got.samples), e - 7 * TICKS_PER_MS, e - 5 * TICKS_PER_MS),
-        );
     }
+    let got = read(&*device, Wall::from_secs(2), Some(200), |_| device.time_now().unwrap() >= e - 5 * TICKS_PER_MS);
+    let stopping = device.time_now().unwrap();
+    device.rx_stop(0, None).unwrap();
+    let stopped = device.time_now().unwrap();
+    let tail = read_tail(&*device);
+    let last = tail.samples.last().or(got.samples.last()).map(|(t, _)| *t);
+    let again = (device.time_now().unwrap() / 200 + 20_000) * 200;
+    device.rx_start(0, again).unwrap();
+    device.tx_send(0, &[&tone], Some(again), true, true, Wall::from_secs(2)).unwrap();
+    let after = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= again + 20 * TICKS_PER_MS));
+    device.rx_stop(0, None).unwrap();
+    let _ = drain(&*device);
+    let reports = flush_tx(&*device);
+    let freqs = tone_freqs(&after.samples);
+    let unconsumed = last.is_some_and(|t| t < e) && stopped < e;
+    let seen = classify_tone(&after.samples, again, again + 100 * TICKS_PER_MS, again + 5 * TICKS_PER_MS, 100e3);
+    println!(
+        "D9 P4 B: AUTO/AUTO{}: e = start + 20 ms; unconsumed entry before the restart: {unconsumed}; tone windows after the restart {} (noise power {:?}, threshold {:.1e}; the frequencies below mean something only where the tone is seen); stop called at {stopping}, returned {stopped} (e − stop call {:.0} µs); last sample before the restart at {last:?} ({:?} µs from e); restart at {again}: first windows {:?}; median 1–10 ms after {:?} Hz; first steps {:?}; first stream's median e − 7..e − 5 ms {:?} Hz; {log:?}; tx {reports:?}",
+        if valid { "" } else { " — INCONCLUSIVE: the tune's DSP value did not change" },
+        seen.after,
+        seen.floor,
+        seen.threshold,
+        (e - stopping) as f64 / 200.0,
+        last.map(|t| (t - e) as f64 / 200.0),
+        freqs.iter().take(3).map(|(t, f)| format!("{:+.0} µs {f:.0}", (t - again) as f64 / 200.0)).collect::<Vec<_>>(),
+        median_freq(&freqs, again + TICKS_PER_MS, again + 10 * TICKS_PER_MS),
+        first_steps(&after.samples, again, 6),
+        median_freq(&tone_freqs(&got.samples), e - 7 * TICKS_PER_MS, e - 5 * TICKS_PER_MS),
+    );
+
+    let c = common::d9::p4_dsp_only(&*device, chan, &mut tune, common::d9::P4Case::DspOnlyReopen);
+    report_d9_p4(c);
     device.tune_dsp(Dir::Rx, chan, 0.0, None).unwrap();
     device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap();
 }
@@ -1724,7 +1732,7 @@ fn read_until_tick_without_clock(device: &dyn Device, end_tick: i64, ticks_per_s
     let mut out = Read::default();
     let begun = Instant::now();
     while begun.elapsed() < limit && out.end(ticks_per_sample).is_none_or(|end| end < end_tick) {
-        match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
                 out.samples.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * ticks_per_sample, *sample)));
@@ -1740,7 +1748,7 @@ fn drain_without_clock(device: &dyn Device, timeout: Wall, limit: Wall) -> Vec<J
     let mut idle = 0;
     let mut rows = Vec::new();
     while begun.elapsed() < limit && idle < 2 {
-        match device.rx_recv(0, 2_000, timeout) {
+        match device.rx_recv(0, 2_000, timeout, false) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 idle = 0;
                 rows.push(serde_json::json!({ "kind": "samples", "first_tick": first_tick, "samples": samples[0].len() }));
@@ -2338,7 +2346,7 @@ fn hw_ur17_receive_call_duration() {
             let mut sample_counts = std::collections::BTreeMap::<usize, usize>::new();
             for index in 0..200 {
                 let begun = Instant::now();
-                let result = device.rx_recv(0, request_samples, timeout);
+                let result = device.rx_recv(0, request_samples, timeout, false);
                 let duration_ns = u64::try_from(begun.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 durations.push(duration_ns);
                 let (kind, first_tick, last_tick, samples) = match result {

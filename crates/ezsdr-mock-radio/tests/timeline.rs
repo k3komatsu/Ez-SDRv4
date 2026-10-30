@@ -249,7 +249,7 @@ fn terms(profile: &str, direction: Direction, channels: Channels) -> Terms {
     // The transmit clock starts at `arm`, at 0 (RM-25); the receive clock at T0.
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels, ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
-    Terms { t0: T0, root_hz: 1_000_000_000, timed_lead, release_window, stream: Stream { direction, origin, config, lead, call, allowance } }
+    Terms { t0: T0, root_hz: 1_000_000_000, timed_lead, release_window, stream: Stream { direction, origin, config, lead, call, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance } }
 }
 
 fn line_key(direction: Direction, stream: u32) -> StreamKey { (direction, stream) }

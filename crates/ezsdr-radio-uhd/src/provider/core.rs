@@ -85,6 +85,28 @@ pub(crate) struct Clock {
     pub n: i64,
 }
 
+/// A timed receive DDC write not yet proven consumed by a sample from this stream.
+#[derive(Clone)]
+pub(crate) struct RxDspEntry {
+    pub order: (i64, u64),
+    pub channel: usize,
+    pub value: f64,
+    pub accepted_at: Option<i64>,
+}
+
+/// Device-side state serialized against a receive stream's final stop.
+#[derive(Default)]
+pub(crate) struct RxDsp {
+    pub pending: Vec<RxDspEntry>,
+    /// Pending entries already reported by an owner that could not recover them.
+    pub reported: BTreeSet<((i64, u64), usize)>,
+    /// Latest accepted DDC write per channel, retained so Provider::stop can restore its S value.
+    pub latest: BTreeMap<usize, RxDspEntry>,
+    pub restore: BTreeMap<usize, f64>,
+    pub restore_ready: bool,
+    pub stopped: bool,
+}
+
 impl Clock {
     /// The root tick of sample `k`.
     pub fn instant(&self, k: i64) -> i64 {
@@ -794,6 +816,8 @@ pub(crate) struct Core {
     pub device: Arc<dyn Device>,
     /// Serializes streamer open/close admission with publishing device loss (UR-29).
     device_gate: Mutex<()>,
+    /// Each receive handover and its stream's final stop share a clock lock (D9b-2).
+    pub rx_dsp: Vec<ClockMutex<RxDsp>>,
     /// A timed TX DSP write and the open-time flush share each channel's gate (D9b-1a).
     tx_dsp_gates: Vec<ClockMutex<()>>,
     /// Every tx_async reader, including shutdown, shares one per-stream gate.
@@ -878,6 +902,7 @@ impl Core {
             block_len: description.block_len as usize,
             device,
             device_gate: Mutex::new(()),
+            rx_dsp: (0..rx_count).map(|_| host.clock_mutex(RxDsp::default())).collect(),
             tx_dsp_gates: (0..tx_channel_count).map(|_| host.clock_mutex(())).collect(),
             tx_report_gates: (0..tx_count).map(|_| host.clock_mutex(())).collect(),
             tx_report_stash: (0..tx_count).map(|_| Mutex::new(VecDeque::new())).collect(),
@@ -1427,23 +1452,30 @@ impl Core {
     /// is how a thread holding correlations against the replaced streamer learns of it (UR-28).
     /// On error, the caller books the refusal before giving the claim back (UR-25).
     pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<bool, (DeviceError, Claim)> {
+        self.owner_configure_with_abort(dir, k, next, || {})
+    }
+
+    /// Calls `before_abort` on every non-error exit that abandons a planned segment, before its
+    /// claim is released when one was taken.
+    pub fn owner_configure_with_abort(&self, dir: Dir, k: usize, next: &Planned, mut before_abort: impl FnMut()) -> Result<bool, (DeviceError, Claim)> {
         let stream = stream_key(dir, k);
         let (mut current, mut step, release_first, claim) = {
             let mut streams = lock(&self.streams);
-            if self.is_lost() { return Ok(false); }
-            if streams.holder(stream) != Holder::Free { return Ok(false); }
-            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };
-            if current.refused { return Ok(false); }
+            if self.is_lost() { drop(streams); before_abort(); return Ok(false); }
+            if streams.holder(stream) != Holder::Free { drop(streams); before_abort(); return Ok(false); }
+            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { drop(streams); before_abort(); return Ok(false) };
+            if current.refused { drop(streams); before_abort(); return Ok(false); }
             let step = streams.owner_step(stream, current.set(), current.segment.by);
             if step == Owner::Nothing { return Ok(true); }
             let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()
                 || streams.needed_before(stream, current.set(), current.segment.origin)
                 || streams.move_source_busy(stream, current.segment.by));
-            let Some(claim) = streams.claim_owner(stream, current.segment.by) else { return Ok(false) };
+            let Some(claim) = streams.claim_owner(stream, current.segment.by) else { drop(streams); before_abort(); return Ok(false) };
             (current, step, release_first, claim)
         };
         if release_first {
             if self.is_lost() {
+                before_abort();
                 lock(&self.streams).give_back(claim);
                 return Ok(false);
             }
@@ -1453,6 +1485,7 @@ impl Core {
                 lock(&self.streams).record_open(stream, None);
             }
             let Some(latest) = self.await_release(dir, k, &current) else {
+                before_abort();
                 lock(&self.streams).give_back(claim);
                 return Ok(false);
             };
@@ -1761,6 +1794,7 @@ mod tests {
             config: cfg(1),
             lead: 0,
             call: 2_000,
+            release_window: 0,
             allowance: 0,
         })
     }
@@ -1793,6 +1827,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: core.ticks(core.description.timing.release_window_ns),
             allowance: 0,
         });
         device.rx_open(0, &[0]).unwrap();
@@ -1895,6 +1930,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: 0,
             allowance: 0,
         });
         let (middle, destination) = {
@@ -1978,6 +2014,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: core.ticks(core.description.timing.release_window_ns),
             allowance: 0,
         });
         device.rx_open(0, &[0]).unwrap();
@@ -2092,6 +2129,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: core.ticks(core.description.timing.release_window_ns),
             allowance: 0,
         });
         device.rx_open(0, &[0]).unwrap();
@@ -2126,6 +2164,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: core.ticks(core.description.timing.release_window_ns),
             allowance: 0,
         });
         device.rx_open(0, &[0]).unwrap();
@@ -2244,6 +2283,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 1_000,
             call: 0,
+            release_window: 0,
             allowance: 0,
         });
         device.tx_open(1, &[0]).unwrap();
@@ -2304,7 +2344,7 @@ mod tests {
             let core = two_by_two();
             let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
             let ms = |n: i64| core.ticks(n * 1_000_000);
-            let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: Config { channels, ratio: Rational::new(200, 1).unwrap() }, lead: ms(50), call: 0, allowance: 0 });
+            let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: Config { channels, ratio: Rational::new(200, 1).unwrap() }, lead: ms(50), call: 0, release_window: 0, allowance: 0 });
             let mut streams = lock(&core.streams);
             streams.lines.insert(from, line(Channels::first(1)));
             streams.lines.insert(to, line(Channels::first(0)));
@@ -2345,6 +2385,7 @@ mod tests {
             config: config(channels),
             lead: core.ticks(50_000_000),
             call: 0,
+            release_window: 0,
             allowance: 0,
         });
         {
@@ -2744,6 +2785,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: 0,
             allowance: 0,
         });
         streams.lines.insert(from, rx_line(Channels::first(2)));

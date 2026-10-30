@@ -638,7 +638,7 @@ fn mr_18_a_layout_instance_s_changes_belong_to_their_own_stream() {
     assert_eq!(harness.clocks_of("mock/rx/s0").len(), 1);
     assert_eq!(harness.clocks_of("mock/rx/s1").len(), 1);
     // Channel 1's antenna is `cold` (D16): the stream that holds it is cut, begins a new
-    // segment a start lead after the cut and registers a new SampleClock, though its set
+    // segment after the cut and registers a new SampleClock, though its set
     // and rate do not change.
     harness.push(update("radio.rx.c1.antenna", Value::from("B"), UpdateClass::Cold, None));
     harness.step(T0 + 10_000_000).unwrap();
@@ -649,10 +649,9 @@ fn mr_18_a_layout_instance_s_changes_belong_to_their_own_stream() {
     harness.step(T0 + 70_000_000).unwrap();
     let clocks = harness.clocks_of("mock/rx/s1");
     assert_eq!(clocks.len(), 2);
-    // RM-18's ready instant for a receive segment after a cut: the cut's instant, the
-    // receive call in progress (2 000 samples at 1 Msps = 2 ms), the 3 ms allowance and the
-    // direction's 50 ms start lead.
-    assert_eq!(clocks[1].origin.ticks_in(ROOT).unwrap(), T0 + 65_000_000);
+    // RM-25's ready instant: the cut, 3 ms release window, 2 ms receive call, 3 ms allowance,
+    // then the direction's 50 ms start lead.
+    assert_eq!(clocks[1].origin.ticks_in(ROOT).unwrap(), T0 + 68_000_000);
     assert_eq!(harness.clocks_of("mock/rx/s0").len(), 1);
     // A per-channel value whose number is not the channel's own front end is judged on
     // that channel alone: the BasicRX's channel 1 has no gain to set and tunes only its
@@ -690,7 +689,7 @@ fn mr_18_a_layout_instance_s_changes_belong_to_their_own_stream() {
     assert_eq!(source.len(), 1);
     assert!(source[0].ended_at.is_some());
     assert_eq!(destination.len(), 3);
-    assert_eq!(destination[2].origin.ticks_in(ROOT).unwrap(), T0 + 185_000_000);
+    assert_eq!(destination[2].origin.ticks_in(ROOT).unwrap(), T0 + 188_000_000);
 }
 
 
@@ -1232,7 +1231,7 @@ fn mr_40_a_receive_move_waits_for_release_and_lead_and_records_channel_order() {
     assert_eq!(source[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), now);
     assert_eq!(destination.len(), 2);
     assert_eq!(destination[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), now);
-    assert_eq!(destination[1].origin.ticks_in(ROOT).unwrap(), now + 103_500_000);
+    assert_eq!(destination[1].origin.ticks_in(ROOT).unwrap(), now + 106_500_000);
     let block = harness.blocks("rx1").into_iter()
         .find(|block| block.header().first_sample_time.domain() == destination[1].domain)
         .expect("the moved receive segment publishes on its new clock");
@@ -1303,7 +1302,7 @@ fn mr_40_a_move_uses_the_instance_floor_across_streams_directions_and_missing_li
     assert_eq!(harness.clocks_of("mock/rx/s0")[0].ended_at.unwrap().ticks_in(ROOT).unwrap(), now + 30_000_000);
     let moved = harness.clocks_of("mock/rx/s1");
     assert_eq!(moved.len(), 1);
-    assert_eq!(moved[0].origin.ticks_in(ROOT).unwrap(), now + 135_000_000);
+    assert_eq!(moved[0].origin.ticks_in(ROOT).unwrap(), now + 138_000_000);
     let late: Vec<i64> = harness.events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::LATE_COMMAND)
         .map(|event| event.payload["applied"]["ticks"].as_i64().unwrap()).collect();
     assert_eq!(late, [now + 30_000_000, now + 40_000_000]);
@@ -2939,7 +2938,7 @@ fn mr_20_a_refused_transmit_burst_leaves_the_channel_silent() {
 #[test]
 fn mr_18_a_layout_a_move_after_a_refused_source_change_waits_the_refused_segments_end() {
     // RM-25, RM-34 (design 43): the source's rate change (due at T0 + 10 ms; its segment would
-    // begin at 65 ms) is refused, and a move of its channel c1 to the other stream is due at
+    // begin at 68 ms) is refused, and a move of its channel c1 to the other stream is due at
     // T0 + 100 ms. The refused segment runs for planning until the move cuts it, so the
     // destination begins where it would had the change not been refused: s0 and s1 begin at the
     // same instants in both runs, and the destination a lead after the source's release.
@@ -2967,7 +2966,7 @@ fn mr_18_a_layout_a_move_after_a_refused_source_change_waits_the_refused_segment
     assert!(plain_s1[0] >= T0 + 100_000_000 + 50_000_000, "the destination waits the source's release: {plain_s1:?}");
     assert_eq!(refused_s1, plain_s1, "the destination's origin does not move");
     assert_eq!(plain_s0.len(), 3, "{plain_s0:?}");
-    assert_eq!(plain_s0[1], T0 + 65_000_000, "the change's segment, which the refusal leaves out");
+    assert_eq!(plain_s0[1], T0 + 68_000_000, "the change's segment, which the refusal leaves out");
     assert_eq!(refused_s0, [plain_s0[0], plain_s0[2]], "the source's other origins do not move");
 }
 
@@ -3004,9 +3003,9 @@ fn mr_20_a_refused_move_halts_both_lines() {
     let s1 = harness.clocks_of("mock/rx/s1");
     assert_eq!(s1.len(), 1, "{s1:?}");
     // RM-25: the refused move's segment ran for planning until this `start_rx` cut it at `started`,
-    // so the segment waits the receive call in progress there (2 000 samples at 1 MS/s, 2 ms), the
-    // allowance (3 ms) and the lead: 55 ms.
-    assert_eq!(s1[0].origin, TimePoint::new(ROOT, started + 55_000_000));
+    // so the segment waits the 3 ms release window, receive call (2 ms), allowance (3 ms) and
+    // lead: 58 ms.
+    assert_eq!(s1[0].origin, TimePoint::new(ROOT, started + 58_000_000));
     let begun = harness.section("segments").into_iter().find(|row| row["stream"] == 1).expect("the destination's segment");
     assert_eq!(begun["channels"], serde_json::json!([1]), "{begun}");
     let first = harness.headers("rx1").into_iter().next().expect("the destination published");
@@ -3773,8 +3772,8 @@ fn mr_34_a_layout_an_update_at_a_cold_instant_is_timed_whatever_the_refusal_orde
 /// The origins of the refusal scene, in nanoseconds after T0, measured on the tree before RM-25
 /// kept a refusal from moving a later origin (design 43): S2 with C1 not refused, S3 after it, and
 /// the earlier origin S3 had with C1 refused. A refused C1 now leaves S3 at the second.
-const REFUSAL_O2: i64 = 65_000_000;
-const REFUSAL_O3: i64 = 124_000_000;
+const REFUSAL_O2: i64 = 68_000_000;
+const REFUSAL_O3: i64 = 127_000_000;
 const REFUSAL_EARLY: i64 = 70_000_000;
 
 /// The origins the refusal scene's segments have without the fault and with C1 refused.

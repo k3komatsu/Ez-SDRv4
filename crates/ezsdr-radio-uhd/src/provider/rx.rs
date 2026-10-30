@@ -20,7 +20,7 @@ use ezsdr_radio::timeline::{Channels, Config, StreamKey};
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{stream_key, Clock, Core, Holder, Streams, lock};
+use super::core::{stream_key, Clock, Core, Holder, RxDsp, Streams, lock};
 use super::mode::DescriptionExt;
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
@@ -138,6 +138,8 @@ pub(crate) struct Rx {
     exit: bool,
     /// When the last untimed stop was issued: the next stream drops what precedes it.
     last_stop: Option<i64>,
+    /// A silent or late-started stream must stop even if its logical cut was not reached.
+    stop_requested: bool,
 }
 
 const RECV_TIMEOUT: Wall = Wall::from_millis(100);
@@ -178,6 +180,7 @@ impl Rx {
             stall_at: None,
             exit: false,
             last_stop: None,
+            stop_requested: false,
         }
     }
 
@@ -203,12 +206,8 @@ impl Rx {
         let Some(stream) = self.stream.as_mut() else { return };
         stream.follow(&lock(&self.core.streams), stream_key(Dir::Rx, self.k));
         let done = stream.cut.is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;
-        if done {
-            if !stream.stopped {
-                stream.stopped = true;
-                self.last_stop = stop_at_cut(&self.core, self.k, stream.cut.expect("a cut")).or(self.last_stop);
-            }
-            self.finish();
+        if done || self.stop_requested {
+            self.try_end();
         }
     }
 
@@ -227,10 +226,12 @@ impl Rx {
     fn turn(&mut self) -> Turn {
         self.poll();
         if self.exit && self.stream.is_none() {
+            self.settle_pending(None, "receive owner exited without a stream to drain");
             return Turn::Exit;
         }
         if self.core.is_lost() {
             // RM-16: the stream and its clock end at the loss's cut (`finish` reads the plan).
+            self.settle_pending(None, "device lost before pending DDC entries were drained");
             self.finish();
             return if self.exit { Turn::Exit } else { Turn::Idle };
         }
@@ -248,7 +249,15 @@ impl Rx {
             }
         }
         // A cut booked during the wait cuts this block too: `samples` reads the plan (RM-16).
-        let result = self.core.device.rx_recv(self.k, self.recv_len(), self.recv_timeout());
+        let len = self.recv_len();
+        let timeout = self.recv_timeout();
+        if len == 0 || timeout < Wall::from_millis(1) {
+            self.stop_requested = true;
+            self.try_end();
+            return Turn::Idle;
+        }
+        let one_packet = self.stream.as_ref().is_some_and(|stream| stream.cut.is_some_and(|cut| self.core.now() >= cut));
+        let result = self.core.device.rx_recv(self.k, len, timeout, one_packet);
         self.receive(result);
         Turn::Busy
     }
@@ -262,13 +271,171 @@ impl Rx {
             self.follow();
             if let Some(stream) = self.stream.as_mut() {
                 stream.cut_at(stream.clock.instant(stream.expected));
-                if !stream.stopped {
-                    stream.stopped = true;
-                    self.last_stop = stop_at_cut(&self.core, self.k, stream.cut.expect("set above")).or(self.last_stop);
+            }
+            self.stop_requested = true;
+            self.try_end();
+        }
+    }
+
+    /// Stops only after every handed DDC entry has sample evidence, or after its bounded drain
+    /// and one bounded flush attempt. The per-stream clock lock orders this final decision with
+    /// control's handover of another timed frequency.
+    fn try_end(&mut self) {
+        let Some(stream) = self.stream.as_ref() else { return };
+        let Some(cut) = stream.cut else { return };
+        let clock = stream.clock;
+        let channels = stream.channels;
+        if stream.stopped || self.core.is_lost() {
+            self.settle_pending(None, "receive chain stopped before pending DDC entries were drained");
+            self.finish();
+            return;
+        }
+        let provider_stop = lock(&self.core.streams).stop;
+        let now = self.core.now();
+        let core = self.core.clone();
+        let mut dsp = core.rx_dsp[self.k].lock();
+        let pending = !dsp.pending.is_empty();
+        let flush_deadline = pending.then(|| rx_drain_deadline(&self.core, self.k, clock.n, cut, &dsp.pending)).flatten();
+        if let Some(deadline) = flush_deadline {
+            let flush_at = deadline - i128::from(self.core.ticks(DELIVERY_ALLOWANCE_NS));
+            if i128::from(now) < flush_at {
+                return;
+            }
+        }
+        let restore_needed = provider_stop.is_some_and(|(at, _)| dsp.latest.values().any(|entry| {
+            entry.order.0 > at || entry.accepted_at.is_some_and(|accepted| accepted > at)
+        }));
+        if restore_needed && !dsp.restore_ready {
+            return;
+        }
+
+        let stopped_at = match stop_at_cut(&self.core, self.k, cut) {
+            Ok(stopped_at) => stopped_at,
+            Err(error) => {
+                self.settle_pending_locked(&mut dsp, None, &format!("receive stop failed: {}", error.message));
+                if provider_stop.is_some() {
+                    self.skip_restore_rx(&dsp, &format!("receive stop failed; restore was not attempted: {}", error.message));
+                }
+                None
+            }
+        };
+        if let Some(issued) = stopped_at {
+            dsp.stopped = true;
+            let recovery = (!dsp.pending.is_empty() && !self.core.is_lost())
+                .then(|| (clock.n, channels, flush_deadline.expect("a pending drain has a deadline")));
+            self.settle_pending_locked(&mut dsp, recovery, "receive drain and one flush did not show DDC consumption");
+            if provider_stop.is_some() {
+                if dsp.stopped && !self.core.is_lost() {
+                    self.restore_rx(&dsp);
+                } else {
+                    let reason = if self.core.is_lost() { "device lost; restore was not attempted" } else { "receive stop failed; restore was not attempted" };
+                    self.skip_restore_rx(&dsp, reason);
                 }
             }
-            self.finish();
+            self.last_stop = Some(issued).or(self.last_stop);
+        } else {
+            self.settle_pending_locked(&mut dsp, None, "device lost before pending DDC entries were drained");
         }
+        if let Some(stream) = self.stream.as_mut() { stream.stopped = true; }
+        self.core.probe("rx_before_finish", None);
+        self.finish();
+    }
+
+    /// One immediate-start flush, bounded by the drain's remaining hard deadline.
+    fn flush_rx(&self, dsp: &mut RxDsp, sample_ticks: i64, channels: Channels, deadline: i128) {
+        let call = self.core.block_len.max(self.core.device.rx_packet_samples(self.k));
+        let packet = self.core.device.rx_packet_samples(self.k);
+        if let Err(error) = self.core.device.rx_start_now(self.k) {
+            self.core.device_failed(None, "rx_drain", &error);
+        } else {
+            dsp.stopped = false;
+            while !dsp.pending.is_empty() && i128::from(self.core.now()) < deadline && !self.core.is_lost() {
+                let left = (deadline - i128::from(self.core.now())).max(0);
+                let timeout_ns = left * 1_000_000_000 / i128::from(self.core.mcr);
+                if timeout_ns < 1_000_000 { break; }
+                let len = bounded_read_len(call, packet, left, sample_ticks);
+                if len == 0 { break; }
+                let timeout = Wall::from_nanos(timeout_ns.min(u64::MAX as i128) as u64);
+                match self.core.device.rx_recv(self.k, len, timeout, true) {
+                    RxRecv::Samples { first_tick, samples } => consume_rx_dsp(dsp, sample_ticks, channels, first_tick, &samples),
+                    RxRecv::Failed(error) if error.lost => self.core.device_lost(&error.message),
+                    RxRecv::Failed(_error) => self.core.stat("rx_errors", 1),
+                    RxRecv::Timeout | RxRecv::Overflow { .. } | RxRecv::Alignment | RxRecv::BadPacket | RxRecv::LateCommand => {}
+                }
+            }
+            if !self.core.is_lost() {
+                match self.core.device.rx_stop(self.k, None) {
+                    Ok(()) => dsp.stopped = true,
+                    Err(error) => self.core.device_failed(None, "rx_drain", &error),
+                }
+            }
+        }
+    }
+
+    /// Settles every accepted timed DDC write before this owner exits or relinquishes its chain.
+    /// A context permits the existing bounded stop/restart recovery; otherwise the outstanding
+    /// entry is retained and reported.
+    fn settle_pending(&mut self, recovery: Option<(i64, Channels, i128)>, reason: &str) {
+        let core = self.core.clone();
+        let mut dsp = core.rx_dsp[self.k].lock();
+        self.settle_pending_locked(&mut dsp, recovery, reason);
+    }
+
+    fn settle_pending_locked(&mut self, dsp: &mut RxDsp, recovery: Option<(i64, Channels, i128)>, reason: &str) {
+        if !dsp.pending.iter().any(|entry| !dsp.reported.contains(&(entry.order, entry.channel))) { return; }
+        if let Some((sample_ticks, channels, deadline)) = recovery.filter(|_| !self.core.is_lost()) {
+            self.flush_rx(dsp, sample_ticks, channels, deadline);
+        }
+        if !dsp.pending.is_empty() { self.reject_pending_rx_dsp(dsp, reason); }
+    }
+
+    /// Restores the receive frequency in force at Provider::stop's original S.
+    fn restore_rx(&self, dsp: &RxDsp) {
+        for (&channel, &value) in &dsp.restore {
+            if self.core.is_lost() { return; }
+            if let Some(entry) = dsp.pending.iter().find(|entry| entry.channel == channel) {
+                self.record_restore_failure(channel, value, &format!("not restored because timed DDC value {} at {} remains pending", entry.value, entry.order.0));
+                continue;
+            }
+            let settings = crate::device::Settings { freq: Some(value), ..crate::device::Settings::default() };
+            match self.core.device.apply(Dir::Rx, channel, &settings, None) {
+                Ok(applied) => lock(&self.core.rec).applied.push(json!({
+                    "key": self.core.description.applied_key(Dir::Rx, channel, self.k, "frequency_hz"),
+                    "claimed": value, "read_back": applied.freq, "at": self.core.at(self.core.now()), "restore": true,
+                })),
+                Err(error) => {
+                    self.record_restore_failure(channel, value, &error.message);
+                    self.core.device_failed(None, "rx_restore", &error);
+                    if error.lost { return; }
+                }
+            }
+        }
+    }
+
+    fn skip_restore_rx(&self, dsp: &RxDsp, reason: &str) {
+        for (&channel, &value) in &dsp.restore {
+            self.record_restore_failure(channel, value, reason);
+        }
+    }
+
+    fn reject_pending_rx_dsp(&self, dsp: &mut RxDsp, reason: &str) {
+        let entries: Vec<_> = dsp.pending.iter()
+            .filter(|entry| !dsp.reported.contains(&(entry.order, entry.channel)))
+            .map(|entry| ((entry.order, entry.channel), format!("channel c{} value {} at {}", entry.channel, entry.value, entry.order.0)))
+            .collect();
+        if entries.is_empty() { return; }
+        let details = entries.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>().join(", ");
+        for (key, _) in entries { dsp.reported.insert(key); }
+        self.core.reject_note(json!({ "call": "rx_drain", "stream": self.k, "error": format!("{reason}: {details}") }));
+    }
+
+    fn record_restore_failure(&self, channel: usize, value: f64, error: &str) {
+        lock(&self.core.rec).applied.push(json!({
+            "key": self.core.description.applied_key(Dir::Rx, channel, self.k, "frequency_hz"),
+            "claimed": value, "read_back": null, "at": self.core.at(self.core.now()), "restore": true,
+            "error": error,
+        }));
+        self.core.reject_note(json!({ "call": "rx_restore", "stream": self.k, "error": format!("channel c{channel} value {value}: {error}") }));
     }
 
     /// The earliest origin of a planned segment not yet begun, as a test reads it (UR-25): an
@@ -298,27 +465,18 @@ impl Rx {
             next
         };
         let Some(next) = next else {
+            self.settle_pending(None, "no receive segment owns the pending DDC entries");
             self.core.release_unneeded(Dir::Rx, self.k);
             return false;
         };
         let origin = next.segment.origin;
         // The record decides what is opened and configured (UR-13, UR-36).
-        match self.core.owner_configure(Dir::Rx, self.k, &next) {
+        let core = self.core.clone();
+        match core.owner_configure_with_abort(Dir::Rx, self.k, &next, || self.settle_pending(None, "receive segment was removed before it acquired an owner")) {
             Ok(true) => {}
             Ok(false) => return true,
             Err((error, claim)) => {
-                // Not begun. A refusal the plan cannot take — its command pruned — skips the
-                // segment. The refusal is booked while the claim still holds the stream, in
-                // this one section, so no owner finds it free before the line holds it.
-                let mut streams = lock(&self.core.streams);
-                self.core.probe("refused_booking", Some(&streams));
-                let refused = next.segment.by.is_some_and(|by| streams.refuse(&self.core, key, by));
-                streams.give_back(claim);
-                drop(streams);
-                if !refused {
-                    self.from = origin.saturating_add(1);
-                }
-                self.core.device_failed(None, "update_parameter", &error);
+                self.refuse_segment(&next, Some(claim), error, false);
                 return true;
             }
         }
@@ -329,8 +487,13 @@ impl Rx {
             return true;
         }
         let channels = next.set();
-        if let Err(error) = self.core.device.rx_start(self.k, origin) {
-            self.core.device_failed(None, "update_parameter", &error);
+        let started = {
+            let mut dsp = self.core.rx_dsp[self.k].lock();
+            dsp.stopped = false;
+            self.core.device.rx_start(self.k, origin)
+        };
+        if let Err(error) = started {
+            self.refuse_segment(&next, None, error, true);
             return true;
         }
         let stream = self.core.description.stream_node(&self.core.id, Dir::Rx, self.k);
@@ -340,6 +503,7 @@ impl Rx {
                 let clock = Clock { domain: handle.id(), origin, n: next.n() };
                 self.pool = HostPool::new(self.core.block_len * channels.count().max(1) as usize * 8);
                 self.stream = Some(Stream::new(clock, handle, channels, self.last_stop.take()));
+                self.stop_requested = false;
                 let mut streams = lock(&self.core.streams);
                 streams.started(key, Some((origin, next.segment.config, next.segment.by)), origin, next.segment.config);
                 drop(streams);
@@ -352,10 +516,11 @@ impl Rx {
         true
     }
 
-    /// The stream ends: its clock, if it has one, ends at its cut (RM-16, UR-17), and the
-    /// items before the command that began it are pruned (#63). The cut is read from the
-    /// plan here, since another thread may have booked an earlier one — a loss, or
-    /// `Provider::stop`'s end — after this turn read it, while a receive call waited.
+    /// The caller holds this stream's RX-DSP lock through completion, preventing a handover
+    /// from seeing a stopped device with the segment still active. Its clock ends at the cut
+    /// (RM-16, UR-17), and the items before the command that began it are pruned (#63). The cut
+    /// is read from the plan here, since another thread may have booked an earlier one — a loss,
+    /// or `Provider::stop`'s end — after this turn read it, while a receive call waited.
     fn finish(&mut self) {
         let Some(mut stream) = self.stream.take() else { return };
         let key = stream_key(Dir::Rx, self.k);
@@ -371,6 +536,32 @@ impl Rx {
         streams.prune(key, by);
     }
 
+    /// A failed successor cannot own a timed DDC value already handed to it. Recover before
+    /// refusing the segment or returning its streamer to the rest of the Provider.
+    fn refuse_segment(&mut self, next: &Planned, claim: Option<super::core::Claim>, error: crate::device::DeviceError, mark_stopped: bool) {
+        let core = self.core.clone();
+        let mut dsp = core.rx_dsp[self.k].lock();
+        if mark_stopped { dsp.stopped = true; }
+        let recovery = if !error.lost && !dsp.pending.is_empty() && !self.core.is_lost() {
+            let call = self.core.block_len.max(self.core.device.rx_packet_samples(self.k));
+            let latest = dsp.pending.iter().map(|entry| entry.order.0).max().unwrap_or(next.segment.origin);
+            let deadline = i128::from(self.core.now()).max(i128::from(latest))
+                + call as i128 * i128::from(next.n())
+                + i128::from(self.core.ticks(DELIVERY_ALLOWANCE_NS));
+            Some((next.n(), next.set(), deadline))
+        } else { None };
+        self.settle_pending_locked(&mut dsp, recovery, "refused receive segment left pending DDC entries");
+        let key = stream_key(Dir::Rx, self.k);
+        let mut streams = lock(&self.core.streams);
+        self.core.probe("refused_booking", Some(&streams));
+        let refused = next.segment.by.is_some_and(|by| streams.refuse(&self.core, key, by));
+        if let Some(claim) = claim { streams.give_back(claim); }
+        drop(streams);
+        if !refused { self.from = next.segment.origin.saturating_add(1); }
+        drop(dsp);
+        self.core.device_failed(None, "update_parameter", &error);
+    }
+
     /// How many samples to ask `rx_recv` for: while a cut is pending, no more than up to
     /// the cut, so that the last block ends at the cut and the stream is stopped about a
     /// delivery after it, whatever `block_len` (Review N, B1).
@@ -378,7 +569,15 @@ impl Rx {
         let block = self.core.block_len;
         let Some(stream) = self.stream.as_ref() else { return block };
         let Some(cut) = stream.cut.filter(|_| !stream.stopped) else { return block };
-        (stream.clock.at_or_after(cut) - stream.expected).clamp(1, block as i64) as usize
+        let left = stream.clock.at_or_after(cut) - stream.expected;
+        let mut len = if left <= 0 && !self.core.rx_dsp[self.k].lock().pending.is_empty() { block } else { left.clamp(1, block as i64) as usize };
+        let dsp = self.core.rx_dsp[self.k].lock();
+        if let Some(deadline) = rx_drain_deadline(&self.core, self.k, stream.clock.n, cut, &dsp.pending) {
+            let remaining = deadline - i128::from(self.core.now());
+            let packet = self.core.device.rx_packet_samples(self.k);
+            len = bounded_read_len(len, packet, remaining, stream.clock.n);
+        }
+        len
     }
 
     /// How long `rx_recv` may wait: while a cut is pending, no longer than to the cut plus
@@ -391,38 +590,30 @@ impl Rx {
         let left = i128::from(cut) + i128::from(quiet_span(&self.core, stream)) - i128::from(self.core.now());
         let ns = (left.max(0) * 1_000_000_000 / i128::from(self.core.mcr))
             .clamp(1_000_000, RECV_TIMEOUT.as_nanos() as i128);
-        Wall::from_nanos(ns as u64)
+        let dsp = self.core.rx_dsp[self.k].lock();
+        let ns = rx_drain_deadline(&self.core, self.k, stream.clock.n, cut, &dsp.pending)
+            .map_or(ns, |deadline| ns.min((deadline - i128::from(self.core.now())).max(0) * 1_000_000_000 / i128::from(self.core.mcr)));
+        Wall::from_nanos(ns.min(u64::MAX as i128) as u64)
     }
 
-    fn receive(&mut self, result: RxRecv) {
+    pub(super) fn receive(&mut self, result: RxRecv) {
         let now = self.core.now();
+        if matches!(&result, RxRecv::Timeout) {
+            self.timeout(now);
+            return;
+        }
+        if matches!(&result, RxRecv::LateCommand) && self.stream.as_ref().is_some_and(|stream| stream.cut.is_some()) {
+            let cut = self.stream.as_ref().and_then(|stream| stream.cut).expect("the cut was checked");
+            self.core.timing(json!({ "what": "rx_stop_late", "cut": cut, "at": now }));
+            self.stop_requested = true;
+            self.try_end();
+            return;
+        }
         let Some(stream) = self.stream.as_mut() else { return };
         match result {
             RxRecv::Samples { first_tick, samples } => {
                 self.last_samples = self.host.now();
                 self.samples(first_tick, samples);
-            }
-            RxRecv::Timeout => {
-                // Past the cut and its allowance, and silent for as long: a stream still
-                // delivering, however late, is waited for (Review N, B2).
-                let span = quiet_span(&self.core, stream);
-                // The two unit tests that exercise this wait a 10 ms silence of the device's
-                // host clock — about 3× the ≈ 4 ms `quiet_span` at 1 MS/s (a 2 000-sample
-                // block plus the 3 ms delivery allowance). UR-29's lost-device monitor below
-                // is the 1 s one; this quiet test is not.
-                let quiet = self.host.now().saturating_sub(self.last_samples) >= Wall::from_nanos(self.core.ns(span).max(0) as u64);
-                if let Some(cut) = stream.cut.filter(|cut| quiet && i128::from(now) >= i128::from(*cut) + i128::from(span)) {
-                    // Silent past its cut: stopped all the same, never left streaming.
-                    if !stream.stopped {
-                        self.last_stop = stop_at_cut(&self.core, self.k, cut).or(self.last_stop);
-                    }
-                    self.finish();
-                } else if stream.cut.is_none_or(|cut| now < cut)
-                    && i128::from(now) > i128::from(stream.start) + i128::from(self.core.mcr)
-                    && self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(1)
-                {
-                    self.core.device_lost("UR-29: the receive stream yielded nothing for 1 s");
-                }
             }
             RxRecv::Overflow { out_of_sequence: false } => {
                 stream.report(Pending::Overrun);
@@ -433,17 +624,6 @@ impl Rx {
                 self.core.stat("rx_overflows", 1);
             }
             RxRecv::Alignment => stream.report(Pending::Alignment),
-            RxRecv::LateCommand if stream.cut.is_some() => {
-                // A late start of a stream that is ending: stop it untimed, never restart
-                // it (Review M, P1-A).
-                self.core.timing(json!({ "what": "rx_stop_late", "cut": stream.cut, "at": now }));
-                if !stream.stopped {
-                    if let Some(issued) = stop_at_cut(&self.core, self.k, stream.cut.expect("a cut")) {
-                        stream.stopped = true;
-                        self.last_stop = Some(issued);
-                    }
-                }
-            }
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays. The new start
                 // waits the profile's start lead from now (spec 20, VF-6).
@@ -469,12 +649,30 @@ impl Rx {
                 self.core.stat("rx_errors", 1);
                 self.core.timing(json!({ "what": "rx_error", "error": error.message }));
             }
+            RxRecv::Timeout => unreachable!("timeouts are handled before borrowing the stream"),
+        }
+    }
+
+    fn timeout(&mut self, now: i64) {
+        let Some(stream) = self.stream.as_ref() else { return };
+        let span = quiet_span(&self.core, stream);
+        let quiet = self.host.now().saturating_sub(self.last_samples) >= Wall::from_nanos(self.core.ns(span).max(0) as u64);
+        let ended = stream.cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));
+        let lost = stream.cut.is_none_or(|cut| now < cut)
+            && i128::from(now) > i128::from(stream.start) + i128::from(self.core.mcr)
+            && self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(1);
+        if ended {
+            self.stop_requested = true;
+            self.try_end();
+        } else if lost {
+            self.core.device_lost("UR-29: the receive stream yielded nothing for 1 s");
         }
     }
 
     fn samples(&mut self, first_tick: i64, mut samples: Vec<Vec<Iq>>) {
+        let (clock, channels) = self.stream.as_ref().map(|stream| (stream.clock, stream.channels)).expect("a stream");
+        consume_rx_dsp(&mut self.core.rx_dsp[self.k].lock(), clock.n, channels, first_tick, &samples);
         let stream = self.stream.as_mut().expect("a stream");
-        let clock = stream.clock;
         if first_tick < clock.origin || first_tick < stream.not_before {
             // The old stream's samples still in flight after its stop (Review M, N-3;
             // Review N, B1: after a late switch they can follow the new origin).
@@ -498,20 +696,16 @@ impl Rx {
                 ended = true;
             }
             if k + len > stream.expected {
-                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, k + len);
+                let delivered = stream.cut.map_or(k + len, |cut| (k + len).min(clock.at_or_after(cut)));
+                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, delivered);
             }
-        }
-        if let Some(cut) = stream.cut.filter(|_| ended && !stream.stopped) {
-            // UR-25: the samples reached the cut, so the stream is stopped untimed now.
-            stream.stopped = true;
-            self.last_stop = stop_at_cut(&self.core, self.k, cut).or(self.last_stop);
         }
         if k < stream.expected {
             let trim = stream.expected - k;
             if trim >= len {
                 self.core.stat("rx_overlapping", 1);
                 if ended {
-                    self.finish();
+                    self.try_end();
                 }
                 return;
             }
@@ -617,9 +811,40 @@ impl Rx {
             }
         }
         if ended {
-            self.finish();
+            self.try_end();
         }
     }
+}
+
+/// One received sample can prove at most one timed DDC write on its logical channel consumed.
+fn consume_rx_dsp(dsp: &mut RxDsp, sample_ticks: i64, channels: Channels, first_tick: i64, samples: &[Vec<Iq>]) {
+    for (index, channel) in channels.iter().enumerate() {
+        let Some(samples) = samples.get(index) else { continue };
+        for sample in 0..samples.len() {
+            let tick = i128::from(first_tick) + sample as i128 * i128::from(sample_ticks);
+            let Some(position) = dsp.pending.iter().position(|entry| entry.channel == channel as usize) else { continue };
+            let entry = &dsp.pending[position];
+            if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {
+                let entry = dsp.pending.remove(position);
+                dsp.reported.remove(&(entry.order, entry.channel));
+            }
+        }
+    }
+}
+
+fn rx_drain_deadline(core: &Core, k: usize, sample_ticks: i64, cut: i64, pending: &[super::core::RxDspEntry]) -> Option<i128> {
+    let latest = pending.iter().map(|entry| entry.order.0).max()?;
+    let call = core.block_len.max(core.device.rx_packet_samples(k)) as i128;
+    let allowance = i128::from(core.ticks(DELIVERY_ALLOWANCE_NS));
+    let quiet = i128::from(cut) + i128::from(core.block_len as i64) * i128::from(sample_ticks);
+    Some((i128::from(latest) + call * i128::from(sample_ticks)).max(quiet) + allowance)
+}
+
+/// Keep each UHD receive to one packet and to no more samples than fit before the deadline.
+fn bounded_read_len(requested: usize, packet: usize, remaining_ticks: i128, sample_ticks: i64) -> usize {
+    if remaining_ticks <= 0 { return 0; }
+    let by_time = usize::try_from((remaining_ticks / i128::from(sample_ticks)).max(1)).unwrap_or(usize::MAX);
+    requested.min(if packet == 0 { requested } else { packet }).min(by_time)
 }
 
 /// How long a stream past its cut must have been silent to be taken as ended: a block and
@@ -632,9 +857,9 @@ fn quiet_span(core: &Core, stream: &Stream) -> i64 {
 /// Stops the stream untimed once its samples reached the cut (or at an abort's), and
 /// records it (UR-25, UR-30): the X3x0 carries out a timed stop at once, before its time
 /// (§11 F1). Returns the instant it was issued.
-fn stop_at_cut(core: &Core, k: usize, cut: i64) -> Option<i64> {
+fn stop_at_cut(core: &Core, k: usize, cut: i64) -> Result<Option<i64>, crate::device::DeviceError> {
     if core.is_lost() {
-        return None;
+        return Ok(None);
     }
     let now = core.now();
     core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
@@ -644,11 +869,11 @@ fn stop_at_cut(core: &Core, k: usize, cut: i64) -> Option<i64> {
             // The device produces samples until the stop reaches it (the bench: ~0.4 ms
             // into the call): the next stream drops anything before the call's return
             // plus a device lead (Review O, N-3); it starts a restart lead later anyway.
-            Some(core.now() + core.ticks(DEVICE_LEAD_NS))
+            Ok(Some(core.now() + core.ticks(DEVICE_LEAD_NS)))
         }
         Err(error) => {
             core.device_failed(None, "update_parameter", &error);
-            None
+            if error.lost { Ok(None) } else { Err(error) }
         }
     }
 }
@@ -703,6 +928,7 @@ mod tests {
             config,
             lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
             call: core.block_len as i64,
+            release_window: core.ticks(core.description.timing.release_window_ns),
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         }));
         let (to_rx, cmds) = std::sync::mpsc::channel();
@@ -734,6 +960,894 @@ mod tests {
     }
 
     #[test]
+    fn ur_24_equal_time_rx_entries_need_distinct_samples_after_acceptance() {
+        let mut dsp = RxDsp {
+            pending: vec![
+                super::super::core::RxDspEntry { order: (0, 1), channel: 0, value: 1.0, accepted_at: Some(200) },
+                super::super::core::RxDspEntry { order: (0, 2), channel: 0, value: 2.0, accepted_at: Some(200) },
+                super::super::core::RxDspEntry { order: (0, 3), channel: 1, value: 3.0, accepted_at: Some(0) },
+            ],
+            ..Default::default()
+        };
+        let clock = Clock { domain: ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, origin: 0, n: 200 };
+        let channels = Channels::first(2);
+        let samples = vec![vec![[0.0, 0.0]; 1], vec![[0.0, 0.0]; 1]];
+        consume_rx_dsp(&mut dsp, clock.n, channels, 0, &samples);
+        assert_eq!(dsp.pending.iter().map(|entry| entry.order.1).collect::<Vec<_>>(), [1, 2], "the channel-1 sample and the pre-acceptance channel-0 sample cannot consume either channel-0 entry");
+        consume_rx_dsp(&mut dsp, clock.n, channels, 200, &samples);
+        assert_eq!(dsp.pending.iter().map(|entry| entry.order.1).collect::<Vec<_>>(), [2], "one sample consumes only one equal-time entry on channel 0");
+        consume_rx_dsp(&mut dsp, clock.n, channels, 400, &samples);
+        assert!(dsp.pending.is_empty());
+    }
+
+    #[test]
+    fn ur_24_a_cut_after_timed_rx_release_drains_before_its_successor() {
+        // Owner path: the timed handover is accepted first, a later cold booking cuts the
+        // segment before its instant, and the block spanning the cut drains the DDC without
+        // publishing its tail. A 20 ms receive call makes the minimum 3 ms lead observable.
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_packet: Some(20_000),
+            ..Default::default()
+        }));
+        let mut description = super::super::test_support::default_description(2_000);
+        description.timing.rx_start_lead_ns = 3_000_000;
+        let output = link();
+        let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), vec![output.clone()], BTreeMap::new(), description);
+        let ticks = |ms: i64| core.ticks(ms * 1_000_000);
+        let frozen = super::super::test_support::Frozen::of(&device);
+        let t0 = core.now();
+        device.set_time(t0);
+        let (cut, e) = (t0 + ticks(8), t0 + ticks(10));
+        device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        device.rx_open(0, &[0]).unwrap();
+        let mut config = core.description.defaults();
+        config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
+        let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
+        rx_start[0] = Some((Channels::first(1), 200));
+        let start = super::super::control::Start {
+            t0,
+            rx: rx_start,
+            tx: vec![None; core.description.stream_count(Dir::Tx)],
+        };
+        let (to_tx, _tx) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
+        device.rx_start(0, t0).unwrap();
+
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(1),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))),
+        );
+        super::super::test_support::device_at(&core, &time, &device, t0 + ticks(7));
+        control.release();
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the accepted timed value is an RX drain obligation");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
+
+        let same_rate = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
+        book(&core, cut, 2, Kind::Cold(same_rate));
+        let planned = lock(&core.streams).planned(stream_key(Dir::Rx, 0));
+        let successor = planned.last().unwrap().segment.origin;
+        assert_eq!(planned[0].segment.instant(planned[0].segment.cut.unwrap()).unwrap(), cut);
+        assert_eq!(successor, t0 + ticks(37), "cut + 3 ms release + 20 ms receive call + 3 ms allowance + 3 ms lead");
+
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        let clock = Clock { domain: handle.id(), origin: t0, n: 200 };
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), 0)), None);
+        super::super::test_support::device_at(&core, &time, &device, e);
+        drop(frozen);
+        let block = device.rx_recv(0, 20_000, Wall::from_millis(100), false);
+        assert!(matches!(&block, RxRecv::Samples { first_tick: 0, .. }), "the real fake receive call spans the cut: {block:?}");
+        rx.receive(block);
+
+        assert!(rx.stream.is_none(), "the old owner stopped after the sample evidence");
+        assert!(core.rx_dsp[0].lock().pending.is_empty());
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the DDC entry was consumed");
+        let (published, _) = output.receive().expect("the pre-cut prefix is published");
+        assert_eq!(published.header().len, ((cut - t0) / 200) as u32);
+        assert_eq!(published.header().first_sample_time.ticks_in(clock.domain).unwrap(), 0);
+        assert!(output.receive().is_none(), "the tail at or after the cut is not published");
+        let published = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_stop_untimed").cloned().expect("the owner stopped");
+        assert_eq!(published["cut"], cut);
+        assert!(successor - published["at"].as_i64().unwrap() >= ticks(3), "the full minimum RX lead remains after the drained stop: {published}, successor={successor}");
+    }
+
+    #[test]
+    fn ur_24_a_stop_decision_waits_for_a_gated_timed_rx_handover() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            command_queue: 64,
+            ..Default::default()
+        }));
+        let output = link();
+        let (core, time, _) = super::super::test_support::rig_on(spy.clone(), vec![output.clone()], 2_000);
+        spy.watch(&core);
+        let t0 = core.now();
+        spy.set_time(t0);
+        let ticks = |ms: i64| core.ticks(ms * 1_000_000);
+        core.device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        core.device.rx_open(0, &[0]).unwrap();
+        let mut config = core.description.defaults();
+        config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
+        let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
+        rx_start[0] = Some((Channels::first(1), 200));
+        let start = super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] };
+        let (to_tx, _tx) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
+        core.device.rx_start(0, t0).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        let clock = Clock { domain: handle.id(), origin: t0, n: 200 };
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), t0)), None);
+        rx.receive(samples(t0, 2_000));
+
+        let e = t0 + ticks(5);
+        control.book_timed(ezsdr_kernel::event::ActionId(1), super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+        let cut = t0 + ticks(8);
+        book(&core, cut, 2, Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }));
+        let release_at = e - ticks(core.description.timing.release_window_ns / 1_000_000);
+        time.advance_to(core.at(release_at)).unwrap();
+        spy.set_time(release_at);
+        let gate = spy.stop_after("apply");
+        let (control_done, control_returned) = std::sync::mpsc::channel();
+        let control_thread = core.device.host().spawn("rx-d9b-handover", move || {
+            control.release();
+            let _ = control_done.send(control);
+        }).unwrap();
+        gate.wait();
+
+        let after_e = e + ticks(1);
+        time.advance_to(core.at(after_e)).unwrap();
+        spy.set_time(after_e);
+        let (owner_done, owner_returned) = std::sync::mpsc::channel();
+        let owner_thread = core.device.host().spawn("rx-d9b-stop", move || {
+            rx.receive(samples(after_e, 2_000));
+            let _ = owner_done.send(rx);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while !(core.rx_dsp[0].is_held() && core.rx_dsp[0].waiters() > 0) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(core.rx_dsp[0].is_held() && core.rx_dsp[0].waiters() > 0, "the stop decision did not wait behind the handover lock");
+        assert_eq!(spy.seen("rx_stop"), 0, "the chain stopped before the accepted handover was published");
+
+        gate.release();
+        let _control = control_returned.recv_timeout(Wall::from_secs(10)).expect("the timed handover completed");
+        control_thread.join().unwrap();
+        let rx = owner_returned.recv_timeout(Wall::from_secs(10)).expect("the receive owner completed");
+        owner_thread.join().unwrap();
+
+        assert!(rx.stream.is_none());
+        assert!(core.rx_dsp[0].lock().pending.is_empty(), "the accepted value was not drained");
+        let order = spy.order();
+        let apply = order.iter().rposition(|name| *name == "apply").unwrap();
+        let stop = order.iter().position(|name| *name == "rx_stop").unwrap();
+        assert!(apply < stop, "the timed apply and stop crossed: {order:?}");
+        let (published, _) = output.receive().expect("the prefix before the cut is published");
+        assert_eq!(published.header().first_sample_time.ticks_in(clock.domain).unwrap(), 0);
+        let (tail_prefix, _) = output.receive().expect("the delivered pre-cut drain prefix");
+        assert_eq!((tail_prefix.header().first_sample_time.ticks_in(clock.domain).unwrap(), tail_prefix.header().len), ((after_e - t0) / 200, 2_000));
+        assert!(tail_prefix.header().first_sample_time.ticks_in(clock.domain).unwrap() + i64::from(tail_prefix.header().len) <= (cut - t0) / 200, "the tail at or after the cut was published");
+        assert!(output.receive().is_none(), "the drain tail at or after the cut was published");
+    }
+
+    #[test]
+    fn ur_24_a_completed_rx_owner_serializes_a_late_frequency() {
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
+        let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let _frozen = super::super::test_support::Frozen::of(&device);
+        let t0 = core.now();
+        device.set_time(t0);
+        let ticks = |ms: i64| core.ticks(ms * 1_000_000);
+        core.device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        core.device.rx_open(0, &[0]).unwrap();
+        let mut config = core.description.defaults();
+        config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
+        let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
+        rx_start[0] = Some((Channels::first(1), 200));
+        let start = super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] };
+        let (to_tx, _tx) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
+        core.device.rx_start(0, t0).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), t0)), None);
+        rx.receive(samples(t0, 2_000));
+
+        let e = t0 + ticks(100);
+        let cut = e + ticks(10);
+        book(&core, cut, 2, Kind::Stop);
+        control.book_timed(ezsdr_kernel::event::ActionId(1), super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+        let release_at = e - core.ticks(core.description.timing.release_window_ns);
+        super::super::test_support::device_at(&core, &time, &device, release_at);
+        rx.stream.as_mut().unwrap().cut_at(cut);
+
+        let (owner_ready, owner_at_finish) = std::sync::mpsc::channel();
+        let (resume_owner, owner_resume) = std::sync::mpsc::channel();
+        let owner_resume = std::sync::Mutex::new(owner_resume);
+        super::super::test_support::probe(&core, "rx_before_finish", move |_| {
+            let _ = owner_ready.send(());
+            let _ = owner_resume.lock().unwrap().recv();
+        });
+        let (owner_done, owner_returned) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-finish-frequency-race", move || {
+            rx.try_end();
+            drop(to_rx);
+            let _ = owner_done.send(rx);
+        }).unwrap();
+        owner_at_finish.recv_timeout(Wall::from_secs(10)).expect("the stopped owner reached completion");
+
+        let (control_ready, control_at_apply) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "before_timed_apply", move |_| { let _ = control_ready.send(()); });
+        let (control_done, control_returned) = std::sync::mpsc::channel();
+        let control_thread = core.device.host().spawn("rx-late-frequency", move || {
+            control.release();
+            let _ = control_done.send(());
+        }).unwrap();
+        control_at_apply.recv_timeout(Wall::from_secs(10)).expect("control reached the timed handover");
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_dsp[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let waited_for_completion = core.rx_dsp[0].waiters() > 0;
+
+        resume_owner.send(()).unwrap();
+        let rx = owner_returned.recv_timeout(Wall::from_secs(10)).expect("the owner completed the segment");
+        owner.join().unwrap();
+        control_returned.recv_timeout(Wall::from_secs(10)).expect("the late update settled");
+        control_thread.join().unwrap();
+
+        assert!(waited_for_completion, "control did not serialize with the owner's completion");
+        assert!(rx.stream.is_none());
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")), "a completed segment received a late device write: {:?}", device.calls());
+        assert!(core.rx_dsp[0].lock().pending.is_empty(), "completion left a stale DDC obligation");
+        assert!(lock(&core.streams).active(stream_key(Dir::Rx, 0)).is_none(), "the owner recorded completion before handing over the lock");
+    }
+
+    #[test]
+    fn ur_24_provider_stop_drains_after_s_then_restores_the_frequency_in_force_at_s() {
+        let device = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_packet: Some(1_000),
+            ..Default::default()
+        }));
+        let output = link();
+        let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        device.watch(&core);
+        let frozen = super::super::test_support::Frozen::on(device.host());
+        let device_at = |ticks| {
+            if core.now() < ticks { time.advance_to(core.at(ticks)).unwrap(); }
+            device.set_time(ticks);
+            assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks));
+        };
+        let t0 = core.now();
+        device.set_time(t0);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let (at_s, a, b) = (t0 + ms(8), 1.001e9, 1.002e9);
+        device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        device.rx_open(0, &[0]).unwrap();
+
+        let mut config = core.description.defaults();
+        config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
+        let frequency = super::super::core::key("radio.rx.c0.frequency_hz");
+        let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
+        rx_start[0] = Some((Channels::first(1), 200));
+        let start = super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] };
+        let (to_tx, _tx) = std::sync::mpsc::channel();
+        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
+        device.rx_start(0, t0).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(200, 1).unwrap()).unwrap();
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 0, cmds, Some((handle, Channels::first(1), t0)), None);
+
+        control.book_timed(ezsdr_kernel::event::ActionId(1), frequency.clone(), ezsdr_kernel::spec::Value::num(a).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(t0 + ms(5)))));
+        device_at(t0 + ms(2));
+        control.release();
+        device_at(t0 + ms(5));
+        control.release();
+        assert!(lock(&core.rec).applied.iter().any(|row| row["key"] == "radio.rx.c0.frequency_hz" && row["at"]["ticks"] == t0 + ms(5)), "the due A row was folded into the record");
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "A's drain obligation survives row folding");
+        control.book_timed(ezsdr_kernel::event::ActionId(2), frequency, ezsdr_kernel::spec::Value::num(b).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(t0 + ms(10)))));
+        device_at(t0 + ms(7));
+        control.release();
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "A took effect before S; only the post-S B remains in the DDC");
+        assert!(device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at <= t0 + ms(6) && *value == a && *timed));
+
+        device_at(at_s);
+        {
+            let mut streams = lock(&core.streams);
+            streams.stop = Some((at_s, StopMode::Orderly));
+            streams.end(&core, at_s, false, false);
+        }
+        control.finish();
+        assert_eq!(core.rx_dsp[0].lock().restore.get(&0), Some(&a));
+        assert!(lock(&core.rec).applied.iter().any(|row| row["key"] == "radio.rx.c0.frequency_hz" && row["cancelled_at"]["ticks"] == at_s), "B is cancelled at the original S");
+
+        for first in (0..((at_s - t0) / 200) as usize).step_by(2_000) {
+            let len = (((at_s - t0) / 200) as usize - first).min(2_000);
+            rx.receive(samples(t0 + first as i64 * 200, len));
+        }
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the pre-S samples consume A but not B");
+        rx.stream.as_mut().unwrap().cut_at(at_s);
+        let deadline = rx_drain_deadline(&core, 0, 200, at_s, &core.rx_dsp[0].lock().pending).unwrap();
+        let flush_at = deadline - i128::from(core.ticks(DELIVERY_ALLOWANCE_NS));
+        device_at(i64::try_from(flush_at).unwrap());
+        drop(frozen);
+        rx.try_end();
+
+        assert!(rx.stream.is_none());
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the stream consumed both timed values before stopping");
+        let restored_at = device.time_now().unwrap();
+        assert!(device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at <= restored_at && *value == a && !timed), "the device is restored before another Run can configure it: {:?}", device.dsp_log(Dir::Rx, 0));
+        let rec = lock(&core.rec);
+        let restores: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
+        assert_eq!(restores.len(), 1, "restoration happens once, after the pending value is drained: {restores:?}");
+        assert_eq!((restores[0]["claimed"].as_f64(), restores[0]["read_back"].as_f64()), (Some(a), Some(a)));
+        assert!(!rec.rejected.iter().any(|row| row["call"] == "rx_restore"), "restore was not attempted while the DDC value was pending: {:?}", rec.rejected);
+        drop(rec);
+        let order = device.order();
+        let consumed = order.iter().rposition(|call| *call == "rx_recv").unwrap();
+        let restored = order.iter().rposition(|call| *call == "apply").unwrap();
+        assert!(consumed < restored, "the flush receive returned before the restore apply: {order:?}");
+        assert!(device.rx_apply_pending().iter().any(|(channel, at, value, pending)| *channel == 0 && at.is_none() && *value == a && *pending == 0), "the restore apply observed the DDC entry consumed: {:?}", device.rx_apply_pending());
+        let published = received(&output);
+        assert_eq!(published.iter().map(|(_, _, len)| *len).sum::<u32>(), ((at_s - t0) / 200) as u32, "the pre-S prefix is published");
+        assert_eq!(published.iter().map(|(_, tick, _)| *tick).collect::<Vec<_>>(), [0, 2_000, 4_000, 6_000]);
+        assert!(output.receive().is_none(), "no sample at or after S is published");
+    }
+
+    #[test]
+    fn ur_24_multichannel_abort_keeps_overflow_and_drain_samples_off_the_link() {
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            ..Default::default()
+        }));
+        let output = link();
+        let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let _frozen = super::super::test_support::Frozen::of(&device);
+        device.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 2);
+        device.rx_start(0, 0).unwrap();
+        let entries = [
+            (core.ticks(1_000_000), 1, 0, 1.001e9),
+            (core.ticks(2_000_000), 2, 1, 1.002e9),
+            (core.ticks(2_000_000), 3, 1, 1.003e9),
+        ];
+        {
+            let mut dsp = core.rx_dsp[0].lock();
+            for &(at, seq, channel, value) in &entries {
+                device.apply(Dir::Rx, channel, &crate::device::Settings { freq: Some(value), ..Default::default() }, Some(at)).unwrap();
+                let entry = super::super::core::RxDspEntry { order: (at, seq), channel, value, accepted_at: Some(0) };
+                dsp.pending.push(entry.clone());
+                dsp.latest.insert(channel, entry);
+            }
+        }
+
+        rx.receive(RxRecv::Overflow { out_of_sequence: false });
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 3, "an overflow is not sample evidence");
+        rx.command(RxCmd::Shutdown(StopMode::Abort));
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 3, "abort does not abandon handed DDC entries");
+        let after_e = core.ticks(6_000_000);
+        super::super::test_support::device_at(&core, &time, &device, after_e);
+        let drained = device.rx_recv(0, 6_000, Wall::from_millis(10), false);
+        assert!(matches!(&drained, RxRecv::Samples { first_tick: 0, .. }), "the fake DDC kept flowing through all handed entries: {drained:?}");
+        rx.receive(drained);
+
+        assert!(rx.stream.is_none());
+        assert!(core.rx_dsp[0].lock().pending.is_empty(), "samples on each channel prove all three commands consumed");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
+        assert_eq!(device.dsp_pending(Dir::Rx, 1), 0);
+        assert!(output.receive().is_none(), "abort publishes no overflow/drain tail at or after its cut");
+        assert_eq!(clock.origin, 0);
+    }
+
+    #[test]
+    fn ur_24_fake_ddc_distinguishes_host_silence_from_a_stalled_ddc() {
+        for (fault, pending) in [
+            (crate::device::FakeFault::Silence(Wall::ZERO), 0),
+            (crate::device::FakeFault::RxFlowStall(Wall::ZERO), 1),
+        ] {
+            let device = crate::device::FakeDevice::new(crate::device::FakeConfig {
+                clock: crate::ClockMode::Manual,
+                faults: vec![fault],
+                ..Default::default()
+            });
+            let _frozen = super::super::test_support::Frozen::of(&device);
+            device.set_time(0);
+            device.rx_open(0, &[0]).unwrap();
+            device.rx_start(0, 0).unwrap();
+            drop(_frozen);
+            assert!(matches!(device.rx_recv(0, 2_000, Wall::from_millis(1), false), RxRecv::Timeout));
+            let at = 200_000;
+            device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(at)).unwrap();
+            device.set_time(400_000);
+            assert!(matches!(device.rx_recv(0, 2_000, Wall::from_millis(1), false), RxRecv::Timeout), "no host block is delivered");
+            assert_eq!(device.dsp_pending(Dir::Rx, 0), pending, "host silence and stopped chain flow are distinct");
+            assert_eq!(device.dsp_log(Dir::Rx, 0).len(), usize::from(pending == 0), "only flowing DDC samples take the timed entry");
+        }
+    }
+
+    #[test]
+    fn ur_24_drain_deadline_runs_one_bounded_flush_and_consumes_or_reports() {
+        for (succeeds, near_deadline) in [(true, false), (false, false), (false, true)] {
+            let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+                clock: crate::ClockMode::Manual,
+                rx_latency: Wall::from_millis(1),
+                rx_packet: Some(1_000),
+                faults: if succeeds {
+                    vec![crate::device::FakeFault::RxFlowStall(Wall::ZERO)]
+                } else {
+                    vec![crate::device::FakeFault::RxFlowStall(Wall::ZERO), crate::device::FakeFault::RxFlowStall(Wall::from_micros(1))]
+                },
+                ..Default::default()
+            }));
+            let output = link();
+            let mut description = super::super::test_support::default_description(20_000);
+            description.timing.rx_start_lead_ns = description.timing.release_window_ns;
+            let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![output], BTreeMap::new(), description);
+            spy.watch(&core);
+            let frozen = super::super::test_support::Frozen::on(spy.host());
+            spy.set_time(core.now());
+            let (mut rx, clock) = rx(&core, 1);
+            let start = core.now();
+            let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
+            {
+                let mut streams = lock(&core.streams);
+                let key = stream_key(Dir::Rx, 0);
+                let mut line = streams.line(key).unwrap().clone();
+                line.stream.call = call;
+                streams.lines.insert(key, line);
+            }
+            let call_ticks = call * clock.n;
+            let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
+            let release_window = core.ticks(core.description.timing.release_window_ns);
+            let lead = core.ticks(core.description.timing.rx_start_lead_ns);
+            assert!(release_window > 0);
+            let successor = start + release_window + call_ticks + allowance + lead;
+            plan(&core, &[(start, Some(start), None), (successor, None, Some(1))]);
+            spy.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+            core.device.rx_start(0, start).unwrap();
+            let instant = start + release_window;
+            spy.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(instant)).unwrap();
+            assert!(matches!(spy.rx_recv(0, call as usize, Wall::ZERO, false), RxRecv::Timeout), "the old receive flow did not stall");
+            assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the stalled old flow leaves the timed DDC entry pending");
+            let entry = super::super::core::RxDspEntry { order: (instant, 1), channel: 0, value: 1.001e9, accepted_at: Some(start) };
+            {
+                let mut dsp = core.rx_dsp[0].lock();
+                dsp.pending.push(entry.clone());
+                dsp.latest.insert(0, entry);
+            }
+            rx.stream.as_mut().unwrap().cut_at(start);
+            let flush_at = (instant + call_ticks).max(start + core.block_len as i64 * clock.n);
+            let flush_deadline = flush_at + allowance;
+            assert_eq!(flush_deadline, successor - lead, "the bounded flush ends at the shared post-cut readiness floor");
+            let before_deadline = flush_at - 1;
+            time.advance_to(core.at(before_deadline)).unwrap();
+            spy.set_time(before_deadline);
+            rx.try_end();
+            assert_eq!(spy.seen("rx_stop"), 0, "the regular drain stopped before its packet-duration boundary");
+            assert_eq!(spy.seen("rx_start"), 1, "the flush began before the packet-duration boundary");
+            assert_eq!(spy.seen("rx_start_now"), 0);
+
+            time.advance_to(core.at(flush_at)).unwrap();
+            spy.set_time(flush_at);
+            let start_gate = spy.stop_after("rx_start_now");
+            let recv_gate = (!near_deadline).then(|| spy.stop_before("rx_recv"));
+            let (done, finished) = std::sync::mpsc::channel();
+            let host = core.device.host();
+            let worker = host.spawn("rx-d9b-flush", move || {
+                rx.try_end();
+                let _ = done.send(rx);
+            }).unwrap();
+            start_gate.wait();
+            assert_eq!(spy.seen("rx_stop"), 1, "the cut stop precedes the one flush");
+            assert_eq!(spy.seen("rx_start"), 1);
+            assert_eq!(spy.seen("rx_start_now"), 1);
+            assert_eq!(spy.seen("rx_recv"), 1, "only the old-flow stall has read before the flush");
+            if near_deadline {
+                let last_safe = flush_deadline - core.ticks(500_000);
+                time.advance_to(core.at(last_safe)).unwrap();
+                spy.set_time(last_safe);
+            }
+            start_gate.release();
+            if let Some(recv_gate) = recv_gate {
+                recv_gate.wait();
+                time.advance_to(core.at(flush_deadline)).unwrap();
+                spy.set_time(flush_deadline);
+                drop(frozen);
+                recv_gate.release();
+            } else {
+                drop(frozen);
+            }
+            let rx = finished.recv_timeout(Wall::from_secs(10)).expect("the bounded owner drain completed");
+            worker.join().unwrap();
+            assert!(rx.stream.is_none());
+            assert_eq!(core.rx_dsp[0].lock().pending.len(), usize::from(!succeeds));
+            assert_eq!(spy.seen("rx_start"), 1);
+            assert_eq!(spy.seen("rx_start_now"), 1);
+            assert_eq!(spy.seen("rx_recv"), 1 + usize::from(!near_deadline), "the old-flow stall occurs once; a flush read is skipped when less than 1 ms remains");
+            let requested = spy.rx_requests();
+            assert_eq!(requested.first(), Some(&(call as usize)));
+            if near_deadline {
+                assert_eq!(requested.len(), 1);
+            } else {
+                assert_eq!(requested.get(1), Some(&1_000), "a flush read cannot span multiple device packets");
+            }
+            assert_eq!(spy.seen("rx_stop"), 2, "the owner cuts once and stops the one flush once");
+            let order = spy.order();
+            let first_stop = order.iter().position(|name| *name == "rx_stop").unwrap();
+            let flush_start = order.iter().position(|name| *name == "rx_start_now").unwrap();
+            let final_stop = order.iter().rposition(|name| *name == "rx_stop").unwrap();
+            assert!(first_stop < flush_start && flush_start < final_stop, "the owner did not stop, flush once, then stop: {order:?}");
+            if !near_deadline {
+                let flush_recv = order.iter().rposition(|name| *name == "rx_recv").unwrap();
+                assert!(flush_start < flush_recv && flush_recv < final_stop, "the owner did not read between the flush start and stop: {order:?}");
+            }
+            assert!(successor - core.now() >= lead, "the flush consumed the successor's RX lead: successor={successor}, now={}", core.now());
+            let rejected = lock(&core.rec).rejected.clone();
+            assert_eq!(rejected.iter().filter(|row| row["call"] == "rx_drain").count(), usize::from(!succeeds));
+            if !succeeds {
+                assert!(rejected.iter().any(|row| row["error"].as_str().is_some_and(|error| error.contains("channel c0") && error.contains("1001000000") && error.contains(&format!("at {instant}")))), "{rejected:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ur_24_a_deadline_receive_uses_one_short_packet_and_preserves_successor_lead() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_latency: Wall::from_micros(6_500),
+            rx_packet: Some(500),
+            ..Default::default()
+        }));
+        let mut description = super::super::test_support::default_description(20_000);
+        description.timing.rx_start_lead_ns = description.timing.release_window_ns;
+        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), description);
+        spy.watch(&core);
+        spy.report_rx_packet_max(20_000);
+        let frozen = super::super::test_support::Frozen::on(spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        let now = clock.instant(46_000);
+        let expected = 23_000;
+        let cut_index = 43_000;
+        let cut = clock.instant(cut_index);
+        let call = core.block_len.max(spy.rx_packet_samples(0)) as i64;
+        assert_eq!(call, 20_000);
+        time.advance_to(core.at(now)).unwrap();
+        spy.set_time(now);
+        spy.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        spy.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(0)).unwrap();
+        spy.rx_start(0, now).unwrap();
+        let entry = super::super::core::RxDspEntry { order: (0, 1), channel: 0, value: 1.001e9, accepted_at: Some(now) };
+        {
+            let mut dsp = core.rx_dsp[0].lock();
+            dsp.pending.push(entry.clone());
+            dsp.latest.insert(0, entry);
+        }
+        rx.stream.as_mut().unwrap().expected = expected;
+        let release = core.ticks(core.description.timing.release_window_ns);
+        let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
+        let lead = core.ticks(core.description.timing.rx_start_lead_ns);
+        let successor = cut + release + call * clock.n + allowance + lead;
+        plan(&core, &[(0, Some(cut_index), None), (successor, None, Some(1))]);
+        let deadline = rx_drain_deadline(&core, 0, clock.n, cut, &core.rx_dsp[0].lock().pending).unwrap();
+        assert_eq!(deadline - i128::from(now), i128::from(core.ticks(20_000_000)), "the ordinary receive starts with one 20 ms packet-maximum window remaining");
+        drop(frozen);
+
+        let gate = spy.stop_after("rx_recv");
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = core.device.host().spawn("rx-short-packet-deadline", move || {
+            rx.turn();
+            let _ = done.send(rx);
+        }).unwrap();
+        gate.wait();
+        let returned_at = spy.time_now().unwrap();
+        assert_eq!(returned_at, now + core.ticks(7_000_000), "the one-packet receive returned after 500 samples and delivery latency");
+        time.advance_to(core.at(returned_at)).unwrap();
+        spy.set_time(returned_at);
+        gate.release();
+        let rx = finished.recv_timeout(Wall::from_secs(10)).expect("the owner completed its cut receive");
+        worker.join().unwrap();
+
+        assert!(rx.stream.is_none(), "the late packet is clipped at the cut and the owner stops");
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 0, "the first short packet consumed the timed DDC entry");
+        assert_eq!(spy.rx_requests(), [20_000], "the request is larger than the FakeDevice's actual 500-sample packets");
+        assert!(successor - core.now() >= lead, "a repeated per-packet timeout consumed the successor's lead: successor={successor}, now={}", core.now());
+    }
+
+    #[test]
+    fn ur_24_a_far_future_cut_keeps_pre_cut_receives_multi_packet() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_packet: Some(500),
+            ..Default::default()
+        }));
+        let output = link();
+        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        spy.watch(&core);
+        let frozen = super::super::test_support::Frozen::on(spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        let cut_at = core.ticks(40_000_000);
+        plan(&core, &[(0, Some(clock.at_or_after(cut_at)), None)]);
+        spy.rx_start(0, 0).unwrap();
+
+        // Register before releasing the freeze; channel waits keep the owner busy between turns.
+        let (turn, turns) = std::sync::mpsc::channel();
+        let (first_done, first_turn) = std::sync::mpsc::channel();
+        let (second_done, second_turn) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let worker = spy.host().spawn("rx-far-future-cut", move || {
+            turns.recv().unwrap();
+            rx.turn();
+            first_done.send(()).unwrap();
+            turns.recv().unwrap();
+            rx.turn();
+            second_done.send(rx).unwrap();
+            let _ = released.recv();
+        }).unwrap();
+        drop(frozen);
+
+        turn.send(()).unwrap();
+        first_turn.recv_timeout(Wall::from_secs(10)).expect("the pre-cut receive completed");
+        assert_eq!(spy.rx_requests(), [2_000], "the booked cut does not shrink the ordinary request");
+        assert_eq!(spy.rx_packet_modes(), [false], "a read that starts before the cut remains multi-packet");
+        assert_eq!(received(&output).iter().map(|(_, _, len)| *len).collect::<Vec<_>>(), [2_000], "the pre-cut read returned four 500-sample packets");
+
+        time.advance_to(core.at(cut_at)).unwrap();
+        spy.set_time(cut_at);
+        turn.send(()).unwrap();
+        let _rx = second_turn.recv_timeout(Wall::from_secs(10)).expect("the post-cut receive completed");
+        assert_eq!(spy.rx_requests(), [2_000, 2_000], "the request size is unchanged after the cut");
+        assert_eq!(spy.rx_packet_modes(), [false, true], "only the read starting at/after the cut is one-packet");
+        assert_eq!(received(&output).iter().map(|(_, _, len)| *len).collect::<Vec<_>>(), [500], "the post-cut read returns one device packet");
+        drop(release);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn ur_24_a_shutdown_without_an_rx_stream_reports_pending_ddc() {
+        let (core, device, _, _) = super::super::test_support::rig_with_links(vec![link()]);
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(to_rx);
+        let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
+        rx.exit = true;
+        core.rx_dsp[0].lock().pending.push(super::super::core::RxDspEntry {
+            order: (core.now() + 1, 1), channel: 0, value: 1.001e9, accepted_at: Some(core.now()),
+        });
+
+        assert!(matches!(rx.turn(), Turn::Exit));
+
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the unconsumed entry remains visible");
+        assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "rx_drain"), "shutdown reports the unowned entry");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start_now") || call.starts_with("rx_recv")), "shutdown has no streamer to recover");
+    }
+
+    #[test]
+    fn ur_24_nonloss_rx_stop_failure_reports_pending_and_skips_restore() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        spy.watch(&core);
+        let frozen = super::super::test_support::Frozen::on(spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        let stop_at = core.now();
+        let entry = super::super::core::RxDspEntry { order: (stop_at + 1, 1), channel: 0, value: 1.001e9, accepted_at: Some(stop_at + 1) };
+        {
+            let mut streams = lock(&core.streams);
+            streams.stop = Some((stop_at, StopMode::Orderly));
+        }
+        rx.stream.as_mut().unwrap().cut_at(stop_at);
+        {
+            let mut dsp = core.rx_dsp[0].lock();
+            dsp.pending.push(entry.clone());
+            dsp.latest.insert(0, entry.clone());
+            dsp.restore.insert(0, 1e9);
+            dsp.restore_ready = true;
+        }
+        let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
+        let flush_at = (entry.order.0 + call * clock.n).max(stop_at + core.block_len as i64 * clock.n);
+        time.advance_to(core.at(flush_at)).unwrap();
+        spy.set_time(flush_at);
+        spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted rx_stop refusal"));
+
+        rx.try_end();
+        drop(frozen);
+
+        assert!(rx.stream.is_none());
+        assert_eq!(spy.seen("rx_stop"), 1);
+        assert_eq!(spy.seen("rx_start_now"), 0, "a failed stop does not start a recovery flush");
+        assert_eq!(spy.seen("rx_recv"), 0);
+        assert!(!core.rx_dsp[0].lock().stopped, "a refused stop is not recorded as physically stopped");
+        let dsp = core.rx_dsp[0].lock();
+        assert_eq!(dsp.pending.len(), 1);
+        assert_eq!((dsp.pending[0].order, dsp.pending[0].channel, dsp.pending[0].value), (entry.order, entry.channel, entry.value));
+        let rec = lock(&core.rec);
+        assert!(rec.rejected.iter().any(|row| row["call"] == "rx_drain" && row["error"].as_str().is_some_and(|error| error.contains("test: scripted rx_stop refusal") && error.contains("channel c0"))), "{:?}", rec.rejected);
+        assert!(rec.rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("restore was not attempted"))), "{:?}", rec.rejected);
+        let skipped: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0]["error"].as_str().is_some_and(|error| error.contains("restore was not attempted")), "{skipped:?}");
+    }
+
+    #[test]
+    fn ur_24_provider_stop_skips_restore_when_flush_stop_fails() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_packet: Some(1_000),
+            ..Default::default()
+        }));
+        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        spy.watch(&core);
+        let frozen = super::super::test_support::Frozen::on(spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        core.device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        core.device.rx_start(0, 0).unwrap();
+        let stop_at = core.now();
+        let entry = super::super::core::RxDspEntry {
+            order: (stop_at + core.ticks(3_000_000), 1), channel: 0, value: 1.001e9, accepted_at: Some(stop_at),
+        };
+        core.device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(entry.value), ..Default::default() }, Some(entry.order.0)).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.stop = Some((stop_at, StopMode::Orderly));
+        }
+        rx.stream.as_mut().unwrap().cut_at(stop_at);
+        {
+            let mut dsp = core.rx_dsp[0].lock();
+            dsp.pending.push(entry.clone());
+            dsp.latest.insert(0, entry.clone());
+            dsp.restore.insert(0, 1e9);
+            dsp.restore_ready = true;
+        }
+        let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
+        let flush_at = entry.order.0 + call * clock.n;
+        time.advance_to(core.at(flush_at)).unwrap();
+        spy.set_time(flush_at);
+        let applied = spy.seen("apply");
+        let gate = spy.stop_after("rx_stop");
+        let (done, finished) = std::sync::mpsc::channel();
+        let host = core.device.host();
+        let worker = host.spawn("rx-d9b-final-stop", move || {
+            rx.try_end();
+            let _ = done.send(rx);
+        }).unwrap();
+        gate.wait();
+        assert_eq!(spy.seen("rx_stop"), 1, "the gated stop is the successful cut stop");
+        spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted final rx_stop refusal"));
+        drop(frozen);
+        gate.release();
+        let rx = finished.recv_timeout(Wall::from_secs(10)).expect("the bounded drain finished");
+        worker.join().unwrap();
+
+        assert!(rx.stream.is_none());
+        assert_eq!(spy.seen("rx_stop"), 2, "the refusal belongs to the flush's final stop");
+        assert_eq!(spy.seen("rx_start_now"), 1);
+        assert!(spy.seen("rx_recv") > 0, "the flush reads the post-S entry before its final stop fails");
+        let order = spy.order();
+        let last_recv = order.iter().rposition(|name| *name == "rx_recv").unwrap();
+        let final_stop = order.iter().rposition(|name| *name == "rx_stop").unwrap();
+        assert!(last_recv < final_stop, "the final stop follows the drain reads: {order:?}");
+        assert_eq!(spy.seen("apply"), applied, "no restore apply follows the failed final stop");
+        assert!(!core.rx_dsp[0].lock().stopped, "a refused final stop is not recorded as stopped");
+        assert!(core.rx_dsp[0].lock().pending.is_empty(), "the flush consumed the DDC entry before the stop refusal");
+        let rec = lock(&core.rec);
+        let skipped: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
+        assert_eq!(skipped.len(), 1, "the skipped restore is recorded: {skipped:?}");
+        assert!(skipped[0]["error"].as_str().is_some_and(|error| error.contains("receive stop failed; restore was not attempted")), "{skipped:?}");
+        assert!(rec.rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("receive stop failed; restore was not attempted"))), "{:?}", rec.rejected);
+    }
+
+    #[test]
+    fn ur_24_device_loss_ends_a_drain_without_more_receive_calls() {
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_packet: Some(2_000),
+            ..Default::default()
+        }));
+        let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        spy.watch(&core);
+        let frozen = super::super::test_support::Frozen::on(spy.host());
+        spy.set_time(core.now());
+        let (mut rx, clock) = rx(&core, 1);
+        spy.rx_start(0, 0).unwrap();
+        let entry = super::super::core::RxDspEntry { order: (core.ticks(1_000_000), 1), channel: 0, value: 1.001e9, accepted_at: Some(0) };
+        spy.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(entry.value), ..Default::default() }, Some(entry.order.0)).unwrap();
+        rx.stream.as_mut().unwrap().cut_at(0);
+        core.rx_dsp[0].lock().pending.push(entry);
+        let flush_at = core.ticks(1_000_000) + core.block_len as i64 * clock.n;
+        time.advance_to(core.at(flush_at)).unwrap();
+        spy.set_time(flush_at);
+        let gate = spy.stop_after("rx_start_now");
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            rx.try_end();
+            let _ = done.send(rx);
+        });
+        gate.wait();
+        assert_eq!(spy.seen("rx_stop"), 1, "the cut stop precedes the recovery start");
+        assert_eq!(spy.seen("rx_recv"), 0);
+        let after_loss_at = flush_at + core.ticks(1_000_000);
+        time.advance_to(core.at(after_loss_at)).unwrap();
+        spy.set_time(after_loss_at);
+        core.device_lost("test: loss during RX flush");
+        drop(frozen);
+        gate.release();
+        let rx = finished.recv_timeout(Wall::from_secs(10)).expect("the lost recovery ended promptly");
+        worker.join().unwrap();
+
+        assert!(rx.stream.is_none());
+        assert_eq!(spy.seen("rx_start_now"), 1);
+        assert_eq!(spy.seen("rx_recv"), 0, "recovery did not read after loss");
+        assert_eq!(spy.seen("rx_stop"), 1, "recovery did not issue a final stop after loss");
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1);
+        assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "rx_drain" && row["error"].as_str().is_some_and(|error| error.contains("channel c0"))));
+        assert_eq!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1);
+    }
+
+    #[test]
+    fn ur_24_provider_stop_records_restore_failure_and_stops_after_loss() {
+        for lost in [false, true] {
+            let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+            let wrapper: Arc<dyn Device> = if lost {
+                Arc::new(super::super::test_support::ApplyFails::lost(inner.clone(), Dir::Rx, Some(0)))
+            } else {
+                Arc::new(super::super::test_support::ApplyFails::new(inner.clone(), Dir::Rx, Some(0)))
+            };
+            let output = link();
+            let (core, _time, events) = super::super::test_support::rig_on_description(wrapper.clone(), vec![output], BTreeMap::new(), super::super::test_support::default_description(2_000));
+            inner.set_time(0);
+            let (mut rx, _) = rx(&core, 1);
+            inner.rx_start(0, 0).unwrap();
+            {
+                let mut streams = lock(&core.streams);
+                streams.stop = Some((0, StopMode::Orderly));
+            }
+            rx.stream.as_mut().unwrap().cut_at(0);
+            {
+                let mut dsp = core.rx_dsp[0].lock();
+                for (channel, value) in [(0, 1.001e9), (1, 1.003e9)] {
+                    let entry = super::super::core::RxDspEntry { order: (1, channel as u64 + 1), channel, value, accepted_at: Some(1) };
+                    dsp.latest.insert(channel, entry);
+                    dsp.restore.insert(channel, value);
+                }
+                dsp.restore_ready = true;
+            }
+
+            rx.try_end();
+
+            assert!(rx.stream.is_none());
+            let rec = lock(&core.rec);
+            let restore: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
+            assert_eq!(restore.len(), if lost { 1 } else { 2 }, "{restore:?}");
+            assert_eq!(restore[0]["error"].as_str(), Some(if lost { "test: scripted loss on an apply" } else { "test: scripted refusal of an apply" }));
+            assert!(rec.rejected.iter().any(|row| row["call"] == "rx_restore"));
+            drop(rec);
+            if lost {
+                assert!(core.is_lost());
+                assert!(!inner.calls().iter().any(|call| call == "apply rx 1"), "no later channel restore is attempted after loss");
+                assert_eq!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1);
+            } else {
+                assert!(!core.is_lost());
+                assert!(inner.calls().iter().any(|call| call.starts_with("apply rx 1 ")), "a non-lost channel refusal does not skip the next restore");
+            }
+        }
+    }
+
+    #[test]
     fn ur_29_a_lost_receive_owner_configure_releases_stream_lock_before_reporting() {
         let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
         let device: Arc<dyn Device> = Arc::new(super::super::test_support::ApplyFails::lost(inner.clone(), Dir::Rx, Some(0)));
@@ -761,6 +1875,7 @@ mod tests {
             config: Config { channels, ratio },
             lead: 0,
             call: 0,
+            release_window: 0,
             allowance: 0,
         });
         device.rx_open(1, &[1]).unwrap();
@@ -803,6 +1918,106 @@ mod tests {
         assert!(!lock(&core.streams).line(to).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "Stop is not a device refusal");
         assert!(!events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
             .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "Stop interruption emits no refusal");
+    }
+
+    fn waiting_rx_move() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Planned, StreamKey, StreamKey) {
+        let (core, device, _time, _events) = super::super::test_support::rig_with_links(vec![link()]);
+        let from = stream_key(Dir::Rx, 1);
+        let to = stream_key(Dir::Rx, 0);
+        let ratio = Rational::new(200, 1).unwrap();
+        let line = |channels| Line::new(ezsdr_radio::timeline::Stream {
+            direction: Direction::Rx,
+            origin: 0,
+            config: Config { channels, ratio },
+            lead: 0,
+            call: 0,
+            release_window: 0,
+            allowance: 0,
+        });
+        device.rx_open(1, &[1]).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            *streams = Streams::with_streams(2, 1);
+            streams.lines.insert(from, line(Channels::first(2).without(0)));
+            streams.lines.insert(to, line(Channels::first(1)));
+            streams.stream_mut(from).set = super::super::core::DeviceSet::Open(Channels::first(2).without(0));
+            streams.seq = 1;
+            streams.lines.book_move(from, to, 1, Some(10_000), 0, 1, 0).unwrap();
+            streams.changed(&core, from);
+            streams.changed(&core, to);
+        }
+        let next = lock(&core.streams).planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
+        (core, device, next, from, to)
+    }
+
+    fn hand_rx_dsp(core: &Core, device: &crate::device::FakeDevice, channel: usize) {
+        let at = core.now() + core.ticks(1_000_000);
+        let value = 1.001e9;
+        let accepted_at = device.time_now().unwrap();
+        device.apply(Dir::Rx, channel, &crate::device::Settings { freq: Some(value), ..Default::default() }, Some(at)).unwrap();
+        let mut dsp = core.rx_dsp[0].lock();
+        let entry = super::super::core::RxDspEntry { order: (at, 2), channel, value, accepted_at: Some(accepted_at) };
+        dsp.pending.push(entry.clone());
+        dsp.latest.insert(channel, entry);
+    }
+
+    #[test]
+    fn ur_24_a_pending_ddc_is_reported_when_provider_stop_cancels_await_release() {
+        let (core, device, next, _from, to) = waiting_rx_move();
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
+        rx.from = next.segment.origin;
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let (done, finished) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-wait-stop-ddc", move || {
+            let began = rx.begin();
+            let _ = done.send((began, rx));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
+        hand_rx_dsp(&core, &device, 1);
+        {
+            let mut streams = lock(&core.streams);
+            let at = core.now();
+            streams.stop = Some((at, StopMode::Orderly));
+            streams.end(&core, at, false, false);
+        }
+        owner.join().unwrap();
+        let (began, _rx) = finished.recv_timeout(Wall::from_secs(10)).unwrap();
+        assert!(began, "the owner handled the planned turn");
+        assert!(!lock(&core.streams).planned(to).iter().any(|planned| planned.segment.by == Some(1)), "Provider::stop removed the moved destination segment");
+        assert_eq!(lock(&core.streams).holder(to), Holder::Free);
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the unconsumed DDC entry remains visible");
+        assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "rx_drain"), "the abandoned entry is reported");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start_now") || call.starts_with("rx_recv")), "the closed chain is not streamed for recovery: {:?}", device.calls());
+        drop(to_rx);
+    }
+
+    #[test]
+    fn ur_24_a_pending_ddc_is_reported_when_source_refusal_removes_move_destination() {
+        let (core, device, next, from, to) = waiting_rx_move();
+        let (to_rx, cmds) = std::sync::mpsc::channel();
+        let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
+        rx.from = next.segment.origin;
+        let (entered, reached) = std::sync::mpsc::channel();
+        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        let (done, finished) = std::sync::mpsc::channel();
+        let owner = core.device.host().spawn("rx-wait-refusal-ddc", move || {
+            let began = rx.begin();
+            let _ = done.send((began, rx));
+        }).unwrap();
+        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
+        hand_rx_dsp(&core, &device, 1);
+        assert!(lock(&core.streams).refuse(&core, from, 1), "the source refuses the move");
+        owner.join().unwrap();
+        let (began, _rx) = finished.recv_timeout(Wall::from_secs(10)).unwrap();
+        assert!(began, "the owner handled the removed segment");
+        assert!(!lock(&core.streams).planned(to).iter().any(|planned| planned.segment.by == Some(1)), "the source refusal removed the moved destination segment");
+        assert_eq!(lock(&core.streams).holder(to), Holder::Free);
+        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the unconsumed DDC entry remains visible");
+        assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "rx_drain"), "the abandoned entry is reported");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start_now") || call.starts_with("rx_recv")), "the closed chain is not streamed for recovery: {:?}", device.calls());
+        drop(to_rx);
     }
 
     fn rate(rate: u64) -> Kind {
@@ -976,7 +2191,7 @@ mod tests {
         // C's start was not late: its streamer delivers its samples where a missed start would
         // come back as `LateCommand` (UR-17).
         super::super::test_support::device_at(&core, &time, &device, c_origin + 1_000 * 200);
-        let got = device.rx_recv(2, 1_000, Wall::from_millis(100));
+        let got = device.rx_recv(2, 1_000, Wall::from_millis(100), false);
         assert!(matches!(got, RxRecv::Samples { first_tick: first, .. } if first == c_origin), "C's start was late: {got:?} {calls:?}");
         // B delivered its own segment up to its cut: the blocks the link still holds are
         // contiguous and the last ends there. (The link keeps its last 16, so the sum is not
@@ -1002,6 +2217,7 @@ mod tests {
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
             lead: 0,
             call: 2_000,
+            release_window: 0,
             allowance: 0,
         }));
         let (to_rx, cmds) = std::sync::mpsc::channel();
@@ -1256,6 +2472,7 @@ mod tests {
             config: Config { channels: Channels::first(0), ratio: Rational::new(200, 1).unwrap() },
             lead: 0,
             call: 2_000,
+            release_window: 0,
             allowance: 0,
         }));
         book(&core, origin, 1, rate(1_000_000));
@@ -1311,6 +2528,7 @@ mod tests {
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
             lead: 0,
             call: 2_000,
+            release_window: 0,
             allowance: 0,
         }));
         let (to_rx, cmds) = std::sync::mpsc::channel();
@@ -1352,6 +2570,7 @@ mod tests {
                 config,
                 lead: 0,
                 call: 2_000,
+                release_window: 0,
                 allowance: 0,
             }));
             streams.end(&core, loss, false, false);
@@ -1500,6 +2719,7 @@ mod tests {
                 config,
                 lead: 0,
                 call: 0,
+                release_window: 0,
                 allowance: 0,
             });
             line.plan = vec![
@@ -1530,7 +2750,7 @@ mod tests {
         // device delivers its samples; a missed start would come back as `LateCommand`.
         assert!(device.time_now().unwrap() < clock.instant(5_000), "the device's clock reached the start before it was issued");
         super::super::test_support::device_at(&core, &time, &device, clock.instant(5_000) + 1_000 * 200);
-        let got = device.rx_recv(1, 1_000, Wall::from_millis(100));
+        let got = device.rx_recv(1, 1_000, Wall::from_millis(100), false);
         assert!(matches!(got, RxRecv::Samples { .. }), "the next segment's start was late: {got:?}");
         rx.receive(got);
         let blocks = received(&link);
@@ -1716,7 +2936,7 @@ mod tests {
         assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.ends_with("at=-")), "the new set's channel is not configured: {calls:?}");
         // What the reopened streamer delivers: channel 1's loopback, sample for sample.
         super::super::test_support::device_at(&core, &time, &device, origin + 2_000 * 200);
-        let got = match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
+        let got = match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
             RxRecv::Samples { first_tick, samples } => {
                 assert_eq!(first_tick, origin, "the streamer's first sample");
                 samples
@@ -2109,17 +3329,17 @@ mod tests {
     fn ur_25_a_refused_segment_is_booked_by_uhd_rx() {
         // RM-25: when the device refuses a segment's configuration, uhd-rx books the change as
         // refused itself, which halts the stream, and reads the plan made so at once: a
-        // `start_rx` that was a no-op resumes the stream. The refused segment (origin 65 ms) runs
+        // `start_rx` that was a no-op resumes the stream. The refused segment (origin 68 ms) runs
         // for planning until that `start_rx` cuts it, with no sample, at its origin, so the new one
         // begins after the call in progress there (1 ms at 2 MS/s), the allowance (3 ms) and the
-        // lead (50 ms): 119 ms.
+        // release window (3 ms), and lead (50 ms): 125 ms.
         let refuse = crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 };
         let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(10), 1, rate(2_000_000));
         book(&core, ms(20), 2, Kind::Start);
-        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(65), Some(1))]);
+        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(68), Some(1))]);
         rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
@@ -2133,13 +3353,13 @@ mod tests {
         assert!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().any(|item| item.seq == 1 && item.refused));
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, [format!("rx_start 0 {}", ms(119))]);
+        assert_eq!(starts, [format!("rx_start 0 {}", ms(125))]);
         assert_eq!(rx.stream.as_ref().map(|stream| stream.config.ratio.num()), Some(100), "the refused rate is the stream's (KC-27)");
         let streams = lock(&core.streams);
         let active = streams.active(stream_key(Dir::Rx, 0)).expect("the resumed segment");
-        assert_eq!((active.0, active.2), (ms(119), Some(2)), "the command that began the resumed segment is the Start's");
+        assert_eq!((active.0, active.2), (ms(125), Some(2)), "the command that began the resumed segment is the Start's");
         assert_eq!(active.1.ratio.num(), 100);
-        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(119), active.1, 0)));
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(125), active.1, 0)));
     }
 
     #[test]
@@ -2155,7 +3375,7 @@ mod tests {
         book(&core, ms(300), 3, Kind::Stop);
         rx.poll();
         rx.receive(samples(0, 10_000));
-        for (origin, len) in [(ms(65), 270_000), (ms(254), 46_000)] {
+        for (origin, len) in [(ms(68), 270_000), (ms(257), 43_000)] {
             assert!(rx.begin());
             rx.receive(samples(origin, len));
             assert!(rx.stream.is_none(), "the segment from {origin} ends at its cut");
@@ -2235,6 +3455,7 @@ mod tests {
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
             lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Tx)),
             call: core.block_len as i64,
+            release_window: 0,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         })
     }
@@ -2329,6 +3550,7 @@ mod tests {
                 config: Config { channels: Channels::first(0).with(1), ratio: Rational::new(200, 1).unwrap() },
                 lead: 0,
                 call: 0,
+                release_window: 0,
                 allowance: 0,
             }));
             streams.stream_mut(other).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));

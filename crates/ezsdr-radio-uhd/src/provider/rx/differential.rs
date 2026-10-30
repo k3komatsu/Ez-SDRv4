@@ -94,7 +94,7 @@ fn terms(block: i64) -> Terms {
     let ticks = |ns: i64| (ns + 4) / 5;
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
-    let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
+    let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, release_window: ticks(description.timing.release_window_ns), allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, timed_lead: 0, release_window: 0, stream }
 }
 
@@ -607,6 +607,18 @@ impl Device for Scripted {
         Ok(())
     }
 
+    fn rx_start_now(&self, _stream: usize) -> Result<(), DeviceError> {
+        let mut world = lock(&self.world);
+        if world.lost {
+            return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
+        }
+        let at = world.now;
+        world.call("rx_start_now".to_owned());
+        let n = (200e6 / world.rate).round() as i64;
+        world.runs.push_back(Run { origin: at, n, next: at, end: None });
+        Ok(())
+    }
+
     fn rx_packet_samples(&self, _stream: usize) -> usize {
         0
     }
@@ -626,7 +638,7 @@ impl Device for Scripted {
         Ok(())
     }
 
-    fn rx_recv(&self, _stream: usize, n: usize, timeout: Wall) -> RxRecv {
+    fn rx_recv(&self, _stream: usize, n: usize, timeout: Wall, _one_packet: bool) -> RxRecv {
         let mut world = lock(&self.world);
         let gone = || RxRecv::Failed(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
         if world.lost {

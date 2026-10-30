@@ -2,7 +2,7 @@
 
 use std::time::{Duration as Wall, Instant};
 
-use ezsdr_radio_uhd::{Device, DeviceError, Dir, Iq, Settings, TxCode, TxReport};
+use ezsdr_radio_uhd::{Device, DeviceError, Dir, Iq, RxRecv, Settings, TxCode, TxReport};
 
 use super::SAFE_TX_HZ;
 
@@ -86,6 +86,36 @@ pub struct D70Result {
     pub reports: Vec<TxReport>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum P4Case {
+    DspOnly,
+    DspOnlyReopen,
+}
+
+impl P4Case {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DspOnly => "A: DSP only",
+            Self::DspOnlyReopen => "C: DSP only, then close and reopen",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct P4Result {
+    pub case: P4Case,
+    pub start: i64,
+    pub e: i64,
+    pub stopping: i64,
+    pub stopped: i64,
+    pub last: Option<i64>,
+    pub again: i64,
+    pub before: Capture,
+    pub after: Capture,
+    pub log: Vec<String>,
+    pub reports: Vec<String>,
+}
+
 pub fn tone_1msps(n: usize) -> Vec<Iq> {
     (0..n).map(|i| {
         let phase = 2.0 * std::f64::consts::PI * 100e3 * (i as f64 / 1e6);
@@ -122,10 +152,16 @@ fn wait_until(device: &dyn Device, tick: i64) {
 }
 
 fn read_until(device: &dyn Device, end: i64) -> Capture {
+    let out = read_capture_until(device, end);
+    assert!(out.end().is_some_and(|got| got >= end), "raw probe capture ended at {:?}, wanted {end}; {:?}", out.end(), out.other);
+    out
+}
+
+fn read_capture_until(device: &dyn Device, end: i64) -> Capture {
     let mut out = Capture::default();
     let begun = Instant::now();
     while begun.elapsed() < Wall::from_secs(3) && out.end().is_none_or(|got| got < end) {
-        match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
                 out.samples.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * SAMPLE_TICKS, *sample)));
@@ -133,15 +169,77 @@ fn read_until(device: &dyn Device, end: i64) -> Capture {
             other => out.other.push((device.time_now().unwrap_or(-1), format!("{other:?}"))),
         }
     }
-    assert!(out.end().is_some_and(|got| got >= end), "raw probe capture ended at {:?}, wanted {end}; {:?}", out.end(), out.other);
     out
+}
+
+fn read_device_until(device: &dyn Device, limit: Wall, keep: i64, until: impl Fn() -> bool) -> Capture {
+    let mut out = Capture::default();
+    let begun = Instant::now();
+    while begun.elapsed() < limit && !until() {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
+            RxRecv::Samples { first_tick, samples } => {
+                out.blocks.push((first_tick, samples[0].len()));
+                out.samples.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * keep, *sample)));
+            }
+            other => out.other.push((device.time_now().unwrap_or(-1), format!("{other:?}"))),
+        }
+    }
+    out
+}
+
+fn read_tail(device: &dyn Device) -> Capture {
+    let mut out = Capture::default();
+    let begun = Instant::now();
+    while begun.elapsed() < Wall::from_secs(3) && !(out.other.len() >= 2 && out.other[out.other.len() - 2..].iter().all(|(_, other)| other == "Timeout")) {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
+            RxRecv::Samples { first_tick, samples } => {
+                out.blocks.push((first_tick, samples[0].len()));
+                out.samples.extend(samples[0].iter().enumerate().map(|(i, sample)| (first_tick + i as i64 * SAMPLE_TICKS, *sample)));
+            }
+            other => out.other.push((device.time_now().unwrap_or(-1), format!("{other:?}"))),
+        }
+    }
+    out
+}
+
+/// P4 A/C's raw device sequence, shared with FakeDevice; the hardware caller keeps the RF verdict.
+pub fn p4_dsp_only(device: &dyn Device, chan: usize, tune: &mut DspTune<'_>, case: P4Case) -> P4Result {
+    assert!(SAFE_TX_HZ.contains(&(BASE_HZ + SHIFT_HZ + 100e3)));
+    let tone = tone_1msps(100_000);
+    tune_zero(tune, chan);
+    let start = after_ms(device, 100);
+    let e = start + 20 * MS;
+    device.rx_start(0, start).unwrap();
+    device.tx_send(0, &[&tone[..30_000]], Some(start), true, true, TX_TIMEOUT).unwrap();
+    let before_apply = device.time_now().unwrap();
+    let dsp = tune(Dir::Rx, chan, SHIFT_HZ, Some(e)).unwrap();
+    let mut log = vec![format!("tune_dsp {dsp} (call {before_apply}..{})", device.time_now().unwrap())];
+    let before = read_device_until(device, Wall::from_secs(2), SAMPLE_TICKS, || device.time_now().unwrap() >= e - 5 * MS);
+    let stopping = device.time_now().unwrap();
+    device.rx_stop(0, None).unwrap();
+    let stopped = device.time_now().unwrap();
+    let tail = read_tail(device);
+    let last = tail.samples.last().or(before.samples.last()).map(|(tick, _)| *tick);
+    if case == P4Case::DspOnlyReopen {
+        device.rx_close(0);
+        device.rx_open(0, &[chan]).unwrap();
+        log.push("closed and reopened the streamer".to_owned());
+    }
+    let again = after_ms(device, 20);
+    device.rx_start(0, again).unwrap();
+    device.tx_send(0, &[&tone], Some(again), true, true, TX_TIMEOUT).unwrap();
+    let after = read_capture_until(device, again + 20 * MS);
+    device.rx_stop(0, None).unwrap();
+    drain_rx(device);
+    let reports = reports(device, Wall::from_millis(10)).into_iter().map(|report| format!("{:?}", report.code)).collect();
+    P4Result { case, start, e, stopping, stopped, last, again, before, after, log, reports }
 }
 
 fn drain_rx(device: &dyn Device) {
     let begun = Instant::now();
     let mut timeouts = 0;
     while begun.elapsed() < Wall::from_secs(3) && timeouts < 2 {
-        match device.rx_recv(0, 2_000, Wall::from_millis(100)) {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
             ezsdr_radio_uhd::RxRecv::Timeout => timeouts += 1,
             _ => timeouts = 0,
         }

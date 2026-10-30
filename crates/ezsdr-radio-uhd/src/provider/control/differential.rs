@@ -79,8 +79,8 @@ fn terms(direction: Direction) -> Terms {
     let ticks = |ns: i64| ns / 5;
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
-    let stream = Stream { direction, origin, config, lead: 50 * MS, call: 2_000, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     let release_window = ticks(super::super::test_support::default_description(2_000).timing.release_window_ns);
+    let stream = Stream { direction, origin, config, lead: 50 * MS, call: 2_000, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, timed_lead: ticks(DEVICE_LEAD_NS), release_window, stream }
 }
 

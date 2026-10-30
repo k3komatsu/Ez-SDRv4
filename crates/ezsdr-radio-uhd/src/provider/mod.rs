@@ -1058,13 +1058,14 @@ mod tests {
         fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<crate::device::Applied, crate::DeviceError> { self.inner.apply(dir, chan, settings, at) }
         fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> { self.inner.rx_open(stream, channels) }
         fn rx_start(&self, stream: usize, at: i64) -> Result<(), crate::DeviceError> { self.inner.rx_start(stream, at) }
+        fn rx_start_now(&self, stream: usize) -> Result<(), crate::DeviceError> { self.inner.rx_start_now(stream) }
         fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
         fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), crate::DeviceError> { self.inner.rx_stop(stream, at) }
-        fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> crate::device::RxRecv {
+        fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> crate::device::RxRecv {
             if stream == 0 {
                 return crate::device::RxRecv::Failed(crate::DeviceError { lost: true, message: "test: lost in stream 0's receive".to_owned() });
             }
-            self.inner.rx_recv(stream, n, timeout)
+            self.inner.rx_recv(stream, n, timeout, one_packet)
         }
         fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> { self.inner.tx_open(stream, channels) }
         fn tx_send(&self, stream: usize, samples: &[&[crate::Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, crate::DeviceError> {

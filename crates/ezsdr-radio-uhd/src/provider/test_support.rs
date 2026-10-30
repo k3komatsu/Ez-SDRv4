@@ -147,7 +147,10 @@ pub(super) struct Frozen {
 
 impl Frozen {
     pub fn of(device: &FakeDevice) -> Frozen {
-        let clock = device.host();
+        Frozen::on(device.host())
+    }
+
+    pub fn on(clock: HostClock) -> Frozen {
         assert!(clock.is_manual(), "a clock is frozen on a manual clock alone");
         let (release, wait) = channel();
         let thread = clock.spawn("frozen", move || { let _ = wait.recv(); }).expect("a participant thread");
@@ -250,7 +253,7 @@ struct Hold {
 /// while one is held" check.
 fn family(name: &str) -> Option<Dir> {
     match name {
-        "rx_open" | "rx_close" | "rx_start" | "rx_recv" | "rx_packet_samples" | "rx_stop" => Some(Dir::Rx),
+        "rx_open" | "rx_close" | "rx_start" | "rx_start_now" | "rx_recv" | "rx_packet_samples" | "rx_stop" => Some(Dir::Rx),
         "tx_open" | "tx_close" | "tx_send" | "tx_async" => Some(Dir::Tx),
         _ => None,
     }
@@ -260,14 +263,23 @@ fn family(name: &str) -> Option<Dir> {
 /// lock (UR-25, design 33 D15): the test build counts the caller's own guards, so a line
 /// another thread holds is not mistaken for the caller's. It counts each call, so a test can
 /// prove its sequence passed one, and it can hold a chosen call until the test lets it go.
+type RxApplyPending = (usize, Option<i64>, f64, usize);
+
 pub(super) struct LockSpy {
     inner: FakeDevice,
     core: Mutex<Weak<Core>>,
     calls: Mutex<BTreeMap<&'static str, usize>>,
     order: Mutex<Vec<&'static str>>,
+    rx_requests: Mutex<Vec<usize>>,
+    rx_one_packet: Mutex<Vec<bool>>,
+    rx_packet_max: Mutex<Option<usize>>,
+    rx_apply_pending: Mutex<Vec<RxApplyPending>>,
     hosts: Mutex<Vec<bool>>,
     before: Mutex<BTreeMap<&'static str, Hold>>,
     after: Mutex<BTreeMap<&'static str, Hold>>,
+    rx_apply_error: Mutex<Option<DeviceError>>,
+    rx_start_error: Mutex<Option<DeviceError>>,
+    rx_stop_error: Mutex<Option<DeviceError>>,
     /// The call a gate holds now: no other call of its direction may enter meanwhile.
     holding: Mutex<Option<&'static str>>,
 }
@@ -279,9 +291,16 @@ impl LockSpy {
             core: Mutex::new(Weak::new()),
             calls: Mutex::new(BTreeMap::new()),
             order: Mutex::new(Vec::new()),
+            rx_requests: Mutex::new(Vec::new()),
+            rx_one_packet: Mutex::new(Vec::new()),
+            rx_packet_max: Mutex::new(None),
+            rx_apply_pending: Mutex::new(Vec::new()),
             hosts: Mutex::new(Vec::new()),
             before: Mutex::new(BTreeMap::new()),
             after: Mutex::new(BTreeMap::new()),
+            rx_apply_error: Mutex::new(None),
+            rx_start_error: Mutex::new(None),
+            rx_stop_error: Mutex::new(None),
             holding: Mutex::new(None),
         }
     }
@@ -301,9 +320,42 @@ impl LockSpy {
         self.order.lock().unwrap().clone()
     }
 
+    /// Sample count requested by each receive call, in order.
+    pub fn rx_requests(&self) -> Vec<usize> {
+        self.rx_requests.lock().unwrap().clone()
+    }
+
+    pub fn rx_packet_modes(&self) -> Vec<bool> {
+        self.rx_one_packet.lock().unwrap().clone()
+    }
+
+    pub fn report_rx_packet_max(&self, samples: usize) {
+        *self.rx_packet_max.lock().unwrap() = Some(samples);
+    }
+
+    pub fn rx_apply_pending(&self) -> Vec<RxApplyPending> {
+        self.rx_apply_pending.lock().unwrap().clone()
+    }
+
     /// Every call the fake behind the spy saw, in order.
     pub fn log(&self) -> Vec<String> {
         self.inner.calls()
+    }
+
+    pub fn dsp_pending(&self, dir: Dir, chan: usize) -> usize {
+        self.inner.dsp_pending(dir, chan)
+    }
+
+    pub fn dsp_log(&self, dir: Dir, chan: usize) -> Vec<(i64, f64, bool)> {
+        self.inner.dsp_log(dir, chan)
+    }
+
+    pub fn set_time(&self, ticks: i64) {
+        self.inner.set_time(ticks);
+    }
+
+    pub fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
     }
 
     /// Whether the line lock was held at each host clock read since `watch`, in order (UR-25).
@@ -323,6 +375,18 @@ impl LockSpy {
         let (gate, hold) = gate();
         self.after.lock().unwrap().insert(name, hold);
         gate
+    }
+
+    pub fn refuse_rx_stop(&self, error: DeviceError) {
+        *self.rx_stop_error.lock().unwrap() = Some(error);
+    }
+
+    pub fn refuse_rx_apply(&self, error: DeviceError) {
+        *self.rx_apply_error.lock().unwrap() = Some(error);
+    }
+
+    pub fn refuse_rx_start(&self, error: DeviceError) {
+        *self.rx_start_error.lock().unwrap() = Some(error);
     }
 
     /// Records the call, fails when its caller holds the line, and holds it at its gate.
@@ -383,12 +447,35 @@ impl Device for LockSpy {
     fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
     fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.call("apply", || self.inner.apply(dir, chan, s, at)) }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        self.call("apply", || {
+            if dir == Dir::Rx {
+                if let Some(freq) = s.freq { self.rx_apply_pending.lock().unwrap().push((chan, at, freq, self.inner.dsp_pending(dir, chan))); }
+                if let Some(error) = self.rx_apply_error.lock().unwrap().take() { return Err(error); }
+            }
+            self.inner.apply(dir, chan, s, at)
+        })
+    }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.call("rx_open", || self.inner.rx_open(stream, channels)) }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.call("rx_start", || self.inner.rx_start(stream, at)) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.call("rx_packet_samples", || self.inner.rx_packet_samples(stream)) }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.call("rx_stop", || self.inner.rx_stop(stream, at)) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.call("rx_recv", || self.inner.rx_recv(stream, n, timeout)) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        self.call("rx_start", || match self.rx_start_error.lock().unwrap().take() {
+            Some(error) => Err(error),
+            None => self.inner.rx_start(stream, at),
+        })
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.call("rx_start_now", || self.inner.rx_start_now(stream)) }
+    fn rx_packet_samples(&self, stream: usize) -> usize { self.call("rx_packet_samples", || self.rx_packet_max.lock().unwrap().unwrap_or_else(|| self.inner.rx_packet_samples(stream))) }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        self.call("rx_stop", || match self.rx_stop_error.lock().unwrap().take() {
+            Some(error) => Err(error),
+            None => self.inner.rx_stop(stream, at),
+        })
+    }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
+        self.rx_requests.lock().unwrap().push(n);
+        self.rx_one_packet.lock().unwrap().push(one_packet);
+        self.call("rx_recv", || self.inner.rx_recv(stream, n, timeout, one_packet))
+    }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.call("tx_open", || self.inner.tx_open(stream, channels)) }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.call("tx_send", || self.inner.tx_send(stream, samples, at, sob, eob, timeout))
@@ -483,9 +570,10 @@ impl Device for ApplyFails {
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
@@ -555,9 +643,10 @@ impl Device for HoldApply {
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
@@ -612,9 +701,10 @@ impl Device for ReportFeed {
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, s, at) }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
@@ -756,9 +846,10 @@ impl Device for TxSpy {
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, s, at) }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> RxRecv { self.inner.rx_recv(stream, n, timeout) }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.record("tx_open", 0, false);
         self.inner.tx_open(stream, channels)

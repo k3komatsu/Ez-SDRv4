@@ -179,11 +179,12 @@ impl Device for GuardedDevice {
         self.open_stream(true, stream, channels, || self.inner().rx_open(stream, channels))
     }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { refuse_or!(self, self.inner().rx_start(stream, at)) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { refuse_or!(self, self.inner().rx_start_now(stream)) }
     fn rx_packet_samples(&self, stream: usize) -> usize { if self.refusal().is_some() { 0 } else { self.inner().rx_packet_samples(stream) } }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { refuse_or!(self, self.inner().rx_stop(stream, at)) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> RxRecv {
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         if let Some(error) = self.refusal() { return RxRecv::Failed(error); }
-        let result = self.inner().rx_recv(stream, n, timeout);
+        let result = self.inner().rx_recv(stream, n, timeout, one_packet);
         if let RxRecv::Failed(error) = &result {
             if error.lost || is_control_timeout(&error.message) { self.latch.set(format!("device call failed: {}", error.message)); }
         }
@@ -294,14 +295,15 @@ impl Device for CountingDevice {
         result
     }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
     fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall) -> RxRecv {
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         if self.fault.starve_rx == Some(stream) {
             self.inner.host().sleep(timeout);
             return RxRecv::Timeout;
         }
-        let result = self.inner.rx_recv(stream, n, timeout);
+        let result = self.inner.rx_recv(stream, n, timeout, one_packet);
         if let RxRecv::Samples { samples, .. } = &result {
             *self.counts.lock().unwrap().rx.entry(stream).or_default() += samples.first().map_or(0, Vec::len) as u64;
         }

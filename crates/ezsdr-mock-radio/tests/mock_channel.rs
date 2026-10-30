@@ -955,7 +955,7 @@ fn mr_30_untimed_receive_tune_precedes_transmit_at_one_origin() {
     step(&world, &mut [&mut radio], t0);
     for (name, value, at) in [
         ("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), switch),
-        ("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), switch + 5_000_000),
+        ("radio.tx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), switch + 8_000_000),
     ] {
         radio.push(Action::UpdateParameter {
             target: tgt("mock"),

@@ -841,10 +841,11 @@ fn mr_34_a_scheduled_receive_retune_inside_a_running_segment_is_a_timed_tune() {
 fn mr_34_a_scheduled_receive_update_inside_a_refused_change_span_is_untimed() {
     // RM-25 (design 43), KC-17, MR-34: a Spec Run's timed entries reach the Provider before T0, so
     // no receive time is fixed. C1 (rate, due T0 + 10 ms) is refused by the first `cold_change_refused`
-    // fault, C2 (due T0 + 70 ms) begins S3 behind the refused segment's cut at T0 + 124 ms (not at
-    // T0 + 70 ms, as before the refusal kept S3's origin), and a retune due T0 + 75 ms, before S3
-    // and covered by no segment, is an untimed tune: S3's entry row has no coherent basis and no
-    // timed row follows it. The refused segment has no row.
+    // fault, C2 (due T0 + 70 ms) cuts the refused segment at T0 + 124 ms and begins S3 at T0 +
+    // 127 ms: the receive successor waits the release window before its old-rate call and lead
+    // (RM-25). A retune due T0 + 75 ms, before S3 and covered by no segment, is an untimed tune:
+    // S3's entry row has no coherent basis and no timed row follows it. The refused segment has
+    // no row.
     let temp = rig::TempDir::new("mr-34-refused-span");
     let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
     let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
@@ -866,7 +867,7 @@ fn mr_34_a_scheduled_receive_update_inside_a_refused_change_span_is_untimed() {
     let segments = section(&manifest, "mock", "ezsdr.radio.mock.segments").as_array().unwrap();
     let rx: Vec<&serde_json::Value> = segments.iter().filter(|row| row["direction"] == "rx" && row["stream"] == 0).collect();
     let origins: Vec<i64> = rx.iter().map(|row| row["origin"]["ticks"].as_i64().unwrap()).collect();
-    assert_eq!(origins, [T0, T0 + 124_000_000], "S2, the refused segment, has no row");
+    assert_eq!(origins, [T0, T0 + 127_000_000], "S2, the refused segment, has no row");
     let s3 = rx[1]["coherence"].as_array().unwrap();
     assert_eq!(s3.len(), 1, "no timed row: {s3:?}");
     assert_eq!(s3[0]["basis"], "none");

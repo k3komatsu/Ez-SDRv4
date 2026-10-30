@@ -1458,9 +1458,9 @@ fn mr_18_a_cold_rate_change_starts_a_new_sample_clock() {
     harness.actions.push(update_action("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, effective))));
     harness.step(effective).unwrap();
     harness.link.as_ref().unwrap().queue.lock().unwrap().clear();
-    // x3xx's ready instant and start lead: the new clock starts 50 ms after the receive
-    // call in progress at the cut (2 000 samples, 2 ms) and 3 ms (RM-25, MR-18; spec 22, VH-4).
-    let restarted = effective + 55_000_000;
+    // x3xx's ready instant and start lead: the new clock starts after the 3 ms release window,
+    // the 2 ms receive call and 3 ms allowance at the cut, then the 50 ms lead.
+    let restarted = effective + 58_000_000;
     harness.step(restarted + 999_501).unwrap();
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, effective)));
@@ -1522,12 +1522,11 @@ fn mr_18_a_cold_receive_change_before_t0_applies_at_t0() {
     harness.actions.push(update_action("radio.rx.s0.sample_rate_hz", Value::num(2_000_000.0).unwrap(), UpdateClass::Cold, None));
     harness.step(0).unwrap();
     // It applies at T0, where the first segment starts, so that segment has no sample and no
-    // clock, and the new one waits x3xx's receive call, 3 ms and start lead (RM-25,
-    // MR-18; spec 22, VH-4).
-    harness.step(t0 + 55_000_000 + 999_501).unwrap();
+    // clock; its receive successor waits the release window, call, allowance and start lead.
+    harness.step(t0 + 58_000_000 + 999_501).unwrap();
     let records = harness.clocks.sample_clock_records();
     assert_eq!(records.len(), 1, "one receive clock: {records:?}");
-    assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, t0 + 55_000_000));
+    assert_eq!(records.last().unwrap().origin, TimePoint::new(ROOT, t0 + 58_000_000));
     let applied = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.applied").unwrap()];
     assert_eq!(applied[0]["at"]["ticks"], t0);
     let first = harness.link.as_ref().unwrap().receive().unwrap().0;
@@ -3248,9 +3247,8 @@ fn mr_20_a_cold_change_refused_fault_halts_the_stream() {
 fn mr_20_the_next_cold_change_resumes_a_refused_stream() {
     // MR-25, RM-25: a halted stream has no segment until its next `cold` change or `start_rx`; the
     // change resumes it from the refused value (2 Msps, #64). The refused segment would have begun
-    // at e + 55 ms and runs for planning until this change cuts it, with no sample, at that origin;
-    // the new one begins after the call in progress there (2 000 samples at 2 MS/s, 1 ms), the
-    // 3 ms allowance and the 50 ms lead: e + 109 ms.
+    // at e + 58 ms and runs for planning until this change cuts it, with no sample, at that origin;
+    // the later receive successor also waits the release window, call, allowance and lead.
     let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
     let mut harness = Harness::new(
         "x3xx",
@@ -3271,7 +3269,7 @@ fn mr_20_the_next_cold_change_resumes_a_refused_stream() {
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e)));
-    assert_eq!(records[1].origin, TimePoint::new(ROOT, e + 109_000_000));
+    assert_eq!(records[1].origin, TimePoint::new(ROOT, e + 115_000_000));
     // The rate of record is the refused one: 2 Msps on a 1 GHz root is 500 ticks a sample.
     assert_eq!(records[1].root_ticks_per_tick, Rational::new(500, 1).unwrap());
     let segments = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()];
@@ -3290,9 +3288,8 @@ fn mr_20_the_next_cold_change_resumes_a_refused_stream() {
 fn mr_20_only_the_first_cold_change_is_refused() {
     // MR-20, RM-25: the fault is spent on one change. The second change then applies, and the
     // refused segment runs for planning until it cuts it: the first change's segment (2 MS/s)
-    // would begin at 58 ms (the cut at 3 ms, the call and allowance, the lead), and the second
-    // change at 200 ms cuts it at 200 ms, so the second clock begins at 254 ms: the cut, the call
-    // in progress (2 000 samples at 2 MS/s, 1 ms), the 3 ms allowance and the 50 ms lead.
+    // begins at 61 ms (the cut at 3 ms, release window, call, allowance and lead), and the second
+    // change at 200 ms cuts it there; its successor begins after the same readiness terms.
     let env = [("sim.faults", serde_json::json!([cold_change_refused_at(1_000_000)]))];
     let mut harness = Harness::new("x3xx", &[("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(1_000_000.0).unwrap()))], &[], &env, Some((BackPressure::DropOldest, 64)));
     let t0 = 2_000_000_000;
@@ -3311,7 +3308,7 @@ fn mr_20_only_the_first_cold_change_is_refused() {
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e1)));
-    assert_eq!(records[1].origin, TimePoint::new(ROOT, e2 + 54_000_000), "the second change's clock begins where the unrefused plan puts it");
+    assert_eq!(records[1].origin, TimePoint::new(ROOT, e2 + 57_000_000), "the second change's clock begins where the unrefused plan puts it");
     assert_eq!(records[1].root_ticks_per_tick, Rational::new(250, 1).unwrap());
     assert_eq!(rejected_rows(&harness), [("update_parameter".to_owned(), REFUSED.to_owned(), e1)]);
     assert_eq!(applied_rows(&harness, "radio.rx.s0.sample_rate_hz"), [(serde_json::json!(2_000_000.0), e1), (serde_json::json!(4_000_000.0), e2)]);
@@ -3439,9 +3436,9 @@ fn mr_20_a_change_before_the_fault_is_no_candidate() {
     let records: Vec<_> = harness.clocks.sample_clock_records().into_iter().filter(|record| record.stream == rid("mock/rx/s0")).collect();
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0].ended_at, Some(TimePoint::new(ROOT, e1)));
-    // The first change's segment begins at e1 + 55 ms, after the fault's 60 ms... no: T0 + 10 ms
-    // + 55 ms is T0 + 65 ms, so it begins after the fault and was still not a candidate.
-    assert_eq!(records[1].origin, TimePoint::new(ROOT, e1 + 55_000_000));
+    // The first change's segment begins at e1 + 58 ms (T0 + 68 ms), after the fault, so it was
+    // still not a candidate.
+    assert_eq!(records[1].origin, TimePoint::new(ROOT, e1 + 58_000_000));
     assert_eq!(records[1].ended_at, Some(TimePoint::new(ROOT, e2)));
     assert_eq!(rejected_rows(&harness), [("update_parameter".to_owned(), REFUSED.to_owned(), e2)]);
     assert_eq!(fault_rows(&harness, "cold_change_refused"), [(serde_json::json!(true), serde_json::json!(0))]);
