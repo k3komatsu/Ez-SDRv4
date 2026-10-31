@@ -52,7 +52,8 @@ def main():
     work = f"{REMOTE}/{tag}"
     for host in {h for h, _ in hosts}:
         run(*SSH, host, f"mkdir -p {work}/src {work}/out && chmod 777 {work}/out")  # the container runs as its own user
-        run("rsync", "-a", "--delete", "-e", " ".join(SSH), *[f"--exclude={e}" for e in EXCLUDES], "./", f"{host}:{work}/src/")
+        run("rsync", "-a", "--chmod=Dgo+rx,Fgo+r", "--delete",  # a 0600 file (umask 0077) is unreadable to the container user
+             "-e", " ".join(SSH), *[f"--exclude={e}" for e in EXCLUDES], "./", f"{host}:{work}/src/")
         run(*SSH, host, f"docker build -q -t {REMOTE} {work}/src/plan/maintenance/tools/remote >/dev/null")
     for (host, i), chunk in shards.items():
         if not chunk:
