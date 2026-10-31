@@ -17,10 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::module_api::{Authority, AuthorityDescriptor, Pacing};
-use ezsdr_kernel::time::{
-    ClockDomain, ClockRegistry, ClockRelation, EpochRef, Rational, ScheduleHandle, TimeAuthority,
-    TimeError, TimePoint, Validity,
-};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, ClockRelation, EpochRef, Rational, ScheduleHandle, TimeAuthority, TimeError, TimePoint, Validity};
 
 use crate::device::Device;
 use crate::host::HostClock;
@@ -237,9 +234,7 @@ impl TimeAuthority for DeviceTime {
     }
 
     fn governs(&self, domain: ClockDomainId) -> bool {
-        domain == self.root
-            || domain == ClockDomainId::HOST_MONOTONIC
-            || self.clocks.get(domain).is_ok_and(|d| d.root_id() == self.root)
+        domain == self.root || domain == ClockDomainId::HOST_MONOTONIC || self.clocks.get(domain).is_ok_and(|d| d.root_id() == self.root)
     }
 
     fn now(&self, domain: ClockDomainId) -> Result<TimePoint, TimeError> {
@@ -353,13 +348,7 @@ impl DeviceAuthority {
     /// (at the next PPS when `time_source` is not `internal`), registers the master
     /// clock as a Root and measures its relations (UR-7, UR-8). On a manual host clock it
     /// returns only once `uhd-clock`'s first read, the first anchor, was exact (UR-7).
-    pub fn new(
-        device: Arc<dyn Device>,
-        clocks: Arc<ClockRegistry>,
-        clock_source: &str,
-        time_source: &str,
-        args: &str,
-    ) -> Result<DeviceAuthority, String> {
+    pub fn new(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, clock_source: &str, time_source: &str, args: &str) -> Result<DeviceAuthority, String> {
         device.set_sources(clock_source, time_source).map_err(|e| {
             // The X300's reference PLL not locking within UHD's 30 s, named for the client;
             // a new open usually locks (bench-results.md parts 3–9; design-notes §18).
@@ -373,16 +362,10 @@ impl DeviceAuthority {
         let mcr = device.master_clock_rate();
         let rate = Rational::new(mcr, 1).map_err(|e| format!("UR-7: {e}"))?;
         let root = clocks.allocate_id().map_err(|e| format!("UR-7: {e}"))?;
-        clocks
-            .register(ClockDomain::root(root, rate, epoch(clock_source, time_source, args)))
-            .map_err(|e| format!("UR-7: {e}"))?;
+        clocks.register(ClockDomain::root(root, rate, epoch(clock_source, time_source, args))).map_err(|e| format!("UR-7: {e}"))?;
         let host = device.host();
         let built = Instant::now();
-        let utc = || {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as i64)
-        };
+        let utc = || SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
         // UR-8: one device read bracketed by the monotonic clock and UTC, and by the host
         // clock (plan 30 §4.6: the anchor takes the host clock's reading).
         let (mono_before, utc_before) = (Instant::now(), utc());
@@ -411,31 +394,13 @@ impl DeviceAuthority {
             .map_err(|e| format!("UR-8: {e}"))
         };
         let relations = vec![
-            relation(
-                ClockDomainId::HOST_MONOTONIC,
-                mb + (ma - mb) / 2,
-                ma - mb,
-                1e-4,
-                "ezsdr.radio.uhd.host_bracket",
-                validity,
-            )?,
-            relation(
-                ClockDomainId::UTC,
-                utc_before + (utc_after - utc_before) / 2,
-                utc_after - utc_before,
-                1e-5,
-                "ezsdr.radio.uhd.host_utc_bracket",
-                validity,
-            )?,
+            relation(ClockDomainId::HOST_MONOTONIC, mb + (ma - mb) / 2, ma - mb, 1e-4, "ezsdr.radio.uhd.host_bracket", validity)?,
+            relation(ClockDomainId::UTC, utc_before + (utc_after - utc_before) / 2, utc_after - utc_before, 1e-5, "ezsdr.radio.uhd.host_utc_bracket", validity)?,
         ];
         // On a manual clock only provisional: this read ran on a running clock, so its midpoint
         // can be off by half its bracket, and uhd-clock's first read replaces it before `new`
         // returns (UR-7).
-        let anchor = Anchor {
-            host: host_before + (host_after - host_before) / 2,
-            real: mono_before + (mono_after - mono_before) / 2,
-            device: device_tick,
-        };
+        let anchor = Anchor { host: host_before + (host_after - host_before) / 2, real: mono_before + (mono_after - mono_before) / 2, device: device_tick };
         let time = Arc::new(DeviceTime {
             device,
             host,
@@ -462,42 +427,40 @@ impl DeviceAuthority {
         #[cfg(test)]
         let mut pause = hooks::take();
         let thread = clock_host
-            .spawn("uhd-clock", move || loop {
-                // Woken at once by `drop`, and the flag checked before the device is read,
-                // so that no read follows the Authority's end (D-1).
-                if *lock(&flag) {
-                    return;
+            .spawn("uhd-clock", move || {
+                loop {
+                    // Woken at once by `drop`, and the flag checked before the device is read,
+                    // so that no read follows the Authority's end (D-1).
+                    if *lock(&flag) {
+                        return;
+                    }
+                    if let Some(report) = first.take() {
+                        let _ = report.send(clock.upgrade().is_some_and(|time| time.reanchor()));
+                    }
+                    // `drop` sets the flag before it notifies: reading the generation before this
+                    // second check means a notify between them cannot be missed, so drop ends the
+                    // nap at once even while the clock is stopped (UR-7's D-1).
+                    let seen = thread_clock.generation();
+                    if *lock(&flag) {
+                        return;
+                    }
+                    thread_clock.wait(Some(thread_clock.now() + REANCHOR), None, seen);
+                    if *lock(&flag) {
+                        return;
+                    }
+                    #[cfg(test)]
+                    if let Some((reached, release)) = pause.take() {
+                        let _ = reached.send(());
+                        let _ = release.recv();
+                    }
+                    match clock.upgrade() {
+                        Some(time) => time.reanchor(),
+                        None => return,
+                    };
                 }
-                if let Some(report) = first.take() {
-                    let _ = report.send(clock.upgrade().is_some_and(|time| time.reanchor()));
-                }
-                // `drop` sets the flag before it notifies: reading the generation before this
-                // second check means a notify between them cannot be missed, so drop ends the
-                // nap at once even while the clock is stopped (UR-7's D-1).
-                let seen = thread_clock.generation();
-                if *lock(&flag) {
-                    return;
-                }
-                thread_clock.wait(Some(thread_clock.now() + REANCHOR), None, seen);
-                if *lock(&flag) {
-                    return;
-                }
-                #[cfg(test)]
-                if let Some((reached, release)) = pause.take() {
-                    let _ = reached.send(());
-                    let _ = release.recv();
-                }
-                match clock.upgrade() {
-                    Some(time) => time.reanchor(),
-                    None => return,
-                };
             })
             .map_err(|e| format!("UR-7: uhd-clock: {e}"))?;
-        let descriptor = AuthorityDescriptor {
-            module: crate::module_ref(),
-            governs: vec![root, ClockDomainId::HOST_MONOTONIC],
-            pacing: Pacing::Device,
-        };
+        let descriptor = AuthorityDescriptor { module: crate::module_ref(), governs: vec![root, ClockDomainId::HOST_MONOTONIC], pacing: Pacing::Device };
         let authority = DeviceAuthority { time, descriptor, relations, clock: Some((stop, thread)) };
         if manual {
             // A first read that is not exact, or does not come, refuses the Authority, whose
@@ -564,10 +527,7 @@ impl Authority for DeviceAuthority {
             let seen = self.time.host.generation();
             let (root_next, host_next) = {
                 let s = lock(&self.time.schedule);
-                (
-                    s.root.pending.first_key_value().map(|(&(t, _), _)| t),
-                    s.host.pending.first_key_value().map(|(&(t, _), _)| t),
-                )
+                (s.root.pending.first_key_value().map(|(&(t, _), _)| t), s.host.pending.first_key_value().map(|(&(t, _), _)| t))
             };
             if let Some(tick) = root_next.filter(|tick| *tick <= self.time.extrapolate()) {
                 if let Some(fired) = self.time.fire_root(tick) {
@@ -637,7 +597,7 @@ mod tests {
     use crate::device::{FakeConfig, FakeDevice, FakeFault};
     use crate::host::{ClockMode, passes};
     use ezsdr_kernel::id::ResourceId;
-    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::sync::mpsc::{Receiver, Sender, channel};
 
     /// Root ticks of `n` milliseconds on the fake's 200 MHz master clock.
     fn ms(n: i64) -> i64 {
@@ -697,9 +657,12 @@ mod tests {
     /// still until the test releases it (M3).
     fn hold_until_released(device: &FakeDevice) -> (Sender<()>, JoinHandle<()>) {
         let (release, gate) = channel::<()>();
-        let holder = device.host().spawn("busy", move || {
-            let _ = gate.recv();
-        }).expect("a participant thread");
+        let holder = device
+            .host()
+            .spawn("busy", move || {
+                let _ = gate.recv();
+            })
+            .expect("a participant thread");
         (release, holder)
     }
 
@@ -708,7 +671,12 @@ mod tests {
     fn napping(authority: &Arc<DeviceAuthority>, device: &FakeDevice) -> (Receiver<Option<TimePoint>>, JoinHandle<()>) {
         until("uhd-clock waits on the held clock", || device.host().blocked() == 1);
         let (tx, rx) = channel();
-        let waiter = { let a = authority.clone(); std::thread::spawn(move || { let _ = tx.send(a.next_wakeup()); }) };
+        let waiter = {
+            let a = authority.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(a.next_wakeup());
+            })
+        };
         until("the waiter naps on the held clock", || device.host().blocked() >= 2);
         (rx, waiter)
     }
@@ -909,7 +877,13 @@ mod tests {
         let at = TimePoint::new(root, ticks(&*time, root) + ms(1));
         time.schedule(at, Box::new(|_| {})).unwrap();
         let (tx, rx) = channel();
-        let waiter = { let a = authority.clone(); std::thread::spawn(move || { let woke = a.next_wakeup(); let _ = tx.send((woke, passes())); }) };
+        let waiter = {
+            let a = authority.clone();
+            std::thread::spawn(move || {
+                let woke = a.next_wakeup();
+                let _ = tx.send((woke, passes()));
+            })
+        };
         let (woke, passes) = bounded(&rx, "the root entry after the busy interval");
         assert_eq!(woke, Some(at));
         assert!(passes <= 8, "a next_wakeup on a stopped clock passed {passes} times through its clock waits");
@@ -928,9 +902,15 @@ mod tests {
         time.schedule(host_at, Box::new(|_| {})).unwrap();
         time.schedule(root_at, Box::new(|_| {})).unwrap();
         let authority = Arc::new(authority);
-        let first = { let a = authority.clone(); within("the first due instant", move || a.next_wakeup()) };
+        let first = {
+            let a = authority.clone();
+            within("the first due instant", move || a.next_wakeup())
+        };
         assert_eq!(first, Some(root_at), "the root timeline fires first");
-        let second = { let a = authority.clone(); within("the second due instant", move || a.next_wakeup()) };
+        let second = {
+            let a = authority.clone();
+            within("the second due instant", move || a.next_wakeup())
+        };
         assert_eq!(second, Some(host_at));
     }
 
@@ -945,15 +925,15 @@ mod tests {
         let fired = TimePoint::new(root, ticks(&*time, root));
         time.schedule(fired, Box::new(|_| {})).unwrap();
         let authority = Arc::new(authority);
-        let woke = { let a = authority.clone(); within("the root instant", move || a.next_wakeup()) };
+        let woke = {
+            let a = authority.clone();
+            within("the root instant", move || a.next_wakeup())
+        };
         assert_eq!(woke, Some(fired));
         // A derived domain shares the root's axis: sample 0 is root tick 0, before `fired`.
         let handle = clocks.declare_sample_clock(ResourceId::parse("usrp/rx").unwrap(), root, Rational::new(200, 1).unwrap()).unwrap();
         let derived = clocks.register_sample_clock(&handle, 0).unwrap();
-        assert!(matches!(
-            time.schedule(TimePoint::new(derived, 0), Box::new(|_| {})),
-            Err(TimeError::InPast { .. })
-        ), "a derived domain shares the root's timeline");
+        assert!(matches!(time.schedule(TimePoint::new(derived, 0), Box::new(|_| {})), Err(TimeError::InPast { .. })), "a derived domain shares the root's timeline");
         // The HOST timeline is separate: an instant before the fired root one is accepted.
         time.schedule(TimePoint::new(host(), 0), Box::new(|_| {})).expect("host.monotonic is another timeline");
     }
@@ -989,11 +969,17 @@ mod tests {
         time.schedule(later, Box::new(|_| {})).unwrap();
         time.schedule(earlier, Box::new(|_| {})).unwrap();
         let authority = Arc::new(authority);
-        let first = { let a = authority.clone(); within("the earlier HOST instant", move || a.next_wakeup()) };
+        let first = {
+            let a = authority.clone();
+            within("the earlier HOST instant", move || a.next_wakeup())
+        };
         assert_eq!(first, Some(earlier), "the earlier HOST instant fires first");
         // A re-anchor of uhd-clock happens while the second waits.
         device.host().sleep(Duration::from_millis(140));
-        let second = { let a = authority.clone(); within("the later HOST instant", move || a.next_wakeup()) };
+        let second = {
+            let a = authority.clone();
+            within("the later HOST instant", move || a.next_wakeup())
+        };
         assert_eq!(second, Some(later));
     }
 
@@ -1015,7 +1001,10 @@ mod tests {
         time.schedule(at, Box::new(move |t| log.lock().unwrap().push(t))).unwrap();
         let authority = Arc::new(authority);
         let begun = Instant::now();
-        let woke = { let a = authority.clone(); within("the HOST schedule", move || a.next_wakeup()) };
+        let woke = {
+            let a = authority.clone();
+            within("the HOST schedule", move || a.next_wakeup())
+        };
         assert_eq!(woke, Some(at), "the HOST schedule fires and returns its instant");
         assert!(begun.elapsed() >= Duration::from_millis(30), "the HOST schedule fired early: {:?}", begun.elapsed());
         assert_eq!(*fired.lock().unwrap(), vec![at]);
@@ -1023,9 +1012,15 @@ mod tests {
         let host_at = TimePoint::new(host(), ticks(&*time, host()));
         time.schedule(root_at, Box::new(|_| {})).unwrap();
         time.schedule(host_at, Box::new(|_| {})).unwrap();
-        let first = { let a = authority.clone(); within("the root instant", move || a.next_wakeup()) };
+        let first = {
+            let a = authority.clone();
+            within("the root instant", move || a.next_wakeup())
+        };
         assert_eq!(first, Some(root_at), "the root timeline fires first");
-        let second = { let a = authority.clone(); within("the HOST instant", move || a.next_wakeup()) };
+        let second = {
+            let a = authority.clone();
+            within("the HOST instant", move || a.next_wakeup())
+        };
         assert_eq!(second, Some(host_at));
     }
 

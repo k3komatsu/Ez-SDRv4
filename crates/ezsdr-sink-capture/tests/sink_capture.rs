@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ezsdr_hostmem::{write_cf32, HostPool, HOST_MEMORY};
+use ezsdr_hostmem::{HOST_MEMORY, HostPool, write_cf32};
 use ezsdr_kernel::binding::{Binding, Violation};
 use ezsdr_kernel::contract::{DataContractId, PortRef};
 use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind, EventSource, Target};
@@ -12,33 +12,23 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint,
-    ModuleError, ModuleErrorKind, ModuleRef, Pacing, ProfileRef, Sink, StopMode, UpdateClass,
-    Version, VersionReq, VocabularyRequirement, KERNEL_API,
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, KERNEL_API, ModuleError, ModuleErrorKind, ModuleRef, Pacing, ProfileRef, Sink, StopMode, UpdateClass, Version, VersionReq,
+    VocabularyRequirement,
 };
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::Policy;
 use ezsdr_kernel::spec::{Ident, Key, Namespace, OutputReq, SinkFeed, Value};
-use ezsdr_kernel::stream::{
-    BackPressure, BlockFlags, BlockHeader, BlockRef, ChannelMask, DataLink, Direction, DropCarry,
-    PublishOutcome, SampleBlock,
-};
-use ezsdr_kernel::time::{
-    AbsoluteDeadline, ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational,
-    TimePoint,
-};
+use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, ChannelMask, DataLink, Direction, DropCarry, PublishOutcome, SampleBlock};
+use ezsdr_kernel::time::{AbsoluteDeadline, ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimePoint};
 use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, CAPTURE_WRITTEN, REQUEST_REJECTED};
-use ezsdr_sink_capture::{descriptor, sigmf_meta, sink_descriptor, CaptureSink};
+use ezsdr_sink_capture::{CaptureSink, descriptor, sigmf_meta, sink_descriptor};
 use serde_json::json;
 
 struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> TempDir {
-        let path = std::env::temp_dir().join(format!(
-            "ezsdr-capture-{}-{name}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("ezsdr-capture-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         TempDir(path)
     }
@@ -64,12 +54,7 @@ struct TestLink {
 
 impl TestLink {
     fn new(policy: BackPressure, capacity: usize) -> TestLink {
-        TestLink {
-            policy,
-            capacity: capacity.max(1),
-            queue: Mutex::new((VecDeque::new(), DropCarry::default())),
-            drops: AtomicU64::new(0),
-        }
+        TestLink { policy, capacity: capacity.max(1), queue: Mutex::new((VecDeque::new(), DropCarry::default())), drops: AtomicU64::new(0) }
     }
 }
 
@@ -165,83 +150,26 @@ impl Environment {
     fn new() -> Environment {
         let clocks = Arc::new(ClockRegistry::new());
         let root = clocks.allocate_id().unwrap();
-        clocks
-            .register(ClockDomain::root(
-                root,
-                Rational::new(1_000_000_000, 1).expect("root rate"),
-                EpochRef::Arbitrary {
-                    set_by: "sink_capture_test".to_owned(),
-                },
-            ))
-            .expect("root registration");
-        let time = Arc::new(
-            ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning)
-                .expect("manual time"),
-        );
+        clocks.register(ClockDomain::root(root, Rational::new(1_000_000_000, 1).expect("root rate"), EpochRef::Arbitrary { set_by: "sink_capture_test".to_owned() })).expect("root registration");
+        let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).expect("manual time"));
         let stream = ResourceId::parse("dev/rx").expect("stream id");
-        let sample_handle = clocks
-            .declare_sample_clock(
-                stream.clone(),
-                root,
-                Rational::new(1_000, 1).expect("sample rate ratio"),
-            )
-            .expect("sample clock declaration");
-        let sample_clock = clocks
-            .register_sample_clock(&sample_handle, 0)
-            .expect("sample clock registration");
-        let changed_handle = clocks
-            .declare_sample_clock(
-                stream,
-                root,
-                Rational::new(2_000, 1).expect("changed sample rate ratio"),
-            )
-            .expect("changed sample clock declaration");
-        clocks
-            .end(sample_clock, TimePoint::new(root, 58_000))
-            .expect("old sample clock end");
-        let changed_clock = clocks
-            .register_sample_clock(&changed_handle, 58_000)
-            .expect("changed sample clock registration");
+        let sample_handle = clocks.declare_sample_clock(stream.clone(), root, Rational::new(1_000, 1).expect("sample rate ratio")).expect("sample clock declaration");
+        let sample_clock = clocks.register_sample_clock(&sample_handle, 0).expect("sample clock registration");
+        let changed_handle = clocks.declare_sample_clock(stream, root, Rational::new(2_000, 1).expect("changed sample rate ratio")).expect("changed sample clock declaration");
+        clocks.end(sample_clock, TimePoint::new(root, 58_000)).expect("old sample clock end");
+        let changed_clock = clocks.register_sample_clock(&changed_handle, 58_000).expect("changed sample clock registration");
         let unrelated_root = clocks.allocate_id().unwrap();
         clocks
-            .register(ClockDomain::root(
-                unrelated_root,
-                Rational::new(1_000_000_000, 1).expect("unrelated rate"),
-                EpochRef::Arbitrary {
-                    set_by: "unrelated_test_root".to_owned(),
-                },
-            ))
+            .register(ClockDomain::root(unrelated_root, Rational::new(1_000_000_000, 1).expect("unrelated rate"), EpochRef::Arbitrary { set_by: "unrelated_test_root".to_owned() }))
             .expect("unrelated root registration");
         let source = source();
         let kind = EventKind::parse(REQUEST_REJECTED).expect("Sink event kind");
-        let events = Arc::new(EventCollector::new(
-            &[(source, kind)],
-            &[],
-            32,
-            &Policy::default(),
-        ));
-        Environment {
-            clocks,
-            root,
-            sample_clock,
-            changed_clock,
-            unrelated_root,
-            time,
-            events,
-            actions: Arc::new(ActionQueue::default()),
-            submitter: Arc::new(NoopSubmitter),
-        }
+        let events = Arc::new(EventCollector::new(&[(source, kind)], &[], 32, &Policy::default()));
+        Environment { clocks, root, sample_clock, changed_clock, unrelated_root, time, events, actions: Arc::new(ActionQueue::default()), submitter: Arc::new(NoopSubmitter) }
     }
 
     fn context(&self, links: Vec<AttachedPort>) -> ezsdr_kernel::module_api::PrepareContext {
-        let mut ctx = ezsdr_kernel::module_api::PrepareContext::testing(
-            source(),
-            self.time.clone(),
-            self.clocks.clone(),
-            self.events.clone(),
-            self.actions.clone(),
-            self.submitter.clone(),
-        );
+        let mut ctx = ezsdr_kernel::module_api::PrepareContext::testing(source(), self.time.clone(), self.clocks.clone(), self.events.clone(), self.actions.clone(), self.submitter.clone());
         ctx.links = links;
         ctx
     }
@@ -260,46 +188,23 @@ impl Rig {
         Rig::with_link(name, params, BackPressure::DropOldest, 64)
     }
 
-    fn with_link(
-        name: &str,
-        params: BTreeMap<Key, Value>,
-        policy: BackPressure,
-        capacity: usize,
-    ) -> Rig {
+    fn with_link(name: &str, params: BTreeMap<Key, Value>, policy: BackPressure, capacity: usize) -> Rig {
         let temp = TempDir::new(name);
         let env = Environment::new();
         let link = Arc::new(TestLink::new(policy, capacity));
-        let mut sink = CaptureSink::from_binding(&binding(temp.path(), false, None))
-            .expect("valid binding");
+        let mut sink = CaptureSink::from_binding(&binding(temp.path(), false, None)).expect("valid binding");
         let attached = attached("rec", "in", Endpoint::StreamIn(link.clone()));
-        sink.prepare(&fragment(params), env.context(vec![attached]))
-            .expect("valid prepare");
-        Rig {
-            _temp: temp,
-            env,
-            link,
-            sink,
-            pool: HostPool::new(80_000),
-        }
+        sink.prepare(&fragment(params), env.context(vec![attached])).expect("valid prepare");
+        Rig { _temp: temp, env, link, sink, pool: HostPool::new(80_000) }
     }
 
     fn push_ramp(&mut self, first: i64, len: u32) -> PublishOutcome {
-        let block = ramp_block(
-            &mut self.pool,
-            self.env.sample_clock,
-            first,
-            first as f32,
-            len,
-            BlockFlags::NONE,
-            None,
-        );
+        let block = ramp_block(&mut self.pool, self.env.sample_clock, first, first as f32, len, BlockFlags::NONE, None);
         self.link.publish(block)
     }
 
     fn step(&mut self) -> Result<bool, ModuleError> {
-        self.sink
-            .step(TimePoint::new(self.env.root, 0))
-            .map(|outcome| outcome.progressed)
+        self.sink.step(TimePoint::new(self.env.root, 0)).map(|outcome| outcome.progressed)
     }
 
     fn stop(&mut self, mode: StopMode) -> Vec<ArtifactRef> {
@@ -317,22 +222,11 @@ fn key(value: &str) -> Key {
 
 fn binding(dir: &Path, extra_selector: bool, profile: Option<ezsdr_kernel::module_api::ProfileRef>) -> Binding {
     let descriptor = descriptor();
-    let mut selector = BTreeMap::from([(
-        ident("dir"),
-        Value::from(dir.to_string_lossy().into_owned()),
-    )]);
+    let mut selector = BTreeMap::from([(ident("dir"), Value::from(dir.to_string_lossy().into_owned()))]);
     if extra_selector {
         selector.insert(ident("unused"), Value::from(1));
     }
-    Binding {
-        module: ModuleRef {
-            id: descriptor.id,
-            version: descriptor.version,
-        },
-        selector,
-        profile,
-        feed: None,
-    }
+    Binding { module: ModuleRef { id: descriptor.id, version: descriptor.version }, selector, profile, feed: None }
 }
 
 /// The refusal `CaptureSink::from_binding` gives for `binding` (HD-8); a Sink is not
@@ -349,22 +243,12 @@ fn fragment(params: BTreeMap<Key, Value>) -> Fragment {
     let request = OutputReq {
         id: ident("rec"),
         kind: Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("artifact kind"),
-        feed: SinkFeed {
-            port: PortRef {
-                component: ident("source"),
-                port: ident("out"),
-            },
-            policy: BackPressure::DropOldest,
-            capacity: 8,
-        },
+        feed: SinkFeed { port: PortRef { component: ident("source"), port: ident("out") }, policy: BackPressure::DropOldest, capacity: 8 },
         params,
     };
     Fragment {
         id: ident("rec"),
-        instance: ModuleRef {
-            id: descriptor.id,
-            version: descriptor.version,
-        },
+        instance: ModuleRef { id: descriptor.id, version: descriptor.version },
         role: ezsdr_kernel::module_api::Role::Sink,
         content: serde_json::to_value(request).expect("OutputReq JSON"),
         after: Vec::new(),
@@ -390,24 +274,10 @@ fn sample_count(count: i64) -> BTreeMap<Key, Value> {
 }
 
 fn request(n: Value, at: Option<AbsoluteDeadline>) -> Action {
-    Action::UpdateParameter {
-        target: Target::Output { output: ident("rec") },
-        key: key(CAPTURE_SAMPLES),
-        value: n,
-        class: UpdateClass::BlockBoundary,
-        at,
-    }
+    Action::UpdateParameter { target: Target::Output { output: ident("rec") }, key: key(CAPTURE_SAMPLES), value: n, class: UpdateClass::BlockBoundary, at }
 }
 
-fn ramp_block(
-    pool: &mut HostPool,
-    domain: ClockDomainId,
-    first: i64,
-    value_first: f32,
-    len: u32,
-    flags: BlockFlags,
-    lost: Option<u64>,
-) -> BlockRef {
+fn ramp_block(pool: &mut HostPool, domain: ClockDomainId, first: i64, value_first: f32, len: u32, flags: BlockFlags, lost: Option<u64>) -> BlockRef {
     let len_usize = len as usize;
     let bytes = pool.fill(len_usize * ezsdr_hostmem::CF32_BYTES, |buf| {
         for index in 0..len_usize {
@@ -425,10 +295,7 @@ fn ramp_block(
         lost,
         contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32 contract"),
     };
-    BlockRef::new(
-        SampleBlock::new_host(header, HOST_MEMORY, bytes, ezsdr_hostmem::CF32_BYTES as u32)
-            .expect("well-formed CF32 block"),
-    )
+    BlockRef::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, ezsdr_hostmem::CF32_BYTES as u32).expect("well-formed CF32 block"))
 }
 
 fn artifact_samples(artifact: &ArtifactRef) -> Vec<f32> {
@@ -436,10 +303,7 @@ fn artifact_samples(artifact: &ArtifactRef) -> Vec<f32> {
     let bytes = fs::read(path).expect("capture file");
     assert_eq!(bytes.len() as u64, artifact.size_bytes);
     assert_eq!(ContentHash::of_bytes(&bytes), artifact.hash);
-    bytes
-        .chunks_exact(8)
-        .map(|sample| f32::from_le_bytes(sample[..4].try_into().expect("real sample")))
-        .collect()
+    bytes.chunks_exact(8).map(|sample| f32::from_le_bytes(sample[..4].try_into().expect("real sample"))).collect()
 }
 
 fn assert_ramp(artifact: &ArtifactRef, first: usize, count: usize) {
@@ -478,29 +342,14 @@ fn hd_07_descriptor() {
     assert_eq!(module.version, Version::new(1, 2, 0));
     assert_eq!(module.kernel_api, KERNEL_API);
     assert_eq!(module.roles, vec![ezsdr_kernel::module_api::Role::Sink]);
-    assert_eq!(
-        module.impl_hash,
-        Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0"))
-    );
-    assert_eq!(
-        module.vocabularies,
-        vec![VocabularyRequirement {
-            id: Namespace::parse("sink").expect("namespace"),
-            req: VersionReq(Version::new(1, 1, 0)),
-        }]
-    );
+    assert_eq!(module.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0")));
+    assert_eq!(module.vocabularies, vec![VocabularyRequirement { id: Namespace::parse("sink").expect("namespace"), req: VersionReq(Version::new(1, 1, 0)) }]);
     let sink = sink_descriptor();
     assert_eq!(sink.module.id, module.id);
     assert_eq!(sink.kind, Namespace::parse("ezsdr.sink.capture").expect("sink kind"));
     assert_eq!(sink.memory_domains, vec![HOST_MEMORY]);
-    assert_eq!(
-        sink.contracts.iter().map(DataContractId::as_str).collect::<Vec<_>>(),
-        vec!["ezsdr.stream.cf32", "ezsdr.stream.sc16"]
-    );
-    assert_eq!(
-        sink.artifact_kinds,
-        vec![Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("artifact kind")]
-    );
+    assert_eq!(sink.contracts.iter().map(DataContractId::as_str).collect::<Vec<_>>(), vec!["ezsdr.stream.cf32", "ezsdr.stream.sc16"]);
+    assert_eq!(sink.artifact_kinds, vec![Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("artifact kind")]);
 }
 
 #[test]
@@ -512,24 +361,14 @@ fn hd_09_prepare_cases() {
     let one = attached("rec", "in", Endpoint::StreamIn(link_a.clone()));
     let two = attached("rec", "in", Endpoint::StreamIn(link_b.clone()));
 
-    let mut no_link = CaptureSink::from_binding(&binding(temp.path(), false, None))
-        .expect("valid binding");
+    let mut no_link = CaptureSink::from_binding(&binding(temp.path(), false, None)).expect("valid binding");
     assert!(no_link.prepare(&fragment(BTreeMap::new()), env.context(Vec::new())).is_err());
 
-    let mut two_links = CaptureSink::from_binding(&binding(temp.path(), false, None))
-        .expect("valid binding");
-    assert!(two_links
-        .prepare(&fragment(BTreeMap::new()), env.context(vec![one.clone(), two]))
-        .is_err());
+    let mut two_links = CaptureSink::from_binding(&binding(temp.path(), false, None)).expect("valid binding");
+    assert!(two_links.prepare(&fragment(BTreeMap::new()), env.context(vec![one.clone(), two])).is_err());
 
-    let mut wrong_port = CaptureSink::from_binding(&binding(temp.path(), false, None))
-        .expect("valid binding");
-    assert!(wrong_port
-        .prepare(
-            &fragment(BTreeMap::new()),
-            env.context(vec![attached("rec", "out", Endpoint::StreamIn(link_a.clone()))]),
-        )
-        .is_err());
+    let mut wrong_port = CaptureSink::from_binding(&binding(temp.path(), false, None)).expect("valid binding");
+    assert!(wrong_port.prepare(&fragment(BTreeMap::new()), env.context(vec![attached("rec", "out", Endpoint::StreamIn(link_a.clone()))]),).is_err());
 
     assert!(CaptureSink::from_binding(&binding(temp.path(), true, None)).is_err());
 
@@ -553,29 +392,17 @@ fn hd_09_prepare_cases() {
     assert_eq!(error.kind, ModuleErrorKind::Rejected);
     assert_eq!(error.message, "HD-8: selector must contain exactly the `dir` string");
 
-    let mut zero = CaptureSink::from_binding(&binding(temp.path(), false, None))
-        .expect("valid binding");
-    assert!(zero
-        .prepare(&fragment(sample_count(0)), env.context(vec![one.clone()]))
-        .is_err());
+    let mut zero = CaptureSink::from_binding(&binding(temp.path(), false, None)).expect("valid binding");
+    assert!(zero.prepare(&fragment(sample_count(0)), env.context(vec![one.clone()])).is_err());
 
-    let mut unknown = CaptureSink::from_binding(&binding(temp.path(), false, None))
-        .expect("valid binding");
-    assert!(unknown
-        .prepare(
-            &fragment(BTreeMap::from([(key("other.key"), Value::from(1))])),
-            env.context(vec![one.clone()]),
-        )
-        .is_err());
+    let mut unknown = CaptureSink::from_binding(&binding(temp.path(), false, None)).expect("valid binding");
+    assert!(unknown.prepare(&fragment(BTreeMap::from([(key("other.key"), Value::from(1))])), env.context(vec![one.clone()]),).is_err());
 
     let file_dir = temp.path().join("regular-file");
     fs::create_dir_all(temp.path()).expect("create temporary parent");
     fs::write(&file_dir, b"not a directory").expect("create regular file");
-    let mut blocked_dir = CaptureSink::from_binding(&binding(&file_dir, false, None))
-        .expect("binding path need not exist yet");
-    assert!(blocked_dir
-        .prepare(&fragment(BTreeMap::new()), env.context(vec![one]))
-        .is_err());
+    let mut blocked_dir = CaptureSink::from_binding(&binding(&file_dir, false, None)).expect("binding path need not exist yet");
+    assert!(blocked_dir.prepare(&fragment(BTreeMap::new()), env.context(vec![one])).is_err());
 }
 
 #[test]
@@ -605,37 +432,13 @@ fn hd_10_capture_of_n_samples_across_jittered_blocks() {
 #[test]
 fn hd_10_a_capture_spans_a_gap_and_a_clock_change() {
     let mut rig = Rig::new("gap-clock", sample_count(12));
-    let first = ramp_block(
-        &mut rig.pool,
-        rig.env.sample_clock,
-        0,
-        0.0,
-        4,
-        BlockFlags::NONE,
-        None,
-    );
+    let first = ramp_block(&mut rig.pool, rig.env.sample_clock, 0, 0.0, 4, BlockFlags::NONE, None);
     rig.link.publish(first);
     rig.step().expect("first block");
-    let overflow = ramp_block(
-        &mut rig.pool,
-        rig.env.sample_clock,
-        54,
-        54.0,
-        4,
-        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED,
-        Some(50),
-    );
+    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 54, 54.0, 4, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
     rig.link.publish(overflow);
     rig.step().expect("overflow block");
-    let changed = ramp_block(
-        &mut rig.pool,
-        rig.env.changed_clock,
-        0,
-        58.0,
-        4,
-        BlockFlags::NONE,
-        None,
-    );
+    let changed = ramp_block(&mut rig.pool, rig.env.changed_clock, 0, 58.0, 4, BlockFlags::NONE, None);
     rig.link.publish(changed);
     rig.step().expect("new SampleClock block");
     let artifacts = rig.stop(StopMode::Orderly);
@@ -646,23 +449,14 @@ fn hd_10_a_capture_spans_a_gap_and_a_clock_change() {
     assert_eq!(maps[1].domain, rig.env.changed_clock);
     assert_eq!(maps[0].gaps.len(), 1);
     assert_eq!(maps[0].gaps[0].lost, Some(50));
-    assert_eq!(
-        maps[0].gaps[0].cause,
-        ezsdr_kernel::stream::GapCause::OverflowRestart {}
-    );
+    assert_eq!(maps[0].gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
 }
 
 #[test]
 fn hd_10_session_requests_are_sequential() {
     let mut rig = Rig::new("sequential", BTreeMap::new());
-    rig.env.actions.push(request(
-        Value::from(100),
-        Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 100))),
-    ));
-    rig.env.actions.push(request(
-        Value::from(100),
-        Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 150))),
-    ));
+    rig.env.actions.push(request(Value::from(100), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 100)))));
+    rig.env.actions.push(request(Value::from(100), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 150)))));
     rig.push_ramp(0, 500);
     rig.step().expect("step succeeds");
     let artifacts = rig.stop(StopMode::Orderly);
@@ -674,10 +468,7 @@ fn hd_10_session_requests_are_sequential() {
 #[test]
 fn hd_10_the_own_capture_comes_first() {
     let mut rig = Rig::new("own-first", sample_count(50));
-    rig.env.actions.push(request(
-        Value::from(20),
-        Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 0))),
-    ));
+    rig.env.actions.push(request(Value::from(20), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 0)))));
     rig.push_ramp(0, 100);
     rig.step().expect("step succeeds");
     let artifacts = rig.stop(StopMode::Orderly);
@@ -696,33 +487,12 @@ fn hd_10_no_capture_no_artifact() {
 
 #[test]
 fn hd_10_the_carry_attributes_a_dropped_overflow() {
-    let mut rig = Rig::with_link(
-        "drop-carry",
-        sample_count(100),
-        BackPressure::DropOldest,
-        1,
-    );
+    let mut rig = Rig::with_link("drop-carry", sample_count(100), BackPressure::DropOldest, 1);
     rig.push_ramp(0, 10);
     rig.step().expect("start capture before link drop");
-    let overflow = ramp_block(
-        &mut rig.pool,
-        rig.env.sample_clock,
-        10,
-        10.0,
-        10,
-        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED,
-        Some(50),
-    );
+    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 10, 10.0, 10, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
     assert_eq!(rig.link.publish(overflow), PublishOutcome::Accepted);
-    let after_drop = ramp_block(
-        &mut rig.pool,
-        rig.env.sample_clock,
-        70,
-        70.0,
-        10,
-        BlockFlags::NONE,
-        None,
-    );
+    let after_drop = ramp_block(&mut rig.pool, rig.env.sample_clock, 70, 70.0, 10, BlockFlags::NONE, None);
     assert_eq!(rig.link.publish(after_drop), PublishOutcome::DroppedOldest);
     rig.step().expect("carry reaches continuity builder");
     let artifacts = rig.stop(StopMode::Orderly);
@@ -740,12 +510,8 @@ fn hd_10_a_carry_before_a_capture_is_discarded() {
     // recording before that block; the drops a carry counts that precede the capture's
     // start are dropped with it, so the recording holds no gap of theirs.
     let mut rig = Rig::with_link("carry-before-capture", BTreeMap::new(), BackPressure::DropOldest, 1);
-    rig.env.actions.push(request(
-        Value::from(4),
-        Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 54))),
-    ));
-    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 54, 54.0, 4,
-        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
+    rig.env.actions.push(request(Value::from(4), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.sample_clock, 54)))));
+    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 54, 54.0, 4, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
     assert_eq!(rig.link.publish(overflow), PublishOutcome::Accepted);
     // The block in which the capture starts evicts the one that carried the overflow.
     let starts = ramp_block(&mut rig.pool, rig.env.sample_clock, 58, 58.0, 4, BlockFlags::NONE, None);
@@ -835,12 +601,7 @@ fn hd_11_an_unexpected_action_is_rejected() {
     assert_eq!(events[0].kind.as_str(), REQUEST_REJECTED);
     assert_eq!(events[0].payload["kind"], "tx_burst");
     assert!(events[0].payload["reason"].as_str().unwrap().starts_with("HD-14"));
-    rig.env.actions.push(Action::Command {
-        target: Target::Output { output: ident("rec") },
-        verb: ident("start_rx"),
-        params: BTreeMap::new(),
-        at: None,
-    });
+    rig.env.actions.push(Action::Command { target: Target::Output { output: ident("rec") }, verb: ident("start_rx"), params: BTreeMap::new(), at: None });
     assert!(rig.step().expect("unexpected Command is an event"));
     let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     assert_eq!(events[0].payload["kind"], "command");
@@ -852,21 +613,16 @@ fn hd_14_a_bad_capture_value_is_an_event_not_a_failure() {
     rig.env.actions.push(request(Value::from(0), None));
     rig.env.actions.push(request(Value::num(5.0).unwrap(), None));
     assert!(rig.step().expect("bad values are rejected events"));
-    rig.env.actions.push(request(
-        Value::from(5),
-        Some(AbsoluteDeadline::new(TimePoint::new(rig.env.unrelated_root, 0))),
-    ));
+    rig.env.actions.push(request(Value::from(5), Some(AbsoluteDeadline::new(TimePoint::new(rig.env.unrelated_root, 0)))));
     rig.env.actions.push(request(Value::from(10), None));
     rig.push_ramp(0, 10);
     assert!(rig.step().expect("unrelated time is rejected and valid request runs"));
     // Phase 6, VD-1: the served request is announced too (HD-16); the three refusals remain.
-    let events: Vec<_> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() != CAPTURE_WRITTEN).collect();
+    let events: Vec<_> =
+        rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() != CAPTURE_WRITTEN).collect();
     assert_eq!(events.len(), 3);
     assert!(events.iter().all(|event| event.kind.as_str() == REQUEST_REJECTED));
-    assert!(events.iter().all(|event| {
-        event.payload["kind"] == "update_parameter"
-            && event.payload["reason"].as_str().unwrap().starts_with("HD-14")
-    }));
+    assert!(events.iter().all(|event| { event.payload["kind"] == "update_parameter" && event.payload["reason"].as_str().unwrap().starts_with("HD-14") }));
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].id, ident("capture_4"));
@@ -899,8 +655,7 @@ fn hd_13_stop_preserves_trailing_drop_carry() {
         let mut rig = Rig::with_link("trailing-carry", sample_count(100), BackPressure::DropOldest, 1);
         rig.push_ramp(0, 2);
         rig.step().expect("begin capture");
-        let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 52, 52.0, 2,
-            BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
+        let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 52, 52.0, 2, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
         assert_eq!(rig.link.publish(overflow), PublishOutcome::Accepted);
         assert_eq!(rig.push_ramp(54, 2), PublishOutcome::DroppedOldest);
         let artifacts = rig.stop(mode);
@@ -916,10 +671,13 @@ fn hd_13_stop_preserves_trailing_drop_carry() {
         assert_eq!(map.gaps[0].link_dropped, 1);
         assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
         assert_eq!(rig.link.take_drop_carry().blocks, 0);
-        assert_eq!(meta_of(&artifacts[0]).unwrap()["global"]["ezsdr:gaps"], json!([
-            {"sample_start": 2, "global_index": 2, "len": 0, "lost": 50,
-             "cause": {"kind": "overflow_restart"}, "link_dropped": 1}
-        ]));
+        assert_eq!(
+            meta_of(&artifacts[0]).unwrap()["global"]["ezsdr:gaps"],
+            json!([
+                {"sample_start": 2, "global_index": 2, "len": 0, "lost": 50,
+                 "cause": {"kind": "overflow_restart"}, "link_dropped": 1}
+            ])
+        );
     }
 }
 
@@ -928,8 +686,7 @@ fn hd_11_targeted_stop_keeps_carry_on_the_finished_capture() {
     let mut rig = Rig::with_link("stop-carry", sample_count(100), BackPressure::DropOldest, 1);
     rig.push_ramp(0, 2);
     rig.step().expect("begin capture");
-    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 52, 52.0, 2,
-        BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
+    let overflow = ramp_block(&mut rig.pool, rig.env.sample_clock, 52, 52.0, 2, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(50));
     rig.link.publish(overflow);
     assert_eq!(rig.push_ramp(54, 2), PublishOutcome::DroppedOldest);
     rig.env.actions.push(Action::Stop { target: own() });
@@ -977,9 +734,7 @@ fn hd_11_stop_for_own_target_finishes_the_capture() {
     let mut rig = Rig::new("stop-own-target", sample_count(8));
     rig.push_ramp(0, 4);
     rig.step().expect("start partial capture");
-    rig.env.actions.push(Action::Stop {
-        target: own(),
-    });
+    rig.env.actions.push(Action::Stop { target: own() });
     assert!(rig.step().expect("own Stop finishes the capture"));
     // Phase 6, VD-1: the only event is the partial capture's announcement (HD-16).
     let events = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
@@ -998,9 +753,7 @@ fn hd_11_a_stop_discards_unstarted_requests_and_later_ones_are_served() {
     rig.push_ramp(0, 4);
     rig.step().expect("start the own capture");
     rig.env.actions.push(request(Value::from(3), None));
-    rig.env.actions.push(Action::Stop {
-        target: own(),
-    });
+    rig.env.actions.push(Action::Stop { target: own() });
     rig.step().expect("the Stop finishes the own capture");
     rig.env.actions.push(request(Value::from(2), None));
     rig.push_ramp(4, 6);
@@ -1028,9 +781,7 @@ fn hd_10_unknown_contract_is_rejected() {
         contract: DataContractId::parse("test.unknown").expect("test contract"),
     };
     let bytes: Arc<[u8]> = vec![0; 8].into();
-    rig.link.publish(BlockRef::new(
-        SampleBlock::new_host(header, HOST_MEMORY, bytes, 8).expect("host block"),
-    ));
+    rig.link.publish(BlockRef::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, 8).expect("host block")));
     let error = rig.step().expect_err("unknown contract is a Module defect");
     assert!(error.message.starts_with("HD-10: contract test.unknown"));
 }
@@ -1056,10 +807,7 @@ fn channel_block(pool: &mut HostPool, domain: ClockDomainId, first: i64, len: u3
         lost: None,
         contract: DataContractId::parse("ezsdr.stream.cf32").expect("cf32 contract"),
     };
-    BlockRef::new(
-        SampleBlock::new_host(header, HOST_MEMORY, bytes, ezsdr_hostmem::CF32_BYTES as u32)
-            .expect("well-formed CF32 block"),
-    )
+    BlockRef::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, ezsdr_hostmem::CF32_BYTES as u32).expect("well-formed CF32 block"))
 }
 
 fn meta_of(artifact: &ArtifactRef) -> Option<serde_json::Value> {
@@ -1121,12 +869,7 @@ fn hd_15_channel_validity() {
     let full = ChannelMask::full(2);
     let only_first = ChannelMask::from_bits(0b01);
     let domain = rig.env.sample_clock;
-    for (first, valid, flags) in [
-        (0, full, BlockFlags::NONE),
-        (10, only_first, BlockFlags::NONE),
-        (20, full, BlockFlags::NONE),
-        (30, only_first, BlockFlags::NONE),
-    ] {
+    for (first, valid, flags) in [(0, full, BlockFlags::NONE), (10, only_first, BlockFlags::NONE), (20, full, BlockFlags::NONE), (30, only_first, BlockFlags::NONE)] {
         let block = channel_block(&mut rig.pool, domain, first, 10, 2, valid, flags);
         rig.link.publish(block);
     }
@@ -1134,18 +877,24 @@ fn hd_15_channel_validity() {
     let artifacts = rig.stop(StopMode::Orderly);
     let meta = meta_of(&artifacts[0]).expect("metadata");
     assert_eq!(meta["global"]["core:num_channels"], 2);
-    assert_eq!(meta["global"]["ezsdr:valid"], json!([
-        [{ "sample_start": 0, "sample_count": 40 }],
-        [{ "sample_start": 0, "sample_count": 10 }, { "sample_start": 20, "sample_count": 10 }]
-    ]));
+    assert_eq!(
+        meta["global"]["ezsdr:valid"],
+        json!([
+            [{ "sample_start": 0, "sample_count": 40 }],
+            [{ "sample_start": 0, "sample_count": 10 }, { "sample_start": 20, "sample_count": 10 }]
+        ])
+    );
     // SC-31d: one annotation per break; SC-31c: a channel still invalid at the end has
     // a break running to the end.
-    assert_eq!(meta["annotations"], json!([
-        { "core:sample_start": 10, "core:sample_count": 10, "core:label": "invalid channel",
-          "ezsdr:channel": 1 },
-        { "core:sample_start": 30, "core:sample_count": 10, "core:label": "invalid channel",
-          "ezsdr:channel": 1 }
-    ]));
+    assert_eq!(
+        meta["annotations"],
+        json!([
+            { "core:sample_start": 10, "core:sample_count": 10, "core:label": "invalid channel",
+              "ezsdr:channel": 1 },
+            { "core:sample_start": 30, "core:sample_count": 10, "core:label": "invalid channel",
+              "ezsdr:channel": 1 }
+        ])
+    );
     assert_eq!(meta["captures"], json!([{ "core:sample_start": 0, "core:global_index": 0 }]));
 }
 
@@ -1192,10 +941,7 @@ fn hd_15_the_datatype_follows_the_contract() {
     builder.push(&header, DropCarry::default()).expect("one block");
     let map = builder.finish(DropCarry::default());
     let rate = Rational::new(3, 2).expect("rate");
-    let datatype = |contract: &str| {
-        sigmf_meta(&map, rate, &DataContractId::parse(contract).expect("contract id"), false)
-            .map(|meta| meta["global"]["core:datatype"].clone())
-    };
+    let datatype = |contract: &str| sigmf_meta(&map, rate, &DataContractId::parse(contract).expect("contract id"), false).map(|meta| meta["global"]["core:datatype"].clone());
     assert_eq!(datatype("ezsdr.stream.cf32"), Ok(json!("cf32_le")));
     assert_eq!(datatype("ezsdr.stream.sc16"), Ok(json!("ci16_le")));
     assert!(datatype("ezsdr.stream.cs8").unwrap_err().starts_with("HD-15"));
@@ -1235,24 +981,26 @@ fn hd_15_gap_fields_carry_the_continuity_causes() {
     let evicted_overflow = DropCarry { flags: BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, lost: Some(50), blocks: 1 };
     // [0, 10); a link drop of 5 (SC-31 LinkDrop); [15, 25); a stream gap of 50 that
     // reported 30 lost (Mixed); [75, 85); then a carry no block follows (SC-30c).
-    let map = map_of(&[
-        (0, 10, BlockFlags::NONE, None, none),
-        (15, 10, BlockFlags::NONE, None, dropped),
-        (75, 10, BlockFlags::GAP_BEFORE, Some(30), none),
-    ], evicted_overflow);
+    let map = map_of(&[(0, 10, BlockFlags::NONE, None, none), (15, 10, BlockFlags::NONE, None, dropped), (75, 10, BlockFlags::GAP_BEFORE, Some(30), none)], evicted_overflow);
     let meta = sigmf_meta(&map, Rational::integer(1).unwrap(), &cf32(), true).unwrap();
     assert_eq!(meta["global"]["ezsdr:partial"], true);
-    assert_eq!(meta["global"]["ezsdr:gaps"], json!([
-        { "sample_start": 10, "global_index": 10, "len": 5, "lost": null, "cause": { "kind": "link_drop" }, "link_dropped": 1 },
-        { "sample_start": 20, "global_index": 25, "len": 50, "lost": 30, "cause": { "kind": "mixed", "stream_lost": 30 }, "link_dropped": 0 },
-        { "sample_start": 30, "global_index": 85, "len": 0, "lost": 50, "cause": { "kind": "overflow_restart" }, "link_dropped": 1 }
-    ]));
+    assert_eq!(
+        meta["global"]["ezsdr:gaps"],
+        json!([
+            { "sample_start": 10, "global_index": 10, "len": 5, "lost": null, "cause": { "kind": "link_drop" }, "link_dropped": 1 },
+            { "sample_start": 20, "global_index": 25, "len": 50, "lost": 30, "cause": { "kind": "mixed", "stream_lost": 30 }, "link_dropped": 0 },
+            { "sample_start": 30, "global_index": 85, "len": 0, "lost": 50, "cause": { "kind": "overflow_restart" }, "link_dropped": 1 }
+        ])
+    );
     // The zero-extent gap at the end opens no empty capture segment.
-    assert_eq!(meta["captures"], json!([
-        { "core:sample_start": 0, "core:global_index": 0 },
-        { "core:sample_start": 10, "core:global_index": 15 },
-        { "core:sample_start": 20, "core:global_index": 75 }
-    ]));
+    assert_eq!(
+        meta["captures"],
+        json!([
+            { "core:sample_start": 0, "core:global_index": 0 },
+            { "core:sample_start": 10, "core:global_index": 15 },
+            { "core:sample_start": 20, "core:global_index": 75 }
+        ])
+    );
 }
 
 #[test]
@@ -1277,9 +1025,8 @@ fn hd_15_annotations_are_sorted_by_index_then_channel() {
     let map = builder.finish(DropCarry::default());
     assert_eq!(map.channel_gaps.iter().map(|g| g.channel).collect::<Vec<_>>(), [2, 1]);
     let meta = sigmf_meta(&map, Rational::integer(1).unwrap(), &cf32(), false).unwrap();
-    let order: Vec<_> = meta["annotations"].as_array().unwrap().iter()
-        .map(|a| (a["core:sample_start"].as_u64().unwrap(), a["ezsdr:channel"].as_u64().unwrap(), a["core:sample_count"].as_u64().unwrap()))
-        .collect();
+    let order: Vec<_> =
+        meta["annotations"].as_array().unwrap().iter().map(|a| (a["core:sample_start"].as_u64().unwrap(), a["ezsdr:channel"].as_u64().unwrap(), a["core:sample_count"].as_u64().unwrap())).collect();
     assert_eq!(order, [(10, 1, 30), (20, 2, 10)]);
 }
 
@@ -1289,22 +1036,10 @@ fn hd_15_a_map_it_cannot_describe_is_refused() {
     // indices would be negative or out of range is refused, not written as invalid
     // SigMF (a `core:sample_start` below 0).
     let mut before_first = map_of(&[(100, 10, BlockFlags::NONE, None, DropCarry::default())], DropCarry::default());
-    before_first.gaps.push(ezsdr_kernel::stream::Gap {
-        start: TimePoint::new(before_first.domain, 0),
-        len: 5,
-        lost: None,
-        cause: ezsdr_kernel::stream::GapCause::Stream {},
-        link_dropped: 0,
-    });
+    before_first.gaps.push(ezsdr_kernel::stream::Gap { start: TimePoint::new(before_first.domain, 0), len: 5, lost: None, cause: ezsdr_kernel::stream::GapCause::Stream {}, link_dropped: 0 });
     assert!(sigmf_meta(&before_first, Rational::integer(1).unwrap(), &cf32(), false).unwrap_err().starts_with("HD-15"));
     let mut huge = map_of(&[(0, 10, BlockFlags::NONE, None, DropCarry::default())], DropCarry::default());
-    huge.gaps.push(ezsdr_kernel::stream::Gap {
-        start: TimePoint::new(huge.domain, 10),
-        len: u64::MAX,
-        lost: None,
-        cause: ezsdr_kernel::stream::GapCause::Stream {},
-        link_dropped: 0,
-    });
+    huge.gaps.push(ezsdr_kernel::stream::Gap { start: TimePoint::new(huge.domain, 10), len: u64::MAX, lost: None, cause: ezsdr_kernel::stream::GapCause::Stream {}, link_dropped: 0 });
     assert!(sigmf_meta(&huge, Rational::integer(1).unwrap(), &cf32(), false).unwrap_err().starts_with("HD-15"));
 }
 
@@ -1420,8 +1155,7 @@ fn hd_16_a_capture_whose_metadata_write_fails_is_not_announced() {
     let error = rig.step().expect_err("the metadata write fails and fails the step");
     assert!(error.message.starts_with("HD-15: cannot write"), "{}", error.message);
 
-    let announced: Vec<_> = rig.env.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-        .filter(|event| event.kind.as_str() == CAPTURE_WRITTEN).collect();
+    let announced: Vec<_> = rig.env.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == CAPTURE_WRITTEN).collect();
     assert!(announced.is_empty(), "a capture whose metadata write failed is not announced");
     let artifacts = rig.stop(StopMode::Orderly);
     assert_eq!(artifacts.len(), 1, "a failed metadata write does not cost the capture");
@@ -1443,15 +1177,24 @@ fn hd_16_every_answer_names_its_action() {
     rig.env.actions.push(tx_burst());
     rig.push_ramp(4, 10);
     rig.step().expect("the requests are handled");
-    let numbers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["action"].clone())).collect();
-    assert_eq!(numbers, vec![
-        (CAPTURE_WRITTEN.to_owned(), json!(null)),
-        (REQUEST_REJECTED.to_owned(), json!(1)),
-        (REQUEST_REJECTED.to_owned(), json!(2)),
-        (REQUEST_REJECTED.to_owned(), json!(5)),
-        (REQUEST_REJECTED.to_owned(), json!(3)),
-        (CAPTURE_WRITTEN.to_owned(), json!(4)),
-    ]);
+    let numbers: Vec<(String, serde_json::Value)> = rig
+        .env
+        .events
+        .drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+        .iter()
+        .map(|event| (event.kind.as_str().to_owned(), event.payload["action"].clone()))
+        .collect();
+    assert_eq!(
+        numbers,
+        vec![
+            (CAPTURE_WRITTEN.to_owned(), json!(null)),
+            (REQUEST_REJECTED.to_owned(), json!(1)),
+            (REQUEST_REJECTED.to_owned(), json!(2)),
+            (REQUEST_REJECTED.to_owned(), json!(5)),
+            (REQUEST_REJECTED.to_owned(), json!(3)),
+            (CAPTURE_WRITTEN.to_owned(), json!(4)),
+        ]
+    );
 }
 
 #[test]
@@ -1464,15 +1207,15 @@ fn hd_16_each_requester_gets_its_own_answer() {
     rig.env.actions.push(request(Value::from(4), None));
     rig.push_ramp(0, 9);
     rig.step().expect("the requests are served");
-    let answers: Vec<(serde_json::Value, serde_json::Value, serde_json::Value)> = rig.env.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
+    let answers: Vec<(serde_json::Value, serde_json::Value, serde_json::Value)> = rig
+        .env
+        .events
+        .drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+        .iter()
         .filter(|event| event.kind.as_str() == CAPTURE_WRITTEN)
         .map(|event| (event.payload["action"].clone(), event.payload["artifact"]["id"].clone(), event.payload["artifact"]["continuity"][0]["first"]["ticks"].clone()))
         .collect();
-    assert_eq!(answers, vec![
-        (json!(1), json!("capture_1"), json!(0)),
-        (json!(2), json!("capture_2"), json!(3)),
-        (json!(3), json!("capture_3"), json!(5)),
-    ]);
+    assert_eq!(answers, vec![(json!(1), json!("capture_1"), json!(0)), (json!(2), json!("capture_2"), json!(3)), (json!(3), json!("capture_3"), json!(5)),]);
 }
 
 #[test]
@@ -1486,7 +1229,13 @@ fn hd_16_a_discarded_request_is_answered() {
     rig.step().expect("the first request starts");
     rig.env.actions.push(Action::Stop { target: own() });
     rig.step().expect("the Stop");
-    let answers: Vec<(String, serde_json::Value)> = rig.env.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().map(|event| (event.kind.as_str().to_owned(), event.payload["action"].clone())).collect();
+    let answers: Vec<(String, serde_json::Value)> = rig
+        .env
+        .events
+        .drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+        .iter()
+        .map(|event| (event.kind.as_str().to_owned(), event.payload["action"].clone()))
+        .collect();
     assert_eq!(answers, vec![(CAPTURE_WRITTEN.to_owned(), json!(1)), (REQUEST_REJECTED.to_owned(), json!(2))]);
 }
 
@@ -1498,11 +1247,8 @@ fn hd_10_a_colliding_request_preserves_the_completed_recording() {
     let mut own = fragment(sample_count(2));
     own.id = ident("rec_capture_1");
     own.content["id"] = json!("rec_capture_1");
-    other.prepare(&own, rig.env.context(vec![attached(
-        "rec_capture_1", "in", Endpoint::StreamIn(other_link.clone()),
-    )])).unwrap();
-    other_link.publish(ramp_block(&mut rig.pool, rig.env.sample_clock,
-        0, 0.0, 2, BlockFlags::NONE, None));
+    other.prepare(&own, rig.env.context(vec![attached("rec_capture_1", "in", Endpoint::StreamIn(other_link.clone()))])).unwrap();
+    other_link.publish(ramp_block(&mut rig.pool, rig.env.sample_clock, 0, 0.0, 2, BlockFlags::NONE, None));
     other.step(TimePoint::new(rig.env.root, 0)).unwrap();
     let original = other.stop(StopMode::Orderly).unwrap().remove(0);
     let path = Path::new(original.uri.strip_prefix("file://").unwrap());
@@ -1521,13 +1267,19 @@ fn hd_10_a_colliding_request_preserves_the_completed_recording() {
 
 #[test]
 fn hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture() {
-    fn publish(rig: &mut Rig, contract: &str, domain: ClockDomainId,
-        first: i64, flags: BlockFlags, lost: Option<u64>) -> PublishOutcome {
+    fn publish(rig: &mut Rig, contract: &str, domain: ClockDomainId, first: i64, flags: BlockFlags, lost: Option<u64>) -> PublishOutcome {
         let bps = if contract == "ezsdr.stream.cf32" { 8 } else { 4 };
         let bytes = rig.pool.fill(2 * bps, |buf| buf.fill(0));
-        let header = BlockHeader { first_sample_time: TimePoint::new(domain, first), len: 2,
-            channels: 1, direction: Direction::Rx, valid: ChannelMask::full(1), flags, lost,
-            contract: DataContractId::parse(contract).unwrap() };
+        let header = BlockHeader {
+            first_sample_time: TimePoint::new(domain, first),
+            len: 2,
+            channels: 1,
+            direction: Direction::Rx,
+            valid: ChannelMask::full(1),
+            flags,
+            lost,
+            contract: DataContractId::parse(contract).unwrap(),
+        };
         rig.link.publish(BlockRef::new(SampleBlock::new_host(header, HOST_MEMORY, bytes, bps as u32).unwrap()))
     }
     for (old, new) in [("ezsdr.stream.cf32", "ezsdr.stream.sc16"), ("ezsdr.stream.sc16", "ezsdr.stream.cf32")] {
@@ -1536,9 +1288,10 @@ fn hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture() {
             let old_clock = rig.env.sample_clock;
             publish(&mut rig, old, old_clock, 0, BlockFlags::NONE, None);
             rig.step().unwrap();
-            if queued { rig.env.actions.push(request(Value::from(2), None)); }
-            assert_eq!(publish(&mut rig, old, old_clock, 12,
-                BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(10)), PublishOutcome::Accepted);
+            if queued {
+                rig.env.actions.push(request(Value::from(2), None));
+            }
+            assert_eq!(publish(&mut rig, old, old_clock, 12, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(10)), PublishOutcome::Accepted);
             let new_clock = rig.env.changed_clock;
             assert_eq!(publish(&mut rig, new, new_clock, 0, BlockFlags::NONE, None), PublishOutcome::DroppedOldest);
             rig.step().unwrap();
@@ -1547,9 +1300,12 @@ fn hd_10_contract_changes_keep_drop_carry_on_the_outgoing_capture() {
             assert!(artifacts[0].partial);
             assert_eq!(artifacts[0].size_bytes, if old == "ezsdr.stream.cf32" { 16 } else { 8 });
             let map = &artifacts[0].continuity[0];
-            assert_eq!(map.end.ticks_in(old_clock).unwrap(), 2); assert_eq!(map.gaps.len(), 1);
-            assert_eq!(map.gaps[0].start.ticks_in(old_clock).unwrap(), 2); assert_eq!(map.gaps[0].len, 0);
-            assert_eq!(map.gaps[0].lost, Some(10)); assert_eq!(map.gaps[0].link_dropped, 1);
+            assert_eq!(map.end.ticks_in(old_clock).unwrap(), 2);
+            assert_eq!(map.gaps.len(), 1);
+            assert_eq!(map.gaps[0].start.ticks_in(old_clock).unwrap(), 2);
+            assert_eq!(map.gaps[0].len, 0);
+            assert_eq!(map.gaps[0].lost, Some(10));
+            assert_eq!(map.gaps[0].link_dropped, 1);
             assert_eq!(map.gaps[0].cause, ezsdr_kernel::stream::GapCause::OverflowRestart {});
             if queued {
                 assert!(!artifacts[1].partial);

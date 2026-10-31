@@ -3,15 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::hash::ContentHash;
-use crate::manifest::{
-    ClocksSection, EventsSection, LinkRecord, Manifest, ModuleEntry, PrepareSection, RunSection,
-    TerminationSection,
-};
+use crate::manifest::{ClocksSection, EventsSection, LinkRecord, Manifest, ModuleEntry, PrepareSection, RunSection, TerminationSection};
 use crate::module_api::{Fidelity, ModuleRef, ProfileRef, Provider, StopMode};
-use crate::run::{
-    CleanupFailure, CleanupMode, CleanupOps, CleanupStep, RunState, StopCause, Termination,
-    run_cleanup,
-};
+use crate::run::{CleanupFailure, CleanupMode, CleanupOps, CleanupStep, RunState, StopCause, Termination, run_cleanup};
 use crate::spec::{Ident, Namespace};
 
 use super::RunHandle;
@@ -19,12 +13,7 @@ use super::state::{Inst, Shared, contain, contain_all, lock, manifest_failure, t
 
 impl RunHandle {
     pub(super) fn settle(&mut self) {
-        if lock(&self.shared.end).is_some()
-            && !matches!(
-                lock(&self.shared.machine).state(),
-                RunState::CleanedUp { .. }
-            )
-        {
+        if lock(&self.shared.end).is_some() && !matches!(lock(&self.shared.machine).state(), RunState::CleanedUp { .. }) {
             self.cleanup();
         }
     }
@@ -38,87 +27,43 @@ impl RunHandle {
             return;
         }
         let at = Some(self.shared.now());
-        let result = lock(&self.shared.machine).begin_stopping(
-            request.mode,
-            at,
-            &*self.shared.ctx.host_clock,
-        );
-        debug_assert!(
-            result.is_ok(),
-            "coordinator failed to enter Stopping: {result:?}"
-        );
-        let order = self
-            .shared
-            .routing()
-            .map(|routing| routing.reverse.clone())
-            .unwrap_or_default();
-        let outcome = run_cleanup(
-            Arc::new(Ops {
-                shared: self.shared.clone(),
-            }),
-            &order,
-            request.mode,
-            &|| {
-                lock(&self.shared.end)
-                    .as_ref()
-                    .is_some_and(|end| end.mode == CleanupMode::Abort)
-                    .then_some(CleanupMode::Abort)
-            },
-        );
+        let result = lock(&self.shared.machine).begin_stopping(request.mode, at, &*self.shared.ctx.host_clock);
+        debug_assert!(result.is_ok(), "coordinator failed to enter Stopping: {result:?}");
+        let order = self.shared.routing().map(|routing| routing.reverse.clone()).unwrap_or_default();
+        let outcome = run_cleanup(Arc::new(Ops { shared: self.shared.clone() }), &order, request.mode, &|| {
+            lock(&self.shared.end).as_ref().is_some_and(|end| end.mode == CleanupMode::Abort).then_some(CleanupMode::Abort)
+        });
         // Step 3 joined the data thread; a Run with no fragment never ran step 3.
         super::paced::stop_data_thread(&self.shared);
         self.shared.closing.store(true, Ordering::Release);
         self.lease.released = true;
-        let termination = lock(&self.shared.end)
-            .as_ref()
-            .map(|e| e.termination.clone())
-            .unwrap_or(request.termination);
+        let termination = lock(&self.shared.end).as_ref().map(|e| e.termination.clone()).unwrap_or(request.termination);
         let at = Some(self.shared.now());
-        let result = lock(&self.shared.machine).finish(
-            termination.clone(),
-            at,
-            &*self.shared.ctx.host_clock,
-        );
-        debug_assert!(
-            result.is_ok(),
-            "coordinator failed to enter CleanedUp: {result:?}"
-        );
+        let result = lock(&self.shared.machine).finish(termination.clone(), at, &*self.shared.ctx.host_clock);
+        debug_assert!(result.is_ok(), "coordinator failed to enter CleanedUp: {result:?}");
         self.manifest = Some(self.assemble_manifest(termination, outcome.failures));
         lock(&self.shared.links).clear();
         self.links_by_ref.clear();
     }
 
-    fn assemble_manifest(
-        &self,
-        termination: Termination,
-        mut cleanup_failures: Vec<CleanupFailure>,
-    ) -> Manifest {
+    fn assemble_manifest(&self, termination: Termination, mut cleanup_failures: Vec<CleanupFailure>) -> Manifest {
         let mut fidelities = Vec::new();
         let mut manifest_failures = Vec::new();
         let mut module_sections = Vec::new();
         for (i, slot) in self.shared.providers.iter().enumerate() {
             let first = self.shared.first_fragment(Inst::Provider(i));
             match try_slot(&slot.object) {
-                None => manifest_failures.push(manifest_failure(
-                    Some(first),
-                    "KC-44: the instance is still held by an abandoned cleanup step",
-                )),
+                None => manifest_failures.push(manifest_failure(Some(first), "KC-44: the instance is still held by an abandoned cleanup step")),
                 Some(guard) => match contain_all(|| {
                     let instance = guard.instance();
                     (instance.fidelity, instance.sections.clone())
                 }) {
-                    Err(()) => manifest_failures.push(manifest_failure(
-                        Some(first),
-                        "KC-44: a Module panicked while reading instance()",
-                    )),
+                    Err(()) => manifest_failures.push(manifest_failure(Some(first), "KC-44: a Module panicked while reading instance()")),
                     Ok((fidelity, sections)) => {
                         fidelities.push(fidelity);
                         let Some(owner) = Namespace::parse(slot.module.id.as_str()).ok() else {
                             if !sections.is_empty() {
-                                manifest_failures.push(manifest_failure(
-                                    Some(first),
-                                    format!("KC-44: Module id {} is not a Namespace", slot.module.id),
-                                ));
+                                manifest_failures.push(manifest_failure(Some(first), format!("KC-44: Module id {} is not a Namespace", slot.module.id)));
                             }
                             continue;
                         };
@@ -136,15 +81,11 @@ impl RunHandle {
             execution_class: self.shared.routing().map(|routing| routing.plan.class),
             fidelity,
             transitions: lock(&self.shared.machine).transitions().to_vec(),
-            deterministic: self.shared.routing().is_some_and(|routing| {
-                routing.plan.class == crate::module_api::ExecutionClass::Simulation
-            }),
+            deterministic: self.shared.routing().is_some_and(|routing| routing.plan.class == crate::module_api::ExecutionClass::Simulation),
             children: self.children.clone(),
         };
         let plan = self.shared.routing().map(|routing| routing.plan.clone());
-        let prepare = PrepareSection {
-            reports: self.reports.clone().unwrap_or_default(),
-        };
+        let prepare = PrepareSection { reports: self.reports.clone().unwrap_or_default() };
         let mut modules = Vec::new();
         let mut selected: Vec<(ModuleRef, Option<ProfileRef>)> = Vec::new();
         for binding in self.shared.ctx.profile.bindings.values() {
@@ -160,27 +101,12 @@ impl RunHandle {
             }
         }
         for (module, profile) in selected {
-            let descriptor = self
-                .shared
-                .ctx
-                .registry
-                .modules()
-                .find(|d| d.id == module.id && d.version == module.version);
-            modules.push(ModuleEntry {
-                module,
-                impl_hash: descriptor.and_then(|d| d.impl_hash.clone()),
-                profile,
-            });
+            let descriptor = self.shared.ctx.registry.modules().find(|d| d.id == module.id && d.version == module.version);
+            modules.push(ModuleEntry { module, impl_hash: descriptor.and_then(|d| d.impl_hash.clone()), profile });
         }
         let mut vocabularies = BTreeMap::new();
         for module in &modules {
-            if let Some(descriptor) = self
-                .shared
-                .ctx
-                .registry
-                .modules()
-                .find(|d| d.id == module.module.id && d.version == module.module.version)
-            {
+            if let Some(descriptor) = self.shared.ctx.registry.modules().find(|d| d.id == module.module.id && d.version == module.module.version) {
                 for requirement in &descriptor.vocabularies {
                     if let Some(vocabulary) = self.shared.ctx.registry.vocabulary(&requirement.id) {
                         vocabularies.insert(requirement.id.clone(), vocabulary.version);
@@ -188,27 +114,12 @@ impl RunHandle {
                 }
             }
         }
-        let components: BTreeMap<Ident, ContentHash> = self
-            .shared
-            .ctx
-            .spec
-            .graph
-            .components
-            .iter()
-            .map(|(name, component)| (name.clone(), component.implementation.hash.clone()))
-            .collect();
+        let components: BTreeMap<Ident, ContentHash> = self.shared.ctx.spec.graph.components.iter().map(|(name, component)| (name.clone(), component.implementation.hash.clone())).collect();
         let links = {
             // `links` before `link_drops`, the order step 6 takes them in.
             let links = lock(&self.shared.links);
             let drops = lock(&self.shared.link_drops);
-            links
-                .iter()
-                .enumerate()
-                .map(|(i, (decl, _))| LinkRecord {
-                    link: decl.id,
-                    drops: drops.get(i).copied(),
-                })
-                .collect()
+            links.iter().enumerate().map(|(i, (decl, _))| LinkRecord { link: decl.id, drops: drops.get(i).copied() }).collect()
         };
         let relations = self.relations(&mut manifest_failures);
         cleanup_failures.extend(lock(&self.shared.cleanup_failures).clone());
@@ -228,17 +139,10 @@ impl RunHandle {
             vocabularies,
             components,
             inputs: self.inputs.clone(),
-            clocks: ClocksSection {
-                domains: self.shared.ctx.clocks.domains(),
-                relations,
-                sample_clocks: self.shared.ctx.clocks.sample_clock_records(),
-            },
+            clocks: ClocksSection { domains: self.shared.ctx.clocks.domains(), relations, sample_clocks: self.shared.ctx.clocks.sample_clock_records() },
             links,
             events: EventsSection {
-                counters: lock(&self.shared.counters)
-                    .clone()
-                    .or_else(|| self.shared.collector.get().map(|c| c.counters()))
-                    .unwrap_or_default(),
+                counters: lock(&self.shared.counters).clone().or_else(|| self.shared.collector.get().map(|c| c.counters())).unwrap_or_default(),
                 delivered: lock(&self.shared.delivered).clone(),
             },
             lease: self.lease.record(),
@@ -258,18 +162,12 @@ impl RunHandle {
         for (owner, fragment, source, entries) in module_sections {
             for (section, value) in entries {
                 if let Err(error) = manifest.write_section(&owner, source.clone(), section, value) {
-                    manifest
-                        .termination
-                        .cleanup_failures
-                        .push(manifest_failure(Some(fragment.clone()), format!("KC-44: {error}")));
+                    manifest.termination.cleanup_failures.push(manifest_failure(Some(fragment.clone()), format!("KC-44: {error}")));
                 }
             }
         }
         if let Err(error) = manifest.seal() {
-            manifest.termination.cleanup_failures.push(manifest_failure(
-                None,
-                format!("KC-44: the Manifest could not be sealed: {error}"),
-            ));
+            manifest.termination.cleanup_failures.push(manifest_failure(None, format!("KC-44: the Manifest could not be sealed: {error}")));
             manifest.hash = None;
         }
         manifest
@@ -284,23 +182,12 @@ impl RunHandle {
             return Vec::new();
         }
         let published = contain_all(|| self.shared.authority.relations()).unwrap_or_default();
-        let (kept, foreign): (Vec<_>, Vec<_>) = published
-            .into_iter()
-            .partition(|relation| relation.source() == self.shared.primary);
+        let (kept, foreign): (Vec<_>, Vec<_>) = published.into_iter().partition(|relation| relation.source() == self.shared.primary);
         for _ in foreign {
-            failures.push(manifest_failure(
-                None,
-                "TM-18: a relation whose source is not the primary root",
-            ));
+            failures.push(manifest_failure(None, "TM-18: a relation whose source is not the primary root"));
         }
-        if !kept
-            .iter()
-            .any(|relation| relation.target() == crate::id::ClockDomainId::UTC)
-        {
-            failures.push(manifest_failure(
-                None,
-                "TM-18: the Authority published no relation of its root to utc",
-            ));
+        if !kept.iter().any(|relation| relation.target() == crate::id::ClockDomainId::UTC) {
+            failures.push(manifest_failure(None, "TM-18: the Authority published no relation of its root to utc"));
         }
         kept
     }
@@ -309,13 +196,7 @@ impl RunHandle {
 /// Requests orderly client finish when no other end was requested (KC-34).
 pub(super) fn finish(run: &mut RunHandle) {
     if !matches!(run.state(), RunState::CleanedUp { .. }) {
-        request(
-            &run.shared,
-            Termination::Stopped {
-                cause: StopCause::Client {},
-            },
-            CleanupMode::Orderly,
-        );
+        request(&run.shared, Termination::Stopped { cause: StopCause::Client {} }, CleanupMode::Orderly);
         run.cleanup();
     }
 }
@@ -336,10 +217,7 @@ pub(super) fn request(shared: &Shared, termination: Termination, mode: CleanupMo
     if escalates {
         current.mode = CleanupMode::Abort;
     }
-    let overridden = matches!(
-        termination,
-        Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } }
-    );
+    let overridden = matches!(termination, Termination::Failed { .. } | Termination::Stopped { cause: StopCause::Policy { .. } });
     let mut also = lock(&shared.also);
     if (escalates || overridden) && current.termination != termination && !also.contains(&termination) {
         also.push(termination);
@@ -367,22 +245,13 @@ impl Ops {
         if !lock(&self.shared.prepared).contains(fragment) {
             return None;
         }
-        self.shared
-            .routing()
-            .and_then(|routing| routing.fragment_of.get(fragment).copied())
+        self.shared.routing().and_then(|routing| routing.fragment_of.get(fragment).copied())
     }
 }
 
 impl CleanupOps for Ops {
-    fn perform(
-        &self,
-        step: CleanupStep,
-        fragment: Option<&Ident>,
-        _mode: CleanupMode,
-    ) -> Result<(), crate::module_api::ModuleError> {
-        if (step as u8) > (CleanupStep::DrainAndStopConsumers as u8)
-            || (step == CleanupStep::DrainAndStopConsumers && self.shared.drained.load(Ordering::Acquire))
-        {
+    fn perform(&self, step: CleanupStep, fragment: Option<&Ident>, _mode: CleanupMode) -> Result<(), crate::module_api::ModuleError> {
+        if (step as u8) > (CleanupStep::DrainAndStopConsumers as u8) || (step == CleanupStep::DrainAndStopConsumers && self.shared.drained.load(Ordering::Acquire)) {
             self.shared.closing.store(true, Ordering::Release);
         }
         match step {
@@ -395,45 +264,25 @@ impl CleanupOps for Ops {
                 let marks = lock(&self.shared.marks).clone();
                 let mut artifacts = lock(&self.shared.artifacts);
                 for artifact in artifacts.values_mut().flatten() {
-                    let span = artifact
-                        .continuity
-                        .first()
-                        .zip(artifact.continuity.last())
-                        .map(|(first, last)| {
-                            let start = self
-                                .shared
-                                .ctx
-                                .clocks
-                                .convert(first.first, self.shared.primary)
-                                .map(|point| point.floor());
-                            let end = super::state::ceil_convert(
-                                &self.shared.ctx.clocks,
-                                last.end,
-                                self.shared.primary,
-                            );
-                            start.and_then(|start| end.map(|end| (start, end)))
-                        });
+                    let span = artifact.continuity.first().zip(artifact.continuity.last()).map(|(first, last)| {
+                        let start = self.shared.ctx.clocks.convert(first.first, self.shared.primary).map(|point| point.floor());
+                        let end = super::state::ceil_convert(&self.shared.ctx.clocks, last.end, self.shared.primary);
+                        start.and_then(|start| end.map(|end| (start, end)))
+                    });
                     for (kind, time) in &marks {
                         let applies = match &span {
                             None => true,
                             Some(Err(_)) => true,
-                            Some(Ok((start, end))) => {
-                                match self.shared.ctx.clocks.convert(*time, self.shared.primary) {
-                                    Ok(at) => {
-                                        let at = at.floor();
-                                        at.try_cmp(*start).is_ok_and(|o| o.is_ge())
-                                            && at.try_cmp(*end).is_ok_and(|o| o.is_lt())
-                                    }
-                                    Err(_) => true,
+                            Some(Ok((start, end))) => match self.shared.ctx.clocks.convert(*time, self.shared.primary) {
+                                Ok(at) => {
+                                    let at = at.floor();
+                                    at.try_cmp(*start).is_ok_and(|o| o.is_ge()) && at.try_cmp(*end).is_ok_and(|o| o.is_lt())
                                 }
-                            }
+                                Err(_) => true,
+                            },
                         };
                         if applies {
-                            crate::manifest::mark_open_artifacts(
-                                std::slice::from_mut(artifact),
-                                kind.clone(),
-                                *time,
-                            );
+                            crate::manifest::mark_open_artifacts(std::slice::from_mut(artifact), kind.clone(), *time);
                         }
                     }
                 }
@@ -444,7 +293,11 @@ impl CleanupOps for Ops {
                 let _admission = lock(&self.shared.admission);
                 self.shared.frozen.store(true, Ordering::Release);
                 // RS-16: what the queues held was admitted and never delivered.
-                let mut undelivered: Vec<_> = self.shared.providers.iter().map(|slot| &slot.queue)
+                let mut undelivered: Vec<_> = self
+                    .shared
+                    .providers
+                    .iter()
+                    .map(|slot| &slot.queue)
                     .chain(self.shared.sinks.iter().map(|slot| &slot.queue))
                     .chain(self.shared.executors.iter().map(|slot| &slot.queue))
                     .flat_map(|queue| queue.clear())
@@ -457,14 +310,9 @@ impl CleanupOps for Ops {
                 // one panic would leave the rest neither cancelled nor kept. The panics
                 // are reported together (F25).
                 let total = pending.len();
-                let panicked = pending
-                    .into_iter()
-                    .filter(|handle| self.shared.cancel(*handle).is_err())
-                    .count();
+                let panicked = pending.into_iter().filter(|handle| self.shared.cancel(*handle).is_err()).count();
                 if panicked > 0 {
-                    return Err(crate::module_api::ModuleError::rejected(format!(
-                        "KC-30: a Module panicked during cleanup: Authority cancel(), {panicked} of {total} handles"
-                    )));
+                    return Err(crate::module_api::ModuleError::rejected(format!("KC-30: a Module panicked during cleanup: Authority cancel(), {panicked} of {total} handles")));
                 }
                 Ok(())
             }
@@ -477,12 +325,9 @@ impl CleanupOps for Ops {
                     return Ok(());
                 }
                 let stop_consumer = (CleanupStep::DrainAndStopConsumers as u8, instance);
-                let needs_stop = matches!(instance, Inst::Sink(_) | Inst::Executor(_))
-                    && !done.contains(&stop_consumer);
+                let needs_stop = matches!(instance, Inst::Sink(_) | Inst::Executor(_)) && !done.contains(&stop_consumer);
                 let Some(mut guard) = slot_lock(&self.shared, instance) else {
-                    return Err(crate::module_api::ModuleError::rejected(
-                        "KC-39: the instance is still held by an abandoned cleanup step",
-                    ));
+                    return Err(crate::module_api::ModuleError::rejected("KC-39: the instance is still held by an abandoned cleanup step"));
                 };
                 if needs_stop {
                     done.insert(stop_consumer);
@@ -519,9 +364,7 @@ impl CleanupOps for Ops {
                     return Ok(());
                 };
                 let mut done = lock(&self.shared.done);
-                if done.contains(&(CleanupStep::RestoreBaseline as u8, instance))
-                    || done.contains(&(step as u8, instance))
-                {
+                if done.contains(&(CleanupStep::RestoreBaseline as u8, instance)) || done.contains(&(step as u8, instance)) {
                     return Ok(());
                 }
                 done.insert((step as u8, instance));
@@ -549,27 +392,20 @@ impl CleanupOps for Ops {
                 }
                 let mode = current_stop_mode(&self.shared);
                 let mut done = lock(&self.shared.done);
-                if done.contains(&(CleanupStep::RestoreBaseline as u8, instance))
-                    || done.contains(&(step as u8, instance))
-                {
+                if done.contains(&(CleanupStep::RestoreBaseline as u8, instance)) || done.contains(&(step as u8, instance)) {
                     return Ok(());
                 }
                 let guard = match instance {
-                    Inst::Executor(i) => {
-                        try_slot(&self.shared.executors[i].object).map(CleanupGuard::Executor)
-                    }
+                    Inst::Executor(i) => try_slot(&self.shared.executors[i].object).map(CleanupGuard::Executor),
                     Inst::Sink(i) => try_slot(&self.shared.sinks[i].object).map(CleanupGuard::Sink),
                     Inst::Provider(_) => return Ok(()),
                 };
                 let Some(mut guard) = guard else {
-                    return Err(crate::module_api::ModuleError::rejected(
-                        "KC-39: the instance is still held by an abandoned cleanup step",
-                    ));
+                    return Err(crate::module_api::ModuleError::rejected("KC-39: the instance is still held by an abandoned cleanup step"));
                 };
                 done.insert((step as u8, instance));
                 drop(done);
-                let result = contain(|| guard.stop_consumer(mode))
-                    .map(|artifacts| keep_artifacts(&self.shared, instance, artifacts));
+                let result = contain(|| guard.stop_consumer(mode)).map(|artifacts| keep_artifacts(&self.shared, instance, artifacts));
                 if let Err(error) = &result {
                     super::pipeline::emit_device_lost(&self.shared, instance, error);
                 }
@@ -582,10 +418,7 @@ impl CleanupOps for Ops {
                 if let Some(collector) = self.shared.collector.get() {
                     *lock(&self.shared.counters) = Some(collector.counters());
                 }
-                *lock(&self.shared.link_drops) = lock(&self.shared.links)
-                    .iter()
-                    .map(|(_, link)| link.drops())
-                    .collect();
+                *lock(&self.shared.link_drops) = lock(&self.shared.links).iter().map(|(_, link)| link.drops()).collect();
                 Ok(())
             }
         }
@@ -596,10 +429,7 @@ impl CleanupOps for Ops {
 fn keep_artifacts(shared: &Shared, instance: Inst, artifacts: Vec<crate::manifest::ArtifactRef>) {
     if let Inst::Sink(i) = instance {
         if !artifacts.is_empty() {
-            lock(&shared.artifacts)
-                .entry(shared.sinks[i].output.clone())
-                .or_default()
-                .extend(artifacts);
+            lock(&shared.artifacts).entry(shared.sinks[i].output.clone()).or_default().extend(artifacts);
         }
     }
 }
@@ -618,10 +448,7 @@ enum CleanupGuard<'a> {
 }
 
 impl CleanupGuard<'_> {
-    fn stop_consumer(
-        &mut self,
-        mode: StopMode,
-    ) -> Result<Vec<crate::manifest::ArtifactRef>, crate::module_api::ModuleError> {
+    fn stop_consumer(&mut self, mode: StopMode) -> Result<Vec<crate::manifest::ArtifactRef>, crate::module_api::ModuleError> {
         match self {
             Self::Sink(g) => g.stop(mode),
             Self::Executor(g) => g.stop(mode).map(|()| Vec::new()),

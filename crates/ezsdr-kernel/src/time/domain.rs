@@ -78,29 +78,12 @@ pub struct ClockDomain {
 impl ClockDomain {
     /// A root timekeeper (TM-3).
     pub fn root(id: ClockDomainId, tick_rate: Rational, epoch: EpochRef) -> ClockDomain {
-        ClockDomain {
-            id,
-            kind: ClockDomainKind::Root { tick_rate, epoch },
-            ended_at: None,
-        }
+        ClockDomain { id, kind: ClockDomainKind::Root { tick_rate, epoch }, ended_at: None }
     }
 
     /// An exact division of a root (TM-3).
-    pub fn derived(
-        id: ClockDomainId,
-        root: ClockDomainId,
-        root_ticks_per_tick: Rational,
-        origin: i64,
-    ) -> ClockDomain {
-        ClockDomain {
-            id,
-            kind: ClockDomainKind::Derived {
-                root,
-                root_ticks_per_tick,
-                origin,
-            },
-            ended_at: None,
-        }
+    pub fn derived(id: ClockDomainId, root: ClockDomainId, root_ticks_per_tick: Rational, origin: i64) -> ClockDomain {
+        ClockDomain { id, kind: ClockDomainKind::Derived { root, root_ticks_per_tick, origin }, ended_at: None }
     }
 
     /// The root of this domain; a `Root` is its own root (TM-4).
@@ -115,15 +98,7 @@ impl ClockDomain {
     fn terms(&self) -> (u64, u64, i64) {
         match &self.kind {
             ClockDomainKind::Root { .. } => (1, 1, 0),
-            ClockDomainKind::Derived {
-                root_ticks_per_tick,
-                origin,
-                ..
-            } => (
-                root_ticks_per_tick.num(),
-                root_ticks_per_tick.den(),
-                *origin,
-            ),
+            ClockDomainKind::Derived { root_ticks_per_tick, origin, .. } => (root_ticks_per_tick.num(), root_ticks_per_tick.den(), *origin),
         }
     }
 }
@@ -210,28 +185,9 @@ impl ClockRegistry {
     pub fn new() -> ClockRegistry {
         let ghz = Rational::new(1_000_000_000, 1).expect("1 GHz is a valid rational");
         let mut domains = BTreeMap::new();
-        domains.insert(
-            ClockDomainId::UTC,
-            ClockDomain::root(ClockDomainId::UTC, ghz, EpochRef::Utc1970 {}),
-        );
-        domains.insert(
-            ClockDomainId::HOST_MONOTONIC,
-            ClockDomain::root(
-                ClockDomainId::HOST_MONOTONIC,
-                ghz,
-                EpochRef::Arbitrary {
-                    set_by: "host.monotonic".to_owned(),
-                },
-            ),
-        );
-        ClockRegistry {
-            inner: RwLock::new(Inner {
-                domains,
-                records: Vec::new(),
-                declared: Vec::new(),
-                next_local: ClockDomainId::FIRST_ALLOCATABLE,
-            }),
-        }
+        domains.insert(ClockDomainId::UTC, ClockDomain::root(ClockDomainId::UTC, ghz, EpochRef::Utc1970 {}));
+        domains.insert(ClockDomainId::HOST_MONOTONIC, ClockDomain::root(ClockDomainId::HOST_MONOTONIC, ghz, EpochRef::Arbitrary { set_by: "host.monotonic".to_owned() }));
+        ClockRegistry { inner: RwLock::new(Inner { domains, records: Vec::new(), declared: Vec::new(), next_local: ClockDomainId::FIRST_ALLOCATABLE }) }
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
@@ -276,11 +232,7 @@ impl ClockRegistry {
                     return Err(TimeError::LimitExceeded);
                 }
             }
-            ClockDomainKind::Derived {
-                root,
-                root_ticks_per_tick,
-                ..
-            } => {
+            ClockDomainKind::Derived { root, root_ticks_per_tick, .. } => {
                 if root_ticks_per_tick.exceeds(RATIO_TERM_CAP) {
                     return Err(TimeError::LimitExceeded);
                 }
@@ -288,10 +240,7 @@ impl ClockRegistry {
                     None => return Err(TimeError::UnknownDomain { id: *root }),
                     Some(r) if !matches!(r.kind, ClockDomainKind::Root { .. }) => {
                         // TM-3: a Derived domain names a Root directly; no chains.
-                        return Err(TimeError::Unrelated {
-                            a: domain.id,
-                            b: *root,
-                        });
+                        return Err(TimeError::Unrelated { a: domain.id, b: *root });
                     }
                     Some(_) => {}
                 }
@@ -308,11 +257,7 @@ impl ClockRegistry {
 
     /// The registered domain, or `UnknownDomain` (TM-12).
     pub fn get(&self, id: ClockDomainId) -> Result<ClockDomain, TimeError> {
-        self.read()
-            .domains
-            .get(&id)
-            .cloned()
-            .ok_or(TimeError::UnknownDomain { id })
+        self.read().domains.get(&id).cloned().ok_or(TimeError::UnknownDomain { id })
     }
 
     /// True when the id is registered (TM-12).
@@ -324,21 +269,11 @@ impl ClockRegistry {
     /// with `Stopped`; a domain is otherwise immutable (TM-12, TM-13c).
     pub fn end(&self, id: ClockDomainId, at: TimePoint) -> Result<(), TimeError> {
         let mut inner = self.write();
-        let root = inner
-            .domains
-            .get(&id)
-            .ok_or(TimeError::UnknownDomain { id })?
-            .root_id();
+        let root = inner.domains.get(&id).ok_or(TimeError::UnknownDomain { id })?.root_id();
         if at.domain != root {
-            return Err(TimeError::DomainMismatch {
-                expected: root,
-                found: at.domain,
-            });
+            return Err(TimeError::DomainMismatch { expected: root, found: at.domain });
         }
-        let domain = inner
-            .domains
-            .get_mut(&id)
-            .ok_or(TimeError::UnknownDomain { id })?;
+        let domain = inner.domains.get_mut(&id).ok_or(TimeError::UnknownDomain { id })?;
         if domain.ended_at.is_some() {
             return Err(TimeError::Stopped);
         }
@@ -354,12 +289,7 @@ impl ClockRegistry {
     /// stream's first transmit clock; a later clock's origin is the one its Vocabulary places.
     ///
     /// Rule: TM-13a.
-    pub fn declare_sample_clock(
-        &self,
-        stream: ResourceId,
-        root: ClockDomainId,
-        root_ticks_per_tick: Rational,
-    ) -> Result<SampleClockHandle, TimeError> {
+    pub fn declare_sample_clock(&self, stream: ResourceId, root: ClockDomainId, root_ticks_per_tick: Rational) -> Result<SampleClockHandle, TimeError> {
         if root_ticks_per_tick.exceeds(RATIO_TERM_CAP) {
             return Err(TimeError::LimitExceeded);
         }
@@ -372,12 +302,7 @@ impl ClockRegistry {
                 return Err(TimeError::NotARoot { id: root });
             }
         }
-        let handle = SampleClockHandle {
-            id: self.allocate_id()?,
-            root,
-            root_ticks_per_tick,
-            stream,
-        };
+        let handle = SampleClockHandle { id: self.allocate_id()?, root, root_ticks_per_tick, stream };
         // TM-12 (KA-2): the declaration is recorded, so that a SpecTime can resolve
         // against a receive clock that is registered only at its first sample.
         self.write().declared.push(handle.clone());
@@ -397,17 +322,8 @@ impl ClockRegistry {
 
     /// Registers a declared SampleClock once its origin is known, and records it for
     /// the Manifest. `origin` is a root tick (TM-13b, TM-13d, TM-13e).
-    pub fn register_sample_clock(
-        &self,
-        handle: &SampleClockHandle,
-        origin: i64,
-    ) -> Result<ClockDomainId, TimeError> {
-        self.register(ClockDomain::derived(
-            handle.id,
-            handle.root,
-            handle.root_ticks_per_tick,
-            origin,
-        ))?;
+    pub fn register_sample_clock(&self, handle: &SampleClockHandle, origin: i64) -> Result<ClockDomainId, TimeError> {
+        self.register(ClockDomain::derived(handle.id, handle.root, handle.root_ticks_per_tick, origin))?;
         let nominal_rate = self.nominal_rate(handle.id)?;
         self.write().records.push(SampleClockRecord {
             stream: handle.stream.clone(),
@@ -430,21 +346,11 @@ impl ClockRegistry {
     /// `root_ticks_per_tick` (TM-10).
     pub fn nominal_rate(&self, id: ClockDomainId) -> Result<Rational, TimeError> {
         let inner = self.read();
-        let domain = inner
-            .domains
-            .get(&id)
-            .ok_or(TimeError::UnknownDomain { id })?;
+        let domain = inner.domains.get(&id).ok_or(TimeError::UnknownDomain { id })?;
         match &domain.kind {
             ClockDomainKind::Root { tick_rate, .. } => Ok(*tick_rate),
-            ClockDomainKind::Derived {
-                root,
-                root_ticks_per_tick,
-                ..
-            } => {
-                let root = inner
-                    .domains
-                    .get(root)
-                    .ok_or(TimeError::UnknownDomain { id: *root })?;
+            ClockDomainKind::Derived { root, root_ticks_per_tick, .. } => {
+                let root = inner.domains.get(root).ok_or(TimeError::UnknownDomain { id: *root })?;
                 let ClockDomainKind::Root { tick_rate, .. } = root.kind else {
                     return Err(TimeError::Unrelated { a: id, b: root.id });
                 };
@@ -456,20 +362,10 @@ impl ClockRegistry {
     /// Builds the conversion between two exactly related domains, that is, two
     /// domains with the same root. Different roots fail with `Unrelated`: the only
     /// path between them is a [`ClockRelation`](super::ClockRelation) (TM-4, TM-5).
-    pub fn conversion(
-        &self,
-        from: ClockDomainId,
-        to: ClockDomainId,
-    ) -> Result<ExactConversion, TimeError> {
+    pub fn conversion(&self, from: ClockDomainId, to: ClockDomainId) -> Result<ExactConversion, TimeError> {
         let inner = self.read();
-        let a = inner
-            .domains
-            .get(&from)
-            .ok_or(TimeError::UnknownDomain { id: from })?;
-        let b = inner
-            .domains
-            .get(&to)
-            .ok_or(TimeError::UnknownDomain { id: to })?;
+        let a = inner.domains.get(&from).ok_or(TimeError::UnknownDomain { id: from })?;
+        let b = inner.domains.get(&to).ok_or(TimeError::UnknownDomain { id: to })?;
         if a.root_id() != b.root_id() {
             return Err(TimeError::Unrelated { a: from, b: to });
         }
@@ -494,25 +390,12 @@ impl ClockRegistry {
         let from_rate = self.nominal_rate(d.domain)?;
         let to_rate = self.nominal_rate(to)?;
         // ticks_to = ticks · (num_to/den_to) / (num_from/den_from)
-        let numerator = (d.ticks as i128)
-            .checked_mul(to_rate.num() as i128)
-            .and_then(|v| v.checked_mul(from_rate.den() as i128))
-            .ok_or(TimeError::Overflow)?;
-        let denominator = (to_rate.den() as i128)
-            .checked_mul(from_rate.num() as i128)
-            .ok_or(TimeError::Overflow)?;
-        let floor_ticks =
-            i64::try_from(numerator.div_euclid(denominator)).map_err(|_| TimeError::Overflow)?;
+        let numerator = (d.ticks as i128).checked_mul(to_rate.num() as i128).and_then(|v| v.checked_mul(from_rate.den() as i128)).ok_or(TimeError::Overflow)?;
+        let denominator = (to_rate.den() as i128).checked_mul(from_rate.num() as i128).ok_or(TimeError::Overflow)?;
+        let floor_ticks = i64::try_from(numerator.div_euclid(denominator)).map_err(|_| TimeError::Overflow)?;
         let rem = numerator.rem_euclid(denominator);
         let floor = Duration::new(to, floor_ticks);
-        if rem == 0 {
-            Ok(Rescaled::Exact { duration: floor })
-        } else {
-            Ok(Rescaled::Inexact {
-                floor,
-                remainder: super::rational_from_u128(rem as u128, denominator as u128)?,
-            })
-        }
+        if rem == 0 { Ok(Rescaled::Exact { duration: floor }) } else { Ok(Rescaled::Inexact { floor, remainder: super::rational_from_u128(rem as u128, denominator as u128)? }) }
     }
 
     /// Orders two durations exactly, across domains if need be, by cross-multiplying
@@ -528,14 +411,8 @@ impl ClockRegistry {
         }
         let ra = self.nominal_rate(a.domain)?;
         let rb = self.nominal_rate(b.domain)?;
-        let lhs = (a.ticks as i128)
-            .checked_mul(rb.num() as i128)
-            .and_then(|v| v.checked_mul(ra.den() as i128))
-            .ok_or(TimeError::Overflow)?;
-        let rhs = (b.ticks as i128)
-            .checked_mul(ra.num() as i128)
-            .and_then(|v| v.checked_mul(rb.den() as i128))
-            .ok_or(TimeError::Overflow)?;
+        let lhs = (a.ticks as i128).checked_mul(rb.num() as i128).and_then(|v| v.checked_mul(ra.den() as i128)).ok_or(TimeError::Overflow)?;
+        let rhs = (b.ticks as i128).checked_mul(ra.num() as i128).and_then(|v| v.checked_mul(rb.den() as i128)).ok_or(TimeError::Overflow)?;
         Ok(lhs.cmp(&rhs))
     }
 }

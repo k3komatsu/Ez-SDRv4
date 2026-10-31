@@ -45,11 +45,7 @@ impl DescriptionExt for Description {
     }
 
     fn stream_rate(&self, configuration: &BTreeMap<Key, Value>, dir: Dir, k: usize) -> f64 {
-        configuration
-            .get(&Key::parse(&ezsdr_radio::keys::stream(dir.name(), k as u32)).expect("a declared radio key"))
-            .and_then(Value::as_scalar)
-            .and_then(scalar_number)
-            .unwrap_or(0.0)
+        configuration.get(&Key::parse(&ezsdr_radio::keys::stream(dir.name(), k as u32)).expect("a declared radio key")).and_then(Value::as_scalar).and_then(scalar_number).unwrap_or(0.0)
     }
 
     fn settings(&self, configuration: &BTreeMap<Key, Value>, dir: Dir, k: usize, chan: usize) -> Settings {
@@ -62,11 +58,7 @@ impl DescriptionExt for Description {
     }
 
     fn applied_key(&self, dir: Dir, chan: usize, k: usize, leaf: &str) -> String {
-        if leaf == ezsdr_radio::keys::STREAM_LEAF {
-            ezsdr_radio::keys::stream(dir.name(), k as u32)
-        } else {
-            ezsdr_radio::keys::channel(dir.name(), chan as u32, leaf)
-        }
+        if leaf == ezsdr_radio::keys::STREAM_LEAF { ezsdr_radio::keys::stream(dir.name(), k as u32) } else { ezsdr_radio::keys::channel(dir.name(), chan as u32, leaf) }
     }
 }
 
@@ -83,18 +75,12 @@ pub(crate) fn scalar_number(scalar: &Scalar) -> Option<f64> {
 }
 
 fn number(configuration: &BTreeMap<Key, Value>, name: &str) -> Option<f64> {
-    configuration
-        .get(&Key::parse(name).expect("a declared radio key"))
-        .and_then(Value::as_scalar)
-        .and_then(scalar_number)
+    configuration.get(&Key::parse(name).expect("a declared radio key")).and_then(Value::as_scalar).and_then(scalar_number)
 }
 
 fn text(configuration: &BTreeMap<Key, Value>, name: &str) -> Option<String> {
-    configuration
-        .get(&Key::parse(name).expect("a declared radio key"))
-        .and_then(Value::as_scalar)
-        .and_then(|scalar| match scalar {
-            Scalar::Str(value) => Some(value.clone()),
-            _ => None,
-        })
+    configuration.get(&Key::parse(name).expect("a declared radio key")).and_then(Value::as_scalar).and_then(|scalar| match scalar {
+        Scalar::Str(value) => Some(value.clone()),
+        _ => None,
+    })
 }

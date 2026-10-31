@@ -28,23 +28,16 @@ pub struct AdmittedTarget {
 /// uncertain, and an uncertain transmit instant is not a transmit instant.
 ///
 /// Rule: SC-23a, SC-23b.
-pub fn admit_burst_target(
-    registry: &ClockRegistry,
-    target: TimePoint,
-    tx_domain: ClockDomainId,
-) -> Result<AdmittedTarget, StreamError> {
+pub fn admit_burst_target(registry: &ClockRegistry, target: TimePoint, tx_domain: ClockDomainId) -> Result<AdmittedTarget, StreamError> {
     if target.domain() == tx_domain {
-        return Ok(AdmittedTarget { target, requested_target: None,
-        });
+        return Ok(AdmittedTarget { target, requested_target: None });
     }
     // SC-23b: `Unrelated` propagates out of `conversion`, which is the refusal.
     match registry.conversion(target.domain(), tx_domain)?.apply(target)? {
-        Converted::Exact { point } => Ok(AdmittedTarget { target: point, requested_target: None,
-        }),
+        Converted::Exact { point } => Ok(AdmittedTarget { target: point, requested_target: None }),
         Converted::Inexact { floor, .. } => {
             let next = floor.checked_add(Duration::new(tx_domain, 1))?;
-            Ok(AdmittedTarget { target: next, requested_target: Some(target),
-            })
+            Ok(AdmittedTarget { target: next, requested_target: Some(target) })
         }
     }
 }
@@ -108,13 +101,7 @@ impl LatePolicy {
     /// towards reporting slightly more lateness, never less.
     ///
     /// Rule: SC-27, TM-21.
-    pub fn decide(
-        self,
-        registry: &ClockRegistry,
-        target: TimePoint,
-        now: TimePoint,
-        min_lead: Duration,
-    ) -> Result<LateOutcome, TimeError> {
+    pub fn decide(self, registry: &ClockRegistry, target: TimePoint, now: TimePoint, min_lead: Duration) -> Result<LateOutcome, TimeError> {
         let host = ClockDomainId::HOST_MONOTONIC;
         // SC-27 declares `min_lead` in `host.monotonic`; checked up front so that
         // the same misuse is not silently tolerated on the on-time path and
@@ -125,10 +112,7 @@ impl LatePolicy {
             return Ok(LateOutcome::OnTime {});
         }
         let lead_host = registry.rescale(lead, host)?.floor();
-        let late_by = Duration::new(
-            host,
-            min_lead_ticks.checked_sub(lead_host.ticks_in(host)?).ok_or(TimeError::Overflow)?,
-        );
+        let late_by = Duration::new(host, min_lead_ticks.checked_sub(lead_host.ticks_in(host)?).ok_or(TimeError::Overflow)?);
         Ok(match self {
             LatePolicy::RejectAtPlan => LateOutcome::PlanViolation { late_by },
             LatePolicy::SendAsapAndFlag => LateOutcome::SendAsap { late_by },
@@ -262,10 +246,7 @@ impl Open {
             blocks: self.blocks,
             samples: self.samples,
             // SC-26, SC-29a: complete repetitions of the declared waveform.
-            wraps: self
-                .waveform_len
-                .filter(|l| *l > 0)
-                .map_or(0, |l| (self.samples / l as u64).min(u32::MAX as u64) as u32),
+            wraps: self.waveform_len.filter(|l| *l > 0).map_or(0, |l| (self.samples / l as u64).min(u32::MAX as u64) as u32),
             late_by: self.late_by,
             end,
         }
@@ -299,12 +280,7 @@ impl BurstTracker {
     pub fn state(&self) -> BurstState {
         match &self.open {
             None => BurstState::Idle,
-            Some(o) => BurstState::InBurst {
-                target: o.target,
-                expected_next: o.expected_next,
-                blocks: o.blocks,
-                samples: o.samples,
-            },
+            Some(o) => BurstState::InBurst { target: o.target, expected_next: o.expected_next, blocks: o.blocks, samples: o.samples },
         }
     }
 
@@ -317,24 +293,14 @@ impl BurstTracker {
     /// an error path the Provider did not plan for.
     ///
     /// Rule: SC-24, SC-25, SC-26, SC-29, SC-29a.
-    pub fn on_block(
-        &mut self,
-        h: &BlockHeader,
-        open: Option<BurstOpen>,
-    ) -> Result<BurstStep, StreamError> {
+    pub fn on_block(&mut self, h: &BlockHeader, open: Option<BurstOpen>) -> Result<BurstStep, StreamError> {
         if h.first_sample_time.domain() != self.domain {
-            return Err(StreamError::Time(TimeError::DomainMismatch {
-                expected: self.domain,
-                found: h.first_sample_time.domain(),
-            }));
+            return Err(StreamError::Time(TimeError::DomainMismatch { expected: self.domain, found: h.first_sample_time.domain() }));
         }
         let sob = h.flags.contains(BlockFlags::START_OF_BURST);
         let eob = h.flags.contains(BlockFlags::END_OF_BURST);
         if sob != open.is_some() {
-            return Err(StreamError::InvalidBlock {
-                reason: "a BurstOpen accompanies exactly the block that carries START_OF_BURST"
-                    .to_owned(),
-            });
+            return Err(StreamError::InvalidBlock { reason: "a BurstOpen accompanies exactly the block that carries START_OF_BURST".to_owned() });
         }
         let t = h.first_sample_time;
         let end = h.end_time()?;
@@ -381,29 +347,17 @@ impl BurstTracker {
                 } else {
                     None
                 };
-                Ok(BurstStep::Discontinuity { expected, got: t, closed, then_ended,
-                })
+                Ok(BurstStep::Discontinuity { expected, got: t, closed, then_ended })
             }
         }
     }
 
     fn begin(&mut self, t: TimePoint, end: TimePoint, len: u32, open: BurstOpen) {
         let late_by = match open.late {
-            Some(LateOutcome::SendAsap { late_by })
-            | Some(LateOutcome::Drop { late_by })
-            | Some(LateOutcome::PlanViolation { late_by }) => Some(late_by),
+            Some(LateOutcome::SendAsap { late_by }) | Some(LateOutcome::Drop { late_by }) | Some(LateOutcome::PlanViolation { late_by }) => Some(late_by),
             _ => None,
         };
-        self.open = Some(Open {
-            target: t,
-            requested_target: open.requested_target,
-            expected_next: end,
-            blocks: 1,
-            samples: len as u64,
-            waveform_len: open.waveform_len,
-            late_by,
-            actual_start: None,
-        });
+        self.open = Some(Open { target: t, requested_target: open.requested_target, expected_next: end, blocks: 1, samples: len as u64, waveform_len: open.waveform_len, late_by, actual_start: None });
     }
 
     /// The late outcome of the open burst, for a burst opened by a time jump in a
@@ -413,9 +367,7 @@ impl BurstTracker {
     pub fn set_late(&mut self, late: LateOutcome) {
         if let Some(o) = self.open.as_mut() {
             o.late_by = match late {
-                LateOutcome::SendAsap { late_by }
-                | LateOutcome::Drop { late_by }
-                | LateOutcome::PlanViolation { late_by } => Some(late_by),
+                LateOutcome::SendAsap { late_by } | LateOutcome::Drop { late_by } | LateOutcome::PlanViolation { late_by } => Some(late_by),
                 LateOutcome::OnTime {} => None,
             };
         }

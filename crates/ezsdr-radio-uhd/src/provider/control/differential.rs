@@ -7,20 +7,20 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
 
+use super::super::test_support::target_of;
 use ezsdr_kernel::event::Action;
 use ezsdr_kernel::module_api::{ActionReceiver, UpdateClass};
 use ezsdr_kernel::spec::{Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Rational, TimePoint};
 use ezsdr_radio::kinds;
-use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Stream, NO_RELEASE, plan};
-use super::super::test_support::target_of;
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, NO_RELEASE, Stream, plan};
 use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
 
 use ezsdr_kernel::id::ClockDomainId;
 
-use super::Control;
 use super::super::core::{booked_stream, key, lock};
+use super::Control;
 use crate::device::{Device, Dir, FakeConfig};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
@@ -88,10 +88,15 @@ fn terms(direction: Direction) -> Terms {
 /// and the timeds' floor (RM-21, design 38 D2 (1)); `floored` says, by op index, each timed
 /// update's instant and whether its requested one held.
 fn layout_schedule(sequence: &Sequence, terms: &Terms) -> (Vec<Entry>, BTreeMap<usize, (i64, bool)>) {
-    let mut entries: Vec<Entry> = sequence.faults.iter().enumerate().map(|(index, (at, _))| {
-        let e = terms.t0 + terms.ticks(*at);
-        Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
-    }).collect();
+    let mut entries: Vec<Entry> = sequence
+        .faults
+        .iter()
+        .enumerate()
+        .map(|(index, (at, _))| {
+            let e = terms.t0 + terms.ticks(*at);
+            Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
+        })
+        .collect();
     let mut cold = Vec::new();
     let mut timed: Vec<i64> = Vec::new();
     let mut floored = BTreeMap::new();
@@ -133,12 +138,16 @@ fn layout_items(sequence: &Sequence, terms: &Terms) -> Vec<Item> {
     for entry in schedule {
         if let Event::Op(index) = entry.event {
             if let Op::Cold { direction, change: Change::Channels(count), .. } = *ops[index] {
-                if direction != terms.stream.direction { continue; }
+                if direction != terms.stream.direction {
+                    continue;
+                }
                 let desired = Channels::first(u32::from(count));
                 let mut sub = 0;
                 for channel in 0..2 {
                     let wanted = desired.contains(channel);
-                    if config.channels.contains(channel) == wanted { continue; }
+                    if config.channels.contains(channel) == wanted {
+                        continue;
+                    }
                     config.channels = if wanted { config.channels.with(channel) } else { config.channels.without(channel) };
                     items.push(Item { e: entry.e, seq: entry.seq * 2 + sub, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config) });
                     sub += 1;
@@ -157,7 +166,9 @@ fn layout_items(sequence: &Sequence, terms: &Terms) -> Vec<Item> {
                         Change::Channels(_) => unreachable!("channel changes are expanded above"),
                         Change::Rate(rate) => {
                             config.ratio = terms.ratio(rate);
-                            if config.channels.is_empty() { continue; }
+                            if config.channels.is_empty() {
+                                continue;
+                            }
                         }
                     }
                     Kind::Cold(config)
@@ -186,8 +197,12 @@ fn rm_26_the_timeline_against_uhd_control() {
             if let Op::Cold { direction, change: Change::Channels(next), .. } = *op {
                 let index = usize::from(direction == Direction::Tx);
                 let before = memberships[index];
-                if before < 2 && next == 2 { became_two += 1; }
-                if before == 2 && next < 2 { reduced_from_two += 1; }
+                if before < 2 && next == 2 {
+                    became_two += 1;
+                }
+                if before == 2 && next < 2 {
+                    reduced_from_two += 1;
+                }
                 memberships[index] = next;
             }
         }
@@ -229,12 +244,15 @@ fn rm_26_the_timeline_against_uhd_control() {
     // fails the series' own test.
     let stalled = Sequence {
         class: Class::Loss,
-        rounds: vec![(0, vec![
-            Op::Cold { direction: Direction::Rx, change: Change::Channels(0), at_ns: None },
-            Op::Timed { direction: Direction::Rx, gain_db: 1.0, at_ns: Some(10_400_000) },
-            Op::Timed { direction: Direction::Rx, gain_db: 2.0, at_ns: Some(10_400_000) },
-            Op::Timed { direction: Direction::Tx, gain_db: 3.0, at_ns: Some(10_400_000) },
-        ])],
+        rounds: vec![(
+            0,
+            vec![
+                Op::Cold { direction: Direction::Rx, change: Change::Channels(0), at_ns: None },
+                Op::Timed { direction: Direction::Rx, gain_db: 1.0, at_ns: Some(10_400_000) },
+                Op::Timed { direction: Direction::Rx, gain_db: 2.0, at_ns: Some(10_400_000) },
+                Op::Timed { direction: Direction::Tx, gain_db: 3.0, at_ns: Some(10_400_000) },
+            ],
+        )],
         faults: vec![(10_900_000, Fault::Loss)],
     };
     let mut expected = expect(&stalled);
@@ -291,9 +309,7 @@ fn release_instants(sequence: &Sequence) -> Vec<i64> {
 /// Whether the expected plan gives `channel` a segment at or after `t`: one covering `t`, or
 /// one beginning later (UR-24's `targets`).
 fn reaches(plan: &[ezsdr_radio::timeline::Segment], channel: u32, t: i64) -> bool {
-    plan.iter().any(|segment| {
-        segment.config.channels.contains(channel) && (segment.origin >= t || (segment.origin <= t && segment.cut.is_none_or(|cut| segment.instant(cut).unwrap() > t)))
-    })
+    plan.iter().any(|segment| segment.config.channels.contains(channel) && (segment.origin >= t || (segment.origin <= t && segment.cut.is_none_or(|cut| segment.instant(cut).unwrap() > t))))
 }
 
 /// The commands whose row the comparison leaves out, decided from the sequence alone (design
@@ -339,8 +355,7 @@ fn ceilings(sequence: &Sequence) -> Vec<(String, f64, i64)> {
 /// refused, and after a loss nothing more is booked, every pending command settling at it.
 fn expect(sequence: &Sequence) -> Record {
     let (rx, tx) = (terms(Direction::Rx), terms(Direction::Tx));
-    let clocks = |terms: &Terms| plan(&terms.stream, &layout_items(sequence, terms)).unwrap().iter()
-        .map(|s| (s.origin, s.cut.map(|k| s.instant(k).unwrap()))).collect();
+    let clocks = |terms: &Terms| plan(&terms.stream, &layout_items(sequence, terms)).unwrap().iter().map(|s| (s.origin, s.cut.map(|k| s.instant(k).unwrap()))).collect();
     let loss = loss_of(sequence);
     let (_, floored) = layout_schedule(sequence, &rx);
     let mut timed = Vec::new();
@@ -391,11 +406,21 @@ impl ActionReceiver for NoActions {
 /// A receive link that takes nothing: uhd-rx does not run.
 struct NoLink;
 impl DataLink for NoLink {
-    fn publish(&self, _block: BlockRef) -> PublishOutcome { PublishOutcome::Accepted }
-    fn receive(&self) -> Option<(BlockRef, DropCarry)> { None }
-    fn drops(&self) -> u64 { 0 }
-    fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
-    fn policy(&self) -> BackPressure { BackPressure::DropOldest }
+    fn publish(&self, _block: BlockRef) -> PublishOutcome {
+        PublishOutcome::Accepted
+    }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        None
+    }
+    fn drops(&self) -> u64 {
+        0
+    }
+    fn take_drop_carry(&self) -> DropCarry {
+        DropCarry::default()
+    }
+    fn policy(&self) -> BackPressure {
+        BackPressure::DropOldest
+    }
 }
 
 /// Books a sequence on uhd-control as its loop does (MA-14b): each round's Actions at its
@@ -413,11 +438,7 @@ fn run(sequence: &Sequence) -> Record {
     let (to_tx, from_tx) = channel();
     let mut config = core.description.defaults();
     config.insert(key("radio.tx.c0.stream"), Value::from(0));
-    let start = super::Start {
-        t0: T0,
-        rx: vec![Some((ezsdr_radio::timeline::Channels::first(1), 200))],
-        tx: vec![Some((tx, ezsdr_radio::timeline::Channels::first(1)))],
-    };
+    let start = super::Start { t0: T0, rx: vec![Some((ezsdr_radio::timeline::Channels::first(1), 200))], tx: vec![Some((tx, ezsdr_radio::timeline::Channels::first(1)))] };
     let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
     let ticks = |ns: i64| ns / 5;
     let at = |ns: Option<i64>| ns.map(|ns| AbsoluteDeadline::new(core.at(T0 + ticks(ns))));
@@ -441,25 +462,35 @@ fn run(sequence: &Sequence) -> Record {
                         let mut changed = false;
                         for (channel, member) in memberships[index].iter_mut().enumerate() {
                             let selected = channel < usize::from(count);
-                            if *member == selected { continue; }
+                            if *member == selected {
+                                continue;
+                            }
                             changed = true;
                             *member = selected;
-                            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), Action::UpdateParameter {
-                                target: target_of(&core.id),
-                                key: key(&format!("radio.{side}.c{channel}.stream")),
-                                value: Value::from(if selected { 0 } else { -1 }),
-                                class: UpdateClass::Cold,
-                                at: at(at_ns),
-                            }, Some(core.id.clone())));
+                            control.book(ezsdr_kernel::module_api::Dispatched::new(
+                                ezsdr_kernel::event::ActionId(1),
+                                Action::UpdateParameter {
+                                    target: target_of(&core.id),
+                                    key: key(&format!("radio.{side}.c{channel}.stream")),
+                                    value: Value::from(if selected { 0 } else { -1 }),
+                                    class: UpdateClass::Cold,
+                                    at: at(at_ns),
+                                },
+                                Some(core.id.clone()),
+                            ));
                         }
                         if !changed {
-                            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), Action::UpdateParameter {
-                                target: target_of(&core.id),
-                                key: key(&format!("radio.{side}.c0.stream")),
-                                value: Value::from(if count == 0 { -1 } else { 0 }),
-                                class: UpdateClass::Cold,
-                                at: at(at_ns),
-                            }, Some(core.id.clone())));
+                            control.book(ezsdr_kernel::module_api::Dispatched::new(
+                                ezsdr_kernel::event::ActionId(1),
+                                Action::UpdateParameter {
+                                    target: target_of(&core.id),
+                                    key: key(&format!("radio.{side}.c0.stream")),
+                                    value: Value::from(if count == 0 { -1 } else { 0 }),
+                                    class: UpdateClass::Cold,
+                                    at: at(at_ns),
+                                },
+                                Some(core.id.clone()),
+                            ));
                         }
                     }
                     continue;
@@ -477,11 +508,21 @@ fn run(sequence: &Sequence) -> Record {
                                 Change::Channels(n) => ("c0.stream", Value::from(if n == 0 { -1 } else { 0 })),
                                 Change::Rate(rate) => ("s0.sample_rate_hz", Value::num(rate as f64).unwrap()),
                             };
-                            (Action::UpdateParameter { target: target_of(&core.id), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) }, core.id.clone())
+                            (
+                                Action::UpdateParameter { target: target_of(&core.id), key: key(&format!("radio.{}.{name}", side(direction))), value, class: UpdateClass::Cold, at: at(at_ns) },
+                                core.id.clone(),
+                            )
                         }
-                        Op::Timed { direction, gain_db, at_ns } => (Action::UpdateParameter {
-                            target: target_of(&core.id), key: key(&format!("radio.{}.c0.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
-                        }, core.id.clone()),
+                        Op::Timed { direction, gain_db, at_ns } => (
+                            Action::UpdateParameter {
+                                target: target_of(&core.id),
+                                key: key(&format!("radio.{}.c0.gain_db", side(direction))),
+                                value: Value::num(gain_db).unwrap(),
+                                class: UpdateClass::HardwareTimed,
+                                at: at(at_ns),
+                            },
+                            core.id.clone(),
+                        ),
                     };
                     control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), action, Some(node)));
                 }
@@ -519,23 +560,24 @@ fn run(sequence: &Sequence) -> Record {
     }
     let records = core.clocks.sample_clock_records();
     let clocks_of = |stream| records.iter().filter(|r| r.stream == stream).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect();
-    let late = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+    let late = events
+        .drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0))
+        .into_iter()
         .filter(|event| event.kind.as_str() == kinds::LATE_COMMAND)
         .filter_map(|event| {
             let key = event.payload["key"].as_str()?.to_owned();
-            (key.ends_with(".gain_db") || key.ends_with(".frequency_hz")).then(|| {
-                (Some(key), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap())
-            })
+            (key.ends_with(".gain_db") || key.ends_with(".frequency_hz"))
+                .then(|| (Some(key), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap()))
         })
         .collect();
     let rec = lock(&core.rec);
-    let rows: Vec<(String, f64, i64, bool)> = rec.applied.iter()
+    let rows: Vec<(String, f64, i64, bool)> = rec
+        .applied
+        .iter()
         .filter(|r| r["read_back"].is_null())
         .filter_map(|r| {
             let key = r["key"].as_str()?;
-            (key.ends_with(".gain_db") || key.ends_with(".frequency_hz")).then(|| {
-                (key.to_owned(), r["claimed"].as_f64().unwrap(), r["at"]["ticks"].as_i64().unwrap(), r["cancelled"].is_string())
-            })
+            (key.ends_with(".gain_db") || key.ends_with(".frequency_hz")).then(|| (key.to_owned(), r["claimed"].as_f64().unwrap(), r["at"]["ticks"].as_i64().unwrap(), r["cancelled"].is_string()))
         })
         .collect();
     let mut applied = rows.clone();
@@ -560,12 +602,15 @@ fn rm_26_the_ceiling_is_decided_from_the_sequence() {
     // compared.
     let sequence = |loss: i64| Sequence {
         class: Class::Loss,
-        rounds: vec![(0, vec![
-            Op::Cold { direction: Direction::Rx, change: Change::Channels(0), at_ns: None },
-            Op::Timed { direction: Direction::Rx, gain_db: 1.0, at_ns: Some(10_400_000) },
-            Op::Timed { direction: Direction::Rx, gain_db: 2.0, at_ns: Some(10_400_000) },
-            Op::Timed { direction: Direction::Tx, gain_db: 3.0, at_ns: Some(10_400_000) },
-        ])],
+        rounds: vec![(
+            0,
+            vec![
+                Op::Cold { direction: Direction::Rx, change: Change::Channels(0), at_ns: None },
+                Op::Timed { direction: Direction::Rx, gain_db: 1.0, at_ns: Some(10_400_000) },
+                Op::Timed { direction: Direction::Rx, gain_db: 2.0, at_ns: Some(10_400_000) },
+                Op::Timed { direction: Direction::Tx, gain_db: 3.0, at_ns: Some(10_400_000) },
+            ],
+        )],
         faults: vec![(loss, Fault::Loss)],
     };
     let live = ("radio.tx.c0.gain_db".to_owned(), 3.0, T0 + 10_400_000 / 5);

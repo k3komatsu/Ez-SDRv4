@@ -29,10 +29,7 @@ fn uhd_api_struct_sizes_match_the_headers() {
     // `uhd/types/usrp_info.h`).
     assert_eq!(
         ezsdr_radio_uhd::uhd_struct_sizes(),
-        [
-            ("uhd_stream_args_t", 40), ("uhd_stream_cmd_t", 40), ("uhd_tune_request_t", 48),
-            ("uhd_tune_result_t", 40), ("uhd_range_t", 24), ("uhd_usrp_rx_info_t", 64),
-        ]
+        [("uhd_stream_args_t", 40), ("uhd_stream_cmd_t", 40), ("uhd_tune_request_t", 48), ("uhd_tune_result_t", 40), ("uhd_range_t", 24), ("uhd_usrp_rx_info_t", 64),]
     );
 }
 

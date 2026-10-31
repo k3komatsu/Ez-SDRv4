@@ -75,16 +75,8 @@ impl Grid {
             return None;
         }
         match self {
-            Grid::Values(values) => values.iter().copied().min_by(|a, b| {
-                (a - value)
-                    .abs()
-                    .total_cmp(&(b - value).abs())
-                    .then_with(|| a.total_cmp(b))
-            }),
-            Grid::Integer { lo, hi } => {
-                (value.fract() == 0.0 && value >= *lo as f64 && value <= *hi as f64)
-                    .then_some(value)
-            }
+            Grid::Values(values) => values.iter().copied().min_by(|a, b| (a - value).abs().total_cmp(&(b - value).abs()).then_with(|| a.total_cmp(b))),
+            Grid::Integer { lo, hi } => (value.fract() == 0.0 && value >= *lo as f64 && value <= *hi as f64).then_some(value),
             Grid::Step { step: 0.0, .. } => Some(value),
             Grid::Step { lo, hi, step } => {
                 let f = (value / step).floor();
@@ -148,11 +140,7 @@ impl Grid {
 }
 
 pub(crate) fn rejected(key: &Key, requested: &Constraint, reason: String) -> RejectedRequest {
-    RejectedRequest {
-        key: key.clone(),
-        requested: requested.clone(),
-        reason,
-    }
+    RejectedRequest { key: key.clone(), requested: requested.clone(), reason }
 }
 
 fn number(value: &Scalar) -> Option<f64> {
@@ -168,13 +156,7 @@ pub(crate) fn num(x: f64) -> Scalar {
     Scalar::try_from(x).expect("a profile number is finite")
 }
 
-pub(crate) fn coerce_numeric(
-    key: &Key,
-    constraint: &Constraint,
-    grid: &Grid,
-    default: Option<&Value>,
-    whole_hertz: bool,
-) -> Result<(Value, Option<Coercion>), String> {
+pub(crate) fn coerce_numeric(key: &Key, constraint: &Constraint, grid: &Grid, default: Option<&Value>, whole_hertz: bool) -> Result<(Value, Option<Coercion>), String> {
     let requested_eq = match constraint {
         Constraint::Eq { value } => Some(value),
         _ => None,
@@ -187,59 +169,40 @@ pub(crate) fn coerce_numeric(
             if whole_hertz && value.fract() != 0.0 {
                 return Err("RM-8: this device represents a rate as whole hertz".to_owned());
             }
-            grid.nearest(value)
-                .ok_or_else(|| format!("RM-8: {value} is outside {}..{}", grid.min(), grid.max()))?
+            grid.nearest(value).ok_or_else(|| format!("RM-8: {value} is outside {}..{}", grid.min(), grid.max()))?
         }
         Constraint::Min { value } => {
             let value = number(value).ok_or_else(|| "RM-4: expected a number".to_owned())?;
-            grid.at_or_above(value)
-                .ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?
+            grid.at_or_above(value).ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?
         }
         Constraint::Max { value } => {
             let value = number(value).ok_or_else(|| "RM-4: expected a number".to_owned())?;
-            grid.at_or_below(value)
-                .ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?
+            grid.at_or_below(value).ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?
         }
         Constraint::Range { min, max } => {
             let min = bound(min.as_ref(), grid.min())?;
             let max = bound(max.as_ref(), grid.max())?;
-            grid.at_or_above(min)
-                .filter(|value| *value <= max)
-                .ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?
+            grid.at_or_above(min).filter(|value| *value <= max).ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?
         }
-        Constraint::Set { values } => values
-            .iter()
-            .filter_map(number)
-            .find(|value| grid.contains(*value))
-            .ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?,
-        Constraint::Present {} => default.ok_or_else(|| "RM-5: no default".to_owned())?
-            .as_scalar().and_then(number)
-            .ok_or_else(|| "RM-5: numeric default is invalid".to_owned())?,
+        Constraint::Set { values } => values.iter().filter_map(number).find(|value| grid.contains(*value)).ok_or_else(|| format!("RM-8: no grid value satisfies {constraint:?}"))?,
+        Constraint::Present {} => default.ok_or_else(|| "RM-5: no default".to_owned())?.as_scalar().and_then(number).ok_or_else(|| "RM-5: numeric default is invalid".to_owned())?,
     };
     let applied = Value::from(num(value));
     let coercion = requested_eq.and_then(|requested| {
-        number(requested)
-            .filter(|requested| *requested != value)
-            .map(|_| Coercion {
-                key: key.clone(),
-                requested: Value::from(requested.clone()),
-                applied: applied.clone(),
-                reason: "RM-8: nearest grid value".to_owned(),
-            })
+        number(requested).filter(|requested| *requested != value).map(|_| Coercion {
+            key: key.clone(),
+            requested: Value::from(requested.clone()),
+            applied: applied.clone(),
+            reason: "RM-8: nearest grid value".to_owned(),
+        })
     });
     Ok((applied, coercion))
 }
 
-pub(crate) fn coerce_antenna(
-    constraint: &Constraint,
-    allowed: &[String],
-    default: Option<&Value>,
-) -> Result<(Value, Option<Coercion>), String> {
+pub(crate) fn coerce_antenna(constraint: &Constraint, allowed: &[String], default: Option<&Value>) -> Result<(Value, Option<Coercion>), String> {
     let known = |name: &str| allowed.iter().any(|allowed| allowed == name);
     match constraint {
-        Constraint::Eq { value: Scalar::Str(value) } if known(value) => {
-            Ok((Value::from(value.as_str()), None))
-        }
+        Constraint::Eq { value: Scalar::Str(value) } if known(value) => Ok((Value::from(value.as_str()), None)),
         Constraint::Set { values } => values
             .iter()
             .find_map(|value| match value {
@@ -249,9 +212,7 @@ pub(crate) fn coerce_antenna(
             .map(|value| (value, None))
             .ok_or_else(|| "RM-8: no requested antenna is available".to_owned()),
         Constraint::Present {} => Ok((default.cloned().ok_or("RM-5: no default")?, None)),
-        Constraint::Eq { value: Scalar::Str(value) } => {
-            Err(format!("RM-8: {value} is not an antenna of this device"))
-        }
+        Constraint::Eq { value: Scalar::Str(value) } => Err(format!("RM-8: {value} is not an antenna of this device")),
         _ => Err("RM-4: antenna must be a supported string".to_owned()),
     }
 }

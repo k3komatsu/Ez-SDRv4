@@ -86,12 +86,7 @@ pub struct DropCarry {
 
 impl DropCarry {
     /// The flags a carry keeps from a dropped block (SC-20b).
-    pub const CARRIED_FLAGS: BlockFlags = BlockFlags(
-        BlockFlags::GAP_BEFORE.0
-            | BlockFlags::RESTARTED.0
-            | BlockFlags::SEQ_DISCONTINUITY.0
-            | BlockFlags::ALIGNMENT.0,
-    );
+    pub const CARRIED_FLAGS: BlockFlags = BlockFlags(BlockFlags::GAP_BEFORE.0 | BlockFlags::RESTARTED.0 | BlockFlags::SEQ_DISCONTINUITY.0 | BlockFlags::ALIGNMENT.0);
 
     /// True when nothing has been dropped (SC-20b).
     pub fn is_empty(self) -> bool {
@@ -101,11 +96,7 @@ impl DropCarry {
     /// Folds one dropped block into the carry (SC-20b).
     pub fn absorb(&mut self, dropped: &BlockRef) {
         let h = dropped.header();
-        self.merge(DropCarry {
-            flags: BlockFlags(h.flags.0 & DropCarry::CARRIED_FLAGS.0),
-            lost: h.lost,
-            blocks: 1,
-        });
+        self.merge(DropCarry { flags: BlockFlags(h.flags.0 & DropCarry::CARRIED_FLAGS.0), lost: h.lost, blocks: 1 });
     }
 
     /// Folds another carry in: flags united, `lost` counts summed where present,
@@ -148,12 +139,7 @@ pub trait DataLink: Send + Sync {
 /// Rule: SC-21. Vision §30, invariant 21.
 pub fn check_sink_link(decl: &DataLinkDecl, consumer_is_sink: bool) -> Result<(), StreamError> {
     if consumer_is_sink && !decl.policy.is_drop_class() {
-        return Err(StreamError::InvalidBlock {
-            reason: format!(
-                "link {} feeds a Sink and must be drop-class, not {:?} (SC-21)",
-                decl.id, decl.policy
-            ),
-        });
+        return Err(StreamError::InvalidBlock { reason: format!("link {} feeds a Sink and must be drop-class, not {:?} (SC-21)", decl.id, decl.policy) });
     }
     Ok(())
 }

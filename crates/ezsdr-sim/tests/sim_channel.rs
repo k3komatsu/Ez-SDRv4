@@ -5,11 +5,9 @@ use ezsdr_kernel::binding::{AdmissionCheck, CheckStage};
 use ezsdr_kernel::id::RunId;
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::Rational;
-use ezsdr_sim::channel::{
-    self, ChannelCheck, ChannelSpec, Coupling, Medium, Radiated, RootInstant, Transmitter,
-};
 use ezsdr_sim::SimRng;
-use serde_json::{json, Value as JsonValue};
+use ezsdr_sim::channel::{self, ChannelCheck, ChannelSpec, Coupling, Medium, Radiated, RootInstant, Transmitter};
+use serde_json::{Value as JsonValue, json};
 
 fn env(value: JsonValue) -> BTreeMap<Namespace, JsonValue> {
     BTreeMap::from([(Namespace::parse("sim.channel").unwrap(), value)])
@@ -40,11 +38,7 @@ impl Transmitter for Ramp {
     fn radiated(&self, channel: u16, at: RootInstant) -> Option<Radiated> {
         self.asked.lock().unwrap().push((channel, at.num, at.den));
         let tick = at.sample_at_or_before(0, Rational::new(1, 1).unwrap());
-        (tick >= 0).then(|| Radiated {
-            re: tick as f64 + f64::from(channel),
-            im: -(tick as f64),
-            frequency_hz: self.frequency_hz,
-        })
+        (tick >= 0).then(|| Radiated { re: tick as f64 + f64::from(channel), im: -(tick as f64), frequency_hz: self.frequency_hz })
     }
 }
 
@@ -119,10 +113,7 @@ fn ch_01_reader() {
 
 #[test]
 fn ch_02_check() {
-    let effective = BTreeMap::from([
-        (id("a"), BTreeMap::<Key, Value>::new()),
-        (id("b"), BTreeMap::<Key, Value>::new()),
-    ]);
+    let effective = BTreeMap::from([(id("a"), BTreeMap::<Key, Value>::new()), (id("b"), BTreeMap::<Key, Value>::new())]);
     let empty = BTreeMap::new();
     let valid = json!({
         "couplings": [{ "tx": "a", "tx_channel": 0, "rx": "b", "rx_channel": 0, "gain_db": 0 }],
@@ -142,14 +133,7 @@ fn ch_02_check() {
     });
     let violations = ChannelCheck.check(&unknown, &effective, &empty, CheckStage::Validate);
     let reasons: Vec<&str> = violations.iter().map(|v| v.reason.as_str()).collect();
-    assert_eq!(
-        reasons,
-        [
-            "CH-2: x names no fragment of this Run",
-            "CH-2: y names no fragment of this Run",
-            "CH-2: z names no fragment of this Run",
-        ]
-    );
+    assert_eq!(reasons, ["CH-2: x names no fragment of this Run", "CH-2: y names no fragment of this Run", "CH-2: z names no fragment of this Run",]);
     assert!(violations.iter().all(|v| v.check == Namespace::parse("sim.channel").unwrap() && v.key.is_none()));
 
     let malformed = ChannelCheck.check(&json!({ "couplings": 3 }), &effective, &empty, CheckStage::Validate);
@@ -166,10 +150,7 @@ fn ch_02_check() {
     });
     let unordered_violations = ChannelCheck.check(&unordered, &effective, &empty, CheckStage::Validate);
     let unordered_reasons: Vec<&str> = unordered_violations.iter().map(|v| v.reason.as_str()).collect();
-    assert_eq!(
-        unordered_reasons,
-        ["CH-2: y names no fragment of this Run", "CH-2: z names no fragment of this Run"]
-    );
+    assert_eq!(unordered_reasons, ["CH-2: y names no fragment of this Run", "CH-2: z names no fragment of this Run"]);
 }
 
 #[test]
@@ -207,13 +188,7 @@ fn ch_03_a_sample_at_or_before_saturates_with_the_sign_of_the_instant() {
 #[test]
 fn ch_04_the_field_sums_paths_with_gain_delay_and_the_frequency_gate() {
     let spec = ChannelSpec {
-        couplings: vec![
-            coupling("a", 0, "b", 0, -20.0, 100),
-            coupling("a", 1, "b", 0, 0.0, 0),
-            coupling("c", 0, "b", 0, 0.0, 0),
-            coupling("a", 0, "b", 1, 6.0, 0),
-            coupling("d", 0, "b", 0, 0.0, 0),
-        ],
+        couplings: vec![coupling("a", 0, "b", 0, -20.0, 100), coupling("a", 1, "b", 0, 0.0, 0), coupling("c", 0, "b", 0, 0.0, 0), coupling("a", 0, "b", 1, 6.0, 0), coupling("d", 0, "b", 0, 0.0, 0)],
         noise_dbfs: BTreeMap::new(),
     };
     let medium = Medium::new();
@@ -260,13 +235,7 @@ fn ch_04_a_delay_rounds_up_to_a_root_tick() {
 fn ch_04_b_two_couplings_with_the_same_ends_are_two_paths() {
     // CH-4: a two-tap channel costs nothing to allow, so both couplings count. A join
     // that keyed the paths by their ends, or skipped a duplicate, would read only one.
-    let spec = ChannelSpec {
-        couplings: vec![
-            coupling("a", 0, "b", 0, -20.0, 100),
-            coupling("a", 0, "b", 0, 0.0, 0),
-        ],
-        noise_dbfs: BTreeMap::new(),
-    };
+    let spec = ChannelSpec { couplings: vec![coupling("a", 0, "b", 0, -20.0, 100), coupling("a", 0, "b", 0, 0.0, 0)], noise_dbfs: BTreeMap::new() };
     let medium = Medium::new();
     let a = Ramp::new(1.0e9);
     medium.join(&run(), &id("a"), &spec, 0, 1_000_000_000, a.clone()).unwrap();
@@ -289,14 +258,7 @@ fn ch_04_c_the_field_sums_the_paths_in_document_order() {
     // So the field is 1.0 exactly in document order and 0.0 in the other two, which kills a
     // join that iterated the paths in ends order or in reverse, and kills any reordering
     // that moves the small term behind a large one.
-    let spec = ChannelSpec {
-        couplings: vec![
-            coupling("a", 2, "b", 0, 0.0, 0),
-            coupling("a", 0, "b", 0, 0.0, 0),
-            coupling("a", 1, "b", 0, 0.0, 0),
-        ],
-        noise_dbfs: BTreeMap::new(),
-    };
+    let spec = ChannelSpec { couplings: vec![coupling("a", 2, "b", 0, 0.0, 0), coupling("a", 0, "b", 0, 0.0, 0), coupling("a", 1, "b", 0, 0.0, 0)], noise_dbfs: BTreeMap::new() };
     let medium = Medium::new();
     let a = Fixed(vec![(1.0e16, 0.0), (1.0, 0.0), (-1.0e16, 0.0)]);
     medium.join(&run(), &id("a"), &spec, 0, 1_000_000_000, Arc::new(a)).unwrap();
@@ -357,10 +319,7 @@ fn ch_05_gaussian_pair_follows_its_formula() {
 
 #[test]
 fn ch_06_join_rules_and_missing_fragments() {
-    let spec = ChannelSpec {
-        couplings: vec![coupling("a", 0, "b", 0, 0.0, 0)],
-        noise_dbfs: BTreeMap::from([(id("c"), -30.0)]),
-    };
+    let spec = ChannelSpec { couplings: vec![coupling("a", 0, "b", 0, 0.0, 0)], noise_dbfs: BTreeMap::from([(id("c"), -30.0)]) };
     let medium = Medium::new();
     assert!(medium.missing().is_empty());
     medium.join(&run(), &id("a"), &spec, 1, 1_000_000_000, Arc::new(Silent)).unwrap();
@@ -380,21 +339,14 @@ fn ch_06_join_rules_and_missing_fragments() {
     assert!(medium.missing().is_empty());
     assert!(Medium::new().join(&run(), &id("a"), &spec, 1, 0, Arc::new(Silent)).unwrap_err().starts_with("CH-6: "));
     let far = ChannelSpec { couplings: vec![coupling("a", 0, "b", 0, 0.0, 1 << 62)], noise_dbfs: BTreeMap::new() };
-    assert_eq!(
-        Medium::new().join(&run(), &id("a"), &far, 1, 2_000_000_000, Arc::new(Silent)).unwrap_err(),
-        "CH-6: a delay overflows the root",
-        "2^62 ns at a 2 GHz root is 2^63 root ticks"
-    );
+    assert_eq!(Medium::new().join(&run(), &id("a"), &far, 1, 2_000_000_000, Arc::new(Silent)).unwrap_err(), "CH-6: a delay overflows the root", "2^62 ns at a 2 GHz root is 2^63 root ticks");
     assert!(Medium::new().join(&run(), &id("a"), &far, 1, 1_000_000_000, Arc::new(Silent)).is_ok());
 
     // CH-6: "A refusal changes nothing." The same medium is reused after the refused
     // first join above, so a join that recorded the Run or the document before it
     // validated the paths would refuse the good join that follows as a later one.
     let reused = Medium::new();
-    assert_eq!(
-        reused.join(&run(), &id("a"), &far, 1, 2_000_000_000, Arc::new(Silent)).unwrap_err(),
-        "CH-6: a delay overflows the root"
-    );
+    assert_eq!(reused.join(&run(), &id("a"), &far, 1, 2_000_000_000, Arc::new(Silent)).unwrap_err(), "CH-6: a delay overflows the root");
     assert!(reused.missing().is_empty(), "a refused first join leaves the medium unjoined");
     reused.join(&run(), &id("a"), &spec, 1, 1_000_000_000, Arc::new(Silent)).unwrap();
     assert_eq!(reused.missing(), vec![id("b"), id("c")], "the refused document was not adopted");

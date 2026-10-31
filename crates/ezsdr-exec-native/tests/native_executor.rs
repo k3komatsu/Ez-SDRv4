@@ -5,28 +5,21 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use ezsdr_exec_native::{
-    Component, ComponentContext, Implementation, NativeExecutor, descriptor, executor_descriptor,
-};
+use ezsdr_exec_native::{Component, ComponentContext, Implementation, NativeExecutor, descriptor, executor_descriptor};
 use ezsdr_kernel::binding::Violation;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
 use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, ComponentImpl,
-    ComponentKind, ComponentPlacement, ComponentRequires, ComponentTiming, Endpoint, ExecutionClass, Executor,
-    Factories, IslandDecl, ModuleError, ModuleRegistry, Pacing, PrepareContext, StepOutcome,
-    StopMode, UpdateClass,
+    ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, ComponentImpl, ComponentKind, ComponentPlacement, ComponentRequires, ComponentTiming, Endpoint, ExecutionClass, Executor,
+    Factories, IslandDecl, ModuleError, ModuleRegistry, Pacing, PrepareContext, StepOutcome, StopMode, UpdateClass,
 };
 use ezsdr_kernel::policy::Policy;
 use ezsdr_kernel::run::StopCause;
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
-use ezsdr_kernel::time::{
-    ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget,
-    TimePoint,
-};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget, TimePoint};
 
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 const SCRIPTED: &str = "test.scripted";
@@ -207,10 +200,7 @@ fn island(local: u32, components: &[&str]) -> IslandDecl {
     IslandDecl {
         id: IslandId::local(local),
         executor: id("exec"),
-        components: components
-            .iter()
-            .map(|c| ComponentPlacement { component: id(c), memory_domain: MemoryDomainId::local(0) })
-            .collect(),
+        components: components.iter().map(|c| ComponentPlacement { component: id(c), memory_domain: MemoryDomainId::local(0) }).collect(),
         affinity: None,
         rt_policy: None,
     }
@@ -236,9 +226,7 @@ fn refusal(check: &str, reason: &str) -> Violation {
 fn prepared(h: &Harness, components: &[&str]) -> NativeExecutor {
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let descriptors: Vec<_> = components.iter().map(|c| component(c)).collect();
-    executor
-        .prepare(&island(0, components), h.ctx(0, ExecutionClass::Simulation, components.iter().map(|c| link_end(c)).collect(), &descriptors))
-        .unwrap();
+    executor.prepare(&island(0, components), h.ctx(0, ExecutionClass::Simulation, components.iter().map(|c| link_end(c)).collect(), &descriptors)).unwrap();
     executor
 }
 
@@ -268,9 +256,7 @@ fn nx_03_a_component_is_loaded_by_its_impl_identity() {
     let h = Harness::new();
     let refused = |descriptor: ComponentDescriptor| {
         let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
-        let error = executor
-            .prepare(&island(0, &["c"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[descriptor]))
-            .unwrap_err();
+        let error = executor.prepare(&island(0, &["c"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[descriptor])).unwrap_err();
         assert!(error.message.starts_with("NX-3: component c "), "{}", error.message);
         error.message
     };
@@ -297,54 +283,34 @@ fn nx_03_a_component_is_loaded_by_its_impl_identity() {
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
     let mut unknown_d = component("d");
     unknown_d.implementation.id = "test.other".to_owned();
-    let error = executor
-        .prepare(&island(0, &["c", "d"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[component("c"), unknown_d]))
-        .unwrap_err();
+    let error = executor.prepare(&island(0, &["c", "d"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[component("c"), unknown_d])).unwrap_err();
     assert!(error.message.starts_with("NX-3: component d "), "{}", error.message);
     executor.stop(StopMode::Orderly).expect("the kept component stops");
     executor.cleanup();
-    assert_eq!(log(), vec![
-        "prepare:c:links=:source=island 100",
-        "stop:c:Orderly",
-        "cleanup:c",
-    ]);
+    assert_eq!(log(), vec!["prepare:c:links=:source=island 100", "stop:c:Orderly", "cleanup:c",]);
 }
 
 #[test]
 fn nx_04_prepare_cases() {
     let h = Harness::new();
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
-    let other_class = executor
-        .prepare(&island(0, &["a"]), h.ctx(0, ExecutionClass::RealtimeEmulation, Vec::new(), &[component("a")]))
-        .unwrap_err();
+    let other_class = executor.prepare(&island(0, &["a"]), h.ctx(0, ExecutionClass::RealtimeEmulation, Vec::new(), &[component("a")])).unwrap_err();
     assert_eq!(other_class.kind, ezsdr_kernel::module_api::ModuleErrorKind::Unsupported);
     assert!(other_class.message.starts_with("NX-4:"), "{}", other_class.message);
 
-    let foreign = executor
-        .prepare(&island(0, &["a"]), h.ctx(0, ExecutionClass::Simulation, vec![link_end("z")], &[component("a")]))
-        .unwrap_err();
+    let foreign = executor.prepare(&island(0, &["a"]), h.ctx(0, ExecutionClass::Simulation, vec![link_end("z")], &[component("a")])).unwrap_err();
     assert!(foreign.message.contains("z, which is not in this Island"), "{}", foreign.message);
     assert!(log().is_empty());
 
     // Two Islands on one Executor: each component sees only its own link ends and its
     // own Island's source; the Kernel files each report under the Island it invoked.
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
-    let first = executor
-        .prepare(&island(3, &["a", "b"]), h.ctx(3, ExecutionClass::Simulation, vec![link_end("a"), link_end("b"), link_end("b")], &[component("a"), component("b")]))
-        .unwrap();
-    executor
-        .prepare(&island(4, &["c"]), h.ctx(4, ExecutionClass::Simulation, vec![link_end("c")], &[component("c")]))
-        .unwrap();
+    let first = executor.prepare(&island(3, &["a", "b"]), h.ctx(3, ExecutionClass::Simulation, vec![link_end("a"), link_end("b"), link_end("b")], &[component("a"), component("b")])).unwrap();
+    executor.prepare(&island(4, &["c"]), h.ctx(4, ExecutionClass::Simulation, vec![link_end("c")], &[component("c")])).unwrap();
     assert!(first.effective.is_empty() && first.coercions.is_empty() && first.warnings.is_empty());
-    assert_eq!(log(), vec![
-        "prepare:a:links=a.rx:source=island 103",
-        "prepare:b:links=b.rx,b.rx:source=island 103",
-        "prepare:c:links=c.rx:source=island 104",
-    ]);
+    assert_eq!(log(), vec!["prepare:a:links=a.rx:source=island 103", "prepare:b:links=b.rx,b.rx:source=island 103", "prepare:c:links=c.rx:source=island 104",]);
 
-    let twice = executor
-        .prepare(&island(5, &["a"]), h.ctx(5, ExecutionClass::Simulation, Vec::new(), &[component("a")]))
-        .unwrap_err();
+    let twice = executor.prepare(&island(5, &["a"]), h.ctx(5, ExecutionClass::Simulation, Vec::new(), &[component("a")])).unwrap_err();
     assert!(twice.message.contains("component a is placed twice"), "{}", twice.message);
 
     // A component whose `prepare` fails fails the Island's, and is still cleaned up
@@ -352,9 +318,7 @@ fn nx_04_prepare_cases() {
     let h = Harness::new();
     SCRIPT.with(|s| s.borrow_mut().failing_prepare.push("f".to_owned()));
     let mut executor = NativeExecutor::new(vec![scripted()]).unwrap();
-    let failed = executor
-        .prepare(&island(0, &["f"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[component("f")]))
-        .unwrap_err();
+    let failed = executor.prepare(&island(0, &["f"]), h.ctx(0, ExecutionClass::Simulation, Vec::new(), &[component("f")])).unwrap_err();
     assert_eq!(failed.message, "test: f fails its prepare");
     executor.cleanup();
     assert_eq!(log(), vec!["prepare:f:links=:source=island 100", "cleanup:f"]);

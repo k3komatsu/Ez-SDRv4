@@ -337,10 +337,7 @@ pub struct ModuleSection {
 impl Manifest {
     /// The content of section `name` written by the instance `source` (RS-39).
     pub fn section(&self, source: &crate::event::EventSource, name: &str) -> Option<&serde_json::Value> {
-        self.sections
-            .iter()
-            .find(|s| &s.source == source && s.name.as_str() == name)
-            .map(|s| &s.content)
+        self.sections.iter().find(|s| &s.source == source && s.name.as_str() == name).map(|s| &s.content)
     }
 }
 
@@ -352,8 +349,7 @@ pub fn mark_open_artifacts(open: &mut [ArtifactRef], kind: EventKind, time: Time
     // Every artifact open at that moment, with no exception: MA-26 makes `partial`
     // the ordinary state of an artifact still open on an abort.
     for a in open.iter_mut() {
-        a.marks.push(ArtifactMark { kind: kind.clone(), time,
-        });
+        a.marks.push(ArtifactMark { kind: kind.clone(), time });
     }
 }
 
@@ -367,22 +363,8 @@ pub fn mark_open_artifacts(open: &mut [ArtifactRef], kind: EventKind, time: Time
 /// hashable.
 ///
 /// Rule: RS-44a, RS-45.
-pub fn ingest_input(
-    id: Ident,
-    kind: Namespace,
-    uri: impl Into<String>,
-    bytes: &[u8],
-) -> ArtifactRef {
-    ArtifactRef {
-        id,
-        kind,
-        uri: uri.into(),
-        hash: ContentHash::of_bytes(bytes),
-        size_bytes: bytes.len() as u64,
-        partial: false,
-        marks: Vec::new(),
-        continuity: Vec::new(),
-    }
+pub fn ingest_input(id: Ident, kind: Namespace, uri: impl Into<String>, bytes: &[u8]) -> ArtifactRef {
+    ArtifactRef { id, kind, uri: uri.into(), hash: ContentHash::of_bytes(bytes), size_bytes: bytes.len() as u64, partial: false, marks: Vec::new(), continuity: Vec::new() }
 }
 
 impl Manifest {
@@ -398,9 +380,7 @@ impl Manifest {
     pub fn from_json(doc: &serde_json::Value) -> Result<Manifest, crate::spec::SpecError> {
         crate::spec::check_version(doc)?;
         crate::spec::check_ascii_keys(doc)?;
-        serde_json::from_value(doc.clone())
-            .map_err(|e| crate::spec::SpecError::Structural { reason: format!("RS-38: {e}"),
-        })
+        serde_json::from_value(doc.clone()).map_err(|e| crate::spec::SpecError::Structural { reason: format!("RS-38: {e}") })
     }
 
     /// Computes the Manifest's own hash over the body with `hash` removed, and
@@ -409,9 +389,7 @@ impl Manifest {
         // RS-42: `deterministic` may be claimed only for the Simulation class. The
         // Manifest is the artifact the claim lands in, so this is where it is
         // enforced rather than trusted.
-        self.run.deterministic =
-            self.run.deterministic
-                && self.run.execution_class.is_some_and(|class| class.may_claim_determinism());
+        self.run.deterministic = self.run.deterministic && self.run.execution_class.is_some_and(|class| class.may_claim_determinism());
         // Computed into a local and stored only on success: clearing the field first
         // left a previously sealed Manifest with `hash: None` when the re-seal failed,
         // so a Manifest that had a valid hash lost it (RS-46).
@@ -431,17 +409,9 @@ impl Manifest {
     /// Records a Module's section, refusing a write outside its own registered
     /// namespace. The transmit burst records of SC-28 and a Provider's envelope go
     /// in that Module's section, not in the envelope (RS-39).
-    pub fn write_section(
-        &mut self,
-        owner: &Namespace,
-        source: crate::event::EventSource,
-        section: Namespace,
-        content: serde_json::Value,
-    ) -> Result<(), crate::run::RunError> {
+    pub fn write_section(&mut self, owner: &Namespace, source: crate::event::EventSource, section: Namespace, content: serde_json::Value) -> Result<(), crate::run::RunError> {
         if !section.is_under(owner) {
-            return Err(crate::run::RunError::SectionNamespaceForbidden {
-                ns: owner.to_string(),
-            });
+            return Err(crate::run::RunError::SectionNamespaceForbidden { ns: owner.to_string() });
         }
         // `sections` is the path RS-39 and RS-43 design for untrusted Module content
         // and it passes no `from_json`, so OV-15's ASCII key rule is checked here.

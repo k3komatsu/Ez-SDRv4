@@ -63,10 +63,14 @@ pub fn classify_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], burst_start: i64, b
     const SPAN: i64 = 25 * 200;
     // A window is 25 samples one tick spacing apart: one that straddles a hole in the capture
     // (the packets' timestamps jump across missing samples) is dropped.
-    let windows: Vec<(i64, f64, f64, f64)> = samples.chunks_exact(25).filter(|w| w[24].0 - w[0].0 == 24 * 200).map(|w| {
-        let (coherence, hz) = window_tone(w);
-        (w[0].0, coherence, hz, w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / 25.0)
-    }).collect();
+    let windows: Vec<(i64, f64, f64, f64)> = samples
+        .chunks_exact(25)
+        .filter(|w| w[24].0 - w[0].0 == 24 * 200)
+        .map(|w| {
+            let (coherence, hz) = window_tone(w);
+            (w[0].0, coherence, hz, w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / 25.0)
+        })
+        .collect();
     // Noise at the sc16 LSB (the bench's 0 dB receive gain) reaches any coherence up to 1: the floor is a power.
     let quiet: Vec<f64> = windows.iter().filter(|(t, ..)| t + SPAN <= burst_start - MS / 2).map(|(.., power)| *power).collect();
     let floor = (quiet.len() >= 10).then(|| quiet.iter().sum::<f64>() / quiet.len() as f64);
@@ -96,11 +100,27 @@ pub fn classify_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], burst_start: i64, b
 /// `classify_tone`'s verdict for a probe's line: the move, or why there is none to report.
 pub fn tone_verdict(report: &ToneReport) -> String {
     if report.gapped {
-        format!("INCONCLUSIVE: the tone moved, but samples are missing between the last window at the base frequency and the first shifted one (noise power {:?}, threshold {:.1e})", report.floor, report.threshold)
+        format!(
+            "INCONCLUSIVE: the tone moved, but samples are missing between the last window at the base frequency and the first shifted one (noise power {:?}, threshold {:.1e})",
+            report.floor, report.threshold
+        )
     } else if report.usable() {
-        format!("the tone leaves 100 kHz {} {:?} µs from e (signal windows {} of {} before e, {} of {} after; noise power {:?}, threshold {:.1e})", if report.at_or_before { "at or before" } else { "at" }, report.moves_at.map(|t| t as f64 / 200.0), report.before, report.before_of, report.after, report.after_of, report.floor, report.threshold)
+        format!(
+            "the tone leaves 100 kHz {} {:?} µs from e (signal windows {} of {} before e, {} of {} after; noise power {:?}, threshold {:.1e})",
+            if report.at_or_before { "at or before" } else { "at" },
+            report.moves_at.map(|t| t as f64 / 200.0),
+            report.before,
+            report.before_of,
+            report.after,
+            report.after_of,
+            report.floor,
+            report.threshold
+        )
     } else {
-        format!("INCONCLUSIVE: no usable signal windows (before e {} of {}, after e {} of {}, noise power {:?}, threshold {:.1e})", report.before, report.before_of, report.after, report.after_of, report.floor, report.threshold)
+        format!(
+            "INCONCLUSIVE: no usable signal windows (before e {} of {}, after e {} of {}, noise power {:?}, threshold {:.1e})",
+            report.before, report.before_of, report.after, report.after_of, report.floor, report.threshold
+        )
     }
 }
 
@@ -128,7 +148,9 @@ pub fn burst_phase(samples: &[(f32, f32)], wave: &[(f32, f32)], offset: usize) -
     };
     let half = wave.len() / 2;
     let (re, im, energy) = correlate(0..wave.len());
-    if energy <= 0.0 || half == 0 { return None; }
+    if energy <= 0.0 || half == 0 {
+        return None;
+    }
     let (first, second) = (correlate(0..half), correlate(half..wave.len()));
     let deg = |(re, im, _): (f64, f64, f64)| im.atan2(re).to_degrees();
     Some(BurstPhase { deg: im.atan2(re).to_degrees(), halves_deg: [deg(first), deg(second)], gain: re.hypot(im) / energy })
@@ -137,8 +159,12 @@ pub fn burst_phase(samples: &[(f32, f32)], wave: &[(f32, f32)], offset: usize) -
 /// The probe's verdict on a burst's phase: the degrees, or why none can be read (INFERRED INCONCLUSIVE): a loop too weak
 /// (gain under 0.002 of the waveform's energy; the bench's 30 dB loop gives about 0.015) or a phase that moves across the burst.
 pub fn phase_verdict(phase: &BurstPhase) -> Result<f64, String> {
-    if phase.gain < 0.002 { return Err(format!("the loop's gain {:.4} is too weak to read a phase", phase.gain)); }
-    if !phase_is_steady(phase) { return Err(format!("the phase is not steady across the burst ({:.1} and {:.1} degrees)", phase.halves_deg[0], phase.halves_deg[1])); }
+    if phase.gain < 0.002 {
+        return Err(format!("the loop's gain {:.4} is too weak to read a phase", phase.gain));
+    }
+    if !phase_is_steady(phase) {
+        return Err(format!("the phase is not steady across the burst ({:.1} and {:.1} degrees)", phase.halves_deg[0], phase.halves_deg[1]));
+    }
     Ok(phase.deg)
 }
 
@@ -154,7 +180,9 @@ pub fn angle_difference_deg(a: f64, b: f64) -> f64 {
 
 /// The largest difference between any two of `phases` (degrees); `None` for fewer than two.
 pub fn circular_spread_deg(phases: &[f64]) -> Option<f64> {
-    if phases.len() < 2 { return None; }
+    if phases.len() < 2 {
+        return None;
+    }
     Some(phases.iter().flat_map(|a| phases.iter().map(move |b| angle_difference_deg(*a, *b))).fold(0.0, f64::max))
 }
 
@@ -167,8 +195,12 @@ pub fn continuation_in_loopback(samples: &[(i64, ezsdr_radio_uhd::Iq)], start: i
     let mut queued: Vec<f32> = samples.iter().filter(|(t, _)| *t >= start + MS && *t < queued_end).map(|(_, s)| s[0].abs() + s[1].abs()).collect();
     queued.sort_by(f32::total_cmp);
     let median = queued.get(queued.len() / 2).copied().unwrap_or(0.0);
-    if queued.len() < 10_000 || median <= 0.0 { return Err(format!("INCONCLUSIVE: no baseline from the queued part ({} samples, median {median})", queued.len())); }
+    if queued.len() < 10_000 || median <= 0.0 {
+        return Err(format!("INCONCLUSIVE: no baseline from the queued part ({} samples, median {median})", queued.len()));
+    }
     let covered = samples.iter().filter(|(t, _)| *t >= next + 100 * 200 && *t < next + 2_000 * 200).count();
-    if covered < 1_500 { return Err(format!("INCONCLUSIVE: the continuation's interval was captured in only {covered} samples")); }
+    if covered < 1_500 {
+        return Err(format!("INCONCLUSIVE: the continuation's interval was captured in only {covered} samples"));
+    }
     Ok(samples.iter().filter(|(t, s)| *t >= next + 100 * 200 && *t < next + 2_000 * 200 && s[0].abs() + s[1].abs() > median / 2.0).count())
 }

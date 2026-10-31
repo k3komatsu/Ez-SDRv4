@@ -11,7 +11,7 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
-use support::{artifact, end_session, finish_at, root, section, session_run, spec_run, T0, output, resource, source};
+use support::{T0, artifact, end_session, finish_at, output, resource, root, section, session_run, source, spec_run};
 
 fn complete(spec: &serde_json::Value, profile_name: &str, selector: serde_json::Value, environment: serde_json::Value, test: &str, horizon: i64) -> Manifest {
     let temp = rig::TempDir::new(test);
@@ -77,10 +77,7 @@ fn v58_10_experiments_name_no_mock_type() {
             assert!(crates.contains(&name.as_str()), "{file}: names crate {name}");
         }
         for line in source.lines().filter(|line| line.trim_start().starts_with("use ")) {
-            assert!(
-                allowed.iter().any(|prefix| line.trim_start().starts_with(prefix)),
-                "{file}: unexpected import: {line}"
-            );
+            assert!(allowed.iter().any(|prefix| line.trim_start().starts_with(prefix)), "{file}: unexpected import: {line}");
         }
     }
     // Since Phase 6 the Python package and its examples: they name Vocabulary keys, verbs
@@ -94,7 +91,9 @@ fn v58_10_experiments_name_no_mock_type() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            for forbidden in ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "sim.channel", "sim.seed", "sim.faults", "ezsdr.radio", "ezsdr.sink", "ezsdr.sim", "ezsdr.link", "ezsdr.exec"] {
+            for forbidden in
+                ["mock", "Mock", "x310", "ideal", "sim-engine", "sim_engine", "sim.channel", "sim.seed", "sim.faults", "ezsdr.radio", "ezsdr.sink", "ezsdr.sim", "ezsdr.link", "ezsdr.exec"]
+            {
                 assert!(!source.contains(forbidden), "{}: found forbidden name {forbidden}", path.display());
             }
             scanned += 1;
@@ -196,10 +195,7 @@ fn v58_06_injected_overflow_is_a_uhd_overflow() {
     assert_eq!(gap.lost, Some(50_000));
     assert_eq!(gap.link_dropped, 0);
     let event = manifest.events.delivered.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::RX_OVERFLOW).unwrap();
-    assert_eq!(
-        RxOverflowPayload::from_payload(&event.payload).unwrap(),
-        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 }
-    );
+    assert_eq!(RxOverflowPayload::from_payload(&event.payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 });
 }
 
 #[test]
@@ -221,10 +217,13 @@ fn v51_an_overflowed_capture_is_a_sigmf_recording() {
     assert_eq!(meta["global"]["core:datatype"], "cf32_le");
     assert_eq!(meta["global"]["core:sample_rate"], json!(1_000_000.0));
     assert_eq!(meta["global"]["ezsdr:partial"], false);
-    assert_eq!(meta["captures"], json!([
-        { "core:sample_start": 0, "core:global_index": 0 },
-        { "core:sample_start": 1_000, "core:global_index": 51_000 }
-    ]));
+    assert_eq!(
+        meta["captures"],
+        json!([
+            { "core:sample_start": 0, "core:global_index": 0 },
+            { "core:sample_start": 1_000, "core:global_index": 51_000 }
+        ])
+    );
     let gaps = meta["global"]["ezsdr:gaps"].as_array().unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0]["cause"], json!({ "kind": "overflow_restart" }));
@@ -273,8 +272,12 @@ fn v58_07_manifest_records_every_input_and_output() {
     for module in ["ezsdr.sim-engine", "ezsdr.radio.mock", "ezsdr.link.host", "ezsdr.sink.capture"] {
         assert!(support::modules(&manifest).contains(&module));
     }
-    for vocabulary in ["radio", "sim", "sink"] { assert!(manifest.vocabularies.keys().any(|id| id.as_str() == vocabulary)); }
-    for stream in ["mock/rx/s0", "mock/tx/s0"] { assert!(manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.path() == stream)); }
+    for vocabulary in ["radio", "sim", "sink"] {
+        assert!(manifest.vocabularies.keys().any(|id| id.as_str() == vocabulary));
+    }
+    for stream in ["mock/rx/s0", "mock/tx/s0"] {
+        assert!(manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.path() == stream));
+    }
     assert_eq!(manifest.links.len(), manifest.plan.as_ref().unwrap().links.len());
     // MR-27: a MockRadio section carries no instance id; the Kernel files it under the
     // instance's source (RS-39).
@@ -298,7 +301,17 @@ fn v58_11_short_lead_burst_is_a_time_error() {
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     let (bytes, _) = experiments::waveform(1_000);
     run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap();
-    run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: Some(TimePoint::new(clock, T0 + 2_000_000)), params: Default::default() }, Some(&bytes)).unwrap();
+    run.submit(
+        SessionAction::Vocabulary {
+            ns: Namespace::parse("radio").unwrap(),
+            verb: Ident::parse("start_repeat").unwrap(),
+            target: resource("radio/tx/s0"),
+            at: Some(TimePoint::new(clock, T0 + 2_000_000)),
+            params: Default::default(),
+        },
+        Some(&bytes),
+    )
+    .unwrap();
     let manifest = end_session(run, clock, T0 + 60_000_000);
     // The new transmit clock starts x3xx's start lead after the change, at T0 + 51 ms
     // (RM-25); the burst for T0 + 2 ms is its sample −49 000, before that origin, so it is
@@ -368,8 +381,24 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     let (bytes, _) = experiments::waveform(1_000);
     let a = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap();
-    let b = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() }, Some(&bytes)).unwrap();
-    let c = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: output("rec"), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(5_000))]) }, None).unwrap();
+    let b = run
+        .submit(
+            SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
+            Some(&bytes),
+        )
+        .unwrap();
+    let c = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: Namespace::parse("sink").unwrap(),
+                verb: Ident::parse("capture").unwrap(),
+                target: output("rec"),
+                at: None,
+                params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(5_000))]),
+            },
+            None,
+        )
+        .unwrap();
     assert_eq!([a.seq, b.seq, c.seq], [0, 1, 2]);
     assert!([a, b, c].iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
     // Past the new transmit clock's origin, a start lead after the enable (RM-25).
@@ -395,13 +424,17 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     let capture = |run: &mut ezsdr_kernel::coordinator::RunHandle, samples: i64| {
-        run.submit(SessionAction::Vocabulary {
-            ns: Namespace::parse("sink").unwrap(),
-            verb: Ident::parse("capture").unwrap(),
-            target: output("rec"),
-            at: None,
-            params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(samples))]),
-        }, None).unwrap()
+        run.submit(
+            SessionAction::Vocabulary {
+                ns: Namespace::parse("sink").unwrap(),
+                verb: Ident::parse("capture").unwrap(),
+                target: output("rec"),
+                at: None,
+                params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(samples))]),
+            },
+            None,
+        )
+        .unwrap()
     };
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     assert!(matches!(capture(&mut run, 50_000).outcome, Outcome::Admitted { .. }));
@@ -416,7 +449,10 @@ fn v58_13_a_session_stop_of_the_recorder_keeps_a_partial_capture() {
     // The Stop finished the recording capture with what it held — samples 1 000 to
     // 9 999, delivered before T0 + 10 ms — and the Sink went on to serve the next one.
     assert!(stopped.partial);
-    assert_eq!((stopped.continuity[0].first.ticks_in(stopped.continuity[0].first.domain()).unwrap(), stopped.continuity[0].end.ticks_in(stopped.continuity[0].end.domain()).unwrap(), stopped.size_bytes), (1_000, 10_000, 72_000));
+    assert_eq!(
+        (stopped.continuity[0].first.ticks_in(stopped.continuity[0].first.domain()).unwrap(), stopped.continuity[0].end.ticks_in(stopped.continuity[0].end.domain()).unwrap(), stopped.size_bytes),
+        (1_000, 10_000, 72_000)
+    );
     assert!(!later.partial);
     assert_eq!((later.continuity[0].first.ticks_in(later.continuity[0].first.domain()).unwrap(), later.size_bytes), (11_000, 8_000));
     assert_eq!(manifest.action_log.len(), 3);
@@ -463,7 +499,8 @@ fn v58_16_runtime_retune_outside_the_rf_envelope_is_rejected() {
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
-    let submit = |run: &mut ezsdr_kernel::coordinator::RunHandle, key: &str, value| run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }, None).unwrap();
+    let submit =
+        |run: &mut ezsdr_kernel::coordinator::RunHandle, key: &str, value| run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }, None).unwrap();
     let a = submit(&mut run, "radio.tx.c0.frequency_hz", Value::num(2.45e9).unwrap());
     let b = submit(&mut run, "radio.tx.c0.stream", Value::from(0));
     let c = submit(&mut run, "radio.tx.c0.frequency_hz", Value::num(2.6e9).unwrap());
@@ -483,11 +520,18 @@ fn kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission() {
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     for channels in [1, 0] {
-        let entry = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(if channels == 0 { -1 } else { 0 }) }, None).unwrap();
+        let entry = run
+            .submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(if channels == 0 { -1 } else { 0 }) }, None)
+            .unwrap();
         assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
     }
     let (bytes, _) = experiments::waveform(1_000);
-    let entry = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() }, Some(&bytes)).unwrap();
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
+            Some(&bytes),
+        )
+        .unwrap();
     let Outcome::Rejected { violations } = entry.outcome else { panic!("a burst on an ended transmit clock was admitted") };
     assert!(violations.iter().any(|violation| violation.reason.starts_with("SC-23: ") && violation.reason.ends_with("has no running transmit SampleClock")));
     let manifest = end_session(run, clock, T0 + 5_000_000);
@@ -563,10 +607,7 @@ fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
     // Kernel files each under its writer's source, so both survive. Keyed by name alone,
     // the last instance written won and the other's records were silently gone.
     let temp = rig::TempDir::new("v58-08-sections");
-    let (manifest, _) = link_run(
-        &temp, "a", "b", "x3xx", false,
-        coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000),
-    );
+    let (manifest, _) = link_run(&temp, "a", "b", "x3xx", false, coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000));
     for suffix in ["applied", "bursts", "envelope", "faults", "rejected", "stats"] {
         let name = format!("ezsdr.radio.mock.{suffix}");
         let writers: Vec<_> = manifest.sections.iter().filter(|s| s.name.as_str() == name).map(|s| s.source.clone()).collect();
@@ -579,10 +620,7 @@ fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
     assert_eq!(section(&manifest, "dev_rx", "ezsdr.radio.mock.bursts").as_array().unwrap().len(), 0, "the receiver transmits nothing");
 
     // and the winner does not depend on the selector: the other jitter value, same ids
-    let (jitter, _) = link_run(
-        &temp, "a", "b", "x3xx", true,
-        coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000),
-    );
+    let (jitter, _) = link_run(&temp, "a", "b", "x3xx", true, coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000));
     assert_eq!(section(&jitter, "dev_tx", "ezsdr.radio.mock.bursts").as_array().unwrap().len(), 1);
     assert_ne!(section(&jitter, "dev_rx", "ezsdr.radio.mock.stats")["rx_blocks"], 0);
 }
@@ -626,10 +664,7 @@ fn kd_01_a_faulted_round_does_not_depend_on_fragment_names() {
         let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
         let clock = root(&run);
         let manifest = finish_at(run, clock, T0 + 25_000_000);
-        let mut lost: Vec<_> = manifest.events.delivered.iter()
-            .filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST)
-            .map(|event| event.source.clone())
-            .collect();
+        let mut lost: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).map(|event| event.source.clone()).collect();
         lost.sort();
         assert_eq!(lost, [source("dev_rx"), source("dev_tx")], "tx {tx}, rx {rx}");
     }
@@ -712,10 +747,7 @@ fn v58_12_the_channel_output_does_not_depend_on_block_lengths() {
     let receiver = |manifest: &ezsdr_kernel::manifest::Manifest| section(manifest, "dev_rx", "ezsdr.radio.mock.stats").clone();
     let (plain_rx, jitter_rx) = (receiver(&plain), receiver(&jitter));
     assert_eq!(section(&plain, "dev_tx", "ezsdr.radio.mock.stats")["rx_blocks"], 0, "the transmitter has no receive link");
-    assert_ne!(
-        plain_rx["rx_samples"], jitter_rx["rx_samples"],
-        "the two runs must really use different block lengths, or the equal capture proves nothing"
-    );
+    assert_ne!(plain_rx["rx_samples"], jitter_rx["rx_samples"], "the two runs must really use different block lengths, or the equal capture proves nothing");
 }
 
 #[test]
@@ -733,12 +765,33 @@ fn v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order
         let (bytes, _) = experiments::waveform_of(&samples);
         let entries = [
             run.submit(SessionAction::SetParameter { target: resource(tx), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap(),
-            run.submit(SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: output("rec"), at: Some(TimePoint::new(clock, T0 + 1_990_000)), params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(5_000))]) }, None).unwrap(),
+            run.submit(
+                SessionAction::Vocabulary {
+                    ns: Namespace::parse("sink").unwrap(),
+                    verb: Ident::parse("capture").unwrap(),
+                    target: output("rec"),
+                    at: Some(TimePoint::new(clock, T0 + 1_990_000)),
+                    params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(5_000))]),
+                },
+                None,
+            )
+            .unwrap(),
         ];
         // T0 + 1 999 000 ns is the instant of the receiver's sample 1 999, the last of its
         // first block; the burst starts there, in the round that could have published it.
         run.advance_to(TimePoint::new(clock, T0 + 1_999_000)).unwrap();
-        let burst = run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource(&format!("{tx}/tx/s0")), at: None, params: Default::default() }, Some(&bytes)).unwrap();
+        let burst = run
+            .submit(
+                SessionAction::Vocabulary {
+                    ns: Namespace::parse("radio").unwrap(),
+                    verb: Ident::parse("start_repeat").unwrap(),
+                    target: resource(&format!("{tx}/tx/s0")),
+                    at: None,
+                    params: Default::default(),
+                },
+                Some(&bytes),
+            )
+            .unwrap();
         run.advance_to(TimePoint::new(clock, T0 + 3_500_500)).unwrap();
         let stop = run.submit(SessionAction::Stop { target: Some(resource(&format!("{tx}/tx/s0"))) }, None).unwrap();
         assert!(entries.iter().chain([&burst, &stop]).all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
@@ -770,8 +823,22 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
     let (bytes, _) = experiments::waveform_of(&samples);
     let entries = [
         run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap(),
-        run.submit(SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() }, Some(&bytes)).unwrap(),
-        run.submit(SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: output("rec"), at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(5_000))]) }, None).unwrap(),
+        run.submit(
+            SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
+            Some(&bytes),
+        )
+        .unwrap(),
+        run.submit(
+            SessionAction::Vocabulary {
+                ns: Namespace::parse("sink").unwrap(),
+                verb: Ident::parse("capture").unwrap(),
+                target: output("rec"),
+                at: None,
+                params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(5_000))]),
+            },
+            None,
+        )
+        .unwrap(),
     ];
     assert!(entries.iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
     let manifest = end_session(run, clock, T0 + 20_000_000);

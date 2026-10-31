@@ -222,9 +222,7 @@ pub enum RunError {
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RunError::StructuralMutationForbidden => {
-                f.write_str("the graph's structure does not change while a Run is Running")
-            }
+            RunError::StructuralMutationForbidden => f.write_str("the graph's structure does not change while a Run is Running"),
             RunError::RunNotRunning => f.write_str("the Run is not Running"),
             RunError::LeaseTtlRequired => f.write_str("a Detached Lease needs a TTL"),
             RunError::LeaseNotRenewable => f.write_str("this Lease is not renewable"),
@@ -241,9 +239,7 @@ impl fmt::Display for RunError {
             RunError::EventSourceOutsideRoot { root, source } => {
                 write!(f, "event source {source} is outside this instance's root {root}")
             }
-            RunError::ForeignEventHandle => {
-                f.write_str("the event handle was minted by another Run or another event sink")
-            }
+            RunError::ForeignEventHandle => f.write_str("the event handle was minted by another Run or another event sink"),
             RunError::PayloadKeyNotAscii { position } => {
                 write!(f, "SB-9a: a map key under {position} is not ASCII")
             }
@@ -293,8 +289,7 @@ impl Default for SystemHostClock {
 impl SystemHostClock {
     /// A clock anchored at construction (RS-22).
     pub fn new() -> SystemHostClock {
-        SystemHostClock { base: std::time::Instant::now(),
-        }
+        SystemHostClock { base: std::time::Instant::now() }
     }
 }
 
@@ -304,10 +299,7 @@ impl HostClock for SystemHostClock {
     }
 
     fn utc_nanos(&self) -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0)
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
     }
 }
 
@@ -377,24 +369,12 @@ impl Lease {
 
     /// The default: the Run ends when its client disconnects (RS-21).
     pub fn attached() -> Lease {
-        Lease {
-            mode: LeaseMode::Attached {},
-            token: None,
-            holder: None,
-            expires_at_host: None,
-            adoptions: 0,
-            released: false,
-        }
+        Lease { mode: LeaseMode::Attached {}, token: None, holder: None, expires_at_host: None, adoptions: 0, released: false }
     }
 
     /// A Detached Lease with its token. A `Detached` Lease without a TTL is
     /// `LeaseTtlRequired` (RS-21, RS-24).
-    pub fn detached(
-        ttl_ms: u64,
-        renewable: bool,
-        token: impl Into<String>,
-        clock: &dyn HostClock,
-    ) -> Result<Lease, RunError> {
+    pub fn detached(ttl_ms: u64, renewable: bool, token: impl Into<String>, clock: &dyn HostClock) -> Result<Lease, RunError> {
         if ttl_ms == 0 {
             return Err(RunError::LeaseTtlRequired);
         }
@@ -446,8 +426,7 @@ impl Lease {
 
     /// Whether the TTL has run out (RS-23).
     pub fn expired(&self, clock: &dyn HostClock) -> bool {
-        matches!(self.mode, LeaseMode::Detached { .. })
-            && self.expires_at_host.is_some_and(|at| clock.monotonic_millis() >= at)
+        matches!(self.mode, LeaseMode::Detached { .. }) && self.expires_at_host.is_some_and(|at| clock.monotonic_millis() >= at)
     }
 
     /// Reclaims a Detached Lease. A wrong token is `AdoptRejected` (RS-24).
@@ -467,8 +446,7 @@ impl Lease {
     /// (RS-24).
     pub fn renew(&mut self, clock: &dyn HostClock) -> Result<(), RunError> {
         match self.mode {
-            LeaseMode::Detached { ttl_ms, renewable: true,
-            } => {
+            LeaseMode::Detached { ttl_ms, renewable: true } => {
                 // Only an armed Lease has a deadline to push out; renewing an
                 // attached one is a no-op rather than a new expiry (RS-22, RS-24).
                 if self.expires_at_host.is_some() {
@@ -524,10 +502,7 @@ impl CleanupStep {
     /// The three steps that run per fragment, in reverse dependency order: the
     /// device that was armed first is released last (RS-8).
     pub fn is_per_fragment(self) -> bool {
-        matches!(
-            self,
-            CleanupStep::StopProviders | CleanupStep::DrainAndStopConsumers | CleanupStep::RestoreBaseline
-        )
+        matches!(self, CleanupStep::StopProviders | CleanupStep::DrainAndStopConsumers | CleanupStep::RestoreBaseline)
     }
 }
 
@@ -556,12 +531,7 @@ pub struct CleanupFailure {
 /// Rule: RS-6, RS-8a.
 pub trait CleanupOps: Send + Sync {
     /// Performs one step, on one fragment for the three per-fragment steps (RS-6).
-    fn perform(
-        &self,
-        step: CleanupStep,
-        fragment: Option<&Ident>,
-        mode: CleanupMode,
-    ) -> Result<(), ModuleError>;
+    fn perform(&self, step: CleanupStep, fragment: Option<&Ident>, mode: CleanupMode) -> Result<(), ModuleError>;
 
     /// The deadline for a step, in milliseconds: the Provider's declared one where
     /// it has one and a Kernel default otherwise (RS-8a).
@@ -599,12 +569,7 @@ pub struct CleanupOutcome {
 /// same: a worker thread with a join timeout, which is what this is.
 ///
 /// Rule: RS-6, RS-7, RS-8, RS-8a, RS-9, RS-10.
-pub fn run_cleanup(
-    ops: Arc<dyn CleanupOps>,
-    reverse_order: &[Ident],
-    mode: CleanupMode,
-    escalate: &dyn Fn() -> Option<CleanupMode>,
-) -> CleanupOutcome {
+pub fn run_cleanup(ops: Arc<dyn CleanupOps>, reverse_order: &[Ident], mode: CleanupMode, escalate: &dyn Fn() -> Option<CleanupMode>) -> CleanupOutcome {
     let mut out = CleanupOutcome::default();
     let mut mode = mode;
     for step in CLEANUP_STEPS {
@@ -614,27 +579,13 @@ pub fn run_cleanup(
             mode = escalated;
         }
         out.modes.push((step, mode));
-        let targets: Vec<Option<Ident>> = if step.is_per_fragment() {
-            reverse_order.iter().cloned().map(Some).collect()
-        } else {
-            vec![None]
-        };
+        let targets: Vec<Option<Ident>> = if step.is_per_fragment() { reverse_order.iter().cloned().map(Some).collect() } else { vec![None] };
         for fragment in targets {
             let deadline = ops.deadline_millis(step, fragment.as_ref());
             match perform_with_deadline(&ops, step, fragment.clone(), mode, deadline) {
                 Ok(()) => {}
-                Err(Some(e)) => out.failures.push(CleanupFailure {
-                    step,
-                    fragment,
-                    reason: e.message,
-                    timed_out: false,
-                }),
-                Err(None) => out.failures.push(CleanupFailure {
-                    step,
-                    fragment,
-                    reason: format!("RS-8a: abandoned after {deadline} ms"),
-                    timed_out: true,
-                }),
+                Err(Some(e)) => out.failures.push(CleanupFailure { step, fragment, reason: e.message, timed_out: false }),
+                Err(None) => out.failures.push(CleanupFailure { step, fragment, reason: format!("RS-8a: abandoned after {deadline} ms"), timed_out: true }),
             }
         }
     }
@@ -642,13 +593,7 @@ pub fn run_cleanup(
 }
 
 /// `Err(None)` means the step exceeded its deadline and was abandoned (RS-8a).
-fn perform_with_deadline(
-    ops: &Arc<dyn CleanupOps>,
-    step: CleanupStep,
-    fragment: Option<Ident>,
-    mode: CleanupMode,
-    deadline_ms: u64,
-) -> Result<(), Option<ModuleError>> {
+fn perform_with_deadline(ops: &Arc<dyn CleanupOps>, step: CleanupStep, fragment: Option<Ident>, mode: CleanupMode, deadline_ms: u64) -> Result<(), Option<ModuleError>> {
     let (tx, rx) = mpsc::channel();
     let ops = Arc::clone(ops);
     std::thread::spawn(move || {
@@ -659,9 +604,7 @@ fn perform_with_deadline(
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(Some(e)),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(None),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(Some(ModuleError::rejected(
-            "RS-6: the cleanup step panicked".to_owned(),
-        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(Some(ModuleError::rejected("RS-6: the cleanup step panicked".to_owned()))),
     }
 }
 
@@ -689,14 +632,7 @@ pub struct RunStateMachine {
 impl RunStateMachine {
     /// A Run in `Created`, with that transition recorded (RS-2, RS-5).
     pub fn new(clock: &dyn HostClock) -> RunStateMachine {
-        RunStateMachine {
-            state: RunState::Created {},
-            transitions: vec![TransitionRecord {
-                state: RunState::Created {},
-                at: None,
-                host_utc_nanos: clock.utc_nanos(),
-            }],
-        }
+        RunStateMachine { state: RunState::Created {}, transitions: vec![TransitionRecord { state: RunState::Created {}, at: None, host_utc_nanos: clock.utc_nanos() }] }
     }
 
     /// Where the Run is (RS-2).
@@ -710,21 +646,11 @@ impl RunStateMachine {
     }
 
     /// Moves to `to`, recording it. An illegal transition is refused (RS-2, RS-5).
-    pub fn move_to(
-        &mut self,
-        to: RunState,
-        at: Option<TimePoint>,
-        clock: &dyn HostClock,
-    ) -> Result<(), RunError> {
+    pub fn move_to(&mut self, to: RunState, at: Option<TimePoint>, clock: &dyn HostClock) -> Result<(), RunError> {
         if !self.state.can_move_to(&to) {
-            return Err(RunError::IllegalTransition { from: self.state.clone(), to,
-            });
+            return Err(RunError::IllegalTransition { from: self.state.clone(), to });
         }
-        self.transitions.push(TransitionRecord {
-            state: to.clone(),
-            at,
-            host_utc_nanos: clock.utc_nanos(),
-        });
+        self.transitions.push(TransitionRecord { state: to.clone(), at, host_utc_nanos: clock.utc_nanos() });
         self.state = to;
         Ok(())
     }
@@ -732,23 +658,13 @@ impl RunStateMachine {
     /// A failure at any stage moves the Run to `Stopping { abort }` with
     /// `Failed { stage, reason }`; a cancellation before `Running` moves it to
     /// `Stopping { orderly }` (RS-3).
-    pub fn begin_stopping(
-        &mut self,
-        mode: CleanupMode,
-        at: Option<TimePoint>,
-        clock: &dyn HostClock,
-    ) -> Result<(), RunError> {
+    pub fn begin_stopping(&mut self, mode: CleanupMode, at: Option<TimePoint>, clock: &dyn HostClock) -> Result<(), RunError> {
         self.move_to(RunState::Stopping { mode }, at, clock)
     }
 
     /// Ends the Run. A Manifest is written for every Run that reaches `CleanedUp`,
     /// including one that failed at `validate` (RS-11).
-    pub fn finish(
-        &mut self,
-        termination: Termination,
-        at: Option<TimePoint>,
-        clock: &dyn HostClock,
-    ) -> Result<(), RunError> {
+    pub fn finish(&mut self, termination: Termination, at: Option<TimePoint>, clock: &dyn HostClock) -> Result<(), RunError> {
         self.move_to(RunState::CleanedUp { termination }, at, clock)
     }
 
@@ -762,10 +678,6 @@ impl RunStateMachine {
 
     /// Refuses an Action while the Run is not `Running` (RS-18).
     pub fn check_running(&self) -> Result<(), RunError> {
-        if matches!(self.state, RunState::Running {}) {
-            Ok(())
-        } else {
-            Err(RunError::RunNotRunning)
-        }
+        if matches!(self.state, RunState::Running {}) { Ok(()) } else { Err(RunError::RunNotRunning) }
     }
 }

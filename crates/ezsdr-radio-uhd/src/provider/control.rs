@@ -4,9 +4,9 @@
 //! device's time. It never waits for a device instant.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc::Sender;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 
 use std::time::Duration as Wall;
 
@@ -15,26 +15,23 @@ use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{ActionReceiver, Dispatched, Requested, UpdateClass};
 use ezsdr_kernel::spec::{Constraint, Key, Value};
 use ezsdr_kernel::stream::{BurstOpen, Direction, LateOutcome};
-use ezsdr_kernel::time::{AbsoluteDeadline, Duration, Rational, TimePoint, TimeError};
-use ezsdr_radio::payloads::{
-    ClockLostPayload, ClockReference, CommandQueueFullPayload, LateCommandPayload, TimeErrorCause,
-    TimeErrorOutcome, TimeErrorPayload,
-};
-use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, StreamKey, NO_RELEASE};
+use ezsdr_kernel::time::{AbsoluteDeadline, Duration, Rational, TimeError, TimePoint};
 use ezsdr_radio::kinds;
+use ezsdr_radio::payloads::{ClockLostPayload, ClockReference, CommandQueueFullPayload, LateCommandPayload, TimeErrorCause, TimeErrorOutcome, TimeErrorPayload};
+use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, NO_RELEASE, Segment, StreamKey};
 use serde_json::json;
 
-use super::core::{assert_line_free, stream_key, Clock, Core, Holder, RxEntry, SegmentKey, lock};
 #[cfg(test)]
 use super::core::Restore;
 #[cfg(test)]
 use super::core::booked_stream;
+use super::core::{Clock, Core, Holder, RxEntry, SegmentKey, assert_line_free, lock, stream_key};
 use super::mode::{DescriptionExt, scalar_number};
-use ezsdr_radio::Addressed;
 use super::tx::{Held, TxCmd};
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
 use crate::host::{ClockMutex, HostClock};
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
+use ezsdr_radio::Addressed;
 
 const POLL: Wall = Wall::from_millis(1);
 const CHECK: Wall = Wall::from_millis(500);
@@ -51,11 +48,7 @@ struct Timed {
 
 impl Timed {
     fn settings(&self) -> Settings {
-        if self.key.as_str().ends_with("frequency_hz") {
-            Settings { freq: Some(self.value), ..Settings::default() }
-        } else {
-            Settings { gain: Some(self.value), ..Settings::default() }
-        }
+        if self.key.as_str().ends_with("frequency_hz") { Settings { freq: Some(self.value), ..Settings::default() } } else { Settings { gain: Some(self.value), ..Settings::default() } }
     }
 }
 
@@ -109,11 +102,7 @@ pub(crate) struct ColdConfig {
 impl ColdConfig {
     #[cfg(test)]
     pub fn new(base: BTreeMap<Key, Value>) -> Self {
-        Self {
-            base,
-            updates: HostClock::real().clock_mutex(BTreeMap::new()),
-            configured: AtomicBool::new(false),
-        }
+        Self { base, updates: HostClock::real().clock_mutex(BTreeMap::new()), configured: AtomicBool::new(false) }
     }
 
     /// The numbered configuration at the segment's origin (RM-30, UR-12), with held timed
@@ -149,9 +138,15 @@ impl ColdConfig {
     fn settings_on(&self, core: &Core, updates: &BTreeMap<(i64, u64), (usize, Settings)>, dir: Dir, k: usize, origin: i64, chan: usize) -> Settings {
         let mut settings = core.description.settings(&self.base, dir, k, chan);
         for (update_chan, update) in updates.range(..=(origin, u64::MAX)).map(|(_, update)| update) {
-            if *update_chan != chan { continue; }
-            if let Some(freq) = update.freq { settings.freq = Some(freq); }
-            if let Some(gain) = update.gain { settings.gain = Some(gain); }
+            if *update_chan != chan {
+                continue;
+            }
+            if let Some(freq) = update.freq {
+                settings.freq = Some(freq);
+            }
+            if let Some(gain) = update.gain {
+                settings.gain = Some(gain);
+            }
         }
         settings
     }
@@ -279,29 +274,24 @@ pub(crate) struct Start {
 
 impl Control {
     /// uhd-control, with the streams' timelines shared from the Run's start.
-    pub fn new(
-        core: Arc<Core>,
-        actions: Arc<dyn ActionReceiver>,
-        to_tx: Vec<Sender<TxCmd>>,
-        config: BTreeMap<Key, Value>,
-        reference_monitored: bool,
-        start: Start,
-    ) -> Control {
+    pub fn new(core: Arc<Core>, actions: Arc<dyn ActionReceiver>, to_tx: Vec<Sender<TxCmd>>, config: BTreeMap<Key, Value>, reference_monitored: bool, start: Start) -> Control {
         let host = core.device.host();
         // RM-25, VH-4: this Module's terms — each direction's start lead, and, for a receive
         // segment after a cut, the receive call in progress there and the delivery
         // allowance (UR-25). The call term is each receive stream's own packet size.
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
         let release_window = core.ticks(core.description.timing.release_window_ns);
-        let line = |key: StreamKey, origin: i64, channels: Channels, n: i64, call: i64| Line::new(timeline::Stream {
-            direction: key.0,
-            origin,
-            config: Config { channels, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, key.0)),
-            call,
-            release_window: if key.0 == Direction::Rx { release_window } else { 0 },
-            allowance,
-        });
+        let line = |key: StreamKey, origin: i64, channels: Channels, n: i64, call: i64| {
+            Line::new(timeline::Stream {
+                direction: key.0,
+                origin,
+                config: Config { channels, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
+                lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, key.0)),
+                call,
+                release_window: if key.0 == Direction::Rx { release_window } else { 0 },
+                allowance,
+            })
+        };
         let n = |dir: Dir, k: usize| {
             let rate = core.description.stream_rate(&config, dir, k);
             decimation(core.mcr, rate).map_or(1, |n| n as i64)
@@ -393,14 +383,18 @@ impl Control {
                 let mut restore = Vec::new();
                 let frequency = |channel: usize| {
                     let initial = self.core.description.settings(&self.initial_config, Dir::Rx, k, channel).freq.unwrap_or(0.0);
-                    self.rx_frequency.get(&channel)
+                    self.rx_frequency
+                        .get(&channel)
                         .filter(|((e, _), _)| *e <= at)
                         .map(|(order, value)| (*order, *value))
                         .into_iter()
                         .chain(self.released_at.iter().filter_map(|(&(e, seq), given)| {
-                            (e <= at && (!given.given || given.handed_at.is_none_or(|handed| handed <= at))
-                                && given.timed.dir == Dir::Rx && given.timed.chan == channel && given.timed.key.as_str().ends_with("frequency_hz"))
-                                .then_some(((e, seq), given.timed.value))
+                            (e <= at
+                                && (!given.given || given.handed_at.is_none_or(|handed| handed <= at))
+                                && given.timed.dir == Dir::Rx
+                                && given.timed.chan == channel
+                                && given.timed.key.as_str().ends_with("frequency_hz"))
+                            .then_some(((e, seq), given.timed.value))
                         }))
                         .max_by_key(|(order, _)| *order)
                         .map_or(initial, |(_, value)| value)
@@ -496,9 +490,7 @@ impl Control {
             // RM-12, RM-21: `start_rx` turns the receive stream on at its `at`, or at its booking
             // if that is later; it is never late. A stream the layout holds no channel for is
             // accepted and carries out nothing, as MockRadio's does (D14).
-            Action::Command { verb, params, at, .. }
-                if verb.as_str() == ezsdr_radio::START_RX && params.is_empty() =>
-            {
+            Action::Command { verb, params, at, .. } if verb.as_str() == ezsdr_radio::START_RX && params.is_empty() => {
                 let Addressed::Stream { direction: Direction::Rx, k } = addressed else {
                     return self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider");
                 };
@@ -516,9 +508,7 @@ impl Control {
                 streams.stream_mut(stream).configs.insert(seq, config);
                 streams.book(&self.core, stream, Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start });
             }
-            Action::Command { .. } => {
-                self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider")
-            }
+            Action::Command { .. } => self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider"),
             Action::Emit { .. } => self.core.command_rejected(Some(id), "emit", "UR-26: not supported by this Provider"),
         }
     }
@@ -552,7 +542,9 @@ impl Control {
     }
 
     fn ceil_root(&self, at: Option<AbsoluteDeadline>) -> Result<Option<i64>, TimeError> {
-        let Some(t) = at.map(|deadline| deadline.time_point) else { return Ok(None); };
+        let Some(t) = at.map(|deadline| deadline.time_point) else {
+            return Ok(None);
+        };
         let root = self.core.root;
         if let Ok(ticks) = t.ticks_in(root) {
             return Ok(Some(ticks));
@@ -565,12 +557,7 @@ impl Control {
     }
 
     fn late_command(&self, key: Option<Key>, requested: i64, applied: i64) {
-        let payload = serde_json::to_value(LateCommandPayload {
-            key,
-            requested: self.core.at(requested),
-            applied: self.core.at(applied),
-        })
-        .expect("a payload");
+        let payload = serde_json::to_value(LateCommandPayload { key, requested: self.core.at(requested), applied: self.core.at(applied) }).expect("a payload");
         self.core.emit(&self.core.id, kinds::LATE_COMMAND, Severity::Warning, payload);
     }
 
@@ -598,17 +585,21 @@ impl Control {
         }
         let key = stream_key(dir, stream as usize);
         let streams = lock(&self.core.streams);
-        if streams.line(key).is_none_or(|line| line.halted(t)) { return false; }
+        if streams.line(key).is_none_or(|line| line.halted(t)) {
+            return false;
+        }
         if rx_frequency {
             let completed = &streams.stream(key).completed;
             return timeline::covering(
-                streams.planned(key).iter().filter(|planned| {
-                    !planned.refused
-                        && !completed.contains(&(planned.segment.origin, planned.segment.config, planned.segment.by))
-                }).map(|planned| &planned.segment),
+                streams
+                    .planned(key)
+                    .iter()
+                    .filter(|planned| !planned.refused && !completed.contains(&(planned.segment.origin, planned.segment.config, planned.segment.by)))
+                    .map(|planned| &planned.segment),
                 chan as u32,
                 t,
-            ).is_some();
+            )
+            .is_some();
         }
         true
     }
@@ -624,8 +615,7 @@ impl Control {
             let streams = lock(&self.core.streams);
             (0..streams.count(dir)).flat_map(|k| streams.planned(stream_key(dir, k))).collect()
         };
-        let reaches = planned.iter().any(|planned|
-            !planned.refused && planned.segment.origin >= t && planned.segment.config.channels.contains(chan as u32));
+        let reaches = planned.iter().any(|planned| !planned.refused && planned.segment.origin >= t && planned.segment.config.channels.contains(chan as u32));
         (reaches.then_some(chan).into_iter().collect(), false)
     }
 
@@ -787,8 +777,13 @@ impl Control {
     /// after its instant starts from — released, or with no channel its instant passed with.
     fn of_record(&mut self, order: (i64, u64), timed: Timed) {
         if timed.dir == Dir::Rx && timed.key.as_str().ends_with("frequency_hz") {
-            self.rx_frequency.entry(timed.chan)
-                .and_modify(|current| { if current.0 < order { *current = (order, timed.value); } })
+            self.rx_frequency
+                .entry(timed.chan)
+                .and_modify(|current| {
+                    if current.0 < order {
+                        *current = (order, timed.value);
+                    }
+                })
                 .or_insert((order, timed.value));
         }
         self.config.insert(timed.key, Value::num(timed.value).expect("UR-24: read from a Value"));
@@ -800,8 +795,7 @@ impl Control {
     fn reach(&self, chan: usize, e: i64) -> Reach {
         let planned: Vec<Planned> = {
             let streams = lock(&self.core.streams);
-            (0..streams.count(Dir::Rx)).flat_map(|k| streams.planned(stream_key(Dir::Rx, k)))
-                .collect()
+            (0..streams.count(Dir::Rx)).flat_map(|k| streams.planned(stream_key(Dir::Rx, k))).collect()
         };
         let holds = |planned: &&Planned| !planned.refused && planned.segment.config.channels.contains(chan as u32);
         // A segment of the channel whose samples pass at `e` (RM-36).
@@ -811,7 +805,9 @@ impl Control {
         // The segment the value is for: the first to begin after `e` that runs at all. One with
         // no configuration is the stream's first, which `prepare` configured, or one its owner
         // has begun; the mark of no other projection counts.
-        let next = planned.iter().filter(holds)
+        let next = planned
+            .iter()
+            .filter(holds)
             .filter(|planned| planned.segment.origin > e && planned.segment.cut.is_none_or(|cut| planned.segment.instant(cut).is_ok_and(|end| end > planned.segment.origin)))
             .min_by_key(|planned| planned.segment.origin);
         match next {
@@ -845,8 +841,7 @@ impl Control {
             // pass the channel's DDC at `e`; a segment's configure, or this release untimed
             // where it has been configured already, gives it otherwise.
             let rx_frequency = timed.dir == Dir::Rx && settings.freq.is_some();
-            let rx_stream = rx_frequency.then(|| self.core.description.stream_of(&self.config_at(e), true, timed.chan as u32))
-                .filter(|stream| *stream >= 0).map(|stream| stream as usize);
+            let rx_stream = rx_frequency.then(|| self.core.description.stream_of(&self.config_at(e), true, timed.chan as u32)).filter(|stream| *stream >= 0).map(|stream| stream as usize);
             let mut rx_chain = rx_stream.map(|stream| self.core.rx_chain[stream].lock());
             let mut reach = if rx_frequency { self.reach(*chan, e) } else { Reach::Timed };
             if rx_frequency && rx_chain.is_none() && matches!(reach, Reach::Timed) {
@@ -859,15 +854,21 @@ impl Control {
                 }
                 if rx_frequency && matches!(reach, Reach::Timed) {
                     let stream = stream_key(Dir::Rx, rx_stream.expect("an RX frequency has a stream"));
-                    let covering = streams.planned(stream).into_iter().find(|planned| {
-                        timeline::covering(std::iter::once(&planned.segment), timed.chan as u32, e).is_some()
-                    }).map(|planned| SegmentKey { by: planned.segment.by, origin: planned.segment.origin });
+                    let covering = streams
+                        .planned(stream)
+                        .into_iter()
+                        .find(|planned| timeline::covering(std::iter::once(&planned.segment), timed.chan as u32, e).is_some())
+                        .map(|planned| SegmentKey { by: planned.segment.by, origin: planned.segment.origin });
                     let eligible = covering.is_some_and(|segment| chain.eligible(segment, e));
                     drop(streams);
-                    if covering.is_some() && !eligible { return Handed::Blocked; }
+                    if covering.is_some() && !eligible {
+                        return Handed::Blocked;
+                    }
                     if covering.is_none() {
                         reach = self.reach(*chan, e);
-                        if matches!(reach, Reach::Timed) { return Handed::Blocked; }
+                        if matches!(reach, Reach::Timed) {
+                            return Handed::Blocked;
+                        }
                     }
                 } else {
                     drop(streams);
@@ -988,7 +989,11 @@ impl Control {
     fn book_cold(&mut self, id: ActionId, key: Key, value: Value, at: Option<AbsoluteDeadline>) {
         let dir = match ezsdr_radio::concrete(&key) {
             Some(ezsdr_radio::Concrete::Channel { rx, .. }) | Some(ezsdr_radio::Concrete::Stream { rx, .. }) => {
-                if rx { Dir::Rx } else { Dir::Tx }
+                if rx {
+                    Dir::Rx
+                } else {
+                    Dir::Tx
+                }
             }
             None => return self.core.command_rejected(Some(id), "update_parameter", &format!("UR-26: {key} is not updated at runtime by this Provider")),
         };
@@ -1011,10 +1016,7 @@ impl Control {
         let before = self.config_at(e);
         let mut candidate = before.clone();
         candidate.insert(key.clone(), value.clone());
-        let request = Requested {
-            resource: self.core.id.clone(),
-            constraints: candidate.iter().filter_map(|(k, v)| Some((k.clone(), Constraint::Eq { value: v.as_scalar()?.clone() }))).collect(),
-        };
+        let request = Requested { resource: self.core.id.clone(), constraints: candidate.iter().filter_map(|(k, v)| Some((k.clone(), Constraint::Eq { value: v.as_scalar()?.clone() }))).collect() };
         let report = match self.core.description.coerce(&self.core.id, &request) {
             Ok(report) => report,
             Err(error) => return self.core.command_rejected(Some(id), "update_parameter", &error.message),
@@ -1032,22 +1034,13 @@ impl Control {
                 let from = stream_key(dir, was as usize);
                 let to = stream_key(dir, is as usize);
                 if streams.line(from).is_none() || streams.line(to).is_none() {
-                    return self.core.command_rejected(
-                        Some(id), "update_parameter",
-                        &format!("RM-34: no line for move of channel c{number} from stream s{was} to s{is}"),
-                    );
+                    return self.core.command_rejected(Some(id), "update_parameter", &format!("RM-34: no line for move of channel c{number} from stream s{was} to s{is}"));
                 }
                 let mut lines = streams.lines.clone();
                 match lines.book_move(from, to, number, Some(e), now, seq, now) {
                     Ok((effective, _)) if effective == e => streams.lines = lines,
-                    Ok((effective, _)) => return self.core.command_rejected(
-                        Some(id), "update_parameter",
-                        &format!("RM-34: move's line instant {effective} differs from the Provider instant {e}"),
-                    ),
-                    Err(error) => return self.core.command_rejected(
-                        Some(id), "update_parameter",
-                        &format!("RM-34: move of channel c{number} from stream s{was} to s{is} was refused ({error:?})"),
-                    ),
+                    Ok((effective, _)) => return self.core.command_rejected(Some(id), "update_parameter", &format!("RM-34: move's line instant {effective} differs from the Provider instant {e}")),
+                    Err(error) => return self.core.command_rejected(Some(id), "update_parameter", &format!("RM-34: move of channel c{number} from stream s{was} to s{is} was refused ({error:?})")),
                 }
                 streams.changed(&self.core, from);
                 streams.changed(&self.core, to);
@@ -1126,7 +1119,10 @@ impl Control {
         // RM-25, VH-4: an enable from no stream — its owner idle, nothing planned to run —
         // is configured by uhd-control itself, which opens the streamer, and is ready when
         // that configuration ends; any other change by the owner at the cut (UR-17, UR-23).
-        let wants_from_none = !channels.is_empty() && idle && planned && streams.holder(stream) == Holder::Free
+        let wants_from_none = !channels.is_empty()
+            && idle
+            && planned
+            && streams.holder(stream) == Holder::Free
             && streams.held_elsewhere(stream, channels).is_none()
             && !streams.needed_before(stream, channels, i64::MAX);
         let mut from_none_claim = if wants_from_none { streams.claim_from_none(stream) } else { None };
@@ -1154,11 +1150,7 @@ impl Control {
             let mut checked: Option<Result<(), DeviceError>> = None;
             let mut configured: Option<Result<i64, DeviceError>> = None;
             if may_call {
-                let open = if dir == Dir::Tx {
-                    self.core.open_tx_device(k, channels).map(|_| ())
-                } else {
-                    self.core.open_device(dir, k, channels)
-                };
+                let open = if dir == Dir::Tx { self.core.open_tx_device(k, channels).map(|_| ()) } else { self.core.open_device(dir, k, channels) };
                 let check = if open.is_ok() && !self.core.is_lost() { self.core.check_opened(dir, channels) } else { Ok(()) };
                 if open.is_ok() && check.is_err() && !self.core.is_lost() {
                     self.core.close_device(dir, k);
@@ -1180,11 +1172,7 @@ impl Control {
                     .collect();
                 // UR-29: a loss between two channels stops the rest; `Core::configure` looks
                 // before each one's apply.
-                let config = if open.is_ok() && check.is_ok() && !self.core.is_lost() {
-                    Some(self.core.configure(dir, &entries, rate, k))
-                } else {
-                    None
-                };
+                let config = if open.is_ok() && check.is_ok() && !self.core.is_lost() { Some(self.core.configure(dir, &entries, rate, k)) } else { None };
                 opened = Some(open);
                 checked = Some(check);
                 configured = config;
@@ -1198,7 +1186,9 @@ impl Control {
             }
             if !may_call || self.core.is_lost() || streams.stop.is_some() {
                 // UR-25: the ownership goes back, and nothing of the enable is booked.
-                if let Some(claim) = from_none_claim.take() { streams.give_back(claim); }
+                if let Some(claim) = from_none_claim.take() {
+                    streams.give_back(claim);
+                }
                 drop(streams);
                 return;
             }
@@ -1228,7 +1218,9 @@ impl Control {
         } else {
             streams.stream_mut(stream).configs.remove(&seq);
         }
-        if let Some(claim) = from_none_claim.take() { streams.give_back(claim); }
+        if let Some(claim) = from_none_claim.take() {
+            streams.give_back(claim);
+        }
         drop(streams);
         if let Some(error) = failure {
             self.core.device_failed(Some(id), "update_parameter", &error);
@@ -1300,12 +1292,7 @@ impl Control {
         let lead = self.core.ticks(DEVICE_LEAD_NS);
         let now = timeline::decided_at(self.core.now(), clock.origin, lead);
         let now_k = clock.at_or_after(now);
-        let decided = late_policy.decide(
-            &self.core.clocks,
-            at.time_point,
-            TimePoint::new(clock.domain, now_k),
-            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS),
-        );
+        let decided = late_policy.decide(&self.core.clocks, at.time_point, TimePoint::new(clock.domain, now_k), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS));
         let outcome = match decided {
             Ok(outcome) => outcome,
             Err(error) => return reject(&format!("UR-21: {error}")),
@@ -1316,13 +1303,9 @@ impl Control {
         };
         let mut requested = requested_at.map(|d| d.time_point);
         let time_error = |outcome: TimeErrorOutcome, late_by: Duration| {
-            let payload = serde_json::to_value(TimeErrorPayload {
-                cause: TimeErrorCause::Late,
-                outcome,
-                late_by_ns: late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX),
-                target: at.time_point,
-            })
-            .expect("a payload");
+            let payload =
+                serde_json::to_value(TimeErrorPayload { cause: TimeErrorCause::Late, outcome, late_by_ns: late_by.ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap_or(i64::MAX), target: at.time_point })
+                    .expect("a payload");
             // The burst's own stream (RM-29).
             self.core.emit(&self.core.stream_node(Dir::Tx, k), kinds::TIME_ERROR, Severity::Error, payload);
         };
@@ -1353,21 +1336,11 @@ impl Control {
         if !lock(&self.core.held).insert((clock.domain, start)) {
             return reject("UR-21: a held burst already has this start");
         }
-        let open = BurstOpen {
-            waveform_len: u32::try_from(len).ok(),
-            late: (!matches!(outcome, LateOutcome::OnTime {})).then_some(outcome),
-            requested_target: requested,
-        };
-        let _ = self.to_tx.get(k).map(|to_tx| to_tx.send(TxCmd::Burst(Held {
-            k: start,
-            domain: clock.domain,
-            samples: Arc::new(samples),
-            waveform_len: len,
-            repeat,
-            open,
-            policy: late_policy,
-            target: at.time_point,
-        })));
+        let open = BurstOpen { waveform_len: u32::try_from(len).ok(), late: (!matches!(outcome, LateOutcome::OnTime {})).then_some(outcome), requested_target: requested };
+        let _ = self
+            .to_tx
+            .get(k)
+            .map(|to_tx| to_tx.send(TxCmd::Burst(Held { k: start, domain: clock.domain, samples: Arc::new(samples), waveform_len: len, repeat, open, policy: late_policy, target: at.time_point })));
     }
 
     // ------------------------------------------------------------ UR-27, UR-29
@@ -1411,8 +1384,8 @@ mod differential;
 mod tests {
     use std::sync::mpsc::{Receiver, channel};
 
+    use super::super::core::{RxDevice, key};
     use super::*;
-    use super::super::core::{key, RxDevice};
     use crate::device::Device;
     use crate::provider::test_support::device_at;
     use ezsdr_kernel::spec::Scalar;
@@ -1420,17 +1393,29 @@ mod tests {
 
     struct NoActions;
     impl ActionReceiver for NoActions {
-        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { None }
+        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+            None
+        }
     }
 
     /// A receive link that takes nothing, so that the receive side has a stream.
     struct NoLink;
     impl DataLink for NoLink {
-        fn publish(&self, _block: BlockRef) -> PublishOutcome { PublishOutcome::Accepted }
-        fn receive(&self) -> Option<(BlockRef, DropCarry)> { None }
-        fn drops(&self) -> u64 { 0 }
-        fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
-        fn policy(&self) -> BackPressure { BackPressure::DropOldest }
+        fn publish(&self, _block: BlockRef) -> PublishOutcome {
+            PublishOutcome::Accepted
+        }
+        fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+            None
+        }
+        fn drops(&self) -> u64 {
+            0
+        }
+        fn take_drop_carry(&self) -> DropCarry {
+            DropCarry::default()
+        }
+        fn policy(&self) -> BackPressure {
+            BackPressure::DropOldest
+        }
     }
 
     fn rig() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>) {
@@ -1464,12 +1449,7 @@ mod tests {
         let (mut control, _) = control(&core, &[Dir::Rx]);
         for seq in 1..=1_000 {
             let channel = seq as usize % 2;
-            control.of_record((seq, seq as u64), Timed {
-                key: key(&format!("radio.rx.c{channel}.frequency_hz")),
-                dir: Dir::Rx,
-                value: 1e9 + seq as f64,
-                chan: channel,
-            });
+            control.of_record((seq, seq as u64), Timed { key: key(&format!("radio.rx.c{channel}.frequency_hz")), dir: Dir::Rx, value: 1e9 + seq as f64, chan: channel });
         }
 
         assert_eq!(control.rx_frequency.len(), 2, "folded history grows with channels, not retunes");
@@ -1580,22 +1560,17 @@ mod tests {
         assert!(rejected.iter().all(|event| event.time.ticks_in(core.root).unwrap() < ms(200)), "an enable was processed at or after the refused origin: {rejected:?}");
         assert!(lock(&core.streams).is_idle(stream_key(Dir::Tx, 0)), "a refused enable adopted a clock");
         let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
-        assert_eq!(sends, ["tx_send 0 n=2 at=- sob=true eob=true", "tx_send 0 n=2 at=- sob=true eob=true"],
-            "each refused streamer generation gets its own T3 flush: {:?}", sends);
+        assert_eq!(sends, ["tx_send 0 n=2 at=- sob=true eob=true", "tx_send 0 n=2 at=- sob=true eob=true"], "each refused streamer generation gets its own T3 flush: {:?}", sends);
     }
 
     #[test]
     fn ur_22_from_none_open_waits_for_t3_flush_ack_before_timed_tx_dsp() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
-        }));
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, _, _) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
         spy.watch(&core);
         let (mut control, _tx) = control(&core, &[]);
         control.config.insert(key("radio.tx.c0.stream"), Value::from(-1));
-        control.book(Dispatched::new(ActionId(1), Action::Stop {
-            target: Some(super::super::test_support::target_of(&core.tx_id)),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         lock(&core.streams).search(booked_stream(Dir::Tx), false);
         let at = AbsoluteDeadline::new(core.at(core.ticks(100_000_000)));
         super::super::core::assert_tx_open_flush_barrier(core, spy, move || {
@@ -1605,25 +1580,33 @@ mod tests {
 
     #[test]
     fn ur_22_timed_control_give_waits_for_t3_flush_ack() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
-        }));
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, _, _) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
         spy.watch(&core);
         let gate = spy.stop_before("tx_async");
         let (open_done, opened) = std::sync::mpsc::channel();
-        let opener = core.device.host().spawn("control-tx-flush", {
-            let core = core.clone();
-            move || { let _ = open_done.send(core.open_tx_device(0, Channels::first(1))); }
-        }).unwrap();
+        let opener = core
+            .device
+            .host()
+            .spawn("control-tx-flush", {
+                let core = core.clone();
+                move || {
+                    let _ = open_done.send(core.open_tx_device(0, Channels::first(1)));
+                }
+            })
+            .unwrap();
         gate.wait();
 
         let (mut control, _tx) = control(&core, &[]);
         let timed = Timed { key: key("radio.tx.c0.gain_db"), dir: Dir::Tx, value: 1.0, chan: 0 };
         let (release_done, released) = std::sync::mpsc::channel();
-        let release = core.device.host().spawn("control-timed-give", move || {
-            let _ = release_done.send(control.give(10_000, 1, timed, &[0]));
-        }).unwrap();
+        let release = core
+            .device
+            .host()
+            .spawn("control-timed-give", move || {
+                let _ = release_done.send(control.give(10_000, 1, timed, &[0]));
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
         while core.tx_dsp_waiters(0) == 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
@@ -1748,7 +1731,9 @@ mod tests {
         assert!(next_b.segment.cut.is_some_and(|cut| next_b.segment.instant(cut).unwrap() > next_b.segment.origin));
 
         let (b_waiting, b_waited) = channel();
-        crate::provider::test_support::probe(&core, "wait_release", move |_| { let _ = b_waiting.send(()); });
+        crate::provider::test_support::probe(&core, "wait_release", move |_| {
+            let _ = b_waiting.send(());
+        });
         let (open_entered, open_reached) = channel();
         let (open_resume, open_wait) = channel();
         let open_wait = std::sync::Mutex::new(open_wait);
@@ -1765,7 +1750,13 @@ mod tests {
         let owner_core = core.clone();
         let (b_done, b_result_rx) = channel();
         let next_b_for_owner = next_b.clone();
-        let b_owner = core.device.host().spawn("rx-chain-B", move || { let _ = b_done.send(owner_core.owner_configure(Dir::Rx, 1, &next_b_for_owner)); }).unwrap();
+        let b_owner = core
+            .device
+            .host()
+            .spawn("rx-chain-B", move || {
+                let _ = b_done.send(owner_core.owner_configure(Dir::Rx, 1, &next_b_for_owner));
+            })
+            .unwrap();
         assert!(b_waited.recv_timeout(Wall::from_secs(10)).is_ok(), "B reached its release wait");
         {
             let mut streams = lock(&core.streams);
@@ -1782,10 +1773,18 @@ mod tests {
         let join_seq = lock(&core.streams).seq;
         let next_c = lock(&core.streams).planned(c).into_iter().find(|planned| planned.segment.by == Some(join_seq)).expect("C's joined segment");
         let (c_waiting, c_waited) = channel();
-        crate::provider::test_support::probe(&core, "wait_release", move |_| { let _ = c_waiting.send(()); });
+        crate::provider::test_support::probe(&core, "wait_release", move |_| {
+            let _ = c_waiting.send(());
+        });
         let owner_core = core.clone();
         let (c_done, c_result_rx) = channel();
-        let c_owner = core.device.host().spawn("rx-chain-C", move || { let _ = c_done.send(owner_core.owner_configure(Dir::Rx, 2, &next_c)); }).unwrap();
+        let c_owner = core
+            .device
+            .host()
+            .spawn("rx-chain-C", move || {
+                let _ = c_done.send(owner_core.owner_configure(Dir::Rx, 2, &next_c));
+            })
+            .unwrap();
         let c_reached_wait = c_waited.recv_timeout(Wall::from_secs(10)).is_ok();
 
         let _ = open_resume.send(());
@@ -1817,19 +1816,12 @@ mod tests {
     fn ur_34_a_control_books_the_next_action_while_an_owner_close_is_gated() {
         // A6: the owner is blocked inside its release call; uhd-control must still book the
         // following Action rather than waiting for the device.
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
-        }));
-        let (core, _time, _events) = crate::provider::test_support::rig_on_description_links(
-            spy.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), layout_description());
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+        let (core, _time, _events) = crate::provider::test_support::rig_on_description_links(spy.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), layout_description());
         spy.watch(&core);
         let mut values = core.description.defaults();
         values.insert(key("radio.rx.c1.stream"), Value::from(1));
-        let start = Start {
-            t0: 0,
-            rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))],
-            tx: vec![None],
-        };
+        let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))], tx: vec![None] };
         let (to_tx, _tx) = channel();
         let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false, start);
         spy.rx_open(0, &[0]).unwrap();
@@ -1867,11 +1859,7 @@ mod tests {
         let (core, device, _time, _events) = two_stream_rig();
         let mut config = core.description.defaults();
         config.insert(key("radio.rx.c1.stream"), Value::from(0));
-        let start = Start {
-            t0: 0,
-            rx: vec![Some((Channels::first(2), 100)), Some((Channels::first(0), 200))],
-            tx: vec![None],
-        };
+        let start = Start { t0: 0, rx: vec![Some((Channels::first(2), 100)), Some((Channels::first(0), 200))], tx: vec![None] };
         let (to_tx, _tx) = channel();
         let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
         let e = core.ticks(100_000_000);
@@ -1886,8 +1874,7 @@ mod tests {
         assert!(matches!(to_item.kind, Kind::Cold(config) if config.channels.contains(1)));
         assert!(streams.stream(stream_key(Dir::Rx, 0)).configs.contains_key(&1));
         assert!(streams.stream(stream_key(Dir::Rx, 1)).configs.contains_key(&1));
-        assert!(!Arc::ptr_eq(&streams.stream(stream_key(Dir::Rx, 0)).configs[&1], &streams.stream(stream_key(Dir::Rx, 1)).configs[&1]),
-            "each line's projection has its own update lock");
+        assert!(!Arc::ptr_eq(&streams.stream(stream_key(Dir::Rx, 0)).configs[&1], &streams.stream(stream_key(Dir::Rx, 1)).configs[&1]), "each line's projection has its own update lock");
         drop(streams);
         assert!(control.colds.contains_key(&(e, 1)), "the move is in the layout floor");
         let rec = lock(&core.rec);
@@ -1914,8 +1901,7 @@ mod tests {
         let e = core.ticks(100_000_000);
         control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(1), Some(AbsoluteDeadline::new(core.at(e))));
         let rejected = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-        let reason = rejected.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED)
-            .unwrap().payload["reason"].as_str().unwrap();
+        let reason = rejected.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).unwrap().payload["reason"].as_str().unwrap();
         assert_eq!(reason, "RM-34: no line for move of channel c1 from stream s0 to s1");
         assert!(device.calls().is_empty(), "{:?}", device.calls());
     }
@@ -1949,17 +1935,14 @@ mod tests {
         assert!(!streams.lines.config_at(stream_key(Dir::Rx, 0), core.ticks(400_000_000)).channels.contains(1));
         assert!(streams.lines.config_at(stream_key(Dir::Rx, 1), core.ticks(400_000_000)).channels.contains(1));
         drop(streams);
-        assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
-            .all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
+        assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
     }
 
     #[test]
     fn ur_34_a_transmit_stop_books_the_wait_exit_and_queues_the_owner_stop() {
         let (core, _device, _time) = rig();
         let (mut control, owner) = control(&core, &[Dir::Tx]);
-        control.book(Dispatched::new(ActionId(1), Action::Stop {
-            target: Some(super::super::test_support::target_of(&core.tx_id)),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         let stream = booked_stream(Dir::Tx);
         let stop = lock(&core.streams).line(stream).unwrap().items.iter().find(|item| item.kind == Kind::Stop).copied().unwrap();
         assert!(matches!(owner.try_recv().unwrap(), TxCmd::Stop));
@@ -1974,12 +1957,7 @@ mod tests {
         let device = Arc::new(crate::device::FakeDevice::new(config));
         let mut description = layout_description();
         description.timing.command_queue_depth = 3;
-        let (core, time, events) = crate::provider::test_support::rig_on_description_links(
-            device.clone(),
-            vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]],
-            BTreeMap::new(),
-            description,
-        );
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), description);
         let _frozen = hold(&core, &time, &device);
         let (to_tx, _tx) = channel();
         let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(1), 200))], tx: vec![None] };
@@ -2057,7 +2035,11 @@ mod tests {
         let (by, origin) = (planned[0].segment.by.expect("the enable"), planned[0].segment.origin);
         let before = device.calls().len();
         assert!(owner_rx(&core).begin(), "the owner begins the enable's segment");
-        assert_eq!((lock(&core.streams).stream(booked_stream(Dir::Rx)).configured, device.calls()[before..].iter().any(|call| call.starts_with("apply"))), (Some(by), false), "the owner configured a segment the record holds");
+        assert_eq!(
+            (lock(&core.streams).stream(booked_stream(Dir::Rx)).configured, device.calls()[before..].iter().any(|call| call.starts_with("apply"))),
+            (Some(by), false),
+            "the owner configured a segment the record holds"
+        );
         let gain = key("radio.rx.c0.gain_db");
         let mark = device.calls().len();
         control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(50)))));
@@ -2120,7 +2102,9 @@ mod tests {
         lock(&core.streams).search(booked_stream(Dir::Rx), false);
         control.book_cold(ActionId(4), key("radio.rx.c0.stream"), Value::from(0), at(9_500));
         control.release();
-        let applied: Vec<(String, String)> = device.calls().into_iter()
+        let applied: Vec<(String, String)> = device
+            .calls()
+            .into_iter()
             .filter(|call| call.starts_with("apply rx 0") && call.contains("gain=") && !call.ends_with("at=-"))
             .map(|call| {
                 let gain = call.split("gain=").nth(1).unwrap().split(' ').next().unwrap().to_owned();
@@ -2158,7 +2142,9 @@ mod tests {
         control.release();
         time.advance_to(core.at(us(98_000))).unwrap();
         control.release();
-        let applied: Vec<(String, i64)> = device.calls().into_iter()
+        let applied: Vec<(String, i64)> = device
+            .calls()
+            .into_iter()
             .filter(|call| call.starts_with("apply") && call.contains("gain=") && !call.ends_with("at=-"))
             .map(|call| (call.split(' ').nth(1).expect("a direction").to_owned(), call.split("at=").nth(1).expect("an instant").split(' ').next().unwrap().parse().unwrap()))
             .collect();
@@ -2190,7 +2176,9 @@ mod tests {
         assert_eq!((control.held.len(), given(&device.calls())), (2, 0), "the command behind the waiting one was given: {:?}", device.calls());
         time.advance_to(core.at(us(100_600))).unwrap();
         control.release();
-        let applied: Vec<(String, i64)> = device.calls().into_iter()
+        let applied: Vec<(String, i64)> = device
+            .calls()
+            .into_iter()
             .filter(|call| call.starts_with("apply") && call.contains("gain=") && !call.ends_with("at=-"))
             .map(|call| (call.split(' ').nth(1).expect("a direction").to_owned(), call.split("at=").nth(1).expect("an instant").split(' ').next().unwrap().parse().unwrap()))
             .collect();
@@ -2228,7 +2216,11 @@ mod tests {
         assert_eq!(projection.settings_on(&core, &projection.updates.lock(), Dir::Rx, 0, us(100_500), 0).gain, Some(0.0), "the cancelled command stayed in the projection");
         device_at(&core, &time, &device, us(101_000));
         control.release();
-        assert_eq!((rows_of(&core, &gain), device.calls().iter().filter(|call| call.contains("gain=3")).count()), (vec![(us(100_500), false, false)], 0), "the cancelled command was released or applied");
+        assert_eq!(
+            (rows_of(&core, &gain), device.calls().iter().filter(|call| call.contains("gain=3")).count()),
+            (vec![(us(100_500), false, false)], 0),
+            "the cancelled command was released or applied"
+        );
     }
 
     #[test]
@@ -2299,9 +2291,7 @@ mod tests {
     }
 
     fn receive_through_rx_cut(core: &Core, rx: &mut super::super::rx::Rx, planned: &Planned) {
-        let current = plan_of_stream(core, Dir::Rx, planned.k).into_iter()
-            .find(|current| current.segment.origin == planned.segment.origin)
-            .expect("the owner segment remains planned until finish");
+        let current = plan_of_stream(core, Dir::Rx, planned.k).into_iter().find(|current| current.segment.origin == planned.segment.origin).expect("the owner segment remains planned until finish");
         let cut = current.segment.instant(current.segment.cut.expect("the plan published its RX cut")).expect("the cut is representable");
         let offset = cut - planned.segment.origin;
         let n = planned.n();
@@ -2329,7 +2319,9 @@ mod tests {
         let mut rx = owner_rx(&core);
         let mark = device.calls().len();
         for _ in 0..4 {
-            if core.rx_chain[0].lock().segment().is_some() { end_rx_owner(&core, &mut rx, 0); }
+            if core.rx_chain[0].lock().segment().is_some() {
+                end_rx_owner(&core, &mut rx, 0);
+            }
             rx.begin();
         }
         let owner = owner_rx_calls(&device.calls()[mark..]);
@@ -2437,8 +2429,7 @@ mod tests {
         // UR-24, design 38 D2 (3): the row comes at the command's instant.
         time.advance_to(core.at(core.ticks(2_000_000))).unwrap();
         control.release();
-        assert!(lock(&core.rec).applied.iter().any(|r|
-            r["key"] == "radio.rx.c0.gain_db" && r["issued"] == true && r["at"]["ticks"] == core.ticks(2_000_000)));
+        assert!(lock(&core.rec).applied.iter().any(|r| r["key"] == "radio.rx.c0.gain_db" && r["issued"] == true && r["at"]["ticks"] == core.ticks(2_000_000)));
         assert!(lock(&core.rec).rejected.is_empty());
     }
 
@@ -2451,28 +2442,29 @@ mod tests {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0), (1.0, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
         let (mut control, to_tx) = control(&core, &[Dir::Tx]);
         let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
         // Booking 10 ms in: the requested start (sample 0) is far behind the 2 ms device lead.
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
         let requested = TimePoint::new(clock.domain, 0);
-        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform,
-            repeat: false,
-            at: AbsoluteDeadline::new(requested),
-            requested_at: None,
-            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
-        let verdict = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform,
+                repeat: false,
+                at: AbsoluteDeadline::new(requested),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
+        let verdict =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
         assert_eq!(verdict.payload["outcome"], "send_asap", "{verdict:?}");
         // Still between the booking and uhd-tx's first hand-over: what uhd-control hands over
         // is the moved start, and the moved start is what its reservation holds.
@@ -2488,25 +2480,25 @@ mod tests {
         let samples: Vec<[f32; 2]> = (0..997).map(|i| [i as f32 / 1_000.0, 0.25]).collect();
         let bytes: Vec<u8> = samples.iter().flat_map(|sample| [sample[0].to_le_bytes(), sample[1].to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, _) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
         let (mut control, to_tx) = control(&core, &[Dir::Tx]);
         let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
-        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform,
-            repeat: true,
-            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 20_000)),
-            requested_at: None,
-            late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform,
+                repeat: true,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 20_000)),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
         let TxCmd::Burst(held) = to_tx.try_recv().expect("production booking hands the repeat to uhd-tx") else { panic!("not a burst") };
         assert_eq!(held.waveform_len, 997);
         assert_eq!(held.open.waveform_len, Some(997));
@@ -2522,41 +2514,45 @@ mod tests {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, _events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
         let (mut control, to_tx) = control(&core, &[Dir::Tx]);
         let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
         // On time at 20 ms, asked for at 5 ms.
         let requested = TimePoint::new(clock.domain, 5_000);
-        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform: waveform.clone(),
-            repeat: false,
-            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 20_000)),
-            requested_at: Some(AbsoluteDeadline::new(requested)),
-            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform: waveform.clone(),
+                repeat: false,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 20_000)),
+                requested_at: Some(AbsoluteDeadline::new(requested)),
+                late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
         let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
         assert_eq!(held.k, 20_000, "an on-time burst starts at its `at`");
         assert_eq!(held.open.requested_target, Some(requested), "the on-time burst's requested target is the `requested_at`");
         // Late: its `at` is behind the booking, asked for at 2 ms; `SendAsap` moves the start.
         let requested = TimePoint::new(clock.domain, 2_000);
-        control.book(Dispatched::new(ActionId(2), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform,
-            repeat: false,
-            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
-            requested_at: Some(AbsoluteDeadline::new(requested)),
-            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(
+            ActionId(2),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform,
+                repeat: false,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
+                requested_at: Some(AbsoluteDeadline::new(requested)),
+                late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
         let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the moved burst to uhd-tx") else { panic!("not a burst") };
         assert_eq!(held.k, 12_000, "the moved start is the device lead past the booking");
         assert_eq!(held.open.requested_target, Some(requested), "the moved burst's requested target is its `requested_at`, not its moved start");
@@ -2571,12 +2567,8 @@ mod tests {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
         let (mut control, to_tx) = control(&core, &[Dir::Tx]);
         core.start_up.store(core.ticks(1_000_000_000), std::sync::atomic::Ordering::Release);
@@ -2584,21 +2576,24 @@ mod tests {
         // 20 ms ahead: past the device lead, so the late policy is not what refuses it, and
         // before the start-up.
         let target = TimePoint::new(clock.domain, 20_000);
-        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform,
-            repeat: false,
-            at: AbsoluteDeadline::new(target),
-            requested_at: None,
-            late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform,
+                repeat: false,
+                at: AbsoluteDeadline::new(target),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
         let rejected = lock(&core.rec).rejected.clone();
         assert!(rejected.iter().any(|row| row["reason"].as_str().unwrap_or("").starts_with("UR-21: the burst begins before the device's start-up")), "{rejected:?}");
         assert!(to_tx.try_recv().is_err(), "a refused burst was handed to uhd-tx");
         // The refusal reaches the caller as `COMMAND_REJECTED`, naming the Action it answers.
-        let event = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .find(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).expect("COMMAND_REJECTED");
+        let event = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).expect("COMMAND_REJECTED");
         assert_eq!(event.payload["reason"], "UR-21: the burst begins before the device's start-up", "{event:?}");
         assert_eq!(event.payload["action"], 1, "{event:?}");
     }
@@ -2613,12 +2608,8 @@ mod tests {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0), (0.75, 0.0), (1.0, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
         let (mut control, to_tx) = control(&core, &[Dir::Tx]);
         // Booked now: the new clock's origin is its start lead after the old segment's cut,
@@ -2631,17 +2622,21 @@ mod tests {
         // 5 ms before that origin: more than the 2 ms device lead away, so the booking is late
         // and the moved start is the origin (10 000 samples at 2 MS/s).
         let target = TimePoint::new(clock.domain, -10_000);
-        control.book(Dispatched::new(ActionId(2), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform,
-            repeat: false,
-            at: AbsoluteDeadline::new(target),
-            requested_at: None,
-            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
-        let verdict = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
+        control.book(Dispatched::new(
+            ActionId(2),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform,
+                repeat: false,
+                at: AbsoluteDeadline::new(target),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
+        let verdict =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
         assert_eq!(verdict.payload["outcome"], "send_asap", "{verdict:?}");
         assert_eq!(verdict.payload["target"], serde_json::to_value(target).unwrap(), "{verdict:?}");
         let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
@@ -2659,12 +2654,8 @@ mod tests {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
         let (mut control, to_tx) = control(&core, &[Dir::Tx]);
         let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
@@ -2676,19 +2667,25 @@ mod tests {
             time.advance_to(core.at(receipt)).unwrap();
             let target = TimePoint::new(clock.domain, clock.at_or_after(receipt + lead));
             time.advance_to(core.at(receipt + ms(read_after))).unwrap();
-            control.book(Dispatched::new(ActionId(n as u64 + 1), Action::TxBurst {
-                target: super::super::test_support::target_of(&core.tx_id),
-                waveform: waveform.clone(),
-                repeat: false,
-                at: AbsoluteDeadline::new(target),
-                requested_at: None,
-                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
-                metadata: BTreeMap::new(),
-            }, Some(core.tx_id.clone())));
+            control.book(Dispatched::new(
+                ActionId(n as u64 + 1),
+                Action::TxBurst {
+                    target: super::super::test_support::target_of(&core.tx_id),
+                    waveform: waveform.clone(),
+                    repeat: false,
+                    at: AbsoluteDeadline::new(target),
+                    requested_at: None,
+                    late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                    metadata: BTreeMap::new(),
+                },
+                Some(core.tx_id.clone()),
+            ));
             let errors: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).collect();
             assert_eq!(errors.len(), usize::from(late), "read {read_after} ms after receipt: {errors:?}");
             assert_eq!(to_tx.try_recv().is_ok(), !late, "read {read_after} ms after receipt: a late `drop_and_flag` burst is not handed to uhd-tx");
-            if late { assert_eq!(errors[0].payload["outcome"], "drop", "{errors:?}"); }
+            if late {
+                assert_eq!(errors[0].payload["outcome"], "drop", "{errors:?}");
+            }
         }
     }
 
@@ -2700,12 +2697,8 @@ mod tests {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         for (read_after_ms, late) in [(1, false), (49, true)] {
             let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash.clone(), Arc::<[u8]>::from(bytes.clone()))]));
             let (mut control, to_tx) = control(&core, &[Dir::Tx]);
@@ -2715,15 +2708,19 @@ mod tests {
             assert_eq!(plan[1].segment.origin, core.ticks(50_000_000), "the new clock's origin");
             time.advance_to(core.at(core.ticks(read_after_ms * 1_000_000))).unwrap();
             events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
-            control.book(Dispatched::new(ActionId(2), Action::TxBurst {
-                target: super::super::test_support::target_of(&core.tx_id),
-                waveform: waveform.clone(),
-                repeat: false,
-                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
-                requested_at: None,
-                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
-                metadata: BTreeMap::new(),
-            }, Some(core.tx_id.clone())));
+            control.book(Dispatched::new(
+                ActionId(2),
+                Action::TxBurst {
+                    target: super::super::test_support::target_of(&core.tx_id),
+                    waveform: waveform.clone(),
+                    repeat: false,
+                    at: AbsoluteDeadline::new(TimePoint::new(clock.domain, 0)),
+                    requested_at: None,
+                    late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                    metadata: BTreeMap::new(),
+                },
+                Some(core.tx_id.clone()),
+            ));
             let errors = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).count();
             assert_eq!(errors, usize::from(late), "read {read_after_ms} ms after the change");
             match to_tx.try_recv() {
@@ -2772,7 +2769,8 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(300)))));
         control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
-        let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        let late: Vec<_> =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
         assert_eq!(late.len(), 1);
         assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(ms(100)), Some(ms(300))));
         let plan = plan_of(&core, Dir::Rx);
@@ -2821,10 +2819,12 @@ mod tests {
         let mut observed = Vec::new();
         for dir in [Dir::Rx, Dir::Tx] {
             let (core, device, _) = rig();
-            match dir { Dir::Rx => device.rx_open(0, &[0]).unwrap(), Dir::Tx => device.tx_open(0, &[0]).unwrap() }
+            match dir {
+                Dir::Rx => device.rx_open(0, &[0]).unwrap(),
+                Dir::Tx => device.tx_open(0, &[0]).unwrap(),
+            }
             let (mut control, _tx) = control(&core, &[dir]);
-            control.book_cold(ActionId(1), key(&format!("radio.{}.s0.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
-                Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
+            control.book_cold(ActionId(1), key(&format!("radio.{}.s0.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(1_000_000_000)))));
             let gain = key(&format!("radio.{}.c0.gain_db", dir.name()));
             control.book_timed(ActionId(1), gain.clone(), Value::num(3.0).unwrap(), None);
             control.release();
@@ -2852,12 +2852,7 @@ mod tests {
         cold.book((101, 3), 0, Settings { gain: Some(9.0), freq: Some(2e9), ..Settings::default() });
         cold.book((100, 4), 0, Settings { freq: Some(1.1e9), ..Settings::default() });
         assert_eq!(cold.settings_on(&core, &cold.updates.lock(), Dir::Rx, 0, 49, 0).gain, Some(0.0));
-        let segment = ezsdr_radio::timeline::Segment {
-            origin: 100,
-            cut: None,
-            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            by: Some(4),
-        };
+        let segment = ezsdr_radio::timeline::Segment { origin: 100, cut: None, config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, by: Some(4) };
         cold.configure(&core, Dir::Rx, &segment, 0).unwrap();
         let applied = device.read_back(Dir::Rx, 0);
         assert_eq!((applied.gain, applied.freq), (Some(7.0), Some(1.1e9)));
@@ -2897,16 +2892,14 @@ mod tests {
         for dir in [Dir::Rx, Dir::Tx] {
             for (at, now) in [(i64::MAX, 0), (aligned_max, 0), (0, i64::MAX - 1)] {
                 let (mut core, device, _) = rig();
-                let time = Arc::new(ezsdr_kernel::time::ManualTimeAuthority::new(core.clocks.clone(), core.root, &[],
-                    ezsdr_kernel::module_api::Pacing::Device).unwrap());
+                let time = Arc::new(ezsdr_kernel::time::ManualTimeAuthority::new(core.clocks.clone(), core.root, &[], ezsdr_kernel::module_api::Pacing::Device).unwrap());
                 Arc::get_mut(&mut core).unwrap().time = time.clone();
                 let (mut control, _tx) = control(&core, &[dir]);
                 time.advance_to(core.at(now)).unwrap();
                 let config = control.config_at(i64::MAX);
                 let records = core.clocks.sample_clock_records();
                 let version = lock(&core.streams).version;
-                control.book_cold(ActionId(1), key(&format!("radio.{}.s0.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(),
-                    Some(AbsoluteDeadline::new(core.at(at))));
+                control.book_cold(ActionId(1), key(&format!("radio.{}.s0.sample_rate_hz", dir.name())), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(at))));
                 assert_eq!(control.config_at(i64::MAX), config);
                 assert_eq!(core.clocks.sample_clock_records(), records);
                 assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().unwrap().contains("verflow")), "{:?}", lock(&core.rec).rejected);
@@ -2945,14 +2938,14 @@ mod tests {
                         };
                         let config = control.config_at(i64::MAX);
                         let version = lock(&core.streams).version;
-                        let name = if cold {
-                            format!("radio.{}.s0.sample_rate_hz", dir.name())
+                        let name = if cold { format!("radio.{}.s0.sample_rate_hz", dir.name()) } else { format!("radio.{}.c0.gain_db", dir.name()) };
+                        if cold {
+                            control.book_cold(ActionId(1), key(&name), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(at)));
                         } else {
-                            format!("radio.{}.c0.gain_db", dir.name())
-                        };
-                        if cold { control.book_cold(ActionId(1), key(&name), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(at))); }
-                        else { control.book_timed(ActionId(1), key(&name), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(at))); }
-                        assert!(control.held.is_empty()); assert_eq!(control.config_at(i64::MAX), config);
+                            control.book_timed(ActionId(1), key(&name), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(at)));
+                        }
+                        assert!(control.held.is_empty());
+                        assert_eq!(control.config_at(i64::MAX), config);
                         assert_eq!(lock(&core.streams).version, version, "the plan is unchanged");
                         assert_eq!(core.clocks.sample_clock_records(), records);
                         assert!(device.calls().is_empty());
@@ -2998,8 +2991,8 @@ mod tests {
         control.release();
         time.advance_to(core.at(core.ticks(160_000_000))).unwrap();
         control.release();
-        let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.tx.c0.gain_db")
-            .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
+        let rows: Vec<_> =
+            lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.tx.c0.gain_db").map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
         assert_eq!(rows, [(1.0, true, false), (2.0, true, false), (4.0, false, true)]);
         assert_eq!(device.calls().iter().filter(|call| call.starts_with("apply tx")).count(), 2, "{:?}", device.calls());
     }
@@ -3014,7 +3007,10 @@ mod tests {
         for (dir, halt, enable) in [(Dir::Rx, true, "cold"), (Dir::Rx, true, "start_rx"), (Dir::Tx, true, "cold"), (Dir::Rx, false, "start_rx")] {
             let case = format!("{} halt={halt} {enable}", dir.name());
             let (core, device, time) = rig();
-            match dir { Dir::Rx => device.rx_open(0, &[0]).unwrap(), Dir::Tx => device.tx_open(0, &[0]).unwrap() }
+            match dir {
+                Dir::Rx => device.rx_open(0, &[0]).unwrap(),
+                Dir::Tx => device.tx_open(0, &[0]).unwrap(),
+            }
             let (mut control, _tx) = control(&core, &[dir]);
             let ms = |n: i64| core.ticks(n * 1_000_000);
             let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
@@ -3030,12 +3026,16 @@ mod tests {
             control.book_timed(ActionId(1), gain.clone(), Value::num(3.0).unwrap(), at(200));
             match enable {
                 "cold" => control.book_cold(ActionId(1), rate.clone(), Value::num(1e6).unwrap(), at(300)),
-                _ => control.book(Dispatched::new(ActionId(1), Action::Command {
-                    target: super::super::test_support::target_of(&core.rx_id),
-                    verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
-                    params: BTreeMap::new(),
-                    at: at(300),
-                }, Some(core.rx_id.clone()))),
+                _ => control.book(Dispatched::new(
+                    ActionId(1),
+                    Action::Command {
+                        target: super::super::test_support::target_of(&core.rx_id),
+                        verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
+                        params: BTreeMap::new(),
+                        at: at(300),
+                    },
+                    Some(core.rx_id.clone()),
+                )),
             }
             time.advance_to(core.at(ms(199))).unwrap();
             control.release();
@@ -3074,10 +3074,11 @@ mod tests {
         control.release();
         control.book_timed(ActionId(2), gain.clone(), Value::num(2.0).unwrap(), at(9_700));
         control.release();
-        let ats: Vec<i64> = device.calls().iter().filter(|c| c.starts_with("apply rx 0") && !c.contains("at=-"))
-            .map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap()).collect();
+        let ats: Vec<i64> =
+            device.calls().iter().filter(|c| c.starts_with("apply rx 0") && !c.contains("at=-")).map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap()).collect();
         assert_eq!(ats, [us(10_000), us(10_000)], "the earlier command handed to the device out of order: {:?}", device.calls());
-        let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        let late: Vec<_> =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
         assert_eq!(late.len(), 1, "{late:?}");
         assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(us(9_700)), Some(us(10_000))));
     }
@@ -3139,7 +3140,9 @@ mod tests {
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
         let freq = key("radio.rx.c0.frequency_hz");
         let released = |device: &crate::device::FakeDevice| -> Vec<(i64, i64)> {
-            device.calls().iter()
+            device
+                .calls()
+                .iter()
                 .filter(|c| c.starts_with("apply rx 0 rate=- freq=") && !c.contains("at=-"))
                 .map(|c| {
                     let at: i64 = c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
@@ -3261,8 +3264,8 @@ mod tests {
         // (UR-24).
         time.advance_to(core.at(us(300_100))).unwrap();
         control.release();
-        let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.rx.c0.gain_db")
-            .map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
+        let rows: Vec<_> =
+            lock(&core.rec).applied.iter().filter(|r| r["key"] == "radio.rx.c0.gain_db").map(|r| (r["claimed"].as_f64().unwrap(), r["issued"] == true, r["note"] == "no channel")).collect();
         assert_eq!(rows, [(1.0, true, false), (2.0, false, true)]);
         assert!(!device.calls().iter().any(|call| call.starts_with("apply rx") && call.contains("gain=2")), "{:?}", device.calls());
     }
@@ -3296,10 +3299,16 @@ mod tests {
         lock(&core.streams).end(&core, ms(7), true, false);
         let ends = |stream: StreamKey| -> Vec<(i64, u64, bool)> {
             let streams = lock(&core.streams);
-            streams.line(stream).expect("the line").items.iter().filter_map(|item| match item.kind {
-                Kind::End { abort } => Some((item.e, item.seq, abort)),
-                _ => None,
-            }).collect()
+            streams
+                .line(stream)
+                .expect("the line")
+                .items
+                .iter()
+                .filter_map(|item| match item.kind {
+                    Kind::End { abort } => Some((item.e, item.seq, abort)),
+                    _ => None,
+                })
+                .collect()
         };
         assert_eq!(ends(rx), [(ms(5), seq, false)], "the receive line");
         assert_eq!(ends(tx), [(ms(5), seq, false)], "the transmit line");
@@ -3402,10 +3411,15 @@ mod tests {
         control.release();
         control.book_timed(ActionId(2), key("radio.rx.c0.gain_db"), Value::num(2.0).unwrap(), at(9_700));
         control.release();
-        let ats: Vec<i64> = device.calls().iter().filter(|c| c.starts_with("apply rx 0") && !c.contains("at=-") && c.contains("gain=2"))
-            .map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap()).collect();
+        let ats: Vec<i64> = device
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("apply rx 0") && !c.contains("at=-") && c.contains("gain=2"))
+            .map(|c| c.split("at=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap())
+            .collect();
         assert_eq!(ats, [us(10_000)], "the receive command was handed over out of the queue's order: {:?}", device.calls());
-        let late: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
+        let late: Vec<_> =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::LATE_COMMAND).collect();
         assert_eq!(late.len(), 1, "{late:?}");
         assert_eq!((late[0].payload["requested"]["ticks"].as_i64(), late[0].payload["applied"]["ticks"].as_i64()), (Some(us(9_700)), Some(us(10_000))));
     }
@@ -3438,7 +3452,12 @@ mod tests {
         again.book_timed(ActionId(3), key("radio.rx.c0.gain_db"), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(50_000_000)))));
         time.advance_to(core.at(core.ticks(47_000_000))).unwrap();
         again.release();
-        assert_eq!((spy.seen("apply"), spy.log().iter().filter(|call| call.starts_with("apply rx 0") && !call.ends_with("at=-")).count()), (2, 1), "the enable's configure and the timed release did not apply: {:?}", spy.log());
+        assert_eq!(
+            (spy.seen("apply"), spy.log().iter().filter(|call| call.starts_with("apply rx 0") && !call.ends_with("at=-")).count()),
+            (2, 1),
+            "the enable's configure and the timed release did not apply: {:?}",
+            spy.log()
+        );
     }
 
     #[test]
@@ -3514,7 +3533,8 @@ mod tests {
         ]);
         let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
         let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
-        let (core, _time, _) = crate::provider::test_support::rig_on_description(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), description);
+        let (core, _time, _) =
+            crate::provider::test_support::rig_on_description(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), description);
         let (mut ctrl, _tx) = control(&core, &[Dir::Rx]);
         let streams = std::ptr::from_ref(&core.streams) as usize;
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -3523,7 +3543,8 @@ mod tests {
         let taken = crate::provider::test_support::taken_locks();
         assert_eq!(taken.iter().filter(|address| **address == streams).count(), 1, "an accepted change took the line lock {taken:?}");
 
-        let (core, _time, _) = crate::provider::test_support::rig_on_inputs(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], 2_000, BTreeMap::new());
+        let (core, _time, _) =
+            crate::provider::test_support::rig_on_inputs(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], 2_000, BTreeMap::new());
         let (mut ctrl, _tx) = control(&core, &[]);
         ctrl.config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         let streams = std::ptr::from_ref(&core.streams) as usize;
@@ -3543,19 +3564,19 @@ mod tests {
         ]);
         let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
         let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
-        let (core, _time, _) = crate::provider::test_support::rig_on_description(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), description);
+        let (core, _time, _) =
+            crate::provider::test_support::rig_on_description(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), description);
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let streams = std::ptr::from_ref(&core.streams) as usize;
         let instant = core.ticks(300_000_000);
         let at = Some(AbsoluteDeadline::new(core.at(instant)));
         let node = core.stream_node(Dir::Rx, 0);
         crate::provider::test_support::record_locks();
-        control.book(Dispatched::new(ActionId(1), Action::Command {
-            target: super::super::test_support::target_of(&node),
-            verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
-            params: BTreeMap::new(),
-            at,
-        }, Some(node)));
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::Command { target: super::super::test_support::target_of(&node), verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(), params: BTreeMap::new(), at },
+            Some(node),
+        ));
         let taken = crate::provider::test_support::taken_locks();
         assert_eq!(taken.iter().filter(|address| **address == streams).count(), 1, "an accepted start_rx took the line lock {taken:?}");
         let start = lock(&core.streams).line(booked_stream(Dir::Rx)).unwrap().items.iter().find(|item| matches!(item.kind, Kind::Start)).map(|item| item.e);
@@ -3607,13 +3628,17 @@ mod tests {
     /// idle, through the Action path (uhi-control's own booking).
     fn rx_enable_from_none(control: &mut Control, core: &Core, id: u64, ms: i64, channels: i64) {
         lock(&core.streams).search(booked_stream(Dir::Rx), false);
-        control.book(Dispatched::new(ActionId(id), Action::UpdateParameter {
-            target: super::super::test_support::target_of(&core.id),
-            key: key("radio.rx.c0.stream"),
-            value: Value::from(if channels > 0 { 0 } else { -1 }),
-            class: UpdateClass::Cold,
-            at: Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))),
-        }, Some(core.id.clone())));
+        control.book(Dispatched::new(
+            ActionId(id),
+            Action::UpdateParameter {
+                target: super::super::test_support::target_of(&core.id),
+                key: key("radio.rx.c0.stream"),
+                value: Value::from(if channels > 0 { 0 } else { -1 }),
+                class: UpdateClass::Cold,
+                at: Some(AbsoluteDeadline::new(core.at(core.ticks(ms * 1_000_000)))),
+            },
+            Some(core.id.clone()),
+        ));
     }
 
     /// How many `cold` changes the receive line holds (RM-25): an enable that books nothing
@@ -3647,11 +3672,13 @@ mod tests {
         let host = core.device.host();
         let core_ = core.clone();
         let (done, finished) = channel();
-        let control_thread = host.spawn("control", move || {
-            let mut control = control;
-            rx_enable_from_none(&mut control, &core_, 5, 300, 1);
-            let _ = done.send(());
-        }).expect("a participant thread");
+        let control_thread = host
+            .spawn("control", move || {
+                let mut control = control;
+                rx_enable_from_none(&mut control, &core_, 5, 300, 1);
+                let _ = done.send(());
+            })
+            .expect("a participant thread");
         gate.wait();
         let mut rx = owner_rx(&core);
         let cursor = rx.cursor();
@@ -3758,12 +3785,14 @@ mod tests {
         let gate = spy.stop_before("rx_open");
         let host = core.device.host();
         let core_ = core.clone();
-        let owner = host.spawn("rx", move || {
-            let (to_rx, cmds) = channel();
-            std::mem::forget(to_rx);
-            let mut rx = super::super::rx::Rx::new(core_.clone(), 0, cmds, None, None);
-            rx.begin();
-        }).expect("a participant thread");
+        let owner = host
+            .spawn("rx", move || {
+                let (to_rx, cmds) = channel();
+                std::mem::forget(to_rx);
+                let mut rx = super::super::rx::Rx::new(core_.clone(), 0, cmds, None, None);
+                rx.begin();
+            })
+            .expect("a participant thread");
         gate.wait();
         assert!(!lock(&core.streams).is_idle(booked_stream(Dir::Rx)), "the owner has not begun");
         let mark = spy.log().len();
@@ -3797,11 +3826,13 @@ mod tests {
         let host = core.device.host();
         let core_ = core.clone();
         let (done, finished) = channel();
-        let control_thread = host.spawn("control", move || {
-            let mut control = control;
-            rx_enable_from_none(&mut control, &core_, 2, 100, 1);
-            let _ = done.send(());
-        }).expect("a participant thread");
+        let control_thread = host
+            .spawn("control", move || {
+                let mut control = control;
+                rx_enable_from_none(&mut control, &core_, 2, 100, 1);
+                let _ = done.send(());
+            })
+            .expect("a participant thread");
         assert!(returned.recv_timeout(Wall::from_secs(10)).is_ok(), "the open returned to Core");
         core.device_lost("test");
         let _ = resume.send(());
@@ -3865,11 +3896,13 @@ mod tests {
         let host = core.device.host();
         let core_ = core.clone();
         let (done, finished) = channel();
-        let control_thread = host.spawn("control", move || {
-            let mut control = control;
-            control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core_.at(core_.ticks(100_000_000)))));
-            let _ = done.send(());
-        }).expect("a participant thread");
+        let control_thread = host
+            .spawn("control", move || {
+                let mut control = control;
+                control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core_.at(core_.ticks(100_000_000)))));
+                let _ = done.send(());
+            })
+            .expect("a participant thread");
         gate.wait();
         core.device_lost("test");
         gate.release();
@@ -3894,11 +3927,13 @@ mod tests {
         let host = core.device.host();
         let core_ = core.clone();
         let (done, finished) = channel();
-        let control_thread = host.spawn("control", move || {
-            let mut control = control;
-            rx_enable_from_none(&mut control, &core_, 2, 100, 1);
-            let _ = done.send(());
-        }).expect("a participant thread");
+        let control_thread = host
+            .spawn("control", move || {
+                let mut control = control;
+                rx_enable_from_none(&mut control, &core_, 2, 100, 1);
+                let _ = done.send(());
+            })
+            .expect("a participant thread");
         gate.wait();
         {
             // As `Provider::stop` books it before its joins.
@@ -3955,11 +3990,13 @@ mod tests {
         let host = core.device.host();
         let core_ = core.clone();
         let (done, finished) = channel();
-        let control_thread = host.spawn("control", move || {
-            let mut control = control;
-            rx_enable_from_none(&mut control, &core_, 2, 100, 1);
-            let _ = done.send(());
-        }).expect("a participant thread");
+        let control_thread = host
+            .spawn("control", move || {
+                let mut control = control;
+                rx_enable_from_none(&mut control, &core_, 2, 100, 1);
+                let _ = done.send(());
+            })
+            .expect("a participant thread");
         assert!(returned.recv_timeout(Wall::from_secs(10)).is_ok(), "the rate comparison returned to Core");
         core.device_lost("test");
         let _ = resume.send(());
@@ -3985,8 +4022,12 @@ mod tests {
     /// The released rows of `key`, as their instant, whether `issued`, and whether `no channel`;
     /// a configure's rows are not the release's (theirs read the device back).
     fn rows_of(core: &Core, key: &Key) -> Vec<(i64, bool, bool)> {
-        lock(&core.rec).applied.iter().filter(|row| row["key"] == key.as_str() && row["read_back"].is_null())
-            .map(|row| (row["at"]["ticks"].as_i64().expect("an instant"), row["issued"] == true, row["note"] == "no channel")).collect()
+        lock(&core.rec)
+            .applied
+            .iter()
+            .filter(|row| row["key"] == key.as_str() && row["read_back"].is_null())
+            .map(|row| (row["at"]["ticks"].as_i64().expect("an instant"), row["issued"] == true, row["note"] == "no channel"))
+            .collect()
     }
 
     #[test]
@@ -4012,7 +4053,11 @@ mod tests {
         assert!(owner_rx(&core).begin(), "the owner begins the planned segment");
         let owner = device.calls()[mark..].to_vec();
         assert_eq!(timed.len(), 1, "{:?}", device.calls());
-        assert_eq!(owner.iter().filter(|call| call.starts_with("apply rx 0") && call.ends_with("at=-") && call.contains("gain=3")).count(), 1, "the owner's configure applies the value again: {owner:?}");
+        assert_eq!(
+            owner.iter().filter(|call| call.starts_with("apply rx 0") && call.ends_with("at=-") && call.contains("gain=3")).count(),
+            1,
+            "the owner's configure applies the value again: {owner:?}"
+        );
         device_at(&core, &time, &device, origin + core.ticks(1_000_000));
         assert_eq!(device.read_back(Dir::Rx, 0).gain, Some(3.0));
     }
@@ -4040,12 +4085,14 @@ mod tests {
         });
         let host = core.device.host();
         let core_ = core.clone();
-        let owner = host.spawn("rx", move || {
-            let (to_rx, cmds) = channel();
-            std::mem::forget(to_rx);
-            let mut rx = super::super::rx::Rx::new(core_.clone(), 0, cmds, None, None);
-            rx.begin();
-        }).expect("a participant thread");
+        let owner = host
+            .spawn("rx", move || {
+                let (to_rx, cmds) = channel();
+                std::mem::forget(to_rx);
+                let mut rx = super::super::rx::Rx::new(core_.clone(), 0, cmds, None, None);
+                rx.begin();
+            })
+            .expect("a participant thread");
         entered_rx.recv_timeout(Wall::from_secs(10)).expect("the owner reached its configure's return");
         assert_eq!(lock(&core.streams).stream(booked_stream(Dir::Rx)).configured, None, "the record is published before the window");
         let gain = key("radio.rx.c0.gain_db");
@@ -4086,10 +4133,14 @@ mod tests {
         });
         let mut rx = owner_rx(&core);
         let (done, finished) = channel();
-        let owner = core.device.host().spawn("rx-successor-configured", move || {
-            rx.begin();
-            let _ = done.send(rx);
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-successor-configured", move || {
+                rx.begin();
+                let _ = done.send(rx);
+            })
+            .unwrap();
         configured_rx.recv_timeout(Wall::from_secs(10)).expect("the successor configuration completed");
 
         control.book_timed(ActionId(3), frequency, Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
@@ -4105,7 +4156,11 @@ mod tests {
         assert!(device.calls().iter().any(|call| call == &format!("rx_start 0 {origin}")), "the owner did not start the configured successor: {:?}", device.calls());
         control.release();
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "the next release pass hands the held value to the armed chain");
-        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))), "the successor retune was not handed at its original instant: {:?}", device.calls());
+        assert!(
+            device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))),
+            "the successor retune was not handed at its original instant: {:?}",
+            device.calls()
+        );
         assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the handover remains an owner drain obligation");
         device_at(&core, &time, &device, e + core.ticks(2_000_000));
         drop(frozen);
@@ -4144,7 +4199,9 @@ mod tests {
                 let mut chain = core.rx_chain[0].lock();
                 chain.adopt_start(SegmentKey { by: segment.by, origin: segment.origin }, segment.origin);
                 chain.stop_result(Ok(())).unwrap();
-                if completed { let _ = chain.finish(); }
+                if completed {
+                    let _ = chain.finish();
+                }
             }
             let value = 1.001e9;
             control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(8)))));
@@ -4491,11 +4548,15 @@ mod tests {
         time.advance_to(core.at(ms(52))).unwrap();
         let gate = spy.stop_after("apply");
         let core_ = core.clone();
-        let publisher = core.device.host().spawn("loss", move || {
-            gate.wait();
-            core_.device_lost("the test's loss");
-            gate.release();
-        }).expect("a participant thread");
+        let publisher = core
+            .device
+            .host()
+            .spawn("loss", move || {
+                gate.wait();
+                core_.device_lost("the test's loss");
+                gate.release();
+            })
+            .expect("a participant thread");
         control.release();
         publisher.join().expect("the publisher thread");
         let applies: Vec<String> = spy.log().into_iter().filter(|call| call.starts_with("apply")).collect();
@@ -4535,7 +4596,11 @@ mod tests {
         device_at(&core, &time, &inner, origin + core.ticks(1_000_000));
         let projection = plan_of(&core, Dir::Rx)[0].settings.clone().expect("the settings");
         assert!(rows_of(&core, &gain).is_empty() && control.config[&gain] == Value::num(0.0).unwrap(), "the refused release wrote a row or the configuration of record");
-        assert_eq!((inner.read_back(Dir::Rx, 0).gain, projection.settings_on(&core, &projection.updates.lock(), Dir::Rx, 0, origin, 0).gain), (Some(0.0), Some(3.0)), "the refused release is not the projection's");
+        assert_eq!(
+            (inner.read_back(Dir::Rx, 0).gain, projection.settings_on(&core, &projection.updates.lock(), Dir::Rx, 0, origin, 0).gain),
+            (Some(0.0), Some(3.0)),
+            "the refused release is not the projection's"
+        );
     }
 
     #[test]
@@ -4674,7 +4739,11 @@ mod tests {
         device_at(&core, &time, &device, us(100_600));
         // UR-24, design 38 D2 (3): the row is written when the instant has come.
         control.release();
-        assert_eq!((before, device.read_back(Dir::Tx, 0).gain, rows_of(&core, &gain)), (Some(0.0), Some(3.0), vec![(us(100_500), true, false)]), "the device did not take the waited-for value at its instant");
+        assert_eq!(
+            (before, device.read_back(Dir::Tx, 0).gain, rows_of(&core, &gain)),
+            (Some(0.0), Some(3.0), vec![(us(100_500), true, false)]),
+            "the device did not take the waited-for value at its instant"
+        );
         assert_eq!(control.config_at(us(101_000))[&gain], Value::num(3.0).unwrap(), "the given release is not the configuration of record after its instant");
     }
 
@@ -4796,7 +4865,8 @@ mod tests {
         let (core, device, time) = layout_rig();
         let _frozen = hold(&core, &time, &device);
         let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.description.defaults(), false, Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![None, None] });
+        let mut control =
+            Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], core.description.defaults(), false, Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![None, None] });
         control.config.insert(key("radio.rx.c1.stream"), Value::from(0));
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
@@ -4849,12 +4919,14 @@ mod tests {
         let core_ = core.clone();
         let host = device.host();
         let (done, finished) = channel();
-        let booking = host.spawn("from-none-enable", move || {
-            let mut control = control;
-            lock(&core_.streams).search(booked_stream(Dir::Rx), false);
-            control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core_.at(core_.ticks(100_000_000)))));
-            let _ = done.send(());
-        }).expect("a participant thread");
+        let booking = host
+            .spawn("from-none-enable", move || {
+                let mut control = control;
+                lock(&core_.streams).search(booked_stream(Dir::Rx), false);
+                control.book_cold(ActionId(2), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core_.at(core_.ticks(100_000_000)))));
+                let _ = done.send(());
+            })
+            .expect("a participant thread");
         gate.wait();
         assert_eq!(core.now(), 0, "the configuration had not begun at the clock's start");
         time.advance_to(core.at(ms(200))).unwrap();
@@ -4904,8 +4976,11 @@ mod tests {
         assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.ends_with("at=-")), "the change was configured at its booking: {:?}", device.calls());
         plan[1].configure(&core, Dir::Rx).expect("the switch configures");
         let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(), 1,
-            "the switch's configuration does not carry the held retune: {calls:?}");
+        assert_eq!(
+            calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(),
+            1,
+            "the switch's configuration does not carry the held retune: {calls:?}"
+        );
         // The held retune is still released at its own instant.
         time.advance_to(core.at(ms(318))).unwrap();
         control.release();
@@ -4913,10 +4988,16 @@ mod tests {
         // UR-24 (R1): 320 ms is after the cut and before the switch's origin: no sample passes the
         // DDC then, so the retune is no timed command; the switch (configured here) already
         // carries it, and the release applies it untimed once more.
-        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && !call.ends_with("at=-")).count(), 0,
-            "the retune was given as a timed command: {calls:?}");
-        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("rate=-") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(), 1,
-            "the retune was not applied untimed: {calls:?}");
+        assert_eq!(
+            calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && !call.ends_with("at=-")).count(),
+            0,
+            "the retune was given as a timed command: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("rate=-") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(),
+            1,
+            "the retune was not applied untimed: {calls:?}"
+        );
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
         assert!(events_of(&events, kinds::LATE_COMMAND).is_empty());
     }
@@ -5195,10 +5276,7 @@ mod tests {
             values.insert(key(name), Value::from(1));
         }
         let rx = vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))];
-        let tx = vec![
-            Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))),
-            Some((core.register_in(Dir::Tx, 1, 200, 0).unwrap(), Channels::first(2).without(0))),
-        ];
+        let tx = vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), Some((core.register_in(Dir::Tx, 1, 200, 0).unwrap(), Channels::first(2).without(0)))];
         Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false, Start { t0: 0, rx, tx })
     }
 
@@ -5215,8 +5293,14 @@ mod tests {
         values.insert(key("radio.rx.c0.stream"), Value::from(0));
         values.insert(key("radio.rx.c1.stream"), Value::from(-1));
         let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        let mut control = Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] },
+        );
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
         lock(&core.streams).search(booked_stream(Dir::Rx), true);
@@ -5256,8 +5340,14 @@ mod tests {
         values.insert(key("radio.tx.c0.stream"), Value::from(0));
         values.insert(key("radio.tx.c1.stream"), Value::from(-1));
         let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            Start { t0: 0, rx: vec![None, None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        let mut control = Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            Start { t0: 0, rx: vec![None, None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] },
+        );
         control.book_cold(ActionId(1), key("radio.tx.c0.stream"), Value::from(-1), at(100));
         control.book_cold(ActionId(2), key("radio.tx.c1.stream"), Value::from(0), at(100));
         let plan = plan_of_stream(&core, Dir::Tx, 0);
@@ -5289,8 +5379,14 @@ mod tests {
         values.insert(key("radio.rx.c0.stream"), Value::from(0));
         values.insert(key("radio.rx.c1.stream"), Value::from(0));
         let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        let mut control = Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] },
+        );
         start_rx_chain(&core, &plan_of_stream(&core, Dir::Rx, 0)[0]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
@@ -5324,7 +5420,8 @@ mod tests {
                 streams.complete(stream_key(Dir::Rx, 0), active);
             }
         }
-        let source = plan_of_stream(&core, Dir::Rx, 0).into_iter()
+        let source = plan_of_stream(&core, Dir::Rx, 0)
+            .into_iter()
             .find(|planned| planned.segment.origin >= ms(200) && planned.segment.config.channels.contains(0))
             .expect("the source's post-move segment keeps channel 0");
         core.close_device(Dir::Rx, 0);
@@ -5344,11 +5441,7 @@ mod tests {
         control.release();
         device_at(&core, &time, &device, ms(300));
         assert_eq!(device.dsp_pending(Dir::Rx, 1), 0, "the flowing DDC took the later update too");
-        assert_eq!(device.dsp_log(Dir::Rx, 1), [
-            (ms(170), 10e6, true),
-            (ms(200), 10e6, false),
-            (ms(280), 20e6, true),
-        ]);
+        assert_eq!(device.dsp_log(Dir::Rx, 1), [(ms(170), 10e6, true), (ms(200), 10e6, false), (ms(280), 20e6, true),]);
         let calls = device.calls();
         assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=20000000") && call.contains(&format!("at={} effective={}", ms(280), ms(280)))), "{calls:?}");
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{calls:?}");
@@ -5474,15 +5567,24 @@ mod tests {
         values.insert(key("radio.rx.c0.stream"), Value::from(-1));
         values.insert(key("radio.rx.c1.stream"), Value::from(0));
         values.insert(key("radio.rx.c2.stream"), Value::from(-1));
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            Start { t0: 0, rx: vec![Some((Channels::first(2).without(0), 200)), None, None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1)))] });
+        let mut control = Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            Start { t0: 0, rx: vec![Some((Channels::first(2).without(0), 200)), None, None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1)))] },
+        );
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
         lock(&core.streams).search(stream_key(Dir::Rx, 0), true);
         control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(1), at(100));
         control.book_cold(ActionId(2), key("radio.rx.c1.stream"), Value::from(2), at(250));
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
-        let middle = plan_of_stream(&core, Dir::Rx, 1).into_iter().find(|planned| planned.segment.cut.is_some() && planned.segment.config.channels == Channels::first(2).without(0)).expect("B's finite segment");
+        let middle = plan_of_stream(&core, Dir::Rx, 1)
+            .into_iter()
+            .find(|planned| planned.segment.cut.is_some() && planned.segment.config.channels == Channels::first(2).without(0))
+            .expect("B's finite segment");
         let cut = middle.segment.cut.expect("B's segment is finite");
         let cut_end = middle.segment.instant(cut).unwrap();
         assert_eq!(cut_end, ms(250), "B's cut is not e₂");
@@ -5502,12 +5604,8 @@ mod tests {
         let samples: Vec<(f32, f32)> = (0..1_000).map(|i| (i as f32 / 1_000.0, 0.0)).collect();
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
         let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
         let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]), layout_description());
@@ -5517,22 +5615,34 @@ mod tests {
         let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
         let k = (ms(30) - clock.origin) / clock.n;
         assert!(clock.instant(k) >= ms(30), "the burst is booked ahead of its instant");
-        control.book(Dispatched::new(ActionId(1), Action::TxBurst {
-            target: super::super::test_support::target_of(&ResourceId::parse("usrp/tx/s0").unwrap()),
-            waveform,
-            repeat: false,
-            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, k)),
-            requested_at: None,
-            late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(ResourceId::parse("usrp/tx/s0").unwrap())));
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&ResourceId::parse("usrp/tx/s0").unwrap()),
+                waveform,
+                repeat: false,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, k)),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(ResourceId::parse("usrp/tx/s0").unwrap()),
+        ));
         assert!(matches!(to_tx.try_recv(), Ok(TxCmd::Burst(_))), "the burst was not handed to uhd-tx");
         let held = lock(&core.held).len();
         assert_eq!(held, 1, "the burst is not held ahead of its instant");
-        control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(super::super::test_support::target_of(&ResourceId::parse("usrp/rx/s0").unwrap())) }, Some(ResourceId::parse("usrp/rx/s0").unwrap())));
+        control.book(Dispatched::new(
+            ActionId(2),
+            Action::Stop { target: Some(super::super::test_support::target_of(&ResourceId::parse("usrp/rx/s0").unwrap())) },
+            Some(ResourceId::parse("usrp/rx/s0").unwrap()),
+        ));
         assert!(to_tx.try_recv().is_err(), "the receive stream's Stop reached uhd-tx");
         assert_eq!(lock(&core.held).len(), held, "the receive stream's Stop cancelled the transmit burst");
-        assert_eq!(lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| item.kind == Kind::Stop).count()), 0, "the receive Stop was booked on the transmit line");
+        assert_eq!(
+            lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| item.kind == Kind::Stop).count()),
+            0,
+            "the receive Stop was booked on the transmit line"
+        );
         assert_eq!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).map_or(0, |line| line.items.iter().filter(|item| item.kind == Kind::Stop).count()), 1, "the receive stream is not stopped");
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{:?}", device.calls());
     }
@@ -5567,7 +5677,11 @@ mod tests {
         let changes = timing_of(&core, "cold_change");
         let antennas: Vec<i64> = changes.iter().filter(|row| row["key"] == "radio.rx.c0.antenna").map(|row| row["e"].as_i64().unwrap()).collect();
         assert_eq!(antennas, [ms(50), ms(60)], "the refused instant is no floor: {changes:?}");
-        assert_eq!(changes.iter().filter(|row| row["key"] == "radio.tx.c0.stream").map(|row| row["e"].as_i64().unwrap()).collect::<Vec<_>>(), [ms(120)], "the later join is not at its own instant: {changes:?}");
+        assert_eq!(
+            changes.iter().filter(|row| row["key"] == "radio.tx.c0.stream").map(|row| row["e"].as_i64().unwrap()).collect::<Vec<_>>(),
+            [ms(120)],
+            "the later join is not at its own instant: {changes:?}"
+        );
         let plan = plan_of(&core, Dir::Tx);
         assert!(plan.len() == 1 && plan[0].segment.origin == ms(120), "the later join begins no transmit segment: {:?}", plan_rows(&plan));
         plan[0].configure(&core, Dir::Tx).expect("the joined segment configures");
@@ -5591,7 +5705,9 @@ mod tests {
 
     /// The timed applies of one direction's gain, in call order, as `(gain, at)`.
     fn timed_gains(device: &crate::device::FakeDevice, dir: &str) -> Vec<(f64, i64)> {
-        device.calls().into_iter()
+        device
+            .calls()
+            .into_iter()
             .filter(|call| call.starts_with(&format!("apply {dir} ")) && call.contains("gain=") && !call.ends_with("at=-"))
             .map(|call| {
                 let gain = call.split("gain=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
@@ -5610,14 +5726,12 @@ mod tests {
 
     /// The `cancelled_at` of every cancelled row (UR-30).
     fn cancelled_at(core: &Core) -> Vec<i64> {
-        lock(&core.rec).applied.iter().filter(|row| !row["cancelled"].is_null())
-            .map(|row| row["cancelled_at"]["ticks"].as_i64().unwrap()).collect()
+        lock(&core.rec).applied.iter().filter(|row| !row["cancelled"].is_null()).map(|row| row["cancelled_at"]["ticks"].as_i64().unwrap()).collect()
     }
 
     /// The reason of every cancelled row (UR-30): the stop's or the loss's, whichever ended the Run.
     fn cancelled_reasons(core: &Core) -> Vec<String> {
-        lock(&core.rec).applied.iter().filter(|row| !row["cancelled"].is_null())
-            .map(|row| row["cancelled"].as_str().unwrap().to_owned()).collect()
+        lock(&core.rec).applied.iter().filter(|row| !row["cancelled"].is_null()).map(|row| row["cancelled"].as_str().unwrap().to_owned()).collect()
     }
 
     #[test]
@@ -5768,7 +5882,9 @@ mod tests {
         control.book_timed(ActionId(2), gain.clone(), Value::num(2.0).unwrap(), Some(AbsoluteDeadline::new(core.at(half))));
         let late = events_of(&events, kinds::LATE_COMMAND);
         assert_eq!(
-            late.iter().map(|event| (event.payload["key"].as_str().unwrap().to_owned(), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap())).collect::<Vec<_>>(),
+            late.iter()
+                .map(|event| (event.payload["key"].as_str().unwrap().to_owned(), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap()))
+                .collect::<Vec<_>>(),
             [(gain.as_str().to_owned(), half, ms(10))],
             "the refused command did not floor B: {late:?}",
         );
@@ -5802,8 +5918,11 @@ mod tests {
         time.advance_to(core.at(ms(7) + core.ticks(200_000))).unwrap();
         let half = ms(9) + core.ticks(500_000);
         control.book_timed(ActionId(20), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(half))));
-        let seen: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .filter(|event| event.kind.as_str() == kinds::LATE_COMMAND || event.kind.as_str() == kinds::COMMAND_QUEUE_FULL).collect();
+        let seen: Vec<_> = events
+            .drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+            .into_iter()
+            .filter(|event| event.kind.as_str() == kinds::LATE_COMMAND || event.kind.as_str() == kinds::COMMAND_QUEUE_FULL)
+            .collect();
         let order: Vec<&str> = seen.iter().map(|event| event.kind.as_str()).collect();
         assert_eq!(order, [kinds::LATE_COMMAND, kinds::COMMAND_QUEUE_FULL], "the refused command freed its slot: {seen:?}");
         assert_eq!(
@@ -5838,7 +5957,9 @@ mod tests {
         control.book_timed(ActionId(3), gain.clone(), Value::num(2.0).unwrap(), Some(AbsoluteDeadline::new(core.at(half))));
         let late = events_of(&events, kinds::LATE_COMMAND);
         assert_eq!(
-            late.iter().map(|event| (event.payload["key"].as_str().unwrap().to_owned(), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap())).collect::<Vec<_>>(),
+            late.iter()
+                .map(|event| (event.payload["key"].as_str().unwrap().to_owned(), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap()))
+                .collect::<Vec<_>>(),
             [(gain.as_str().to_owned(), half, ms(10))],
             "the channel's leaving moved the floor: {late:?}",
         );
@@ -5882,19 +6003,11 @@ mod tests {
         control.of_record((ms(4), 1), timed(1.001e9));
         control.of_record((ms(4), 2), timed(1.002e9));
         control.released_at.insert((ms(12), 3), Given { timed: timed(1.003e9), live: true, given: true, handed_at: Some(ms(7)) });
-        control.released_at.insert((ms(7), 4), Given {
-            timed: Timed { key: key("radio.rx.c1.frequency_hz"), dir: Dir::Rx, value: 1.004e9, chan: 1 },
-            live: true,
-            given: true,
-            handed_at: Some(ms(9)),
-        });
+        control.released_at.insert((ms(7), 4), Given { timed: Timed { key: key("radio.rx.c1.frequency_hz"), dir: Dir::Rx, value: 1.004e9, chan: 1 }, live: true, given: true, handed_at: Some(ms(9)) });
         {
             let mut chain = core.rx_chain[0].lock();
             chain.adopt_start(SegmentKey { by: None, origin: 0 }, 0);
-            for entry in [
-                RxEntry { order: (ms(12), 3), channel: 0, value: 1.003e9, accepted_at: Some(ms(7)) },
-                RxEntry { order: (ms(7), 4), channel: 1, value: 1.004e9, accepted_at: Some(ms(9)) },
-            ] {
+            for entry in [RxEntry { order: (ms(12), 3), channel: 0, value: 1.003e9, accepted_at: Some(ms(7)) }, RxEntry { order: (ms(7), 4), channel: 1, value: 1.004e9, accepted_at: Some(ms(9)) }] {
                 let accepted_at = entry.accepted_at.unwrap();
                 chain.hand(entry, || Ok(()), || accepted_at).unwrap();
             }
@@ -5905,7 +6018,10 @@ mod tests {
 
         let chain = core.rx_chain[0].lock();
         assert!(matches!(chain.restore(), Restore::Planned(values) if values.get(&0) == Some(&1.002e9)), "same-instant booking order wins at S; a value recorded after S does not");
-        assert!(matches!(chain.restore(), Restore::Planned(values) if values.get(&1) == Some(&core.description.settings(&control.initial_config, Dir::Rx, 0, 1).freq.unwrap())), "a channel without a prior update restores its initial in-force setting");
+        assert!(
+            matches!(chain.restore(), Restore::Planned(values) if values.get(&1) == Some(&core.description.settings(&control.initial_config, Dir::Rx, 0, 1).freq.unwrap())),
+            "a channel without a prior update restores its initial in-force setting"
+        );
     }
 
     #[test]
@@ -6212,7 +6328,9 @@ mod tests {
             }
             time.advance_to(core.at(ms(10) + core.ticks(600_000))).unwrap();
             control.finish();
-            let rows: Vec<(i64, bool, bool)> = lock(&core.rec).applied.iter()
+            let rows: Vec<(i64, bool, bool)> = lock(&core.rec)
+                .applied
+                .iter()
                 .filter(|row| row["key"] == rx.as_str() || row["key"] == tx.as_str())
                 .map(|row| (row["at"]["ticks"].as_i64().unwrap(), row["issued"] == true, row["note"] == "no channel"))
                 .collect();
@@ -6318,7 +6436,9 @@ mod tests {
         control.book_timed(ActionId(2), gain.clone(), Value::num(2.0).unwrap(), Some(AbsoluteDeadline::new(core.at(half))));
         let late = events_of(&events, kinds::LATE_COMMAND);
         assert_eq!(
-            late.iter().map(|event| (event.payload["key"].as_str().unwrap().to_owned(), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap())).collect::<Vec<_>>(),
+            late.iter()
+                .map(|event| (event.payload["key"].as_str().unwrap().to_owned(), event.payload["requested"]["ticks"].as_i64().unwrap(), event.payload["applied"]["ticks"].as_i64().unwrap()))
+                .collect::<Vec<_>>(),
             [(gain.as_str().to_owned(), half, ms(12))],
             "the description's window did not floor B: {late:?}",
         );
@@ -6333,10 +6453,7 @@ mod tests {
 
     #[test]
     fn measurement_candidate_directional_start_leads_set_cold_change_origins() {
-        for (dir, lead_ns, field) in [
-            (Dir::Rx, 333_000_000, "radio.rx.s0.sample_rate_hz"),
-            (Dir::Tx, 277_000_000, "radio.tx.s0.sample_rate_hz"),
-        ] {
+        for (dir, lead_ns, field) in [(Dir::Rx, 333_000_000, "radio.rx.s0.sample_rate_hz"), (Dir::Tx, 277_000_000, "radio.tx.s0.sample_rate_hz")] {
             let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
             let mut description = layout_description();
             match dir {
@@ -6354,7 +6471,9 @@ mod tests {
             let rx_ready = if dir == Dir::Rx {
                 core.ticks(core.description.timing.release_window_ns + crate::profile::DELIVERY_ALLOWANCE_NS)
                     + core.block_len.max(core.device.rx_packet_samples(0)) as i64 * first.config.ratio.num() as i64
-            } else { 0 };
+            } else {
+                0
+            };
             assert_eq!(planned[1].segment.origin, cut + rx_ready + core.ticks(lead_ns), "{dir:?}: the named cold rate change must read its directional candidate lead");
         }
     }
@@ -6501,11 +6620,15 @@ mod tests {
         time.advance_to(core.at(ms(10))).unwrap();
         let gate = spy.stop_after("apply");
         let core_ = core.clone();
-        let publisher = core.device.host().spawn("loss", move || {
-            gate.wait();
-            core_.device_lost("the test's loss");
-            gate.release();
-        }).expect("a participant thread");
+        let publisher = core
+            .device
+            .host()
+            .spawn("loss", move || {
+                gate.wait();
+                core_.device_lost("the test's loss");
+                gate.release();
+            })
+            .expect("a participant thread");
         control.release();
         publisher.join().expect("the publisher thread");
         assert_eq!(spy.seen("apply"), 1, "the lost device was called again: {:?}", spy.log());
@@ -6520,7 +6643,8 @@ mod tests {
 
     /// A running receive segment's `uhd-control` on the manual rig, the receive stream
     /// `Stop`ped at the device's instant 0, so that no sample passes after it.
-    fn stopped_receive() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>, Control, crate::provider::test_support::Frozen) {
+    fn stopped_receive()
+    -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>, Control, crate::provider::test_support::Frozen) {
         let (core, device, time, events) = manual_rig_events();
         let frozen = hold(&core, &time, &device);
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
@@ -6534,7 +6658,9 @@ mod tests {
         drop(chain);
         let stream = stream_key(Dir::Rx, 0);
         let mut streams = lock(&core.streams);
-        if let Some(active) = streams.finished(stream) { streams.complete(stream, active); }
+        if let Some(active) = streams.finished(stream) {
+            streams.complete(stream, active);
+        }
         drop(streams);
         (core, device, time, events, control, frozen)
     }
@@ -6623,7 +6749,8 @@ mod tests {
         start_rx_chain(&core, &plan_of(&core, Dir::Rx)[0]);
         timed_at(&mut control, &core, &time, 10, "radio.rx.c0.frequency_hz", 2.1e9, 100);
         let ms = |n: i64| core.ticks(n * 1_000_000);
-        let given: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(100)))).collect();
+        let given: Vec<String> =
+            device.calls().into_iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(100)))).collect();
         assert_eq!(given.len(), 1, "{:?}", device.calls());
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "no sample passes the unit rig's DDC");
         assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the accepted timed frequency belongs to the RX chain");
@@ -6698,7 +6825,11 @@ mod tests {
         let planned = plan_of(&core, Dir::Rx);
         assert_eq!(planned[1].segment.origin, o3);
         let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(), 1, "the configure carries the value too: {calls:?}");
+        assert_eq!(
+            calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(),
+            1,
+            "the configure carries the value too: {calls:?}"
+        );
         assert_eq!(timed(&calls), 1, "{calls:?}");
         device_at(&core, &time, &device, o3 + ms(10));
         let samples = device.rx_recv(0, 2_000, Wall::from_millis(10), false);
@@ -6733,12 +6864,11 @@ mod tests {
         control.release();
         assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000")), "deferred: {:?}", device.calls());
         let node = core.stream_node(Dir::Rx, 0);
-        control.book(Dispatched::new(ActionId(2), Action::Command {
-            target: super::super::test_support::target_of(&node),
-            verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(),
-            params: BTreeMap::new(),
-            at: None,
-        }, Some(node)));
+        control.book(Dispatched::new(
+            ActionId(2),
+            Action::Command { target: super::super::test_support::target_of(&node), verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(), params: BTreeMap::new(), at: None },
+            Some(node),
+        ));
         let planned = plan_of(&core, Dir::Rx);
         assert_eq!(planned.last().expect("the start's segment").segment.origin, e, "97 ms plus the 3 ms lead");
         planned.last().unwrap().configure(&core, Dir::Rx).expect("the segment configures");
@@ -6798,27 +6928,27 @@ mod tests {
     fn tx_waveform() -> (ezsdr_kernel::hash::ContentHash, Arc<[u8]>, ezsdr_kernel::manifest::ArtifactRef) {
         let bytes: Vec<u8> = [(0.25f32, 0.0f32), (0.5, 0.0)].iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
-        let waveform = ezsdr_kernel::manifest::ingest_input(
-            ezsdr_kernel::spec::Ident::parse("waveform").unwrap(),
-            ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(),
-            format!("mem:{hash}"),
-            &bytes,
-        );
+        let waveform =
+            ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         (hash, Arc::from(bytes), waveform)
     }
 
     /// Submits a burst at sample `k` of `clock` and returns the root instant uhd-control hands uhd-tx
     /// for its first sample, with the sample it names; none when it was not handed over.
     fn submit_burst(control: &mut Control, core: &Core, to_tx: &Receiver<TxCmd>, waveform: &ezsdr_kernel::manifest::ArtifactRef, clock: Clock, k: i64) -> Option<(i64, i64)> {
-        control.book(Dispatched::new(ActionId(90), Action::TxBurst {
-            target: super::super::test_support::target_of(&core.tx_id),
-            waveform: waveform.clone(),
-            repeat: false,
-            at: AbsoluteDeadline::new(TimePoint::new(clock.domain, k)),
-            requested_at: None,
-            late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
-            metadata: BTreeMap::new(),
-        }, Some(core.tx_id.clone())));
+        control.book(Dispatched::new(
+            ActionId(90),
+            Action::TxBurst {
+                target: super::super::test_support::target_of(&core.tx_id),
+                waveform: waveform.clone(),
+                repeat: false,
+                at: AbsoluteDeadline::new(TimePoint::new(clock.domain, k)),
+                requested_at: None,
+                late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+                metadata: BTreeMap::new(),
+            },
+            Some(core.tx_id.clone()),
+        ));
         match to_tx.try_recv() {
             Ok(TxCmd::Burst(held)) => {
                 assert_eq!(held.domain, clock.domain, "the burst names the successor's clock");
@@ -6832,10 +6962,13 @@ mod tests {
     /// clock ends at) for each segment, in ticks.
     fn transmit_clocks(core: &Core) -> Vec<(i64, Option<i64>, Option<i64>)> {
         let records = core.clocks.sample_clock_records();
-        plan_of(core, Dir::Tx).iter().map(|planned| {
-            let record = planned.clock.and_then(|clock| records.iter().find(|record| record.domain == clock.domain));
-            (planned.segment.origin, planned.clock.map(|clock| clock.origin), record.and_then(|record| record.ended_at).map(|at| at.ticks_in(record.unwrap().root).unwrap()))
-        }).collect()
+        plan_of(core, Dir::Tx)
+            .iter()
+            .map(|planned| {
+                let record = planned.clock.and_then(|clock| records.iter().find(|record| record.domain == clock.domain));
+                (planned.segment.origin, planned.clock.map(|clock| clock.origin), record.and_then(|record| record.ended_at).map(|at| at.ticks_in(record.unwrap().root).unwrap()))
+            })
+            .collect()
     }
 
     #[test]
@@ -6981,7 +7114,9 @@ mod tests {
             control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms(300))))));
             let plan = plan_of(&core, Dir::Rx);
             let e = plan[1].segment.origin - before * one_tick(&core);
-            if !covered { start_rx_chain(&core, &plan[0]); }
+            if !covered {
+                start_rx_chain(&core, &plan[0]);
+            }
             time.advance_to(core.at(e - core.ticks(4_000_000))).ok();
             control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
             time.advance_to(core.at(e - core.ticks(1_000_000))).unwrap();
@@ -7024,11 +7159,19 @@ mod tests {
         let destination = plan_of_stream(&core, Dir::Rx, 0).into_iter().find(|planned| planned.segment.config.channels.contains(1)).expect("the destination segment");
         assert!(destination.segment.origin > ms(101), "the destination begins after the value's instant");
         let (waiting, waited) = channel();
-        crate::provider::test_support::probe(&core, "wait_release", move |_| { let _ = waiting.send(()); });
+        crate::provider::test_support::probe(&core, "wait_release", move |_| {
+            let _ = waiting.send(());
+        });
         let owner_core = core.clone();
         let (done, result) = channel();
         let destination_for_owner = destination.clone();
-        let owner = core.device.host().spawn("rx-chain-0", move || { let _ = done.send(owner_core.owner_configure(Dir::Rx, 0, &destination_for_owner)); }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-chain-0", move || {
+                let _ = done.send(owner_core.owner_configure(Dir::Rx, 0, &destination_for_owner));
+            })
+            .unwrap();
         assert!(waited.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination's owner waits for the source's release");
         // The value, released before the source's cut while the destination waits.
         time.advance_to(core.at(ms(95))).unwrap();
@@ -7159,7 +7302,12 @@ mod tests {
         let (reached, resume) = pause_core_at(core, probe_name);
         let owner_core = core.clone();
         let (done, result) = channel();
-        core.device.host().spawn("rx-chain-0", move || { let _ = done.send(owner_core.owner_configure(Dir::Rx, 0, &planned).unwrap_or(false)); }).unwrap();
+        core.device
+            .host()
+            .spawn("rx-chain-0", move || {
+                let _ = done.send(owner_core.owner_configure(Dir::Rx, 0, &planned).unwrap_or(false));
+            })
+            .unwrap();
         (reached, resume, result)
     }
 
@@ -7224,13 +7372,16 @@ mod tests {
         let (done, done_rx) = channel();
         let at = Some(AbsoluteDeadline::new(core.at(ms(310))));
         let mut control = control;
-        core.device.host().spawn("uhd-control", move || {
-            control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), at);
-            let _ = booked.send(());
-            let _ = go_rx.recv();
-            control.release();
-            let _ = done.send(());
-        }).unwrap();
+        core.device
+            .host()
+            .spawn("uhd-control", move || {
+                control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), at);
+                let _ = booked.send(());
+                let _ = go_rx.recv();
+                control.release();
+                let _ = done.send(());
+            })
+            .unwrap();
         until_waiting(plan[1].settings.as_ref().unwrap(), 1, "the booking");
         assert!(booked_rx.try_recv().is_err(), "the booking waits for the configure's lock");
         let _ = resume.send(());
@@ -7241,7 +7392,8 @@ mod tests {
         assert!(done_rx.recv_timeout(Wall::from_secs(10)).is_ok());
         let calls = device.calls();
         let configure = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.ends_with("at=-")).expect("the configure's write");
-        let release = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("rate=-") && call.contains("freq=2100000000") && call.ends_with("at=-")).expect("the release's untimed write");
+        let release =
+            calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("rate=-") && call.contains("freq=2100000000") && call.ends_with("at=-")).expect("the release's untimed write");
         assert!(configure < release, "{calls:?}");
         assert_eq!(device.freq_at(Dir::Rx, 0, ms(311)), 2.1e9);
     }
@@ -7259,15 +7411,27 @@ mod tests {
         let (reached, resume, result) = paused_configure(&core, plan[1].clone(), "apply");
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok());
         let (done, done_rx) = channel();
-        core.device.host().spawn("uhd-control", move || { control.release(); let _ = done.send(()); }).unwrap();
+        core.device
+            .host()
+            .spawn("uhd-control", move || {
+                control.release();
+                let _ = done.send(());
+            })
+            .unwrap();
         until_waiting(plan[1].settings.as_ref().unwrap(), 1, "the release");
         assert!(done_rx.try_recv().is_err(), "the release waits for the configure's lock");
         let _ = resume.send(());
         assert!(result.recv_timeout(Wall::from_secs(10)).unwrap());
         assert!(done_rx.recv_timeout(Wall::from_secs(10)).is_ok());
         let calls = device.calls();
-        let configure = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.contains("freq=2100000000") && call.ends_with("at=-")).expect("the configure carried the value");
-        let release = calls.iter().rposition(|call| call.starts_with("apply rx 0") && call.contains("rate=-") && call.contains("freq=2100000000") && call.ends_with("at=-")).expect("the release's untimed write");
+        let configure = calls
+            .iter()
+            .position(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.contains("freq=2100000000") && call.ends_with("at=-"))
+            .expect("the configure carried the value");
+        let release = calls
+            .iter()
+            .rposition(|call| call.starts_with("apply rx 0") && call.contains("rate=-") && call.contains("freq=2100000000") && call.ends_with("at=-"))
+            .expect("the release's untimed write");
         assert!(configure < release, "{calls:?}");
     }
 
@@ -7356,7 +7520,15 @@ mod tests {
             control.settle(at, "Provider::stop", lost);
             let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|row| row["key"] == freq.as_str()).cloned().collect();
             assert_eq!(rows.len(), 1, "{rows:?}");
-            let state = if rows[0].get("cancelled").is_some() { "cancelled" } else if rows[0]["note"] == "no channel" { "no channel" } else if rows[0]["issued"] == true { "issued" } else { "other" };
+            let state = if rows[0].get("cancelled").is_some() {
+                "cancelled"
+            } else if rows[0]["note"] == "no channel" {
+                "no channel"
+            } else if rows[0]["issued"] == true {
+                "issued"
+            } else {
+                "other"
+            };
             assert_eq!(state, expected, "lost: {lost}, stop {early} ms before e: {rows:?}");
         }
     }
@@ -7475,7 +7647,12 @@ mod tests {
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0 ") && call.contains("freq=2000000000") && call.contains("at=")).count(), 1, "{calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000")).count(), 0, "channel 1's value is the new segment's: {calls:?}");
         plan[1].configure(&core, Dir::Rx).expect("the new segment configures");
-        assert_eq!(device.calls().iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(), 1, "its configure carries the value: {:?}", device.calls());
+        assert_eq!(
+            device.calls().iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(),
+            1,
+            "its configure carries the value: {:?}",
+            device.calls()
+        );
     }
 
     #[test]
@@ -7506,7 +7683,9 @@ mod tests {
     }
 
     fn device_at_spy(core: &Core, time: &ezsdr_kernel::time::ManualTimeAuthority, spy: &crate::provider::test_support::LockSpy, ticks: i64) {
-        if core.now() < ticks { time.advance_to(core.at(ticks)).unwrap(); }
+        if core.now() < ticks {
+            time.advance_to(core.at(ticks)).unwrap();
+        }
         spy.set_time(ticks);
     }
 
@@ -7515,8 +7694,7 @@ mod tests {
         // idle from-none path. This leaves the real owner configuration/start refusal gates
         // available after the timed command is handed to the planned segment.
         lock(&core.streams).search(booked_stream(Dir::Rx), true);
-        control.book_cold(ActionId(id), key("radio.rx.c0.stream"), Value::from(0),
-            Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
+        control.book_cold(ActionId(id), key("radio.rx.c0.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
         let planned = plan_of(core, Dir::Rx);
         assert_eq!(planned.len(), 1, "the owner has one planned successor");
         assert!(planned[0].settings.as_ref().is_some_and(|settings| !settings.is_configured()), "control did not leave configuration to the owner");
@@ -7548,20 +7726,30 @@ mod tests {
         let gate = spy.stop_after("rx_start");
         let mut rx = owner_rx(&core);
         let (owner_done, owner_returned) = channel();
-        let owner = core.device.host().spawn("rx-begin-publication", move || {
-            assert!(rx.begin());
-            let _ = owner_done.send(rx);
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-begin-publication", move || {
+                assert!(rx.begin());
+                let _ = owner_done.send(rx);
+            })
+            .unwrap();
         gate.wait();
         let release_at = e - core.ticks(core.description.timing.release_window_ns);
         device_at_spy(&core, &time, &spy, release_at);
         let (release_done, release_returned) = channel();
-        let release = core.device.host().spawn("control-before-begin-publication", move || {
-            control.release();
-            let _ = release_done.send(control);
-        }).unwrap();
+        let release = core
+            .device
+            .host()
+            .spawn("control-before-begin-publication", move || {
+                control.release();
+                let _ = release_done.send(control);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "control did not wait on begin's chain lock");
         assert!(lock(&core.streams).active(stream_key(Dir::Rx, 0)).is_none(), "Streams::started is not published early");
         assert!(core.rx_chain[0].is_held(), "the owner still holds eligibility unpublished");
@@ -7599,12 +7787,18 @@ mod tests {
         assert_eq!(chain.device(), RxDevice::Streaming);
         assert_eq!(chain.segment(), Some(segment), "first sample preserves the covering segment key");
         let (done, returned) = channel();
-        let control_thread = core.device.host().spawn("control-after-first-rx-sample", move || {
-            control.release();
-            let _ = done.send(control);
-        }).unwrap();
+        let control_thread = core
+            .device
+            .host()
+            .spawn("control-after-first-rx-sample", move || {
+                control.release();
+                let _ = done.send(control);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "the timed handoff did not wait for first-sample publication");
         assert!(chain.debt().is_empty());
         drop(chain);
@@ -7648,18 +7842,28 @@ mod tests {
         device_at_spy(&core, &time, &spy, e - core.ticks(core.description.timing.release_window_ns));
         let gate = spy.stop_after("apply");
         let (control_done, control_returned) = channel();
-        let control_thread = core.device.host().spawn("rx-apply-before-restart", move || {
-            apply_control.release();
-            let _ = control_done.send(apply_control);
-        }).unwrap();
+        let control_thread = core
+            .device
+            .host()
+            .spawn("rx-apply-before-restart", move || {
+                apply_control.release();
+                let _ = control_done.send(apply_control);
+            })
+            .unwrap();
         gate.wait();
         let (owner_done, owner_returned) = channel();
-        let owner_thread = core.device.host().spawn("rx-restart-after-apply", move || {
-            rx.receive(crate::device::RxRecv::LateCommand);
-            let _ = owner_done.send(rx);
-        }).unwrap();
+        let owner_thread = core
+            .device
+            .host()
+            .spawn("rx-restart-after-apply", move || {
+                rx.receive(crate::device::RxRecv::LateCommand);
+                let _ = owner_done.send(rx);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "restart did not wait behind the timed apply");
         assert_eq!(spy.seen("rx_start"), 1, "restart cannot reach the device before debt publication");
         gate.release();
@@ -7685,19 +7889,29 @@ mod tests {
         device_at_spy(&core, &time, &spy, e - core.ticks(core.description.timing.release_window_ns));
         let gate = spy.stop_after("rx_start");
         let (restart_done, restarted) = channel();
-        let restart = core.device.host().spawn("rx-restart-before-timed-apply", move || {
-            rx.receive(crate::device::RxRecv::LateCommand);
-            let _ = restart_done.send(rx);
-        }).unwrap();
+        let restart = core
+            .device
+            .host()
+            .spawn("rx-restart-before-timed-apply", move || {
+                rx.receive(crate::device::RxRecv::LateCommand);
+                let _ = restart_done.send(rx);
+            })
+            .unwrap();
         gate.wait();
         assert!(core.rx_chain[0].is_held(), "restart retains the chain lock while rx_start is in flight");
         let (release_done, released) = channel();
-        let release = core.device.host().spawn("timed-apply-after-rx-restart", move || {
-            third_control.release();
-            let _ = release_done.send(third_control);
-        }).unwrap();
+        let release = core
+            .device
+            .host()
+            .spawn("timed-apply-after-rx-restart", move || {
+                third_control.release();
+                let _ = release_done.send(third_control);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "timed apply did not wait behind the restart lock");
         assert!(!spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")), "timed apply crossed the restart gate: {:?}", spy.log());
         gate.release();
@@ -7771,9 +7985,7 @@ mod tests {
         }));
         let mut description = crate::provider::test_support::default_description(2_000);
         description.timing.rx_start_lead_ns = description.timing.release_window_ns;
-        let (core, time, _events) = crate::provider::test_support::rig_on_description(
-            device.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), description,
-        );
+        let (core, time, _events) = crate::provider::test_support::rig_on_description(device.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), description);
         let frozen = hold(&core, &time, &device);
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let initial = plan_of(&core, Dir::Rx)[0].clone();
@@ -7789,12 +8001,11 @@ mod tests {
         let mut rx = super::super::rx::Rx::new(core.clone(), 0, cmds, Some((handle, channels, initial.segment.origin)), None);
 
         let ticks = |ms: i64| core.ticks(ms * 1_000_000);
-        let (lead, window) = (
-            core.ticks(core.description.timing.rx_start_lead_ns),
-            core.ticks(core.description.timing.release_window_ns),
-        );
+        let (lead, window) = (core.ticks(core.description.timing.rx_start_lead_ns), core.ticks(core.description.timing.release_window_ns));
         let sync_device = |at| {
-            if core.now() < at { time.advance_to(core.at(at)).unwrap(); }
+            if core.now() < at {
+                time.advance_to(core.at(at)).unwrap();
+            }
             device.set_time(at);
         };
         assert_eq!(lead, window, "this sequence exercises the minimum L = W boundary");
@@ -7804,7 +8015,14 @@ mod tests {
         control.book_timed(ActionId(1), frequency.clone(), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(old_e))));
         device_at(&core, &time, &device, cut);
         control.release();
-        assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the old segment owns its accepted entry: held={:?}, calls={:?}, plan={:?}", control.held.keys().collect::<Vec<_>>(), device.calls(), plan_rows(&plan_of(&core, Dir::Rx)));
+        assert_eq!(
+            core.rx_chain[0].lock().debt().len(),
+            1,
+            "the old segment owns its accepted entry: held={:?}, calls={:?}, plan={:?}",
+            control.held.keys().collect::<Vec<_>>(),
+            device.calls(),
+            plan_rows(&plan_of(&core, Dir::Rx))
+        );
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
 
         control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(cut))));
@@ -7844,19 +8062,27 @@ mod tests {
             let _ = owner_resume.lock().unwrap().recv();
         });
         let (owner_done, owner_returned) = channel();
-        let owner = core.device.host().spawn("rx-minimum-lead-drain", move || {
-            rx.try_end();
-            let _ = owner_done.send(rx);
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-minimum-lead-drain", move || {
+                rx.try_end();
+                let _ = owner_done.send(rx);
+            })
+            .unwrap();
         wait_reached.recv_timeout(Wall::from_secs(10)).expect("the old owner reached finish after its drain");
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the old timed entry was consumed by the bounded flush");
 
         sync_device(deadline);
         let (control_done, control_returned) = channel();
-        let release_thread = core.device.host().spawn("rx-successor-release-window", move || {
-            control.release();
-            let _ = control_done.send(control);
-        }).unwrap();
+        let release_thread = core
+            .device
+            .host()
+            .spawn("rx-successor-release-window", move || {
+                control.release();
+                let _ = control_done.send(control);
+            })
+            .unwrap();
         let waiter_deadline = std::time::Instant::now() + Wall::from_secs(10);
         while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < waiter_deadline {
             std::thread::yield_now();
@@ -7874,18 +8100,30 @@ mod tests {
         assert!(lock(&core.rec).applied.iter().all(|row| row["key"] != frequency.as_str() || row["claimed"] != 2.2e9), "the held value was recorded before begin");
         assert!(rx.begin(), "the successor begins after the old chain finishes");
         assert_eq!(successor_origin - core.now(), lead, "the successor starts with exactly its minimum lead");
-        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=2200000000") && call.contains(&format!("at={successor_origin} effective="))), "configuration did not replace the still-held timed handoff: {:?}", device.calls());
+        assert!(
+            !device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=2200000000") && call.contains(&format!("at={successor_origin} effective="))),
+            "configuration did not replace the still-held timed handoff: {:?}",
+            device.calls()
+        );
 
         control.release();
         assert!(!control.held.contains_key(&successor_order));
-        let timed: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2200000000") && call.contains(&format!("at={successor_origin} effective={successor_origin}"))).collect();
+        let timed: Vec<_> = device
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2200000000") && call.contains(&format!("at={successor_origin} effective={successor_origin}")))
+            .collect();
         assert_eq!(timed.len(), 1, "the successor receives one timed handoff: {:?}", device.calls());
         sync_device(successor_origin);
         control.release();
         let samples = core.device.rx_recv(0, core.block_len, Wall::from_millis(10), false);
         assert!(matches!(&samples, crate::device::RxRecv::Samples { .. }), "the successor produces qualifying samples: {samples:?}");
         rx.receive(samples);
-        assert!(device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at >= successor_origin && *value == 2.2e9 && *timed), "the fake applies the successor value on a qualifying sample: {:?}", device.dsp_log(Dir::Rx, 0));
+        assert!(
+            device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at >= successor_origin && *value == 2.2e9 && *timed),
+            "the fake applies the successor value on a qualifying sample: {:?}",
+            device.dsp_log(Dir::Rx, 0)
+        );
         assert_eq!(core.rx_chain[0].lock().debt().len(), 0, "the successor sample consumes its own debt");
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
     }
@@ -7905,23 +8143,25 @@ mod tests {
         let rx0 = key("radio.rx.c0.frequency_hz");
         let rx1 = key("radio.rx.c1.frequency_hz");
         let tx0 = key("radio.tx.c0.gain_db");
-        for (id, target, value, at) in [
-            (2, rx0.clone(), 1.001e9, e),
-            (3, rx1.clone(), 1.002e9, later_rx),
-            (4, tx0.clone(), 3.0, later_tx),
-        ] {
+        for (id, target, value, at) in [(2, rx0.clone(), 1.001e9, e), (3, rx1.clone(), 1.002e9, later_rx), (4, tx0.clone(), 3.0, later_tx)] {
             control.book_timed(ActionId(id), target, Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(at))));
         }
         device_at(&core, &time, &device, later_tx + core.ticks(1_000_000));
 
         let chain = core.rx_chain[0].lock();
         let (done, returned) = channel();
-        let release = core.device.host().spawn("blocked-rx-head-release", move || {
-            control.release();
-            let _ = done.send(control);
-        }).unwrap();
+        let release = core
+            .device
+            .host()
+            .spawn("blocked-rx-head-release", move || {
+                control.release();
+                let _ = done.send(control);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "the release pass reached the blocked owner's chain lock");
         assert!(!device.calls().iter().any(|call| call.starts_with("apply ")), "a later RX/TX command passed the blocked head: {:?}", device.calls());
         assert!(lock(&core.rec).applied.is_empty(), "no command was recorded before the head resolved");
@@ -7935,8 +8175,12 @@ mod tests {
         control.release();
         assert!(control.held.is_empty());
         let calls = device.calls();
-        let first = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective="))).expect("the blocked head is handed first");
-        let second = calls.iter().position(|call| call.starts_with("apply rx 1") && call.contains("freq=1002000000") && call.contains(&format!("at={later_rx} effective="))).expect("the later RX update is handed");
+        let first =
+            calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective="))).expect("the blocked head is handed first");
+        let second = calls
+            .iter()
+            .position(|call| call.starts_with("apply rx 1") && call.contains("freq=1002000000") && call.contains(&format!("at={later_rx} effective=")))
+            .expect("the later RX update is handed");
         let third = calls.iter().position(|call| call.starts_with("apply tx 0") && call.contains("gain=3") && call.contains(&format!("at={later_tx} effective="))).expect("the TX update is handed");
         assert!(first < second && second < third, "release preserves the (e, sequence) device order: {calls:?}");
         assert!(calls[second].contains(&format!("effective={}", device.time_now().unwrap())), "the already-running second owner was physically late: {calls:?}");
@@ -7967,7 +8211,10 @@ mod tests {
         device_at(&core, &time, &device, earlier - window);
         control.release();
         assert_eq!(rows_of(&core, &earlier_key), [], "the earlier command is issued but its instant has not arrived");
-        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 1") && call.contains("freq=1001000000") && call.contains(&format!("at={earlier} effective="))), "the earlier command was handed before the blocked head");
+        assert!(
+            device.calls().iter().any(|call| call.starts_with("apply rx 1") && call.contains("freq=1001000000") && call.contains(&format!("at={earlier} effective="))),
+            "the earlier command was handed before the blocked head"
+        );
 
         device_at(&core, &time, &device, earlier + core.ticks(1_000_000));
         control.release();
@@ -8103,11 +8350,14 @@ mod tests {
         let (core, device, time, _) = both_rig();
         let _frozen = hold(&core, &time, &device);
         let mut config = core.description.defaults();
-        for name in ["radio.rx.c0.stream", "radio.rx.c1.stream"] { config.insert(key(name), Value::from(-1)); }
-        for name in ["radio.tx.c0.stream", "radio.tx.c1.stream"] { config.insert(key(name), Value::from(-1)); }
+        for name in ["radio.rx.c0.stream", "radio.rx.c1.stream"] {
+            config.insert(key(name), Value::from(-1));
+        }
+        for name in ["radio.tx.c0.stream", "radio.tx.c1.stream"] {
+            config.insert(key(name), Value::from(-1));
+        }
         let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false,
-            Start { t0: 0, rx: vec![None, None], tx: vec![None, None] });
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, Start { t0: 0, rx: vec![None, None], tx: vec![None, None] });
         let (origin, e, value) = successor_frequency(&mut control, &core, 1);
         let frequency = key("radio.rx.c0.frequency_hz");
         control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
@@ -8119,7 +8369,8 @@ mod tests {
         let move_at = origin + core.ticks(500_000);
         lock(&core.streams).search(stream_key(Dir::Rx, 1), true);
         control.book_cold(ActionId(3), key("radio.rx.c0.stream"), Value::from(1), Some(AbsoluteDeadline::new(core.at(move_at))));
-        let destination = plan_of_stream(&core, Dir::Rx, 1).into_iter()
+        let destination = plan_of_stream(&core, Dir::Rx, 1)
+            .into_iter()
             .find(|planned| planned.segment.origin > e && planned.segment.config.channels.contains(0))
             .expect("the move creates a later destination segment");
         assert!(destination.settings.as_ref().is_some_and(|settings| !settings.is_configured()));
@@ -8128,11 +8379,17 @@ mod tests {
 
         assert!(control.held.is_empty(), "the new destination's configure now carries the value");
         assert_eq!(rows_of(&core, &frequency), [(e, true, true)], "no destination is active at e, so the row keeps the existing no-channel note");
-        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))),
-            "the held value was not written to the old destination: {:?}", device.calls());
+        assert!(
+            !device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))),
+            "the held value was not written to the old destination: {:?}",
+            device.calls()
+        );
         destination.configure(&core, Dir::Rx).expect("the destination configures from the updated projection");
-        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}") ) && call.ends_with("at=-")),
-            "the new destination configure carries the held frequency: {:?}", device.calls());
+        assert!(
+            device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}")) && call.ends_with("at=-")),
+            "the new destination configure carries the held frequency: {:?}",
+            device.calls()
+        );
     }
 
     #[test]
@@ -8155,8 +8412,11 @@ mod tests {
         assert!(control.held.is_empty());
         assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the removed destination records no channel at the original instant");
         assert!(lock(&core.rec).applied.iter().any(|row| row["key"] == frequency.as_str() && row["note"] == "no channel" && row["at"]["ticks"] == core.at(e).ticks_in(core.root).unwrap()));
-        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))),
-            "the removed destination receives no stale timed or untimed write: {:?}", device.calls());
+        assert!(
+            !device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))),
+            "the removed destination receives no stale timed or untimed write: {:?}",
+            device.calls()
+        );
     }
 
     fn configured_successor_refusal_case(refuse_start: bool) {
@@ -8182,15 +8442,13 @@ mod tests {
         assert!(core.rx_chain[0].lock().segment().is_none());
         assert!(core.rx_chain[0].lock().debt().is_empty());
         assert_eq!(control.held.len(), 1, "the refusal leaves the frequency for the next release pass");
-        assert!(!spy.log().iter().any(|call| call.contains(&format!("freq={value}") ) && call.contains("at=")),
-            "the refused successor never receives a timed frequency: {:?}", spy.log());
+        assert!(!spy.log().iter().any(|call| call.contains(&format!("freq={value}")) && call.contains("at=")), "the refused successor never receives a timed frequency: {:?}", spy.log());
 
         device_at_spy(&core, &time, &spy, e);
         control.release();
         assert!(control.held.is_empty());
         assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the refusal removes the only destination, so the row records no channel");
-        assert_eq!(control.config.get(&frequency), Some(&Value::num(value).unwrap()),
-            "the no-channel outcome remains the configuration of record");
+        assert_eq!(control.config.get(&frequency), Some(&Value::num(value).unwrap()), "the no-channel outcome remains the configuration of record");
 
         core.close_device(Dir::Rx, 0);
         core.open_streamer(Dir::Rx, 0, Channels::first(1)).expect("the later run reopens the clean chain");
@@ -8198,8 +8456,11 @@ mod tests {
         core.configure(Dir::Rx, &[(0, settings)], 1e6, 0).expect("the later configure uses the recorded frequency");
         assert_eq!(core.rx_chain[0].lock().latest().get(&0).map(|entry| entry.value), None, "a failed segment did not create a timed device entry");
         assert_eq!(spy.dsp_pending(Dir::Rx, 0), 0, "no stale timed write survives the close/open");
-        assert!(spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}")) && call.ends_with("at=-")),
-            "the later open/configure applies the projected value untimed: {:?}", spy.log());
+        assert!(
+            spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}")) && call.ends_with("at=-")),
+            "the later open/configure applies the projected value untimed: {:?}",
+            spy.log()
+        );
         assert!(origin < e);
     }
 
@@ -8240,13 +8501,8 @@ mod tests {
 
     #[test]
     fn ur_24_a_loss_during_timed_rx_handoff_finishes_without_recovery_calls() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            command_queue: 64,
-            ..Default::default()
-        }));
-        let (core, time, events) = crate::provider::test_support::rig_on_description(
-            spy.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), crate::provider::test_support::default_description(2_000));
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
+        let (core, time, events) = crate::provider::test_support::rig_on_description(spy.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), crate::provider::test_support::default_description(2_000));
         spy.watch(&core);
         let _frozen = crate::provider::test_support::Frozen::on(spy.host());
         let (mut control, _) = control(&core, &[]);
@@ -8269,18 +8525,26 @@ mod tests {
         spy.refuse_rx_apply(crate::DeviceError { lost: true, message: "scripted loss during timed handoff".to_owned() });
         let gate = spy.stop_before("apply");
         let (release_done, released) = channel();
-        let release = spy.host().spawn("rx-loss-timed-handoff", move || {
-            control.release();
-            let _ = release_done.send(control);
-        }).unwrap();
+        let release = spy
+            .host()
+            .spawn("rx-loss-timed-handoff", move || {
+                control.release();
+                let _ = release_done.send(control);
+            })
+            .unwrap();
         gate.wait();
         let (owner_done, returned) = channel();
-        let owner = spy.host().spawn("rx-late-command-during-loss", move || {
-            rx.receive(crate::device::RxRecv::LateCommand);
-            let _ = owner_done.send(rx);
-        }).unwrap();
+        let owner = spy
+            .host()
+            .spawn("rx-late-command-during-loss", move || {
+                rx.receive(crate::device::RxRecv::LateCommand);
+                let _ = owner_done.send(rx);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "LateCommand reached the chain lock while the timed handoff held it");
         gate.release();
         let _control = released.recv_timeout(Wall::from_secs(10)).expect("the timed handoff reported loss");
@@ -8380,8 +8644,8 @@ mod tests {
     #[test]
     fn ur_24_a_delayed_rx_apply_refusal_rolls_back_debt_and_record() {
         let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
-        let (core, time, witness) = crate::provider::test_support::rig_on_description_links_witness(
-            spy.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), both_description());
+        let (core, time, witness) =
+            crate::provider::test_support::rig_on_description_links_witness(spy.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), both_description());
         witness.watch(&core);
         spy.watch(&core);
         let _frozen = crate::provider::test_support::Frozen::on(spy.host());
@@ -8419,8 +8683,7 @@ mod tests {
         control.release();
         assert_eq!(control.held.len(), 2, "the unbegun covering segment keeps the command and suffix held");
         assert!(core.rx_chain[0].lock().segment().is_none(), "the covering segment has not begun");
-        assert!(spy.rx_apply_pending().iter().all(|(_, at, value, _)| *at != Some(refused_e) || *value != 1.002e9),
-            "the blocked command was not attempted: {:?}", spy.rx_apply_pending());
+        assert!(spy.rx_apply_pending().iter().all(|(_, at, value, _)| *at != Some(refused_e) || *value != 1.002e9), "the blocked command was not attempted: {:?}", spy.rx_apply_pending());
 
         device_at_spy(&core, &time, &spy, refused_e + 1);
         assert!(core.now() > refused_e);
@@ -8433,9 +8696,11 @@ mod tests {
         spy.refuse_rx_apply(crate::device::DeviceError::failed("scripted delayed refusal"));
         control.release();
         assert!(spy.time_now().unwrap() > refused_e, "the refusal call occurs after its instant");
-        assert!(spy.rx_apply_pending()[applies_before_refusal..].iter()
-            .any(|(channel, at, value, _)| (*channel, *at, *value) == (0, Some(refused_e), 1.002e9)),
-            "the delayed timed apply was refused: {:?}", spy.rx_apply_pending());
+        assert!(
+            spy.rx_apply_pending()[applies_before_refusal..].iter().any(|(channel, at, value, _)| (*channel, *at, *value) == (0, Some(refused_e), 1.002e9)),
+            "the delayed timed apply was refused: {:?}",
+            spy.rx_apply_pending()
+        );
         assert!(core.rx_chain[0].lock().debt().is_empty(), "the provisional refused entry was removed");
         assert_eq!(core.rx_chain[1].lock().debt().iter().map(|entry| entry.order.0).collect::<Vec<_>>(), [old_e], "the other stream's earlier debt remains");
         assert_eq!(core.rx_chain[1].lock().latest().get(&1), Some(&old_latest), "a refused value is not the configuration of record");
@@ -8454,10 +8719,4 @@ mod tests {
         control.release();
         assert_eq!(rows_of(&core, &frequency).last(), Some(&(later_e, true, false)), "the later command is recorded when its instant arrives");
     }
-
-
-
-
-
-
 }

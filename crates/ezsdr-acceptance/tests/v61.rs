@@ -9,7 +9,7 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::TimePoint;
 use serde_json::json;
-use support::{artifact, finish_at, root, section, session_run, spec_run, T0, output};
+use support::{T0, artifact, finish_at, output, root, section, session_run, spec_run};
 
 #[test]
 fn v61_01_repeat_is_continuous_across_the_wrap() {
@@ -23,8 +23,7 @@ fn v61_01_repeat_is_continuous_across_the_wrap() {
 
     let stats = section(&manifest, "mock", "ezsdr.radio.mock.stats");
     let tx_blocks = stats["tx_blocks"].as_u64().expect("transmit block count");
-    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> =
-        serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].samples, tx_blocks * 1_000);
     assert_eq!(bursts[0].blocks, u32::try_from(tx_blocks).unwrap());
@@ -33,21 +32,12 @@ fn v61_01_repeat_is_continuous_across_the_wrap() {
 #[test]
 fn v61_02_capture_starts_at_the_requested_sample_index() {
     let temp = rig::TempDir::new("v61-02");
-    let profile = rig::session_profile(
-        "x3xx",
-        json!({ "id": "mock", "rx_test_pattern": "ramp" }),
-        &temp.0,
-        json!({}),
-    );
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock", "rx_test_pattern": "ramp" }), &temp.0, json!({}));
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     // RM-25: the receive clock is registered with the first block, published at 2 ms.
     run.advance_to(TimePoint::new(clock, T0 + 3_000_000)).unwrap();
-    let rx_clock = run
-        .sample_clocks()
-        .into_iter()
-        .find(|record| record.stream == ResourceId::parse("mock/rx/s0").unwrap())
-        .expect("receive SampleClock registered");
+    let rx_clock = run.sample_clocks().into_iter().find(|record| record.stream == ResourceId::parse("mock/rx/s0").unwrap()).expect("receive SampleClock registered");
     let entry = run
         .submit(
             SessionAction::Vocabulary {
@@ -55,10 +45,7 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
                 verb: Ident::parse("capture").unwrap(),
                 target: output("rec"),
                 at: Some(TimePoint::new(rx_clock.domain, 12_345)),
-                params: BTreeMap::from([(
-                    Key::parse("sink.capture_samples").unwrap(),
-                    Value::from(100),
-                )]),
+                params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(100))]),
             },
             None,
         )
@@ -73,19 +60,14 @@ fn v61_02_capture_starts_at_the_requested_sample_index() {
 #[test]
 fn v61_03_timed_start_of_tx_and_capture() {
     let (bytes, waveform) = experiments::waveform(1_000);
-    let spec = experiments::with_timed_capture(
-        experiments::transmit(1.0e6, &waveform, false, "drop_and_flag", 5_000, None),
-        1_000,
-        5_000,
-    );
+    let spec = experiments::with_timed_capture(experiments::transmit(1.0e6, &waveform, false, "drop_and_flag", 5_000, None), 1_000, 5_000);
     let temp = rig::TempDir::new("v61-03");
     let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash, bytes)]));
     let clock = root(&run);
     let manifest = finish_at(run, clock, T0 + 10_000_000);
 
-    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> =
-        serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), 2_005_000);
     let capture = artifact(&manifest, "rec", 0);
@@ -125,12 +107,14 @@ fn v61_04_pps_source_is_armed_first_and_streams_align() {
             "radio.rx.c0.frequency_hz": { "kind": "eq", "value": 1.0e9 }
         }
     });
-    let output = |id: &str, component: &str| json!({
-        "id": id,
-        "kind": "sink.capture",
-        "feed": ezsdr_acceptance::experiments::rx_feed(component, 0),
-        "params": {}
-    });
+    let output = |id: &str, component: &str| {
+        json!({
+            "id": id,
+            "kind": "sink.capture",
+            "feed": ezsdr_acceptance::experiments::rx_feed(component, 0),
+            "params": {}
+        })
+    };
     let spec = json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
@@ -148,12 +132,7 @@ fn v61_04_pps_source_is_armed_first_and_streams_align() {
     assert!(ids.iter().position(|id| *id == "pps") < ids.iter().position(|id| *id == "follow"));
     assert!(plan.deps.contains(&(Ident::parse("pps").unwrap(), Ident::parse("follow").unwrap())));
     for stream in ["pps/rx/s0", "follow/rx/s0"] {
-        let record = manifest
-            .clocks
-            .sample_clocks
-            .iter()
-            .find(|record| record.stream == ResourceId::parse(stream).unwrap())
-            .expect("receive SampleClock recorded");
+        let record = manifest.clocks.sample_clocks.iter().find(|record| record.stream == ResourceId::parse(stream).unwrap()).expect("receive SampleClock recorded");
         assert_eq!(record.origin, TimePoint::new(clock, T0));
     }
 }

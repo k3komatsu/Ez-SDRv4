@@ -1,35 +1,33 @@
 //! A controlled Provider clock for command-order tests without host deadlines.
+use super::core::Core;
+use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
+use crate::host::HostClock;
+use ezsdr_kernel::event::{Event, EventCollector, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
+use ezsdr_kernel::hash::ContentHash;
+use ezsdr_kernel::id::ResourceId;
+use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
+use ezsdr_kernel::policy::{EventKindRegistry, Policy};
+use ezsdr_kernel::run::RunError;
+use ezsdr_kernel::spec::{Ident, Scalar, Value};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority, TimePoint};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration as Wall;
-use ezsdr_kernel::event::{Event, EventCollector, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
-use ezsdr_kernel::hash::ContentHash;
-use ezsdr_kernel::id::ResourceId;
-use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
-use ezsdr_kernel::policy::{EventKindRegistry, Policy};
-use ezsdr_kernel::spec::{Ident, Scalar, Value};
-use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority, TimePoint};
-use ezsdr_kernel::run::RunError;
-use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
-use crate::host::HostClock;
-use super::core::Core;
 
 pub(super) fn rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     rig_with_links(Vec::new())
 }
 
 /// `rig` with the receive stream's links.
-pub(super) fn rig_with_links(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>)
-    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_with_links(links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     rig_with(FakeConfig::default(), links)
 }
 
 /// `rig_with_links` on a FakeDevice of `config`.
-pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>)
-    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let device = Arc::new(FakeDevice::new(config));
     let (core, time, events) = rig_on(device.clone(), links, 2_000);
     (core, device, time, events)
@@ -37,22 +35,24 @@ pub(super) fn rig_with(config: FakeConfig, links: Vec<Arc<dyn ezsdr_kernel::stre
 
 /// `rig` with the Run's Command inputs, for a test that books a waveform (UR-21: a burst's
 /// bytes must be an input of its Run).
-pub(super) fn rig_with_inputs(inputs: BTreeMap<ContentHash, Arc<[u8]>>)
-    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_with_inputs(inputs: BTreeMap<ContentHash, Arc<[u8]>>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let device = Arc::new(FakeDevice::new(FakeConfig::default()));
     let (core, time, events) = rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
     (core, device, time, events)
 }
 
 /// The rig on any device, with `block_len`.
-pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32)
-    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_on(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     rig_on_inputs(device, links, block_len, BTreeMap::new())
 }
 
 /// `rig_on` with the Run's Command inputs.
-pub(super) fn rig_on_inputs(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, block_len: u32, inputs: BTreeMap<ContentHash, Arc<[u8]>>)
-    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_on_inputs(
+    device: Arc<dyn Device>,
+    links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
+    block_len: u32,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     rig_on_description(device, links, inputs, default_description(block_len))
 }
 
@@ -66,34 +66,45 @@ pub(super) fn default_description(block_len: u32) -> ezsdr_radio::channels::Desc
 }
 
 /// `rig_on_inputs` with a specific layout description.
-pub(super) fn rig_on_description(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
-    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_on_description(
+    device: Arc<dyn Device>,
+    links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    description: ezsdr_radio::channels::Description,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     rig_on_description_links(device, vec![links], inputs, description)
 }
 
 /// `rig_on_description` with each receive stream's links (RM-29): index `k` is stream `k`'s.
-pub(super) fn rig_on_description_links(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
-    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_on_description_links(
+    device: Arc<dyn Device>,
+    links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    description: ezsdr_radio::channels::Description,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
-    clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
-        EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
+    clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
     let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());
     let mut kinds = EventKindRegistry::with_kernel_kinds();
-    ezsdr_radio::register(&mut ModuleRegistry::new(),
-        &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
+    ezsdr_radio::register(&mut ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
     // The instance's own nodes, under either key set (RM-29): a layout's events come from
     // its stream nodes.
-    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
-        kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"]
+        .iter()
+        .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
+        .collect();
     let events = Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()));
     let core = core_on(device, clocks, time.clone(), events.clone(), inputs, links, description);
     (core, time, events)
 }
 
 /// A layout rig with `links` on receive stream `k` alone.
-pub(super) fn rig_with_links_on(k: usize, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, description: ezsdr_radio::channels::Description)
-    -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
+pub(super) fn rig_with_links_on(
+    k: usize,
+    links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
+    description: ezsdr_radio::channels::Description,
+) -> (Arc<Core>, Arc<FakeDevice>, Arc<ManualTimeAuthority>, Arc<EventCollector>) {
     let device = Arc::new(FakeDevice::new(FakeConfig::default()));
     let mut per_stream: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>> = Vec::new();
     per_stream.resize_with(k + 1, Vec::new);
@@ -104,24 +115,32 @@ pub(super) fn rig_with_links_on(k: usize, links: Vec<Arc<dyn ezsdr_kernel::strea
 
 /// `rig_on_description` through a sink that witnesses which events are emitted while the line lock
 /// is held (UR-25): the test keeps the witness and reads it.
-pub(super) fn rig_on_description_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
-    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
+pub(super) fn rig_on_description_witness(
+    device: Arc<dyn Device>,
+    links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    description: ezsdr_radio::channels::Description,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
     rig_on_description_links_witness(device, vec![links], inputs, description)
 }
 
 /// `rig_on_description_links` through a sink that witnesses control-path events.
-pub(super) fn rig_on_description_links_witness(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
-    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
+pub(super) fn rig_on_description_links_witness(
+    device: Arc<dyn Device>,
+    links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    description: ezsdr_radio::channels::Description,
+) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
-    clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
-        EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
+    clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
     let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());
     let mut kinds = EventKindRegistry::with_kernel_kinds();
-    ezsdr_radio::register(&mut ModuleRegistry::new(),
-        &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
-        kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
+    ezsdr_radio::register(&mut ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
+    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"]
+        .iter()
+        .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
+        .collect();
     let witness = Arc::new(SectionWitness::new(Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()))));
     let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, links, description);
     witness.watch(&core);
@@ -129,11 +148,17 @@ pub(super) fn rig_on_description_links_witness(device: Arc<dyn Device>, links: V
 }
 
 /// The rig's `Core` on `sink`.
-fn core_on(device: Arc<dyn Device>, clocks: Arc<ClockRegistry>, time: Arc<ManualTimeAuthority>, events: Arc<dyn EventSink>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, description: ezsdr_radio::channels::Description) -> Arc<Core> {
+fn core_on(
+    device: Arc<dyn Device>,
+    clocks: Arc<ClockRegistry>,
+    time: Arc<ManualTimeAuthority>,
+    events: Arc<dyn EventSink>,
+    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
+    links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
+    description: ezsdr_radio::channels::Description,
+) -> Arc<Core> {
     let root = time.primary_root();
-    Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(),
-        root, time, clocks, events, Arc::new(inputs), links, description)
-        .expect("the rx node is inside the instance root"))
+    Arc::new(Core::new(device, ResourceId::parse("usrp").unwrap(), root, time, clocks, events, Arc::new(inputs), links, description).expect("the rx node is inside the instance root"))
 }
 
 /// A target the Kernel would resolve to `node` (KC-23): its first segment as the resource
@@ -159,7 +184,11 @@ impl Frozen {
     pub fn on(clock: HostClock) -> Frozen {
         assert!(clock.is_manual(), "a clock is frozen on a manual clock alone");
         let (release, wait) = channel();
-        let thread = clock.spawn("frozen", move || { let _ = wait.recv(); }).expect("a participant thread");
+        let thread = clock
+            .spawn("frozen", move || {
+                let _ = wait.recv();
+            })
+            .expect("a participant thread");
         Frozen { release: Some(release), thread: Some(thread) }
     }
 }
@@ -439,38 +468,70 @@ fn gate() -> (Gate, Hold) {
 }
 
 impl Device for LockSpy {
-    fn describe(&self) -> serde_json::Value { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
+    fn describe(&self) -> serde_json::Value {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
     fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
         self.call("rates", || self.inner.rates(dir, chan))
     }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
         self.call("apply", || {
             if dir == Dir::Rx {
-                if let Some(freq) = s.freq { self.rx_apply_pending.lock().unwrap().push((chan, at, freq, self.inner.dsp_pending(dir, chan))); }
-                if let Some(error) = self.rx_apply_error.lock().unwrap().take() { return Err(error); }
+                if let Some(freq) = s.freq {
+                    self.rx_apply_pending.lock().unwrap().push((chan, at, freq, self.inner.dsp_pending(dir, chan)));
+                }
+                if let Some(error) = self.rx_apply_error.lock().unwrap().take() {
+                    return Err(error);
+                }
             }
             self.inner.apply(dir, chan, s, at)
         })
     }
-    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.call("rx_open", || self.inner.rx_open(stream, channels)) }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.call("rx_open", || self.inner.rx_open(stream, channels))
+    }
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         self.call("rx_start", || match self.rx_start_error.lock().unwrap().take() {
             Some(error) => Err(error),
             None => self.inner.rx_start(stream, at),
         })
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.call("rx_start_now", || self.inner.rx_start_now(stream)) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.call("rx_packet_samples", || self.rx_packet_max.lock().unwrap().unwrap_or_else(|| self.inner.rx_packet_samples(stream))) }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.call("rx_start_now", || self.inner.rx_start_now(stream))
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.call("rx_packet_samples", || self.rx_packet_max.lock().unwrap().unwrap_or_else(|| self.inner.rx_packet_samples(stream)))
+    }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
         self.call("rx_stop", || match self.rx_stop_error.lock().unwrap().take() {
             Some(error) => Err(error),
@@ -482,16 +543,30 @@ impl Device for LockSpy {
         self.rx_one_packet.lock().unwrap().push(one_packet);
         self.call("rx_recv", || self.inner.rx_recv(stream, n, timeout, one_packet))
     }
-    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.call("tx_open", || self.inner.tx_open(stream, channels)) }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.call("tx_open", || self.inner.tx_open(stream, channels))
+    }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.call("tx_send", || self.inner.tx_send(stream, samples, at, sob, eob, timeout))
     }
-    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.call("tx_async", || self.inner.tx_async(stream, timeout)) }
-    fn rx_close(&self, stream: usize) { self.call("rx_close", || self.inner.rx_close(stream)) }
-    fn tx_close(&self, stream: usize) { self.call("tx_close", || self.inner.tx_close(stream)) }
-    fn close_streams(&self) { self.call("close_streams", || self.inner.close_streams()) }
-    fn mark_lost(&self) { self.call("mark_lost", || self.inner.mark_lost()) }
-    fn raise_thread_priority(&self) -> Result<(), DeviceError> { self.inner.raise_thread_priority() }
+    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> {
+        self.call("tx_async", || self.inner.tx_async(stream, timeout))
+    }
+    fn rx_close(&self, stream: usize) {
+        self.call("rx_close", || self.inner.rx_close(stream))
+    }
+    fn tx_close(&self, stream: usize) {
+        self.call("tx_close", || self.inner.tx_close(stream))
+    }
+    fn close_streams(&self) {
+        self.call("close_streams", || self.inner.close_streams())
+    }
+    fn mark_lost(&self) {
+        self.call("mark_lost", || self.inner.mark_lost())
+    }
+    fn raise_thread_priority(&self) -> Result<(), DeviceError> {
+        self.inner.raise_thread_priority()
+    }
     fn host(&self) -> HostClock {
         // Only once the rig has watched: `Control::new` reads the clock before the test does.
         if self.core.lock().unwrap().upgrade().is_some() {
@@ -551,46 +626,94 @@ impl ApplyFails {
 }
 
 impl Device for ApplyFails {
-    fn describe(&self) -> serde_json::Value { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn describe(&self) -> serde_json::Value {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
         self.attempts.lock().unwrap().push((dir, chan, at));
         if dir == self.dir && Some(at.is_some()) == self.timed && self.chan.is_none_or(|want| want == chan) && !self.fired.swap(true, Ordering::SeqCst) {
-            return if self.lost {
-                Err(DeviceError { lost: true, message: "test: scripted loss on an apply".to_owned() })
-            } else {
-                Err(DeviceError::failed("test: scripted refusal of an apply"))
-            };
+            return if self.lost { Err(DeviceError { lost: true, message: "test: scripted loss on an apply".to_owned() }) } else { Err(DeviceError::failed("test: scripted refusal of an apply")) };
         }
         self.inner.apply(dir, chan, s, at)
     }
-    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
-    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.rx_open(stream, channels)
+    }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        self.inner.rx_start(stream, at)
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_start_now(stream)
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.inner.rx_packet_samples(stream)
+    }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream, at)
+    }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
+        self.inner.rx_recv(stream, n, timeout, one_packet)
+    }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.tx_open(stream, channels)
+    }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
-    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
-    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
-    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-    fn close_streams(&self) { self.inner.close_streams() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
-    fn host(&self) -> HostClock { self.inner.host() }
+    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> {
+        self.inner.tx_async(stream, timeout)
+    }
+    fn rx_close(&self, stream: usize) {
+        self.inner.rx_close(stream)
+    }
+    fn tx_close(&self, stream: usize) {
+        self.inner.tx_close(stream)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
+    fn host(&self) -> HostClock {
+        self.inner.host()
+    }
 }
 
 /// A `FakeDevice` whose untimed `apply` of one direction and channel is held after the
@@ -622,18 +745,42 @@ impl HoldApply {
 }
 
 impl Device for HoldApply {
-    fn describe(&self) -> serde_json::Value { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn describe(&self) -> serde_json::Value {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
     fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
         let applied = self.inner.apply(dir, chan, s, at)?;
         let held = at.is_none() && dir == self.dir && self.chan.is_none_or(|want| want == chan) && std::mem::replace(&mut *self.pending.lock().unwrap(), false);
@@ -647,23 +794,51 @@ impl Device for HoldApply {
         }
         Ok(applied)
     }
-    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
-    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.rx_open(stream, channels)
+    }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        self.inner.rx_start(stream, at)
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_start_now(stream)
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.inner.rx_packet_samples(stream)
+    }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream, at)
+    }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
+        self.inner.rx_recv(stream, n, timeout, one_packet)
+    }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.tx_open(stream, channels)
+    }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
-    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
-    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
-    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-    fn close_streams(&self) { self.inner.close_streams() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
-    fn host(&self) -> HostClock { self.inner.host() }
+    fn tx_async(&self, stream: usize, timeout: std::time::Duration) -> Result<Option<TxReport>, DeviceError> {
+        self.inner.tx_async(stream, timeout)
+    }
+    fn rx_close(&self, stream: usize) {
+        self.inner.rx_close(stream)
+    }
+    fn tx_close(&self, stream: usize) {
+        self.inner.tx_close(stream)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
+    fn host(&self) -> HostClock {
+        self.inner.host()
+    }
 }
 
 /// A `FakeDevice` whose asynchronous reports the test writes: `tx_async` returns the reports
@@ -692,26 +867,66 @@ impl ReportFeed {
 }
 
 impl Device for ReportFeed {
-    fn describe(&self) -> serde_json::Value { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, s, at) }
-    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
-    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn describe(&self) -> serde_json::Value {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        self.inner.apply(dir, chan, s, at)
+    }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.rx_open(stream, channels)
+    }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        self.inner.rx_start(stream, at)
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_start_now(stream)
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.inner.rx_packet_samples(stream)
+    }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream, at)
+    }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
+        self.inner.rx_recv(stream, n, timeout, one_packet)
+    }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.tx_open(stream, channels)
+    }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: std::time::Duration) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
@@ -723,12 +938,24 @@ impl Device for ReportFeed {
             None => self.inner.tx_async(stream, timeout),
         }
     }
-    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
-    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-    fn close_streams(&self) { self.inner.close_streams() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
-    fn host(&self) -> HostClock { self.inner.host() }
+    fn rx_close(&self, stream: usize) {
+        self.inner.rx_close(stream)
+    }
+    fn tx_close(&self, stream: usize) {
+        self.inner.tx_close(stream)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
+    fn host(&self) -> HostClock {
+        self.inner.host()
+    }
 }
 
 /// An event sink that records whether each control-path event was emitted while the
@@ -837,25 +1064,63 @@ impl TxSpy {
 }
 
 impl Device for TxSpy {
-    fn describe(&self) -> serde_json::Value { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, s, at) }
-    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.rx_open(stream, channels) }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
-    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv { self.inner.rx_recv(stream, n, timeout, one_packet) }
+    fn describe(&self) -> serde_json::Value {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        self.inner.apply(dir, chan, s, at)
+    }
+    fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.rx_open(stream, channels)
+    }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        self.inner.rx_start(stream, at)
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_start_now(stream)
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.inner.rx_packet_samples(stream)
+    }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream, at)
+    }
+    fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
+        self.inner.rx_recv(stream, n, timeout, one_packet)
+    }
     fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.record("tx_open", 0, false);
         self.inner.tx_open(stream, channels)
@@ -871,7 +1136,9 @@ impl Device for TxSpy {
         let held = {
             let mut trap = self.trap.lock().unwrap();
             let fire = trap.as_ref().is_some_and(|held| {
-                if sends < held.after_sends { return false; }
+                if sends < held.after_sends {
+                    return false;
+                }
                 let mut idle = self.idle.lock().unwrap();
                 *idle += 1;
                 *idle == held.nth
@@ -884,11 +1151,21 @@ impl Device for TxSpy {
         }
         self.inner.tx_async(stream, timeout)
     }
-    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
-    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-    fn close_streams(&self) { self.inner.close_streams() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn host(&self) -> HostClock { self.inner.host() }
+    fn rx_close(&self, stream: usize) {
+        self.inner.rx_close(stream)
+    }
+    fn tx_close(&self, stream: usize) {
+        self.inner.tx_close(stream)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn host(&self) -> HostClock {
+        self.inner.host()
+    }
     fn raise_thread_priority(&self) -> Result<(), DeviceError> {
         self.record("raise_thread_priority", 0, false);
         let me = std::thread::current().name().unwrap_or("").to_owned();

@@ -152,9 +152,7 @@ impl ContractRegistry {
         let mut map = self.contracts.write().unwrap_or_else(|e| e.into_inner());
         match map.get(&contract.id) {
             Some(existing) if *existing == contract => Ok(()),
-            Some(_) => Err(StreamError::InvalidBlock {
-                reason: format!("contract {} is already registered with a different definition", contract.id),
-            }),
+            Some(_) => Err(StreamError::InvalidBlock { reason: format!("contract {} is already registered with a different definition", contract.id) }),
             None => {
                 map.insert(contract.id.clone(), contract);
                 Ok(())
@@ -167,12 +165,7 @@ impl ContractRegistry {
     ///
     /// Rule: SC-2, MA-37.
     pub fn ids(&self) -> Vec<DataContractId> {
-        self.contracts
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys()
-            .cloned()
-            .collect()
+        self.contracts.read().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
     }
 
     /// The registered contract, if any (SC-2).
@@ -185,22 +178,12 @@ impl ContractRegistry {
     /// is directional, and it is the only contract check the Kernel performs.
     ///
     /// Rule: SC-3.
-    pub fn check_link(
-        &self,
-        from: &DataContractId,
-        to: &DataContractId,
-    ) -> Result<(), StreamError> {
+    pub fn check_link(&self, from: &DataContractId, to: &DataContractId) -> Result<(), StreamError> {
         if from == to {
             return Ok(());
         }
-        let consumer = self.get(to).ok_or_else(|| StreamError::InvalidBlock {
-            reason: format!("contract {to} is not registered"),
-        })?;
-        if consumer.compatible_from.contains(from) {
-            Ok(())
-        } else {
-            Err(StreamError::Incompatible { from: from.clone(), to: to.clone() })
-        }
+        let consumer = self.get(to).ok_or_else(|| StreamError::InvalidBlock { reason: format!("contract {to} is not registered") })?;
+        if consumer.compatible_from.contains(from) { Ok(()) } else { Err(StreamError::Incompatible { from: from.clone(), to: to.clone() }) }
     }
 }
 
@@ -211,33 +194,19 @@ impl ContractRegistry {
 ///
 /// Rule: SC-4.
 pub fn standard_contracts() -> Vec<DataContract> {
-    let attrs = |pairs: &[(&str, Scalar)]| -> BTreeMap<String, Scalar> {
-        pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
-    };
+    let attrs = |pairs: &[(&str, Scalar)]| -> BTreeMap<String, Scalar> { pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect() };
     let id = |s: &str| DataContractId::parse(s).expect("SC-4 ids are well formed");
     vec![
         DataContract {
             id: id("ezsdr.stream.cf32"),
-            attributes: attrs(&[
-                ("bytes_per_sample", Scalar::Int(8)),
-                ("full_scale", Scalar::try_from(1.0).expect("finite")),
-                ("layout", Scalar::from("planar")),
-            ]),
+            attributes: attrs(&[("bytes_per_sample", Scalar::Int(8)), ("full_scale", Scalar::try_from(1.0).expect("finite")), ("layout", Scalar::from("planar"))]),
             compatible_from: BTreeSet::new(),
         },
         DataContract {
             id: id("ezsdr.stream.sc16"),
-            attributes: attrs(&[
-                ("bytes_per_sample", Scalar::Int(4)),
-                ("full_scale", Scalar::try_from(32767.0).expect("finite")),
-                ("layout", Scalar::from("planar")),
-            ]),
+            attributes: attrs(&[("bytes_per_sample", Scalar::Int(4)), ("full_scale", Scalar::try_from(32767.0).expect("finite")), ("layout", Scalar::from("planar"))]),
             compatible_from: BTreeSet::new(),
         },
-        DataContract {
-            id: id("ezsdr.control"),
-            attributes: BTreeMap::new(),
-            compatible_from: BTreeSet::new(),
-        },
+        DataContract { id: id("ezsdr.control"), attributes: BTreeMap::new(), compatible_from: BTreeSet::new() },
     ]
 }

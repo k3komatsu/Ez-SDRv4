@@ -10,9 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use ezsdr_kernel::event::{
-    EventCollector, EventKind, EventRecord, HOT_PAYLOAD_BYTES, Severity,
-};
+use ezsdr_kernel::event::{EventCollector, EventKind, EventRecord, HOT_PAYLOAD_BYTES, Severity};
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::run::RunError;
@@ -53,18 +51,11 @@ fn rs_32_emit_allocates_nothing() {
     let source = support::node_source("radio");
     let kind = EventKind::parse(EventKind::LINK_BACKPRESSURE).expect("parses");
     // A ring deep enough that the drop path is not the only one exercised.
-    let collector = Arc::new(EventCollector::new(
-        &[(source.clone(), kind.clone())],
-        &policy.table.keys().cloned().collect::<Vec<_>>(),
-        1_024,
-        &policy,
-    ));
+    let collector = Arc::new(EventCollector::new(&[(source.clone(), kind.clone())], &policy.table.keys().cloned().collect::<Vec<_>>(), 1_024, &policy));
     // What a Module emits through: the root-bound view `prepare` hands it (item 3),
     // whose `emit` adds the scope and index check on the hot path.
     let view = collector.view(source.clone());
-    let handle = view
-        .resolve(&source, &kind)
-        .expect("the view's root covers its own node");
+    let handle = view.resolve(&source, &kind).expect("the view's root covers its own node");
     let payload = [7u8; 16];
     let at = TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0);
 
@@ -78,15 +69,8 @@ fn rs_32_emit_allocates_nothing() {
 
     // The record's size equals the documented constant.
     assert_eq!(HOT_PAYLOAD_BYTES, 32);
-    assert!(
-        size_of::<EventRecord>() <= 64,
-        "an EventRecord is fixed-size and small, not {} bytes",
-        size_of::<EventRecord>()
-    );
+    assert!(size_of::<EventRecord>() <= 64, "an EventRecord is fixed-size and small, not {} bytes", size_of::<EventRecord>());
     // A larger payload is produced on the control path only.
-    assert_eq!(
-        view.emit(handle, at, Severity::Warning, &[0u8; HOT_PAYLOAD_BYTES + 1]),
-        Err(RunError::PayloadTooLarge)
-    );
+    assert_eq!(view.emit(handle, at, Severity::Warning, &[0u8; HOT_PAYLOAD_BYTES + 1]), Err(RunError::PayloadTooLarge));
     assert_eq!(policy.reaction_for(&kind), Reaction::MarkArtifact);
 }

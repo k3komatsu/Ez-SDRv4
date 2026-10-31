@@ -62,20 +62,16 @@ fn channel_namespace() -> &'static Namespace {
 /// Reads `sim.channel`: `None` when the section is absent, an error when it is not a
 /// [`ChannelSpec`] of JSON objects, when a gain is outside `−400..=400` dB, a noise power
 /// outside `−400..=100` dBFS or a delay above 2^62 (CH-1).
-pub fn read(
-    environment: &BTreeMap<Namespace, serde_json::Value>,
-) -> Result<Option<ChannelSpec>, String> {
+pub fn read(environment: &BTreeMap<Namespace, serde_json::Value>) -> Result<Option<ChannelSpec>, String> {
     let Some(value) = environment.get(channel_namespace()) else {
         return Ok(None);
     };
     // serde also reads a struct from a JSON array; the document is an object of objects.
-    let objects = value.is_object()
-        && value.get("couplings").and_then(serde_json::Value::as_array).is_none_or(|couplings| couplings.iter().all(serde_json::Value::is_object));
+    let objects = value.is_object() && value.get("couplings").and_then(serde_json::Value::as_array).is_none_or(|couplings| couplings.iter().all(serde_json::Value::is_object));
     if !objects {
         return Err("CH-1: sim.channel and each of its couplings must be JSON objects".to_owned());
     }
-    let spec: ChannelSpec =
-        serde_json::from_value(value.clone()).map_err(|error| format!("CH-1: {error}"))?;
+    let spec: ChannelSpec = serde_json::from_value(value.clone()).map_err(|error| format!("CH-1: {error}"))?;
     if let Some(coupling) = spec.couplings.iter().find(|c| !(-400.0..=400.0).contains(&c.gain_db)) {
         return Err(format!("CH-1: the gain of {} -> {} is outside -400..=400 dB", coupling.tx, coupling.rx));
     }
@@ -102,28 +98,13 @@ impl AdmissionCheck for ChannelCheck {
         VALIDATE
     }
 
-    fn check(
-        &self,
-        section: &serde_json::Value,
-        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _stage: CheckStage,
-    ) -> Vec<Violation> {
-        let violation = |reason: String| Violation {
-            check: channel_namespace().clone(),
-            key: None,
-            requested: None,
-            reason,
-        };
+    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
+        let violation = |reason: String| Violation { check: channel_namespace().clone(), key: None, requested: None, reason };
         let environment = BTreeMap::from([(channel_namespace().clone(), section.clone())]);
         match read(&environment) {
             Err(reason) => vec![violation(format!("CH-2: {reason}"))],
             Ok(None) => vec![],
-            Ok(Some(spec)) => named(&spec)
-                .into_iter()
-                .filter(|name| !effective.contains_key(name))
-                .map(|name| violation(format!("CH-2: {name} names no fragment of this Run")))
-                .collect(),
+            Ok(Some(spec)) => named(&spec).into_iter().filter(|name| !effective.contains_key(name)).map(|name| violation(format!("CH-2: {name} names no fragment of this Run"))).collect(),
         }
     }
 }
@@ -241,15 +222,7 @@ impl Medium {
     /// Joins fragment `fragment` of Run `run`. The first join fixes the Run, the
     /// document, the seed and the root rate; a later join that differs in any of them,
     /// or a second join of one fragment, is refused (CH-6).
-    pub fn join(
-        &self,
-        run: &RunId,
-        fragment: &Ident,
-        spec: &ChannelSpec,
-        seed: u64,
-        root_rate_hz: u64,
-        transmitter: Arc<dyn Transmitter>,
-    ) -> Result<(), String> {
+    pub fn join(&self, run: &RunId, fragment: &Ident, spec: &ChannelSpec, seed: u64, root_rate_hz: u64, transmitter: Arc<dyn Transmitter>) -> Result<(), String> {
         let mut state = lock(&self.state);
         match &state.run {
             None => {
@@ -258,16 +231,14 @@ impl Medium {
                 }
                 let mut paths = Vec::with_capacity(spec.couplings.len());
                 for coupling in &spec.couplings {
-                    let ticks = (i128::from(coupling.delay_ns) * i128::from(root_rate_hz) + 999_999_999)
-                        / 1_000_000_000;
+                    let ticks = (i128::from(coupling.delay_ns) * i128::from(root_rate_hz) + 999_999_999) / 1_000_000_000;
                     paths.push(Path {
                         tx: coupling.tx.clone(),
                         tx_channel: coupling.tx_channel,
                         rx: coupling.rx.clone(),
                         rx_channel: coupling.rx_channel,
                         amplitude: 10f64.powf(coupling.gain_db / 20.0),
-                        delay_ticks: i64::try_from(ticks)
-                            .map_err(|_| "CH-6: a delay overflows the root".to_owned())?,
+                        delay_ticks: i64::try_from(ticks).map_err(|_| "CH-6: a delay overflows the root".to_owned())?,
                     });
                 }
                 state.run = Some(run.clone());
@@ -311,18 +282,9 @@ impl Medium {
                 .paths
                 .iter()
                 .filter(|path| path.rx == *rx && path.rx_channel == channel)
-                .filter_map(|path| {
-                    state
-                        .transmitters
-                        .get(&path.tx)
-                        .map(|tx| (tx.clone(), path.tx_channel, path.amplitude, path.delay_ticks))
-                })
+                .filter_map(|path| state.transmitters.get(&path.tx).map(|tx| (tx.clone(), path.tx_channel, path.amplitude, path.delay_ticks)))
                 .collect();
-            let sigma = state
-                .spec
-                .as_ref()
-                .and_then(|spec| spec.noise_dbfs.get(rx))
-                .map(|dbfs| (10f64.powf(dbfs / 10.0) / 2.0).sqrt());
+            let sigma = state.spec.as_ref().and_then(|spec| spec.noise_dbfs.get(rx)).map(|dbfs| (10f64.powf(dbfs / 10.0) / 2.0).sqrt());
             (sources, sigma)
         };
         let (mut re, mut im) = (0.0, 0.0);
@@ -337,10 +299,7 @@ impl Medium {
         if let Some(sigma) = sigma {
             let mut state = lock(&self.state);
             let seed = state.seed;
-            let rng = state
-                .noise
-                .entry((rx.clone(), channel))
-                .or_insert_with(|| SimRng::new(seed, &format!("sim.channel/{rx}/{channel}")));
+            let rng = state.noise.entry((rx.clone(), channel)).or_insert_with(|| SimRng::new(seed, &format!("sim.channel/{rx}/{channel}")));
             let (g1, g2) = gaussian_pair(rng);
             re += sigma * g1;
             im += sigma * g2;

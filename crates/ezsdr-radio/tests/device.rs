@@ -1,6 +1,6 @@
 //! X3xx rate-grid and UHD rate-set behavior (design 33 D5).
 
-use ezsdr_radio::device::{rate_set_matches, Grid};
+use ezsdr_radio::device::{Grid, rate_set_matches};
 use ezsdr_radio::x3xx;
 
 #[test]

@@ -13,12 +13,7 @@ use serde_json::Value;
 
 pub const T0: i64 = 2_000_000_000;
 
-pub fn spec_run(
-    _temp: &TempDir,
-    spec: &Value,
-    profile: &Value,
-    inputs: BTreeMap<ContentHash, Vec<u8>>,
-) -> RunHandle {
+pub fn spec_run(_temp: &TempDir, spec: &Value, profile: &Value, inputs: BTreeMap<ContentHash, Vec<u8>>) -> RunHandle {
     coordinator::start_spec_run(spec, profile, rig::assemble(profile, inputs)).expect("Spec Run starts")
 }
 
@@ -26,11 +21,13 @@ pub fn session_run(_temp: &TempDir, profile: &Value) -> RunHandle {
     coordinator::connect(profile, rig::assemble(profile, BTreeMap::new()), Lease::attached()).expect("Session connects")
 }
 
-pub fn root(run: &RunHandle) -> ClockDomainId { run.now().domain() }
+pub fn root(run: &RunHandle) -> ClockDomainId {
+    run.now().domain()
+}
 
 pub fn finish_at(mut run: RunHandle, root: ClockDomainId, tick: i64) -> Manifest {
     match run.run_until_end(ezsdr_kernel::time::TimePoint::new(root, tick)) {
-        Ok(()) | Err(RunHandleError::Ended { .. }) => {},
+        Ok(()) | Err(RunHandleError::Ended { .. }) => {}
         Err(error) => panic!("advance Spec Run: {error}"),
     }
     run.finish()

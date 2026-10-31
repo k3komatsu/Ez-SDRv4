@@ -9,19 +9,8 @@ use crate::spec::{CapabilityValue, Constraint, ExperimentSpec, Ident, Namespace,
 
 use super::{CompileInputs, PrepareError, PrepareReport};
 
-pub(super) fn check_effective_narrows(
-    declared: &CapabilityValue,
-    effective: &CapabilityValue,
-) -> Result<(), ModuleError> {
-    let within = |value: &Scalar| {
-        satisfies(
-            &Constraint::Eq {
-                value: value.clone(),
-            },
-            declared,
-        )
-        .unwrap_or(false)
-    };
+pub(super) fn check_effective_narrows(declared: &CapabilityValue, effective: &CapabilityValue) -> Result<(), ModuleError> {
+    let within = |value: &Scalar| satisfies(&Constraint::Eq { value: value.clone() }, declared).unwrap_or(false);
     let narrows = match effective {
         CapabilityValue::One { value } => within(value),
         CapabilityValue::AnyOf { values } => values.iter().all(within),
@@ -34,18 +23,10 @@ pub(super) fn check_effective_narrows(
             within(min)
                 && within(max)
                 && matches!(order, Some(Less | Equal))
-                && (matches!(declared, CapabilityValue::Range { .. })
-                    || order == Some(Equal)
-                    || matches!((min, max), (Scalar::Bool(_), Scalar::Bool(_))))
+                && (matches!(declared, CapabilityValue::Range { .. }) || order == Some(Equal) || matches!((min, max), (Scalar::Bool(_), Scalar::Bool(_))))
         }
     };
-    if narrows {
-        Ok(())
-    } else {
-        Err(ModuleError::rejected(
-            "MA-12: `effective` may narrow a declared capability and must not widen one".to_owned(),
-        ))
-    }
+    if narrows { Ok(()) } else { Err(ModuleError::rejected("MA-12: `effective` may narrow a declared capability and must not widen one".to_owned())) }
 }
 
 pub(super) fn collect_prepare(
@@ -72,12 +53,7 @@ pub(super) fn collect_prepare(
     // check, SB-44's preview comparison and the constraint re-match would all be
     // skipped in silence while a report applied any value at all (D99).
     if let Err(reason) = super::validation::admission_is_this_runs(spec, inputs, admission) {
-        return Err(PrepareError::Violations(vec![Violation {
-            check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
-            key: None,
-            requested: None,
-            reason: format!("SB-39: {reason}"),
-        }]));
+        return Err(PrepareError::Violations(vec![Violation { check: Namespace::parse("ezsdr.effective").expect("a valid literal"), key: None, requested: None, reason: format!("SB-39: {reason}") }]));
     }
     let mut ok = BTreeMap::new();
     for (fragment, r) in reports {
@@ -89,12 +65,12 @@ pub(super) fn collect_prepare(
         }
     }
     // Authority fragments have no lifecycle (MA-2); every other fragment reports.
-    let expected: BTreeSet<_> = spec.resources.keys().cloned()
+    let expected: BTreeSet<_> = spec
+        .resources
+        .keys()
+        .cloned()
         .chain(spec.outputs.iter().map(|output| output.id.clone()))
-        .chain(profile.placements.islands.iter().map(|island| {
-            Ident::parse(&format!("island_{}", island.id.local))
-                .expect("an Island's numeric local id forms an Ident")
-        }))
+        .chain(profile.placements.islands.iter().map(|island| Ident::parse(&format!("island_{}", island.id.local)).expect("an Island's numeric local id forms an Ident")))
         .collect();
     let violations: Vec<Violation> = expected
         .iter()
@@ -127,29 +103,18 @@ pub(super) fn collect_prepare(
         // key nobody named, and the Manifest recorded a "coercion" of a value nobody
         // asked for (SB-42, SB-46).
         if let Some(req) = spec.resources.get(fragment) {
-            if let Some(stray) = r
-                .coercions
-                .iter()
-                .find(|c| !req.requires.contains_key(&c.key))
-            {
+            if let Some(stray) = r.coercions.iter().find(|c| !req.requires.contains_key(&c.key)) {
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.coercion").expect("a valid literal"),
                     key: Some(stray.key.clone()),
                     requested: Some(stray.requested.clone()),
-                    reason: format!(
-                        "SB-44: {} reports a coercion of {}, which its request does not name",
-                        fragment, stray.key
-                    ),
+                    reason: format!("SB-44: {} reports a coercion of {}, which its request does not name", fragment, stray.key),
                 });
             }
         }
         let mut warned = Vec::new();
         for c in &r.coercions {
-            let policy = super::coercion::coercion_policy(
-                spec_coercion.get(&c.key).copied(),
-                is_session,
-                registry.key_decl(&c.key),
-            );
+            let policy = super::coercion::coercion_policy(spec_coercion.get(&c.key).copied(), is_session, registry.key_decl(&c.key));
             match super::coercion::apply_coercion(policy, c) {
                 Ok(None) => {}
                 Ok(Some(w)) => warned.push(w),
@@ -164,16 +129,8 @@ pub(super) fn collect_prepare(
         r.warnings.extend(warned);
     }
     // SB-30's second point, per fragment (KA-4): each report's own `effective`.
-    let per_fragment: BTreeMap<Ident, BTreeMap<crate::spec::Key, Value>> = ok
-        .iter()
-        .map(|(fragment, r)| (fragment.clone(), r.effective.clone()))
-        .collect();
-    violations.extend(checks.run(
-        environment,
-        &per_fragment,
-        &BTreeMap::new(),
-        CheckStage::Prepare,
-    ));
+    let per_fragment: BTreeMap<Ident, BTreeMap<crate::spec::Key, Value>> = ok.iter().map(|(fragment, r)| (fragment.clone(), r.effective.clone())).collect();
+    violations.extend(checks.run(environment, &per_fragment, &BTreeMap::new(), CheckStage::Prepare));
 
     // MA-12's second sentence, both halves. `effective` may **narrow** a declared
     // capability and must not widen one, and the Spec's own constraints are re-matched
@@ -195,8 +152,7 @@ pub(super) fn collect_prepare(
         // configuration, so a key two fragments name keeps both values, and two
         // channels asking their own line's declared rate do not refuse each other
         // (spec 20, KH-1). A Provider fragment's id is the resource name.
-        let report = ok.get(name)
-            .expect("SB-41 checked every lifecycle fragment's report");
+        let report = ok.get(name).expect("SB-41 checked every lifecycle fragment's report");
         for (key, declared) in &node.capabilities {
             let Some(applied) = report.effective.get(key) else {
                 continue;
@@ -206,12 +162,7 @@ pub(super) fn collect_prepare(
                 None => Err(ModuleError::rejected("MA-12: a capability's `effective` value is a scalar".to_owned())),
             };
             if let Err(e) = narrows {
-                violations.push(Violation {
-                    check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
-                    key: Some(key.clone()),
-                    requested: Some(applied.clone()),
-                    reason: e.message,
-                });
+                violations.push(Violation { check: Namespace::parse("ezsdr.effective").expect("a valid literal"), key: Some(key.clone()), requested: Some(applied.clone()), reason: e.message });
             }
         }
         for (key, constraint) in &req.requires {
@@ -237,13 +188,7 @@ pub(super) fn collect_prepare(
             // coercion to `b`, so `b` — satisfied directly, never passed to `coerce` —
             // was refused for not applying a value nobody computed for it. That is the
             // ordinary two-channel Spec whenever one channel coerces.
-            if let Some(preview) = admission
-                .coercions_preview
-                .iter()
-                .filter(|p| p.resource == *name)
-                .map(|p| &p.coercion)
-                .find(|c| c.key == *key)
-            {
+            if let Some(preview) = admission.coercions_preview.iter().filter(|p| p.resource == *name).map(|p| &p.coercion).find(|c| c.key == *key) {
                 if let Some(applied) = report.effective.get(key) {
                     if *applied != preview.applied {
                         violations.push(Violation {
@@ -263,9 +208,7 @@ pub(super) fn collect_prepare(
             let Some(applied) = report.effective.get(key) else {
                 continue;
             };
-            let satisfied = applied.as_scalar().is_some_and(|value| {
-                satisfies(constraint, &CapabilityValue::One { value: value.clone() }).unwrap_or(false)
-            });
+            let satisfied = applied.as_scalar().is_some_and(|value| satisfies(constraint, &CapabilityValue::One { value: value.clone() }).unwrap_or(false));
             if !satisfied {
                 violations.push(Violation {
                     check: Namespace::parse("ezsdr.effective").expect("a valid literal"),
@@ -279,9 +222,5 @@ pub(super) fn collect_prepare(
             }
         }
     }
-    if violations.is_empty() {
-        Ok(ok)
-    } else {
-        Err(PrepareError::Violations(violations))
-    }
+    if violations.is_empty() { Ok(ok) } else { Err(PrepareError::Violations(violations)) }
 }

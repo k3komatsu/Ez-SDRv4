@@ -16,10 +16,7 @@ use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventKind, Ev
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ResourceId, RunId};
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
-use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, Authority, AttachedPort, Endpoint, ExecutionClass, Link,
-    ModuleErrorKind, ModuleRegistry, PrepareContext, Provider, Role, Sink,
-};
+use ezsdr_kernel::module_api::{ActionReceiver, ActionSubmitter, AttachedPort, Authority, Endpoint, ExecutionClass, Link, ModuleErrorKind, ModuleRegistry, PrepareContext, Provider, Role, Sink};
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::run::{Lease, RunState, Stage, StopCause, Termination};
@@ -56,11 +53,7 @@ pub struct TempDir(pub PathBuf);
 impl TempDir {
     pub fn new() -> TempDir {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ezsdr-uhd-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = std::env::temp_dir().join(format!("ezsdr-uhd-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&path).unwrap();
         TempDir(path)
     }
@@ -149,7 +142,9 @@ pub fn set_selector_override(selector: Option<Json>) {
 pub fn with_selector<T>(selector: Json, body: impl FnOnce() -> T) -> T {
     struct Remove;
     impl Drop for Remove {
-        fn drop(&mut self) { set_selector_override(None); }
+        fn drop(&mut self) {
+            set_selector_override(None);
+        }
     }
     set_selector_override(Some(selector));
     let _remove = Remove;
@@ -174,7 +169,10 @@ pub fn effective_layout(device: &dyn Device) -> (Json, Json) {
 pub fn channel_hz(device: &dyn Device, dir: ezsdr_radio_uhd::Dir, chan: usize) -> f64 {
     let (rx, tx) = effective_layout(device);
     let elements = if dir == ezsdr_radio_uhd::Dir::Rx { rx } else { tx };
-    elements.get(chan).and_then(Json::as_str).and_then(|element| element.split(':').nth(2))
+    elements
+        .get(chan)
+        .and_then(Json::as_str)
+        .and_then(|element| element.split(':').nth(2))
         .and_then(ezsdr_radio::x3xx::FrontEnd::parse)
         .map_or_else(|| board_of(device).default_frequency_hz(), ezsdr_radio::x3xx::FrontEnd::default_frequency_hz)
 }
@@ -206,7 +204,9 @@ pub fn bench_envelope(device: &dyn Device) -> Json {
     for chan in 0..channels {
         let hz = channel_hz(device, ezsdr_radio_uhd::Dir::Tx, chan);
         let band = ((hz - 1e6).max(0.0), hz + 1e6);
-        if !bands.contains(&band) { bands.push(band); }
+        if !bands.contains(&band) {
+            bands.push(band);
+        }
     }
     let bands: Vec<Json> = bands.into_iter().map(|(lo, hi)| json!({ "lo_hz": lo, "hi_hz": hi })).collect();
     json!({ "radio.rf_envelope": { "allowed_bands": bands, "max_gain_db": 0.0, "tx_enabled": vec![true; channels] } })
@@ -221,7 +221,9 @@ pub fn bench_profile(device: &dyn Device, dir: &TempDir, selector: Json, environ
     doc["bindings"]["radio"]["selector"]["rx"] = rx;
     doc["bindings"]["radio"]["selector"]["tx"] = tx;
     if let Some(Json::Object(overlay)) = selector_override() {
-        for (key, value) in overlay { doc["bindings"]["radio"]["selector"][key] = value; }
+        for (key, value) in overlay {
+            doc["bindings"]["radio"]["selector"][key] = value;
+        }
     }
     // The bench's HG image streams over its 10 GbE port (bench.md B0.2); the HG default is 1 GbE.
     if doc["bindings"]["radio"]["selector"].get("link_gbps").is_none() {
@@ -314,12 +316,7 @@ pub fn waveform_of(samples: &[(f32, f32)]) -> (Vec<u8>, ArtifactRef) {
         bytes.extend_from_slice(&im.to_le_bytes());
     }
     let hash = ContentHash::of_bytes(&bytes);
-    let reference = ezsdr_kernel::manifest::ingest_input(
-        Ident::parse("waveform").unwrap(),
-        Namespace::parse("ezsdr.input").unwrap(),
-        format!("mem:{hash}"),
-        &bytes,
-    );
+    let reference = ezsdr_kernel::manifest::ingest_input(Ident::parse("waveform").unwrap(), Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
     (bytes, reference)
 }
 
@@ -372,10 +369,8 @@ pub fn assembly(profile_doc: &Json, device: Arc<dyn Device>, inputs: BTreeMap<Co
         _ => selector("args"),
     };
     // UR-7: the reference PLL misses its lock on about 4% of opens (handoff §6.2); try up to three more times, a second apart.
-    let authority = open_with_pll_retries(
-        || DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args),
-        3, Wall::from_secs(1),
-    ).unwrap();
+    let authority =
+        open_with_pll_retries(|| DeviceAuthority::new(device.clone(), clocks.clone(), &selector("clock_source"), &selector("time_source"), &authority_args), 3, Wall::from_secs(1)).unwrap();
     let mut clean = radio.clone();
     clean.selector.remove(&Ident::parse("authority_args").unwrap());
     let mut providers: BTreeMap<Ident, Box<dyn Provider>> = BTreeMap::new();
@@ -408,13 +403,17 @@ pub fn open_with_pll_retries<T>(mut open: impl FnMut() -> Result<T, String>, ret
     let mut opened = open();
     for retry in 1..=retries {
         let Err(error) = &opened else { break };
-        if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) { break; }
+        if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) {
+            break;
+        }
         println!("UR-7 retry {retry}: {error}");
         std::thread::sleep(pause);
         opened = open();
     }
     // The retries used up on a PLL that stays unlocked: inside a record, nothing after this can use the device (stage 3e).
-    if let Err(error) = &opened { measurement::latch_record_on_pll_failure(error); }
+    if let Err(error) = &opened {
+        measurement::latch_record_on_pll_failure(error);
+    }
     opened
 }
 
@@ -426,9 +425,15 @@ pub fn set_sources_with_pll_retries(device: &dyn Device, clock: &str, time: &str
 
 /// `set_sources_with_pll_retries` with the retries `pause` apart.
 pub fn set_sources_with_pll_retries_every(device: &dyn Device, clock: &str, time: &str, pause: Wall) -> Result<(), String> {
-    open_with_pll_retries(|| device.set_sources(clock, time).map_err(|e| {
-        if e.message.contains("Reference Clock PLL failed to lock") { format!("{} ({e})", ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) } else { format!("UR-7: {e}") }
-    }), 3, pause)
+    open_with_pll_retries(
+        || {
+            device
+                .set_sources(clock, time)
+                .map_err(|e| if e.message.contains("Reference Clock PLL failed to lock") { format!("{} ({e})", ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) } else { format!("UR-7: {e}") })
+        },
+        3,
+        pause,
+    )
 }
 
 pub fn fake(config: FakeConfig) -> Arc<FakeDevice> {
@@ -493,20 +498,26 @@ pub fn events_of(manifest: &Manifest, name: &str) -> Vec<Event> {
 /// an exact capture index. Failure remains a test failure, with raw evidence;
 /// it does not prove the host is at fault or rule out a runtime regression.
 pub fn require_stream_timing(manifest: &Manifest, trial: &str, tx: bool) {
-    let mut evidence: Vec<_> = manifest.events.delivered.iter().filter(|e|
-        (e.kind == kind("radio.LATE_COMMAND") && e.payload["key"].is_null())
-        || e.kind == kind("radio.RX_OVERFLOW")
-        || (tx && e.kind == kind("radio.TX_UNDERFLOW"))
-        || (tx && e.kind == kind("radio.TIME_ERROR") && matches!(
-            e.payload["outcome"].as_str(), Some("drop" | "plan_violation" | "late_at_device"))))
-        .map(|e| json!({ "kind": e.kind, "time": e.time, "payload": e.payload })).collect();
+    let mut evidence: Vec<_> = manifest
+        .events
+        .delivered
+        .iter()
+        .filter(|e| {
+            (e.kind == kind("radio.LATE_COMMAND") && e.payload["key"].is_null())
+                || e.kind == kind("radio.RX_OVERFLOW")
+                || (tx && e.kind == kind("radio.TX_UNDERFLOW"))
+                || (tx && e.kind == kind("radio.TIME_ERROR") && matches!(e.payload["outcome"].as_str(), Some("drop" | "plan_violation" | "late_at_device")))
+        })
+        .map(|e| json!({ "kind": e.kind, "time": e.time, "payload": e.payload }))
+        .collect();
     if tx {
-        evidence.extend(section(manifest, "rejected").as_array().unwrap().iter()
-            .filter(|r| r["reason"].as_str().is_some_and(|s| s.contains("transmit timeline expired"))).cloned());
+        evidence.extend(section(manifest, "rejected").as_array().unwrap().iter().filter(|r| r["reason"].as_str().is_some_and(|s| s.contains("transmit timeline expired"))).cloned());
     }
-    assert!(evidence.is_empty(),
+    assert!(
+        evidence.is_empty(),
         "TIMING_PRECONDITION_UNMET ({trial}): exact indices/uninterrupted playback require on-time, loss-free streams. Evidence: {evidence:?}; async: {}. Host scheduling or a runtime regression may cause this; see tests/README.md. The trial remains a test failure.",
-        section(manifest, "async"));
+        section(manifest, "async")
+    );
 }
 
 pub fn section<'a>(manifest: &'a Manifest, suffix: &str) -> &'a Json {
@@ -524,10 +535,7 @@ pub fn read_capture(artifact: &ArtifactRef, channels: usize) -> Vec<Vec<(f32, f3
     for frame in bytes.chunks_exact(8 * channels) {
         for (c, channel) in out.iter_mut().enumerate() {
             let at = c * 8;
-            channel.push((
-                f32::from_le_bytes(frame[at..at + 4].try_into().unwrap()),
-                f32::from_le_bytes(frame[at + 4..at + 8].try_into().unwrap()),
-            ));
+            channel.push((f32::from_le_bytes(frame[at..at + 4].try_into().unwrap()), f32::from_le_bytes(frame[at + 4..at + 8].try_into().unwrap())));
         }
     }
     out
@@ -595,9 +603,17 @@ pub fn tx_experiment_sends(device: &FakeDevice, prefix: &str) -> Vec<String> {
 }
 
 pub fn tx_clock_origin(manifest: &Manifest, nth: usize) -> i64 {
-    manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap()).nth(nth).unwrap().origin.ticks_in(manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap()).nth(nth).unwrap().root).unwrap()
+    manifest
+        .clocks
+        .sample_clocks
+        .iter()
+        .filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap())
+        .nth(nth)
+        .unwrap()
+        .origin
+        .ticks_in(manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap()).nth(nth).unwrap().root)
+        .unwrap()
 }
-
 
 // ---------------------------------------------------------------- the rehearsal (UR-34)
 //
@@ -766,9 +782,8 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     if !exact {
         diagnose("B6 burst", &samples, &wave);
     }
-    let at = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) }.unwrap_or_else(|| {
-        panic!("the burst's correlation peak: async {} TIME_ERROR {:?}", section(&heard, "async"), events_of(&heard, "radio.TIME_ERROR"))
-    });
+    let at = if exact { exactly(&samples, &wave) } else { correlate(&samples, &wave) }
+        .unwrap_or_else(|| panic!("the burst's correlation peak: async {} TIME_ERROR {:?}", section(&heard, "async"), events_of(&heard, "radio.TIME_ERROR")));
     if exact {
         assert_eq!(at, 0, "the burst at T0 + 10 000 samples is received at sample 10 000");
     }
@@ -795,7 +810,10 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
         let first = periods[0];
         println!("B6 repeat: {} whole periods from sample {} (offset, gain, phase °): {periods:?}", periods.len(), start % wave.len());
         for (at, gain, phase) in &periods {
-            assert!(*gain > 0.5 * first.1 && (phase - first.2 + 540.0).rem_euclid(360.0) - 180.0 < 20.0 && (phase - first.2 + 540.0).rem_euclid(360.0) - 180.0 > -20.0, "the repeat is not back to back at sample {at}: {periods:?}");
+            assert!(
+                *gain > 0.5 * first.1 && (phase - first.2 + 540.0).rem_euclid(360.0) - 180.0 < 20.0 && (phase - first.2 + 540.0).rem_euclid(360.0) - 180.0 > -20.0,
+                "the repeat is not back to back at sample {at}: {periods:?}"
+            );
         }
     }
     assert!(events_of(&looped, "radio.TX_UNDERFLOW").is_empty());
@@ -843,10 +861,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
         // device-late burst, or a move beyond the whole 5 ms lead, fails.
         let payloads: Vec<TimeErrorPayload> = errors.iter().map(|e| serde_json::from_value(e.payload.clone()).unwrap()).collect();
         let lead = ezsdr_radio_uhd::profile::DEVICE_LEAD_NS + ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS;
-        assert!(
-            payloads.iter().all(|p| p.outcome != TimeErrorOutcome::LateAtDevice && p.late_by_ns <= lead),
-            "spike K6: {payloads:?}"
-        );
+        assert!(payloads.iter().all(|p| p.outcome != TimeErrorOutcome::LateAtDevice && p.late_by_ns <= lead), "spike K6: {payloads:?}");
     } else {
         assert!(errors.is_empty(), "no TIME_ERROR (spike K6): {errors:?}");
     }
@@ -870,12 +885,20 @@ pub fn tx_at(run: &RunHandle, lead: i64) -> TimePoint {
 /// 10 000 samples and the burst begins 5 000 samples into it, the loop's delay (35 to 44 samples, B6) later, give or take the instants' rounding.
 pub fn ma1_phase(manifest: &Manifest, wave: &[(f32, f32)]) -> Result<f64, String> {
     let artifact = capture_of(manifest, "rec");
-    if artifact.continuity.len() != 1 { return Err(format!("the capture has {} stretches, not one (a gap)", artifact.continuity.len())); }
-    if !events_of(manifest, "radio.TIME_ERROR").is_empty() { return Err("the burst was late (TIME_ERROR)".to_owned()); }
+    if artifact.continuity.len() != 1 {
+        return Err(format!("the capture has {} stretches, not one (a gap)", artifact.continuity.len()));
+    }
+    if !events_of(manifest, "radio.TIME_ERROR").is_empty() {
+        return Err("the burst was late (TIME_ERROR)".to_owned());
+    }
     let samples = read_capture(&artifact, 1).remove(0);
-    if samples.len() < 10_000 { return Err(format!("the capture holds {} of 10 000 samples", samples.len())); }
+    if samples.len() < 10_000 {
+        return Err(format!("the capture holds {} of 10 000 samples", samples.len()));
+    }
     let offset = correlate(&samples, wave).ok_or("no waveform peak in the capture (the loopback is weak or the burst is missing)")?;
-    if !(4_950..5_150).contains(&offset) { return Err(format!("the waveform is at sample {offset}, not at the burst's time (4 950 to 5 150)")); }
+    if !(4_950..5_150).contains(&offset) {
+        return Err(format!("the waveform is at sample {offset}, not at the burst's time (4 950 to 5 150)"));
+    }
     let phase = tone::burst_phase(&samples, wave, offset).ok_or("the capture does not hold the whole burst")?;
     tone::phase_verdict(&phase)
 }
@@ -897,10 +920,16 @@ pub fn ma1_run(device: Arc<dyn Device>, timed_after_start: bool, wave: &[(f32, f
         let (_, waveform) = waveform_of(wave);
         let mut spec = with_burst(with_tx(receive_spec(1, 1e6, hz, None), 1e6), &waveform, false, "send_asap_and_flag", 110_000);
         let at = |offset: i64| json!({ "clock": "radio", "offset_ticks": offset });
-        let update = |direction: &str| json!({ "at": at(100_000), "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
-            "key": format!("radio.{direction}.c0.frequency_hz"), "value": f_new } });
-        spec["schedule"].as_array_mut().expect("the burst's schedule").extend([update("rx"), update("tx"), json!({ "at": at(105_000), "action": {
-            "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(), "key": "sink.capture_samples", "value": 10_000 } })]);
+        let update = |direction: &str| {
+            json!({ "at": at(100_000), "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
+            "key": format!("radio.{direction}.c0.frequency_hz"), "value": f_new } })
+        };
+        spec["schedule"].as_array_mut().expect("the burst's schedule").extend([
+            update("rx"),
+            update("tx"),
+            json!({ "at": at(105_000), "action": {
+            "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(), "key": "sink.capture_samples", "value": 10_000 } }),
+        ]);
         let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.to_vec())]);
         captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), envelope, false), device, inputs))
     } else {

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::spec::{Ident, Namespace};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The layout configuration key for a logical channel.
 pub fn channel_key(direction: &str, channel: u32, leaf: &str) -> String {
@@ -72,14 +72,7 @@ pub fn receive(channels: i64, rate_hz: f64, frequency_hz: f64, capture: Option<i
 }
 
 /// A receive experiment with a scheduled transmit burst.
-pub fn transmit(
-    rate_hz: f64,
-    waveform: &ArtifactRef,
-    repeat: bool,
-    late_policy: &str,
-    offset_ticks: i64,
-    capture: Option<i64>,
-) -> Value {
+pub fn transmit(rate_hz: f64, waveform: &ArtifactRef, repeat: bool, late_policy: &str, offset_ticks: i64, capture: Option<i64>) -> Value {
     let mut spec = receive(1, rate_hz, 1.0e9, capture);
     spec["resources"]["radio"]["requires"].as_object_mut().unwrap().extend(direction_requires("tx", 1, rate_hz, 1.0e9));
     spec["schedule"] = json!([{
@@ -99,18 +92,15 @@ pub fn transmit(
 /// Adds a capture request at an instant measured on the named resource's clock.
 pub fn with_timed_capture(spec: Value, samples: i64, offset_ticks: i64) -> Value {
     let mut spec = spec;
-    spec["schedule"]
-        .as_array_mut()
-        .expect("experiment schedule is an array")
-        .push(json!({
-            "at": { "clock": "radio", "offset_ticks": offset_ticks },
-            "action": {
-                "kind": "update_parameter",
-                "target": { "kind": "output", "output": "rec" },
-                "key": "sink.capture_samples",
-                "value": samples
-            }
-        }));
+    spec["schedule"].as_array_mut().expect("experiment schedule is an array").push(json!({
+        "at": { "clock": "radio", "offset_ticks": offset_ticks },
+        "action": {
+            "kind": "update_parameter",
+            "target": { "kind": "output", "output": "rec" },
+            "key": "sink.capture_samples",
+            "value": samples
+        }
+    }));
     spec
 }
 
@@ -142,14 +132,20 @@ pub fn waveform_of(samples: &[(f32, f32)]) -> (Vec<u8>, ArtifactRef) {
 /// coupled, which is the environment's (Vision §8, §58 #8).
 pub fn link(tx: &str, rx: &str, rate_hz: f64, waveform: &ArtifactRef, offset_ticks: i64, capture: i64) -> Value {
     let mut resources = serde_json::Map::new();
-    resources.insert(tx.to_owned(), json!({
-        "kind": "radio.device",
-        "requires": direction_requires("tx", 1, rate_hz, 1.0e9)
-    }));
-    resources.insert(rx.to_owned(), json!({
-        "kind": "radio.device",
-        "requires": direction_requires("rx", 1, rate_hz, 1.0e9)
-    }));
+    resources.insert(
+        tx.to_owned(),
+        json!({
+            "kind": "radio.device",
+            "requires": direction_requires("tx", 1, rate_hz, 1.0e9)
+        }),
+    );
+    resources.insert(
+        rx.to_owned(),
+        json!({
+            "kind": "radio.device",
+            "requires": direction_requires("rx", 1, rate_hz, 1.0e9)
+        }),
+    );
     let target = json!({ "kind": "resource", "resource": tx, "path": "tx/s0" });
     json!({
         "version": 1,

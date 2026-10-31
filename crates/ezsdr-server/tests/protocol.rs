@@ -20,8 +20,8 @@ use ezsdr_kernel::run::{Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, Rational, TimePoint};
-use ezsdr_server::protocol::{ErrorKind, ProtocolError, Reply, ReplyFrame, Request, Response};
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
+use ezsdr_server::protocol::{ErrorKind, ProtocolError, Reply, ReplyFrame, Request, Response};
 use ezsdr_server::{Config, Exit, Handled, Server, serve};
 use serde_json::json;
 
@@ -95,7 +95,13 @@ fn repeat() -> SessionAction {
 }
 
 fn capture(n: i64) -> SessionAction {
-    SessionAction::Vocabulary { ns: Namespace::parse("sink").unwrap(), verb: Ident::parse("capture").unwrap(), target: Target::Output { output: Ident::parse("rec").unwrap() }, at: None, params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]) }
+    SessionAction::Vocabulary {
+        ns: Namespace::parse("sink").unwrap(),
+        verb: Ident::parse("capture").unwrap(),
+        target: Target::Output { output: Ident::parse("rec").unwrap() },
+        at: None,
+        params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(n))]),
+    }
 }
 
 fn written() -> EventKind {
@@ -104,10 +110,12 @@ fn written() -> EventKind {
 
 /// One channel of little-endian cf32: sample `k` is `(k + 1, -(k + 1)) / 4096`.
 fn ramp(len: usize) -> Vec<u8> {
-    (0..len).flat_map(|k| {
-        let v = (k + 1) as f32 / 4096.0;
-        v.to_le_bytes().into_iter().chain((-v).to_le_bytes())
-    }).collect()
+    (0..len)
+        .flat_map(|k| {
+            let v = (k + 1) as f32 / 4096.0;
+            v.to_le_bytes().into_iter().chain((-v).to_le_bytes())
+        })
+        .collect()
 }
 
 /// Captures `n` samples and returns the artifact's URI and the Run's time after the wait.
@@ -116,7 +124,9 @@ fn capture_uri(server: &mut Server, n: i64) -> (String, TimePoint) {
     let entry = submit(server, capture(n), Vec::new());
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
     let within = Duration::new(now.domain(), 1_000_000_000);
-    let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else { panic!("no capture") };
+    let Response::Waited { event: Some(event), now, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else {
+        panic!("no capture")
+    };
     (event.payload["artifact"]["uri"].as_str().unwrap().to_owned(), now)
 }
 
@@ -423,7 +433,11 @@ fn ea_12_time_and_events() {
     // (Review I, P2-5).
     let Response::Status { events: before, now: asked, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
     submit(&mut server, capture(500), Vec::new());
-    let Response::Waited { index: Some(_), now: early, horizon: far, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: before, within: Some(Duration::new(root, 1_000_000_000)), until: None }, Vec::new())) else { panic!() };
+    let Response::Waited { index: Some(_), now: early, horizon: far, .. } =
+        ok(server.handle(Request::WaitFor { kinds: vec![written()], from: before, within: Some(Duration::new(root, 1_000_000_000)), until: None }, Vec::new()))
+    else {
+        panic!()
+    };
     assert_eq!(far.ticks_in(far.domain()).unwrap(), asked.ticks_in(asked.domain()).unwrap() + 1_000_000_000);
     assert!(early.ticks_in(early.domain()).unwrap() < far.ticks_in(far.domain()).unwrap());
     let (uri, at) = capture_uri(&mut server, 2_000);
@@ -434,12 +448,19 @@ fn ea_12_time_and_events() {
     assert_eq!(events[index].time, at, "the wait ended at the round that delivered the event");
     let Response::Events { events: tail, .. } = ok(server.handle(Request::Events { from: index }, Vec::new())) else { panic!() };
     assert_eq!(tail[0], events[index]);
-    let Response::Waited { index: none, now: horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: Some(Duration::new(root, 3_000_000)), until: None }, Vec::new())) else { panic!() };
+    let Response::Waited { index: none, now: horizon, .. } =
+        ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: Some(Duration::new(root, 3_000_000)), until: None }, Vec::new()))
+    else {
+        panic!()
+    };
     assert_eq!(none, None);
     assert_eq!(horizon.ticks_in(horizon.domain()).unwrap(), at.ticks_in(at.domain()).unwrap() + 3_000_000);
     // `until` keeps a deadline across waits: the reply's `horizon` is where it would stand.
     let deadline = TimePoint::new(horizon.domain(), horizon.ticks_in(horizon.domain()).unwrap() + 2_000_000);
-    let Response::Waited { index: none, now: stood, horizon: echoed, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: None, until: Some(deadline) }, Vec::new())) else { panic!() };
+    let Response::Waited { index: none, now: stood, horizon: echoed, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: next, within: None, until: Some(deadline) }, Vec::new()))
+    else {
+        panic!()
+    };
     assert_eq!((none, stood, echoed), (None, deadline, deadline));
     assert_eq!(err(server.handle(Request::WaitFor { kinds: vec![], from: 0, within: Some(Duration::new(root, 1)), until: Some(deadline) }, Vec::new())).kind, ErrorKind::Protocol);
     finish(&mut server);
@@ -557,13 +578,8 @@ fn ea_15_finish_and_disconnect() {
 #[test]
 fn ea_binary_speaks_the_protocol() {
     let temp = TempDir::new("binary");
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ezsdr-server"))
-        .arg("--runs-dir")
-        .arg(&temp.0)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child =
+        std::process::Command::new(env!("CARGO_BIN_EXE_ezsdr-server")).arg("--runs-dir").arg(&temp.0).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut ask = |request: &str| {
@@ -630,7 +646,9 @@ fn ea_15_every_exit_writes_the_manifest() {
             self.0 -= bytes.len();
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     let runs = TempDir::new("closed");
     let input = format!("{HELLO}{{\"request\":{{\"op\":\"connect\"}}}}\n{}", "{\"request\":{\"op\":\"status\"}}\n".repeat(50)).into_bytes();
@@ -777,7 +795,9 @@ fn capture_at(server: &mut Server, n: i64, at: TimePoint) -> ezsdr_kernel::manif
     let entry = submit(server, SessionAction::Vocabulary { ns, verb, target, at: Some(at), params }, Vec::new());
     assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
     let within = seconds(now, rate, 3);
-    let Response::Waited { event: Some(event), .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else { panic!("no capture") };
+    let Response::Waited { event: Some(event), .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: events, within: Some(within), until: None }, Vec::new())) else {
+        panic!("no capture")
+    };
     serde_json::from_value::<ezsdr_sink::CaptureWrittenPayload>(event.payload).unwrap().artifact
 }
 
@@ -805,7 +825,9 @@ fn ea_12_a_duration_is_whole_root_ticks() {
     let (at, _, _) = status(&mut server);
     capture_at(&mut server, 100, TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + 20_000_000));
     let within = Duration::new(now.domain(), 2_000_000_000);
-    let Response::Waited { index: Some(_), now, horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(within), until: None }, Vec::new())) else { panic!("the capture was delivered") };
+    let Response::Waited { index: Some(_), now, horizon, .. } = ok(server.handle(Request::WaitFor { kinds: vec![written()], from: 0, within: Some(within), until: None }, Vec::new())) else {
+        panic!("the capture was delivered")
+    };
     assert!(horizon.ticks_in(horizon.domain()).unwrap() - now.ticks_in(now.domain()).unwrap() >= 1_000_000_000, "horizon {horizon}, now {now}");
     finish(&mut server);
 }
@@ -982,7 +1004,11 @@ fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
     // Review S, TG-S3 (F4): a device lost during a Session stops the Run by Policy; Finish
     // still returns the Manifest and writes it, and the device was marked lost first.
     let temp = TempDir::new("uhd-lost");
-    let device = Arc::new(FakeDevice::new(FakeConfig { clock: ezsdr_radio_uhd::ClockMode::Manual, faults: vec![ezsdr_radio_uhd::FakeFault::Lost(std::time::Duration::from_millis(3_000))], ..FakeConfig::default() }));
+    let device = Arc::new(FakeDevice::new(FakeConfig {
+        clock: ezsdr_radio_uhd::ClockMode::Manual,
+        faults: vec![ezsdr_radio_uhd::FakeFault::Lost(std::time::Duration::from_millis(3_000))],
+        ..FakeConfig::default()
+    }));
     let held = device.clone();
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
@@ -1116,18 +1142,25 @@ fn ea_17_a_capture_at_a_passed_instant_says_where_it_started() {
     let first = first_on_root(&manifest, &artifact);
     // The samples at `at` were delivered before the request arrived: it starts later.
     assert!(first > at.ticks_in(at.domain()).unwrap(), "the first sample at {first}, asked {}", at.ticks_in(at.domain()).unwrap());
-    assert_eq!(artifact.continuity[0].end.ticks_in(artifact.continuity[0].end.domain()).unwrap() - artifact.continuity[0].first.ticks_in(artifact.continuity[0].first.domain()).unwrap(), 1_000, "the map names the samples it holds");
+    assert_eq!(
+        artifact.continuity[0].end.ticks_in(artifact.continuity[0].end.domain()).unwrap() - artifact.continuity[0].first.ticks_in(artifact.continuity[0].first.domain()).unwrap(),
+        1_000,
+        "the map names the samples it holds"
+    );
 }
 
 #[test]
 fn kc_23_an_output_target_cannot_address_a_provider() {
     let temp = TempDir::new("audit-target");
     let (mut server, _) = connected(&temp.0);
-    let entry = submit(&mut server, SessionAction::SetParameter {
-        target: Target::Output { output: Ident::parse("radio").unwrap() },
-        key: Key::parse("radio.rx.c0.gain_db").unwrap(),
-        value: Value::num(3.0).unwrap(),
-    }, vec![]);
-    assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
-        if violations.iter().any(|v| v.reason.starts_with("KC-23: output radio"))), "radio is not an output: {entry:?}");
+    let entry = submit(
+        &mut server,
+        SessionAction::SetParameter { target: Target::Output { output: Ident::parse("radio").unwrap() }, key: Key::parse("radio.rx.c0.gain_db").unwrap(), value: Value::num(3.0).unwrap() },
+        vec![],
+    );
+    assert!(
+        matches!(entry.outcome, Outcome::Rejected { ref violations }
+        if violations.iter().any(|v| v.reason.starts_with("KC-23: output radio"))),
+        "radio is not an output: {entry:?}"
+    );
 }

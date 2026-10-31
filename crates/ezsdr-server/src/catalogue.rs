@@ -25,11 +25,7 @@ pub type OpenDevice = Arc<dyn Fn(&str) -> Result<Arc<dyn ezsdr_radio_uhd::Device
 
 /// The binary's device: UHD's, when the server is built with the feature `uhd` (VE-5).
 fn open_uhd(args: &str) -> Result<Arc<dyn ezsdr_radio_uhd::Device>, String> {
-    if cfg!(feature = "uhd") {
-        ezsdr_radio_uhd::open(args)
-    } else {
-        Err("EA-7: ezsdr.radio.uhd: this server was built without UHD; rebuild ezsdr-server with --features uhd".to_owned())
-    }
+    if cfg!(feature = "uhd") { ezsdr_radio_uhd::open(args) } else { Err("EA-7: ezsdr.radio.uhd: this server was built without UHD; rebuild ezsdr-server with --features uhd".to_owned()) }
 }
 
 /// The registries with every Vocabulary and Module of the catalogue (EA-7).
@@ -53,9 +49,7 @@ fn registries() -> Result<(ModuleRegistry, AdmissionCheckRegistry, EventKindRegi
         let id = descriptor.id.clone();
         registry.register(descriptor, factories).map_err(|e| fail(id.as_str(), &e))?;
     }
-    registry
-        .register_link_descriptor(ezsdr_link_host::link_descriptor())
-        .map_err(|e| fail(LINK, &e))?;
+    registry.register_link_descriptor(ezsdr_link_host::link_descriptor()).map_err(|e| fail(LINK, &e))?;
     Ok((registry, checks, kinds))
 }
 
@@ -63,19 +57,11 @@ fn registries() -> Result<(ModuleRegistry, AdmissionCheckRegistry, EventKindRegi
 /// must name a Module of the catalogue, the native Executor gets `implementations`, and
 /// a binding of `ezsdr.radio.uhd` its device from `open_device` (UHD's when `None`)
 /// (EA-7). The refusal is a message naming the binding.
-pub fn assemble(
-    profile_doc: &serde_json::Value,
-    inputs: BTreeMap<ContentHash, Vec<u8>>,
-    implementations: Vec<Implementation>,
-    open_device: Option<&OpenDevice>,
-) -> Result<Assembly, String> {
+pub fn assemble(profile_doc: &serde_json::Value, inputs: BTreeMap<ContentHash, Vec<u8>>, implementations: Vec<Implementation>, open_device: Option<&OpenDevice>) -> Result<Assembly, String> {
     let profile = BindingProfile::from_json(profile_doc).map_err(|error| error.to_string())?;
     let (registry, checks, kinds) = registries()?;
     let clocks = Arc::new(ClockRegistry::new());
-    let authority_binding = profile
-        .bindings
-        .get(&profile.authority)
-        .ok_or_else(|| format!("EA-7: the authority {} is not bound", profile.authority))?;
+    let authority_binding = profile.bindings.get(&profile.authority).ok_or_else(|| format!("EA-7: the authority {} is not bound", profile.authority))?;
     if ![AUTHORITY, UHD].contains(&authority_binding.module.id.as_str()) {
         return Err(format!("EA-7: the authority must be {AUTHORITY} or {UHD}, not {}", authority_binding.module.id));
     }

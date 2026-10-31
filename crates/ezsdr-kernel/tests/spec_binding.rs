@@ -5,71 +5,28 @@ mod support;
 use ezsdr_kernel::spec::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
 
-use ezsdr_kernel::binding::{
-    AdmissionCheckRegistry, BindingProfile, CheckStage, LinkPlacement, Placements, satisfies,
-};
+use ezsdr_kernel::binding::{AdmissionCheckRegistry, BindingProfile, CheckStage, LinkPlacement, Placements, satisfies};
 use ezsdr_kernel::contract::{ContractRegistry, PortRef};
 use ezsdr_kernel::event::{ActionTemplate, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, IslandId, MemoryDomainId};
-use ezsdr_kernel::module_api::{
-    AuthorityDescriptor, CompileRule, ComponentPlacement, ExecutorDescriptor, Factories, IslandDecl,
-    ModuleRef, ModuleRegistry, Pacing, Provider, Role, UpdateClass,
-};
-use ezsdr_kernel::plan::{
-    CompileInputs, PrepareReport, arm_order, coercion_policy,
-    collect_prepare, plan, release_order, validate,
-};
+use ezsdr_kernel::module_api::{AuthorityDescriptor, CompileRule, ComponentPlacement, ExecutorDescriptor, Factories, IslandDecl, ModuleRef, ModuleRegistry, Pacing, Provider, Role, UpdateClass};
+use ezsdr_kernel::plan::{CompileInputs, PrepareReport, arm_order, coercion_policy, collect_prepare, plan, release_order, validate};
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{
-    CapabilityValue, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl,
-    Namespace, OutputReq, ResourceReq, ScheduleEntry, SinkFeed, SpecError, SpecTime,
-    SubResourceReq, Value, ValueKind,
+    CapabilityValue, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, KeyDecl, Namespace, OutputReq, ResourceReq, ScheduleEntry, SinkFeed, SpecError, SpecTime, SubResourceReq, Value, ValueKind,
 };
 use ezsdr_kernel::stream::{BackPressure, LatePolicy};
-use support::{
-    FailAt, TestLimitsCheck, TestProvider, TestSink, id, key, mid, mref, ns, rid, some_hash,
-    test_provider_descriptor, test_sink_descriptor, test_vocabulary,
-};
+use support::{FailAt, TestLimitsCheck, TestProvider, TestSink, id, key, mid, mref, ns, rid, some_hash, test_provider_descriptor, test_sink_descriptor, test_vocabulary};
 
 fn registry() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     reg.register_vocabulary(test_vocabulary()).expect("fresh");
-    reg.register(
-        test_provider_descriptor(),
-        Factories {
-            provider: true,
-            authority: true,
-            ..Factories::default()
-        },
-    )
-    .expect("registers");
-    reg.register(
-        test_sink_descriptor(),
-        Factories {
-            sink: true,
-            ..Factories::default()
-        },
-    )
-    .expect("registers");
-    reg.register(
-        support::test_executor_descriptor(),
-        Factories {
-            executor: true,
-            ..Factories::default()
-        },
-    )
-    .expect("registers");
-    reg.register(
-        support::test_link_module_descriptor(),
-        Factories {
-            link: true,
-            ..Factories::default()
-        },
-    )
-    .expect("registers");
-    reg.register_link_descriptor(support::test_link_descriptor())
-        .expect("registers the Link descriptor");
+    reg.register(test_provider_descriptor(), Factories { provider: true, authority: true, ..Factories::default() }).expect("registers");
+    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() }).expect("registers");
+    reg.register(support::test_executor_descriptor(), Factories { executor: true, ..Factories::default() }).expect("registers");
+    reg.register(support::test_link_module_descriptor(), Factories { link: true, ..Factories::default() }).expect("registers");
+    reg.register_link_descriptor(support::test_link_descriptor()).expect("registers the Link descriptor");
     reg
 }
 
@@ -98,27 +55,14 @@ fn minimal_spec() -> ExperimentSpec {
 
 /// A Spec built from parts, so tests can vary one field.
 fn spec_with(resources: BTreeMap<Ident, ResourceReq>) -> ExperimentSpec {
-    let mut s = ExperimentSpec {
-        version: 1,
-        ..ExperimentSpec::default()
-    };
-    s.requirements
-        .vocabularies
-        .push(ezsdr_kernel::spec::VocabularyReq {
-            id: ns("test"),
-            major: 1,
-        });
+    let mut s = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
+    s.requirements.vocabularies.push(ezsdr_kernel::spec::VocabularyReq { id: ns("test"), major: 1 });
     s.resources = resources;
     s
 }
 
 fn resource(kind: &str, requires: &[(&str, Constraint)]) -> ResourceReq {
-    ResourceReq {
-        kind: ns(kind),
-        requires: requires.iter().map(|(k, c)| (key(k), c.clone())).collect(),
-        needs: BTreeMap::new(),
-        extensions: BTreeMap::new(),
-    }
+    ResourceReq { kind: ns(kind), requires: requires.iter().map(|(k, c)| (key(k), c.clone())).collect(), needs: BTreeMap::new(), extensions: BTreeMap::new() }
 }
 
 /// Marks the named bindings as **distinct instances** by giving each a selector of
@@ -129,8 +73,7 @@ fn resource(kind: &str, requires: &[(&str, Constraint)]) -> ResourceReq {
 fn distinct_instances(mut p: BindingProfile, names: &[&str]) -> BindingProfile {
     for n in names {
         if let Some(b) = p.bindings.get_mut(&id(n)) {
-            b.selector
-                .insert(id("instance"), Value::from((*n).to_owned()));
+            b.selector.insert(id("instance"), Value::from((*n).to_owned()));
         }
     }
     p
@@ -139,20 +82,7 @@ fn distinct_instances(mut p: BindingProfile, names: &[&str]) -> BindingProfile {
 fn profile_binding(names: &[&str]) -> BindingProfile {
     BindingProfile {
         version: 1,
-        bindings: names
-            .iter()
-            .map(|n| {
-                (
-                    id(n),
-                    ezsdr_kernel::binding::Binding {
-                        module: mref("ezsdr.test.provider"),
-                        feed: None,
-                        selector: BTreeMap::new(),
-                        profile: None,
-                    },
-                )
-            })
-            .collect(),
+        bindings: names.iter().map(|n| (id(n), ezsdr_kernel::binding::Binding { module: mref("ezsdr.test.provider"), feed: None, selector: BTreeMap::new(), profile: None })).collect(),
         // SB-24: mandatory. The first binding rides as the Authority, which the test
         // Provider holds (MA-1); a fixture that means another names it.
         authority: id(names.first().copied().unwrap_or("radio")),
@@ -166,45 +96,15 @@ fn profile_binding(names: &[&str]) -> BindingProfile {
 /// it in (finding D18) — and only a profile with an Island does, because a binding
 /// that plays no role is refused (SB-22, D89).
 fn bind_exec(p: &mut BindingProfile) {
-    p.bindings.insert(
-        id("exec"),
-        ezsdr_kernel::binding::Binding {
-            module: mref("ezsdr.test.executor"),
-            feed: None,
-            selector: BTreeMap::new(),
-            profile: None,
-        },
-    );
+    p.bindings.insert(id("exec"), ezsdr_kernel::binding::Binding { module: mref("ezsdr.test.executor"), feed: None, selector: BTreeMap::new(), profile: None });
 }
 
 /// Selects the test Link for every data link of `spec`: each graph link, then each
 /// output feed, named by its ends (SB-25, D75, D76).
 fn select_test_links(spec: &ExperimentSpec, profile: &mut BindingProfile) {
-    let link = ModuleRef {
-        id: mid("ezsdr.test.link"),
-        version: ezsdr_kernel::module_api::Version::new(1, 0, 0),
-    };
-    let feeds = spec.outputs.iter().map(|o| {
-        (
-            o.feed.port.clone(),
-            PortRef {
-                component: o.id.clone(),
-                port: id("in"),
-            },
-        )
-    });
-    profile.placements.links = spec
-        .graph
-        .links
-        .iter()
-        .map(|l| (l.from.clone(), l.to.clone()))
-        .chain(feeds)
-        .map(|(from, to)| LinkPlacement {
-            link: link.clone(),
-            from,
-            to,
-        })
-        .collect();
+    let link = ModuleRef { id: mid("ezsdr.test.link"), version: ezsdr_kernel::module_api::Version::new(1, 0, 0) };
+    let feeds = spec.outputs.iter().map(|o| (o.feed.port.clone(), PortRef { component: o.id.clone(), port: id("in") }));
+    profile.placements.links = spec.graph.links.iter().map(|l| (l.from.clone(), l.to.clone())).chain(feeds).map(|(from, to)| LinkPlacement { link: link.clone(), from, to }).collect();
 }
 
 struct Fixture<'a> {
@@ -230,16 +130,7 @@ impl<'a> Fixture<'a> {
             // `authority` names, so the others are inert.
             authorities: ["radio", "a", "cap", "line", "peripheral", "pps", "zsource"]
                 .into_iter()
-                .map(|n| {
-                    (
-                        id(n),
-                        AuthorityDescriptor {
-                            module: mref("ezsdr.test.provider"),
-                            governs: vec![ClockDomainId::HOST_MONOTONIC],
-                            pacing: Pacing::FreeRunning,
-                        },
-                    )
-                })
+                .map(|n| (id(n), AuthorityDescriptor { module: mref("ezsdr.test.provider"), governs: vec![ClockDomainId::HOST_MONOTONIC], pacing: Pacing::FreeRunning }))
                 .collect(),
             executors: [(
                 id("exec"),
@@ -290,16 +181,11 @@ fn prepared(
     // `minimal_spec()` here meant every caller had MA-12 and the Spec's constraints
     // checked against a Spec it had not written, which is how a P0 on the crate's
     // headline coercion path survived two review passes and 287 green tests.
-    let admission = validate(spec, profile, &fx.inputs(providers))
-        .unwrap_or_else(|e| panic!("the caller's Spec validates: {e:?}"));
+    let admission = validate(spec, profile, &fx.inputs(providers)).unwrap_or_else(|e| panic!("the caller's Spec validates: {e:?}"));
     collect_prepare(reports, spec, profile, &fx.inputs(providers), &admission)
 }
 
-fn validate_then_plan(
-    spec: &ExperimentSpec,
-    profile: &ezsdr_kernel::binding::BindingProfile,
-    inputs: &ezsdr_kernel::plan::CompileInputs<'_>,
-) -> Result<ezsdr_kernel::plan::ExecutionPlan, SpecError> {
+fn validate_then_plan(spec: &ExperimentSpec, profile: &ezsdr_kernel::binding::BindingProfile, inputs: &ezsdr_kernel::plan::CompileInputs<'_>) -> Result<ezsdr_kernel::plan::ExecutionPlan, SpecError> {
     let admission = validate(spec, profile, inputs)?;
     plan(spec, profile, &admission, inputs)
 }
@@ -322,31 +208,14 @@ fn sb_10_version_one_validates() {
 #[test]
 fn sb_47_version_two_refused_by_name() {
     let doc = serde_json::json!({ "version": 2, "resources": {} });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::UnsupportedVersion {
-            found: 2,
-            supported: vec![1]
-        })
-    );
-    assert_eq!(
-        BindingProfile::from_json(&serde_json::json!({ "version": 2 })),
-        Err(SpecError::UnsupportedVersion {
-            found: 2,
-            supported: vec![1]
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::UnsupportedVersion { found: 2, supported: vec![1] }));
+    assert_eq!(BindingProfile::from_json(&serde_json::json!({ "version": 2 })), Err(SpecError::UnsupportedVersion { found: 2, supported: vec![1] }));
 }
 
 #[test]
 fn sb_09_unknown_top_level_field_refused() {
     let doc = serde_json::json!({ "version": 1, "constants": { "a": 1 } });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::UnknownField {
-            path: "constants".to_owned()
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::UnknownField { path: "constants".to_owned() }));
 }
 
 #[test]
@@ -354,20 +223,11 @@ fn sb_09_inputs_is_a_top_level_field() {
     // SB-20a (Phase 5, KE-1): `inputs` joins the closed top-level set; its entries are
     // `ArtifactRef`s, refused by the deserialiser when they are not, and absent is empty.
     let bytes = [0u8; 8];
-    let reference = ezsdr_kernel::manifest::ingest_input(
-        Ident::parse("pong").unwrap(),
-        ns("ezsdr.input"),
-        format!("mem:{}", ezsdr_kernel::hash::ContentHash::of_bytes(&bytes)),
-        &bytes,
-    );
-    let listed = ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "inputs": [reference] }))
-        .expect("a Spec may list its inputs");
+    let reference = ezsdr_kernel::manifest::ingest_input(Ident::parse("pong").unwrap(), ns("ezsdr.input"), format!("mem:{}", ezsdr_kernel::hash::ContentHash::of_bytes(&bytes)), &bytes);
+    let listed = ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "inputs": [reference] })).expect("a Spec may list its inputs");
     assert_eq!(listed.inputs, vec![reference]);
     let malformed = ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "inputs": [{ "uri": 1 }] }));
-    assert!(
-        matches!(&malformed, Err(SpecError::Structural { reason }) if reason.starts_with("SB-9:")),
-        "{malformed:?}"
-    );
+    assert!(matches!(&malformed, Err(SpecError::Structural { reason }) if reason.starts_with("SB-9:")), "{malformed:?}");
     let absent = ExperimentSpec::from_json(&serde_json::json!({ "version": 1 })).unwrap();
     assert!(absent.inputs.is_empty());
 }
@@ -385,10 +245,7 @@ fn sb_09_an_unknown_nested_field_is_refused() {
     let mut stale = link.clone();
     stale["memory_domain"] = serde_json::json!({ "node": "local", "index": 0 });
     let doc = |l: serde_json::Value| serde_json::json!({ "version": 1, "authority": "radio", "placements": { "links": [l] } });
-    assert!(
-        BindingProfile::from_json(&doc(link)).is_ok(),
-        "the current shape parses"
-    );
+    assert!(BindingProfile::from_json(&doc(link)).is_ok(), "the current shape parses");
     assert!(matches!(
         BindingProfile::from_json(&doc(stale)),
         Err(SpecError::Structural { reason }) if reason.contains("unknown field `memory_domain`")
@@ -410,14 +267,8 @@ fn sb_09_an_unknown_nested_field_is_refused() {
     let stray = serde_json::json!({ "kind": "completed", "stage": "validate" });
     assert!(serde_json::from_value::<ezsdr_kernel::run::Termination>(stray).is_err());
     let plain = serde_json::json!({ "kind": "completed" });
-    assert_eq!(
-        serde_json::from_value::<ezsdr_kernel::run::Termination>(plain.clone()).expect("parses"),
-        ezsdr_kernel::run::Termination::Completed {}
-    );
-    assert_eq!(
-        serde_json::to_value(ezsdr_kernel::run::Termination::Completed {}).expect("writes"),
-        plain
-    );
+    assert_eq!(serde_json::from_value::<ezsdr_kernel::run::Termination>(plain.clone()).expect("parses"), ezsdr_kernel::run::Termination::Completed {});
+    assert_eq!(serde_json::to_value(ezsdr_kernel::run::Termination::Completed {}).expect("writes"), plain);
 }
 
 #[test]
@@ -433,34 +284,21 @@ fn sb_49a_an_old_class_carrying_template_or_rule_is_refused() {
         "class": "hardware_timed"
     });
     let refused = serde_json::from_value::<ActionTemplate>(template);
-    assert!(
-        refused
-            .as_ref()
-            .is_err_and(|e| e.to_string().contains("unknown field `class`")),
-        "an old class-carrying template is refused: {refused:?}"
-    );
+    assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("unknown field `class`")), "an old class-carrying template is refused: {refused:?}");
     let current = serde_json::json!({
         "kind": "update_parameter",
         "target": { "kind": "resource", "resource": "radio", "path": "" },
         "key": "test.gain",
         "value": 1.0
     });
-    assert!(
-        serde_json::from_value::<ActionTemplate>(current).is_ok(),
-        "the class-less template parses"
-    );
+    assert!(serde_json::from_value::<ActionTemplate>(current).is_ok(), "the class-less template parses");
 
     let refused = serde_json::from_value::<CompileRule>(serde_json::json!({
         "kind": "update_parameter",
         "key": "test.capture",
         "class": "block_boundary"
     }));
-    assert!(
-        refused
-            .as_ref()
-            .is_err_and(|e| e.to_string().contains("unknown field `class`")),
-        "an old class-carrying rule is refused: {refused:?}"
-    );
+    assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("unknown field `class`")), "an old class-carrying rule is refused: {refused:?}");
     assert!(
         serde_json::from_value::<CompileRule>(serde_json::json!({
             "kind": "update_parameter",
@@ -476,41 +314,27 @@ fn sb_25_an_island_states_each_component_and_its_memory_domain() {
     // SB-25, MA-38 (spec 20, KH-2): an Island's entry `{ component, memory_domain }` is
     // the one statement of where a component runs. The removed `placements.components`
     // map and its `island` label are refused, never read and dropped (SB-9; invariant 39).
-    let doc = |placements: serde_json::Value| {
-        serde_json::json!({ "version": 1, "authority": "radio", "placements": placements })
-    };
-    let island = |entry: serde_json::Value| {
-        serde_json::json!({ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": [entry] })
-    };
+    let doc = |placements: serde_json::Value| serde_json::json!({ "version": 1, "authority": "radio", "placements": placements });
+    let island = |entry: serde_json::Value| serde_json::json!({ "id": { "node": 0, "local": 0 }, "executor": "exec", "components": [entry] });
     let entry = serde_json::json!({ "component": "c", "memory_domain": { "node": 0, "local": 0 } });
-    let parsed = BindingProfile::from_json(&doc(serde_json::json!({ "islands": [island(entry.clone())] })))
-        .expect("an Island's entry parses");
+    let parsed = BindingProfile::from_json(&doc(serde_json::json!({ "islands": [island(entry.clone())] }))).expect("an Island's entry parses");
     assert_eq!(parsed.placements.islands[0].components, [member("c")]);
     let beside = doc(serde_json::json!({
         "islands": [island(entry.clone())],
         "components": { "c": { "island": "island_0", "memory_domain": { "node": 0, "local": 0 } } }
     }));
     let refused = BindingProfile::from_json(&beside);
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("unknown field `components`")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("unknown field `components`")), "{refused:?}");
     let mut labelled = entry;
     labelled["island"] = serde_json::json!("island_0");
     let refused = BindingProfile::from_json(&doc(serde_json::json!({ "islands": [island(labelled)] })));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("unknown field `island`")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("unknown field `island`")), "{refused:?}");
 }
 
 #[test]
 fn sb_14_compute_expression_refused() {
     // v3's CONSTANTS is an unknown top-level field (SB-9).
-    assert!(matches!(
-        ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "CONSTANTS": { "a": 1 } })),
-        Err(SpecError::UnknownField { .. })
-    ));
+    assert!(matches!(ExperimentSpec::from_json(&serde_json::json!({ "version": 1, "CONSTANTS": { "a": 1 } })), Err(SpecError::UnknownField { .. })));
     // and a `!COMPUTE(...)` value is just a string: there is no evaluation pass.
     let spec = ExperimentSpec::from_json(&serde_json::json!({
         "version": 1,
@@ -527,31 +351,18 @@ fn sb_14_compute_expression_refused() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     // It is never evaluated: it fails the key's declared kind instead (SB-6).
-    assert!(matches!(
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)),
-        Err(SpecError::KeyShape { .. })
-    ));
+    assert!(matches!(validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)), Err(SpecError::KeyShape { .. })));
 }
 
 #[test]
 fn sb_13_placement_in_spec_refused() {
     let doc = serde_json::json!({ "version": 1, "graph": { "placement": {} } });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::PlacementInSpec {
-            path: "graph.placement".to_owned()
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::PlacementInSpec { path: "graph.placement".to_owned() }));
     let doc = serde_json::json!({
         "version": 1,
         "resources": { "radio": { "kind": "test.device", "memory_domain": 0 } }
     });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::PlacementInSpec {
-            path: "resources.radio.memory_domain".to_owned()
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::PlacementInSpec { path: "resources.radio.memory_domain".to_owned() }));
     // `placements` and `executor` are two of SB-13's five names, and the scan runs over
     // the raw document **before** the shapes: a Spec that names an Executor inside a
     // scheduled Action's object is refused here, not after the types have had a chance
@@ -561,23 +372,13 @@ fn sb_13_placement_in_spec_refused() {
         "schedule": [{ "at": { "clock": "radio", "offset_ticks": 0 },
                        "action": { "kind": "stop", "executor": "fpga" } }]
     });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::PlacementInSpec {
-            path: "schedule[0].action.executor".to_owned()
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::PlacementInSpec { path: "schedule[0].action.executor".to_owned() }));
     let doc = serde_json::json!({
         "version": 1,
         "schedule": [{ "at": { "clock": "radio", "offset_ticks": 0 },
                        "action": { "kind": "stop", "placements": { "islands": [] } } }]
     });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::PlacementInSpec {
-            path: "schedule[0].action.placements".to_owned()
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::PlacementInSpec { path: "schedule[0].action.placements".to_owned() }));
 }
 
 #[test]
@@ -586,297 +387,96 @@ fn sb_13_environment_in_spec_refused() {
         "version": 1,
         "resources": { "radio": { "kind": "test.device", "environment": {} } }
     });
-    assert_eq!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::EnvironmentInSpec {
-            path: "resources.radio.environment".to_owned()
-        })
-    );
+    assert_eq!(ExperimentSpec::from_json(&doc), Err(SpecError::EnvironmentInSpec { path: "resources.radio.environment".to_owned() }));
 }
 
 #[test]
 fn sb_02_unknown_key_prefix_refused() {
-    let mut spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "radio.rx.s0.sample_rate_hz",
-                    Constraint::Eq {
-                        value: Scalar::from(2),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let mut spec = spec_with([(id("radio"), resource("test.device", &[("radio.rx.s0.sample_rate_hz", Constraint::Eq { value: Scalar::from(2) })]))].into_iter().collect());
     spec.requirements.vocabularies.clear();
-    spec.requirements
-        .vocabularies
-        .push(ezsdr_kernel::spec::VocabularyReq {
-            id: ns("test"),
-            major: 1,
-        });
-    assert!(matches!(
-        spec.check_key_prefixes(),
-        Err(SpecError::UnknownKeyPrefix { .. })
-    ));
+    spec.requirements.vocabularies.push(ezsdr_kernel::spec::VocabularyReq { id: ns("test"), major: 1 });
+    assert!(matches!(spec.check_key_prefixes(), Err(SpecError::UnknownKeyPrefix { .. })));
 }
 
 // ---------------------------------------------------------------- matching
 
 #[test]
 fn sb_06_constraint_match_table() {
-    let one = CapabilityValue::One {
-        value: Scalar::from(4),
-    };
-    let range = CapabilityValue::Range {
-        min: Scalar::from(2),
-        max: Scalar::from(8),
-    };
-    let any = CapabilityValue::AnyOf {
-        values: vec![Scalar::from(1), Scalar::from(4), Scalar::from(9)],
-    };
+    let one = CapabilityValue::One { value: Scalar::from(4) };
+    let range = CapabilityValue::Range { min: Scalar::from(2), max: Scalar::from(8) };
+    let any = CapabilityValue::AnyOf { values: vec![Scalar::from(1), Scalar::from(4), Scalar::from(9)] };
 
-    let eq4 = Constraint::Eq {
-        value: Scalar::from(4),
-    };
+    let eq4 = Constraint::Eq { value: Scalar::from(4) };
     assert_eq!(satisfies(&eq4, &one), Ok(true));
     assert_eq!(satisfies(&eq4, &range), Ok(true));
     assert_eq!(satisfies(&eq4, &any), Ok(true));
-    assert_eq!(
-        satisfies(
-            &Constraint::Eq {
-                value: Scalar::from(5)
-            },
-            &one
-        ),
-        Ok(false)
-    );
-    assert_eq!(
-        satisfies(
-            &Constraint::Eq {
-                value: Scalar::from(5)
-            },
-            &any
-        ),
-        Ok(false)
-    );
+    assert_eq!(satisfies(&Constraint::Eq { value: Scalar::from(5) }, &one), Ok(false));
+    assert_eq!(satisfies(&Constraint::Eq { value: Scalar::from(5) }, &any), Ok(false));
 
-    let r = Constraint::Range {
-        min: Some(Scalar::from(3)),
-        max: Some(Scalar::from(5)),
-    };
+    let r = Constraint::Range { min: Some(Scalar::from(3)), max: Some(Scalar::from(5)) };
     assert_eq!(satisfies(&r, &one), Ok(true));
     assert_eq!(satisfies(&r, &range), Ok(true), "overlapping ranges");
     assert_eq!(satisfies(&r, &any), Ok(true));
-    let disjoint = Constraint::Range {
-        min: Some(Scalar::from(20)),
-        max: Some(Scalar::from(30)),
-    };
+    let disjoint = Constraint::Range { min: Some(Scalar::from(20)), max: Some(Scalar::from(30)) };
     assert_eq!(satisfies(&disjoint, &range), Ok(false));
 
-    let set = Constraint::Set {
-        values: vec![Scalar::from(4), Scalar::from(100)],
-    };
+    let set = Constraint::Set { values: vec![Scalar::from(4), Scalar::from(100)] };
     assert_eq!(satisfies(&set, &one), Ok(true));
     assert_eq!(satisfies(&set, &range), Ok(true));
     assert_eq!(satisfies(&set, &any), Ok(true));
-    assert_eq!(
-        satisfies(
-            &Constraint::Set {
-                values: vec![Scalar::from(100)]
-            },
-            &one
-        ),
-        Ok(false)
-    );
+    assert_eq!(satisfies(&Constraint::Set { values: vec![Scalar::from(100)] }, &one), Ok(false));
 
-    assert_eq!(
-        satisfies(
-            &Constraint::Min {
-                value: Scalar::from(4)
-            },
-            &one
-        ),
-        Ok(true)
-    );
-    assert_eq!(
-        satisfies(
-            &Constraint::Min {
-                value: Scalar::from(9)
-            },
-            &range
-        ),
-        Ok(false)
-    );
-    assert_eq!(
-        satisfies(
-            &Constraint::Min {
-                value: Scalar::from(8)
-            },
-            &any
-        ),
-        Ok(true)
-    );
-    assert_eq!(
-        satisfies(
-            &Constraint::Max {
-                value: Scalar::from(4)
-            },
-            &one
-        ),
-        Ok(true)
-    );
-    assert_eq!(
-        satisfies(
-            &Constraint::Max {
-                value: Scalar::from(1)
-            },
-            &range
-        ),
-        Ok(false)
-    );
-    assert_eq!(
-        satisfies(
-            &Constraint::Max {
-                value: Scalar::from(1)
-            },
-            &any
-        ),
-        Ok(true)
-    );
+    assert_eq!(satisfies(&Constraint::Min { value: Scalar::from(4) }, &one), Ok(true));
+    assert_eq!(satisfies(&Constraint::Min { value: Scalar::from(9) }, &range), Ok(false));
+    assert_eq!(satisfies(&Constraint::Min { value: Scalar::from(8) }, &any), Ok(true));
+    assert_eq!(satisfies(&Constraint::Max { value: Scalar::from(4) }, &one), Ok(true));
+    assert_eq!(satisfies(&Constraint::Max { value: Scalar::from(1) }, &range), Ok(false));
+    assert_eq!(satisfies(&Constraint::Max { value: Scalar::from(1) }, &any), Ok(true));
 
     assert_eq!(satisfies(&Constraint::Present {}, &one), Ok(true));
 }
 
 #[test]
 fn sb_06_key_shape_mismatch() {
-    let decl = KeyDecl {
-        key: key("test.flag"),
-        indexed: None,
-        kind: ValueKind::Bool,
-        coercible: false,
-        coercion_default: CoercionPolicy::Warn,
-        update_class: None,
-    };
-    assert!(matches!(
-        ezsdr_kernel::binding::check_constraint_kind(
-            &decl,
-            &key("test.flag"),
-            &Constraint::Eq {
-                value: Scalar::Int(1)
-            }
-        ),
-        Err(SpecError::KeyShape { .. })
-    ));
-    assert!(
-        ezsdr_kernel::binding::check_constraint_kind(
-            &decl,
-            &key("test.flag"),
-            &Constraint::Eq {
-                value: Scalar::from(true)
-            }
-        )
-        .is_ok()
-    );
+    let decl = KeyDecl { key: key("test.flag"), indexed: None, kind: ValueKind::Bool, coercible: false, coercion_default: CoercionPolicy::Warn, update_class: None };
+    assert!(matches!(ezsdr_kernel::binding::check_constraint_kind(&decl, &key("test.flag"), &Constraint::Eq { value: Scalar::Int(1) }), Err(SpecError::KeyShape { .. })));
+    assert!(ezsdr_kernel::binding::check_constraint_kind(&decl, &key("test.flag"), &Constraint::Eq { value: Scalar::from(true) }).is_ok());
 }
 
 #[test]
 fn sb_07_coercible_key_consults_provider() {
-    let spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "test.grid",
-                    Constraint::Eq {
-                        value: Scalar::try_from(19.5).unwrap(),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("radio"), resource("test.device", &[("test.grid", Constraint::Eq { value: Scalar::try_from(19.5).unwrap() })]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let providers = one_provider("radio", &p);
-    let result =
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
-    assert_eq!(
-        p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "coerce is called once"
-    );
+    let result = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
+    assert_eq!(p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed), 1, "coerce is called once");
     assert_eq!(result.coercions_preview.len(), 1);
-    assert_eq!(
-        result.coercions_preview[0].coercion.applied,
-        Value::num(20.0).unwrap()
-    );
+    assert_eq!(result.coercions_preview[0].coercion.applied, Value::num(20.0).unwrap());
 }
 
 #[test]
 fn sb_07_non_coercible_key_fails_directly() {
-    let spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "test.count",
-                    Constraint::Eq {
-                        value: Scalar::from(9),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("radio"), resource("test.device", &[("test.count", Constraint::Eq { value: Scalar::from(9) })]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let providers = one_provider("radio", &p);
-    let result =
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
+    let result = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
     assert!(!result.is_admitted());
-    assert_eq!(
-        p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "coerce is not called"
-    );
+    assert_eq!(p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed), 0, "coerce is not called");
     assert_eq!(result.rejected.len(), 1);
     assert_eq!(result.rejected[0].key, key("test.count"));
 }
 
 #[test]
 fn sb_45_coercion_policy_chain() {
-    let decl = KeyDecl {
-        key: key("test.grid"),
-        indexed: None,
-        kind: ValueKind::Num,
-        coercible: true,
-        coercion_default: CoercionPolicy::Reject,
-        update_class: None,
-    };
+    let decl = KeyDecl { key: key("test.grid"), indexed: None, kind: ValueKind::Num, coercible: true, coercion_default: CoercionPolicy::Reject, update_class: None };
     // A Session warns, whatever the Vocabulary's default says.
-    assert_eq!(
-        coercion_policy(None, true, Some(&decl)),
-        CoercionPolicy::Warn
-    );
+    assert_eq!(coercion_policy(None, true, Some(&decl)), CoercionPolicy::Warn);
     // A Spec Run takes the Vocabulary's default.
-    assert_eq!(
-        coercion_policy(None, false, Some(&decl)),
-        CoercionPolicy::Reject
-    );
+    assert_eq!(coercion_policy(None, false, Some(&decl)), CoercionPolicy::Reject);
     // A Spec override wins over both.
-    assert_eq!(
-        coercion_policy(Some(CoercionPolicy::Accept), false, Some(&decl)),
-        CoercionPolicy::Accept
-    );
+    assert_eq!(coercion_policy(Some(CoercionPolicy::Accept), false, Some(&decl)), CoercionPolicy::Accept);
     // With no declaration at all, `warn`.
     assert_eq!(coercion_policy(None, false, None), CoercionPolicy::Warn);
 }
@@ -892,10 +492,7 @@ fn x7_non_local_ids_are_refused() {
         "placements": { "islands": [{ "id": { "node": 7, "local": 0 }, "executor": "exec", "components": [] }] }
     });
     let refused = BindingProfile::from_json(&doc);
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("X7: v4.0 accepts only node 0")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("X7: v4.0 accepts only node 0")), "{refused:?}");
     // A Rust caller cannot build one: `NodeId`'s field is private, so `LOCAL` and this
     // deserialiser are its only values, and `validate` needs no X7 check of its own.
 }
@@ -906,43 +503,17 @@ fn sb_35_no_single_instance() {
     // Each is a resource of its own (a binding that plays no role is refused, D89),
     // and neither instance alone satisfies its request: the matcher never adds the
     // two together (SB-35).
-    let needs_four = || {
-        resource(
-            "test.device",
-            &[(
-                "test.count",
-                Constraint::Min {
-                    value: Scalar::from(4),
-                },
-            )],
-        )
-    };
-    let spec = spec_with(
-        [(id("radio"), needs_four()), (id("radio2"), needs_four())]
-            .into_iter()
-            .collect(),
-    );
+    let needs_four = || resource("test.device", &[("test.count", Constraint::Min { value: Scalar::from(4) })]);
+    let spec = spec_with([(id("radio"), needs_four()), (id("radio2"), needs_four())].into_iter().collect());
     let fx = Fixture::new();
     let a = TestProvider::new("radio", 2);
     let b = TestProvider::new("radio2", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &a as &dyn Provider),
-        (id("radio2"), &b as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &a as &dyn Provider), (id("radio2"), &b as &dyn Provider)].into_iter().collect();
     // Two devices, so the two bindings carry two descriptions (SB-3).
     let mut profile = distinct_instances(profile_binding(&["radio"]), &["radio"]);
     profile.bindings.insert(
         id("radio2"),
-        ezsdr_kernel::binding::Binding {
-            module: mref("ezsdr.test.provider"),
-            feed: None,
-            selector: [(id("instance"), Value::from("radio2".to_owned()))]
-                .into_iter()
-                .collect(),
-            profile: None,
-        },
+        ezsdr_kernel::binding::Binding { module: mref("ezsdr.test.provider"), feed: None, selector: [(id("instance"), Value::from("radio2".to_owned()))].into_iter().collect(), profile: None },
     );
     let result = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(matches!(
@@ -954,54 +525,21 @@ fn sb_35_no_single_instance() {
 
 #[test]
 fn sb_34_sub_resource_binding() {
-    let spec = spec_with(
-        [(
-            id("line"),
-            resource(
-                "test.line",
-                &[(
-                    "test.count",
-                    Constraint::Eq {
-                        value: Scalar::from(2),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("line"), resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("line", &p);
-    let result =
-        validate(&spec, &profile_binding(&["line"]), &fx.inputs(&providers)).expect("validates");
-    assert_eq!(
-        result.matched[&id("line")],
-        rid("radio/0"),
-        "bound to the sub-resource's path"
-    );
+    let result = validate(&spec, &profile_binding(&["line"]), &fx.inputs(&providers)).expect("validates");
+    assert_eq!(result.matched[&id("line")], rid("radio/0"), "bound to the sub-resource's path");
 }
 
 #[test]
 fn sb_34_two_resources_one_instance() {
-    let spec = spec_with(
-        [
-            (id("a"), resource("test.device", &[])),
-            (id("b"), resource("test.line", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), resource("test.device", &[])), (id("b"), resource("test.line", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p as &dyn Provider),
-        (id("b"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let result =
-        validate(&spec, &profile_binding(&["a", "b"]), &fx.inputs(&providers)).expect("validates");
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p as &dyn Provider), (id("b"), &p as &dyn Provider)].into_iter().collect();
+    let result = validate(&spec, &profile_binding(&["a", "b"]), &fx.inputs(&providers)).expect("validates");
     assert_eq!(result.matched[&id("a")], rid("radio"));
     assert_eq!(result.matched[&id("b")], rid("radio/0"));
 }
@@ -1009,17 +547,7 @@ fn sb_34_two_resources_one_instance() {
 #[test]
 fn sb_36_two_needs_of_the_same_name_do_not_collapse() {
     // SB-36's own example names a need `gpio`, which two peripherals would share.
-    let need = |kind: &str| SubResourceReq {
-        kind: ns(kind),
-        requires: [(
-            key("test.count"),
-            Constraint::Eq {
-                value: Scalar::from(2),
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
+    let need = |kind: &str| SubResourceReq { kind: ns(kind), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(2) })].into_iter().collect() };
     let mut a = resource("test.device", &[]);
     a.needs.insert(id("clk"), need("test.line"));
     let mut b = resource("test.device", &[]);
@@ -1032,12 +560,7 @@ fn sb_36_two_needs_of_the_same_name_do_not_collapse() {
     // not collapse — is unaffected (finding D27).
     let p1 = TestProvider::new("radio", 2);
     let p2 = TestProvider::new("radio2", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p1 as &dyn Provider),
-        (id("b"), &p2 as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p1 as &dyn Provider), (id("b"), &p2 as &dyn Provider)].into_iter().collect();
     let two = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
     let result = validate(&spec, &two, &fx.inputs(&providers)).expect("validates");
     assert_eq!(result.matched.len(), 2, "resources only");
@@ -1051,31 +574,15 @@ fn sb_39_the_guard_covers_every_matched_entry() {
     // both (SB-38): each need's entry is present and names a node of an instance this
     // Spec binds, no `matched` key is not a resource and no `needs` entry not a need (D107).
     let mut req = resource("test.device", &[]);
-    req.needs.insert(
-        id("line"),
-        SubResourceReq {
-            kind: ns("test.line"),
-            requires: BTreeMap::new(),
-        },
-    );
+    req.needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: BTreeMap::new() });
     let spec = spec_with([(id("peripheral"), req)].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("peripheral", &p);
     let profile = profile_binding(&["peripheral"]);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-    plan(
-        &spec,
-        &profile,
-        &admission,
-        &fx.inputs(&providers),
-    )
-    .expect("this Run's");
-    let report = || PrepareReport {
-        effective: BTreeMap::new(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
+    plan(&spec, &profile, &admission, &fx.inputs(&providers)).expect("this Run's");
+    let report = || PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
     let tampered = |edit: &dyn Fn(&mut ezsdr_kernel::binding::AdmissionResult)| {
         let mut a = admission.clone();
         edit(&mut a);
@@ -1114,27 +621,10 @@ fn sb_39_the_guard_covers_every_matched_entry() {
             "spare is not a resource of this Spec",
         ),
     ] {
-        let reason = refusal(plan(
-            &spec,
-            &profile,
-            &stale,
-            &fx.inputs(&providers),
-        ));
-        assert!(
-            reason.contains("SB-39") && reason.contains(want),
-            "{reason}"
-        );
-        let err = collect_prepare(
-            vec![(id("peripheral"), Ok(report()))],
-            &spec,
-            &profile,
-            &fx.inputs(&providers),
-            &stale,
-        )
-        .expect_err("refused");
-        let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-            panic!("violations")
-        };
+        let reason = refusal(plan(&spec, &profile, &stale, &fx.inputs(&providers)));
+        assert!(reason.contains("SB-39") && reason.contains(want), "{reason}");
+        let err = collect_prepare(vec![(id("peripheral"), Ok(report()))], &spec, &profile, &fx.inputs(&providers), &stale).expect_err("refused");
+        let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
         assert!(v.iter().any(|x| x.reason.contains(want)), "{v:?}");
     }
 }
@@ -1150,31 +640,13 @@ fn sb_41_a_resource_with_no_report_is_refused() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("admitted");
-    let report = || PrepareReport {
-        effective: BTreeMap::new(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let report = || PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
     for reports in [vec![], vec![(id("other"), Ok(report()))]] {
-        let err = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
-            .expect_err("refused");
-        let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-            panic!("violations")
-        };
-        assert!(
-            v.iter()
-                .any(|x| x.reason == "SB-41: no PrepareReport for fragment radio"),
-            "{v:?}"
-        );
+        let err = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission).expect_err("refused");
+        let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+        assert!(v.iter().any(|x| x.reason == "SB-41: no PrepareReport for fragment radio"), "{v:?}");
     }
-    collect_prepare(
-        vec![(id("radio"), Ok(report()))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect("one report, listed");
+    collect_prepare(vec![(id("radio"), Ok(report()))], &spec, &profile, &fx.inputs(&providers), &admission).expect("one report, listed");
 }
 
 #[test]
@@ -1189,45 +661,22 @@ fn sb_41_sink_reports_are_required() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).unwrap();
-    let report = |name: &str| (id(name), Ok(PrepareReport {
-        effective: BTreeMap::new(),
-        coercions: Vec::new(), warnings: Vec::new(),
-    }));
-    let err = collect_prepare(vec![report("radio")], &spec, &profile, &fx.inputs(&providers), &admission)
-        .expect_err("one report per lifecycle fragment");
+    let report = |name: &str| (id(name), Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() }));
+    let err = collect_prepare(vec![report("radio")], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("one report per lifecycle fragment");
     assert!(matches!(err, ezsdr_kernel::plan::PrepareError::Violations(v)
         if v.iter().any(|x| x.reason == "SB-41: no PrepareReport for fragment rec")));
-    collect_prepare(vec![report("radio"), report("rec")], &spec, &profile,
-        &fx.inputs(&providers), &admission).expect("complete reports are accepted");
+    collect_prepare(vec![report("radio"), report("rec")], &spec, &profile, &fx.inputs(&providers), &admission).expect("complete reports are accepted");
 }
 
 #[test]
 fn sb_36_needs_resolves_across_instances() {
     let mut req = resource("test.device", &[]);
-    req.needs.insert(
-        id("line"),
-        SubResourceReq {
-            kind: ns("test.line"),
-            requires: [(
-                key("test.count"),
-                Constraint::Eq {
-                    value: Scalar::from(2),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        },
-    );
+    req.needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(2) })].into_iter().collect() });
     let spec = spec_with([(id("peripheral"), req)].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("peripheral", &p);
-    let result = validate(
-        &spec,
-        &profile_binding(&["peripheral"]),
-        &fx.inputs(&providers),
-    )
-    .expect("validates");
+    let result = validate(&spec, &profile_binding(&["peripheral"]), &fx.inputs(&providers)).expect("validates");
     // SB-36 records the resolution in `needs`, under its resource; `matched` holds
     // resources only.
     assert_eq!(result.needs[&id("peripheral")][&id("line")], rid("radio/0"));
@@ -1235,67 +684,19 @@ fn sb_36_needs_resolves_across_instances() {
 
     // An unresolvable `needs` fails validate.
     let mut req = resource("test.device", &[]);
-    req.needs.insert(
-        id("line"),
-        SubResourceReq {
-            kind: ns("test.line"),
-            requires: [(
-                key("test.count"),
-                Constraint::Eq {
-                    value: Scalar::from(99),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        },
-    );
+    req.needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(99) })].into_iter().collect() });
     let spec = spec_with([(id("peripheral"), req)].into_iter().collect());
-    assert!(matches!(
-        validate(
-            &spec,
-            &profile_binding(&["peripheral"]),
-            &fx.inputs(&providers)
-        ),
-        Err(SpecError::NoSingleInstance { .. })
-    ));
+    assert!(matches!(validate(&spec, &profile_binding(&["peripheral"]), &fx.inputs(&providers)), Err(SpecError::NoSingleInstance { .. })));
 
     // Across instances: `peripheral`'s own lines have `test.count` 0, so its need for
     // a count-5 line resolves onto the instance bound to the other resource, `radio`.
     let mut req = resource("test.device", &[]);
-    req.needs.insert(
-        id("line"),
-        SubResourceReq {
-            kind: ns("test.line"),
-            requires: [(
-                key("test.count"),
-                Constraint::Eq {
-                    value: Scalar::from(5),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        },
-    );
-    let across = spec_with(
-        [
-            (id("peripheral"), req),
-            (id("radio"), resource("test.device", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    req.needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(5) })].into_iter().collect() });
+    let across = spec_with([(id("peripheral"), req), (id("radio"), resource("test.device", &[]))].into_iter().collect());
     let bare = TestProvider::new("gpio", 0);
     let radio = TestProvider::new("radio", 5);
-    let both: BTreeMap<Ident, &dyn Provider> = [
-        (id("peripheral"), &bare as &dyn Provider),
-        (id("radio"), &radio as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let profile = distinct_instances(
-        profile_binding(&["peripheral", "radio"]),
-        &["peripheral", "radio"],
-    );
+    let both: BTreeMap<Ident, &dyn Provider> = [(id("peripheral"), &bare as &dyn Provider), (id("radio"), &radio as &dyn Provider)].into_iter().collect();
+    let profile = distinct_instances(profile_binding(&["peripheral", "radio"]), &["peripheral", "radio"]);
     let result = validate(&across, &profile, &fx.inputs(&both)).expect("validates");
     assert_eq!(result.needs[&id("peripheral")][&id("line")].path(), "radio/0");
     // But not onto an instance that was handed in under a name no resource binds: it
@@ -1305,10 +706,7 @@ fn sb_36_needs_resolves_across_instances() {
     let mut lone_profile = profile.clone();
     lone_profile.bindings.remove(&id("radio"));
     let refused = validate(&lone, &lone_profile, &fx.inputs(&both));
-    assert!(
-        matches!(&refused, Err(SpecError::NoSingleInstance { .. })),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::NoSingleInstance { .. })), "{refused:?}");
 }
 
 #[test]
@@ -1316,17 +714,7 @@ fn sb_34_a_need_whose_satisfying_nodes_are_bound_is_refused_with_node_already_bo
     // Only `radio`'s two lines have `test.count` 5, and each need takes one of them;
     // the third need finds both taken by exclusive bindings: refused as a resource
     // is, naming the first binder of the first such node.
-    let need = |count: i64| SubResourceReq {
-        kind: ns("test.line"),
-        requires: [(
-            key("test.count"),
-            Constraint::Eq {
-                value: Scalar::from(count),
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
+    let need = |count: i64| SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(count) })].into_iter().collect() };
     let device = |n: &str, count: i64| {
         let mut r = resource("test.device", &[]);
         r.needs.insert(id(n), need(count));
@@ -1336,51 +724,19 @@ fn sb_34_a_need_whose_satisfying_nodes_are_bound_is_refused_with_node_already_bo
     let gpio_x = TestProvider::new("gpio_x", 0);
     let gpio_y = TestProvider::new("gpio_y", 0);
     let radio = TestProvider::new("radio", 5);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &gpio_x as &dyn Provider),
-        (id("cap"), &gpio_y as &dyn Provider),
-        (id("peripheral"), &radio as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &gpio_x as &dyn Provider), (id("cap"), &gpio_y as &dyn Provider), (id("peripheral"), &radio as &dyn Provider)].into_iter().collect();
     let profile = distinct_instances(profile_binding(&["a", "cap", "peripheral"]), &["a", "cap", "peripheral"]);
-    let spec = spec_with(
-        [
-            (id("a"), device("nx", 5)),
-            (id("cap"), device("ny", 5)),
-            (id("peripheral"), device("nz", 5)),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), device("nx", 5)), (id("cap"), device("ny", 5)), (id("peripheral"), device("nz", 5))].into_iter().collect());
     let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("two lines, three needs");
-    let SpecError::NodeAlreadyBound {
-        node,
-        first,
-        second,
-    } = err
-    else {
-        panic!("expected NodeAlreadyBound, got {err:?}")
-    };
+    let SpecError::NodeAlreadyBound { node, first, second } = err else { panic!("expected NodeAlreadyBound, got {err:?}") };
     assert_eq!(node, rid("radio/0").to_string());
     assert_eq!(first, id("nx"));
     assert_eq!(second, id("nz"));
 
     // A need that no node satisfies is still `NoSingleInstance`.
-    let none = spec_with(
-        [
-            (id("a"), device("nx", 99)),
-            (id("cap"), resource("test.device", &[])),
-            (id("peripheral"), resource("test.device", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let none = spec_with([(id("a"), device("nx", 99)), (id("cap"), resource("test.device", &[])), (id("peripheral"), resource("test.device", &[]))].into_iter().collect());
     let refused = validate(&none, &profile, &fx.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::NoSingleInstance { .. })),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::NoSingleInstance { .. })), "{refused:?}");
 }
 
 /// `n` devices, each with one count-5 need, validated against a radio (the last
@@ -1389,38 +745,15 @@ fn needs_on_shareable_lines(n: usize) -> Result<ezsdr_kernel::binding::Admission
     let names = ["a", "cap", "peripheral"];
     let device = |n: &str| {
         let mut r = resource("test.device", &[]);
-        r.needs.insert(
-            id(n),
-            SubResourceReq {
-                kind: ns("test.line"),
-                requires: [(
-                    key("test.count"),
-                    Constraint::Eq {
-                        value: Scalar::from(5),
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            },
-        );
+        r.needs.insert(id(n), SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(5) })].into_iter().collect() });
         r
     };
     let fx = Fixture::new();
     // The last device is the radio itself; the others are bare Providers.
     let bare: Vec<TestProvider> = names[..n - 1].iter().map(|b| TestProvider::new(b, 0)).collect();
     let radio = TestProvider::new("radio", 5).with_shareable_lines();
-    let providers: BTreeMap<Ident, &dyn Provider> = names[..n - 1]
-        .iter()
-        .zip(&bare)
-        .map(|(b, p)| (id(b), p as &dyn Provider))
-        .chain([(id(names[n - 1]), &radio as &dyn Provider)])
-        .collect();
-    let spec = spec_with(
-        names[..n]
-            .iter()
-            .map(|b| (id(b), device(&format!("n_{b}"))))
-            .collect(),
-    );
+    let providers: BTreeMap<Ident, &dyn Provider> = names[..n - 1].iter().zip(&bare).map(|(b, p)| (id(b), p as &dyn Provider)).chain([(id(names[n - 1]), &radio as &dyn Provider)]).collect();
+    let spec = spec_with(names[..n].iter().map(|b| (id(b), device(&format!("n_{b}")))).collect());
     let profile = distinct_instances(profile_binding(&names[..n]), &names[..n]);
     validate(&spec, &profile, &fx.inputs(&providers))
 }
@@ -1445,41 +778,14 @@ fn sb_34_a_need_takes_a_free_node_before_a_bound_shareable_one() {
 fn sb_37_matching_follows_binding() {
     // Two bound instances with different capabilities; the matcher uses the bound
     // instance's, not the union.
-    let spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "test.count",
-                    Constraint::Eq {
-                        value: Scalar::from(8),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("radio"), resource("test.device", &[("test.count", Constraint::Eq { value: Scalar::from(8) })]))].into_iter().collect());
     let fx = Fixture::new();
     let small = TestProvider::new("small", 2);
     let big = TestProvider::new("big", 8);
     let bound_small = one_provider("radio", &small);
     let bound_big = one_provider("radio", &big);
-    assert!(
-        !validate(
-            &spec,
-            &profile_binding(&["radio"]),
-            &fx.inputs(&bound_small)
-        )
-        .expect("validates")
-        .is_admitted()
-    );
-    assert!(
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&bound_big))
-            .expect("validates")
-            .is_admitted()
-    );
+    assert!(!validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&bound_small)).expect("validates").is_admitted());
+    assert!(validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&bound_big)).expect("validates").is_admitted());
 }
 
 // ---------------------------------------------------------------- admission checks
@@ -1491,28 +797,16 @@ fn sb_30_admission_check_runs_at_three_points() {
     // `AdmissionCheckRegistry::run` three times with three stage arguments proves only
     // that the registry dispatches on its own argument — the three call sites could
     // all be missing and it would still pass (D39).
-    let ceiling = |max: f64| -> BTreeMap<Namespace, serde_json::Value> {
-        [(ns("test.limits"), serde_json::json!({ "max_grid": max }))]
-            .into_iter()
-            .collect()
-    };
+    let ceiling = |max: f64| -> BTreeMap<Namespace, serde_json::Value> { [(ns("test.limits"), serde_json::json!({ "max_grid": max }))].into_iter().collect() };
     let asking = |v: f64| {
         let mut r = resource("test.device", &[]);
-        r.requires.insert(
-            key("test.grid"),
-            Constraint::Eq {
-                value: Scalar::try_from(v).unwrap(),
-            },
-        );
+        r.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(v).unwrap() });
         let mut spec = spec_with([(id("radio"), r)].into_iter().collect());
-        spec.policies
-            .coercion
-            .insert(key("test.grid"), CoercionPolicy::Accept);
+        spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
         spec
     };
     let mut fx = Fixture::new();
-    fx.checks
-        .register(std::sync::Arc::new(TestLimitsCheck::new()));
+    fx.checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let providers = one_provider("radio", &p);
 
@@ -1530,10 +824,7 @@ fn sb_30_admission_check_runs_at_three_points() {
     tight.environment = ceiling(19.9);
     let spec = asking(19.5);
     let admission = validate(&spec, &tight, &fx.inputs(&providers)).expect("runs");
-    assert!(
-        admission.is_admitted(),
-        "the requested value is inside the ceiling"
-    );
+    assert!(admission.is_admitted(), "the requested value is inside the ceiling");
     let report = PrepareReport {
         effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
@@ -1544,17 +835,8 @@ fn sb_30_admission_check_runs_at_three_points() {
         }],
         warnings: Vec::new(),
     };
-    let err = collect_prepare(
-        vec![(id("radio"), Ok(report))],
-        &spec,
-        &tight,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("prepare ran the check against the applied configuration");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-        panic!("violations")
-    };
+    let err = collect_prepare(vec![(id("radio"), Ok(report))], &spec, &tight, &fx.inputs(&providers), &admission).expect_err("prepare ran the check against the applied configuration");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
     assert!(v.iter().any(|x| x.check == ns("test.limits")), "{v:?}");
 
     // 3. A Session Action, through the one admission path (RS-16, RS-17). The
@@ -1563,23 +845,9 @@ fn sb_30_admission_check_runs_at_three_points() {
     //    set and the coercion policy alone.
     let env = ceiling(20.0);
     let spec_coercion = BTreeMap::new();
-    let admitter = ezsdr_kernel::session::Admitter {
-        checks: &fx.checks,
-        environment: &env,
-        spec_coercion: &spec_coercion,
-        registry: &fx.registry,
-        is_session: true,
-    };
-    let proposed: BTreeMap<Key, Value> =
-        [(key("test.grid"), Value::num(30.0).unwrap())].into_iter().collect();
-    let violations = admitter
-        .admit(
-            &BTreeMap::new(),
-            &[(id("radio"), proposed.clone())].into_iter().collect(),
-            &[],
-            CheckStage::Runtime,
-        )
-        .expect_err("the runtime point ran the check");
+    let admitter = ezsdr_kernel::session::Admitter { checks: &fx.checks, environment: &env, spec_coercion: &spec_coercion, registry: &fx.registry, is_session: true };
+    let proposed: BTreeMap<Key, Value> = [(key("test.grid"), Value::num(30.0).unwrap())].into_iter().collect();
+    let violations = admitter.admit(&BTreeMap::new(), &[(id("radio"), proposed.clone())].into_iter().collect(), &[], CheckStage::Runtime).expect_err("the runtime point ran the check");
     assert_eq!(violations[0].check, ns("test.limits"));
     assert_eq!(violations[0].requested, Some(Value::num(30.0).unwrap()));
 }
@@ -1587,46 +855,17 @@ fn sb_30_admission_check_runs_at_three_points() {
 #[test]
 fn sb_31_unregistered_section_is_informational() {
     let checks = AdmissionCheckRegistry::new();
-    let environment: BTreeMap<Namespace, serde_json::Value> = [(
-        ns("vendor.thing"),
-        serde_json::json!({ "anything": [1, 2, 3] }),
-    )]
-    .into_iter()
-    .collect();
-    assert!(
-        checks
-            .run(
-                &environment,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                CheckStage::Validate
-            )
-            .is_empty()
-    );
+    let environment: BTreeMap<Namespace, serde_json::Value> = [(ns("vendor.thing"), serde_json::json!({ "anything": [1, 2, 3] }))].into_iter().collect();
+    assert!(checks.run(&environment, &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate).is_empty());
     // And it is still recorded verbatim (SB-27) — in `environment`, which is what
     // the Manifest carries. `section()` is the **Kernel's** reader and serves only
     // SB-26's four names, so that a Kernel read of a Vocabulary's section is not
     // expressible (OV-21).
-    let profile = BindingProfile {
-        version: 1,
-        bindings: BTreeMap::new(),
-        authority: id("radio"),
-        placements: Placements::default(),
-        environment: environment.clone(),
-    };
-    assert_eq!(
-        profile.environment.get(&ns("vendor.thing")),
-        environment.get(&ns("vendor.thing"))
-    );
-    assert!(
-        profile.section("vendor.thing").is_none(),
-        "not a section the Kernel reads"
-    );
+    let profile = BindingProfile { version: 1, bindings: BTreeMap::new(), authority: id("radio"), placements: Placements::default(), environment: environment.clone() };
+    assert_eq!(profile.environment.get(&ns("vendor.thing")), environment.get(&ns("vendor.thing")));
+    assert!(profile.section("vendor.thing").is_none(), "not a section the Kernel reads");
     for name in ezsdr_kernel::binding::KERNEL_SECTIONS {
-        assert!(
-            profile.section(name).is_none(),
-            "{name} is readable but absent here"
-        );
+        assert!(profile.section(name).is_none(), "{name} is readable but absent here");
     }
 }
 
@@ -1636,53 +875,31 @@ fn sb_31_unregistered_section_is_informational() {
 fn sb_39_arm_order_follows_edges() {
     let nodes = vec![id("a"), id("b"), id("c")];
     let edges = vec![(id("a"), id("b")), (id("a"), id("c"))];
-    assert_eq!(
-        arm_order(&nodes, &edges),
-        Ok(vec![id("a"), id("b"), id("c")])
-    );
+    assert_eq!(arm_order(&nodes, &edges), Ok(vec![id("a"), id("b"), id("c")]));
     // Ties by name, whatever the input order.
     let nodes = vec![id("c"), id("b"), id("a")];
-    assert_eq!(
-        arm_order(&nodes, &edges),
-        Ok(vec![id("a"), id("b"), id("c")])
-    );
+    assert_eq!(arm_order(&nodes, &edges), Ok(vec![id("a"), id("b"), id("c")]));
 }
 
 #[test]
 fn sb_39_arm_order_deduplicates_edges_and_keeps_cycle_path_order() {
     let nodes = vec![id("a"), id("b"), id("c")];
     let duplicate_edges = vec![(id("a"), id("b")), (id("a"), id("b"))];
-    assert_eq!(
-        arm_order(&nodes, &duplicate_edges),
-        Ok(vec![id("a"), id("b"), id("c")])
-    );
+    assert_eq!(arm_order(&nodes, &duplicate_edges), Ok(vec![id("a"), id("b"), id("c")]));
 
     // The diagnostic lists unresolved fragments in their original input order.
     let nodes = vec![id("b"), id("a"), id("c")];
     let cycle = vec![(id("a"), id("b")), (id("b"), id("a")), (id("b"), id("a"))];
-    assert_eq!(
-        arm_order(&nodes, &cycle),
-        Err(SpecError::ArmCycle {
-            path: "b -> a".to_owned()
-        })
-    );
+    assert_eq!(arm_order(&nodes, &cycle), Err(SpecError::ArmCycle { path: "b -> a".to_owned() }));
 
-    assert_eq!(
-        arm_order(&[id("a")], &[(id("a"), id("a"))]),
-        Err(SpecError::ArmCycle {
-            path: "a".to_owned()
-        })
-    );
+    assert_eq!(arm_order(&[id("a")], &[(id("a"), id("a"))]), Err(SpecError::ArmCycle { path: "a".to_owned() }));
 }
 
 #[test]
 fn sb_39_arm_cycle_refused() {
     let nodes = vec![id("a"), id("b")];
     let edges = vec![(id("a"), id("b")), (id("b"), id("a"))];
-    assert!(matches!(
-        arm_order(&nodes, &edges),
-        Err(SpecError::ArmCycle { .. })
-    ));
+    assert!(matches!(arm_order(&nodes, &edges), Err(SpecError::ArmCycle { .. })));
 }
 
 #[test]
@@ -1700,39 +917,19 @@ fn sb_39_arm_after_from_the_provider_declaration() {
     // The device that sources PPS is armed first, because the other declares
     // `arm_after` on it.
     #[allow(unused_mut)]
-    let spec = spec_with(
-        [
-            (id("pps"), resource("test.device", &[])),
-            (id("slave"), resource("test.device", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("pps"), resource("test.device", &[])), (id("slave"), resource("test.device", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let pps = TestProvider::new("pps", 2);
     let slave = TestProvider::new("slave", 2).arm_after(rid("pps"));
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("pps"), &pps as &dyn Provider),
-        (id("slave"), &slave as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("pps"), &pps as &dyn Provider), (id("slave"), &slave as &dyn Provider)].into_iter().collect();
     let mut profile = distinct_instances(profile_binding(&["pps", "slave"]), &["pps", "slave"]);
     // SB-24: `authority` names a *binding*. The earlier `radio` here named none,
     // and `plan()` accepted it.
     profile.authority = id("pps");
     let mut fx = fx;
-    fx.authorities.insert(
-        id("pps"),
-        AuthorityDescriptor {
-            module: mref("ezsdr.test.provider"),
-            governs: Vec::new(),
-            pacing: Pacing::FreeRunning,
-        },
-    );
+    fx.authorities.insert(id("pps"), AuthorityDescriptor { module: mref("ezsdr.test.provider"), governs: Vec::new(), pacing: Pacing::FreeRunning });
     let _ = &spec;
-    let plan =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let plan = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     let names: Vec<&str> = plan.fragments.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(names, vec!["pps", "slave"]);
     assert!(plan.deps.contains(&(id("pps"), id("slave"))));
@@ -1740,27 +937,14 @@ fn sb_39_arm_after_from_the_provider_declaration() {
 
 #[test]
 fn sb_39_arm_after_resolves_a_shared_instance_to_its_first_resource_name() {
-    let resources = [
-        (id("a"), resource("test.line", &[])),
-        (id("b"), resource("test.line", &[])),
-        (id("c"), resource("test.device", &[])),
-    ]
-    .into_iter()
-    .collect();
+    let resources = [(id("a"), resource("test.line", &[])), (id("b"), resource("test.line", &[])), (id("c"), resource("test.device", &[]))].into_iter().collect();
     let spec = spec_with(resources);
     let shared = TestProvider::new("radio", 2);
     let c = TestProvider::new("c", 2).arm_after(rid("radio"));
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &shared as &dyn Provider),
-        (id("b"), &shared as &dyn Provider),
-        (id("c"), &c as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &shared as &dyn Provider), (id("b"), &shared as &dyn Provider), (id("c"), &c as &dyn Provider)].into_iter().collect();
     let profile = distinct_instances(profile_binding(&["a", "b", "c"]), &["c"]);
     let fx = Fixture::new();
-    let plan =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let plan = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
 
     assert_eq!(plan.deps, vec![(id("a"), id("c"))]);
 }
@@ -1772,39 +956,20 @@ fn sb_39_a_provider_fragment_carries_the_matched_request() {
     // alone, so no Provider could see a request at all and the MA-12 test had to
     // hand-build one (finding D32).
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.count"),
-        Constraint::Eq {
-            value: Scalar::from(2),
-        },
-    );
+    req.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
 
-    let fragment = built
-        .fragments
-        .iter()
-        .find(|f| f.id == id("radio"))
-        .expect("a fragment");
-    assert!(
-        fragment.content.get("selector").is_some(),
-        "the selector is still there"
-    );
-    let requested: ezsdr_kernel::module_api::Requested =
-        serde_json::from_value(fragment.content["requested"].clone()).expect("a request");
+    let fragment = built.fragments.iter().find(|f| f.id == id("radio")).expect("a fragment");
+    assert!(fragment.content.get("selector").is_some(), "the selector is still there");
+    let requested: ezsdr_kernel::module_api::Requested = serde_json::from_value(fragment.content["requested"].clone()).expect("a request");
     // The node the matcher bound, and the constraints the Spec asked of it.
     assert_eq!(requested.resource, rid("radio"));
-    assert_eq!(
-        requested.constraints.get(&key("test.count")),
-        Some(&Constraint::Eq {
-            value: Scalar::from(2)
-        })
-    );
+    assert_eq!(requested.constraints.get(&key("test.count")), Some(&Constraint::Eq { value: Scalar::from(2) }));
 }
 
 #[test]
@@ -1814,30 +979,17 @@ fn sb_39_a_sink_and_an_island_fragment_carry_their_declarations() {
     // `IslandDecl` — what the capture Sink (HD-9) and the coordinator parse.
     let sink = cf32_sink();
     let mut fx = Fixture::new();
-    fx.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
+    fx.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let content = |plan: &ezsdr_kernel::plan::ExecutionPlan, name: &str| {
-        plan.fragments
-            .iter()
-            .find(|f| f.id == id(name))
-            .expect("a fragment")
-            .content
-            .clone()
-    };
+    let content = |plan: &ezsdr_kernel::plan::ExecutionPlan, name: &str| plan.fragments.iter().find(|f| f.id == id(name)).expect("a fragment").content.clone();
 
     let mut spec = minimal_spec();
     let mut rec = output("rec");
     rec.params.insert(key("test.count"), Value::from(3));
     spec.outputs.push(rec.clone());
     let mut component = support::source_component(support::cf32());
-    component.timing.budget = Some(
-        ezsdr_kernel::time::RelativeBudget::new(ezsdr_kernel::time::Duration::new(
-            ClockDomainId::HOST_MONOTONIC, 1_000_000,
-        )).expect("a positive budget"),
-    );
+    component.timing.budget = Some(ezsdr_kernel::time::RelativeBudget::new(ezsdr_kernel::time::Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000)).expect("a positive budget"));
     spec.graph.components.insert(id("source"), component);
     let mut profile = profile_binding(&["radio"]);
     profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
@@ -1845,43 +997,23 @@ fn sb_39_a_sink_and_an_island_fragment_carry_their_declarations() {
     let placed = IslandDecl {
         components: vec![member("source")],
         affinity: Some(vec![1, 3]),
-        rt_policy: Some(ezsdr_kernel::module_api::RtPolicy {
-            sched: "fifo".to_owned(), priority: 50,
-        }),
+        rt_policy: Some(ezsdr_kernel::module_api::RtPolicy { sched: "fifo".to_owned(), priority: 50 }),
         ..island(3, "exec")
     };
     profile.placements.islands = vec![placed.clone()];
     select_test_links(&spec, &mut profile);
     let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
-    assert_eq!(
-        serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"),
-        rec
-    );
-    assert_eq!(
-        serde_json::from_value::<IslandDecl>(content(&built, "island_3")).expect("an IslandDecl"),
-        placed
-    );
+    assert_eq!(serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"), rec);
+    assert_eq!(serde_json::from_value::<IslandDecl>(content(&built, "island_3")).expect("an IslandDecl"), placed);
 
     // A Session's Sink fragment carries the implicit Spec's output (SB-T2 row 2).
     fx.is_session = true;
     let mut session = profile_binding(&["radio"]);
-    session.bindings.insert(
-        id("rec"),
-        ezsdr_kernel::binding::Binding {
-            feed: Some(radio_feed(4)),
-            ..bind("ezsdr.test.sink")
-        },
-    );
-    let implicit =
-        ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &fx.sinks)
-            .expect("derives");
+    session.bindings.insert(id("rec"), ezsdr_kernel::binding::Binding { feed: Some(radio_feed(4)), ..bind("ezsdr.test.sink") });
+    let implicit = ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &fx.sinks).expect("derives");
     select_test_links(&implicit, &mut session);
-    let built = validate_then_plan(&implicit, &session, &fx.inputs(&providers))
-        .expect("the Session plans");
-    assert_eq!(
-        serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"),
-        output("rec")
-    );
+    let built = validate_then_plan(&implicit, &session, &fx.inputs(&providers)).expect("the Session plans");
+    assert_eq!(serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"), output("rec"));
 }
 
 #[test]
@@ -1907,47 +1039,19 @@ fn sb_41_prepare_reports_one_per_fragment() {
     // back under its own fragment, and the three values of the one key all three name
     // are all kept: no merged map exists to lose two of them.
     let names = ["a", "b", "c"];
-    let spec = spec_with(
-        names
-            .iter()
-            .map(|n| (id(n), resource("test.device", &[])))
-            .collect(),
-    );
+    let spec = spec_with(names.iter().map(|n| (id(n), resource("test.device", &[]))).collect());
     let profile = distinct_instances(profile_binding(&names), &names);
-    let devices: Vec<TestProvider> = names
-        .iter()
-        .zip(1..)
-        .map(|(n, count)| TestProvider::new(n, count))
-        .collect();
-    let providers: BTreeMap<Ident, &dyn Provider> = names
-        .iter()
-        .zip(&devices)
-        .map(|(n, p)| (id(n), p as &dyn Provider))
-        .collect();
-    let report = |count: i64| PrepareReport {
-        effective: [(key("test.count"), Value::from(count))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let devices: Vec<TestProvider> = names.iter().zip(1..).map(|(n, count)| TestProvider::new(n, count)).collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = names.iter().zip(&devices).map(|(n, p)| (id(n), p as &dyn Provider)).collect();
+    let report = |count: i64| PrepareReport { effective: [(key("test.count"), Value::from(count))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
     let handed = vec![(id("c"), report(3)), (id("a"), report(1)), (id("b"), report(2))];
-    let reports = prepared(
-        handed.iter().cloned().map(|(f, r)| (f, Ok(r))).collect(),
-        &Fixture::new(),
-        &spec,
-        &profile,
-        &providers,
-    )
-    .expect("one report per fragment");
+    let reports = prepared(handed.iter().cloned().map(|(f, r)| (f, Ok(r))).collect(), &Fixture::new(), &spec, &profile, &providers).expect("one report per fragment");
     assert_eq!(reports, handed.into_iter().collect::<BTreeMap<_, _>>());
 }
 
 #[test]
 fn sb_42_fragment_failure_fails_the_transaction() {
-    let ok = || PrepareReport {
-        effective: BTreeMap::new(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let ok = || PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
     // The double's injected failure at `prepare`, without a full PrepareContext.
     let provider = TestProvider::new("c", 2).failing_at(FailAt::Prepare);
     assert_eq!(provider.fail_at, FailAt::Prepare);
@@ -1957,14 +1061,7 @@ fn sb_42_fragment_failure_fails_the_transaction() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let spec = minimal_spec();
-    let failed = prepared(
-        reports,
-        &fx,
-        &spec,
-        &profile_binding(&["radio"]),
-        &providers,
-    )
-    .expect_err("the whole transaction fails");
+    let failed = prepared(reports, &fx, &spec, &profile_binding(&["radio"]), &providers).expect_err("the whole transaction fails");
     assert!(
         matches!(
             failed,
@@ -1973,11 +1070,7 @@ fn sb_42_fragment_failure_fails_the_transaction() {
         "the third fragment failed, and the error names it: {failed:?}"
     );
     // Cleanup then releases in reverse dependency order (RS-8).
-    let order = arm_order(
-        &[id("a"), id("b"), id("c")],
-        &[(id("a"), id("b")), (id("b"), id("c"))],
-    )
-    .expect("acyclic");
+    let order = arm_order(&[id("a"), id("b"), id("c")], &[(id("a"), id("b")), (id("b"), id("c"))]).expect("acyclic");
     assert_eq!(release_order(&order), vec![id("c"), id("b"), id("a")]);
 }
 
@@ -2000,19 +1093,10 @@ fn sb_16_spec_time_resolves_at_arm() {
         late_policy: LatePolicy::SendAsapAndFlag,
         metadata: BTreeMap::new(),
     };
-    let entry = ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 1000,
-        },
-        action: template.clone(),
-    };
+    let entry = ScheduleEntry { at: SpecTime { clock: id("radio"), offset_ticks: 1000 }, action: template.clone() };
     // The Spec validates with no time field: a Spec cannot name a ClockDomainId.
     let json = serde_json::to_value(&entry).expect("serialises");
-    assert!(
-        json["action"].get("at").is_none(),
-        "the template carries no time (RS-49a)"
-    );
+    assert!(json["action"].get("at").is_none(), "the template carries no time (RS-49a)");
     assert!(template.is_timed());
 
     // SB-16: the `clock` names **a resource this Spec declares**. Nothing read
@@ -2023,28 +1107,11 @@ fn sb_16_spec_time_resolves_at_arm() {
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    assert!(
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).is_ok(),
-        "`radio` is a declared resource"
-    );
+    assert!(validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).is_ok(), "`radio` is a declared resource");
     let mut dangling = minimal_spec();
-    dangling.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("no_such_resource"),
-            offset_ticks: 1000,
-        },
-        action: template.clone(),
-    });
-    let err = validate(
-        &dangling,
-        &profile_binding(&["radio"]),
-        &fx.inputs(&providers),
-    )
-    .expect_err("the clock names nothing");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")),
-        "{err:?}"
-    );
+    dangling.schedule.push(ScheduleEntry { at: SpecTime { clock: id("no_such_resource"), offset_ticks: 1000 }, action: template.clone() });
+    let err = validate(&dangling, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("the clock names nothing");
+    assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")), "{err:?}");
 
     // SB-16 (item 3): the target names something the Spec declares **in its role**:
     // an undeclared output, an undeclared component, and a resource path outside the
@@ -2058,26 +1125,15 @@ fn sb_16_spec_time_resolves_at_arm() {
         (Target::Resource { resource: id("radio"), path: "a//b".to_owned() }, false),
     ] {
         let mut bad = minimal_spec();
-        bad.graph.components.insert(
-            id("proc"),
-            support::source_component(
-                ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-            ),
-        );
-        bad.schedule.push(ScheduleEntry {
-            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
-            action: ActionTemplate::Stop { target: Some(target.clone()) },
-        });
+        bad.graph.components.insert(id("proc"), support::source_component(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")));
+        bad.schedule.push(ScheduleEntry { at: SpecTime { clock: id("radio"), offset_ticks: 0 }, action: ActionTemplate::Stop { target: Some(target.clone()) } });
         let result = validate(&bad, &profile_binding(&["radio"]), &fx.inputs(&providers));
         if declared {
             result.expect("the graph declares this component");
             continue;
         }
         let err = result.expect_err("the target names nothing in its role");
-        assert!(
-            matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")),
-            "{target}: {err:?}"
-        );
+        assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-16")), "{target}: {err:?}");
     }
 }
 
@@ -2104,29 +1160,17 @@ fn sb_15_link_contract_and_sink_policy() {
     let contracts = ContractRegistry::with_standard_contracts();
     let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
     let sc16 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id");
-    assert!(
-        contracts.check_link(&cf32, &sc16).is_err(),
-        "mismatched contracts (SC-3)"
-    );
+    assert!(contracts.check_link(&cf32, &sc16).is_err(), "mismatched contracts (SC-3)");
 
     let decl = ezsdr_kernel::stream::DataLinkDecl {
         id: DataLinkId::local(0),
-        from: PortRef {
-            component: id("rx"),
-            port: id("out"),
-        },
-        to: PortRef {
-            component: id("recorder"),
-            port: id("in"),
-        },
+        from: PortRef { component: id("rx"), port: id("out") },
+        to: PortRef { component: id("recorder"), port: id("in") },
         contract: cf32,
         policy: BackPressure::Block,
         capacity: 4,
     };
-    assert!(
-        ezsdr_kernel::stream::check_sink_link(&decl, true).is_err(),
-        "Block into a Sink (SC-21)"
-    );
+    assert!(ezsdr_kernel::stream::check_sink_link(&decl, true).is_err(), "Block into a Sink (SC-21)");
 }
 
 #[test]
@@ -2146,20 +1190,11 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
     let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
     let link_into = |consumer: &ezsdr_kernel::contract::DataContractId| {
         let mut spec = minimal_spec();
-        spec.resources
-            .insert(id("line0"), resource("test.line", &[]));
-        spec.graph
-            .components
-            .insert(id("proc"), support::recorder_component(consumer.clone()));
+        spec.resources.insert(id("line0"), resource("test.line", &[]));
+        spec.graph.components.insert(id("proc"), support::recorder_component(consumer.clone()));
         spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
-            from: PortRef {
-                component: id("line0"),
-                port: id("rx"),
-            },
-            to: PortRef {
-                component: id("proc"),
-                port: id("in"),
-            },
+            from: PortRef { component: id("line0"), port: id("rx") },
+            to: PortRef { component: id("proc"), port: id("in") },
             policy: BackPressure::DropOldest,
             capacity: 4,
         });
@@ -2167,40 +1202,21 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
     };
     let mut profile = profile_binding(&["radio", "line0"]);
     bind_exec(&mut profile);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![member("proc")],
-        affinity: None,
-        rt_policy: None,
-    });
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![member("proc")], affinity: None, rt_policy: None });
     select_test_links(&link_into(&sc16), &mut profile);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &p as &dyn Provider),
-        (id("line0"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &p as &dyn Provider), (id("line0"), &p as &dyn Provider)].into_iter().collect();
 
     // A consumer that takes `sc16` matches the **line's** contract, so it plans.
-    let planned = validate_then_plan(
-        &link_into(&sc16),
-        &profile,
-        &fx.inputs(&providers),
-    );
-    assert!(
-        planned.is_ok(),
-        "a resource endpoint is admissible: {planned:?}"
-    );
+    let planned = validate_then_plan(&link_into(&sc16), &profile, &fx.inputs(&providers));
+    assert!(planned.is_ok(), "a resource endpoint is admissible: {planned:?}");
 
     // A consumer that takes `cf32` matches the **root's** contract. It must be
     // refused by SC-3: accepting it would mean the port was resolved on a node the
     // resource is not bound to — a link the Kernel calls compatible and the hardware
     // will not honour.
-    let wrong_contract =
-        validate(&link_into(&cf32), &profile, &fx.inputs(&providers)).expect_err("SC-3 refuses it");
+    let wrong_contract = validate(&link_into(&cf32), &profile, &fx.inputs(&providers)).expect_err("SC-3 refuses it");
     // The message names `sc16` as the producer, which is the proof: the contract came
     // from the bound line, not from the root the resource is not bound to.
     assert!(
@@ -2216,10 +1232,7 @@ fn sb_15_a_bound_resource_port_is_a_link_endpoint() {
     // the `PHY -> Radio Port` direction, and a fixture that names a real port would
     // stop testing SB-15's refusal.
     wrong_port.graph.links[0].from.port = id("no_such_port");
-    assert!(matches!(
-        validate(&wrong_port, &profile, &fx.inputs(&providers)),
-        Err(SpecError::Structural { .. })
-    ));
+    assert!(matches!(validate(&wrong_port, &profile, &fx.inputs(&providers)), Err(SpecError::Structural { .. })));
 }
 
 #[test]
@@ -2231,21 +1244,25 @@ fn ma_10_memory_domains_are_validated_for_every_provider_tree_node() {
     let no_root_domain = TestProvider::new("radio", 2).with_root_memory_domains(Vec::new());
     let providers = one_provider("radio", &no_root_domain);
     let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("root has a port");
-    assert!(matches!(&err, SpecError::Structural { reason }
-        if reason.contains("MA-10") && reason.contains("radio")), "{err:?}");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+        if reason.contains("MA-10") && reason.contains("radio")),
+        "{err:?}"
+    );
 
     // The bound Spec resource is the root; the malformed line remains unbound.
     let malformed_unbound = TestProvider::new("radio", 2).with_line_memory_domains(1, Vec::new());
     let providers = one_provider("radio", &malformed_unbound);
-    let err = validate(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("an unbound node in the Provider tree still has a port");
-    assert!(matches!(&err, SpecError::Structural { reason }
-        if reason.contains("MA-10") && reason.contains("radio/1")), "{err:?}");
+    let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("an unbound node in the Provider tree still has a port");
+    assert!(
+        matches!(&err, SpecError::Structural { reason }
+        if reason.contains("MA-10") && reason.contains("radio/1")),
+        "{err:?}"
+    );
 
     let portless = TestProvider::new("radio", 2).with_portless_child();
     let providers = one_provider("radio", &portless);
-    validate(&spec, &profile, &fx.inputs(&providers))
-        .expect("an empty declaration is valid on a portless structural node");
+    validate(&spec, &profile, &fx.inputs(&providers)).expect("an empty declaration is valid on a portless structural node");
 }
 
 #[test]
@@ -2255,10 +1272,7 @@ fn ma_39_resource_domains_follow_bound_nodes_and_cover_resource_endpoints() {
     // The requested line binds radio/1 (count 2), not its sibling radio/0 (count 1).
     // Only the bound node's domain 2 matches the Island's singleton domain.
     let mut resource_to_component = minimal_spec();
-    resource_to_component.resources.insert(
-        id("line0"),
-        resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]),
-    );
+    resource_to_component.resources.insert(id("line0"), resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]));
     resource_to_component.graph.components.insert(id("recorder"), support::recorder_component(sc16.clone()));
     resource_to_component.graph.links.push(ezsdr_kernel::spec::LinkReq {
         from: PortRef { component: id("line0"), port: id("rx") },
@@ -2270,28 +1284,15 @@ fn ma_39_resource_domains_follow_bound_nodes_and_cover_resource_endpoints() {
     bind_exec(&mut profile);
     let mut recorder = member("recorder");
     recorder.memory_domain = MemoryDomainId::local(2);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![recorder],
-        affinity: None,
-        rt_policy: None,
-    });
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![recorder], affinity: None, rt_policy: None });
     select_test_links(&resource_to_component, &mut profile);
-    let provider = TestProvider::new("radio", 2)
-        .with_asymmetric_lines(1, 2)
-        .with_line_memory_domains(0, vec![MemoryDomainId::local(1)])
-        .with_line_memory_domains(1, vec![MemoryDomainId::local(2)]);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &provider as &dyn Provider),
-        (id("line0"), &provider as &dyn Provider),
-    ].into_iter().collect();
+    let provider = TestProvider::new("radio", 2).with_asymmetric_lines(1, 2).with_line_memory_domains(0, vec![MemoryDomainId::local(1)]).with_line_memory_domains(1, vec![MemoryDomainId::local(2)]);
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &provider as &dyn Provider), (id("line0"), &provider as &dyn Provider)].into_iter().collect();
     let mut fx = Fixture::new();
     fx.executors.get_mut(&id("exec")).expect("exec").memory_domains = vec![MemoryDomainId::local(0), MemoryDomainId::local(2)];
     let admission = validate(&resource_to_component, &profile, &fx.inputs(&providers)).expect("validates");
     assert_eq!(admission.matched[&id("line0")], rid("radio/1"));
-    plan(&resource_to_component, &profile, &admission, &fx.inputs(&providers))
-        .expect("the bound node's domain 2 reaches the component");
+    plan(&resource_to_component, &profile, &admission, &fx.inputs(&providers)).expect("the bound node's domain 2 reaches the component");
 
     // Component -> Resource uses the test Provider's In port (`tx`); domain 2 is
     // not connected to the component's domain 0.
@@ -2306,35 +1307,22 @@ fn ma_39_resource_domains_follow_bound_nodes_and_cover_resource_endpoints() {
     });
     let mut profile = profile_binding(&["radio", "line0"]);
     bind_exec(&mut profile);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![member("source")],
-        affinity: None,
-        rt_policy: None,
-    });
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![member("source")], affinity: None, rt_policy: None });
     select_test_links(&component_to_resource, &mut profile);
     let provider = TestProvider::new("radio", 2).with_line_memory_domains(0, vec![MemoryDomainId::local(2)]);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &provider as &dyn Provider),
-        (id("line0"), &provider as &dyn Provider),
-    ].into_iter().collect();
-    let refused = validate_then_plan(&component_to_resource, &profile, &fx.inputs(&providers))
-        .expect_err("an In port in an unreachable memory domain is refused");
-    assert!(matches!(&refused, SpecError::Structural { reason }
-        if reason.contains("MA-39") && reason.contains("every producer domain")), "{refused:?}");
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &provider as &dyn Provider), (id("line0"), &provider as &dyn Provider)].into_iter().collect();
+    let refused = validate_then_plan(&component_to_resource, &profile, &fx.inputs(&providers)).expect_err("an In port in an unreachable memory domain is refused");
+    assert!(
+        matches!(&refused, SpecError::Structural { reason }
+        if reason.contains("MA-39") && reason.contains("every producer domain")),
+        "{refused:?}"
+    );
 
     // Resource -> Resource also ends at the test Provider's In port. Capabilities
     // bind distinct children; the selected Link bridges 1 <-> 0.
     let mut resource_to_resource = minimal_spec();
-    resource_to_resource.resources.insert(
-        id("line0"),
-        resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(1) })]),
-    );
-    resource_to_resource.resources.insert(
-        id("line1"),
-        resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]),
-    );
+    resource_to_resource.resources.insert(id("line0"), resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(1) })]));
+    resource_to_resource.resources.insert(id("line1"), resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]));
     resource_to_resource.graph.links.push(ezsdr_kernel::spec::LinkReq {
         from: PortRef { component: id("line0"), port: id("rx") },
         to: PortRef { component: id("line1"), port: id("tx") },
@@ -2343,29 +1331,15 @@ fn ma_39_resource_domains_follow_bound_nodes_and_cover_resource_endpoints() {
     });
     let mut profile = profile_binding(&["radio", "line0", "line1"]);
     select_test_links(&resource_to_resource, &mut profile);
-    let provider = TestProvider::new("radio", 2)
-        .with_asymmetric_lines(1, 2)
-        .with_line_memory_domains(0, vec![MemoryDomainId::local(1)])
-        .with_line_memory_domains(1, vec![MemoryDomainId::local(0)]);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &provider as &dyn Provider),
-        (id("line0"), &provider as &dyn Provider),
-        (id("line1"), &provider as &dyn Provider),
-    ].into_iter().collect();
-    validate_then_plan(&resource_to_resource, &profile, &fx.inputs(&providers))
-        .expect("the selected Link connects the bound producer and consumer");
+    let provider = TestProvider::new("radio", 2).with_asymmetric_lines(1, 2).with_line_memory_domains(0, vec![MemoryDomainId::local(1)]).with_line_memory_domains(1, vec![MemoryDomainId::local(0)]);
+    let providers: BTreeMap<Ident, &dyn Provider> =
+        [(id("radio"), &provider as &dyn Provider), (id("line0"), &provider as &dyn Provider), (id("line1"), &provider as &dyn Provider)].into_iter().collect();
+    validate_then_plan(&resource_to_resource, &profile, &fx.inputs(&providers)).expect("the selected Link connects the bound producer and consumer");
 
-    let provider = TestProvider::new("radio", 2)
-        .with_asymmetric_lines(1, 2)
-        .with_line_memory_domains(0, vec![MemoryDomainId::local(2)])
-        .with_line_memory_domains(1, vec![MemoryDomainId::local(0)]);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &provider as &dyn Provider),
-        (id("line0"), &provider as &dyn Provider),
-        (id("line1"), &provider as &dyn Provider),
-    ].into_iter().collect();
-    let refused = validate_then_plan(&resource_to_resource, &profile, &fx.inputs(&providers))
-        .expect_err("the selected Link cannot connect domain 2 to domain 0");
+    let provider = TestProvider::new("radio", 2).with_asymmetric_lines(1, 2).with_line_memory_domains(0, vec![MemoryDomainId::local(2)]).with_line_memory_domains(1, vec![MemoryDomainId::local(0)]);
+    let providers: BTreeMap<Ident, &dyn Provider> =
+        [(id("radio"), &provider as &dyn Provider), (id("line0"), &provider as &dyn Provider), (id("line1"), &provider as &dyn Provider)].into_iter().collect();
+    let refused = validate_then_plan(&resource_to_resource, &profile, &fx.inputs(&providers)).expect_err("the selected Link cannot connect domain 2 to domain 0");
     assert!(matches!(&refused, SpecError::Structural { reason } if reason.contains("MA-39")), "{refused:?}");
 }
 
@@ -2378,14 +1352,15 @@ fn ma_39_sink_feed_rejects_a_resource_domain_set_only_partly_reached() {
     select_test_links(&spec, &mut profile);
     let provider = TestProvider::new("radio", 2).with_root_memory_domains(vec![MemoryDomainId::local(0), MemoryDomainId::local(2)]);
     let providers = one_provider("radio", &provider);
-    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"))
-        .reading(vec![MemoryDomainId::local(1)]);
+    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")).reading(vec![MemoryDomainId::local(1)]);
     let mut fx = Fixture::new();
     fx.sinks.insert(id("capture0"), &sink);
-    let refused = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("domain 0 converts but domain 2 does not");
-    assert!(matches!(&refused, SpecError::Structural { reason }
-        if reason.contains("MA-39") && reason.contains("every producer domain")), "{refused:?}");
+    let refused = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect_err("domain 0 converts but domain 2 does not");
+    assert!(
+        matches!(&refused, SpecError::Structural { reason }
+        if reason.contains("MA-39") && reason.contains("every producer domain")),
+        "{refused:?}"
+    );
 }
 
 #[test]
@@ -2394,14 +1369,7 @@ fn sb_17_capture_without_a_sink_refused() {
     spec.outputs.push(ezsdr_kernel::spec::OutputReq {
         id: id("capture0"),
         kind: ns("test.capture"),
-        feed: ezsdr_kernel::spec::SinkFeed {
-            port: PortRef {
-                component: id("radio"),
-                port: id("rx"),
-            },
-            policy: BackPressure::DropOldest,
-            capacity: 4,
-        },
+        feed: ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 4 },
         params: BTreeMap::new(),
     });
     let fx = Fixture::new();
@@ -2409,10 +1377,7 @@ fn sb_17_capture_without_a_sink_refused() {
     let providers = one_provider("radio", &p);
     // SB-22: the output id has no binding, so there is no Sink to serve it. This is
     // now checkable on the **Spec** path, which is what D17 was about.
-    assert!(matches!(
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)),
-        Err(SpecError::Structural { .. })
-    ));
+    assert!(matches!(validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)), Err(SpecError::Structural { .. })));
 }
 
 #[test]
@@ -2447,50 +1412,24 @@ fn sb_17_the_sink_must_write_the_kind_and_consume_the_contract() {
     let providers = one_provider("radio", &p);
     let with = |sink: &TestSink| {
         let mut fx = Fixture::new();
-        fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
+        fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
         validate(&spec, &profile, &fx.inputs(&providers)).map(|_| ())
     };
     with(&cf32_sink()).expect("a Sink writing test.capture from cf32");
     let reason = refusal(with(&cf32_sink().writing(vec![ns("test.other")])));
-    assert!(
-        reason.contains(
-            "SB-17: output rec wants artifact kind test.capture, which its Sink does not write"
-        ),
-        "{reason}"
-    );
-    let deaf = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.other").expect("id"),
-    );
+    assert!(reason.contains("SB-17: output rec wants artifact kind test.capture, which its Sink does not write"), "{reason}");
+    let deaf = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.other").expect("id"));
     let reason = refusal(with(&deaf));
-    assert!(
-        reason.contains("which its Sink does not consume"),
-        "{reason}"
-    );
+    assert!(reason.contains("which its Sink does not consume"), "{reason}");
 }
 
 #[test]
 fn sb_08_the_test_vocabulary_names_no_radio_word() {
     // OV-21: the matcher is proven generic by a double whose keys are exactly these.
-    let keys: BTreeSet<String> = support::test_vocabulary()
-        .keys
-        .iter()
-        .map(|k| k.key.to_string())
-        .collect();
+    let keys: BTreeSet<String> = support::test_vocabulary().keys.iter().map(|k| k.key.to_string()).collect();
     // `test.tx_clock` is spec 19 §0's (Phase 7, KG-4's tests); `test.list` is item 3's
     // List-kind carrier (review P2-2); `test.item` is SB-2a's numbered declaration.
-    let want: BTreeSet<String> = [
-        "test.count",
-        "test.grid",
-        "test.flag",
-        "test.gain",
-        "test.tx_clock",
-        "test.list",
-        "test.item",
-    ]
-    .map(str::to_owned)
-    .into();
+    let want: BTreeSet<String> = ["test.count", "test.grid", "test.flag", "test.gain", "test.tx_clock", "test.list", "test.item"].map(str::to_owned).into();
     assert_eq!(keys, want);
 }
 
@@ -2510,19 +1449,12 @@ fn sb_20_extensions_reach_the_manifest_verbatim() {
 #[test]
 fn sb_18_unregistered_event_kind_refused() {
     let mut spec = minimal_spec();
-    spec.policies.failure.insert(
-        ezsdr_kernel::event::EventKind::parse("test.RX_OVERFLOWS").expect("parses"),
-        Reaction::Stop,
-    );
+    spec.policies.failure.insert(ezsdr_kernel::event::EventKind::parse("test.RX_OVERFLOWS").expect("parses"), Reaction::Stop);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let err =
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("refused");
-    assert!(
-        err.to_string().contains("RX_OVERFLOWS"),
-        "the refusal names the kind: {err}"
-    );
+    let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("refused");
+    assert!(err.to_string().contains("RX_OVERFLOWS"), "the refusal names the kind: {err}");
 }
 
 #[test]
@@ -2535,59 +1467,24 @@ fn sb_27_environment_portability() {
     let providers = one_provider("radio", &p);
 
     let mut sim = profile_binding(&["radio"]);
-    sim.environment.insert(
-        ns("ezsdr.rf_path"),
-        serde_json::json!({ "path": "simulated" }),
-    );
+    sim.environment.insert(ns("ezsdr.rf_path"), serde_json::json!({ "path": "simulated" }));
     let mut lab = profile_binding(&["radio"]);
-    lab.environment.insert(
-        ns("ezsdr.rf_path"),
-        serde_json::json!({ "path": "simulated" }),
-    );
-    lab.environment
-        .insert(ns("sim.channel"), serde_json::json!({ "model": "awgn" }));
+    lab.environment.insert(ns("ezsdr.rf_path"), serde_json::json!({ "path": "simulated" }));
+    lab.environment.insert(ns("sim.channel"), serde_json::json!({ "model": "awgn" }));
 
-    assert!(
-        validate(&spec, &sim, &fx.inputs(&providers))
-            .expect("validates")
-            .is_admitted()
-    );
-    assert!(
-        validate(&spec, &lab, &fx.inputs(&providers))
-            .expect("validates")
-            .is_admitted()
-    );
-    assert_eq!(
-        ContentHash::of(&spec).expect("hashes"),
-        ContentHash::of(&spec).expect("hashes"),
-        "the Spec hash does not depend on the profile"
-    );
-    assert_ne!(
-        ContentHash::of(&sim).expect("hashes"),
-        ContentHash::of(&lab).expect("hashes"),
-        "the binding hashes differ"
-    );
+    assert!(validate(&spec, &sim, &fx.inputs(&providers)).expect("validates").is_admitted());
+    assert!(validate(&spec, &lab, &fx.inputs(&providers)).expect("validates").is_admitted());
+    assert_eq!(ContentHash::of(&spec).expect("hashes"), ContentHash::of(&spec).expect("hashes"), "the Spec hash does not depend on the profile");
+    assert_ne!(ContentHash::of(&sim).expect("hashes"), ContentHash::of(&lab).expect("hashes"), "the binding hashes differ");
 }
 
 #[test]
 fn ma_41_execution_class_table() {
     use ezsdr_kernel::module_api::{ExecutionClass, RfPath};
-    assert_eq!(
-        ExecutionClass::derive(Pacing::FreeRunning, RfPath::Simulated),
-        Ok(ExecutionClass::Simulation)
-    );
-    assert_eq!(
-        ExecutionClass::derive(Pacing::WallPaced, RfPath::Simulated),
-        Ok(ExecutionClass::RealtimeEmulation)
-    );
-    assert_eq!(
-        ExecutionClass::derive(Pacing::Device, RfPath::Cabled),
-        Ok(ExecutionClass::HardwareInLoop)
-    );
-    assert_eq!(
-        ExecutionClass::derive(Pacing::Device, RfPath::OverTheAir),
-        Ok(ExecutionClass::Hardware)
-    );
+    assert_eq!(ExecutionClass::derive(Pacing::FreeRunning, RfPath::Simulated), Ok(ExecutionClass::Simulation));
+    assert_eq!(ExecutionClass::derive(Pacing::WallPaced, RfPath::Simulated), Ok(ExecutionClass::RealtimeEmulation));
+    assert_eq!(ExecutionClass::derive(Pacing::Device, RfPath::Cabled), Ok(ExecutionClass::HardwareInLoop));
+    assert_eq!(ExecutionClass::derive(Pacing::Device, RfPath::OverTheAir), Ok(ExecutionClass::Hardware));
     // A simulated Authority cannot drive a real RF path.
     assert!(ExecutionClass::derive(Pacing::FreeRunning, RfPath::OverTheAir).is_err());
     assert!(ExecutionClass::derive(Pacing::WallPaced, RfPath::Cabled).is_err());
@@ -2599,13 +1496,8 @@ fn ma_41_execution_class_table() {
 fn rs_12_a_session_compiles_through_the_whole_pipeline() {
     // RS-12: `connect()` runs the whole pipeline of SB-37, and the implicit Spec
     // must survive every stage of it — not just `validate`.
-    let sink = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    );
-    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("recorder"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
+    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"));
+    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("recorder"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let mut fx = Fixture::new();
     fx.is_session = true;
     fx.sinks = sinks.clone();
@@ -2615,53 +1507,29 @@ fn rs_12_a_session_compiles_through_the_whole_pipeline() {
         id("recorder"),
         ezsdr_kernel::binding::Binding {
             module: mref("ezsdr.test.sink"),
-            feed: Some(ezsdr_kernel::spec::SinkFeed {
-                port: PortRef {
-                    component: id("radio"),
-                    port: id("rx"),
-                },
-                policy: BackPressure::DropOldest,
-                capacity: 4,
-            }),
+            feed: Some(ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 4 }),
             selector: BTreeMap::new(),
             profile: None,
         },
     );
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks)
-        .expect("builds the implicit Spec");
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks).expect("builds the implicit Spec");
     // The recorder's feed is a data link like any other and needs a selected Link
     // (SB-25, D75); the implicit Spec does not read `placements`.
     select_test_links(&spec, &mut profile);
     let result = validate(&spec, &profile, &fx.inputs(&providers)).expect("a Session validates");
     assert!(result.is_admitted());
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
-        .expect("a Session plans");
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("a Session plans");
     // MA-25, MA-30: the Sink is its own fragment, prepared and stepped in its own
     // right, and never a component inside an Island.
-    assert!(
-        built
-            .fragments
-            .iter()
-            .any(|f| f.role == Role::Sink && f.id == id("recorder"))
-    );
-    assert_eq!(
-        built.class,
-        ezsdr_kernel::module_api::ExecutionClass::Simulation
-    );
+    assert!(built.fragments.iter().any(|f| f.role == Role::Sink && f.id == id("recorder")));
+    assert_eq!(built.class, ezsdr_kernel::module_api::ExecutionClass::Simulation);
     // D75: the feed is in the plan's links, so the coordinator creates a Link for it
     // (MA-27a); it is numbered after the graph's links, of which a Session has none.
-    let feed: Vec<_> = built
-        .links
-        .iter()
-        .filter(|l| l.to.component.as_str() == "recorder")
-        .collect();
+    let feed: Vec<_> = built.links.iter().filter(|l| l.to.component.as_str() == "recorder").collect();
     assert_eq!(feed.len(), 1, "{:?}", built.links);
-    assert_eq!(
-        feed[0].id,
-        ezsdr_kernel::id::DataLinkId::local(spec.graph.links.len() as u32)
-    );
+    assert_eq!(feed[0].id, ezsdr_kernel::id::DataLinkId::local(spec.graph.links.len() as u32));
 }
 
 #[test]
@@ -2676,99 +1544,34 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     let mut both = support::test_provider_descriptor();
     both.id = rr.id.clone();
     both.roles.push(Role::Sink);
-    fx.registry
-        .register(
-            both,
-            Factories {
-                provider: true,
-                sink: true,
-                authority: true,
-                ..Factories::default()
-            },
-        )
-        .expect("a Module may hold several roles (MA-1)");
-    let sink = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    )
-    .with_module(rr.clone());
-    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
+    fx.registry.register(both, Factories { provider: true, sink: true, authority: true, ..Factories::default() }).expect("a Module may hold several roles (MA-1)");
+    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")).with_module(rr.clone());
+    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     fx.sinks = sinks.clone();
     // `radio` is the Authority too, so its descriptor names the same Module (SB-22f).
     fx.authorities.get_mut(&id("radio")).expect("radio").module = rr.clone();
     let p = TestProvider::new("radio", 2).with_module(rr.clone());
     let providers = one_provider("radio", &p);
-    let feed = ezsdr_kernel::spec::SinkFeed {
-        port: PortRef {
-            component: id("radio"),
-            port: id("rx"),
-        },
-        policy: BackPressure::DropOldest,
-        capacity: 4,
-    };
+    let feed = ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 4 };
     let mut profile = profile_binding(&["radio"]);
-    profile
-        .bindings
-        .get_mut(&id("radio"))
-        .expect("bound")
-        .module = rr.clone();
-    profile.bindings.insert(
-        id("rec"),
-        ezsdr_kernel::binding::Binding {
-            module: rr.clone(),
-            feed: Some(feed.clone()),
-            selector: BTreeMap::new(),
-            profile: None,
-        },
-    );
+    profile.bindings.get_mut(&id("radio")).expect("bound").module = rr.clone();
+    profile.bindings.insert(id("rec"), ezsdr_kernel::binding::Binding { module: rr.clone(), feed: Some(feed.clone()), selector: BTreeMap::new(), profile: None });
     // Bound once per role: `radio` is the resource, `rec` the output.
-    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks)
-        .expect("builds the implicit Spec");
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks).expect("builds the implicit Spec");
     assert_eq!(spec.resources.keys().collect::<Vec<_>>(), [&id("radio")]);
-    assert_eq!(
-        spec.outputs.iter().map(|o| &o.id).collect::<Vec<_>>(),
-        [&id("rec")]
-    );
+    assert_eq!(spec.outputs.iter().map(|o| &o.id).collect::<Vec<_>>(), [&id("rec")]);
     select_test_links(&spec, &mut profile);
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
-        .expect("the Session plans with one fragment per role");
-    assert!(
-        built
-            .fragments
-            .iter()
-            .any(|f| f.role == Role::Provider && f.id == id("radio"))
-    );
-    assert!(
-        built
-            .fragments
-            .iter()
-            .any(|f| f.role == Role::Sink && f.id == id("rec"))
-    );
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("the Session plans with one fragment per role");
+    assert!(built.fragments.iter().any(|f| f.role == Role::Provider && f.id == id("radio")));
+    assert!(built.fragments.iter().any(|f| f.role == Role::Sink && f.id == id("rec")));
 
     // Bound once with a `feed`, the name plays Sink only — not a resource and an
     // output at once — and its feed then names a resource that is not there.
     let mut once = profile_binding(&[]);
-    once.bindings.insert(
-        id("radio"),
-        ezsdr_kernel::binding::Binding {
-            module: rr.clone(),
-            feed: Some(feed),
-            selector: BTreeMap::new(),
-            profile: None,
-        },
-    );
-    let sinks_once: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("radio"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
-    let spec = ezsdr_kernel::session::implicit_spec(&once, &fx.registry, &providers, &sinks_once)
-        .expect("builds");
-    assert!(
-        spec.resources.is_empty() && spec.outputs.len() == 1,
-        "{spec:?}"
-    );
+    once.bindings.insert(id("radio"), ezsdr_kernel::binding::Binding { module: rr.clone(), feed: Some(feed), selector: BTreeMap::new(), profile: None });
+    let sinks_once: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("radio"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+    let spec = ezsdr_kernel::session::implicit_spec(&once, &fx.registry, &providers, &sinks_once).expect("builds");
+    assert!(spec.resources.is_empty() && spec.outputs.len() == 1, "{spec:?}");
 
     // A Provider+Executor Module (an RFNoC-style device) bound as `radio` and, named
     // by an Island, as `fpga`: the Island's name plays Executor, so `fpga` is not a
@@ -2777,83 +1580,35 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     let mut device = support::test_provider_descriptor();
     device.id = px.id.clone();
     device.roles.push(Role::Executor);
-    fx.registry
-        .register(
-            device,
-            Factories {
-                provider: true,
-                executor: true,
-                authority: true,
-                ..Factories::default()
-            },
-        )
-        .expect("registers");
+    fx.registry.register(device, Factories { provider: true, executor: true, authority: true, ..Factories::default() }).expect("registers");
     let p2 = TestProvider::new("radio", 2).with_module(px.clone());
     let providers2 = one_provider("radio", &p2);
     let mut fpga = profile_binding(&["radio"]);
     fpga.bindings.get_mut(&id("radio")).expect("bound").module = px.clone();
-    fpga.bindings.insert(
-        id("fpga"),
-        ezsdr_kernel::binding::Binding {
-            module: px,
-            feed: None,
-            selector: BTreeMap::new(),
-            profile: None,
-        },
-    );
-    fpga.placements.islands.push(IslandDecl {
-        id: ezsdr_kernel::id::IslandId::local(0),
-        executor: id("fpga"),
-        components: Vec::new(),
-        affinity: None,
-        rt_policy: None,
-    });
+    fpga.bindings.insert(id("fpga"), ezsdr_kernel::binding::Binding { module: px, feed: None, selector: BTreeMap::new(), profile: None });
+    fpga.placements.islands.push(IslandDecl { id: ezsdr_kernel::id::IslandId::local(0), executor: id("fpga"), components: Vec::new(), affinity: None, rt_policy: None });
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let spec = ezsdr_kernel::session::implicit_spec(&fpga, &fx.registry, &providers2, &no_sinks)
-        .expect("the Island's executor name is not a resource");
+    let spec = ezsdr_kernel::session::implicit_spec(&fpga, &fx.registry, &providers2, &no_sinks).expect("the Island's executor name is not a resource");
     assert_eq!(spec.resources.keys().collect::<Vec<_>>(), [&id("radio")]);
     // A `feed` on that executor binding would give the name a second role: the
     // derivation reads the Island's name first (SB-T2 row 1), and `validate` refuses the
     // stray feed (SB-22g).
     let mut fed = fpga.clone();
-    fed.bindings.get_mut(&id("fpga")).expect("bound").feed = Some(ezsdr_kernel::spec::SinkFeed {
-        port: PortRef {
-            component: id("radio"),
-            port: id("rx"),
-        },
-        policy: BackPressure::DropOldest,
-        capacity: 4,
-    });
-    let fed_spec = ezsdr_kernel::session::implicit_spec(&fed, &fx.registry, &providers2, &no_sinks)
-        .expect("derives");
+    fed.bindings.get_mut(&id("fpga")).expect("bound").feed =
+        Some(ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 4 });
+    let fed_spec = ezsdr_kernel::session::implicit_spec(&fed, &fx.registry, &providers2, &no_sinks).expect("derives");
     let px = mref("ezsdr.test.radio_fpga");
     fx.authorities.get_mut(&id("radio")).expect("radio").module = px.clone();
     let exec = fx.executors[&id("exec")].clone();
-    fx.executors
-        .insert(id("fpga"), ExecutorDescriptor { module: px, ..exec });
+    fx.executors.insert(id("fpga"), ExecutorDescriptor { module: px, ..exec });
     let refused = validate(&fed_spec, &fed, &fx.inputs(&providers2));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("SB-22g: binding fpga carries `feed` and fills no Sink slot")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("SB-22g: binding fpga carries `feed` and fills no Sink slot")), "{refused:?}");
     // A `feed` on a Module without the Sink role is a role error, as for the other
     // two roles, not a missing instance.
     let mut not_a_sink = profile_binding(&["radio"]);
-    not_a_sink
-        .bindings
-        .get_mut(&id("radio"))
-        .expect("bound")
-        .feed = fed.bindings[&id("fpga")].feed.clone();
-    let refused = ezsdr_kernel::session::implicit_spec(
-        &not_a_sink,
-        &fx.registry,
-        &one_provider("radio", &TestProvider::new("radio", 2)),
-        &no_sinks,
-    );
-    assert!(
-        matches!(&refused, Err(SpecError::WrongBindingRole { expected, .. }) if expected == "Sink"),
-        "{refused:?}"
-    );
+    not_a_sink.bindings.get_mut(&id("radio")).expect("bound").feed = fed.bindings[&id("fpga")].feed.clone();
+    let refused = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &one_provider("radio", &TestProvider::new("radio", 2)), &no_sinks);
+    assert!(matches!(&refused, Err(SpecError::WrongBindingRole { expected, .. }) if expected == "Sink"), "{refused:?}");
 }
 
 #[test]
@@ -2866,33 +1621,17 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     let mut spec = minimal_spec();
     // `proc` produces and `recorder` consumes: SB-15a checks the directions, so the
     // producer needs an `out` port. Before SB-15a this fixture linked `in` to `in`.
-    spec.graph
-        .components
-        .insert(id("proc"), support::source_component(contract.clone()));
-    spec.graph
-        .components
-        .insert(id("recorder"), support::recorder_component(contract));
+    spec.graph.components.insert(id("proc"), support::source_component(contract.clone()));
+    spec.graph.components.insert(id("recorder"), support::recorder_component(contract));
     spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
-        from: PortRef {
-            component: id("proc"),
-            port: id("out"),
-        },
-        to: PortRef {
-            component: id("recorder"),
-            port: id("in"),
-        },
+        from: PortRef { component: id("proc"), port: id("out") },
+        to: PortRef { component: id("recorder"), port: id("in") },
         policy: BackPressure::DropOldest,
         capacity: 4,
     });
     let mut profile = profile_binding(&["radio"]);
     bind_exec(&mut profile);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![member("proc"), member("recorder")],
-        affinity: None,
-        rt_policy: None,
-    });
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![member("proc"), member("recorder")], affinity: None, rt_policy: None });
     select_test_links(&spec, &mut profile);
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
@@ -2903,43 +1642,23 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     // Executor instance (MA-38), not a collision.
     let mut shared = profile.clone();
     shared.placements.islands[0].components = vec![member("proc")];
-    shared.placements.islands.push(IslandDecl {
-        id: IslandId::local(1),
-        components: vec![member("recorder")],
-        ..shared.placements.islands[0].clone()
-    });
+    shared.placements.islands.push(IslandDecl { id: IslandId::local(1), components: vec![member("recorder")], ..shared.placements.islands[0].clone() });
     let planned = validate_then_plan(&spec, &shared, &fx.inputs(&providers));
-    assert!(planned.is_ok_and(|p| {
-        p.fragments
-            .iter()
-            .filter(|f| f.role == Role::Executor)
-            .count()
-            == 2
-    }));
+    assert!(planned.is_ok_and(|p| { p.fragments.iter().filter(|f| f.role == Role::Executor).count() == 2 }));
 
     // D85: an Island's fragment id `island_<n>` is part of the one namespace, so a
     // resource of that name is refused at validate rather than as a duplicate
     // fragment at `plan()`.
     let mut named_like_island = spec.clone();
-    let radio = named_like_island
-        .resources
-        .remove(&id("radio"))
-        .expect("radio");
+    let radio = named_like_island.resources.remove(&id("radio")).expect("radio");
     named_like_island.resources.insert(id("island_0"), radio);
     let mut island_profile = profile.clone();
     let binding = island_profile.bindings.remove(&id("radio")).expect("bound");
     island_profile.bindings.insert(id("island_0"), binding);
     let p0 = TestProvider::new("island_0", 2);
     let island_providers = one_provider("island_0", &p0);
-    let refused = validate(
-        &named_like_island,
-        &island_profile,
-        &fx.inputs(&island_providers),
-    );
-    assert!(
-        matches!(&refused, Err(SpecError::DuplicateBindingName { sets, .. }) if sets == "a resource and an Island fragment id"),
-        "{refused:?}"
-    );
+    let refused = validate(&named_like_island, &island_profile, &fx.inputs(&island_providers));
+    assert!(matches!(&refused, Err(SpecError::DuplicateBindingName { sets, .. }) if sets == "a resource and an Island fragment id"), "{refused:?}");
 
     // SB-15 / D76: a link is named by its two ends, so declaring one pair twice is
     // refused at validate rather than leaving a placement to pick one.
@@ -2961,44 +1680,21 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     // SC-21, through `plan()`: a `Block` feed into a Sink is refused. The rule now
     // bites on the **output's** own link, because a Sink is bound rather than placed
     // and so is never a graph link's consumer (SB-17, finding D17).
-    let sink = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    );
-    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("capture0"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
+    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"));
+    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("capture0"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let mut blocking = spec.clone();
     blocking.outputs.push(ezsdr_kernel::spec::OutputReq {
         id: id("capture0"),
         kind: ns("test.capture"),
-        feed: ezsdr_kernel::spec::SinkFeed {
-            port: PortRef {
-                component: id("radio"),
-                port: id("rx"),
-            },
-            policy: BackPressure::Block,
-            capacity: 4,
-        },
+        feed: ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::Block, capacity: 4 },
         params: BTreeMap::new(),
     });
     let mut bound_sink = profile.clone();
-    bound_sink.bindings.insert(
-        id("capture0"),
-        ezsdr_kernel::binding::Binding {
-            module: mref("ezsdr.test.sink"),
-            feed: None,
-            selector: BTreeMap::new(),
-            profile: None,
-        },
-    );
+    bound_sink.bindings.insert(id("capture0"), ezsdr_kernel::binding::Binding { module: mref("ezsdr.test.sink"), feed: None, selector: BTreeMap::new(), profile: None });
     let mut fx2 = Fixture::new();
     fx2.sinks = sinks;
     let refused = validate_then_plan(&blocking, &bound_sink, &fx2.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("SC-21")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("SC-21")), "{refused:?}");
 
     // D75: with a dropping policy the feed is admitted once its Link is selected, and
     // the plan numbers it after the graph's one link, so the two ids differ.
@@ -3006,92 +1702,41 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
     dropping.outputs[0].feed.policy = BackPressure::DropOldest;
     let mut placed = bound_sink.clone();
     select_test_links(&dropping, &mut placed);
-    let built = validate_then_plan(&dropping, &placed, &fx2.inputs(&providers))
-        .expect("graph link and feed both placed");
-    let ids: Vec<_> = built
-        .links
-        .iter()
-        .map(|l| (l.to.component.as_str(), l.id))
-        .collect();
-    assert_eq!(
-        ids,
-        [
-            ("recorder", ezsdr_kernel::id::DataLinkId::local(0)),
-            ("capture0", ezsdr_kernel::id::DataLinkId::local(1)),
-        ]
-    );
+    let built = validate_then_plan(&dropping, &placed, &fx2.inputs(&providers)).expect("graph link and feed both placed");
+    let ids: Vec<_> = built.links.iter().map(|l| (l.to.component.as_str(), l.id)).collect();
+    assert_eq!(ids, [("recorder", ezsdr_kernel::id::DataLinkId::local(0)), ("capture0", ezsdr_kernel::id::DataLinkId::local(1)),]);
 
     // D82: a Sink or an Executor instance reporting another version than its
     // binding is refused, as a Provider is (D78).
-    let v11 = |name: &str| ModuleRef {
-        id: mid(name),
-        version: ezsdr_kernel::module_api::Version::new(1, 1, 0),
-    };
-    let other_sink = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    )
-    .with_module(v11("ezsdr.test.sink"));
+    let v11 = |name: &str| ModuleRef { id: mid(name), version: ezsdr_kernel::module_api::Version::new(1, 1, 0) };
+    let other_sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")).with_module(v11("ezsdr.test.sink"));
     let mut fx3 = Fixture::new();
-    fx3.sinks = [(
-        id("capture0"),
-        &other_sink as &dyn ezsdr_kernel::module_api::Sink,
-    )]
-    .into_iter()
-    .collect();
+    fx3.sinks = [(id("capture0"), &other_sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let refused = validate_then_plan(&dropping, &placed, &fx3.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Sink instance is ezsdr.test.sink 1.1.0")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Sink instance is ezsdr.test.sink 1.1.0")), "{refused:?}");
     // `plan()` does not assume `validate` ran: admitted with the right Sink, then
     // planned with the wrong one, it still refuses, because the fragment would record
     // a version that is not the one running.
     let admission = validate(&dropping, &placed, &fx2.inputs(&providers)).expect("admitted");
-    let refused = plan(
-        &dropping,
-        &placed,
-        &admission,
-        &fx3.inputs(&providers),
-    );
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Sink instance is ezsdr.test.sink 1.1.0")),
-        "{refused:?}"
-    );
+    let refused = plan(&dropping, &placed, &admission, &fx3.inputs(&providers));
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Sink instance is ezsdr.test.sink 1.1.0")), "{refused:?}");
 
     // D81 through `plan()`: `proc` (domain 0) feeds the output directly. A Sink
     // reading only domain 2 is out of reach of the selected Link (0↔1); one reading
     // domain 1 is reached by it, in the Link's declared direction.
     let mut component_feed = dropping.clone();
-    component_feed.outputs[0].feed.port = PortRef {
-        component: id("proc"),
-        port: id("out"),
-    };
+    component_feed.outputs[0].feed.port = PortRef { component: id("proc"), port: id("out") };
     let mut component_placed = bound_sink.clone();
     select_test_links(&component_feed, &mut component_placed);
     for (domain, admitted) in [(2, false), (1, true)] {
-        let reader = TestSink::new(
-            ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-        )
-        .reading(vec![MemoryDomainId::local(domain)]);
+        let reader = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")).reading(vec![MemoryDomainId::local(domain)]);
         let mut fx5 = Fixture::new();
-        fx5.sinks = [(
-            id("capture0"),
-            &reader as &dyn ezsdr_kernel::module_api::Sink,
-        )]
-        .into_iter()
-        .collect();
-        let planned = validate_then_plan(
-            &component_feed,
-            &component_placed,
-            &fx5.inputs(&providers),
-        );
+        fx5.sinks = [(id("capture0"), &reader as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+        let planned = validate_then_plan(&component_feed, &component_placed, &fx5.inputs(&providers));
         match planned {
             Ok(_) => assert!(admitted, "a Sink reading domain {domain} must be refused"),
             Err(SpecError::Structural { reason }) => {
-                assert!(
-                    !admitted && reason.contains("output capture0's Sink reads"),
-                    "{reason}"
-                )
+                assert!(!admitted && reason.contains("output capture0's Sink reads"), "{reason}")
             }
             Err(e) => panic!("{e:?}"),
         }
@@ -3099,52 +1744,23 @@ fn ma_39_plan_admits_a_real_graph_and_refuses_a_misplaced_component() {
 
     // D86: a Sink or an Executor that reaches no memory domain is refused. A Sink's
     // declaration is checked here before the shared feed reachability rule.
-    let nowhere = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    )
-    .reading(Vec::new());
+    let nowhere = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")).reading(Vec::new());
     let mut fx6 = Fixture::new();
-    fx6.sinks = [(
-        id("capture0"),
-        &nowhere as &dyn ezsdr_kernel::module_api::Sink,
-    )]
-    .into_iter()
-    .collect();
+    fx6.sinks = [(id("capture0"), &nowhere as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let refused = validate(&dropping, &placed, &fx6.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-25: output capture0's Sink declares no memory domain")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-25: output capture0's Sink declares no memory domain")), "{refused:?}");
     // `plan()` re-checks it, as it re-checks the Sink's version.
-    let refused = plan(
-        &dropping,
-        &placed,
-        &admission,
-        &fx6.inputs(&providers),
-    );
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-25: output capture0's Sink declares no memory domain")),
-        "{refused:?}"
-    );
+    let refused = plan(&dropping, &placed, &admission, &fx6.inputs(&providers));
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-25: output capture0's Sink declares no memory domain")), "{refused:?}");
     let mut fx7 = Fixture::new();
-    fx7.executors
-        .get_mut(&id("exec"))
-        .expect("exec")
-        .memory_domains
-        .clear();
+    fx7.executors.get_mut(&id("exec")).expect("exec").memory_domains.clear();
     let refused = validate_then_plan(&spec, &profile, &fx7.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-18: executor exec declares no memory domain")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("MA-18: executor exec declares no memory domain")), "{refused:?}");
 
     let mut fx4 = Fixture::new();
     fx4.executors.get_mut(&id("exec")).expect("exec").module = v11("ezsdr.test.executor");
     let refused = validate_then_plan(&spec, &profile, &fx4.inputs(&providers));
-    assert!(
-        matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Executor instance is ezsdr.test.executor 1.1.0")),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(SpecError::Structural { reason }) if reason.contains("its Executor instance is ezsdr.test.executor 1.1.0")), "{refused:?}");
 }
 
 #[test]
@@ -3156,19 +1772,13 @@ fn ma_41_an_unparseable_rf_path_is_refused_not_defaulted() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let mut profile = profile_binding(&["radio"]);
-    profile.environment.insert(
-        ns("ezsdr.rf_path"),
-        serde_json::json!({ "path": "over_the_air " }),
-    );
+    profile.environment.insert(ns("ezsdr.rf_path"), serde_json::json!({ "path": "over_the_air " }));
     assert!(matches!(
         validate_then_plan(&spec, &profile, &fx.inputs(&providers)),
         Err(SpecError::Structural { reason }) if reason.contains("ezsdr.rf_path")
     ));
     // The correct spelling is refused for the right reason instead (MA-41's table).
-    profile.environment.insert(
-        ns("ezsdr.rf_path"),
-        serde_json::json!({ "path": "over_the_air" }),
-    );
+    profile.environment.insert(ns("ezsdr.rf_path"), serde_json::json!({ "path": "over_the_air" }));
     assert!(matches!(
         validate_then_plan(&spec, &profile, &fx.inputs(&providers)),
         Err(SpecError::Structural { reason }) if reason.contains("MA-41")
@@ -3180,29 +1790,12 @@ fn sb_34_two_resources_take_different_sub_resources() {
     // SB-34: "Two Spec resources may bind to **different** sub-resources of one
     // instance." Binding both to the first kind match hands one physical channel to
     // two resources with no diagnostic.
-    let spec = spec_with(
-        [
-            (id("a"), resource("test.line", &[])),
-            (id("b"), resource("test.line", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), resource("test.line", &[])), (id("b"), resource("test.line", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p as &dyn Provider),
-        (id("b"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let result =
-        validate(&spec, &profile_binding(&["a", "b"]), &fx.inputs(&providers)).expect("validates");
-    assert_ne!(
-        result.matched[&id("a")],
-        result.matched[&id("b")],
-        "not double-booked"
-    );
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p as &dyn Provider), (id("b"), &p as &dyn Provider)].into_iter().collect();
+    let result = validate(&spec, &profile_binding(&["a", "b"]), &fx.inputs(&providers)).expect("validates");
+    assert_ne!(result.matched[&id("a")], result.matched[&id("b")], "not double-booked");
     assert_eq!(result.matched[&id("a")], rid("radio/0"));
     assert_eq!(result.matched[&id("b")], rid("radio/1"));
 }
@@ -3213,38 +1806,12 @@ fn sb_34_exclusive_node_bound_twice_is_refused() {
     // declares it shareable. Three lines asked of a two-line device is not
     // satisfiable, and resolving it by sharing hands one physical channel to two
     // intents with no diagnostic — the failure D27 was raised about.
-    let spec = spec_with(
-        [
-            (id("a"), resource("test.line", &[])),
-            (id("b"), resource("test.line", &[])),
-            (id("c"), resource("test.line", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), resource("test.line", &[])), (id("b"), resource("test.line", &[])), (id("c"), resource("test.line", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p as &dyn Provider),
-        (id("b"), &p as &dyn Provider),
-        (id("c"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let err = validate(
-        &spec,
-        &profile_binding(&["a", "b", "c"]),
-        &fx.inputs(&providers),
-    )
-    .expect_err("two lines cannot serve three resources");
-    let SpecError::NodeAlreadyBound {
-        node,
-        first,
-        second,
-    } = err
-    else {
-        panic!("expected NodeAlreadyBound, got {err:?}")
-    };
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p as &dyn Provider), (id("b"), &p as &dyn Provider), (id("c"), &p as &dyn Provider)].into_iter().collect();
+    let err = validate(&spec, &profile_binding(&["a", "b", "c"]), &fx.inputs(&providers)).expect_err("two lines cannot serve three resources");
+    let SpecError::NodeAlreadyBound { node, first, second } = err else { panic!("expected NodeAlreadyBound, got {err:?}") };
     // The diagnostic names both intents that collided, not just "no instance".
     assert_eq!(node, rid("radio/0").to_string());
     assert_eq!(first, id("a"));
@@ -3256,30 +1823,11 @@ fn sb_34_shareable_node_may_be_bound_twice() {
     // Which kinds are shareable is the Provider's declaration, never the Kernel's
     // knowledge: Vision §8's GPIO banks "may share the timekeeper" of §39, so the
     // Kernel enforces a flag it does not interpret (MA-10, OV-21).
-    let spec = spec_with(
-        [
-            (id("a"), resource("test.line", &[])),
-            (id("b"), resource("test.line", &[])),
-            (id("c"), resource("test.line", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), resource("test.line", &[])), (id("b"), resource("test.line", &[])), (id("c"), resource("test.line", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_shareable_lines();
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p as &dyn Provider),
-        (id("b"), &p as &dyn Provider),
-        (id("c"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let result = validate(
-        &spec,
-        &profile_binding(&["a", "b", "c"]),
-        &fx.inputs(&providers),
-    )
-    .expect("the Provider declared them shareable");
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p as &dyn Provider), (id("b"), &p as &dyn Provider), (id("c"), &p as &dyn Provider)].into_iter().collect();
+    let result = validate(&spec, &profile_binding(&["a", "b", "c"]), &fx.inputs(&providers)).expect("the Provider declared them shareable");
     assert_eq!(result.matched.len(), 3);
     // The preference for a free node still holds: sharing is what is allowed, not
     // what is chosen first.
@@ -3292,27 +1840,11 @@ fn sb_34_shareable_node_may_be_bound_twice() {
 fn sb_34_binds_the_sub_resource_that_can_satisfy_the_request() {
     // A constraint only the *second* channel satisfies must not be rejected because
     // the first one was picked by position.
-    let spec = spec_with(
-        [(
-            id("line"),
-            resource(
-                "test.line",
-                &[(
-                    "test.count",
-                    Constraint::Eq {
-                        value: Scalar::from(8),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("line"), resource("test.line", &[("test.count", Constraint::Eq { value: Scalar::from(8) })]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_asymmetric_lines(2, 8);
     let providers = one_provider("line", &p);
-    let result =
-        validate(&spec, &profile_binding(&["line"]), &fx.inputs(&providers)).expect("validates");
+    let result = validate(&spec, &profile_binding(&["line"]), &fx.inputs(&providers)).expect("validates");
     assert!(result.is_admitted(), "rejected: {:?}", result.rejected);
     assert_eq!(result.matched[&id("line")], rid("radio/1"));
 }
@@ -3321,43 +1853,19 @@ fn sb_34_binds_the_sub_resource_that_can_satisfy_the_request() {
 fn sb_46_validate_applies_the_coercion_policy() {
     // SB-38 makes `validate` the dry run; a coercion its own policy will reject at
     // `prepare` must fail here, not be previewed and passed.
-    let spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "test.grid",
-                    Constraint::Eq {
-                        value: Scalar::try_from(19.5).unwrap(),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("radio"), resource("test.device", &[("test.grid", Constraint::Eq { value: Scalar::try_from(19.5).unwrap() })]))].into_iter().collect());
     let fx = Fixture::new(); // `test.grid`'s KeyDecl defaults to `reject`
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let providers = one_provider("radio", &p);
-    let result =
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
-    assert!(
-        !result.is_admitted(),
-        "a `reject` coercion fails the dry run"
-    );
+    let result = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
+    assert!(!result.is_admitted(), "a `reject` coercion fails the dry run");
     assert_eq!(result.violations.len(), 1);
     assert!(result.violations[0].reason.contains("SB-46"));
 
     // As a Session the same coercion warns, per SB-45's chain.
     let mut session = Fixture::new();
     session.is_session = true;
-    let ok = validate(
-        &spec,
-        &profile_binding(&["radio"]),
-        &session.inputs(&providers),
-    )
-    .expect("validates");
+    let ok = validate(&spec, &profile_binding(&["radio"]), &session.inputs(&providers)).expect("validates");
     assert!(ok.is_admitted());
     assert_eq!(ok.warnings.len(), 1);
 }
@@ -3368,10 +1876,7 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // requested value respected, and `collect_prepare` is where that is caught.
     let mut checks = AdmissionCheckRegistry::new();
     checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
-    let environment: BTreeMap<Namespace, serde_json::Value> =
-        [(ns("test.limits"), serde_json::json!({ "max_grid": 35.0 }))]
-            .into_iter()
-            .collect();
+    let environment: BTreeMap<Namespace, serde_json::Value> = [(ns("test.limits"), serde_json::json!({ "max_grid": 35.0 }))].into_iter().collect();
     let mut fx = Fixture::new();
     fx.checks = checks;
     let mut profile = profile_binding(&["radio"]);
@@ -3385,70 +1890,27 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // SB-44's check counts as a second violation: with a grid of 20, 19.5 snaps to 20
     // (inside `max_grid: 35`) and 30 snaps to 40 (outside it).
     let spec_for = |requested: f64| {
-        let mut spec = spec_with(
-            [(id("radio"), resource("test.device", &[]))]
-                .into_iter()
-                .collect(),
-        );
-        spec.resources
-            .get_mut(&id("radio"))
-            .expect("present")
-            .requires
-            .insert(
-                key("test.grid"),
-                Constraint::Eq {
-                    value: Scalar::try_from(requested).unwrap(),
-                },
-            );
-        spec.policies
-            .coercion
-            .insert(key("test.grid"), CoercionPolicy::Accept);
+        let mut spec = spec_with([(id("radio"), resource("test.device", &[]))].into_iter().collect());
+        spec.resources.get_mut(&id("radio")).expect("present").requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(requested).unwrap() });
+        spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
         spec
     };
     let coerced = |requested: f64, applied: f64| PrepareReport {
-        effective: [(key("test.grid"), Value::num(applied).unwrap())]
-            .into_iter()
-            .collect(),
-        coercions: vec![ezsdr_kernel::spec::Coercion {
-            key: key("test.grid"),
-            requested: Value::num(requested).unwrap(),
-            applied: Value::num(applied).unwrap(),
-            reason: "snapped".to_owned(),
-        }],
+        effective: [(key("test.grid"), Value::num(applied).unwrap())].into_iter().collect(),
+        coercions: vec![ezsdr_kernel::spec::Coercion { key: key("test.grid"), requested: Value::num(requested).unwrap(), applied: Value::num(applied).unwrap(), reason: "snapped".to_owned() }],
         warnings: Vec::new(),
     };
     let spec = spec_for(19.5);
-    assert!(
-        prepared(
-            vec![(id("radio"), Ok(coerced(19.5, 20.0)))],
-            &fx,
-            &spec,
-            &profile,
-            &providers
-        )
-        .is_ok()
-    );
+    assert!(prepared(vec![(id("radio"), Ok(coerced(19.5, 20.0)))], &fx, &spec, &profile, &providers).is_ok());
     let spec = spec_for(30.0);
-    let failed = prepared(
-        vec![(id("radio"), Ok(coerced(30.0, 40.0)))],
-        &fx,
-        &spec,
-        &profile,
-        &providers,
-    )
-    .expect_err("the applied value is outside the limit");
+    let failed = prepared(vec![(id("radio"), Ok(coerced(30.0, 40.0)))], &fx, &spec, &profile, &providers).expect_err("the applied value is outside the limit");
     assert!(matches!(failed, ezsdr_kernel::plan::PrepareError::Violations(v) if v.len() == 1));
 
     // SB-46 names "the stage", not "the validate stage": a coercion on a `reject`
     // key reported by `prepare` is refused here too.
     let coercing = PrepareReport {
         effective: BTreeMap::new(),
-        coercions: vec![ezsdr_kernel::spec::Coercion {
-            key: key("test.grid"),
-            requested: Value::num(19.5).unwrap(),
-            applied: Value::num(20.0).unwrap(),
-            reason: "snapped".to_owned(),
-        }],
+        coercions: vec![ezsdr_kernel::spec::Coercion { key: key("test.grid"), requested: Value::num(19.5).unwrap(), applied: Value::num(20.0).unwrap(), reason: "snapped".to_owned() }],
         warnings: Vec::new(),
     };
     // SB-46 names "the stage", not "the validate stage". To reach the **prepare**
@@ -3458,30 +1920,9 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // `prepare`. The key is requested, so the report is well formed (SB-44, D42), and
     // `test.grid`'s Vocabulary default is `reject`.
     let bare = profile_binding(&["radio"]);
-    let mut defaulted = spec_with(
-        [(id("radio"), resource("test.device", &[]))]
-            .into_iter()
-            .collect(),
-    );
-    defaulted
-        .resources
-        .get_mut(&id("radio"))
-        .expect("present")
-        .requires
-        .insert(
-            key("test.grid"),
-            Constraint::Eq {
-                value: Scalar::try_from(20.0).unwrap(),
-            },
-        );
-    let failed = prepared(
-        vec![(id("radio"), Ok(coercing.clone()))],
-        &fx,
-        &defaulted,
-        &bare,
-        &providers,
-    )
-    .expect_err("`test.grid` defaults to `reject`");
+    let mut defaulted = spec_with([(id("radio"), resource("test.device", &[]))].into_iter().collect());
+    defaulted.resources.get_mut(&id("radio")).expect("present").requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(20.0).unwrap() });
+    let failed = prepared(vec![(id("radio"), Ok(coercing.clone()))], &fx, &defaulted, &bare, &providers).expect_err("`test.grid` defaults to `reject`");
     assert!(
         matches!(&failed, ezsdr_kernel::plan::PrepareError::Violations(v)
             if v.iter().any(|x| x.reason.contains("rejected at prepare"))),
@@ -3493,24 +1934,9 @@ fn sb_30_prepare_runs_the_checks_against_the_applied_configuration() {
     // warned about nothing.
     let mut as_session = Fixture::new();
     as_session.is_session = true;
-    let reports = prepared(
-        vec![(id("radio"), Ok(coercing))],
-        &as_session,
-        &defaulted,
-        &bare,
-        &providers,
-    )
-    .expect("a Session warns rather than refusing");
-    assert_eq!(
-        reports[&id("radio")].warnings.len(),
-        1,
-        "SB-46's warning is on the report"
-    );
-    assert_eq!(
-        reports[&id("radio")].coercions.len(),
-        1,
-        "and the coercion is still recorded"
-    );
+    let reports = prepared(vec![(id("radio"), Ok(coercing))], &as_session, &defaulted, &bare, &providers).expect("a Session warns rather than refusing");
+    assert_eq!(reports[&id("radio")].warnings.len(), 1, "SB-46's warning is on the report");
+    assert_eq!(reports[&id("radio")].coercions.len(), 1, "and the coercion is still recorded");
 }
 
 #[test]
@@ -3520,26 +1946,20 @@ fn ma_41_a_declared_time_class_that_disagrees_is_refused() {
     // declaration is compared with the derivation. Nothing read the section at all.
     let spec = minimal_spec();
     let mut profile = profile_binding(&["radio"]);
-    profile
-        .environment
-        .insert(ns("ezsdr.time"), serde_json::json!({ "class": "hardware" }));
+    profile.environment.insert(ns("ezsdr.time"), serde_json::json!({ "class": "hardware" }));
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     // The Authority is free-running and `ezsdr.rf_path` is absent, so the derived
     // class is Simulation; the declaration says Hardware.
-    let err = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("a declared class that disagrees is refused");
+    let err = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect_err("a declared class that disagrees is refused");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("MA-41") && reason.contains("ezsdr.time")),
         "{err:?}"
     );
     // The agreeing declaration plans, and so does no declaration at all.
-    profile.environment.insert(
-        ns("ezsdr.time"),
-        serde_json::json!({ "class": "simulation" }),
-    );
+    profile.environment.insert(ns("ezsdr.time"), serde_json::json!({ "class": "simulation" }));
     assert!(validate_then_plan(&spec, &profile, &fx.inputs(&providers)).is_ok());
     profile.environment.remove(&ns("ezsdr.time"));
     assert!(validate_then_plan(&spec, &profile, &fx.inputs(&providers)).is_ok());
@@ -3556,10 +1976,7 @@ fn ov_16_a_non_ascii_key_is_refused_at_ingestion() {
         "extensions": { "vendor.thing": { "\u{3c1}": 1 } }
     });
     let err = ExperimentSpec::from_json(&doc).expect_err("refused at ingestion");
-    assert!(
-        matches!(&err, SpecError::UnknownField { path } if path.contains("OV-15")),
-        "{err:?}"
-    );
+    assert!(matches!(&err, SpecError::UnknownField { path } if path.contains("OV-15")), "{err:?}");
 
     // The same document with an ASCII key parses, and its canonical form exists —
     // which is the property the refusal protects.
@@ -3581,38 +1998,21 @@ fn sb_30_a_validate_violation_refuses_the_plan() {
     // RF-envelope refusal raised at the validate point yielded a complete plan
     // (Vision invariant 42).
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(500.0).unwrap(),
-        },
-    );
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(500.0).unwrap() });
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
     let mut profile = profile_binding(&["radio"]);
-    profile
-        .environment
-        .insert(ns("test.limits"), serde_json::json!({ "max_grid": 100.0 }));
+    profile.environment.insert(ns("test.limits"), serde_json::json!({ "max_grid": 100.0 }));
     let mut fx = Fixture::new();
-    fx.checks
-        .register(std::sync::Arc::new(TestLimitsCheck::new()));
+    fx.checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let providers = one_provider("radio", &p);
 
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validate reports");
     assert!(!admission.is_admitted(), "the check refused it");
-    assert!(
-        !admission.violations.is_empty(),
-        "and the violation is recorded for SB-38"
-    );
+    assert!(!admission.violations.is_empty(), "and the violation is recorded for SB-38");
 
     // The same result must not yield a plan.
-    let refused = plan(
-        &spec,
-        &profile,
-        &admission,
-        &fx.inputs(&providers),
-    )
-    .expect_err("SB-30: nothing transmits after a violation");
+    let refused = plan(&spec, &profile, &admission, &fx.inputs(&providers)).expect_err("SB-30: nothing transmits after a violation");
     assert!(matches!(refused, SpecError::Violation(_)), "{refused:?}");
 }
 
@@ -3622,79 +2022,41 @@ fn sb_22a_one_namespace_refuses_a_collision() {
     // Unchecked, a resource and an output could share a name and `plan()` emitted a
     // single fragment for the two, leaving the Spec's declared resource never
     // prepared, armed, stopped or recorded in the Manifest — with the Run admitted.
-    let sink = TestSink::new(
-        ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-    );
-    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("cap"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
-    let mut spec = spec_with(
-        [(id("cap"), resource("test.device", &[]))]
-            .into_iter()
-            .collect(),
-    );
+    let sink = TestSink::new(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"));
+    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("cap"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+    let mut spec = spec_with([(id("cap"), resource("test.device", &[]))].into_iter().collect());
     spec.outputs.push(ezsdr_kernel::spec::OutputReq {
         id: id("cap"),
         kind: ns("test.capture"),
-        feed: ezsdr_kernel::spec::SinkFeed {
-            port: PortRef {
-                component: id("cap"),
-                port: id("rx"),
-            },
-            policy: BackPressure::DropOldest,
-            capacity: 4,
-        },
+        feed: ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("cap"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 4 },
         params: BTreeMap::new(),
     });
     let mut fx = Fixture::new();
     fx.sinks = sinks;
     let p = TestProvider::new("cap", 2);
     let providers = one_provider("cap", &p);
-    let err = validate(&spec, &profile_binding(&["cap"]), &fx.inputs(&providers))
-        .expect_err("the name is in two of the four sets");
-    assert!(
-        matches!(&err, SpecError::DuplicateBindingName { name, .. } if *name == id("cap")),
-        "{err:?}"
-    );
+    let err = validate(&spec, &profile_binding(&["cap"]), &fx.inputs(&providers)).expect_err("the name is in two of the four sets");
+    assert!(matches!(&err, SpecError::DuplicateBindingName { name, .. } if *name == id("cap")), "{err:?}");
 
     // D83: graph component names are the fourth set, and an output id appears once.
     // Each of these passed `validate` and surfaced at `plan()` under a misleading
     // rule — SB-25 "declared twice", or an MA-22 cycle for a component that shadowed
     // a resource of the same name.
     let contract = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
-    let base = spec_with(
-        [(id("radio"), resource("test.device", &[]))]
-            .into_iter()
-            .collect(),
-    );
+    let base = spec_with([(id("radio"), resource("test.device", &[]))].into_iter().collect());
     let mut shadowing = base.clone();
-    shadowing
-        .graph
-        .components
-        .insert(id("radio"), support::source_component(contract.clone()));
+    shadowing.graph.components.insert(id("radio"), support::source_component(contract.clone()));
     let mut output_like_component = base.clone();
-    output_like_component
-        .graph
-        .components
-        .insert(id("cap"), support::recorder_component(contract));
+    output_like_component.graph.components.insert(id("cap"), support::recorder_component(contract));
     output_like_component.outputs.push(spec.outputs[0].clone());
     let mut twice = base.clone();
     twice.outputs.push(spec.outputs[0].clone());
     twice.outputs.push(spec.outputs[0].clone());
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    for (doc, sets) in [
-        (&shadowing, "a resource and a graph component"),
-        (&output_like_component, "a graph component and an output id"),
-        (&twice, "an output id declared twice"),
-    ] {
-        let err = validate(doc, &profile_binding(&["radio"]), &fx.inputs(&providers))
-            .expect_err("a collision is refused at validate");
-        assert!(
-            matches!(&err, SpecError::DuplicateBindingName { sets: s, .. } if s == sets),
-            "{sets}: {err:?}"
-        );
+    for (doc, sets) in [(&shadowing, "a resource and a graph component"), (&output_like_component, "a graph component and an output id"), (&twice, "an output id declared twice")] {
+        let err = validate(doc, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("a collision is refused at validate");
+        assert!(matches!(&err, SpecError::DuplicateBindingName { sets: s, .. } if s == sets), "{sets}: {err:?}");
     }
     // D96: a dedicated Authority's name is a binding and a fragment id, so it is in the
     // namespace — a component, an Island's fragment or an output of that name collides —
@@ -3702,52 +2064,26 @@ fn sb_22a_one_namespace_refuses_a_collision() {
     // which SB-16 reads as the first segment of a Sink's address.
     let mut fx2 = Fixture::new();
     let sim = with_sim_engine(&mut fx2, "proc");
-    fx2.authorities
-        .insert(id("island_0"), fx2.authorities[&id("proc")].clone());
-    fx2.authorities
-        .insert(id("cap"), fx2.authorities[&id("proc")].clone());
-    fx2.authorities
-        .insert(id("exec"), fx2.authorities[&id("proc")].clone());
+    fx2.authorities.insert(id("island_0"), fx2.authorities[&id("proc")].clone());
+    fx2.authorities.insert(id("cap"), fx2.authorities[&id("proc")].clone());
+    fx2.authorities.insert(id("exec"), fx2.authorities[&id("proc")].clone());
     let own = |name: &str| {
         let mut profile = profile_binding(&["radio"]);
-        profile.bindings.insert(
-            id(name),
-            ezsdr_kernel::binding::Binding {
-                module: sim.clone(),
-                ..bind("ezsdr.test.sink")
-            },
-        );
+        profile.bindings.insert(id(name), ezsdr_kernel::binding::Binding { module: sim.clone(), ..bind("ezsdr.test.sink") });
         profile.authority = id(name);
         profile
     };
     let mut with_component = base.clone();
-    with_component.graph.components.insert(
-        id("proc"),
-        support::source_component(
-            ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id"),
-        ),
-    );
+    with_component.graph.components.insert(id("proc"), support::source_component(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id")));
     let mut islanded = own("island_0");
     bind_exec(&mut islanded);
     islanded.placements.islands.push(island(0, "exec"));
     let mut with_cap = base.clone();
     with_cap.outputs.push(spec.outputs[0].clone());
     for (doc, profile, sets) in [
-        (
-            &with_component,
-            own("proc"),
-            "a graph component and the `authority` binding",
-        ),
-        (
-            &base,
-            islanded,
-            "an Island fragment id and the `authority` binding",
-        ),
-        (
-            &with_cap,
-            own("cap"),
-            "an output id and the `authority` binding",
-        ),
+        (&with_component, own("proc"), "a graph component and the `authority` binding"),
+        (&base, islanded, "an Island fragment id and the `authority` binding"),
+        (&with_cap, own("cap"), "an output id and the `authority` binding"),
         (
             &base,
             {
@@ -3758,28 +2094,15 @@ fn sb_22a_one_namespace_refuses_a_collision() {
             "an Island executor and the `authority` binding",
         ),
     ] {
-        let err = validate(doc, &profile, &fx2.inputs(&providers))
-            .expect_err("the authority name collides");
-        assert!(
-            matches!(&err, SpecError::DuplicateBindingName { sets: s, .. } if s == sets),
-            "{sets}: {err:?}"
-        );
+        let err = validate(doc, &profile, &fx2.inputs(&providers)).expect_err("the authority name collides");
+        assert!(matches!(&err, SpecError::DuplicateBindingName { sets: s, .. } if s == sets), "{sets}: {err:?}");
     }
     // No name is reserved for a role: a target and a source carry their role (SB-22a).
-    let named_sink = spec_with(
-        [(id("sink"), resource("test.device", &[]))]
-            .into_iter()
-            .collect(),
-    );
+    let named_sink = spec_with([(id("sink"), resource("test.device", &[]))].into_iter().collect());
     let mut fx_sink = Fixture::new();
     let authority = fx_sink.authorities[&id("radio")].clone();
     fx_sink.authorities.insert(id("sink"), authority);
-    validate(
-        &named_sink,
-        &profile_binding(&["sink"]),
-        &fx_sink.inputs(&one_provider("sink", &p)),
-    )
-    .expect("`sink` is a resource name like any other");
+    validate(&named_sink, &profile_binding(&["sink"]), &fx_sink.inputs(&one_provider("sink", &p))).expect("`sink` is a resource name like any other");
 }
 
 #[test]
@@ -3792,12 +2115,7 @@ fn sb_02_an_ext_key_reaches_the_capability_match() {
     let ext = Key::parse("ext.ezsdr.test.provider.thing").expect("a valid ext key");
     assert!(ext.is_extension());
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        ext.clone(),
-        Constraint::Eq {
-            value: Scalar::from(1),
-        },
-    );
+    req.requires.insert(ext.clone(), Constraint::Eq { value: Scalar::from(1) });
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
@@ -3805,8 +2123,7 @@ fn sb_02_an_ext_key_reaches_the_capability_match() {
 
     // It reaches the capability match, where the node declares nothing under that key,
     // so it is *rejected on the merits* rather than refused as an unknown prefix.
-    let out = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
-        .expect("no UnknownKeyPrefix");
+    let out = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("no UnknownKeyPrefix");
     assert!(!out.is_admitted());
     assert_eq!(out.rejected.len(), 1);
     assert_eq!(out.rejected[0].key, ext);
@@ -3822,32 +2139,19 @@ fn ma_37_a_duplicate_port_name_is_refused_by_validate() {
     let sc16 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id");
     let mut spec = minimal_spec();
     let mut c = support::recorder_component(cf32);
-    c.ports.push(ezsdr_kernel::contract::Port {
-        name: c.ports[0].name.clone(),
-        direction: ezsdr_kernel::contract::PortDirection::In,
-        contract: sc16,
-    });
+    c.ports.push(ezsdr_kernel::contract::Port { name: c.ports[0].name.clone(), direction: ezsdr_kernel::contract::PortDirection::In, contract: sc16 });
     spec.graph.components.insert(id("proc"), c);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
-        .expect_err("MA-37 refuses a duplicate port name");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("MA-37")),
-        "{err:?}"
-    );
+    let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("MA-37 refuses a duplicate port name");
+    assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("MA-37")), "{err:?}");
 
     // And an unregistered contract on a port nothing links to is refused too.
     let mut spec = minimal_spec();
     let ghost = ezsdr_kernel::contract::DataContractId::parse("test.ghost").expect("id");
-    spec.graph
-        .components
-        .insert(id("proc"), support::recorder_component(ghost));
-    assert!(matches!(
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)),
-        Err(SpecError::Structural { .. })
-    ));
+    spec.graph.components.insert(id("proc"), support::recorder_component(ghost));
+    assert!(matches!(validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)), Err(SpecError::Structural { .. })));
 }
 
 #[test]
@@ -3858,12 +2162,7 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
     // whose `prepare` disagreed with its `coerce` put a value the Spec never asked for
     // into `run.effective()` and the Manifest.
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.count"),
-        Constraint::Eq {
-            value: Scalar::from(2),
-        },
-    );
+    req.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
@@ -3872,70 +2171,26 @@ fn ma_12_a_widening_effective_is_refused_at_prepare() {
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
 
     // The node declares `test.count` as exactly 2; a report claiming 7 widens it.
-    let widened = PrepareReport {
-        effective: [(key("test.count"), Value::from(7))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let failed = collect_prepare(
-        vec![(id("radio"), Ok(widened))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("a widening is refused");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
+    let widened = PrepareReport { effective: [(key("test.count"), Value::from(7))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let failed = collect_prepare(vec![(id("radio"), Ok(widened))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a widening is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     // Both halves fire: the widening, and the Spec's own `Eq(2)` no longer satisfied.
     // "MA-12 (re-match)", not bare "MA-12": the narrowing half's message also
     // begins "MA-12", so the looser assertion stayed green with the constraint
     // re-match deleted.
-    assert!(
-        v.iter().any(|x| x.reason.contains("MA-12 (re-match)")),
-        "{v:?}"
-    );
+    assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
 
     // A list is no capability value at all: both halves refuse it, rather than reading
     // its element (spec 26 §3).
-    let listed = PrepareReport {
-        effective: [(key("test.count"), Value::List(vec![Scalar::from(2)]))]
-            .into_iter()
-            .collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let failed = collect_prepare(
-        vec![(id("radio"), Ok(listed))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("a list is refused");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
+    let listed = PrepareReport { effective: [(key("test.count"), Value::List(vec![Scalar::from(2)]))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let failed = collect_prepare(vec![(id("radio"), Ok(listed))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a list is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     assert!(v.iter().any(|x| x.reason.contains("is a scalar")), "{v:?}");
     assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
 
     // The declared value itself passes both.
-    let exact = PrepareReport {
-        effective: [(key("test.count"), Value::from(2))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    assert!(
-        collect_prepare(
-            vec![(id("radio"), Ok(exact))],
-            &spec,
-            &profile,
-            &fx.inputs(&providers),
-            &admission
-        )
-        .is_ok()
-    );
+    let exact = PrepareReport { effective: [(key("test.count"), Value::from(2))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    assert!(collect_prepare(vec![(id("radio"), Ok(exact))], &spec, &profile, &fx.inputs(&providers), &admission).is_ok());
 }
 
 #[test]
@@ -3946,69 +2201,29 @@ fn ma_12_two_resources_naming_one_key_do_not_refuse_each_other() {
     // Spec was unrunnable. Each resource is judged by its own report, and each report
     // keeps its own value (SB-41; spec 20, KH-1).
     let mut a = resource("test.line", &[]);
-    a.requires.insert(
-        key("test.count"),
-        Constraint::Eq {
-            value: Scalar::from(2),
-        },
-    );
+    a.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
     let mut b = resource("test.line", &[]);
-    b.requires.insert(
-        key("test.count"),
-        Constraint::Eq {
-            value: Scalar::from(4),
-        },
-    );
+    b.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(4) });
     let spec = spec_with([(id("a"), a), (id("b"), b)].into_iter().collect());
     let profile = profile_binding(&["a", "b"]);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_asymmetric_lines(2, 4);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p as &dyn Provider),
-        (id("b"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p as &dyn Provider), (id("b"), &p as &dyn Provider)].into_iter().collect();
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(admission.is_admitted());
 
-    let report = |n: i64| PrepareReport {
-        effective: [(key("test.count"), Value::from(n))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let report = |n: i64| PrepareReport { effective: [(key("test.count"), Value::from(n))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
     // Each report states exactly what its own node declares.
-    let reports = collect_prepare(
-        vec![(id("a"), Ok(report(2))), (id("b"), Ok(report(4)))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect("two resources, each satisfied by its own node");
+    let reports =
+        collect_prepare(vec![(id("a"), Ok(report(2))), (id("b"), Ok(report(4)))], &spec, &profile, &fx.inputs(&providers), &admission).expect("two resources, each satisfied by its own node");
     // Both values of the one key are kept, each in its own fragment's report.
-    let counts: Vec<_> = reports
-        .iter()
-        .map(|(f, r)| (f.clone(), r.effective[&key("test.count")].clone()))
-        .collect();
+    let counts: Vec<_> = reports.iter().map(|(f, r)| (f.clone(), r.effective[&key("test.count")].clone())).collect();
     assert_eq!(counts, [(id("a"), Value::from(2)), (id("b"), Value::from(4))]);
 
     // A widening in one report is still refused, and named against that resource.
-    let failed = collect_prepare(
-        vec![(id("a"), Ok(report(9))), (id("b"), Ok(report(4)))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("a's report widens its own node");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
-    assert!(
-        v.iter().any(|x| x.reason.contains("a's effective")),
-        "{v:?}"
-    );
+    let failed = collect_prepare(vec![(id("a"), Ok(report(9))), (id("b"), Ok(report(4)))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a's report widens its own node");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
+    assert!(v.iter().any(|x| x.reason.contains("a's effective")), "{v:?}");
 }
 
 #[test]
@@ -4023,20 +2238,10 @@ fn sb_39_plan_refuses_an_admission_result_from_another_spec() {
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let err = plan(
-        &spec,
-        &profile,
-        &ezsdr_kernel::binding::AdmissionResult::default(),
-        &fx.inputs(&providers),
-    )
-    .expect_err("an empty result is not this Run's");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("SB-39")),
-        "{err:?}"
-    );
+    let err = plan(&spec, &profile, &ezsdr_kernel::binding::AdmissionResult::default(), &fx.inputs(&providers)).expect_err("an empty result is not this Run's");
+    assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-39")), "{err:?}");
     // The real pipeline's result plans, and its fragment carries the request.
-    let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     assert!(built.fragments[0].content.get("requested").is_some());
 }
 
@@ -4044,17 +2249,12 @@ fn sb_39_plan_refuses_an_admission_result_from_another_spec() {
 fn sb_3_no_provider_node_path_is_reserved() {
     // A source carries its role, so a Provider may name its nodes as it likes: under
     // `sink/`, `kernel/`, `unforeseen` or `island_<n>` alike (SB-22h deleted).
-    let spec = spec_with(
-        [(id("radio"), resource("test.device", &[]))]
-            .into_iter()
-            .collect(),
-    );
+    let spec = spec_with([(id("radio"), resource("test.device", &[]))].into_iter().collect());
     let fx = Fixture::new();
     for root in ["sink", "kernel", "unforeseen", "kernel/x", "island_0", "island_12/x"] {
         let p = TestProvider::new(root, 2);
         let providers = one_provider("radio", &p);
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
-            .unwrap_or_else(|err| panic!("{root}: {err:?}"));
+        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).unwrap_or_else(|err| panic!("{root}: {err:?}"));
     }
 }
 
@@ -4064,22 +2264,13 @@ fn sb_02_an_ext_key_needs_a_registered_owner() {
     // hatch unowned: no declaration, no shape check, nobody accountable for the
     // meaning.
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        Key::parse("ext.nobody.owns.this").expect("parses"),
-        Constraint::Eq {
-            value: Scalar::from(1),
-        },
-    );
+    req.requires.insert(Key::parse("ext.nobody.owns.this").expect("parses"), Constraint::Eq { value: Scalar::from(1) });
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers))
-        .expect_err("no registered Module owns it");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("MA-34")),
-        "{err:?}"
-    );
+    let err = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect_err("no registered Module owns it");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("MA-34")), "{err:?}");
 }
 
 #[test]
@@ -4090,13 +2281,9 @@ fn ov_15_a_non_ascii_key_inside_a_value_map_is_refused() {
     // every map is walked (RS-11, OV-15).
     let ascii = Value::Map(BTreeMap::from([("rho".to_owned(), Scalar::from(1))]));
     assert!(ascii.check_ascii_keys("x").is_ok(), "an ASCII key is fine");
-    let from_json: Value =
-        serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
+    let from_json: Value = serde_json::from_value(serde_json::json!({ "\u{3c1}": 1 })).expect("deserialises");
     let err = from_json.check_ascii_keys("params").expect_err("refused");
-    assert!(
-        matches!(&err, SpecError::KeyShape { found, .. } if found.contains("non-ASCII")),
-        "{err:?}"
-    );
+    assert!(matches!(&err, SpecError::KeyShape { found, .. } if found.contains("non-ASCII")), "{err:?}");
 }
 
 #[test]
@@ -4107,16 +2294,9 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
     // re-matching MA-12's constraint over every key refused every coercion by
     // construction and SB-46's `accept` and `warn` branches became unreachable.
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(19.5).unwrap(),
-        },
-    );
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
     let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
-    spec.policies
-        .coercion
-        .insert(key("test.grid"), CoercionPolicy::Accept);
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_grid(20.0);
@@ -4136,20 +2316,9 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         }],
         warnings: Vec::new(),
     };
-    let reports = collect_prepare(
-        vec![(id("radio"), Ok(report))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect("an accepted coercion is applied and recorded, not refused");
+    let reports = collect_prepare(vec![(id("radio"), Ok(report))], &spec, &profile, &fx.inputs(&providers), &admission).expect("an accepted coercion is applied and recorded, not refused");
     assert_eq!(reports[&id("radio")].effective[&key("test.grid")], Value::num(20.0).unwrap());
-    assert_eq!(
-        reports[&id("radio")].coercions.len(),
-        1,
-        "and it is in the PrepareReport"
-    );
+    assert_eq!(reports[&id("radio")].coercions.len(), 1, "and it is in the PrepareReport");
 
     // Applying something other than what `coerce` returned is SB-44's, whether or not
     // the report declares a coercion — the exclusion is keyed on the Kernel's own
@@ -4164,58 +2333,24 @@ fn sb_46_an_accepted_coercion_survives_prepare() {
         }],
         warnings: Vec::new(),
     };
-    let failed = collect_prepare(
-        vec![(id("radio"), Ok(disagreeing))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("the applied value is not the one `coerce` returned");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
+    let failed = collect_prepare(vec![(id("radio"), Ok(disagreeing))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("the applied value is not the one `coerce` returned");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     assert!(v.iter().any(|x| x.reason.contains("SB-44")), "{v:?}");
 
     // A key the Kernel never coerced is still MA-12's, which is the division this
     // restores: `test.count` is satisfied directly, so it has no preview entry.
     let mut counted = resource("test.device", &[]);
-    counted.requires.insert(
-        key("test.count"),
-        Constraint::Eq {
-            value: Scalar::from(2),
-        },
-    );
+    counted.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
     let count_spec = spec_with([(id("radio"), counted)].into_iter().collect());
-    let count_admission =
-        validate(&count_spec, &profile, &fx.inputs(&providers)).expect("validates");
-    assert!(
-        count_admission.coercions_preview.is_empty(),
-        "satisfied directly (SB-6)"
-    );
-    let undeclared = PrepareReport {
-        effective: [(key("test.count"), Value::from(9))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let failed = collect_prepare(
-        vec![(id("radio"), Ok(undeclared))],
-        &count_spec,
-        &profile,
-        &fx.inputs(&providers),
-        &count_admission,
-    )
-    .expect_err("an undeclared change is refused");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
+    let count_admission = validate(&count_spec, &profile, &fx.inputs(&providers)).expect("validates");
+    assert!(count_admission.coercions_preview.is_empty(), "satisfied directly (SB-6)");
+    let undeclared = PrepareReport { effective: [(key("test.count"), Value::from(9))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let failed = collect_prepare(vec![(id("radio"), Ok(undeclared))], &count_spec, &profile, &fx.inputs(&providers), &count_admission).expect_err("an undeclared change is refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     // "MA-12 (re-match)", not bare "MA-12": the narrowing half's message also
     // begins "MA-12", so the looser assertion stayed green with the constraint
     // re-match deleted.
-    assert!(
-        v.iter().any(|x| x.reason.contains("MA-12 (re-match)")),
-        "{v:?}"
-    );
+    assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
 }
 
 #[test]
@@ -4227,42 +2362,20 @@ fn sb_07_coerce_is_called_once_with_the_whole_request() {
     // answered two different questions and the Kernel's check at `prepare` could only
     // be approximate (finding D41).
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(19.5).unwrap(),
-        },
-    );
-    req.requires.insert(
-        key("test.count"),
-        Constraint::Eq {
-            value: Scalar::from(2),
-        },
-    );
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
+    req.requires.insert(key("test.count"), Constraint::Eq { value: Scalar::from(2) });
     let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
-    spec.policies
-        .coercion
-        .insert(key("test.grid"), CoercionPolicy::Accept);
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_grid(20.0);
     let providers = one_provider("radio", &p);
-    let out =
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
+    let out = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
     assert!(out.is_admitted(), "{:?}", out.rejected);
-    assert_eq!(
-        p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "one call for the node, not one per key"
-    );
+    assert_eq!(p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed), 1, "one call for the node, not one per key");
 
     // And the request it saw carried **both** keys — the same map a fragment carries,
     // which is what makes SB-44's equality literal.
-    let seen = p
-        .last_request
-        .lock()
-        .expect("not poisoned")
-        .clone()
-        .expect("coerce was called");
+    let seen = p.last_request.lock().expect("not poisoned").clone().expect("coerce was called");
     assert_eq!(seen.constraints.len(), 2);
     assert!(seen.constraints.contains_key(&key("test.grid")));
     assert!(seen.constraints.contains_key(&key("test.count")));
@@ -4284,26 +2397,13 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
     // Door one: the coercion documents 20.0 and the Run applies 100.0, which is in the
     // node's declared grid so the narrowing half passes.
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(19.5).unwrap(),
-        },
-    );
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
     let mut spec = spec_with([(id("radio"), req)].into_iter().collect());
-    spec.policies
-        .coercion
-        .insert(key("test.grid"), CoercionPolicy::Accept);
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-    assert_eq!(
-        admission.coercions_preview.len(),
-        1,
-        "the Kernel's own record"
-    );
+    assert_eq!(admission.coercions_preview.len(), 1, "the Kernel's own record");
     let lying = PrepareReport {
-        effective: [(key("test.grid"), Value::num(100.0).unwrap())]
-            .into_iter()
-            .collect(),
+        effective: [(key("test.grid"), Value::num(100.0).unwrap())].into_iter().collect(),
         coercions: vec![ezsdr_kernel::spec::Coercion {
             key: key("test.grid"),
             requested: Value::num(19.5).unwrap(),
@@ -4312,68 +2412,30 @@ fn sb_44_a_provider_may_not_exempt_a_key_by_declaring_a_coercion() {
         }],
         warnings: Vec::new(),
     };
-    let failed = collect_prepare(
-        vec![(id("radio"), Ok(lying))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("the applied value is not the documented one");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
+    let failed = collect_prepare(vec![(id("radio"), Ok(lying))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("the applied value is not the documented one");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     assert!(v.iter().any(|x| x.reason.contains("SB-44")), "{v:?}");
 
     // Door two, the worse one: the key was satisfied **directly**, so `coerce` was
     // never called and the dry run previewed nothing — and a coercion invented at
     // `prepare` claimed the exemption anyway.
     let mut direct = resource("test.device", &[]);
-    direct.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(20.0).unwrap(),
-        },
-    );
+    direct.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(20.0).unwrap() });
     let mut spec = spec_with([(id("radio"), direct)].into_iter().collect());
-    spec.policies
-        .coercion
-        .insert(key("test.grid"), CoercionPolicy::Accept);
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-    assert!(
-        admission.coercions_preview.is_empty(),
-        "satisfied directly, so no coercion"
-    );
+    assert!(admission.coercions_preview.is_empty(), "satisfied directly, so no coercion");
     let invented = PrepareReport {
-        effective: [(key("test.grid"), Value::num(100.0).unwrap())]
-            .into_iter()
-            .collect(),
-        coercions: vec![ezsdr_kernel::spec::Coercion {
-            key: key("test.grid"),
-            requested: Value::num(20.0).unwrap(),
-            applied: Value::num(100.0).unwrap(),
-            reason: "invented at prepare".to_owned(),
-        }],
+        effective: [(key("test.grid"), Value::num(100.0).unwrap())].into_iter().collect(),
+        coercions: vec![ezsdr_kernel::spec::Coercion { key: key("test.grid"), requested: Value::num(20.0).unwrap(), applied: Value::num(100.0).unwrap(), reason: "invented at prepare".to_owned() }],
         warnings: Vec::new(),
     };
-    let failed = collect_prepare(
-        vec![(id("radio"), Ok(invented))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("a Spec asking Eq(20.0) may not run at 100");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else {
-        panic!("{failed:?}")
-    };
+    let failed = collect_prepare(vec![(id("radio"), Ok(invented))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a Spec asking Eq(20.0) may not run at 100");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = failed else { panic!("{failed:?}") };
     // "MA-12 (re-match)", not bare "MA-12": the narrowing half's message also
     // begins "MA-12", so the looser assertion stayed green with the constraint
     // re-match deleted.
-    assert!(
-        v.iter().any(|x| x.reason.contains("MA-12 (re-match)")),
-        "{v:?}"
-    );
+    assert!(v.iter().any(|x| x.reason.contains("MA-12 (re-match)")), "{v:?}");
 }
 
 #[test]
@@ -4383,38 +2445,17 @@ fn sb_03_two_instances_may_not_declare_one_node_path() {
     // one address. The matcher treated them as one node and refused the second with
     // `NodeAlreadyBound`, naming two resources colliding on one node when they had
     // asked for two devices.
-    let spec = spec_with(
-        [
-            (id("a"), resource("test.device", &[])),
-            (id("b"), resource("test.device", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), resource("test.device", &[])), (id("b"), resource("test.device", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let one = TestProvider::new("mock", 2);
     let two = TestProvider::new("mock", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &one as &dyn Provider),
-        (id("b"), &two as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &one as &dyn Provider), (id("b"), &two as &dyn Provider)].into_iter().collect();
     let two = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
-    let err =
-        validate(&spec, &two, &fx.inputs(&providers)).expect_err("two instances, one node path");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("SB-3")),
-        "the diagnostic names the real cause: {err:?}"
-    );
+    let err = validate(&spec, &two, &fx.inputs(&providers)).expect_err("two instances, one node path");
+    assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-3")), "the diagnostic names the real cause: {err:?}");
     // Distinct paths bind normally, and one instance bound twice is still SB-34's case.
     let other = TestProvider::new("other", 2);
-    let distinct: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &one as &dyn Provider),
-        (id("b"), &other as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let distinct: BTreeMap<Ident, &dyn Provider> = [(id("a"), &one as &dyn Provider), (id("b"), &other as &dyn Provider)].into_iter().collect();
     assert!(validate(&spec, &two, &fx.inputs(&distinct)).is_ok());
 }
 
@@ -4424,27 +2465,13 @@ fn sb_02_an_ext_key_parses_for_every_module_id_grammar() {
     // Holding an `ext.<module-id>.<path>` key to `Ident`'s grammar refused it at
     // `Key::parse`, before any rule could run, for every Module with a dash or a
     // capital in its id — so MA-34's escape hatch was dead for most of MA-19.
-    for id_text in [
-        "ezsdr.test-provider",
-        "ezsdr.Radio",
-        "ezsdr.test.provider",
-        "vendor.9lives",
-    ] {
-        assert!(
-            ezsdr_kernel::id::ModuleId::parse(id_text).is_ok(),
-            "{id_text} is a valid ModuleId (MA-19)"
-        );
+    for id_text in ["ezsdr.test-provider", "ezsdr.Radio", "ezsdr.test.provider", "vendor.9lives"] {
+        assert!(ezsdr_kernel::id::ModuleId::parse(id_text).is_ok(), "{id_text} is a valid ModuleId (MA-19)");
         let k = format!("ext.{id_text}.thing");
-        assert!(
-            Key::parse(&k).is_ok_and(|k| k.is_extension()),
-            "{k} must parse (SB-2, MA-34)"
-        );
+        assert!(Key::parse(&k).is_ok_and(|k| k.is_extension()), "{k} must parse (SB-2, MA-34)");
     }
     // A Vocabulary-prefixed key keeps the stricter grammar.
-    assert!(
-        Key::parse("test.Grid").is_err(),
-        "a Vocabulary key is lowercase (SB-1)"
-    );
+    assert!(Key::parse("test.Grid").is_err(), "a Vocabulary key is lowercase (SB-1)");
 }
 
 #[test]
@@ -4452,28 +2479,12 @@ fn sb_36_a_need_and_a_resource_of_one_joined_name_do_not_collide() {
     // `needs` is filed by resource, then by need, so `a`'s need `b` and a resource
     // `a_b` are two entries in two maps, not one key `a_b`.
     let mut a = resource("test.device", &[]);
-    a.needs.insert(
-        id("b"),
-        ezsdr_kernel::spec::SubResourceReq {
-            kind: ns("test.line"),
-            requires: BTreeMap::new(),
-        },
-    );
-    let spec = spec_with(
-        [(id("a"), a), (id("a_b"), resource("test.line", &[]))]
-            .into_iter()
-            .collect(),
-    );
+    a.needs.insert(id("b"), ezsdr_kernel::spec::SubResourceReq { kind: ns("test.line"), requires: BTreeMap::new() });
+    let spec = spec_with([(id("a"), a), (id("a_b"), resource("test.line", &[]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p as &dyn Provider),
-        (id("a_b"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let result = validate(&spec, &profile_binding(&["a", "a_b"]), &fx.inputs(&providers))
-        .expect("validates");
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p as &dyn Provider), (id("a_b"), &p as &dyn Provider)].into_iter().collect();
+    let result = validate(&spec, &profile_binding(&["a", "a_b"]), &fx.inputs(&providers)).expect("validates");
     assert!(result.matched.contains_key(&id("a_b")));
     assert!(result.needs[&id("a")].contains_key(&id("b")));
 }
@@ -4482,12 +2493,7 @@ fn sb_36_a_need_and_a_resource_of_one_joined_name_do_not_collide() {
 fn sb_36_needs_whose_joined_names_are_equal_do_not_collide() {
     // `a`/`b_c` and `a_b`/`c` joined to one `a_b_c` before needs were filed by
     // resource; now each resolves under its own resource.
-    let need = |count| SubResourceReq {
-        kind: ns("test.line"),
-        requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(count) })]
-            .into_iter()
-            .collect(),
-    };
+    let need = |count| SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(count) })].into_iter().collect() };
     let mut a = resource("test.device", &[]);
     a.needs.insert(id("b_c"), need(2));
     let mut ab = resource("test.device", &[]);
@@ -4496,10 +2502,7 @@ fn sb_36_needs_whose_joined_names_are_equal_do_not_collide() {
     let fx = Fixture::new();
     let p1 = TestProvider::new("radio", 2);
     let p2 = TestProvider::new("radio2", 4);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &p1 as &dyn Provider),
-        (id("a_b"), &p2 as &dyn Provider),
-    ].into_iter().collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &p1 as &dyn Provider), (id("a_b"), &p2 as &dyn Provider)].into_iter().collect();
     let profile = distinct_instances(profile_binding(&["a", "a_b"]), &["a", "a_b"]);
     let result = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
     assert_ne!(result.needs[&id("a")][&id("b_c")], result.needs[&id("a_b")][&id("c")]);
@@ -4526,102 +2529,34 @@ fn sb_39_two_islands_on_one_executor_is_not_a_cycle() {
 fn sb_06_a_capability_of_the_wrong_kind_is_key_shape_in_every_cell() {
     // SB-6: "a mismatch is `KeyShape`" — including the Range x Range cell, which is
     // the one that could report a malformed capability as merely unsatisfiable.
-    let wrong = CapabilityValue::Range {
-        min: Scalar::from("a"),
-        max: Scalar::from("z"),
-    };
+    let wrong = CapabilityValue::Range { min: Scalar::from("a"), max: Scalar::from("z") };
     for c in [
-        Constraint::Eq {
-            value: Scalar::from(1),
-        },
-        Constraint::Range {
-            min: Some(Scalar::from(1)),
-            max: Some(Scalar::from(2)),
-        },
-        Constraint::Min {
-            value: Scalar::from(1),
-        },
-        Constraint::Max {
-            value: Scalar::from(1),
-        },
+        Constraint::Eq { value: Scalar::from(1) },
+        Constraint::Range { min: Some(Scalar::from(1)), max: Some(Scalar::from(2)) },
+        Constraint::Min { value: Scalar::from(1) },
+        Constraint::Max { value: Scalar::from(1) },
     ] {
-        assert!(
-            matches!(satisfies(&c, &wrong), Err(SpecError::KeyShape { .. })),
-            "{c:?}"
-        );
+        assert!(matches!(satisfies(&c, &wrong), Err(SpecError::KeyShape { .. })), "{c:?}");
     }
 }
 
 #[test]
 fn sb_06_any_of_checks_later_values_after_a_match() {
-    let capability_any = || CapabilityValue::AnyOf {
-        values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
-    };
+    let capability_any = || CapabilityValue::AnyOf { values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())] };
     let malformed_after_match = |constraint: Constraint, capability: CapabilityValue| {
-        assert!(matches!(
-            satisfies(&constraint, &capability),
-            Err(SpecError::KeyShape { .. })
-        ));
+        assert!(matches!(satisfies(&constraint, &capability), Err(SpecError::KeyShape { .. })));
     };
 
-    malformed_after_match(
-        Constraint::Eq {
-            value: Scalar::from(1),
-        },
-        capability_any(),
-    );
-    malformed_after_match(
-        Constraint::Range {
-            min: Some(Scalar::from(0)),
-            max: Some(Scalar::from(2)),
-        },
-        capability_any(),
-    );
-    malformed_after_match(
-        Constraint::Min {
-            value: Scalar::from(1),
-        },
-        capability_any(),
-    );
-    malformed_after_match(
-        Constraint::Max {
-            value: Scalar::from(1),
-        },
-        capability_any(),
-    );
-    malformed_after_match(
-        Constraint::Set {
-            values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
-        },
-        CapabilityValue::One {
-            value: Scalar::from(1),
-        },
-    );
-    malformed_after_match(
-        Constraint::Set {
-            values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
-        },
-        CapabilityValue::Range {
-            min: Scalar::from(0),
-            max: Scalar::from(2),
-        },
-    );
+    malformed_after_match(Constraint::Eq { value: Scalar::from(1) }, capability_any());
+    malformed_after_match(Constraint::Range { min: Some(Scalar::from(0)), max: Some(Scalar::from(2)) }, capability_any());
+    malformed_after_match(Constraint::Min { value: Scalar::from(1) }, capability_any());
+    malformed_after_match(Constraint::Max { value: Scalar::from(1) }, capability_any());
+    malformed_after_match(Constraint::Set { values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())] }, CapabilityValue::One { value: Scalar::from(1) });
+    malformed_after_match(Constraint::Set { values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())] }, CapabilityValue::Range { min: Scalar::from(0), max: Scalar::from(2) });
     // Here the outer Set fold must continue after the first set value matches.
-    malformed_after_match(
-        Constraint::Set {
-            values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())],
-        },
-        CapabilityValue::AnyOf {
-            values: vec![Scalar::from(1)],
-        },
-    );
+    malformed_after_match(Constraint::Set { values: vec![Scalar::from(1), Scalar::from("wrong kind".to_owned())] }, CapabilityValue::AnyOf { values: vec![Scalar::from(1)] });
     // Here the inner AnyOf fold must continue after its first capability matches.
-    malformed_after_match(
-        Constraint::Set {
-            values: vec![Scalar::from(1)],
-        },
-        capability_any(),
-    );
+    malformed_after_match(Constraint::Set { values: vec![Scalar::from(1)] }, capability_any());
 }
 
 #[test]
@@ -4645,16 +2580,10 @@ fn sb_13_an_opaque_parameter_schema_is_not_a_placement() {
             "impl": { "kind": "test.impl", "id": "proc", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
         } } }
     });
-    assert!(
-        ExperimentSpec::from_json(&doc).is_ok(),
-        "an opaque schema is not a placement"
-    );
+    assert!(ExperimentSpec::from_json(&doc).is_ok(), "an opaque schema is not a placement");
     // A real placement field is still refused.
     let doc = serde_json::json!({ "version": 1, "resources": { "r": { "kind": "test.device", "island": 1 } } });
-    assert!(matches!(
-        ExperimentSpec::from_json(&doc),
-        Err(SpecError::PlacementInSpec { .. })
-    ));
+    assert!(matches!(ExperimentSpec::from_json(&doc), Err(SpecError::PlacementInSpec { .. })));
 }
 
 /// `doc` with `value` written at `pointer`.
@@ -4682,11 +2611,7 @@ fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
     let mut spec = minimal_spec();
     spec.schedule.push(ScheduleEntry {
         at: SpecTime { clock: id("radio"), offset_ticks: 0 },
-        action: ActionTemplate::UpdateParameter {
-            target: support::target("radio"),
-            key: key("test.gain"),
-            value: Value::from(1),
-        },
+        action: ActionTemplate::UpdateParameter { target: support::target("radio"), key: key("test.gain"), value: Value::from(1) },
     });
     let spec = serde_json::to_value(&spec).unwrap();
     let mut profile = profile_binding(&["radio"]);
@@ -4700,23 +2625,13 @@ fn sb_04_a_nested_value_is_refused_by_every_deserialiser() {
         at: None,
     })
     .unwrap();
-    let param = serde_json::to_value(ezsdr_kernel::module_api::ParamDecl {
-        key: key("test.gain"),
-        schema: json!({}),
-        update_class: Some(UpdateClass::Cold),
-        default: Value::from(1),
-    })
-    .unwrap();
+    let param = serde_json::to_value(ezsdr_kernel::module_api::ParamDecl { key: key("test.gain"), schema: json!({}), update_class: Some(UpdateClass::Cold), default: Value::from(1) }).unwrap();
     type Parses = fn(&serde_json::Value) -> bool;
     let documents: [(&str, &serde_json::Value, &str, Parses); 4] = [
         ("schedule entry", &spec, "/schedule/0/action/value", |d| ExperimentSpec::from_json(d).is_ok()),
         ("selector", &profile, "/bindings/radio/selector/x", |d| BindingProfile::from_json(d).is_ok()),
-        ("action", &action, "/value", |d| {
-            serde_json::from_value::<ezsdr_kernel::event::Action>(d.clone()).is_ok()
-        }),
-        ("param default", &param, "/default", |d| {
-            serde_json::from_value::<ezsdr_kernel::module_api::ParamDecl>(d.clone()).is_ok()
-        }),
+        ("action", &action, "/value", |d| serde_json::from_value::<ezsdr_kernel::event::Action>(d.clone()).is_ok()),
+        ("param default", &param, "/default", |d| serde_json::from_value::<ezsdr_kernel::module_api::ParamDecl>(d.clone()).is_ok()),
     ];
     for (name, doc, slot, parses) in documents {
         for v in &flat {
@@ -4751,27 +2666,11 @@ fn sb_05_constraint_values_are_scalars() {
     use serde_json::json;
     let spec = serde_json::to_value(minimal_spec()).unwrap();
     let slot = "/resources/radio/requires/test.count";
-    ExperimentSpec::from_json(&with_at(&spec, slot, json!({ "kind": "eq", "value": 2 })))
-        .expect("a scalar constraint");
-    for constraint in [
-        json!({ "kind": "eq", "value": [1] }),
-        json!({ "kind": "min", "value": { "a": 1 } }),
-        json!({ "kind": "range", "min": [1] }),
-        json!({ "kind": "set", "values": [[1]] }),
-    ] {
-        assert!(
-            matches!(
-                ExperimentSpec::from_json(&with_at(&spec, slot, constraint.clone())),
-                Err(SpecError::Structural { .. })
-            ),
-            "{constraint}"
-        );
+    ExperimentSpec::from_json(&with_at(&spec, slot, json!({ "kind": "eq", "value": 2 }))).expect("a scalar constraint");
+    for constraint in [json!({ "kind": "eq", "value": [1] }), json!({ "kind": "min", "value": { "a": 1 } }), json!({ "kind": "range", "min": [1] }), json!({ "kind": "set", "values": [[1]] })] {
+        assert!(matches!(ExperimentSpec::from_json(&with_at(&spec, slot, constraint.clone())), Err(SpecError::Structural { .. })), "{constraint}");
     }
-    for capability in [
-        json!({ "kind": "one", "value": [1] }),
-        json!({ "kind": "range", "min": { "a": 1 }, "max": 2 }),
-        json!({ "kind": "any_of", "values": [[1]] }),
-    ] {
+    for capability in [json!({ "kind": "one", "value": [1] }), json!({ "kind": "range", "min": { "a": 1 }, "max": 2 }), json!({ "kind": "any_of", "values": [[1]] })] {
         assert!(serde_json::from_value::<CapabilityValue>(capability.clone()).is_err(), "{capability}");
     }
 }
@@ -4786,10 +2685,7 @@ fn sb_03_resource_path_addresses_a_sub_resource() {
     assert_eq!(channel.segments().count(), 3);
     assert!(ezsdr_kernel::id::ResourceId::parse("radio//0").is_err());
     assert!(ezsdr_kernel::id::ResourceId::parse("radio/ rx").is_err());
-    assert!(
-        !rid("radio2").is_within(&root),
-        "prefix matching is on segment boundaries"
-    );
+    assert!(!rid("radio2").is_within(&root), "prefix matching is on segment boundaries");
 }
 
 // ------------------------------------------- the Fable second-opinion findings
@@ -4805,102 +2701,63 @@ fn sb_44_a_coercion_is_charged_only_to_the_resource_it_was_computed_for() {
     //
     // This is the ordinary two-channel Spec: two lines, each asking its own grid.
     let mut a = resource("test.device", &[]);
-    a.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(19.5).unwrap(),
-        },
-    );
+    a.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
     let mut b = resource("test.device", &[]);
-    b.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(40.0).unwrap(),
-        },
-    );
+    b.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(40.0).unwrap() });
     let mut spec = spec_with([(id("a"), a), (id("b"), b)].into_iter().collect());
-    spec.policies
-        .coercion
-        .insert(key("test.grid"), CoercionPolicy::Accept);
+    spec.policies.coercion.insert(key("test.grid"), CoercionPolicy::Accept);
     let profile = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
 
     let fx = Fixture::new();
     let pa = TestProvider::new("a", 2).with_grid(20.0);
     let pb = TestProvider::new("b", 2).with_grid(20.0);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &pa as &dyn Provider),
-        (id("b"), &pb as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &pa as &dyn Provider), (id("b"), &pb as &dyn Provider)].into_iter().collect();
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(admission.is_admitted());
     // Exactly one coercion, and it belongs to `a`: `b`'s 40.0 is a declared value.
     assert_eq!(admission.coercions_preview.len(), 1, "only `a` coerced");
-    assert_eq!(
-        admission.coercions_preview[0].resource,
-        id("a"),
-        "and the record says so"
-    );
+    assert_eq!(admission.coercions_preview[0].resource, id("a"), "and the record says so");
 
     let reports = vec![
-        (id("a"), Ok(PrepareReport {
-            effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
-            coercions: vec![ezsdr_kernel::spec::Coercion {
-                key: key("test.grid"),
-                requested: Value::num(19.5).unwrap(),
-                applied: Value::num(20.0).unwrap(),
-                reason: "snapped to a multiple of 20".to_owned(),
-            }],
-            warnings: Vec::new(),
-        })),
-        (id("b"), Ok(PrepareReport {
-            effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })),
+        (
+            id("a"),
+            Ok(PrepareReport {
+                effective: [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
+                coercions: vec![ezsdr_kernel::spec::Coercion {
+                    key: key("test.grid"),
+                    requested: Value::num(19.5).unwrap(),
+                    applied: Value::num(20.0).unwrap(),
+                    reason: "snapped to a multiple of 20".to_owned(),
+                }],
+                warnings: Vec::new(),
+            }),
+        ),
+        (id("b"), Ok(PrepareReport { effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() })),
     ];
-    let reports = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission)
-        .expect("`b` applied what it asked for and is not charged with `a`'s coercion");
+    let reports = collect_prepare(reports, &spec, &profile, &fx.inputs(&providers), &admission).expect("`b` applied what it asked for and is not charged with `a`'s coercion");
     assert_eq!(reports.len(), 2);
 
     // The check is still live for the resource the preview *is* about: `a` applying
     // something other than the 20.0 `coerce` returned is SB-44's own refusal.
     let disagreeing = vec![
-        (id("a"), Ok(PrepareReport {
-            effective: [(key("test.grid"), Value::num(100.0).unwrap())]
-                .into_iter()
-                .collect(),
-            coercions: vec![ezsdr_kernel::spec::Coercion {
-                key: key("test.grid"),
-                requested: Value::num(19.5).unwrap(),
-                applied: Value::num(20.0).unwrap(),
-                reason: "claims 20 and applies 100".to_owned(),
-            }],
-            warnings: Vec::new(),
-        })),
-        (id("b"), Ok(PrepareReport {
-            effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })),
+        (
+            id("a"),
+            Ok(PrepareReport {
+                effective: [(key("test.grid"), Value::num(100.0).unwrap())].into_iter().collect(),
+                coercions: vec![ezsdr_kernel::spec::Coercion {
+                    key: key("test.grid"),
+                    requested: Value::num(19.5).unwrap(),
+                    applied: Value::num(20.0).unwrap(),
+                    reason: "claims 20 and applies 100".to_owned(),
+                }],
+                warnings: Vec::new(),
+            }),
+        ),
+        (id("b"), Ok(PrepareReport { effective: [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() })),
     ];
-    let err = collect_prepare(
-        disagreeing,
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("SB-44 still refuses the resource the preview is about");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-        panic!("expected violations")
-    };
-    assert!(
-        v.iter()
-            .any(|x| x.reason.contains("SB-44") && x.reason.contains("a's effective")),
-        "{v:?}"
-    );
+    let err = collect_prepare(disagreeing, &spec, &profile, &fx.inputs(&providers), &admission).expect_err("SB-44 still refuses the resource the preview is about");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("expected violations") };
+    assert!(v.iter().any(|x| x.reason.contains("SB-44") && x.reason.contains("a's effective")), "{v:?}");
 }
 
 #[test]
@@ -4913,55 +2770,32 @@ fn sb_3_two_bindings_with_one_description_may_be_two_objects() {
     // addresses whatever their descriptions say.
     // Two `test.line` resources, so SB-34 gives each its own node and the only thing
     // under test is SB-3's instance identity.
-    let spec = spec_with(
-        [
-            (id("a"), resource("test.line", &[])),
-            (id("b"), resource("test.line", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("a"), resource("test.line", &[])), (id("b"), resource("test.line", &[]))].into_iter().collect());
     let profile = profile_binding(&["a", "b"]); // one description: empty selectors
     let fx = Fixture::new();
     let first = TestProvider::new("shared", 2);
     let second = TestProvider::new("shared", 2); // a second object, one declared id
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &first as &dyn Provider),
-        (id("b"), &second as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    validate(&spec, &profile, &fx.inputs(&providers))
-        .expect("one description and one declared id is one instance, however many objects");
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &first as &dyn Provider), (id("b"), &second as &dyn Provider)].into_iter().collect();
+    validate(&spec, &profile, &fx.inputs(&providers)).expect("one description and one declared id is one instance, however many objects");
 
     // The second slot may carry a distinct Provider object even though SB-3 deduplicates
     // its binding description. Check both child paths in turn: one is matched for this
     // Spec and one remains unbound, but MA-10 covers both nodes in the second tree.
     for malformed_line in [0, 1] {
-        let malformed_second = TestProvider::new("shared", 2)
-            .with_line_memory_domains(malformed_line, Vec::new());
-        let providers: BTreeMap<Ident, &dyn Provider> = [
-            (id("a"), &first as &dyn Provider),
-            (id("b"), &malformed_second as &dyn Provider),
-        ]
-        .into_iter()
-        .collect();
-        let err = validate(&spec, &profile, &fx.inputs(&providers))
-            .expect_err("MA-10 checks every node of each bound Provider object");
-        assert!(matches!(&err, SpecError::Structural { reason }
-            if reason.contains("MA-10")), "line {malformed_line}: {err:?}");
+        let malformed_second = TestProvider::new("shared", 2).with_line_memory_domains(malformed_line, Vec::new());
+        let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &first as &dyn Provider), (id("b"), &malformed_second as &dyn Provider)].into_iter().collect();
+        let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("MA-10 checks every node of each bound Provider object");
+        assert!(
+            matches!(&err, SpecError::Structural { reason }
+            if reason.contains("MA-10")),
+            "line {malformed_line}: {err:?}"
+        );
     }
 
     // And the refusal the rule is for: one description, two declared ids.
     let other = TestProvider::new("other", 2);
-    let disagreeing: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &first as &dyn Provider),
-        (id("b"), &other as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let err = validate(&spec, &profile, &fx.inputs(&disagreeing))
-        .expect_err("one description cannot name two instances");
+    let disagreeing: BTreeMap<Ident, &dyn Provider> = [(id("a"), &first as &dyn Provider), (id("b"), &other as &dyn Provider)].into_iter().collect();
+    let err = validate(&spec, &profile, &fx.inputs(&disagreeing)).expect_err("one description cannot name two instances");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("SB-3") && reason.contains("one binding description")),
@@ -4985,24 +2819,12 @@ fn ma_41_an_absent_or_non_string_class_is_refused() {
         profile.environment.insert(ns("ezsdr.time"), section);
         profile
     };
-    for (section, expected) in [
-        (
-            serde_json::json!({ "clas": "hardware" }),
-            "declares no `class`",
-        ),
-        (serde_json::json!({}), "declares no `class`"),
-        (serde_json::json!({ "class": 3 }), "is not a string"),
-    ] {
+    for (section, expected) in
+        [(serde_json::json!({ "clas": "hardware" }), "declares no `class`"), (serde_json::json!({}), "declares no `class`"), (serde_json::json!({ "class": 3 }), "is not a string")]
+    {
         let profile = with_time(section.clone());
-        let admission =
-            validate(&spec, &profile, &fx.inputs(&providers)).expect("binding itself is fine");
-        let err = plan(
-            &spec,
-            &profile,
-            &admission,
-            &fx.inputs(&providers),
-        )
-        .expect_err("MA-41 refuses it rather than deriving a class");
+        let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("binding itself is fine");
+        let err = plan(&spec, &profile, &admission, &fx.inputs(&providers)).expect_err("MA-41 refuses it rather than deriving a class");
         assert!(
             matches!(&err, SpecError::Structural { reason }
                 if reason.contains("MA-41") && reason.contains(expected)),
@@ -5012,13 +2834,7 @@ fn ma_41_an_absent_or_non_string_class_is_refused() {
     // The section is optional; only a section that is *present* must declare a class.
     let profile = profile_binding(&["radio"]);
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-    plan(
-        &spec,
-        &profile,
-        &admission,
-        &fx.inputs(&providers),
-    )
-    .expect("no ezsdr.time section is not a declaration to disagree with");
+    plan(&spec, &profile, &admission, &fx.inputs(&providers)).expect("no ezsdr.time section is not a declaration to disagree with");
 }
 
 #[test]
@@ -5029,56 +2845,24 @@ fn sb_39_a_malformed_arm_order_entry_is_refused() {
     // `after` is missing or misspelled contributed no edge and left the fragments in
     // name order — so the PPS source armed second, which is the failure itself, with
     // no diagnostic.
-    let spec = spec_with(
-        [
-            (id("zsource"), resource("test.device", &[])),
-            (id("asink"), resource("test.device", &[])),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("zsource"), resource("test.device", &[])), (id("asink"), resource("test.device", &[]))].into_iter().collect());
     let pz = TestProvider::new("zsource", 2);
     let pa = TestProvider::new("asink", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("zsource"), &pz as &dyn Provider),
-        (id("asink"), &pa as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("zsource"), &pz as &dyn Provider), (id("asink"), &pa as &dyn Provider)].into_iter().collect();
     let with_order = |section: serde_json::Value| {
-        let mut profile = distinct_instances(
-            profile_binding(&["zsource", "asink"]),
-            &["zsource", "asink"],
-        );
+        let mut profile = distinct_instances(profile_binding(&["zsource", "asink"]), &["zsource", "asink"]);
         profile.authority = id("zsource");
         profile.environment.insert(ns("ezsdr.arm_order"), section);
         profile
     };
     let mut fx2 = Fixture::new();
-    fx2.authorities.insert(
-        id("zsource"),
-        AuthorityDescriptor {
-            module: mref("ezsdr.test.provider"),
-            governs: vec![ClockDomainId::HOST_MONOTONIC],
-            pacing: Pacing::FreeRunning,
-        },
-    );
+    fx2.authorities.insert(id("zsource"), AuthorityDescriptor { module: mref("ezsdr.test.provider"), governs: vec![ClockDomainId::HOST_MONOTONIC], pacing: Pacing::FreeRunning });
 
     // The well-formed entry orders the plan, which is what the refusals protect.
     let profile = with_order(serde_json::json!([{ "before": "zsource", "after": "asink" }]));
     let admission = validate(&spec, &profile, &fx2.inputs(&providers)).expect("validates");
-    let p = plan(
-        &spec,
-        &profile,
-        &admission,
-        &fx2.inputs(&providers),
-    )
-    .expect("plans");
-    assert_eq!(
-        p.fragments[0].id,
-        id("zsource"),
-        "the declared edge beats name order"
-    );
+    let p = plan(&spec, &profile, &admission, &fx2.inputs(&providers)).expect("plans");
+    assert_eq!(p.fragments[0].id, id("zsource"), "the declared edge beats name order");
 
     for section in [
         serde_json::json!([{ "befor": "zsource", "after": "asink" }]),
@@ -5088,17 +2872,8 @@ fn sb_39_a_malformed_arm_order_entry_is_refused() {
     ] {
         let profile = with_order(section.clone());
         let admission = validate(&spec, &profile, &fx2.inputs(&providers)).expect("validates");
-        let err = plan(
-            &spec,
-            &profile,
-            &admission,
-            &fx2.inputs(&providers),
-        )
-        .expect_err("a malformed entry is refused, not dropped");
-        assert!(
-            matches!(&err, SpecError::Structural { reason } if reason.contains("SB-39")),
-            "{section}: {err:?}"
-        );
+        let err = plan(&spec, &profile, &admission, &fx2.inputs(&providers)).expect_err("a malformed entry is refused, not dropped");
+        assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-39")), "{section}: {err:?}");
     }
 }
 
@@ -5113,54 +2888,25 @@ fn sb_39_the_plan_records_the_contract_the_link_actually_carries() {
     // already checked SC-3 against the real one.
     let sc16 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id");
     let mut spec = minimal_spec();
-    spec.resources
-        .insert(id("line0"), resource("test.line", &[]));
-    spec.graph
-        .components
-        .insert(id("src"), support::source_component(sc16.clone()));
+    spec.resources.insert(id("line0"), resource("test.line", &[]));
+    spec.graph.components.insert(id("src"), support::source_component(sc16.clone()));
     spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
-        from: PortRef {
-            component: id("src"),
-            port: id("out"),
-        },
-        to: PortRef {
-            component: id("line0"),
-            port: id("tx"),
-        },
+        from: PortRef { component: id("src"), port: id("out") },
+        to: PortRef { component: id("line0"), port: id("tx") },
         policy: BackPressure::DropOldest,
         capacity: 4,
     });
     let mut profile = profile_binding(&["radio", "line0"]);
     bind_exec(&mut profile);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![member("src")],
-        affinity: None,
-        rt_policy: None,
-    });
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![member("src")], affinity: None, rt_policy: None });
     select_test_links(&spec, &mut profile);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &p as &dyn Provider),
-        (id("line0"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &p as &dyn Provider), (id("line0"), &p as &dyn Provider)].into_iter().collect();
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-    let plan = plan(
-        &spec,
-        &profile,
-        &admission,
-        &fx.inputs(&providers),
-    )
-    .expect("plans");
+    let plan = plan(&spec, &profile, &admission, &fx.inputs(&providers)).expect("plans");
     assert_eq!(plan.links.len(), 1);
-    assert_eq!(
-        plan.links[0].contract, sc16,
-        "the bound line's `tx` carries sc16, which is what SC-3 was checked against"
-    );
+    assert_eq!(plan.links[0].contract, sc16, "the bound line's `tx` carries sc16, which is what SC-3 was checked against");
 }
 
 #[test]
@@ -5174,55 +2920,20 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_validate() {
     // substitution of a value nobody requested.
     let spec = minimal_spec();
     let mut with_grid = spec.clone();
-    with_grid
-        .resources
-        .get_mut(&id("radio"))
-        .expect("the fixture's resource")
-        .requires
-        .insert(
-            key("test.grid"),
-            Constraint::Eq {
-                value: Scalar::try_from(19.5).unwrap(),
-            },
-        );
+    with_grid.resources.get_mut(&id("radio")).expect("the fixture's resource").requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(19.5).unwrap() });
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
-    let p = TestProvider::new("radio", 2)
-        .with_grid(20.0)
-        .with_stray_coercion();
+    let p = TestProvider::new("radio", 2).with_grid(20.0).with_stray_coercion();
     let providers = one_provider("radio", &p);
     let admission = validate(&with_grid, &profile, &fx.inputs(&providers)).expect("runs");
     assert!(!admission.is_admitted(), "a malformed report is refused");
-    assert!(
-        admission
-            .violations
-            .iter()
-            .any(|v| v.reason.contains("SB-44")
-                && v.reason.contains("test.flag")
-                && v.reason.contains("does not name")),
-        "{:?}",
-        admission.violations
-    );
+    assert!(admission.violations.iter().any(|v| v.reason.contains("SB-44") && v.reason.contains("test.flag") && v.reason.contains("does not name")), "{:?}", admission.violations);
     // And it is not recorded. `coercions_preview` reaches the Manifest through the
     // `AdmissionResult` (SB-38): recording the stray there kept both harms the refusal
     // exists to prevent — a substitution of a value nobody requested in the document,
     // and that key's own policy default firing for a key nobody named.
-    assert!(
-        admission
-            .coercions_preview
-            .iter()
-            .all(|p| p.coercion.key != key("test.flag")),
-        "{:?}",
-        admission.coercions_preview
-    );
-    assert!(
-        admission
-            .warnings
-            .iter()
-            .all(|w| !format!("{w:?}").contains("test.flag")),
-        "{:?}",
-        admission.warnings
-    );
+    assert!(admission.coercions_preview.iter().all(|p| p.coercion.key != key("test.flag")), "{:?}", admission.coercions_preview);
+    assert!(admission.warnings.iter().all(|w| !format!("{w:?}").contains("test.flag")), "{:?}", admission.warnings);
 }
 
 #[test]
@@ -5245,32 +2956,12 @@ fn sb_44_a_coercion_of_an_unrequested_key_is_refused_at_prepare() {
     // never names `test.flag`.
     let stray = PrepareReport {
         effective: BTreeMap::new(),
-        coercions: vec![ezsdr_kernel::spec::Coercion {
-            key: key("test.flag"),
-            requested: Value::from(false),
-            applied: Value::from(true),
-            reason: "a key the request does not name".to_owned(),
-        }],
+        coercions: vec![ezsdr_kernel::spec::Coercion { key: key("test.flag"), requested: Value::from(false), applied: Value::from(true), reason: "a key the request does not name".to_owned() }],
         warnings: Vec::new(),
     };
-    let err = collect_prepare(
-        vec![(id("radio"), Ok(stray))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("a coercion of a key the request does not name");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-        panic!("violations")
-    };
-    assert!(
-        v.iter().any(|x| x.check == ns("ezsdr.coercion")
-            && x.reason.contains("SB-44")
-            && x.reason.contains("test.flag")
-            && x.reason.contains("does not name")),
-        "{v:?}"
-    );
+    let err = collect_prepare(vec![(id("radio"), Ok(stray))], &spec, &profile, &fx.inputs(&providers), &admission).expect_err("a coercion of a key the request does not name");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+    assert!(v.iter().any(|x| x.check == ns("ezsdr.coercion") && x.reason.contains("SB-44") && x.reason.contains("test.flag") && x.reason.contains("does not name")), "{v:?}");
 }
 
 #[test]
@@ -5283,12 +2974,7 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     // re-match were all skipped in silence. SB-39 guards the same hole one stage
     // earlier, which is what makes the gap reachable rather than theoretical.
     let mut req = resource("test.device", &[]);
-    req.requires.insert(
-        key("test.grid"),
-        Constraint::Eq {
-            value: Scalar::try_from(40.0).unwrap(),
-        },
-    );
+    req.requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(40.0).unwrap() });
     let spec = spec_with([(id("radio"), req)].into_iter().collect());
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
@@ -5296,42 +2982,18 @@ fn sb_30_prepare_refuses_an_admission_result_from_another_spec() {
     let providers = one_provider("radio", &p);
     let report = || PrepareReport {
         // A value the Spec never asked for and the node does not declare.
-        effective: [(key("test.grid"), Value::num(999.0).unwrap())]
-            .into_iter()
-            .collect(),
+        effective: [(key("test.grid"), Value::num(999.0).unwrap())].into_iter().collect(),
         coercions: Vec::new(),
         warnings: Vec::new(),
     };
     let real = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-    collect_prepare(
-        vec![(id("radio"), Ok(report()))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &real,
-    )
-    .expect_err("the real admission catches it");
+    collect_prepare(vec![(id("radio"), Ok(report()))], &spec, &profile, &fx.inputs(&providers), &real).expect_err("the real admission catches it");
 
     let foreign = ezsdr_kernel::binding::AdmissionResult::default();
-    assert!(
-        foreign.is_admitted(),
-        "an empty result is `admitted`, which is the hole"
-    );
-    let err = collect_prepare(
-        vec![(id("radio"), Ok(report()))],
-        &spec,
-        &profile,
-        &fx.inputs(&providers),
-        &foreign,
-    )
-    .expect_err("and an admission that is not this Run's is refused, not believed");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-        panic!("violations")
-    };
-    assert!(
-        v.iter().any(|x| x.reason.contains("not this Run's")),
-        "{v:?}"
-    );
+    assert!(foreign.is_admitted(), "an empty result is `admitted`, which is the hole");
+    let err = collect_prepare(vec![(id("radio"), Ok(report()))], &spec, &profile, &fx.inputs(&providers), &foreign).expect_err("and an admission that is not this Run's is refused, not believed");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+    assert!(v.iter().any(|x| x.reason.contains("not this Run's")), "{v:?}");
 }
 
 #[test]
@@ -5358,35 +3020,17 @@ fn sb_6_equality_is_exact_and_the_matcher_agrees() {
         (i64::MAX, i64::MAX as f64, false),
         (3, 3.5, false),
     ];
-    let written = |v: &Value| {
-        ezsdr_kernel::hash::canonical_json(&serde_json::to_value(v).expect("serialises"))
-            .expect("finite")
-    };
+    let written = |v: &Value| ezsdr_kernel::hash::canonical_json(&serde_json::to_value(v).expect("serialises")).expect("finite");
     for &(i, f, want) in cases {
         let (a, b) = (Scalar::from(i), Scalar::try_from(f).unwrap());
         assert_eq!(a == b, want, "Scalar {i} vs {f}");
         assert_eq!(Value::from(a.clone()) == Value::from(b.clone()), want, "Value {i} vs {f}");
-        assert_eq!(
-            satisfies(
-                &Constraint::Eq { value: b.clone() },
-                &CapabilityValue::One { value: a.clone() }
-            )
-            .expect("both are numbers"),
-            want,
-            "Eq {f} against a declared {i}"
-        );
+        assert_eq!(satisfies(&Constraint::Eq { value: b.clone() }, &CapabilityValue::One { value: a.clone() }).expect("both are numbers"), want, "Eq {f} against a declared {i}");
         // A degenerate `Range` is the same question asked of the ordering, so it must
         // give the same answer — the split between "equality" and "ordering" is what
         // let `Eq` and `Range{v,v}` disagree.
         assert_eq!(
-            satisfies(
-                &Constraint::Range {
-                    min: Some(b.clone()),
-                    max: Some(b.clone())
-                },
-                &CapabilityValue::One { value: a.clone() }
-            )
-            .expect("both are numbers"),
+            satisfies(&Constraint::Range { min: Some(b.clone()), max: Some(b.clone()) }, &CapabilityValue::One { value: a.clone() }).expect("both are numbers"),
             want,
             "Range[{f},{f}] against a declared {i}"
         );
@@ -5395,10 +3039,7 @@ fn sb_6_equality_is_exact_and_the_matcher_agrees() {
     // The order across kinds, in both directions: an `Int` bound against a `Num` and
     // a `Num` bound against an `Int`.
     let num = |x: f64| Scalar::try_from(x).unwrap();
-    let range = |lo: Scalar, hi: Scalar| Constraint::Range {
-        min: Some(lo),
-        max: Some(hi),
-    };
+    let range = |lo: Scalar, hi: Scalar| Constraint::Range { min: Some(lo), max: Some(hi) };
     for (constraint, value, want) in [
         (range(Scalar::from(1), Scalar::from(3)), num(2.5), true),
         (range(Scalar::from(3), Scalar::from(4)), num(2.5), false),
@@ -5411,26 +3052,10 @@ fn sb_6_equality_is_exact_and_the_matcher_agrees() {
 
     // OV-15a's coincidence, stated as the fact it is rather than as the criterion:
     // one value has one hash while |v| <= 2^53, and above it may not.
-    assert_eq!(
-        written(&Value::from(1)),
-        written(&Value::num(1.0).unwrap()),
-        "one value, one hash"
-    );
-    assert_eq!(
-        written(&Value::from(10_000_000_000_000_000)),
-        written(&Value::num(1e16).unwrap()),
-        "and above 2^53 the forms may still agree"
-    );
-    assert_ne!(
-        written(&Value::from(two60)),
-        written(&Value::num(two60 as f64).unwrap()),
-        "but they need not: one value, two documents"
-    );
-    assert_eq!(
-        written(&Value::from(shortest_naming_two60)),
-        written(&Value::num(two60 as f64).unwrap()),
-        "and one document may name two values, which is why the form is not the criterion"
-    );
+    assert_eq!(written(&Value::from(1)), written(&Value::num(1.0).unwrap()), "one value, one hash");
+    assert_eq!(written(&Value::from(10_000_000_000_000_000)), written(&Value::num(1e16).unwrap()), "and above 2^53 the forms may still agree");
+    assert_ne!(written(&Value::from(two60)), written(&Value::num(two60 as f64).unwrap()), "but they need not: one value, two documents");
+    assert_eq!(written(&Value::from(shortest_naming_two60)), written(&Value::num(two60 as f64).unwrap()), "and one document may name two values, which is why the form is not the criterion");
 }
 
 #[test]
@@ -5447,8 +3072,7 @@ fn sb_11_the_declared_vocabulary_major_is_checked() {
     validate(&spec, &profile, &fx.inputs(&providers)).expect("major 1 is what is registered");
 
     spec.requirements.vocabularies[0].major = 2;
-    let err = validate(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("a Spec's keys belong to a major the registry does not have");
+    let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("a Spec's keys belong to a major the registry does not have");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("SB-11") && reason.contains("major 2")),
@@ -5459,10 +3083,7 @@ fn sb_11_the_declared_vocabulary_major_is_checked() {
     // keys then belong to no listed Vocabulary at all.
     spec.requirements.vocabularies[0].id = ns("absent");
     spec.requirements.vocabularies[0].major = 1;
-    assert!(matches!(
-        validate(&spec, &profile, &fx.inputs(&providers)),
-        Err(SpecError::UnknownKeyPrefix { .. })
-    ));
+    assert!(matches!(validate(&spec, &profile, &fx.inputs(&providers)), Err(SpecError::UnknownKeyPrefix { .. })));
 }
 
 #[test]
@@ -5478,17 +3099,8 @@ fn rs_52_a_scheduled_update_states_no_class() {
     let fx = Fixture::new();
     let scheduled = |key_name: &str, value: Value| {
         let mut spec = minimal_spec();
-        spec.schedule.push(ScheduleEntry {
-            at: SpecTime {
-                clock: id("radio"),
-                offset_ticks: 0,
-            },
-            action: ActionTemplate::UpdateParameter {
-                target: support::target("radio"),
-                key: key(key_name),
-                value,
-            },
-        });
+        spec.schedule
+            .push(ScheduleEntry { at: SpecTime { clock: id("radio"), offset_ticks: 0 }, action: ActionTemplate::UpdateParameter { target: support::target("radio"), key: key(key_name), value } });
         spec
     };
     // `test.gain` is the fixture's num-typed Provider parameter and declares a class, so
@@ -5496,18 +3108,8 @@ fn rs_52_a_scheduled_update_states_no_class() {
     // fixed declaration is a declaration gap, refused here (plan §5's
     // `Failed { validate }`), because the entry states no class for `arm` to compare
     // (KC-24 step 5 reads it when the entry is admitted).
-    validate(
-        &scheduled("test.gain", Value::from(1)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("the entry states no class, and the declaration it names gives one");
-    let err = validate(
-        &scheduled("test.count", Value::from(1)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a fixed declaration is a gap validate refuses");
+    validate(&scheduled("test.gain", Value::from(1)), &profile, &fx.inputs(&providers)).expect("the entry states no class, and the declaration it names gives one");
+    let err = validate(&scheduled("test.count", Value::from(1)), &profile, &fx.inputs(&providers)).expect_err("a fixed declaration is a gap validate refuses");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
@@ -5516,12 +3118,7 @@ fn rs_52_a_scheduled_update_states_no_class() {
 
     // SB-2: the entry's value is still checked against its `KeyDecl`'s kind, which is
     // `validate`'s reader of the declaration.
-    let err = validate(
-        &scheduled("test.gain", Value::from(true)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("Bool does not fill a Num declaration");
+    let err = validate(&scheduled("test.gain", Value::from(true)), &profile, &fx.inputs(&providers)).expect_err("Bool does not fill a Num declaration");
     assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
 }
 #[test]
@@ -5546,52 +3143,24 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
         c.params[0].schema = serde_json::json!({ "type": "boolean" });
         spec.graph.components.insert(id("proc"), c);
         spec.schedule.push(ScheduleEntry {
-            at: SpecTime {
-                clock: id("radio"),
-                offset_ticks: 0,
-            },
-            action: ActionTemplate::UpdateParameter {
-                target: Target::Component {
-                    component: id("proc"),
-                },
-                key: key(entry_key),
-                value: Value::from(true),
-            },
+            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+            action: ActionTemplate::UpdateParameter { target: Target::Component { component: id("proc") }, key: key(entry_key), value: Value::from(true) },
         });
         spec
     };
     // A component's parameter key needs no Vocabulary prefix at all (P1-2, item 3):
     // `proc` is declared by no Vocabulary.
-    validate(
-        &scheduled(
-            "proc.threshold",
-            "proc.threshold",
-            Some(UpdateClass::BlockBoundary),
-        ),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("a component key is owned by its component");
+    validate(&scheduled("proc.threshold", "proc.threshold", Some(UpdateClass::BlockBoundary)), &profile, &fx.inputs(&providers)).expect("a component key is owned by its component");
     // A key the component declares fixed, and one whose `ParamDecl` is missing, are
     // both declaration gaps: `validate` refuses each with RS-52, at the schedule
     // entry that names them.
-    let err = validate(
-        &scheduled("test.flag", "test.flag", None),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a fixed declaration is a gap validate refuses");
+    let err = validate(&scheduled("test.flag", "test.flag", None), &profile, &fx.inputs(&providers)).expect_err("a fixed declaration is a gap validate refuses");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
         "{err:?}"
     );
-    let err = validate(
-        &scheduled("test.flag", "test.missing", Some(UpdateClass::BlockBoundary)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a missing declaration is a gap validate refuses");
+    let err = validate(&scheduled("test.flag", "test.missing", Some(UpdateClass::BlockBoundary)), &profile, &fx.inputs(&providers)).expect_err("a missing declaration is a gap validate refuses");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
@@ -5600,23 +3169,13 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
     // The no-fallback rule (item 3): `test.gain`'s `KeyDecl` declares `hardware_timed`,
     // so a fallback would resolve a class where the component's own declaration gives
     // none — and each of these must still be refused as a gap, not admitted.
-    let err = validate(
-        &scheduled("test.gain", "test.gain", None),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a fixed `test.gain` does not fall back to its Vocabulary class");
+    let err = validate(&scheduled("test.gain", "test.gain", None), &profile, &fx.inputs(&providers)).expect_err("a fixed `test.gain` does not fall back to its Vocabulary class");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
         "{err:?}"
     );
-    let err = validate(
-        &scheduled("test.flag", "test.gain", Some(UpdateClass::Cold)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a missing `test.gain` declaration does not fall back either");
+    let err = validate(&scheduled("test.flag", "test.gain", Some(UpdateClass::Cold)), &profile, &fx.inputs(&providers)).expect_err("a missing `test.gain` declaration does not fall back either");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
@@ -5624,35 +3183,16 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
     );
     // A component's value is judged by its own declaration and not by the Vocabulary:
     // the entry sets `test.gain`, whose `KeyDecl` is a `Num`, with a `Bool`.
-    validate(
-        &scheduled("test.gain", "test.gain", Some(UpdateClass::HardwareTimed)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("no Vocabulary kind applies to a component value");
+    validate(&scheduled("test.gain", "test.gain", Some(UpdateClass::HardwareTimed)), &profile, &fx.inputs(&providers)).expect("no Vocabulary kind applies to a component value");
     // The same key on a `{resource}` target is refused: a Provider key is a
     // Vocabulary key (SB-2).
     let mut resource_key = minimal_spec();
     resource_key.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ActionTemplate::UpdateParameter {
-            target: Target::Resource {
-                resource: id("radio"),
-                path: String::new(),
-            },
-            key: key("proc.threshold"),
-            value: Value::from(true),
-        },
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter { target: Target::Resource { resource: id("radio"), path: String::new() }, key: key("proc.threshold"), value: Value::from(true) },
     });
-    let err = validate(&resource_key, &profile, &fx.inputs(&providers))
-        .expect_err("no Vocabulary owns `proc`");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.starts_with("proc.threshold")),
-        "{err:?}"
-    );
+    let err = validate(&resource_key, &profile, &fx.inputs(&providers)).expect_err("no Vocabulary owns `proc`");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.starts_with("proc.threshold")), "{err:?}");
     // A component's params neither lend a class to a Provider key nor shadow the one
     // its `KeyDecl` declares: for a `{resource}` target the Vocabulary is the only
     // source (SB-2, plan §5). `test.grid`'s `KeyDecl` in this fixture states no class,
@@ -5666,38 +3206,18 @@ fn sb_16_a_schedule_entry_may_target_a_component() {
         c.params[0].schema = serde_json::json!({ "type": "number" });
         spec.graph.components.insert(id("proc"), c);
         spec.schedule.push(ScheduleEntry {
-            at: SpecTime {
-                clock: id("radio"),
-                offset_ticks: 0,
-            },
-            action: ActionTemplate::UpdateParameter {
-                target: Target::Resource {
-                    resource: id("radio"),
-                    path: String::new(),
-                },
-                key: key(key_name),
-                value: Value::num(1.0).unwrap(),
-            },
+            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+            action: ActionTemplate::UpdateParameter { target: Target::Resource { resource: id("radio"), path: String::new() }, key: key(key_name), value: Value::num(1.0).unwrap() },
         });
         spec
     };
-    let err = validate(
-        &with_component("test.grid", Some(UpdateClass::BlockBoundary)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("a component's params do not declare a Provider key's class");
+    let err = validate(&with_component("test.grid", Some(UpdateClass::BlockBoundary)), &profile, &fx.inputs(&providers)).expect_err("a component's params do not declare a Provider key's class");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("RS-52") && reason.contains("declares no update class")),
         "{err:?}"
     );
-    validate(
-        &with_component("test.gain", Some(UpdateClass::BlockBoundary)),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect("the Vocabulary's declaration is the one that counts");
+    validate(&with_component("test.gain", Some(UpdateClass::BlockBoundary)), &profile, &fx.inputs(&providers)).expect("the Vocabulary's declaration is the one that counts");
 }
 #[test]
 fn sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind() {
@@ -5716,20 +3236,10 @@ fn sb_02_a_component_value_is_not_checked_against_the_vocabulary_kind() {
     let mut spec = minimal_spec();
     spec.graph.components.insert(id("proc"), component);
     spec.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ActionTemplate::UpdateParameter {
-            target: Target::Component {
-                component: id("proc"),
-            },
-            key: key("test.gain"),
-            value: Value::from(true),
-        },
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter { target: Target::Component { component: id("proc") }, key: key("test.gain"), value: Value::from(true) },
     });
-    validate(&spec, &profile, &fx.inputs(&providers))
-        .expect("a component value is judged by its schema, which the Kernel does not read");
+    validate(&spec, &profile, &fx.inputs(&providers)).expect("a component value is judged by its schema, which the Kernel does not read");
 }
 
 #[test]
@@ -5755,28 +3265,15 @@ fn sb_02_one_key_declared_differently_by_two_components() {
     let scheduled_to = |name: &str| {
         let mut spec = minimal_spec();
         spec.graph.components.insert(id("cold"), component("cold", Some(UpdateClass::Cold)));
-        spec.graph
-            .components
-            .insert(id("hot"), component("hot", Some(UpdateClass::HardwareTimed)));
+        spec.graph.components.insert(id("hot"), component("hot", Some(UpdateClass::HardwareTimed)));
         spec.schedule.push(ScheduleEntry {
-            at: SpecTime {
-                clock: id("radio"),
-                offset_ticks: 0,
-            },
-            action: ActionTemplate::UpdateParameter {
-                target: Target::Component {
-                    component: id(name),
-                },
-                key: key("test.flag"),
-                value: Value::from(true),
-            },
+            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+            action: ActionTemplate::UpdateParameter { target: Target::Component { component: id(name) }, key: key("test.flag"), value: Value::from(true) },
         });
         spec
     };
-    validate(&scheduled_to("cold"), &profile, &fx.inputs(&providers))
-        .expect("cold's declaration is its own");
-    validate(&scheduled_to("hot"), &profile, &fx.inputs(&providers))
-        .expect("hot's declaration is its own");
+    validate(&scheduled_to("cold"), &profile, &fx.inputs(&providers)).expect("cold's declaration is its own");
+    validate(&scheduled_to("hot"), &profile, &fx.inputs(&providers)).expect("hot's declaration is its own");
 }
 #[test]
 fn sb_02_values_are_checked_against_their_key_decl() {
@@ -5792,51 +3289,26 @@ fn sb_02_values_are_checked_against_their_key_decl() {
         spec.outputs.push(OutputReq {
             id: id("rec"),
             kind: ns("test.capture"),
-            feed: SinkFeed {
-                port: PortRef {
-                    component: id("radio"),
-                    port: id("rx"),
-                },
-                policy: BackPressure::DropOldest,
-                capacity: 1,
-            },
+            feed: SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 1 },
             params: [(key(key_name), value)].into_iter().collect(),
         });
         spec
     };
-    let err = validate(&output_with("test.grid", Value::from(true)), &profile, &fx.inputs(&providers))
-        .expect_err("Bool is not a Num");
+    let err = validate(&output_with("test.grid", Value::from(true)), &profile, &fx.inputs(&providers)).expect_err("Bool is not a Num");
     assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
-    let err = validate(
-        &output_with("test.count", Value::num(1.0).expect("finite")),
-        &profile,
-        &fx.inputs(&providers),
-    )
-    .expect_err("Num is not an Int");
+    let err = validate(&output_with("test.count", Value::num(1.0).expect("finite")), &profile, &fx.inputs(&providers)).expect_err("Num is not an Int");
     assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
     // The schedule path: `test.gain` is a `Num` key declared `hardware_timed`.
     let scheduled = |value: Value| {
         let mut spec = minimal_spec();
         spec.schedule.push(ScheduleEntry {
-            at: SpecTime {
-                clock: id("radio"),
-                offset_ticks: 0,
-            },
-            action: ActionTemplate::UpdateParameter {
-                target: Target::Resource {
-                    resource: id("radio"),
-                    path: String::new(),
-                },
-                key: key("test.gain"),
-                value,
-            },
+            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+            action: ActionTemplate::UpdateParameter { target: Target::Resource { resource: id("radio"), path: String::new() }, key: key("test.gain"), value },
         });
         spec
     };
-    validate(&scheduled(Value::from(1)), &profile, &fx.inputs(&providers))
-        .expect("an Int fills a Num declaration");
-    let err = validate(&scheduled(Value::from(true)), &profile, &fx.inputs(&providers))
-        .expect_err("Bool does not fill a Num declaration");
+    validate(&scheduled(Value::from(1)), &profile, &fx.inputs(&providers)).expect("an Int fills a Num declaration");
+    let err = validate(&scheduled(Value::from(true)), &profile, &fx.inputs(&providers)).expect_err("Bool does not fill a Num declaration");
     assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
 }
 
@@ -5852,25 +3324,13 @@ fn sb_02_a_list_value_matches_only_a_list_declaration() {
     let scheduled = |key_name: &str, value: Value| {
         let mut spec = minimal_spec();
         spec.schedule.push(ScheduleEntry {
-            at: SpecTime {
-                clock: id("radio"),
-                offset_ticks: 0,
-            },
-            action: ActionTemplate::UpdateParameter {
-                target: Target::Resource {
-                    resource: id("radio"),
-                    path: String::new(),
-                },
-                key: key(key_name),
-                value,
-            },
+            at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+            action: ActionTemplate::UpdateParameter { target: Target::Resource { resource: id("radio"), path: String::new() }, key: key(key_name), value },
         });
         spec
     };
-    validate(&scheduled("test.list", list()), &profile, &fx.inputs(&providers))
-        .expect("a List fills a List declaration");
-    let err = validate(&scheduled("test.count", list()), &profile, &fx.inputs(&providers))
-        .expect_err("a List does not fill an Int declaration");
+    validate(&scheduled("test.list", list()), &profile, &fx.inputs(&providers)).expect("a List fills a List declaration");
+    let err = validate(&scheduled("test.count", list()), &profile, &fx.inputs(&providers)).expect_err("a List does not fill an Int declaration");
     assert!(matches!(&err, SpecError::KeyShape { .. }), "{err:?}");
 }
 
@@ -5883,128 +3343,59 @@ fn sb_02_the_ext_owner_is_checked_at_every_key_position() {
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let mut coercion = minimal_spec();
-    coercion
-        .policies
-        .coercion
-        .insert(key("ext.nobody.mod.x"), CoercionPolicy::Warn);
-    let err = validate(&coercion, &profile, &fx.inputs(&providers))
-        .expect_err("no Module owns the prefix");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
-        "{err:?}"
-    );
+    coercion.policies.coercion.insert(key("ext.nobody.mod.x"), CoercionPolicy::Warn);
+    let err = validate(&coercion, &profile, &fx.inputs(&providers)).expect_err("no Module owns the prefix");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")), "{err:?}");
     let mut output = minimal_spec();
     output.outputs.push(OutputReq {
         id: id("rec"),
         kind: ns("test.capture"),
-        feed: SinkFeed {
-            port: PortRef {
-                component: id("radio"),
-                port: id("rx"),
-            },
-            policy: BackPressure::DropOldest,
-            capacity: 1,
-        },
+        feed: SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 1 },
         params: [(key("ext.nobody.mod.x"), Value::from(1))].into_iter().collect(),
     });
-    let err = validate(&output, &profile, &fx.inputs(&providers))
-        .expect_err("no Module owns the prefix");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
-        "{err:?}"
-    );
+    let err = validate(&output, &profile, &fx.inputs(&providers)).expect_err("no Module owns the prefix");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")), "{err:?}");
     // P2-1: the `needs[].requires` position.
     let mut need = minimal_spec();
     need.resources
         .get_mut(&id("radio"))
         .expect("radio")
         .needs
-        .insert(
-            id("line"),
-            SubResourceReq {
-                kind: ns("test.line"),
-                requires: [(key("ext.nobody.mod.x"), Constraint::Present {})]
-                    .into_iter()
-                    .collect(),
-            },
-        );
-    let err = validate(&need, &profile, &fx.inputs(&providers))
-        .expect_err("no Module owns the prefix");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
-        "{err:?}"
-    );
+        .insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("ext.nobody.mod.x"), Constraint::Present {})].into_iter().collect() });
+    let err = validate(&need, &profile, &fx.inputs(&providers)).expect_err("no Module owns the prefix");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")), "{err:?}");
     // P2-1: the schedule `{resource}` position.
     let mut scheduled = minimal_spec();
     scheduled.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ActionTemplate::UpdateParameter {
-            target: Target::Resource {
-                resource: id("radio"),
-                path: String::new(),
-            },
-            key: key("ext.nobody.mod.x"),
-            value: Value::from(1),
-        },
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter { target: Target::Resource { resource: id("radio"), path: String::new() }, key: key("ext.nobody.mod.x"), value: Value::from(1) },
     });
-    let err = validate(&scheduled, &profile, &fx.inputs(&providers))
-        .expect_err("no Module owns the prefix");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
-        "{err:?}"
-    );
+    let err = validate(&scheduled, &profile, &fx.inputs(&providers)).expect_err("no Module owns the prefix");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")), "{err:?}");
     // P1-1 (review): `ext.` is stripped once. `ext.ext.ezsdr.test.provider.x` is a
     // legal key whose real owner would be a Module id beginning `ext.ezsdr…`, which
     // no registry holds; stripping every leading `ext.` made `ezsdr.test.provider`
     // "own" it.
     let mut doubled = minimal_spec();
-    doubled
-        .policies
-        .coercion
-        .insert(key("ext.ext.ezsdr.test.provider.x"), CoercionPolicy::Warn);
-    let err = validate(&doubled, &profile, &fx.inputs(&providers))
-        .expect_err("the doubled ext. is not ezsdr.test.provider's");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")),
-        "{err:?}"
-    );
+    doubled.policies.coercion.insert(key("ext.ext.ezsdr.test.provider.x"), CoercionPolicy::Warn);
+    let err = validate(&doubled, &profile, &fx.inputs(&providers)).expect_err("the doubled ext. is not ezsdr.test.provider's");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Module")), "{err:?}");
     // P2-1: a non-`ext.` key whose prefix is declared but that has no `KeyDecl` is
     // refused at the coercion and output positions (item 3; before 3a only a
     // resource's `requires` was checked).
     let mut undeclared = minimal_spec();
-    undeclared
-        .policies
-        .coercion
-        .insert(key("test.undeclared"), CoercionPolicy::Warn);
-    let err = validate(&undeclared, &profile, &fx.inputs(&providers))
-        .expect_err("no KeyDecl declares test.undeclared");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Vocabulary")),
-        "{err:?}"
-    );
+    undeclared.policies.coercion.insert(key("test.undeclared"), CoercionPolicy::Warn);
+    let err = validate(&undeclared, &profile, &fx.inputs(&providers)).expect_err("no KeyDecl declares test.undeclared");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Vocabulary")), "{err:?}");
     let mut undeclared_output = minimal_spec();
     undeclared_output.outputs.push(OutputReq {
         id: id("rec"),
         kind: ns("test.capture"),
-        feed: SinkFeed {
-            port: PortRef {
-                component: id("radio"),
-                port: id("rx"),
-            },
-            policy: BackPressure::DropOldest,
-            capacity: 1,
-        },
+        feed: SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 1 },
         params: [(key("test.undeclared"), Value::from(1))].into_iter().collect(),
     });
-    let err = validate(&undeclared_output, &profile, &fx.inputs(&providers))
-        .expect_err("no KeyDecl declares test.undeclared");
-    assert!(
-        matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Vocabulary")),
-        "{err:?}"
-    );
+    let err = validate(&undeclared_output, &profile, &fx.inputs(&providers)).expect_err("no KeyDecl declares test.undeclared");
+    assert!(matches!(&err, SpecError::UnknownKeyPrefix { key } if key.contains("no registered Vocabulary")), "{err:?}");
 }
 
 #[test]
@@ -6033,20 +3424,10 @@ fn ma_37_a_component_declares_each_parameter_key_once() {
     let mut spec = minimal_spec();
     spec.graph.components.insert(id("proc"), c);
     spec.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ActionTemplate::UpdateParameter {
-            target: Target::Component {
-                component: id("proc"),
-            },
-            key: key("test.capture"),
-            value: Value::from(true),
-        },
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter { target: Target::Component { component: id("proc") }, key: key("test.capture"), value: Value::from(true) },
     });
-    let err = validate(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("the same key is declared twice");
+    let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("the same key is declared twice");
     assert!(
         matches!(&err, SpecError::Structural { reason }
             if reason.contains("MA-37") && reason.contains("duplicate parameter key")),
@@ -6065,21 +3446,11 @@ fn sb_15a_link_direction_is_checked() {
     let cf32 = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("id");
     let linked = |from: (&str, &str), to: (&str, &str)| {
         let mut spec = minimal_spec();
-        spec.graph
-            .components
-            .insert(id("src"), support::source_component(cf32.clone()));
-        spec.graph
-            .components
-            .insert(id("dst"), support::recorder_component(cf32.clone()));
+        spec.graph.components.insert(id("src"), support::source_component(cf32.clone()));
+        spec.graph.components.insert(id("dst"), support::recorder_component(cf32.clone()));
         spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
-            from: PortRef {
-                component: id(from.0),
-                port: id(from.1),
-            },
-            to: PortRef {
-                component: id(to.0),
-                port: id(to.1),
-            },
+            from: PortRef { component: id(from.0), port: id(from.1) },
+            to: PortRef { component: id(to.0), port: id(to.1) },
             policy: BackPressure::DropOldest,
             capacity: 4,
         });
@@ -6087,108 +3458,54 @@ fn sb_15a_link_direction_is_checked() {
     };
     let mut profile = profile_binding(&["radio"]);
     bind_exec(&mut profile);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![member("src"), member("dst")],
-        affinity: None,
-        rt_policy: None,
-    });
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![member("src"), member("dst")], affinity: None, rt_policy: None });
     let valid_link = linked(("src", "out"), ("dst", "in"));
     select_test_links(&valid_link, &mut profile);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
 
-    validate(&valid_link, &profile, &fx.inputs(&providers))
-        .expect("out -> in is the one orientation a link has");
+    validate(&valid_link, &profile, &fx.inputs(&providers)).expect("out -> in is the one orientation a link has");
 
-    for (from, to, why) in [
-        (("dst", "in"), ("dst", "in"), "a consumer cannot produce"),
-        (("src", "out"), ("src", "out"), "a producer cannot consume"),
-    ] {
+    for (from, to, why) in [(("dst", "in"), ("dst", "in"), "a consumer cannot produce"), (("src", "out"), ("src", "out"), "a producer cannot consume")] {
         let err = validate(&linked(from, to), &profile, &fx.inputs(&providers)).expect_err(why);
-        assert!(
-            matches!(&err, SpecError::Structural { reason } if reason.contains("SB-15a")),
-            "{why}: {err:?}"
-        );
+        assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-15a")), "{why}: {err:?}");
     }
 
     // And on a bound resource's port, which is the endpoint SB-15 added: the double's
     // line declares `rx` as `out` and `tx` as `in`.
     let mut spec = minimal_spec();
-    spec.resources
-        .insert(id("line0"), resource("test.line", &[]));
-    spec.graph.components.insert(
-        id("dst"),
-        support::recorder_component(
-            ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id"),
-        ),
-    );
+    spec.resources.insert(id("line0"), resource("test.line", &[]));
+    spec.graph.components.insert(id("dst"), support::recorder_component(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.sc16").expect("id")));
     spec.graph.links.push(ezsdr_kernel::spec::LinkReq {
-        from: PortRef {
-            component: id("line0"),
-            port: id("tx"),
-        },
-        to: PortRef {
-            component: id("dst"),
-            port: id("in"),
-        },
+        from: PortRef { component: id("line0"), port: id("tx") },
+        to: PortRef { component: id("dst"), port: id("in") },
         policy: BackPressure::DropOldest,
         capacity: 4,
     });
     let mut profile = profile_binding(&["radio", "line0"]);
     bind_exec(&mut profile);
-    profile.placements.islands.push(IslandDecl {
-        id: IslandId::local(0),
-        executor: id("exec"),
-        components: vec![member("dst")],
-        affinity: None,
-        rt_policy: None,
-    });
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &p as &dyn Provider),
-        (id("line0"), &p as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let err = validate(&spec, &profile, &fx.inputs(&providers))
-        .expect_err("a resource's `tx` is where samples arrive, not where they leave");
-    assert!(
-        matches!(&err, SpecError::Structural { reason } if reason.contains("SB-15a")),
-        "{err:?}"
-    );
+    profile.placements.islands.push(IslandDecl { id: IslandId::local(0), executor: id("exec"), components: vec![member("dst")], affinity: None, rt_policy: None });
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &p as &dyn Provider), (id("line0"), &p as &dyn Provider)].into_iter().collect();
+    let err = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("a resource's `tx` is where samples arrive, not where they leave");
+    assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("SB-15a")), "{err:?}");
 }
 
 // ---------------------------------------------------------------- bindings and roles (SB-22…SB-22h, SB-24, D95–D99)
 
 /// A binding with no selector, profile or feed (SB-22).
 fn bind(module: &str) -> ezsdr_kernel::binding::Binding {
-    ezsdr_kernel::binding::Binding {
-        module: mref(module),
-        feed: None,
-        selector: BTreeMap::new(),
-        profile: None,
-    }
+    ezsdr_kernel::binding::Binding { module: mref(module), feed: None, selector: BTreeMap::new(), profile: None }
 }
 
 /// An Island's entry for `component`, in memory domain 0 (SB-25, MA-38).
 fn member(component: &str) -> ComponentPlacement {
-    ComponentPlacement {
-        component: id(component),
-        memory_domain: MemoryDomainId::local(0),
-    }
+    ComponentPlacement { component: id(component), memory_domain: MemoryDomainId::local(0) }
 }
 
 /// An Island with no components on the named executor (MA-38).
 fn island(local: u32, executor: &str) -> IslandDecl {
-    IslandDecl {
-        id: IslandId::local(local),
-        executor: id(executor),
-        components: Vec::new(),
-        affinity: None,
-        rt_policy: None,
-    }
+    IslandDecl { id: IslandId::local(local), executor: id(executor), components: Vec::new(), affinity: None, rt_policy: None }
 }
 
 fn cf32_sink() -> TestSink {
@@ -6197,23 +3514,11 @@ fn cf32_sink() -> TestSink {
 
 /// The feed of an output recording `radio`'s `rx` port (SB-17).
 fn radio_feed(capacity: u32) -> ezsdr_kernel::spec::SinkFeed {
-    ezsdr_kernel::spec::SinkFeed {
-        port: PortRef {
-            component: id("radio"),
-            port: id("rx"),
-        },
-        policy: BackPressure::DropOldest,
-        capacity,
-    }
+    ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity }
 }
 
 fn output(name: &str) -> ezsdr_kernel::spec::OutputReq {
-    ezsdr_kernel::spec::OutputReq {
-        id: id(name),
-        kind: ns("test.capture"),
-        feed: radio_feed(4),
-        params: BTreeMap::new(),
-    }
+    ezsdr_kernel::spec::OutputReq { id: id(name), kind: ns("test.capture"), feed: radio_feed(4), params: BTreeMap::new() }
 }
 
 /// Registers Vision §7's `sim-engine`, an Authority and nothing else, and hands in its
@@ -6223,23 +3528,8 @@ fn with_sim_engine(fx: &mut Fixture<'_>, name: &str) -> ModuleRef {
     let mut engine = support::test_provider_descriptor();
     engine.id = sim.id.clone();
     engine.roles = vec![Role::Authority];
-    fx.registry
-        .register(
-            engine,
-            Factories {
-                authority: true,
-                ..Factories::default()
-            },
-        )
-        .expect("an Authority-only Module registers");
-    fx.authorities.insert(
-        id(name),
-        AuthorityDescriptor {
-            module: sim.clone(),
-            governs: Vec::new(),
-            pacing: Pacing::FreeRunning,
-        },
-    );
+    fx.registry.register(engine, Factories { authority: true, ..Factories::default() }).expect("an Authority-only Module registers");
+    fx.authorities.insert(id(name), AuthorityDescriptor { module: sim.clone(), governs: Vec::new(), pacing: Pacing::FreeRunning });
     sim
 }
 
@@ -6252,10 +3542,7 @@ fn refusal<T: std::fmt::Debug>(r: Result<T, SpecError>) -> String {
 }
 
 fn roles_of(plan: &ezsdr_kernel::plan::ExecutionPlan) -> BTreeMap<String, Role> {
-    plan.fragments
-        .iter()
-        .map(|f| (f.id.to_string(), f.role))
-        .collect()
+    plan.fragments.iter().map(|f| (f.id.to_string(), f.role)).collect()
 }
 
 #[test]
@@ -6263,17 +3550,10 @@ fn sb_01_every_name_grammar_is_enforced_at_the_document_boundary() {
     // D95: each of these was `#[serde(transparent)]` over a string, so a document could
     // carry a name no Rust caller could have built. Each is now read through its own
     // `parse`, so deserialisation and parsing agree on every input below.
-    fn agrees<T: serde::de::DeserializeOwned + std::fmt::Debug>(
-        good: &[&str],
-        bad: &[&str],
-        parse: impl Fn(&str) -> bool,
-    ) {
+    fn agrees<T: serde::de::DeserializeOwned + std::fmt::Debug>(good: &[&str], bad: &[&str], parse: impl Fn(&str) -> bool) {
         for s in good {
             assert!(parse(s), "{s:?} parses");
-            assert!(
-                serde_json::from_value::<T>(serde_json::json!(s)).is_ok(),
-                "{s:?} deserialises"
-            );
+            assert!(serde_json::from_value::<T>(serde_json::json!(s)).is_ok(), "{s:?} deserialises");
         }
         for s in bad {
             assert!(!parse(s), "{s:?} does not parse");
@@ -6289,49 +3569,17 @@ fn sb_01_every_name_grammar_is_enforced_at_the_document_boundary() {
     let good_hash = format!("sha256:{hex}");
     let upper_hash = format!("sha256:{}", "A".repeat(64));
     let short_hash = format!("sha256:{}", "0".repeat(63));
-    agrees::<Ident>(
-        &["radio", "radio_0", "a1"],
-        &["Radio", "0radio", "a-b", "", "Bad Name!", "a.b"],
-        |s| Ident::parse(s).is_ok(),
-    );
-    agrees::<Namespace>(
-        &["test", "test.device"],
-        &["A..B", "test.", ".test", "Test.x", ""],
-        |s| Namespace::parse(s).is_ok(),
-    );
-    agrees::<Key>(
-        &["test.count", "ext.My-Mod.x"],
-        &["nodot", "ext.foo", "Test.count", "test..x"],
-        |s| Key::parse(s).is_ok(),
-    );
-    agrees::<ModuleId>(
-        &["ezsdr.test.provider", "My-Mod.x_2"],
-        &["bad id!", "a..b", "", &long],
-        |s| ModuleId::parse(s).is_ok(),
-    );
-    agrees::<EventKind>(
-        &["ezsdr.EVENTS_DROPPED", "test.custom"],
-        &["9 bad", "a..b", "", "a-b", "EVENTS_DROPPED"],
-        |s| EventKind::parse(s).is_ok(),
-    );
-    agrees::<DataContractId>(
-        &["ezsdr.stream.cf32"],
-        &["NOTNS", "Ezsdr.stream", "ezsdr"],
-        |s| DataContractId::parse(s).is_ok(),
-    );
-    agrees::<ContentHash>(&[&good_hash], &["garbage", &upper_hash, &short_hash], |s| {
-        ContentHash::parse(s).is_ok()
-    });
+    agrees::<Ident>(&["radio", "radio_0", "a1"], &["Radio", "0radio", "a-b", "", "Bad Name!", "a.b"], |s| Ident::parse(s).is_ok());
+    agrees::<Namespace>(&["test", "test.device"], &["A..B", "test.", ".test", "Test.x", ""], |s| Namespace::parse(s).is_ok());
+    agrees::<Key>(&["test.count", "ext.My-Mod.x"], &["nodot", "ext.foo", "Test.count", "test..x"], |s| Key::parse(s).is_ok());
+    agrees::<ModuleId>(&["ezsdr.test.provider", "My-Mod.x_2"], &["bad id!", "a..b", "", &long], |s| ModuleId::parse(s).is_ok());
+    agrees::<EventKind>(&["ezsdr.EVENTS_DROPPED", "test.custom"], &["9 bad", "a..b", "", "a-b", "EVENTS_DROPPED"], |s| EventKind::parse(s).is_ok());
+    agrees::<DataContractId>(&["ezsdr.stream.cf32"], &["NOTNS", "Ezsdr.stream", "ezsdr"], |s| DataContractId::parse(s).is_ok());
+    agrees::<ContentHash>(&[&good_hash], &["garbage", &upper_hash, &short_hash], |s| ContentHash::parse(s).is_ok());
     // A `ResourceId` is an object; its path takes SB-1's grammar and its node X7.
     let deep = vec!["a"; 17].join("/");
-    for (path, ok) in [
-        ("radio/rx/0", true),
-        ("a//b", false),
-        ("a/b c", false),
-        (deep.as_str(), false),
-    ] {
-        let parsed =
-            serde_json::from_value::<ResourceId>(serde_json::json!({ "node": 0, "path": path }));
+    for (path, ok) in [("radio/rx/0", true), ("a//b", false), ("a/b c", false), (deep.as_str(), false)] {
+        let parsed = serde_json::from_value::<ResourceId>(serde_json::json!({ "node": 0, "path": path }));
         assert_eq!(parsed.is_ok(), ok, "{path}: {parsed:?}");
         assert_eq!(ResourceId::parse(path).is_ok(), ok, "{path}");
     }
@@ -6365,48 +3613,19 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
     let spec = minimal_spec();
     let profile = profile_binding(&["radio"]);
     let mut fx = Fixture::new();
-    fx.executors.insert(
-        id("ghost"),
-        ExecutorDescriptor {
-            module: mref("ezsdr.test.executor"),
-            kind: ns("test.executor"),
-            memory_domains: Vec::new(),
-            impl_kinds: Vec::new(),
-            capabilities: BTreeMap::new(),
-        },
-    );
-    fx.authorities.insert(
-        id("ghost"),
-        AuthorityDescriptor {
-            module: mref("ezsdr.nobody"),
-            governs: vec![ClockDomainId::local(9)],
-            pacing: Pacing::FreeRunning,
-        },
-    );
+    fx.executors
+        .insert(id("ghost"), ExecutorDescriptor { module: mref("ezsdr.test.executor"), kind: ns("test.executor"), memory_domains: Vec::new(), impl_kinds: Vec::new(), capabilities: BTreeMap::new() });
+    fx.authorities.insert(id("ghost"), AuthorityDescriptor { module: mref("ezsdr.nobody"), governs: vec![ClockDomainId::local(9)], pacing: Pacing::FreeRunning });
     let ghost_sink = cf32_sink().reading(Vec::new());
-    fx.sinks = [(
-        id("ghost"),
-        &ghost_sink as &dyn ezsdr_kernel::module_api::Sink,
-    )]
-    .into_iter()
-    .collect();
+    fx.sinks = [(id("ghost"), &ghost_sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let radio = TestProvider::new("radio", 2);
     // Rooted at the reserved `sink` segment, and another Module version: every
     // check that reads an instance would refuse it.
     let ghost = TestProvider::new("sink", 2)
         .with_instance_id(ResourceId::parse("sink").expect("a path"))
-        .with_module(ModuleRef {
-            id: mid("ezsdr.test.provider"),
-            version: ezsdr_kernel::module_api::Version::new(7, 0, 0),
-        });
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &radio as &dyn Provider),
-        (id("ghost"), &ghost as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers))
-        .expect("nothing supplied under `ghost` is read");
+        .with_module(ModuleRef { id: mid("ezsdr.test.provider"), version: ezsdr_kernel::module_api::Version::new(7, 0, 0) });
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &radio as &dyn Provider), (id("ghost"), &ghost as &dyn Provider)].into_iter().collect();
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("nothing supplied under `ghost` is read");
     assert_eq!(roles_of(&built).keys().collect::<Vec<_>>(), ["radio"]);
     // The same object under a slot's name is read, and refused.
     let as_slot = one_provider("radio", &ghost);
@@ -6415,58 +3634,22 @@ fn sb_22_the_runtime_is_read_only_under_slot_names() {
     // under a non-slot name adds no edge, which would otherwise name no fragment.
     let spare = TestProvider::new("spare_dev", 2);
     let arms = TestProvider::new("radio", 2).arm_after(rid("spare_dev"));
-    let with_spare: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &arms as &dyn Provider),
-        (id("spare"), &spare as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
-    let built = validate_then_plan(&spec, &profile, &fx.inputs(&with_spare))
-        .expect("no edge to a non-slot");
+    let with_spare: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &arms as &dyn Provider), (id("spare"), &spare as &dyn Provider)].into_iter().collect();
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&with_spare)).expect("no edge to a non-slot");
     assert!(built.deps.is_empty(), "{:?}", built.deps);
     // A link endpoint resolves against resource slots only: a need key is in `matched`
     // but is no endpoint, even with a Provider handed in under its name.
     let mut needy = spec.clone();
-    needy
-        .resources
-        .get_mut(&id("radio"))
-        .expect("radio")
-        .needs
-        .insert(
-            id("gpio"),
-            SubResourceReq {
-                kind: ns("test.line"),
-                requires: BTreeMap::new(),
-            },
-        );
-    needy.outputs.push(ezsdr_kernel::spec::OutputReq {
-        feed: ezsdr_kernel::spec::SinkFeed {
-            port: PortRef {
-                component: id("radio_gpio"),
-                port: id("rx"),
-            },
-            ..radio_feed(4)
-        },
-        ..output("rec")
-    });
+    needy.resources.get_mut(&id("radio")).expect("radio").needs.insert(id("gpio"), SubResourceReq { kind: ns("test.line"), requires: BTreeMap::new() });
+    needy.outputs.push(ezsdr_kernel::spec::OutputReq { feed: ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio_gpio"), port: id("rx") }, ..radio_feed(4) }, ..output("rec") });
     let mut rec = profile.clone();
     rec.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
     let sink = cf32_sink();
     let mut fx_rec = Fixture::new();
-    fx_rec.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
-    let under_need: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &radio as &dyn Provider),
-        (id("radio_gpio"), &radio as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    fx_rec.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+    let under_need: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &radio as &dyn Provider), (id("radio_gpio"), &radio as &dyn Provider)].into_iter().collect();
     let reason = refusal(validate(&needy, &rec, &fx_rec.inputs(&under_need)));
-    assert!(
-        reason.contains("SB-17: output rec names source port radio_gpio:rx, which does not exist"),
-        "{reason}"
-    );
+    assert!(reason.contains("SB-17: output rec names source port radio_gpio:rx, which does not exist"), "{reason}");
 }
 
 #[test]
@@ -6476,49 +3659,27 @@ fn sb_22b_spec_run_slots() {
     let mut fx = Fixture::new();
     let sim = with_sim_engine(&mut fx, "sim");
     let sink = cf32_sink();
-    fx.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
+    fx.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let mut spec = minimal_spec();
     spec.outputs.push(output("rec"));
     let mut profile = profile_binding(&["radio"]);
     profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
     bind_exec(&mut profile);
     profile.placements.islands = vec![island(0, "exec"), island(1, "exec")];
-    profile.bindings.insert(
-        id("sim"),
-        ezsdr_kernel::binding::Binding {
-            module: sim,
-            ..bind("ezsdr.test.sink")
-        },
-    );
+    profile.bindings.insert(id("sim"), ezsdr_kernel::binding::Binding { module: sim, ..bind("ezsdr.test.sink") });
     profile.authority = id("sim");
     select_test_links(&spec, &mut profile);
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
-    let want: BTreeMap<String, Role> = [
-        ("island_0", Role::Executor),
-        ("island_1", Role::Executor),
-        ("radio", Role::Provider),
-        ("rec", Role::Sink),
-        ("sim", Role::Authority),
-    ]
-    .into_iter()
-    .map(|(n, r)| (n.to_owned(), r))
-    .collect();
-    assert_eq!(
-        roles_of(&built),
-        want,
-        "one Executor slot serves both Islands"
-    );
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let want: BTreeMap<String, Role> =
+        [("island_0", Role::Executor), ("island_1", Role::Executor), ("radio", Role::Provider), ("rec", Role::Sink), ("sim", Role::Authority)].into_iter().map(|(n, r)| (n.to_owned(), r)).collect();
+    assert_eq!(roles_of(&built), want, "one Executor slot serves both Islands");
     assert_eq!(built.authority, id("sim"));
     // Riding: `authority` names the resource and adds no slot of its own.
     profile.bindings.remove(&id("sim"));
     profile.authority = id("radio");
-    let built =
-        validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
+    let built = validate_then_plan(&spec, &profile, &fx.inputs(&providers)).expect("plans");
     assert!(built.fragments.iter().all(|f| f.role != Role::Authority));
     assert_eq!(built.authority, id("radio"));
 }
@@ -6531,74 +3692,34 @@ fn sb_22c_session_derivation_table() {
     fx.is_session = true;
     let sim = with_sim_engine(&mut fx, "sim");
     let sink = cf32_sink();
-    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
+    let sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     fx.sinks = sinks.clone();
     let mut profile = profile_binding(&["radio"]); // row 3
     bind_exec(&mut profile); // row 1
     profile.placements.islands.push(island(0, "exec"));
-    profile.bindings.insert(
-        id("rec"),
-        ezsdr_kernel::binding::Binding {
-            feed: Some(radio_feed(4)),
-            ..bind("ezsdr.test.sink")
-        },
-    ); // row 2
-    profile.bindings.insert(
-        id("sim"),
-        ezsdr_kernel::binding::Binding {
-            module: sim,
-            ..bind("ezsdr.test.sink")
-        },
-    ); // row 4
+    profile.bindings.insert(id("rec"), ezsdr_kernel::binding::Binding { feed: Some(radio_feed(4)), ..bind("ezsdr.test.sink") }); // row 2
+    profile.bindings.insert(id("sim"), ezsdr_kernel::binding::Binding { module: sim, ..bind("ezsdr.test.sink") }); // row 4
     profile.authority = id("sim");
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks)
-        .expect("derives");
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks).expect("derives");
     assert_eq!(spec.resources.keys().collect::<Vec<_>>(), [&id("radio")]);
-    assert_eq!(
-        spec.resources[&id("radio")].kind,
-        ns("test.device"),
-        "the instance's own root kind"
-    );
+    assert_eq!(spec.resources[&id("radio")].kind, ns("test.device"), "the instance's own root kind");
     assert!(spec.resources[&id("radio")].requires.is_empty());
-    assert_eq!(
-        spec.outputs,
-        vec![output("rec")],
-        "the binding's feed, the Sink's first artifact kind"
-    );
-    assert!(
-        spec.graph.components.is_empty(),
-        "a Sink is never a graph component"
-    );
+    assert_eq!(spec.outputs, vec![output("rec")], "the binding's feed, the Sink's first artifact kind");
+    assert!(spec.graph.components.is_empty(), "a Sink is never a graph component");
     let mut planned = profile.clone();
     select_test_links(&spec, &mut planned);
-    let built = validate_then_plan(&spec, &planned, &fx.inputs(&providers))
-        .expect("the Session plans");
-    let want: BTreeMap<String, Role> = [
-        ("island_0", Role::Executor),
-        ("radio", Role::Provider),
-        ("rec", Role::Sink),
-        ("sim", Role::Authority),
-    ]
-    .into_iter()
-    .map(|(n, r)| (n.to_owned(), r))
-    .collect();
+    let built = validate_then_plan(&spec, &planned, &fx.inputs(&providers)).expect("the Session plans");
+    let want: BTreeMap<String, Role> = [("island_0", Role::Executor), ("radio", Role::Provider), ("rec", Role::Sink), ("sim", Role::Authority)].into_iter().map(|(n, r)| (n.to_owned(), r)).collect();
     assert_eq!(roles_of(&built), want);
 
     // Row 5: a feedless Sink binding fills no slot, and `validate` refuses it.
     let mut spare = planned.clone();
     spare.bindings.insert(id("spare"), bind("ezsdr.test.sink"));
-    let spec5 = ezsdr_kernel::session::implicit_spec(&spare, &fx.registry, &providers, &sinks)
-        .expect("derives");
+    let spec5 = ezsdr_kernel::session::implicit_spec(&spare, &fx.registry, &providers, &sinks).expect("derives");
     assert_eq!(spec5, spec);
-    assert!(
-        refusal(validate(&spec5, &spare, &fx.inputs(&providers)))
-            .contains("SB-22d: binding spare plays no role")
-    );
+    assert!(refusal(validate(&spec5, &spare, &fx.inputs(&providers))).contains("SB-22d: binding spare plays no role"));
 
     // Row 3 named by `authority` is a resource the Authority rides on. The same
     // Provider+Authority binding in a Spec Run whose Spec does not name it is a slot
@@ -6606,107 +3727,41 @@ fn sb_22c_session_derivation_table() {
     let mut clocked = distinct_instances(profile_binding(&["radio", "clock"]), &["radio", "clock"]);
     clocked.authority = id("clock");
     let clock = TestProvider::new("clock", 2);
-    let both: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &p as &dyn Provider),
-        (id("clock"), &clock as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let both: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &p as &dyn Provider), (id("clock"), &clock as &dyn Provider)].into_iter().collect();
     let mut fx2 = Fixture::new();
     fx2.is_session = true;
-    fx2.authorities.insert(
-        id("clock"),
-        AuthorityDescriptor {
-            module: mref("ezsdr.test.provider"),
-            governs: Vec::new(),
-            pacing: Pacing::FreeRunning,
-        },
-    );
+    fx2.authorities.insert(id("clock"), AuthorityDescriptor { module: mref("ezsdr.test.provider"), governs: Vec::new(), pacing: Pacing::FreeRunning });
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let session = ezsdr_kernel::session::implicit_spec(&clocked, &fx2.registry, &both, &no_sinks)
-        .expect("derives");
-    assert_eq!(
-        session.resources.keys().collect::<Vec<_>>(),
-        [&id("clock"), &id("radio")]
-    );
-    let built =
-        validate_then_plan(&session, &clocked, &fx2.inputs(&both)).expect("plans");
+    let session = ezsdr_kernel::session::implicit_spec(&clocked, &fx2.registry, &both, &no_sinks).expect("derives");
+    assert_eq!(session.resources.keys().collect::<Vec<_>>(), [&id("clock"), &id("radio")]);
+    let built = validate_then_plan(&session, &clocked, &fx2.inputs(&both)).expect("plans");
     assert_eq!(roles_of(&built).get("clock"), Some(&Role::Provider));
     fx2.is_session = false;
-    let built = validate_then_plan(&minimal_spec(), &clocked, &fx2.inputs(&both))
-        .expect("plans");
+    let built = validate_then_plan(&minimal_spec(), &clocked, &fx2.inputs(&both)).expect("plans");
     assert_eq!(roles_of(&built).get("clock"), Some(&Role::Authority));
 
     // The derivation refuses only what its row cannot read — registered roles, then the
     // role, then the instance — with SB-22e's and SB-22f's errors.
-    let v9 = ModuleRef {
-        id: mid("ezsdr.test.sink"),
-        version: ezsdr_kernel::module_api::Version::new(9, 0, 0),
-    };
+    let v9 = ModuleRef { id: mid("ezsdr.test.sink"), version: ezsdr_kernel::module_api::Version::new(9, 0, 0) };
     let unregistered_sink = |p: &BindingProfile| {
         let mut p = p.clone();
         p.bindings.get_mut(&id("rec")).expect("bound").module = v9.clone();
         p
     };
-    let reason = refusal(ezsdr_kernel::session::implicit_spec(
-        &unregistered_sink(&profile),
-        &fx.registry,
-        &providers,
-        &sinks,
-    ));
-    assert!(
-        reason.contains(
-            "SB-22e: binding rec names Module ezsdr.test.sink 9.0.0, which is not registered"
-        ),
-        "{reason}"
-    );
+    let reason = refusal(ezsdr_kernel::session::implicit_spec(&unregistered_sink(&profile), &fx.registry, &providers, &sinks));
+    assert!(reason.contains("SB-22e: binding rec names Module ezsdr.test.sink 9.0.0, which is not registered"), "{reason}");
     let mut not_a_sink = profile.clone();
-    not_a_sink
-        .bindings
-        .get_mut(&id("rec"))
-        .expect("bound")
-        .module = mref("ezsdr.test.provider");
-    let e = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &providers, &no_sinks)
-        .expect_err("role before instance");
-    assert!(
-        matches!(&e, SpecError::WrongBindingRole { expected, .. } if expected == "Sink"),
-        "{e:?}"
-    );
-    assert!(
-        refusal(ezsdr_kernel::session::implicit_spec(
-            &profile,
-            &fx.registry,
-            &providers,
-            &no_sinks
-        ))
-        .contains("SB-22f: no Sink instance for binding rec")
-    );
+    not_a_sink.bindings.get_mut(&id("rec")).expect("bound").module = mref("ezsdr.test.provider");
+    let e = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &providers, &no_sinks).expect_err("role before instance");
+    assert!(matches!(&e, SpecError::WrongBindingRole { expected, .. } if expected == "Sink"), "{e:?}");
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &no_sinks)).contains("SB-22f: no Sink instance for binding rec"));
     // Row 2 also reads the Sink's first artifact kind: one that writes none has none to
     // give its output (RS-12).
     let mute = cf32_sink().writing(Vec::new());
-    let mute_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> =
-        [(id("rec"), &mute as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
-    assert!(
-        refusal(ezsdr_kernel::session::implicit_spec(
-            &profile,
-            &fx.registry,
-            &providers,
-            &mute_sinks
-        ))
-        .contains("RS-12: Sink binding rec declares no artifact kind")
-    );
+    let mute_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("rec"), &mute as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &mute_sinks)).contains("RS-12: Sink binding rec declares no artifact kind"));
     let no_providers: BTreeMap<Ident, &dyn Provider> = BTreeMap::new();
-    assert!(
-        refusal(ezsdr_kernel::session::implicit_spec(
-            &profile,
-            &fx.registry,
-            &no_providers,
-            &sinks
-        ))
-        .contains("SB-22f: no Provider instance for binding radio")
-    );
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &no_providers, &sinks)).contains("SB-22f: no Provider instance for binding radio"));
 }
 
 #[test]
@@ -6716,78 +3771,37 @@ fn sb_22d_exactly_the_slots_are_bound() {
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     // A slot with no binding, one of each kind.
-    assert_eq!(
-        validate(&spec, &profile_binding(&[]), &fx.inputs(&providers)),
-        Err(SpecError::UnboundResource { name: id("radio") })
-    );
+    assert_eq!(validate(&spec, &profile_binding(&[]), &fx.inputs(&providers)), Err(SpecError::UnboundResource { name: id("radio") }));
     let mut with_output = spec.clone();
     with_output.outputs.push(output("rec"));
-    assert!(
-        refusal(validate(
-            &with_output,
-            &profile_binding(&["radio"]),
-            &fx.inputs(&providers)
-        ))
-        .contains("UnboundOutput")
-    );
+    assert!(refusal(validate(&with_output, &profile_binding(&["radio"]), &fx.inputs(&providers))).contains("UnboundOutput"));
     let mut unplaced = profile_binding(&["radio"]);
     unplaced.placements.islands.push(island(0, "exec"));
-    assert!(
-        refusal(validate(&spec, &unplaced, &fx.inputs(&providers))).contains("UnboundExecutor")
-    );
+    assert!(refusal(validate(&spec, &unplaced, &fx.inputs(&providers))).contains("UnboundExecutor"));
     let mut nowhere = profile_binding(&["radio"]);
     nowhere.authority = id("nowhere");
-    assert!(
-        refusal(validate(&spec, &nowhere, &fx.inputs(&providers)))
-            .contains("SB-24: `authority` names nowhere, which is not a binding")
-    );
+    assert!(refusal(validate(&spec, &nowhere, &fx.inputs(&providers))).contains("SB-24: `authority` names nowhere, which is not a binding"));
 
     // D89: a binding that fills no slot is read by no check. `ghost` names a version
     // nobody registered and would otherwise have reached the Manifest verbatim (RS-38).
-    let ghost = ModuleRef {
-        id: mid("ezsdr.test.provider"),
-        version: ezsdr_kernel::module_api::Version::new(9, 9, 9),
-    };
-    for (name, module) in [
-        ("spare", mref("ezsdr.test.provider")),
-        ("exec2", mref("ezsdr.test.executor")),
-        ("ghost", ghost),
-    ] {
+    let ghost = ModuleRef { id: mid("ezsdr.test.provider"), version: ezsdr_kernel::module_api::Version::new(9, 9, 9) };
+    for (name, module) in [("spare", mref("ezsdr.test.provider")), ("exec2", mref("ezsdr.test.executor")), ("ghost", ghost)] {
         let mut profile = profile_binding(&["radio"]);
-        profile.bindings.insert(
-            id(name),
-            ezsdr_kernel::binding::Binding {
-                module,
-                ..bind("ezsdr.test.provider")
-            },
-        );
+        profile.bindings.insert(id(name), ezsdr_kernel::binding::Binding { module, ..bind("ezsdr.test.provider") });
         let reason = refusal(validate(&spec, &profile, &fx.inputs(&providers)));
-        assert!(
-            reason.contains(&format!("SB-22d: binding {name} plays no role in this Run")),
-            "{name}: {reason}"
-        );
+        assert!(reason.contains(&format!("SB-22d: binding {name} plays no role in this Run")), "{name}: {reason}");
     }
     // Checked last, so a misspelt output binding is `UnboundOutput`, not "`recc` plays
     // no role".
     let mut misspelt = profile_binding(&["radio"]);
-    misspelt
-        .bindings
-        .insert(id("recc"), bind("ezsdr.test.sink"));
-    assert!(
-        refusal(validate(&with_output, &misspelt, &fx.inputs(&providers)))
-            .contains("UnboundOutput")
-    );
+    misspelt.bindings.insert(id("recc"), bind("ezsdr.test.sink"));
+    assert!(refusal(validate(&with_output, &misspelt, &fx.inputs(&providers))).contains("UnboundOutput"));
     // The same in a Session: an Executor binding no Island names fills no slot.
     let mut session = profile_binding(&["radio"]);
     bind_exec(&mut session);
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let implicit =
-        ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &no_sinks)
-            .expect("builds");
-    assert!(
-        refusal(validate(&implicit, &session, &fx.inputs(&providers)))
-            .contains("SB-22d: binding exec plays no role")
-    );
+    let implicit = ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &no_sinks).expect("builds");
+    assert!(refusal(validate(&implicit, &session, &fx.inputs(&providers))).contains("SB-22d: binding exec plays no role"));
 }
 
 #[test]
@@ -6795,131 +3809,67 @@ fn sb_22e_the_module_holds_the_role() {
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let wrong = |r: Result<ezsdr_kernel::binding::AdmissionResult, SpecError>,
-                 who: &str,
-                 role: &str| {
-        assert!(
-            matches!(&r, Err(SpecError::WrongBindingRole { name, expected, .. }) if *name == id(who) && expected == role),
-            "{who} as {role}: {r:?}"
-        );
+    let wrong = |r: Result<ezsdr_kernel::binding::AdmissionResult, SpecError>, who: &str, role: &str| {
+        assert!(matches!(&r, Err(SpecError::WrongBindingRole { name, expected, .. }) if *name == id(who) && expected == role), "{who} as {role}: {r:?}");
     };
     // A registered Module without the role, for each kind of slot.
     let spec = minimal_spec();
     let mut as_sink = profile_binding(&["radio"]);
-    as_sink
-        .bindings
-        .get_mut(&id("radio"))
-        .expect("bound")
-        .module = mref("ezsdr.test.sink");
-    wrong(
-        validate(&spec, &as_sink, &fx.inputs(&providers)),
-        "radio",
-        "Provider",
-    );
+    as_sink.bindings.get_mut(&id("radio")).expect("bound").module = mref("ezsdr.test.sink");
+    wrong(validate(&spec, &as_sink, &fx.inputs(&providers)), "radio", "Provider");
     let mut with_output = spec.clone();
     with_output.outputs.push(output("rec"));
     let mut rec = profile_binding(&["radio"]);
     rec.bindings.insert(id("rec"), bind("ezsdr.test.provider"));
-    wrong(
-        validate(&with_output, &rec, &fx.inputs(&providers)),
-        "rec",
-        "Sink",
-    );
+    wrong(validate(&with_output, &rec, &fx.inputs(&providers)), "rec", "Sink");
     let mut exec = profile_binding(&["radio"]);
-    exec.bindings
-        .insert(id("exec"), bind("ezsdr.test.provider"));
+    exec.bindings.insert(id("exec"), bind("ezsdr.test.provider"));
     exec.placements.islands.push(island(0, "exec"));
-    wrong(
-        validate(&spec, &exec, &fx.inputs(&providers)),
-        "exec",
-        "Executor",
-    );
+    wrong(validate(&spec, &exec, &fx.inputs(&providers)), "exec", "Executor");
     let mut own = profile_binding(&["radio"]);
     own.bindings.insert(id("sim"), bind("ezsdr.test.sink"));
     own.authority = id("sim");
-    wrong(
-        validate(&spec, &own, &fx.inputs(&providers)),
-        "sim",
-        "Authority",
-    );
+    wrong(validate(&spec, &own, &fx.inputs(&providers)), "sim", "Authority");
     // A resource the Authority rides on must hold Authority as well.
     let mut fx2 = Fixture::new();
     let only = mref("ezsdr.test.provider_only");
     let mut d = support::test_provider_descriptor();
     d.id = only.id.clone();
     d.roles = vec![Role::Provider];
-    fx2.registry
-        .register(
-            d,
-            Factories {
-                provider: true,
-                ..Factories::default()
-            },
-        )
-        .expect("registers");
+    fx2.registry.register(d, Factories { provider: true, ..Factories::default() }).expect("registers");
     let plain = TestProvider::new("radio", 2).with_module(only.clone());
     let plain_providers = one_provider("radio", &plain);
     let mut rides = profile_binding(&["radio"]);
     rides.bindings.get_mut(&id("radio")).expect("bound").module = only;
-    wrong(
-        validate(&spec, &rides, &fx2.inputs(&plain_providers)),
-        "radio",
-        "Authority",
-    );
+    wrong(validate(&spec, &rides, &fx2.inputs(&plain_providers)), "radio", "Authority");
 
     // A version nobody registered is refused as such, with one error on both Run kinds
     // (it used to be `WrongBindingRole` on one and `Structural` on the other).
-    let v2 = ModuleRef {
-        id: mid("ezsdr.test.provider"),
-        version: ezsdr_kernel::module_api::Version::new(2, 0, 0),
-    };
+    let v2 = ModuleRef { id: mid("ezsdr.test.provider"), version: ezsdr_kernel::module_api::Version::new(2, 0, 0) };
     let mut unregistered = profile_binding(&["radio"]);
-    unregistered
-        .bindings
-        .get_mut(&id("radio"))
-        .expect("bound")
-        .module = v2.clone();
+    unregistered.bindings.get_mut(&id("radio")).expect("bound").module = v2.clone();
     let p2 = TestProvider::new("radio", 2).with_module(v2);
     let providers2 = one_provider("radio", &p2);
-    let want =
-        "SB-22e: binding radio names Module ezsdr.test.provider 2.0.0, which is not registered";
+    let want = "SB-22e: binding radio names Module ezsdr.test.provider 2.0.0, which is not registered";
     assert!(refusal(validate(&spec, &unregistered, &fx.inputs(&providers2))).contains(want));
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    assert!(
-        refusal(ezsdr_kernel::session::implicit_spec(
-            &unregistered,
-            &fx.registry,
-            &providers2,
-            &no_sinks
-        ))
-        .contains(want)
-    );
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&unregistered, &fx.registry, &providers2, &no_sinks)).contains(want));
 }
 
 #[test]
 fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
     // For each kind of slot: the object is missing, then it names another version. One
     // profile hash names exactly one Module version per bound name (D78, D82, D98).
-    let v11 = ModuleRef {
-        id: mid("ezsdr.test.provider"),
-        version: ezsdr_kernel::module_api::Version::new(1, 1, 0),
-    };
+    let v11 = ModuleRef { id: mid("ezsdr.test.provider"), version: ezsdr_kernel::module_api::Version::new(1, 1, 0) };
     let spec = minimal_spec();
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     let none: BTreeMap<Ident, &dyn Provider> = BTreeMap::new();
-    assert!(
-        refusal(validate(&spec, &profile, &fx.inputs(&none)))
-            .contains("SB-22f: no Provider instance for binding radio")
-    );
+    assert!(refusal(validate(&spec, &profile, &fx.inputs(&none))).contains("SB-22f: no Provider instance for binding radio"));
     let other = TestProvider::new("radio", 2).with_module(v11.clone());
-    let reason = refusal(validate(
-        &spec,
-        &profile,
-        &fx.inputs(&one_provider("radio", &other)),
-    ));
+    let reason = refusal(validate(&spec, &profile, &fx.inputs(&one_provider("radio", &other))));
     assert!(reason.contains("SB-22f: binding radio names Module ezsdr.test.provider 1.0.0, but its Provider instance is ezsdr.test.provider 1.1.0"), "{reason}");
 
     // A Sink.
@@ -6928,40 +3878,19 @@ fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
     let mut rec = profile_binding(&["radio"]);
     rec.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
     select_test_links(&with_output, &mut rec);
-    assert!(
-        refusal(validate(&with_output, &rec, &fx.inputs(&providers)))
-            .contains("SB-22f: no Sink instance for binding rec")
-    );
-    let sink_v2 = cf32_sink().with_module(ModuleRef {
-        id: mid("ezsdr.test.sink"),
-        version: ezsdr_kernel::module_api::Version::new(2, 0, 0),
-    });
+    assert!(refusal(validate(&with_output, &rec, &fx.inputs(&providers))).contains("SB-22f: no Sink instance for binding rec"));
+    let sink_v2 = cf32_sink().with_module(ModuleRef { id: mid("ezsdr.test.sink"), version: ezsdr_kernel::module_api::Version::new(2, 0, 0) });
     let reading_nothing = cf32_sink().reading(Vec::new());
     let good_sink = cf32_sink();
-    for (sink, want) in [
-        (&sink_v2, "but its Sink instance is ezsdr.test.sink 2.0.0"),
-        (
-            &reading_nothing,
-            "MA-25: output rec's Sink declares no memory domain",
-        ),
-    ] {
+    for (sink, want) in [(&sink_v2, "but its Sink instance is ezsdr.test.sink 2.0.0"), (&reading_nothing, "MA-25: output rec's Sink declares no memory domain")] {
         let mut fx = Fixture::new();
-        fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)]
-            .into_iter()
-            .collect();
-        let reason = refusal(validate_then_plan(
-            &with_output,
-            &rec,
-            &fx.inputs(&providers),
-        ));
+        fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+        let reason = refusal(validate_then_plan(&with_output, &rec, &fx.inputs(&providers)));
         assert!(reason.contains(want), "{want}: {reason}");
     }
     let mut fx_sink = Fixture::new();
-    fx_sink.sinks = [(id("rec"), &good_sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
-    validate_then_plan(&with_output, &rec, &fx_sink.inputs(&providers))
-        .expect("the right Sink plans");
+    fx_sink.sinks = [(id("rec"), &good_sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+    validate_then_plan(&with_output, &rec, &fx_sink.inputs(&providers)).expect("the right Sink plans");
 
     // An Executor.
     let mut placed = profile_binding(&["radio"]);
@@ -6969,14 +3898,8 @@ fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
     placed.placements.islands.push(island(0, "exec"));
     let mut fx_exec = Fixture::new();
     fx_exec.executors.clear();
-    assert!(
-        refusal(validate(&spec, &placed, &fx_exec.inputs(&providers)))
-            .contains("SB-22f: no ExecutorDescriptor for binding exec")
-    );
-    for (edit, want) in [
-        (0, "but its Executor instance is ezsdr.test.executor 2.0.0"),
-        (1, "MA-18: executor exec declares no memory domain"),
-    ] {
+    assert!(refusal(validate(&spec, &placed, &fx_exec.inputs(&providers))).contains("SB-22f: no ExecutorDescriptor for binding exec"));
+    for (edit, want) in [(0, "but its Executor instance is ezsdr.test.executor 2.0.0"), (1, "MA-18: executor exec declares no memory domain")] {
         let mut fx = Fixture::new();
         let d = fx.executors.get_mut(&id("exec")).expect("exec");
         if edit == 0 {
@@ -6991,41 +3914,19 @@ fn sb_22f_the_runtime_supplies_each_slot_at_its_version() {
     // The Authority, riding on `radio` and as a slot of its own (D98).
     let mut fx_auth = Fixture::new();
     fx_auth.authorities.clear();
-    assert!(
-        refusal(validate(&spec, &profile, &fx_auth.inputs(&providers)))
-            .contains("SB-22f: no AuthorityDescriptor for binding radio")
-    );
+    assert!(refusal(validate(&spec, &profile, &fx_auth.inputs(&providers))).contains("SB-22f: no AuthorityDescriptor for binding radio"));
     let mut fx_auth = Fixture::new();
-    fx_auth
-        .authorities
-        .get_mut(&id("radio"))
-        .expect("radio")
-        .module = v11.clone();
+    fx_auth.authorities.get_mut(&id("radio")).expect("radio").module = v11.clone();
     let reason = refusal(validate(&spec, &profile, &fx_auth.inputs(&providers)));
     assert!(reason.contains("SB-22f: binding radio names Module ezsdr.test.provider 1.0.0, but its Authority is ezsdr.test.provider 1.1.0"), "{reason}");
     let mut fx_sim = Fixture::new();
     let sim = with_sim_engine(&mut fx_sim, "sim");
     let mut own = profile_binding(&["radio"]);
-    own.bindings.insert(
-        id("sim"),
-        ezsdr_kernel::binding::Binding {
-            module: sim,
-            ..bind("ezsdr.test.sink")
-        },
-    );
+    own.bindings.insert(id("sim"), ezsdr_kernel::binding::Binding { module: sim, ..bind("ezsdr.test.sink") });
     own.authority = id("sim");
-    validate_then_plan(&spec, &own, &fx_sim.inputs(&providers))
-        .expect("its own version plans");
-    fx_sim
-        .authorities
-        .get_mut(&id("sim"))
-        .expect("sim")
-        .module
-        .version = ezsdr_kernel::module_api::Version::new(3, 0, 0);
-    assert!(
-        refusal(validate(&spec, &own, &fx_sim.inputs(&providers)))
-            .contains("but its Authority is ezsdr.test.sim_engine 3.0.0")
-    );
+    validate_then_plan(&spec, &own, &fx_sim.inputs(&providers)).expect("its own version plans");
+    fx_sim.authorities.get_mut(&id("sim")).expect("sim").module.version = ezsdr_kernel::module_api::Version::new(3, 0, 0);
+    assert!(refusal(validate(&spec, &own, &fx_sim.inputs(&providers))).contains("but its Authority is ezsdr.test.sim_engine 3.0.0"));
 }
 
 #[test]
@@ -7034,10 +3935,7 @@ fn sb_22g_feed_is_a_session_sink_binding_s_only() {
     // second, unread source of truth — including a `Block` policy SC-21 forbids.
     let spec = minimal_spec();
     let mut fed = profile_binding(&["radio"]);
-    fed.bindings.get_mut(&id("radio")).expect("bound").feed = Some(ezsdr_kernel::spec::SinkFeed {
-        policy: BackPressure::Block,
-        ..radio_feed(1)
-    });
+    fed.bindings.get_mut(&id("radio")).expect("bound").feed = Some(ezsdr_kernel::spec::SinkFeed { policy: BackPressure::Block, ..radio_feed(1) });
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
@@ -7046,10 +3944,7 @@ fn sb_22g_feed_is_a_session_sink_binding_s_only() {
     // profile used to validate there; `radio` fills a Provider slot, so it is refused.
     let mut session = Fixture::new();
     session.is_session = true;
-    assert!(
-        refusal(validate(&spec, &fed, &session.inputs(&providers)))
-            .contains("SB-22g: binding radio carries `feed` and fills no Sink slot")
-    );
+    assert!(refusal(validate(&spec, &fed, &session.inputs(&providers))).contains("SB-22g: binding radio carries `feed` and fills no Sink slot"));
     // An Island's executor that carries `feed` is derived as an Executor (row 1), and
     // `validate` refuses the stray feed — the derivation no longer does it itself.
     let mut exec_fed = profile_binding(&["radio"]);
@@ -7057,31 +3952,18 @@ fn sb_22g_feed_is_a_session_sink_binding_s_only() {
     exec_fed.bindings.get_mut(&id("exec")).expect("bound").feed = Some(radio_feed(4));
     exec_fed.placements.islands.push(island(0, "exec"));
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let implicit =
-        ezsdr_kernel::session::implicit_spec(&exec_fed, &session.registry, &providers, &no_sinks)
-            .expect("derives");
-    assert!(
-        refusal(validate(&implicit, &exec_fed, &session.inputs(&providers)))
-            .contains("SB-22g: binding exec carries `feed` and fills no Sink slot")
-    );
+    let implicit = ezsdr_kernel::session::implicit_spec(&exec_fed, &session.registry, &providers, &no_sinks).expect("derives");
+    assert!(refusal(validate(&implicit, &exec_fed, &session.inputs(&providers))).contains("SB-22g: binding exec carries `feed` and fills no Sink slot"));
     // A Session output whose binding carries no feed, or another one.
     let sink = cf32_sink();
-    session.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
+    session.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     let mut with_output = spec.clone();
     with_output.outputs.push(output("rec"));
     let mut rec = profile_binding(&["radio"]);
     rec.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
-    assert!(
-        refusal(validate(&with_output, &rec, &session.inputs(&providers)))
-            .contains("carries no `feed`")
-    );
+    assert!(refusal(validate(&with_output, &rec, &session.inputs(&providers))).contains("carries no `feed`"));
     rec.bindings.get_mut(&id("rec")).expect("bound").feed = Some(radio_feed(8));
-    assert!(
-        refusal(validate(&with_output, &rec, &session.inputs(&providers)))
-            .contains("not its output's")
-    );
+    assert!(refusal(validate(&with_output, &rec, &session.inputs(&providers))).contains("not its output's"));
     rec.bindings.get_mut(&id("rec")).expect("bound").feed = Some(radio_feed(4));
     assert!(validate(&with_output, &rec, &session.inputs(&providers)).is_ok());
 }
@@ -7090,82 +3972,41 @@ fn sb_22g_feed_is_a_session_sink_binding_s_only() {
 fn sb_24_authority_is_named_and_rides_or_stands_alone() {
     // Mandatory: a profile document without it does not parse, and nothing is inferred
     // (D97).
-    assert!(
-        refusal(BindingProfile::from_json(
-            &serde_json::json!({ "version": 1 })
-        ))
-        .contains("authority")
-    );
+    assert!(refusal(BindingProfile::from_json(&serde_json::json!({ "version": 1 }))).contains("authority"));
     let spec = minimal_spec();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
     // Riding on a resource: no fragment of its own, and the class is the resource
     // Authority's pacing.
     let fx = Fixture::new();
-    let built = validate_then_plan(
-        &spec,
-        &profile_binding(&["radio"]),
-        &fx.inputs(&providers),
-    )
-    .expect("plans");
+    let built = validate_then_plan(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("plans");
     assert_eq!(built.authority, id("radio"));
     assert!(built.fragments.iter().all(|f| f.role != Role::Authority));
-    assert_eq!(
-        built.class,
-        ezsdr_kernel::module_api::ExecutionClass::Simulation
-    );
+    assert_eq!(built.class, ezsdr_kernel::module_api::ExecutionClass::Simulation);
     // A slot of its own: Vision §7's `sim-engine`. Its fragment is a record of the Module
     // and version that chose the class — the Authority has no lifecycle (MA-2).
     let mut fx_sim = Fixture::new();
     let sim = with_sim_engine(&mut fx_sim, "sim");
     let mut own = profile_binding(&["radio"]);
-    own.bindings.insert(
-        id("sim"),
-        ezsdr_kernel::binding::Binding {
-            module: sim.clone(),
-            ..bind("ezsdr.test.sink")
-        },
-    );
+    own.bindings.insert(id("sim"), ezsdr_kernel::binding::Binding { module: sim.clone(), ..bind("ezsdr.test.sink") });
     own.authority = id("sim");
-    let built =
-        validate_then_plan(&spec, &own, &fx_sim.inputs(&providers)).expect("plans");
-    let fragment = built
-        .fragments
-        .iter()
-        .find(|f| f.id == id("sim"))
-        .expect("the Authority's own fragment");
+    let built = validate_then_plan(&spec, &own, &fx_sim.inputs(&providers)).expect("plans");
+    let fragment = built.fragments.iter().find(|f| f.id == id("sim")).expect("the Authority's own fragment");
     assert_eq!((fragment.role, &fragment.instance), (Role::Authority, &sim));
     // No content: the Module and version are its `instance`, the selector its binding's.
     assert_eq!(fragment.content, serde_json::Value::Null);
     // Two Authority-capable resources: the one `authority` names decides the class.
     let mut two_spec = spec.clone();
-    two_spec
-        .resources
-        .insert(id("other"), spec.resources[&id("radio")].clone());
+    two_spec.resources.insert(id("other"), spec.resources[&id("radio")].clone());
     let mut two = distinct_instances(profile_binding(&["radio", "other"]), &["radio", "other"]);
     two.authority = id("other");
     let q = TestProvider::new("other", 2);
-    let both: BTreeMap<Ident, &dyn Provider> = [
-        (id("radio"), &p as &dyn Provider),
-        (id("other"), &q as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let both: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &p as &dyn Provider), (id("other"), &q as &dyn Provider)].into_iter().collect();
     let mut fx2 = Fixture::new();
-    fx2.authorities.insert(
-        id("other"),
-        AuthorityDescriptor {
-            module: mref("ezsdr.test.provider"),
-            governs: Vec::new(),
-            pacing: Pacing::WallPaced,
-        },
-    );
+    fx2.authorities.insert(id("other"), AuthorityDescriptor { module: mref("ezsdr.test.provider"), governs: Vec::new(), pacing: Pacing::WallPaced });
     let built = validate_then_plan(&two_spec, &two, &fx2.inputs(&both)).expect("plans");
     assert_eq!(built.authority, id("other"));
-    assert_eq!(
-        built.class,
-        ezsdr_kernel::module_api::ExecutionClass::RealtimeEmulation
-    );
+    assert_eq!(built.class, ezsdr_kernel::module_api::ExecutionClass::RealtimeEmulation);
 }
 
 #[test]
@@ -7179,151 +4020,54 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
     let providers = one_provider("radio", &p);
     let admission = validate(&spec, &clean, &fx.inputs(&providers)).expect("admitted");
     let mut extra = clean.clone();
-    extra
-        .bindings
-        .insert(id("spare"), bind("ezsdr.test.provider"));
-    assert!(
-        refusal(plan(
-            &spec,
-            &extra,
-            &admission,
-            &fx.inputs(&providers)
-        ))
-        .contains("SB-22d: binding spare plays no role")
-    );
+    extra.bindings.insert(id("spare"), bind("ezsdr.test.provider"));
+    assert!(refusal(plan(&spec, &extra, &admission, &fx.inputs(&providers))).contains("SB-22d: binding spare plays no role"));
     // SB-2's and SB-6's structural halves: an unowned `ext.` key, an undeclared key and
     // a constraint of the wrong kind, each refused by `plan` against `radio`'s result.
     for (key_name, constraint, want) in [
-        (
-            "ext.nobody.x",
-            Constraint::Present {},
-            "no registered Module owns this `ext.` prefix",
-        ),
+        ("ext.nobody.x", Constraint::Present {}, "no registered Module owns this `ext.` prefix"),
         ("test.nosuch", Constraint::Present {}, "test.nosuch"),
-        (
-            "test.flag",
-            Constraint::Eq {
-                value: Scalar::from(3),
-            },
-            "KeyShape",
-        ),
+        ("test.flag", Constraint::Eq { value: Scalar::from(3) }, "KeyShape"),
     ] {
         let mut keyed = spec.clone();
-        keyed
-            .resources
-            .get_mut(&id("radio"))
-            .expect("radio")
-            .requires
-            .insert(key(key_name), constraint);
-        let reason = refusal(plan(
-            &keyed,
-            &clean,
-            &admission,
-            &fx.inputs(&providers),
-        ));
+        keyed.resources.get_mut(&id("radio")).expect("radio").requires.insert(key(key_name), constraint);
+        let reason = refusal(plan(&keyed, &clean, &admission, &fx.inputs(&providers)));
         assert!(reason.contains(want), "{key_name}: {reason}");
     }
     // SB-30's first point is re-run too: a result computed without the `test.limits`
     // section does not admit a profile that carries one the Spec's request exceeds.
     let mut limited_fx = Fixture::new();
-    limited_fx
-        .checks
-        .register(std::sync::Arc::new(TestLimitsCheck::new()));
+    limited_fx.checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
     let mut gridded = spec.clone();
-    gridded
-        .resources
-        .get_mut(&id("radio"))
-        .expect("radio")
-        .requires
-        .insert(
-            key("test.grid"),
-            Constraint::Eq {
-                value: Scalar::try_from(40.0).unwrap(),
-            },
-        );
-    let gridded_admission = validate(&gridded, &clean, &limited_fx.inputs(&providers))
-        .expect("no section, no violation");
+    gridded.resources.get_mut(&id("radio")).expect("radio").requires.insert(key("test.grid"), Constraint::Eq { value: Scalar::try_from(40.0).unwrap() });
+    let gridded_admission = validate(&gridded, &clean, &limited_fx.inputs(&providers)).expect("no section, no violation");
     let mut limited = clean.clone();
-    limited
-        .environment
-        .insert(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }));
-    assert!(
-        refusal(plan(
-            &gridded,
-            &limited,
-            &gridded_admission,
-            &limited_fx.inputs(&providers)
-        ))
-        .contains("exceeds the declared ceiling")
-    );
+    limited.environment.insert(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }));
+    assert!(refusal(plan(&gridded, &limited, &gridded_admission, &limited_fx.inputs(&providers))).contains("exceeds the declared ceiling"));
     // A stale result: matched against one instance and planned against another whose
     // tree does not declare the node. "Every resource has a matched node" held, so the
     // Provider fragment would have requested a node its instance does not have.
     // The endpoint checks too: an output fed from a port its node does not declare
     // (SB-17), handed to `plan` beside an admission `validate` gave a Spec without it.
     let mut backwards = spec.clone();
-    backwards.outputs.push(ezsdr_kernel::spec::OutputReq {
-        feed: ezsdr_kernel::spec::SinkFeed {
-            port: PortRef {
-                component: id("radio"),
-                port: id("nowhere"),
-            },
-            ..radio_feed(4)
-        },
-        ..output("rec")
-    });
+    backwards.outputs.push(ezsdr_kernel::spec::OutputReq { feed: ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("nowhere") }, ..radio_feed(4) }, ..output("rec") });
     let mut rec = clean.clone();
     rec.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
     let sink = cf32_sink();
     let mut fx_rec = Fixture::new();
-    fx_rec.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
-    let reason = refusal(plan(
-        &backwards,
-        &rec,
-        &admission,
-        &fx_rec.inputs(&providers),
-    ));
-    assert!(
-        reason.contains("SB-17: output rec names source port radio:nowhere"),
-        "{reason}"
-    );
+    fx_rec.sinks = [(id("rec"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
+    let reason = refusal(plan(&backwards, &rec, &admission, &fx_rec.inputs(&providers)));
+    assert!(reason.contains("SB-17: output rec names source port radio:nowhere"), "{reason}");
     let elsewhere = TestProvider::new("elsewhere", 2);
     let moved = one_provider("radio", &elsewhere);
-    let reason = refusal(plan(
-        &spec,
-        &clean,
-        &admission,
-        &fx.inputs(&moved),
-    ));
-    assert!(
-        reason.contains("SB-39") && reason.contains("is not one its bound instance declares"),
-        "{reason}"
-    );
+    let reason = refusal(plan(&spec, &clean, &admission, &fx.inputs(&moved)));
+    assert!(reason.contains("SB-39") && reason.contains("is not one its bound instance declares"), "{reason}");
     // `collect_prepare` applies the same guard, rather than skipping MA-12 and SB-44 for
     // a node it cannot find.
-    let report = PrepareReport {
-        effective: BTreeMap::new(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let err = collect_prepare(
-        vec![(id("radio"), Ok(report))],
-        &spec,
-        &clean,
-        &fx.inputs(&moved),
-        &admission,
-    )
-    .expect_err("refused");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-        panic!("violations")
-    };
-    assert!(
-        v.iter()
-            .any(|x| x.reason.contains("is not one its bound instance declares")),
-        "{v:?}"
-    );
+    let report = PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
+    let err = collect_prepare(vec![(id("radio"), Ok(report))], &spec, &clean, &fx.inputs(&moved), &admission).expect_err("refused");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+    assert!(v.iter().any(|x| x.reason.contains("is not one its bound instance declares")), "{v:?}");
 }
 
 // ---------------------------------------------------------------- Phase 2 amendments
@@ -7332,163 +4076,64 @@ fn sb_39_plan_reruns_the_structural_checks_and_refuses_a_stale_admission() {
 fn sb_30_the_check_sees_each_fragment_s_own_value() {
     // KA-4: two resources name one key. A merged map keeps one value — in resource
     // order, `b`'s — so a check over it misses `a`, which is the one over the ceiling.
-    let env: BTreeMap<Namespace, serde_json::Value> =
-        [(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }))]
-            .into_iter()
-            .collect();
-    let grid = |v: f64| {
-        resource(
-            "test.device",
-            &[(
-                "test.grid",
-                Constraint::Eq {
-                    value: Scalar::try_from(v).unwrap(),
-                },
-            )],
-        )
-    };
-    let spec = spec_with(
-        [(id("a"), grid(40.0)), (id("b"), grid(20.0))]
-            .into_iter()
-            .collect(),
-    );
+    let env: BTreeMap<Namespace, serde_json::Value> = [(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }))].into_iter().collect();
+    let grid = |v: f64| resource("test.device", &[("test.grid", Constraint::Eq { value: Scalar::try_from(v).unwrap() })]);
+    let spec = spec_with([(id("a"), grid(40.0)), (id("b"), grid(20.0))].into_iter().collect());
     let mut fx = Fixture::new();
-    fx.checks
-        .register(std::sync::Arc::new(TestLimitsCheck::new()));
+    fx.checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
     let (pa, pb) = (TestProvider::new("a", 2), TestProvider::new("b", 2));
-    let providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &pa as &dyn Provider),
-        (id("b"), &pb as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &pa as &dyn Provider), (id("b"), &pb as &dyn Provider)].into_iter().collect();
     let mut profile = distinct_instances(profile_binding(&["a", "b"]), &["a", "b"]);
     profile.environment = env.clone();
-    let names_a = |v: &[ezsdr_kernel::binding::Violation]| {
-        v.len() == 1 && v[0].reason.starts_with("a: ") && v[0].requested == Some(Value::num(40.0).unwrap())
-    };
+    let names_a = |v: &[ezsdr_kernel::binding::Violation]| v.len() == 1 && v[0].reason.starts_with("a: ") && v[0].requested == Some(Value::num(40.0).unwrap());
 
     // 1. validate: one entry per resource, holding its `Eq` constraints' values.
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
     assert!(names_a(&admission.violations), "{:?}", admission.violations);
 
     // A need's `Eq` values are its resource's fragment's too (SB-30, KA-4).
-    let mut with_need = spec_with(
-        [
-            (id("a"), resource("test.device", &[])),
-            (id("b"), grid(20.0)),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let mut with_need = spec_with([(id("a"), resource("test.device", &[])), (id("b"), grid(20.0))].into_iter().collect());
     with_need
         .resources
         .get_mut(&id("a"))
         .expect("a")
         .needs
-        .insert(
-            id("line"),
-            SubResourceReq {
-                kind: ns("test.line"),
-                requires: [(
-                    key("test.grid"),
-                    Constraint::Eq {
-                        value: Scalar::try_from(40.0).unwrap(),
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            },
-        );
+        .insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.grid"), Constraint::Eq { value: Scalar::try_from(40.0).unwrap() })].into_iter().collect() });
     let pa_lines = TestProvider::new("a", 2).with_line_grid();
-    let need_providers: BTreeMap<Ident, &dyn Provider> = [
-        (id("a"), &pa_lines as &dyn Provider),
-        (id("b"), &pb as &dyn Provider),
-    ]
-    .into_iter()
-    .collect();
+    let need_providers: BTreeMap<Ident, &dyn Provider> = [(id("a"), &pa_lines as &dyn Provider), (id("b"), &pb as &dyn Provider)].into_iter().collect();
     // A need's `Eq` values are **not** joined to its resource's entry (item 3,
     // owner 2026-10-11): a need is a resolution to a node, and a check judges the
     // fragment's own request. The 40.0 lives in the need's `requires` and not in
     // `a`'s own (which is empty), so nothing is refused; the need still resolves.
     let admission = validate(&with_need, &profile, &fx.inputs(&need_providers)).expect("runs");
     assert!(
-        !admission
-            .violations
-            .iter()
-            .any(|v| v.check == ns("test.limits") && v.reason.starts_with("a: ")),
+        !admission.violations.iter().any(|v| v.check == ns("test.limits") && v.reason.starts_with("a: ")),
         "the need's value is not its resource's requested configuration: {:?}",
         admission.violations
     );
-    assert!(
-        admission.needs.contains_key(&id("a")),
-        "the need still resolves: {:?}",
-        admission.needs
-    );
+    assert!(admission.needs.contains_key(&id("a")), "the need still resolves: {:?}", admission.needs);
 
     // 2. prepare: one entry per report.
-    let admitted_spec = spec_with(
-        [(id("a"), grid(20.0)), (id("b"), grid(20.0))]
-            .into_iter()
-            .collect(),
-    );
+    let admitted_spec = spec_with([(id("a"), grid(20.0)), (id("b"), grid(20.0))].into_iter().collect());
     let admission = validate(&admitted_spec, &profile, &fx.inputs(&providers)).expect("runs");
     assert!(admission.is_admitted(), "{admission:?}");
-    let report = |v: f64| PrepareReport {
-        effective: [(key("test.grid"), Value::num(v).unwrap())].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let report = |v: f64| PrepareReport { effective: [(key("test.grid"), Value::num(v).unwrap())].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
     // The reports disagree with the requests on purpose: the check must judge what
     // each fragment applied, so the coercion check is the only other refusal.
-    let err = collect_prepare(
-        vec![(id("a"), Ok(report(40.0))), (id("b"), Ok(report(20.0)))],
-        &admitted_spec,
-        &profile,
-        &fx.inputs(&providers),
-        &admission,
-    )
-    .expect_err("a's applied value is over the ceiling");
-    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else {
-        panic!("violations")
-    };
-    let limits: Vec<_> = v
-        .into_iter()
-        .filter(|x| x.check == ns("test.limits"))
-        .collect();
+    let err = collect_prepare(vec![(id("a"), Ok(report(40.0))), (id("b"), Ok(report(20.0)))], &admitted_spec, &profile, &fx.inputs(&providers), &admission)
+        .expect_err("a's applied value is over the ceiling");
+    let ezsdr_kernel::plan::PrepareError::Violations(v) = err else { panic!("violations") };
+    let limits: Vec<_> = v.into_iter().filter(|x| x.check == ns("test.limits")).collect();
     assert!(names_a(&limits), "{limits:?}");
 
     // 3. runtime: the current per-fragment configuration, with only the target's
     //    proposed key.
     let spec_coercion = BTreeMap::new();
-    let admitter = ezsdr_kernel::session::Admitter {
-        checks: &fx.checks,
-        environment: &env,
-        spec_coercion: &spec_coercion,
-        registry: &fx.registry,
-        is_session: true,
-    };
-    let current: BTreeMap<Ident, BTreeMap<Key, Value>> = [
-        (
-            id("a"),
-            [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
-        ),
-        (
-            id("b"),
-            [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect(),
-        ),
-    ]
-    .into_iter()
-    .collect();
-    let proposed: BTreeMap<Ident, BTreeMap<Key, Value>> = [(
-        id("a"),
-        [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect(),
-    )]
-    .into_iter()
-    .collect();
-    let v = admitter
-        .admit(&current, &proposed, &[], CheckStage::Runtime)
-        .expect_err("a's proposed value is over the ceiling");
+    let admitter = ezsdr_kernel::session::Admitter { checks: &fx.checks, environment: &env, spec_coercion: &spec_coercion, registry: &fx.registry, is_session: true };
+    let current: BTreeMap<Ident, BTreeMap<Key, Value>> =
+        [(id("a"), [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect()), (id("b"), [(key("test.grid"), Value::num(20.0).unwrap())].into_iter().collect())].into_iter().collect();
+    let proposed: BTreeMap<Ident, BTreeMap<Key, Value>> = [(id("a"), [(key("test.grid"), Value::num(40.0).unwrap())].into_iter().collect())].into_iter().collect();
+    let v = admitter.admit(&current, &proposed, &[], CheckStage::Runtime).expect_err("a's proposed value is over the ceiling");
     assert!(names_a(&v), "{v:?}");
 }
 
@@ -7500,8 +4145,7 @@ fn sb_30_an_output_s_params_are_checked_at_validate() {
     // output's `params`: with the entry gone, a capture whose requested parameters
     // exceed the envelope was admitted and every check ran over the resources alone.
     let mut fx = Fixture::new();
-    fx.checks
-        .register(std::sync::Arc::new(TestLimitsCheck::new()));
+    fx.checks.register(std::sync::Arc::new(TestLimitsCheck::new()));
     let sink = cf32_sink();
     fx.sinks.insert(id("rec"), &sink);
     let mut spec = minimal_spec();
@@ -7510,21 +4154,13 @@ fn sb_30_an_output_s_params_are_checked_at_validate() {
     spec.outputs.push(rec);
     let mut profile = profile_binding(&["radio"]);
     profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
-    profile.environment = [(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }))]
-        .into_iter()
-        .collect();
+    profile.environment = [(ns("test.limits"), serde_json::json!({ "max_grid": 30.0 }))].into_iter().collect();
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
 
     let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("runs");
     assert!(!admission.is_admitted(), "{admission:?}");
-    assert!(
-        admission.violations.iter().any(|v| v.check == ns("test.limits")
-            && v.reason.starts_with("rec: ")
-            && v.requested == Some(Value::num(40.0).unwrap())),
-        "{:?}",
-        admission.violations
-    );
+    assert!(admission.violations.iter().any(|v| v.check == ns("test.limits") && v.reason.starts_with("rec: ") && v.requested == Some(Value::num(40.0).unwrap())), "{:?}", admission.violations);
 }
 
 #[test]
@@ -7534,58 +4170,22 @@ fn sb_07_coerce_refuses_a_combination() {
     // PerformanceEnvelope refusal at validate().
     let pair = |grid: f64| {
         spec_with(
-            [(
-                id("radio"),
-                resource(
-                    "test.device",
-                    &[
-                        (
-                            "test.count",
-                            Constraint::Eq {
-                                value: Scalar::from(2),
-                            },
-                        ),
-                        (
-                            "test.grid",
-                            Constraint::Eq {
-                                value: Scalar::try_from(grid).unwrap(),
-                            },
-                        ),
-                    ],
-                ),
-            )]
-            .into_iter()
-            .collect(),
+            [(id("radio"), resource("test.device", &[("test.count", Constraint::Eq { value: Scalar::from(2) }), ("test.grid", Constraint::Eq { value: Scalar::try_from(grid).unwrap() })]))]
+                .into_iter()
+                .collect(),
         )
     };
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_joint_limit(50.0);
     let providers = one_provider("radio", &p);
-    let result = validate(
-        &pair(40.0),
-        &profile_binding(&["radio"]),
-        &fx.inputs(&providers),
-    )
-    .expect("validates");
-    assert_eq!(
-        p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "coerce is called"
-    );
+    let result = validate(&pair(40.0), &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
+    assert_eq!(p.coerce_calls.load(std::sync::atomic::Ordering::Relaxed), 1, "coerce is called");
     assert!(!result.is_admitted());
     assert_eq!(result.rejected.len(), 1, "{:?}", result.rejected);
     assert_eq!(result.rejected[0].key, key("test.grid"));
-    assert!(
-        result.rejected[0].reason.contains("joint limit"),
-        "the Provider's reason"
-    );
+    assert!(result.rejected[0].reason.contains("joint limit"), "the Provider's reason");
     // Inside the limit, the same pair is admitted.
-    let ok = validate(
-        &pair(20.0),
-        &profile_binding(&["radio"]),
-        &fx.inputs(&providers),
-    )
-    .expect("validates");
+    let ok = validate(&pair(20.0), &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
     assert!(ok.is_admitted(), "{ok:?}");
 }
 
@@ -7593,32 +4193,13 @@ fn sb_07_coerce_refuses_a_combination() {
 fn sb_07_a_stray_rejection_is_a_violation() {
     // KA-5: a `rejected` entry for a key the request does not name is a malformed
     // report, as SB-44 treats a stray coercion.
-    let spec = spec_with(
-        [(
-            id("radio"),
-            resource(
-                "test.device",
-                &[(
-                    "test.count",
-                    Constraint::Eq {
-                        value: Scalar::from(2),
-                    },
-                )],
-            ),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let spec = spec_with([(id("radio"), resource("test.device", &[("test.count", Constraint::Eq { value: Scalar::from(2) })]))].into_iter().collect());
     let fx = Fixture::new();
     let p = TestProvider::new("radio", 2).with_stray_rejection();
     let providers = one_provider("radio", &p);
-    let result =
-        validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
+    let result = validate(&spec, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("validates");
     assert!(!result.is_admitted());
-    assert!(
-        result.rejected.is_empty(),
-        "nothing the request names was refused"
-    );
+    assert!(result.rejected.is_empty(), "nothing the request names was refused");
     assert_eq!(result.violations.len(), 1, "{:?}", result.violations);
     assert_eq!(result.violations[0].check, ns("ezsdr.coercion"));
     assert_eq!(result.violations[0].key, Some(key("test.flag")));
@@ -7632,10 +4213,7 @@ fn sb_22f_min_command_lead_is_in_host_monotonic() {
     let spec = minimal_spec();
     let fx = Fixture::new();
     for (lead, ok) in [
-        (
-            Duration::new(ClockDomainId::HOST_MONOTONIC, 2_000_000),
-            true,
-        ),
+        (Duration::new(ClockDomainId::HOST_MONOTONIC, 2_000_000), true),
         (Duration::new(ClockDomainId::HOST_MONOTONIC, 0), true),
         (Duration::new(ClockDomainId::HOST_MONOTONIC, -1), false),
         (Duration::new(ClockDomainId::local(7), 2_000_000), false),
@@ -7646,10 +4224,7 @@ fn sb_22f_min_command_lead_is_in_host_monotonic() {
         if ok {
             assert!(result.is_ok(), "{lead:?}: {result:?}");
         } else {
-            assert!(
-                matches!(&result, Err(SpecError::Structural { reason }) if reason.contains("SB-22f")),
-                "{lead:?}: {result:?}"
-            );
+            assert!(matches!(&result, Err(SpecError::Structural { reason }) if reason.contains("SB-22f")), "{lead:?}: {result:?}");
         }
     }
 }
@@ -7666,18 +4241,10 @@ fn ma_41_ezsdr_time_is_a_closed_set() {
         let mut profile = profile_binding(&["radio"]);
         profile.environment.insert(ns("ezsdr.time"), section);
         let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("validates");
-        plan(
-            &spec,
-            &profile,
-            &admission,
-            &fx.inputs(&providers),
-        )
+        plan(&spec, &profile, &admission, &fx.inputs(&providers))
     };
     plan_with(serde_json::json!({ "class": "simulation", "start_lead_ns": 5 })).expect("plans");
-    plan_with(
-        serde_json::json!({ "class": "simulation", "start_lead_ns": 4_611_686_018_427_387_904u64 }),
-    )
-    .expect("2^62 is the ceiling, inclusive");
+    plan_with(serde_json::json!({ "class": "simulation", "start_lead_ns": 4_611_686_018_427_387_904u64 })).expect("2^62 is the ceiling, inclusive");
     for section in [
         serde_json::json!({ "class": "simulation", "start_lead": 5 }),
         serde_json::json!({ "class": "simulation", "start_lead_ns": -1 }),
@@ -7686,16 +4253,9 @@ fn ma_41_ezsdr_time_is_a_closed_set() {
         serde_json::json!({ "class": "simulation", "start_lead_ns": 4_611_686_018_427_387_905u64 }),
     ] {
         let err = plan_with(section.clone()).expect_err("refused");
-        assert!(
-            matches!(&err, SpecError::Structural { reason } if reason.contains("MA-41")),
-            "{section}: {err:?}"
-        );
+        assert!(matches!(&err, SpecError::Structural { reason } if reason.contains("MA-41")), "{section}: {err:?}");
     }
-    assert_eq!(
-        ezsdr_kernel::binding::start_lead_ns(&BTreeMap::new()),
-        Ok(0),
-        "absent means 0"
-    );
+    assert_eq!(ezsdr_kernel::binding::start_lead_ns(&BTreeMap::new()), Ok(0), "absent means 0");
 }
 
 #[test]
@@ -7714,24 +4274,19 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
         ("ext.ezsdr.test.providerx.count", Scalar::from(2), false),
     ] {
         let mut spec = clean.clone();
-        spec.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq {
-            kind: ns("test.line"),
-            requires: [(key(name), Constraint::Eq { value })].into_iter().collect(),
-        });
-        let errors = [
-            validate(&spec, &profile, &inputs).unwrap_err(),
-            plan(&spec, &profile, &admission, &inputs).unwrap_err(),
-        ];
+        spec.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key(name), Constraint::Eq { value })].into_iter().collect() });
+        let errors = [validate(&spec, &profile, &inputs).unwrap_err(), plan(&spec, &profile, &admission, &inputs).unwrap_err()];
         for error in errors {
-            assert!(if shape { matches!(error, SpecError::KeyShape { .. }) }
-                else { matches!(error, SpecError::UnknownKeyPrefix { .. }) }, "{name}: {error:?}");
+            assert!(if shape { matches!(error, SpecError::KeyShape { .. }) } else { matches!(error, SpecError::UnknownKeyPrefix { .. }) }, "{name}: {error:?}");
         }
     }
     let mut valid = clean;
-    valid.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq {
-        kind: ns("test.line"),
-        requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(2) })].into_iter().collect(),
-    });
+    valid
+        .resources
+        .get_mut(&id("radio"))
+        .unwrap()
+        .needs
+        .insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.count"), Constraint::Eq { value: Scalar::from(2) })].into_iter().collect() });
     let admission = validate(&valid, &profile, &inputs).unwrap();
     plan(&valid, &profile, &admission, &inputs).unwrap();
 }
@@ -7744,44 +4299,21 @@ fn sb_02_needs_constraints_are_checked_against_key_decl() {
 fn numbered_key_spec() -> ExperimentSpec {
     let mut spec = minimal_spec();
     let radio = spec.resources.get_mut(&id("radio")).expect("radio");
-    radio.requires.insert(
-        key("test.item0"),
-        Constraint::Eq {
-            value: Scalar::from(3),
-        },
-    );
-    radio.needs.insert(
-        id("line"),
-        SubResourceReq {
-            kind: ns("test.line"),
-            requires: [(key("test.item0"), Constraint::Eq { value: Scalar::from(3) })]
-                .into_iter()
-                .collect(),
-        },
-    );
-    spec.outputs.push(OutputReq {
-        params: [(key("test.item0"), Value::from(3))].into_iter().collect(),
-        ..output("rec")
-    });
-    spec.policies
-        .coercion
-        .insert(key("test.item0"), CoercionPolicy::Reject);
+    radio.requires.insert(key("test.item0"), Constraint::Eq { value: Scalar::from(3) });
+    radio.needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.item0"), Constraint::Eq { value: Scalar::from(3) })].into_iter().collect() });
+    spec.outputs.push(OutputReq { params: [(key("test.item0"), Value::from(3))].into_iter().collect(), ..output("rec") });
+    spec.policies.coercion.insert(key("test.item0"), CoercionPolicy::Reject);
     spec
 }
 
 /// The documents of [`numbered_key_spec`]: the profile binding the recorder, and the
 /// Fixture holding its Sink.
-fn numbered_key_documents<'a>(
-    spec: &ExperimentSpec,
-    sink: &'a TestSink,
-) -> (BindingProfile, Fixture<'a>) {
+fn numbered_key_documents<'a>(spec: &ExperimentSpec, sink: &'a TestSink) -> (BindingProfile, Fixture<'a>) {
     let mut profile = profile_binding(&["radio"]);
     profile.bindings.insert(id("rec"), bind("ezsdr.test.sink"));
     select_test_links(spec, &mut profile);
     let mut fx = Fixture::new();
-    fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)]
-        .into_iter()
-        .collect();
+    fx.sinks = [(id("rec"), sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
     (profile, fx)
 }
 
@@ -7795,58 +4327,25 @@ fn sb_02a_a_numbered_key_reaches_every_key_position() {
     let providers = one_provider("radio", &p);
     let sink = cf32_sink();
     let (profile, fx) = numbered_key_documents(&spec, &sink);
-    let admission = validate(&spec, &profile, &fx.inputs(&providers))
-        .expect("every position names a declared key");
+    let admission = validate(&spec, &profile, &fx.inputs(&providers)).expect("every position names a declared key");
     assert!(admission.is_admitted());
-    assert_eq!(
-        admission.rejected.len(),
-        0,
-        "the capability satisfies the key directly: {:?}",
-        admission.rejected
-    );
-    plan(&spec, &profile, &admission, &fx.inputs(&providers))
-        .expect("plan runs the structural checks again");
+    assert_eq!(admission.rejected.len(), 0, "the capability satisfies the key directly: {:?}", admission.rejected);
+    plan(&spec, &profile, &admission, &fx.inputs(&providers)).expect("plan runs the structural checks again");
     // The schedule position (SB-2's fifth) is `rs_52`'s reader: a scheduled update
     // states no class, so `validate` refuses a declaration that gives none and accepts
     // a numbered declaration that gives one (HardwareTimed here).
     let mut scheduled = minimal_spec();
     scheduled.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ActionTemplate::UpdateParameter {
-            target: support::target("radio"),
-            key: key("test.item0"),
-            value: Value::from(3),
-        },
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter { target: support::target("radio"), key: key("test.item0"), value: Value::from(3) },
     });
-    validate(&scheduled, &profile_binding(&["radio"]), &fx.inputs(&providers))
-        .expect("the numbered declaration carries an update class");
+    validate(&scheduled, &profile_binding(&["radio"]), &fx.inputs(&providers)).expect("the numbered declaration carries an update class");
     // `prepare` over the same Spec: the numbered key's value is the one the matcher
     // applied, and `effective` carries the concrete key.
-    let report = PrepareReport {
-        effective: [(key("test.item0"), Value::from(3))].into_iter().collect(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let empty = PrepareReport {
-        effective: BTreeMap::new(),
-        coercions: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let reports = prepared(
-        vec![(id("radio"), Ok(report)), (id("rec"), Ok(empty))],
-        &fx,
-        &spec,
-        &profile,
-        &providers,
-    )
-    .expect("prepare accepts the report");
-    assert_eq!(
-        reports[&id("radio")].effective[&key("test.item0")],
-        Value::from(3)
-    );
+    let report = PrepareReport { effective: [(key("test.item0"), Value::from(3))].into_iter().collect(), coercions: Vec::new(), warnings: Vec::new() };
+    let empty = PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() };
+    let reports = prepared(vec![(id("radio"), Ok(report)), (id("rec"), Ok(empty))], &fx, &spec, &profile, &providers).expect("prepare accepts the report");
+    assert_eq!(reports[&id("radio")].effective[&key("test.item0")], Value::from(3));
 }
 
 #[test]
@@ -7862,12 +4361,7 @@ fn sb_02a_the_declaration_s_own_spelling_is_no_key() {
     let fx = Fixture::new();
     let required = |name: &str| {
         let mut spec = minimal_spec();
-        spec.resources.get_mut(&id("radio")).unwrap().requires.insert(
-            key(name),
-            Constraint::Eq {
-                value: Scalar::from(3),
-            },
-        );
+        spec.resources.get_mut(&id("radio")).unwrap().requires.insert(key(name), Constraint::Eq { value: Scalar::from(3) });
         spec
     };
     for name in [
@@ -7876,47 +4370,22 @@ fn sb_02a_the_declaration_s_own_spelling_is_no_key() {
         "test.item01",         // a leading zero
         "test.item1234567890", // ten digits
     ] {
-        let refused = validate(&required(name), &profile, &fx.inputs(&providers))
-            .expect_err("{name} is no key");
-        assert!(
-            matches!(&refused, SpecError::UnknownKeyPrefix { key } if key.starts_with(name)),
-            "{name}: {refused:?}"
-        );
+        let refused = validate(&required(name), &profile, &fx.inputs(&providers)).expect_err("{name} is no key");
+        assert!(matches!(&refused, SpecError::UnknownKeyPrefix { key } if key.starts_with(name)), "{name}: {refused:?}");
     }
     // The spelling is no key at the other four positions either: SB-2's structural
     // check runs them through one iterator (item 3), so a numbered declaration is
     // resolved at every one of them or at none.
     let mut needs = minimal_spec();
-    needs.resources.get_mut(&id("radio")).unwrap().needs.insert(
-        id("line"),
-        SubResourceReq {
-            kind: ns("test.line"),
-            requires: [(key("test.item"), Constraint::Present {})]
-                .into_iter()
-                .collect(),
-        },
-    );
+    needs.resources.get_mut(&id("radio")).unwrap().needs.insert(id("line"), SubResourceReq { kind: ns("test.line"), requires: [(key("test.item"), Constraint::Present {})].into_iter().collect() });
     let mut params = minimal_spec();
-    params.outputs.push(OutputReq {
-        params: [(key("test.item"), Value::from(3))].into_iter().collect(),
-        ..output("rec")
-    });
+    params.outputs.push(OutputReq { params: [(key("test.item"), Value::from(3))].into_iter().collect(), ..output("rec") });
     let mut coercion = minimal_spec();
-    coercion
-        .policies
-        .coercion
-        .insert(key("test.item"), CoercionPolicy::Reject);
+    coercion.policies.coercion.insert(key("test.item"), CoercionPolicy::Reject);
     let mut schedule = minimal_spec();
     schedule.schedule.push(ScheduleEntry {
-        at: SpecTime {
-            clock: id("radio"),
-            offset_ticks: 0,
-        },
-        action: ActionTemplate::UpdateParameter {
-            target: support::target("radio"),
-            key: key("test.item"),
-            value: Value::from(3),
-        },
+        at: SpecTime { clock: id("radio"), offset_ticks: 0 },
+        action: ActionTemplate::UpdateParameter { target: support::target("radio"), key: key("test.item"), value: Value::from(3) },
     });
     for (position, spec) in [
         ("a resource's `requires`", required("test.item")),
@@ -7925,12 +4394,8 @@ fn sb_02a_the_declaration_s_own_spelling_is_no_key() {
         ("a `policies.coercion` key", coercion),
         ("a schedule entry's update", schedule),
     ] {
-        let refused = validate(&spec, &profile, &fx.inputs(&providers))
-            .expect_err("the spelling is no key");
-        assert!(
-            matches!(&refused, SpecError::UnknownKeyPrefix { key } if key.starts_with("test.item")),
-            "{position}: {refused:?}"
-        );
+        let refused = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("the spelling is no key");
+        assert!(matches!(&refused, SpecError::UnknownKeyPrefix { key } if key.starts_with("test.item")), "{position}: {refused:?}");
     }
 }
 
@@ -7944,29 +4409,15 @@ fn sb_02a_a_kind_refusal_names_the_concrete_key() {
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
     let mut spec = minimal_spec();
-    spec.resources.get_mut(&id("radio")).unwrap().requires.insert(
-        key("test.item0"),
-        Constraint::Eq {
-            value: Scalar::from(true),
-        },
-    );
+    spec.resources.get_mut(&id("radio")).unwrap().requires.insert(key("test.item0"), Constraint::Eq { value: Scalar::from(true) });
     let refused = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("Bool is not an Int");
-    assert!(
-        matches!(&refused, SpecError::KeyShape { key, .. } if key == "test.item0"),
-        "the refusal names the concrete key: {refused:?}"
-    );
+    assert!(matches!(&refused, SpecError::KeyShape { key, .. } if key == "test.item0"), "the refusal names the concrete key: {refused:?}");
     // A `Value` at an output's `params` is the same refusal through
     // `check_value_kind`.
     let mut output_with = minimal_spec();
-    output_with.outputs.push(OutputReq {
-        params: [(key("test.item0"), Value::from(true))].into_iter().collect(),
-        ..output("rec")
-    });
+    output_with.outputs.push(OutputReq { params: [(key("test.item0"), Value::from(true))].into_iter().collect(), ..output("rec") });
     let refused = validate(&output_with, &profile, &fx.inputs(&providers)).expect_err("Bool is not an Int");
-    assert!(
-        matches!(&refused, SpecError::KeyShape { key, .. } if key == "test.item0"),
-        "the refusal names the concrete key: {refused:?}"
-    );
+    assert!(matches!(&refused, SpecError::KeyShape { key, .. } if key == "test.item0"), "the refusal names the concrete key: {refused:?}");
 }
 
 #[test]
@@ -7974,9 +4425,7 @@ fn sb_02a_a_numbered_key_resolves_its_policy_by_the_concrete_key() {
     // SB-2a: `policies.coercion` keeps its exact key, so a policy for `test.item0`
     // governs that key's coercion and a policy for another index does not — the
     // declaration they share is not the map's key.
-    let p = TestProvider::new("radio", 2)
-        .coercing("test.item0", 2.0)
-        .coercing("test.item1", 2.0);
+    let p = TestProvider::new("radio", 2).coercing("test.item0", 2.0).coercing("test.item1", 2.0);
     let providers = one_provider("radio", &p);
     let profile = profile_binding(&["radio"]);
     let fx = Fixture::new();
@@ -7984,53 +4433,25 @@ fn sb_02a_a_numbered_key_resolves_its_policy_by_the_concrete_key() {
         let mut spec = minimal_spec();
         // No capability is declared for either key, so the coercible declaration sends
         // the request to `coerce` (SB-7), which reports a coercion to a `Num`.
-        spec.resources.get_mut(&id("radio")).unwrap().requires.insert(
-            key(name),
-            Constraint::Eq {
-                value: Scalar::from(3),
-            },
-        );
+        spec.resources.get_mut(&id("radio")).unwrap().requires.insert(key(name), Constraint::Eq { value: Scalar::from(3) });
         spec
     };
     let mut exact = asked("test.item0");
-    exact
-        .policies
-        .coercion
-        .insert(key("test.item0"), CoercionPolicy::Reject);
+    exact.policies.coercion.insert(key("test.item0"), CoercionPolicy::Reject);
     let refused = validate(&exact, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(!refused.is_admitted(), "the concrete key's policy rejects");
-    assert!(
-        refused
-            .violations
-            .iter()
-            .any(|v| v.key == Some(key("test.item0")) && v.reason.contains("SB-46")),
-        "{:?}",
-        refused.violations
-    );
+    assert!(refused.violations.iter().any(|v| v.key == Some(key("test.item0")) && v.reason.contains("SB-46")), "{:?}", refused.violations);
     // Another index's policy leaves this key to its declaration's own default, which
     // is `warn`: the run is admitted and the coercion is recorded as a warning.
     let mut other = asked("test.item0");
-    other
-        .policies
-        .coercion
-        .insert(key("test.item1"), CoercionPolicy::Reject);
+    other.policies.coercion.insert(key("test.item1"), CoercionPolicy::Reject);
     let admitted = validate(&other, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(admitted.is_admitted(), "{:?}", admitted.violations);
     assert_eq!(admitted.warnings.len(), 1, "{:?}", admitted.warnings);
     // And the same policy governs `test.item1`, whose own coercion is the one it names.
     let mut on_item1 = asked("test.item1");
-    on_item1
-        .policies
-        .coercion
-        .insert(key("test.item1"), CoercionPolicy::Reject);
+    on_item1.policies.coercion.insert(key("test.item1"), CoercionPolicy::Reject);
     let refused = validate(&on_item1, &profile, &fx.inputs(&providers)).expect("validates");
     assert!(!refused.is_admitted());
-    assert!(
-        refused
-            .violations
-            .iter()
-            .any(|v| v.key == Some(key("test.item1"))),
-        "{:?}",
-        refused.violations
-    );
+    assert!(refused.violations.iter().any(|v| v.key == Some(key("test.item1"))), "{:?}", refused.violations);
 }

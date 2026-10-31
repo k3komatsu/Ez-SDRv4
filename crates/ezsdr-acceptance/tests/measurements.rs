@@ -1,18 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use ezsdr_kernel::spec::Key;
+use ezsdr_mock_radio::BLOCK_LEN;
 use ezsdr_radio::channels::{self, Description};
 use ezsdr_radio::measurement::{self, Record, ValueRecord, Worst};
-use ezsdr_mock_radio::BLOCK_LEN;
 use ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN;
 const FIXTURE: &str = include_str!("../../ezsdr-radio/tests/fixtures/measurement/records/valid.json");
 
 fn descriptions(record: &Record) -> (Description, Description) {
     let layout = channels::from_selector(&record.selector).expect("measurement selector is a valid x3xx layout");
-    (
-        Description::new(&layout, BLOCK_LEN, &ezsdr_mock_radio::Profile::terms()),
-        Description::new(&layout, DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()),
-    )
+    (Description::new(&layout, BLOCK_LEN, &ezsdr_mock_radio::Profile::terms()), Description::new(&layout, DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()))
 }
 
 struct FileComparison {
@@ -38,14 +35,9 @@ fn compare_files(directory: &Path) -> Vec<FileComparison> {
     let mut comparisons = Vec::with_capacity(files.len());
     for file in files {
         let bytes = std::fs::read(&file).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
-        let record: Record = serde_json::from_slice(&bytes)
-            .unwrap_or_else(|error| panic!("{}: invalid measurement record: {error}", file.display()));
+        let record: Record = serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!("{}: invalid measurement record: {error}", file.display()));
         let (mock, uhd) = descriptions(&record);
-        comparisons.push(FileComparison {
-            file,
-            mock_violations: measurement::compare(&record, &mock),
-            uhd_violations: measurement::compare(&record, &uhd),
-        });
+        comparisons.push(FileComparison { file, mock_violations: measurement::compare(&record, &mock), uhd_violations: measurement::compare(&record, &uhd) });
     }
     comparisons
 }
@@ -110,9 +102,10 @@ fn measurement_between_the_provider_leads_passes_only_uhd() {
     *worst = Worst::Number(3_000_000.0);
     let (mock, uhd) = descriptions(&record);
     let mock_violations = measurement::compare(&record, &mock);
-    assert!(mock_violations.iter().any(|violation| {
-        violation.key == key.as_str() && violation.reason.contains("below measured")
-    }), "MockRadio's 2 ms lead must fail specifically against the 3 ms measurement: {mock_violations:?}");
+    assert!(
+        mock_violations.iter().any(|violation| { violation.key == key.as_str() && violation.reason.contains("below measured") }),
+        "MockRadio's 2 ms lead must fail specifically against the 3 ms measurement: {mock_violations:?}"
+    );
     let uhd_violations = measurement::compare(&record, &uhd);
     assert!(uhd_violations.is_empty(), "UHD's 5 ms lead covers the 3 ms measurement: {uhd_violations:?}");
 }

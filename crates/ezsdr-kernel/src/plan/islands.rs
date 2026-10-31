@@ -15,38 +15,24 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
     // exact over graph links and output feeds, so neither an omitted nor a stale
     // placement is ignored, and a pair named twice is ambiguous rather than
     // first-wins.
-    let pair = |from: &PortRef, to: &PortRef| {
-        format!(
-            "{}.{} -> {}.{}",
-            from.component, from.port, to.component, to.port
-        )
-    };
+    let pair = |from: &PortRef, to: &PortRef| format!("{}.{} -> {}.{}", from.component, from.port, to.component, to.port);
     let mut selected: BTreeMap<(&PortRef, &PortRef), &LinkPlacement> = BTreeMap::new();
     for p in ctx.link_placements {
         if selected.insert((&p.from, &p.to), p).is_some() {
-            return Err(ModuleError::rejected(format!(
-                "SB-25: link placement {} appears more than once",
-                pair(&p.from, &p.to)
-            )));
+            return Err(ModuleError::rejected(format!("SB-25: link placement {} appears more than once", pair(&p.from, &p.to))));
         }
     }
     let mut expected: BTreeSet<(&PortRef, &PortRef)> = BTreeSet::new();
     for (from, to, policy) in ctx.graph_links.iter().chain(ctx.feed_links) {
         let key = pair(from, to);
         if !expected.insert((from, to)) {
-            return Err(ModuleError::rejected(format!(
-                "SB-25: data link {key} is declared twice, so no placement can name one of them"
-            )));
+            return Err(ModuleError::rejected(format!("SB-25: data link {key} is declared twice, so no placement can name one of them")));
         }
-        let placement = selected.get(&(from, to)).ok_or_else(|| {
-            ModuleError::rejected(format!("SB-25: data link {key} has no link placement"))
-        })?;
-        let descriptor = ctx.links.get(&placement.link).ok_or_else(|| {
-            ModuleError::rejected(format!(
-                "MA-28: link placement {key} names Module {} {}, which has no registered Link descriptor",
-                placement.link.id, placement.link.version
-            ))
-        })?;
+        let placement = selected.get(&(from, to)).ok_or_else(|| ModuleError::rejected(format!("SB-25: data link {key} has no link placement")))?;
+        let descriptor = ctx
+            .links
+            .get(&placement.link)
+            .ok_or_else(|| ModuleError::rejected(format!("MA-28: link placement {key} names Module {} {}, which has no registered Link descriptor", placement.link.id, placement.link.version)))?;
         if descriptor.cross_process {
             return Err(ModuleError::rejected(format!(
                 "MA-28: link placement {key} selects Module {} {}, whose cross_process capability is unsupported in v4.0",
@@ -54,21 +40,11 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
             )));
         }
         if !descriptor.policies.contains(policy) {
-            return Err(ModuleError::rejected(format!(
-                "MA-28: link placement {key} selects Module {} {}, which does not implement policy {policy:?}",
-                placement.link.id, placement.link.version
-            )));
+            return Err(ModuleError::rejected(format!("MA-28: link placement {key} selects Module {} {}, which does not implement policy {policy:?}", placement.link.id, placement.link.version)));
         }
     }
-    if let Some(stale) = ctx
-        .link_placements
-        .iter()
-        .find(|p| !expected.contains(&(&p.from, &p.to)))
-    {
-        return Err(ModuleError::rejected(format!(
-            "SB-25: link placement {} names no graph link or output feed",
-            pair(&stale.from, &stale.to)
-        )));
+    if let Some(stale) = ctx.link_placements.iter().find(|p| !expected.contains(&(&p.from, &p.to))) {
+        return Err(ModuleError::rejected(format!("SB-25: link placement {} names no graph link or output feed", pair(&stale.from, &stale.to))));
     }
 
     // Every component placed exactly once.
@@ -78,80 +54,42 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
             match placed.get_mut(c) {
                 Some(n) => *n += 1,
                 None => {
-                    return Err(ModuleError::rejected(format!(
-                        "MA-39: island {} places unknown component {c}",
-                        island.id
-                    )));
+                    return Err(ModuleError::rejected(format!("MA-39: island {} places unknown component {c}", island.id)));
                 }
             }
         }
     }
     if let Some((c, n)) = placed.iter().find(|(_, n)| **n != 1) {
-        return Err(ModuleError::rejected(format!(
-            "MA-39: component {c} is placed {n} times, not exactly once"
-        )));
+        return Err(ModuleError::rejected(format!("MA-39: component {c} is placed {n} times, not exactly once")));
     }
 
     for island in ctx.islands {
-        let executor = ctx.executors.get(&island.executor).ok_or_else(|| {
-            ModuleError::rejected(format!(
-                "MA-39: island {} names unknown executor {}",
-                island.id, island.executor
-            ))
-        })?;
+        let executor = ctx.executors.get(&island.executor).ok_or_else(|| ModuleError::rejected(format!("MA-39: island {} names unknown executor {}", island.id, island.executor)))?;
         for entry in &island.components {
             let name = &entry.component;
             let c = &ctx.components[name];
-            if c.requires.executor_kind.as_str() != "any"
-                && c.requires.executor_kind != executor.kind
-            {
-                return Err(ModuleError::rejected(format!(
-                    "MA-39: {name} requires executor kind {} and island {} is {}",
-                    c.requires.executor_kind, island.id, executor.kind
-                )));
+            if c.requires.executor_kind.as_str() != "any" && c.requires.executor_kind != executor.kind {
+                return Err(ModuleError::rejected(format!("MA-39: {name} requires executor kind {} and island {} is {}", c.requires.executor_kind, island.id, executor.kind)));
             }
             if !executor.impl_kinds.contains(&c.implementation.kind) {
-                return Err(ModuleError::rejected(format!(
-                    "MA-39: {name}'s impl kind {} is not among executor {}'s impl_kinds",
-                    c.implementation.kind, island.executor
-                )));
+                return Err(ModuleError::rejected(format!("MA-39: {name}'s impl kind {} is not among executor {}'s impl_kinds", c.implementation.kind, island.executor)));
             }
             // The memory domain its Island states for it (SB-25, MA-39).
             if !executor.memory_domains.contains(&entry.memory_domain) {
-                return Err(ModuleError::rejected(format!(
-                    "MA-39: {name}'s memory domain {} is not among executor {}'s memory_domains",
-                    entry.memory_domain, island.executor
-                )));
+                return Err(ModuleError::rejected(format!("MA-39: {name}'s memory domain {} is not among executor {}'s memory_domains", entry.memory_domain, island.executor)));
             }
             // An Island with an rt_policy requires a declared budget on every component.
             if island.rt_policy.is_some() && c.timing.budget.is_none() {
-                return Err(ModuleError::rejected(format!(
-                    "MA-39: island {} has an rt_policy and {name} declares no budget",
-                    island.id
-                )));
+                return Err(ModuleError::rejected(format!("MA-39: island {} has an rt_policy and {name} declares no budget", island.id)));
             }
         }
     }
 
-    let island_by_component: BTreeMap<&Ident, IslandId> = ctx
-        .islands
-        .iter()
-        .flat_map(|island| {
-            island
-                .components
-                .iter()
-                .map(move |entry| (&entry.component, island.id))
-        })
-        .collect();
+    let island_by_component: BTreeMap<&Ident, IslandId> = ctx.islands.iter().flat_map(|island| island.components.iter().map(move |entry| (&entry.component, island.id))).collect();
 
     // MA-22's cycle rule, which MA-39 names as one of its own checks. Every graph
     // link is a `stream.*` edge in Phase 1, so none of them may close a cycle.
-    let nodes: Vec<Ident> = ctx
-        .components
-        .keys()
-        .chain(ctx.resource_domains.keys())
-        .cloned()
-        .collect();
+    let nodes: Vec<Ident> = ctx.components.keys().chain(ctx.resource_domains.keys()).cloned().collect();
     let edges: Vec<GraphEdge> = ctx
         .graph_links
         .iter()
@@ -159,80 +97,34 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
             from: from.component.clone(),
             to: to.component.clone(),
             kind: EdgeKind::Stream,
-            crosses_island: island_by_component.get(&from.component)
-                != island_by_component.get(&to.component),
+            crosses_island: island_by_component.get(&from.component) != island_by_component.get(&to.component),
         })
         .collect();
     super::graph::check_cycles(&nodes, &edges)?;
 
     // Every producer domain must reach at least one consumer domain, directly or
     // through the selected Link (MA-39); component domains come from their Islands.
-    let domains: BTreeMap<&Ident, MemoryDomainId> = ctx
-        .islands
-        .iter()
-        .flat_map(|island| &island.components)
-        .map(|entry| (&entry.component, entry.memory_domain))
-        .collect();
-    let endpoint_domains = |r: &PortRef| {
-        ctx.resource_domains
-            .get(&r.component)
-            .cloned()
-            .or_else(|| domains.get(&r.component).map(|domain| vec![*domain]))
-    };
+    let domains: BTreeMap<&Ident, MemoryDomainId> = ctx.islands.iter().flat_map(|island| &island.components).map(|entry| (&entry.component, entry.memory_domain)).collect();
+    let endpoint_domains = |r: &PortRef| ctx.resource_domains.get(&r.component).cloned().or_else(|| domains.get(&r.component).map(|domain| vec![*domain]));
     // One reachability rule for graph links and Sink feeds (MA-39, D31/D81).
-    for ((from, to, _), is_feed) in ctx
-        .graph_links
-        .iter()
-        .map(|link| (link, false))
-        .chain(ctx.feed_links.iter().map(|link| (link, true)))
-    {
-        let producer = endpoint_domains(from).ok_or_else(|| {
-            ModuleError::rejected(format!(
-                "MA-39: link {}:{} -> {}:{} has no producer memory-domain declaration",
-                from.component, from.port, to.component, to.port
-            ))
-        })?;
+    for ((from, to, _), is_feed) in ctx.graph_links.iter().map(|link| (link, false)).chain(ctx.feed_links.iter().map(|link| (link, true))) {
+        let producer = endpoint_domains(from)
+            .ok_or_else(|| ModuleError::rejected(format!("MA-39: link {}:{} -> {}:{} has no producer memory-domain declaration", from.component, from.port, to.component, to.port)))?;
         let consumer = if is_feed {
-            ctx.sinks
-                .get(&to.component)
-                .map(|sink| sink.memory_domains.clone())
-                .ok_or_else(|| {
-                    ModuleError::rejected(format!(
-                        "SB-22f: no Sink instance for output {}",
-                        to.component
-                    ))
-                })?
+            ctx.sinks.get(&to.component).map(|sink| sink.memory_domains.clone()).ok_or_else(|| ModuleError::rejected(format!("SB-22f: no Sink instance for output {}", to.component)))?
         } else {
-            endpoint_domains(to).ok_or_else(|| {
-                ModuleError::rejected(format!(
-                    "MA-39: link {}:{} -> {}:{} has no consumer memory-domain declaration",
-                    from.component, from.port, to.component, to.port
-                ))
-            })?
+            endpoint_domains(to)
+                .ok_or_else(|| ModuleError::rejected(format!("MA-39: link {}:{} -> {}:{} has no consumer memory-domain declaration", from.component, from.port, to.component, to.port)))?
         };
         let placement = selected[&(from, to)];
         let descriptor = &ctx.links[&placement.link];
         if !domains_connect(&producer, &consumer, &descriptor.connects) {
-            let producer_label = format!(
-                "{}:{} has producer domains [{}]",
-                from.component,
-                from.port,
-                producer.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-            );
+            let producer_label = format!("{}:{} has producer domains [{}]", from.component, from.port, producer.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "));
             let consumer_label = if is_feed {
                 let sink = &ctx.sinks[&to.component];
-                format!(
-                    "output {}'s Sink reads [{}]",
-                    to.component,
-                    sink.memory_domains.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-                )
+                format!("output {}'s Sink reads [{}]", to.component, sink.memory_domains.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
             } else {
-                format!(
-                    "{}:{} has consumer domains [{}]",
-                    to.component,
-                    to.port,
-                    consumer.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-                )
+                format!("{}:{} has consumer domains [{}]", to.component, to.port, consumer.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
             };
             return Err(ModuleError::rejected(format!(
                 "MA-39: {producer_label} and {consumer_label}; selected Link Module {} {} does not connect them for every producer domain",
@@ -243,15 +135,6 @@ pub(super) fn admit_islands(ctx: &IslandContext<'_>) -> Result<(), ModuleError> 
     Ok(())
 }
 
-fn domains_connect(
-    producers: &[MemoryDomainId],
-    consumers: &[MemoryDomainId],
-    connects: &[(MemoryDomainId, MemoryDomainId)],
-) -> bool {
-    producers.iter().all(|producer| {
-        consumers.iter().any(|consumer| {
-            producer == consumer
-                || connects.iter().any(|(a, b)| (a == producer && b == consumer) || (a == consumer && b == producer))
-        })
-    })
+fn domains_connect(producers: &[MemoryDomainId], consumers: &[MemoryDomainId], connects: &[(MemoryDomainId, MemoryDomainId)]) -> bool {
+    producers.iter().all(|producer| consumers.iter().any(|consumer| producer == consumer || connects.iter().any(|(a, b)| (a == producer && b == consumer) || (a == consumer && b == producer))))
 }

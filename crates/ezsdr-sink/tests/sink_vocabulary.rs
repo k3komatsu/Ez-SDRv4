@@ -40,10 +40,7 @@ fn hd_06_vocabulary() {
     assert_eq!(event.kind.as_str(), "sink.REQUEST_REJECTED");
     assert_eq!(event.default, Reaction::Continue);
     assert_eq!(event.severity, Severity::Warning);
-    assert_eq!(
-        kinds.get(&EventKind::parse("sink.REQUEST_REJECTED").unwrap()),
-        Some(event)
-    );
+    assert_eq!(kinds.get(&EventKind::parse("sink.REQUEST_REJECTED").unwrap()), Some(event));
     // Phase 6, VD-1 (HD-16).
     let written = &descriptor.event_kinds[1];
     assert_eq!(written.kind.as_str(), ezsdr_sink::CAPTURE_WRITTEN);
@@ -77,10 +74,7 @@ impl DrainSink {
             return;
         };
         while let Some(dispatched) = actions.recv() {
-            self.received
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((dispatched.action, dispatched.node));
+            self.received.lock().unwrap_or_else(|e| e.into_inner()).push((dispatched.action, dispatched.node));
         }
     }
 }
@@ -90,17 +84,9 @@ impl ezsdr_kernel::module_api::Sink for DrainSink {
         &self.descriptor
     }
 
-    fn prepare(
-        &mut self,
-        _f: &ezsdr_kernel::plan::Fragment,
-        ctx: ezsdr_kernel::module_api::PrepareContext,
-    ) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
+    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, ctx: ezsdr_kernel::module_api::PrepareContext) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
         self.actions = Some(ctx.actions);
-        Ok(ezsdr_kernel::plan::PrepareReport {
-            effective: std::collections::BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+        Ok(ezsdr_kernel::plan::PrepareReport { effective: std::collections::BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
@@ -111,18 +97,12 @@ impl ezsdr_kernel::module_api::Sink for DrainSink {
         Ok(())
     }
 
-    fn step(
-        &mut self,
-        _until: TimePoint,
-    ) -> Result<ezsdr_kernel::module_api::StepOutcome, ezsdr_kernel::module_api::ModuleError> {
+    fn step(&mut self, _until: TimePoint) -> Result<ezsdr_kernel::module_api::StepOutcome, ezsdr_kernel::module_api::ModuleError> {
         self.drain();
         Ok(ezsdr_kernel::module_api::StepOutcome { progressed: false })
     }
 
-    fn stop(
-        &mut self,
-        _mode: ezsdr_kernel::module_api::StopMode,
-    ) -> Result<Vec<ezsdr_kernel::manifest::ArtifactRef>, ezsdr_kernel::module_api::ModuleError> {
+    fn stop(&mut self, _mode: ezsdr_kernel::module_api::StopMode) -> Result<Vec<ezsdr_kernel::manifest::ArtifactRef>, ezsdr_kernel::module_api::ModuleError> {
         self.drain();
         Ok(Vec::new())
     }
@@ -143,15 +123,9 @@ impl NullLink {
     fn new() -> NullLink {
         NullLink {
             descriptor: ezsdr_kernel::module_api::LinkDescriptor {
-                module: ezsdr_kernel::module_api::ModuleRef {
-                    id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.link").unwrap(),
-                    version: Version::new(1, 0, 0),
-                },
+                module: ezsdr_kernel::module_api::ModuleRef { id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.link").unwrap(), version: Version::new(1, 0, 0) },
                 kind: Namespace::parse("sink.test.link").unwrap(),
-                connects: vec![(
-                    ezsdr_kernel::id::MemoryDomainId::local(0),
-                    ezsdr_kernel::id::MemoryDomainId::local(0),
-                )],
+                connects: vec![(ezsdr_kernel::id::MemoryDomainId::local(0), ezsdr_kernel::id::MemoryDomainId::local(0))],
                 policies: vec![ezsdr_kernel::stream::BackPressure::DropOldest],
                 cross_process: false,
             },
@@ -164,11 +138,7 @@ impl ezsdr_kernel::module_api::Link for NullLink {
         &self.descriptor
     }
 
-    fn create(
-        &self,
-        _decl: &ezsdr_kernel::stream::DataLinkDecl,
-    ) -> Result<std::sync::Arc<dyn ezsdr_kernel::stream::DataLink>, ezsdr_kernel::module_api::ModuleError>
-    {
+    fn create(&self, _decl: &ezsdr_kernel::stream::DataLinkDecl) -> Result<std::sync::Arc<dyn ezsdr_kernel::stream::DataLink>, ezsdr_kernel::module_api::ModuleError> {
         Ok(std::sync::Arc::new(NullDataLink))
     }
 }
@@ -176,19 +146,11 @@ impl ezsdr_kernel::module_api::Link for NullLink {
 struct NullDataLink;
 
 impl ezsdr_kernel::stream::DataLink for NullDataLink {
-    fn publish(
-        &self,
-        _b: ezsdr_kernel::stream::BlockRef,
-    ) -> ezsdr_kernel::stream::PublishOutcome {
+    fn publish(&self, _b: ezsdr_kernel::stream::BlockRef) -> ezsdr_kernel::stream::PublishOutcome {
         ezsdr_kernel::stream::PublishOutcome::Full
     }
 
-    fn receive(
-        &self,
-    ) -> Option<(
-        ezsdr_kernel::stream::BlockRef,
-        ezsdr_kernel::stream::DropCarry,
-    )> {
+    fn receive(&self) -> Option<(ezsdr_kernel::stream::BlockRef, ezsdr_kernel::stream::DropCarry)> {
         None
     }
 
@@ -213,10 +175,7 @@ struct NullProvider {
 
 impl NullProvider {
     fn new(contract: ezsdr_kernel::contract::DataContractId) -> NullProvider {
-        let module = ezsdr_kernel::module_api::ModuleRef {
-            id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.provider").unwrap(),
-            version: Version::new(1, 0, 0),
-        };
+        let module = ezsdr_kernel::module_api::ModuleRef { id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.provider").unwrap(), version: Version::new(1, 0, 0) };
         NullProvider {
             instance: ezsdr_kernel::module_api::ProviderInstance {
                 id: ezsdr_kernel::id::ResourceId::parse("radio").unwrap(),
@@ -227,11 +186,7 @@ impl NullProvider {
                     kind: Namespace::parse("sink.test.radio").unwrap(),
                     capabilities: std::collections::BTreeMap::new(),
                     children: Vec::new(),
-                    ports: vec![ezsdr_kernel::contract::Port {
-                        name: Ident::parse("rx").unwrap(),
-                        direction: ezsdr_kernel::contract::PortDirection::Out,
-                        contract,
-                    }],
+                    ports: vec![ezsdr_kernel::contract::Port { name: Ident::parse("rx").unwrap(), direction: ezsdr_kernel::contract::PortDirection::Out, contract }],
                     memory_domains: vec![ezsdr_kernel::id::MemoryDomainId::local(0)],
                     shareable: false,
                 },
@@ -250,23 +205,12 @@ impl ezsdr_kernel::module_api::Provider for NullProvider {
         &self.instance
     }
 
-    fn coerce(
-        &self,
-        _request: &ezsdr_kernel::module_api::Requested,
-    ) -> Result<ezsdr_kernel::module_api::CoerceReport, ezsdr_kernel::module_api::ModuleError> {
+    fn coerce(&self, _request: &ezsdr_kernel::module_api::Requested) -> Result<ezsdr_kernel::module_api::CoerceReport, ezsdr_kernel::module_api::ModuleError> {
         Ok(ezsdr_kernel::module_api::CoerceReport::default())
     }
 
-    fn prepare(
-        &mut self,
-        _f: &ezsdr_kernel::plan::Fragment,
-        _ctx: ezsdr_kernel::module_api::PrepareContext,
-    ) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
-        Ok(ezsdr_kernel::plan::PrepareReport {
-            effective: std::collections::BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+    fn prepare(&mut self, _f: &ezsdr_kernel::plan::Fragment, _ctx: ezsdr_kernel::module_api::PrepareContext) -> Result<ezsdr_kernel::plan::PrepareReport, ezsdr_kernel::module_api::ModuleError> {
+        Ok(ezsdr_kernel::plan::PrepareReport { effective: std::collections::BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
@@ -277,10 +221,7 @@ impl ezsdr_kernel::module_api::Provider for NullProvider {
         Ok(())
     }
 
-    fn stop(
-        &mut self,
-        _mode: ezsdr_kernel::module_api::StopMode,
-    ) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
+    fn stop(&mut self, _mode: ezsdr_kernel::module_api::StopMode) -> Result<(), ezsdr_kernel::module_api::ModuleError> {
         Ok(())
     }
 
@@ -294,9 +235,7 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
     use ezsdr_kernel::coordinator::{Assembly, connect};
     use ezsdr_kernel::module_api::{AuthorityDescriptor, Pacing, Role};
     use ezsdr_kernel::run::Lease;
-    use ezsdr_kernel::time::{
-        ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority,
-    };
+    use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority};
 
     let mut registry = ModuleRegistry::new();
     let mut checks = AdmissionCheckRegistry::new();
@@ -312,10 +251,7 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
                 vocabularies: Vec::new(),
                 impl_hash: None,
             },
-            ezsdr_kernel::module_api::Factories {
-                sink: true,
-                ..ezsdr_kernel::module_api::Factories::default()
-            },
+            ezsdr_kernel::module_api::Factories { sink: true, ..ezsdr_kernel::module_api::Factories::default() },
         )
         .expect("the recorder Module registers");
     // SB-22a: an output id and the `authority` name share one namespace, so the
@@ -330,10 +266,7 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
                 vocabularies: Vec::new(),
                 impl_hash: None,
             },
-            ezsdr_kernel::module_api::Factories {
-                authority: true,
-                ..ezsdr_kernel::module_api::Factories::default()
-            },
+            ezsdr_kernel::module_api::Factories { authority: true, ..ezsdr_kernel::module_api::Factories::default() },
         )
         .expect("the test Authority Module registers");
     registry
@@ -346,10 +279,7 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
                 vocabularies: Vec::new(),
                 impl_hash: None,
             },
-            ezsdr_kernel::module_api::Factories {
-                provider: true,
-                ..ezsdr_kernel::module_api::Factories::default()
-            },
+            ezsdr_kernel::module_api::Factories { provider: true, ..ezsdr_kernel::module_api::Factories::default() },
         )
         .expect("the test Provider Module registers");
     registry
@@ -362,30 +292,15 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
                 vocabularies: Vec::new(),
                 impl_hash: None,
             },
-            ezsdr_kernel::module_api::Factories {
-                link: true,
-                ..ezsdr_kernel::module_api::Factories::default()
-            },
+            ezsdr_kernel::module_api::Factories { link: true, ..ezsdr_kernel::module_api::Factories::default() },
         )
         .expect("the test Link Module registers");
-    registry
-        .register_link_descriptor(NullLink::new().descriptor)
-        .expect("the test Link descriptor is registered under its Module");
+    registry.register_link_descriptor(NullLink::new().descriptor).expect("the test Link descriptor is registered under its Module");
 
     let clocks = std::sync::Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
-    clocks
-        .register(ClockDomain::root(
-            root,
-            Rational::new(1_000_000_000, 1).unwrap(),
-            EpochRef::Arbitrary {
-                set_by: "sink.test".to_owned(),
-            },
-        ))
-        .unwrap();
-    let manual = std::sync::Arc::new(
-        ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap(),
-    );
+    clocks.register(ClockDomain::root(root, Rational::new(1_000_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "sink.test".to_owned() })).unwrap();
+    let manual = std::sync::Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());
     struct Sim(pub std::sync::Arc<ManualTimeAuthority>, pub AuthorityDescriptor);
     impl ezsdr_kernel::module_api::Authority for Sim {
         fn descriptor(&self) -> &AuthorityDescriptor {
@@ -404,10 +319,7 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
         Box::new(Sim(
             manual,
             AuthorityDescriptor {
-                module: ezsdr_kernel::module_api::ModuleRef {
-                    id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.authority").unwrap(),
-                    version: Version::new(1, 0, 0),
-                },
+                module: ezsdr_kernel::module_api::ModuleRef { id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.authority").unwrap(), version: Version::new(1, 0, 0) },
                 governs: vec![root, ClockDomainId::HOST_MONOTONIC],
                 pacing: Pacing::FreeRunning,
             },
@@ -418,26 +330,14 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
     assembly.checks = checks;
     assembly.kinds = kinds;
     let contract = ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").unwrap();
-    assembly.providers.insert(
-        Ident::parse("radio").unwrap(),
-        Box::new(NullProvider::new(contract.clone())),
-    );
-    assembly.links.insert(
-        ezsdr_kernel::module_api::ModuleRef {
-            id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.link").unwrap(),
-            version: Version::new(1, 0, 0),
-        },
-        Box::new(NullLink::new()),
-    );
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(NullProvider::new(contract.clone())));
+    assembly.links.insert(ezsdr_kernel::module_api::ModuleRef { id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.test.link").unwrap(), version: Version::new(1, 0, 0) }, Box::new(NullLink::new()));
     let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     assembly.sinks.insert(
         Ident::parse("rec").unwrap(),
         Box::new(DrainSink {
             descriptor: ezsdr_kernel::module_api::SinkDescriptor {
-                module: ezsdr_kernel::module_api::ModuleRef {
-                    id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.capture").unwrap(),
-                    version: Version::new(1, 0, 0),
-                },
+                module: ezsdr_kernel::module_api::ModuleRef { id: ezsdr_kernel::id::ModuleId::parse("ezsdr.sink.capture").unwrap(), version: Version::new(1, 0, 0) },
                 kind: Namespace::parse("sink.recorder").unwrap(),
                 memory_domains: vec![ezsdr_kernel::id::MemoryDomainId::local(0)],
                 contracts: vec![contract],
@@ -479,13 +379,9 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
             SessionAction::Vocabulary {
                 ns: Namespace::parse("sink").unwrap(),
                 verb: Ident::parse("capture").unwrap(),
-                target: ezsdr_kernel::event::Target::Output {
-                    output: Ident::parse("rec").unwrap(),
-                },
+                target: ezsdr_kernel::event::Target::Output { output: Ident::parse("rec").unwrap() },
                 at: Some(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100)),
-                params: [(Key::parse("sink.capture_samples").unwrap(), Value::from(1000))]
-                    .into_iter()
-                    .collect(),
+                params: [(Key::parse("sink.capture_samples").unwrap(), Value::from(1000))].into_iter().collect(),
             },
             None,
         )
@@ -498,18 +394,10 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
         Action::UpdateParameter { key, value, at, class, .. } => {
             assert_eq!(key.as_str(), "sink.capture_samples");
             assert_eq!(*value, Value::Scalar(Scalar::Int(1000)));
-            assert_eq!(
-                at.as_ref().map(|d| d.time_point),
-                Some(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100)),
-                "capture(n, at:) keeps its instant (RS-19)"
-            );
+            assert_eq!(at.as_ref().map(|d| d.time_point), Some(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 100)), "capture(n, at:) keeps its instant (RS-19)");
             // RS-52 (review P2-2): the class the Action reaches the Sink with is the
             // one `sink.capture_samples` declares, read at KC-24's step 5.
-            assert_eq!(
-                *class,
-                ezsdr_kernel::module_api::UpdateClass::BlockBoundary,
-                "the declaration's class, not the compiler's"
-            );
+            assert_eq!(*class, ezsdr_kernel::module_api::UpdateClass::BlockBoundary, "the declaration's class, not the compiler's");
         }
         other => panic!("expected a timed UpdateParameter, got {other:?}"),
     }
@@ -527,11 +415,7 @@ fn hd_14_schema_freeze() {
     if !update {
         for entry in std::fs::read_dir(&dir).expect("schemas/sink is readable") {
             let file = entry.expect("a schema directory entry").file_name().to_string_lossy().into_owned();
-            if file.ends_with(".json")
-                && !schemas
-                    .keys()
-                    .any(|name| ezsdr_kernel::schema::file_name(name) == file)
-            {
+            if file.ends_with(".json") && !schemas.keys().any(|name| ezsdr_kernel::schema::file_name(name) == file) {
                 stale.push(format!("{file}: no registered document generates it"));
             }
         }
@@ -554,13 +438,6 @@ fn hd_14_schema_freeze() {
     }
     assert!(stale.is_empty(), "HD-14: schema freeze failed:\n{}", stale.join("\n"));
 
-    let payload = RequestRejectedPayload {
-        action: ezsdr_kernel::event::ActionId(3),
-        kind: "update_parameter".to_owned(),
-        reason: "HD-14: N must be positive".to_owned(),
-    };
-    assert_eq!(
-        serde_json::to_value(payload).unwrap(),
-        json!({"action": 3, "kind": "update_parameter", "reason": "HD-14: N must be positive"})
-    );
+    let payload = RequestRejectedPayload { action: ezsdr_kernel::event::ActionId(3), kind: "update_parameter".to_owned(), reason: "HD-14: N must be positive".to_owned() };
+    assert_eq!(serde_json::to_value(payload).unwrap(), json!({"action": 3, "kind": "update_parameter", "reason": "HD-14: N must be positive"}));
 }

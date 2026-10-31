@@ -3,9 +3,7 @@ use std::sync::Arc;
 use ezsdr_hostmem::{CF32_BYTES, HOST_MEMORY, HostPool, interleave, read_cf32, write_cf32};
 use ezsdr_kernel::contract::DataContractId;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId};
-use ezsdr_kernel::stream::{
-    BlockHeader, BlockRef, BufferRef, ChannelMask, Direction, SampleBlock,
-};
+use ezsdr_kernel::stream::{BlockHeader, BlockRef, BufferRef, ChannelMask, Direction, SampleBlock};
 use ezsdr_kernel::time::TimePoint;
 
 fn header(ticks: i64, len: u32, channels: u16) -> BlockHeader {
@@ -22,10 +20,7 @@ fn header(ticks: i64, len: u32, channels: u16) -> BlockHeader {
 }
 
 fn hosted_block(ticks: i64, len: u32, channels: u16, bytes: Arc<[u8]>) -> BlockRef {
-    Arc::new(
-        SampleBlock::new_host(header(ticks, len, channels), HOST_MEMORY, bytes, CF32_BYTES as u32)
-            .unwrap(),
-    )
+    Arc::new(SampleBlock::new_host(header(ticks, len, channels), HOST_MEMORY, bytes, CF32_BYTES as u32).unwrap())
 }
 
 #[test]
@@ -60,27 +55,16 @@ fn hd_03_layout_round_trip() {
     let bytes = pool.fill(channels as usize * len * CF32_BYTES, |bytes| {
         for channel in 0..channels as usize {
             for index in 0..len {
-                write_cf32(
-                    bytes,
-                    len,
-                    channel,
-                    index,
-                    channel as f32 * 10.0 + index as f32,
-                    -(channel as f32 * 10.0 + index as f32),
-                );
+                write_cf32(bytes, len, channel, index, channel as f32 * 10.0 + index as f32, -(channel as f32 * 10.0 + index as f32));
             }
         }
     });
-    let block = SampleBlock::new_host(header(100, len as u32, channels), HOST_MEMORY, bytes, 8)
-        .unwrap();
+    let block = SampleBlock::new_host(header(100, len as u32, channels), HOST_MEMORY, bytes, 8).unwrap();
 
     for channel in 0..channels as usize {
         for index in 0..len {
             let value = channel as f32 * 10.0 + index as f32;
-            assert_eq!(
-                read_cf32(block.host_bytes().unwrap(), len, channel, index),
-                (value, -value)
-            );
+            assert_eq!(read_cf32(block.host_bytes().unwrap(), len, channel, index), (value, -value));
         }
     }
 
@@ -96,16 +80,7 @@ fn hd_03_layout_round_trip() {
     assert!(interleave(&block, CF32_BYTES, 3, 2).is_empty());
     assert!(interleave(&block, CF32_BYTES, 0, 4).is_empty());
 
-    let no_host_bytes = SampleBlock::new(
-        header(200, 1, 1),
-        BufferRef {
-            memory_domain: HOST_MEMORY,
-            handle: 0,
-            len_bytes: CF32_BYTES as u64,
-        },
-        CF32_BYTES as u32,
-    )
-    .unwrap();
+    let no_host_bytes = SampleBlock::new(header(200, 1, 1), BufferRef { memory_domain: HOST_MEMORY, handle: 0, len_bytes: CF32_BYTES as u64 }, CF32_BYTES as u32).unwrap();
     assert!(interleave(&no_host_bytes, CF32_BYTES, 0, 1).is_empty());
 }
 
@@ -123,7 +98,6 @@ fn hd_03_a_buffer_short_for_the_consumers_contract_reads_empty() {
 
     // The same block read at the width it was built for is not short.
     let honest: Arc<[u8]> = vec![0u8; 2 * CF32_BYTES].into();
-    let whole = SampleBlock::new_host(header(0, 1, 2), HOST_MEMORY, honest, CF32_BYTES as u32)
-        .unwrap();
+    let whole = SampleBlock::new_host(header(0, 1, 2), HOST_MEMORY, honest, CF32_BYTES as u32).unwrap();
     assert_eq!(interleave(&whole, CF32_BYTES, 0, 1).len(), 2 * CF32_BYTES);
 }

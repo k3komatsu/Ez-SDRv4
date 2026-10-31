@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::spec::{Ident, Key, Scalar, Value};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 /// Builds an `x3xx` layout selector using the numbered channel-and-stream key set.
 pub fn x3xx_selector<R: AsRef<str>, T: AsRef<str>>(rx: &[R], tx: &[T]) -> BTreeMap<Ident, Value> {
@@ -17,11 +17,7 @@ pub fn x3xx_selector<R: AsRef<str>, T: AsRef<str>>(rx: &[R], tx: &[T]) -> BTreeM
 
 /// Builds an `x3xx` selector with caller-supplied layout values.
 pub fn layout_selector(id: &str, rx: Value, tx: Value) -> BTreeMap<Ident, Value> {
-    BTreeMap::from([
-        (Ident::parse("id").unwrap(), Value::from(id)),
-        (Ident::parse("rx").unwrap(), rx),
-        (Ident::parse("tx").unwrap(), tx),
-    ])
+    BTreeMap::from([(Ident::parse("id").unwrap(), Value::from(id)), (Ident::parse("rx").unwrap(), rx), (Ident::parse("tx").unwrap(), tx)])
 }
 
 /// Adds a Mock device id to the shared `x3xx` layout selector.
@@ -33,11 +29,7 @@ pub fn mock_x3xx_selector<R: AsRef<str>, T: AsRef<str>>(id: &str, rx: &[R], tx: 
 
 /// Builds an `ideal` layout selector with its channel counts and device id.
 pub fn ideal_selector(id: &str, rx: i64, tx: i64) -> BTreeMap<Ident, Value> {
-    BTreeMap::from([
-        (Ident::parse("id").unwrap(), Value::from(id)),
-        (Ident::parse("rx").unwrap(), Value::from(rx)),
-        (Ident::parse("tx").unwrap(), Value::from(tx)),
-    ])
+    BTreeMap::from([(Ident::parse("id").unwrap(), Value::from(id)), (Ident::parse("rx").unwrap(), Value::from(rx)), (Ident::parse("tx").unwrap(), Value::from(tx))])
 }
 
 /// Adds the layout selector and default channel counts to an acceptance binding selector.

@@ -26,11 +26,7 @@ impl Timeline {
 
     /// The value in force at `t`: the last change whose tick is at or before `t`.
     pub(crate) fn at(&self, t: RootInstant) -> f64 {
-        self.changes
-            .iter()
-            .rev()
-            .find(|(tick, _)| t.is_at_or_after(*tick))
-            .map_or(self.initial, |(_, value)| *value)
+        self.changes.iter().rev().find(|(tick, _)| t.is_at_or_after(*tick)).map_or(self.initial, |(_, value)| *value)
     }
 }
 
@@ -85,8 +81,12 @@ impl Transmitter for TxShared {
     fn radiated(&self, channel: u16, at: RootInstant) -> Option<Radiated> {
         let plan = self.plan();
         for segment in plan.segments.values().rev() {
-            let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else { continue; };
-            let Some(model) = plan.channel_models.get(usize::from(channel)) else { continue; };
+            let Some(position) = segment.channel_numbers.iter().position(|number| *number == channel) else {
+                continue;
+            };
+            let Some(model) = plan.channel_models.get(usize::from(channel)) else {
+                continue;
+            };
             let j = at.sample_at_or_before(segment.origin, segment.ratio).saturating_sub(model.path_delay_samples);
             if j < segment.start {
                 continue;
@@ -104,11 +104,7 @@ impl Transmitter for TxShared {
             let phase = model.phase.at(stamp);
             let (sin, cos) = phase.sin_cos();
             let frequency = model.frequency_hz.at(stamp);
-            return Some(Radiated {
-                re: amplitude * (re * cos - im * sin),
-                im: amplitude * (re * sin + im * cos),
-                frequency_hz: frequency,
-            });
+            return Some(Radiated { re: amplitude * (re * cos - im * sin), im: amplitude * (re * sin + im * cos), frequency_hz: frequency });
         }
         None
     }

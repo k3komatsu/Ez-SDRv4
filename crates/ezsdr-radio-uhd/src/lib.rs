@@ -17,31 +17,22 @@ use std::sync::Arc;
 
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ModuleId;
-use ezsdr_kernel::module_api::{
-    Factories, KERNEL_API, ModuleDescriptor, ModuleRef, Role, Version, VersionReq, VocabularyRequirement,
-};
+use ezsdr_kernel::module_api::{Factories, KERNEL_API, ModuleDescriptor, ModuleRef, Role, Version, VersionReq, VocabularyRequirement};
 use ezsdr_kernel::spec::Namespace;
 
 pub use authority::{DeviceAuthority, REFERENCE_DID_NOT_LOCK};
-pub use device::{
-    Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxCode, TxReport,
-    decimation, from_time_spec, to_time_spec,
-};
+pub use device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxCode, TxReport, decimation, from_time_spec, to_time_spec};
 pub use host::{ClockMode, HostClock};
 pub use provider::UhdRadio;
 /// UHD's own calls for the C API tests and the bench (feature `uhd`, UR-3).
 #[cfg(feature = "uhd")]
 pub use uhd::{
-    UhdDevice, find as uhd_find, kept_count as uhd_kept_count, streamer_lifecycle as uhd_streamer_lifecycle,
-    struct_sizes as uhd_struct_sizes, subdev_spec_lifecycle as uhd_subdev_spec_lifecycle,
+    UhdDevice, find as uhd_find, kept_count as uhd_kept_count, streamer_lifecycle as uhd_streamer_lifecycle, struct_sizes as uhd_struct_sizes, subdev_spec_lifecycle as uhd_subdev_spec_lifecycle,
 };
 
 /// `ezsdr.radio.uhd` 0.4.0 (UR-1).
 pub fn module_ref() -> ModuleRef {
-    ModuleRef {
-        id: ModuleId::parse("ezsdr.radio.uhd").expect("a valid Module id"),
-        version: Version::new(0, 4, 0),
-    }
+    ModuleRef { id: ModuleId::parse("ezsdr.radio.uhd").expect("a valid Module id"), version: Version::new(0, 4, 0) }
 }
 
 /// The Module descriptor: one Module, the Provider and the Authority roles (UR-1).
@@ -52,10 +43,7 @@ pub fn descriptor() -> ModuleDescriptor {
         version: module.version,
         kernel_api: KERNEL_API,
         roles: vec![Role::Provider, Role::Authority],
-        vocabularies: vec![VocabularyRequirement {
-            id: Namespace::parse(ezsdr_radio::VOCABULARY).expect("the radio namespace"),
-            req: VersionReq(Version::new(2, 0, 0)),
-        }],
+        vocabularies: vec![VocabularyRequirement { id: Namespace::parse(ezsdr_radio::VOCABULARY).expect("the radio namespace"), req: VersionReq(Version::new(2, 0, 0)) }],
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.radio.uhd 0.4.0")),
     }
 }

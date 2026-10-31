@@ -12,14 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use ezsdr_kernel::module_api::{
-    CoercionFidelity, EnvelopeFidelity, Fidelity, RfFidelity, TransportFidelity,
-};
+use ezsdr_kernel::module_api::{CoercionFidelity, EnvelopeFidelity, Fidelity, RfFidelity, TransportFidelity};
 
-use crate::device::{
-    Applied, Device, DeviceError, Dir, Iq, RxRecv, Settings, TxCode, TxReport, from_time_spec,
-    to_time_spec,
-};
+use crate::device::{Applied, Device, DeviceError, Dir, Iq, RxRecv, Settings, TxCode, TxReport, from_time_spec, to_time_spec};
 
 #[allow(non_camel_case_types, dead_code)]
 mod ffi {
@@ -201,7 +196,15 @@ mod ffi {
         pub fn uhd_rx_streamer_free(h: *mut uhd_rx_streamer_handle) -> uhd_error;
         pub fn uhd_usrp_get_rx_stream(h: uhd_usrp_handle, stream_args: *mut uhd_stream_args_t, h_out: uhd_rx_streamer_handle) -> uhd_error;
         pub fn uhd_rx_streamer_max_num_samps(h: uhd_rx_streamer_handle, max_num_samps_out: *mut usize) -> uhd_error;
-        pub fn uhd_rx_streamer_recv(h: uhd_rx_streamer_handle, buffs: *mut *mut c_void, samps_per_buff: usize, md: *mut uhd_rx_metadata_handle, timeout: f64, one_packet: bool, items_recvd: *mut usize) -> uhd_error;
+        pub fn uhd_rx_streamer_recv(
+            h: uhd_rx_streamer_handle,
+            buffs: *mut *mut c_void,
+            samps_per_buff: usize,
+            md: *mut uhd_rx_metadata_handle,
+            timeout: f64,
+            one_packet: bool,
+            items_recvd: *mut usize,
+        ) -> uhd_error;
         pub fn uhd_rx_streamer_issue_stream_cmd(h: uhd_rx_streamer_handle, stream_cmd: *const uhd_stream_cmd_t) -> uhd_error;
         pub fn uhd_rx_streamer_last_error(h: uhd_rx_streamer_handle, error_out: *mut c_char, strbuffer_len: usize) -> uhd_error;
 
@@ -389,14 +392,7 @@ impl TxStream {
         let mut h: uhd_tx_streamer_handle = std::ptr::null_mut();
         // SAFETY: `h` is written by the call.
         unsafe { check("uhd_tx_streamer_make", uhd_tx_streamer_make(&mut h), true)? };
-        let mut stream = TxStream {
-            h,
-            call: Mutex::new(()),
-            md: std::ptr::null_mut(),
-            pointers: Mutex::new(vec![std::ptr::null(); channels]),
-            lost,
-            channels,
-        };
+        let mut stream = TxStream { h, call: Mutex::new(()), md: std::ptr::null_mut(), pointers: Mutex::new(vec![std::ptr::null(); channels]), lost, channels };
         attach(stream.h)?;
         // SAFETY: as above.
         unsafe { check("uhd_async_metadata_make", uhd_async_metadata_make(&mut stream.md), true)? };
@@ -550,11 +546,7 @@ impl UhdDevice {
                 Dir::Rx => self.check_usrp("uhd_usrp_set_rx_freq", uhd_usrp_set_rx_freq(self.usrp, &mut request, chan, &mut result), false),
                 Dir::Tx => self.check_usrp("uhd_usrp_set_tx_freq", uhd_usrp_set_tx_freq(self.usrp, &mut request, chan, &mut result), false),
             };
-            let cleared = if at.is_some() {
-                self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false)
-            } else {
-                Ok(())
-            };
+            let cleared = if at.is_some() { self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false) } else { Ok(()) };
             tuned?;
             cleared?;
             Ok(result.actual_dsp_freq)
@@ -587,11 +579,7 @@ impl UhdDevice {
                 Dir::Rx => self.check_usrp("uhd_usrp_set_rx_freq", uhd_usrp_set_rx_freq(self.usrp, &mut request, chan, &mut result), false),
                 Dir::Tx => self.check_usrp("uhd_usrp_set_tx_freq", uhd_usrp_set_tx_freq(self.usrp, &mut request, chan, &mut result), false),
             };
-            let cleared = if at.is_some() {
-                self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false)
-            } else {
-                Ok(())
-            };
+            let cleared = if at.is_some() { self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false) } else { Ok(()) };
             tuned?;
             cleared?;
             Ok((result.actual_rf_freq, result.actual_dsp_freq))
@@ -715,10 +703,7 @@ impl Device for UhdDevice {
             let _control = lock(&self.control);
             uhd_usrp_get_pp_string(self.usrp, pp.as_mut_ptr(), pp.len() - 1);
             uhd_get_version_string(version.as_mut_ptr(), version.len() - 1);
-            (
-                CStr::from_ptr(pp.as_ptr()).to_string_lossy().into_owned(),
-                CStr::from_ptr(version.as_ptr()).to_string_lossy().into_owned(),
-            )
+            (CStr::from_ptr(pp.as_ptr()).to_string_lossy().into_owned(), CStr::from_ptr(version.as_ptr()).to_string_lossy().into_owned())
         };
         serde_json::json!({
             "args": self.args,
@@ -731,13 +716,7 @@ impl Device for UhdDevice {
     }
 
     fn fidelity(&self) -> Fidelity {
-        Fidelity {
-            timing: EnvelopeFidelity::Real,
-            continuity: EnvelopeFidelity::Real,
-            coercion: CoercionFidelity::Real,
-            rf: RfFidelity::Real,
-            transport: TransportFidelity::Real,
-        }
+        Fidelity { timing: EnvelopeFidelity::Real, continuity: EnvelopeFidelity::Real, coercion: CoercionFidelity::Real, rf: RfFidelity::Real, transport: TransportFidelity::Real }
     }
 
     fn master_clock_rate(&self) -> u64 {
@@ -780,9 +759,14 @@ impl Device for UhdDevice {
         // SAFETY: the info struct is written by the call and freed here.
         unsafe {
             let mut info = uhd_usrp_rx_info_t {
-                mboard_id: std::ptr::null_mut(), mboard_name: std::ptr::null_mut(), mboard_serial: std::ptr::null_mut(),
-                rx_id: std::ptr::null_mut(), rx_subdev_name: std::ptr::null_mut(), rx_subdev_spec: std::ptr::null_mut(),
-                rx_serial: std::ptr::null_mut(), rx_antenna: std::ptr::null_mut(),
+                mboard_id: std::ptr::null_mut(),
+                mboard_name: std::ptr::null_mut(),
+                mboard_serial: std::ptr::null_mut(),
+                rx_id: std::ptr::null_mut(),
+                rx_subdev_name: std::ptr::null_mut(),
+                rx_subdev_spec: std::ptr::null_mut(),
+                rx_serial: std::ptr::null_mut(),
+                rx_antenna: std::ptr::null_mut(),
             };
             let read = self.check_usrp("uhd_usrp_get_rx_info", uhd_usrp_get_rx_info(self.usrp, 0, &mut info), false);
             // SAFETY: `mboard_serial` is filled in by the call, one NUL-terminated string; the
@@ -883,8 +867,7 @@ impl Device for UhdDevice {
         // SAFETY: the vector and the sensor value are made and freed here.
         unsafe {
             check("uhd_string_vector_make", uhd_string_vector_make(&mut names), false)?;
-            let listed = self.check_usrp("uhd_usrp_get_mboard_sensor_names", uhd_usrp_get_mboard_sensor_names(self.usrp, 0, &mut names), false)
-                .map(|()| strings(names));
+            let listed = self.check_usrp("uhd_usrp_get_mboard_sensor_names", uhd_usrp_get_mboard_sensor_names(self.usrp, 0, &mut names), false).map(|()| strings(names));
             uhd_string_vector_free(&mut names);
             if !listed?.iter().any(|n| n == "ref_locked") {
                 return Ok(None);
@@ -893,7 +876,8 @@ impl Device for UhdDevice {
             let mut value: uhd_sensor_value_handle = std::ptr::null_mut();
             check("uhd_sensor_value_make", uhd_sensor_value_make(&mut value), false)?;
             let mut locked = false;
-            let read = self.check_usrp("uhd_usrp_get_mboard_sensor", uhd_usrp_get_mboard_sensor(self.usrp, name.as_ptr(), 0, &mut value), false)
+            let read = self
+                .check_usrp("uhd_usrp_get_mboard_sensor", uhd_usrp_get_mboard_sensor(self.usrp, name.as_ptr(), 0, &mut value), false)
                 .and_then(|()| check("uhd_sensor_value_to_bool", uhd_sensor_value_to_bool(value, &mut locked), false));
             uhd_sensor_value_free(&mut value);
             read.map(|()| Some(locked))
@@ -948,11 +932,7 @@ impl Device for UhdDevice {
                 Ok::<(), DeviceError>(())
             })();
             // A command time left set would make every later untimed call timed.
-            let cleared = if at.is_some() {
-                self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false)
-            } else {
-                Ok(())
-            };
+            let cleared = if at.is_some() { self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false) } else { Ok(()) };
             applied?;
             cleared?;
             let (mut rate, mut freq, mut gain) = (0.0, 0.0, 0.0);
@@ -1249,7 +1229,9 @@ mod ffi_tests {
     }
 
     fn native_entry() {
-        if !PROBE.load(Ordering::SeqCst) { return; }
+        if !PROBE.load(Ordering::SeqCst) {
+            return;
+        }
         let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
         MAX_ACTIVE.fetch_max(active, Ordering::SeqCst);
         let mut entered = lock(&ENTERED.0);
@@ -1257,8 +1239,7 @@ mod ffi_tests {
         ENTERED.1.notify_all();
         // A missing call lock allows both entries to rendezvous. With the lock,
         // the first waits out the rendezvous, returns, then permits the second.
-        let _ = ENTERED.1.wait_timeout_while(entered, Duration::from_millis(500), |n| *n < 2)
-            .unwrap_or_else(|e| e.into_inner());
+        let _ = ENTERED.1.wait_timeout_while(entered, Duration::from_millis(500), |n| *n < 2).unwrap_or_else(|e| e.into_inner());
         ACTIVE.fetch_sub(1, Ordering::SeqCst);
     }
 
@@ -1271,7 +1252,10 @@ mod ffi_tests {
         std::thread::scope(|scope| {
             for call in [a, b] {
                 let start = &start;
-                scope.spawn(move || { start.wait(); call(device); });
+                scope.spawn(move || {
+                    start.wait();
+                    call(device);
+                });
             }
             start.wait();
         });
@@ -1285,10 +1269,7 @@ mod ffi_tests {
     }
 
     #[unsafe(no_mangle)]
-    extern "C" fn uhd_tx_streamer_send(
-        _h: uhd_tx_streamer_handle, buffs: *mut *const c_void,
-        n: usize, md: *mut uhd_tx_metadata_handle, _timeout: f64, sent: *mut usize,
-    ) -> c_int {
+    extern "C" fn uhd_tx_streamer_send(_h: uhd_tx_streamer_handle, buffs: *mut *const c_void, n: usize, md: *mut uhd_tx_metadata_handle, _timeout: f64, sent: *mut usize) -> c_int {
         native_entry();
         SEND_CALLS.fetch_add(1, Ordering::SeqCst);
         // SAFETY: tx_send supplies live output, metadata and pointer-array slots. The
@@ -1300,32 +1281,31 @@ mod ffi_tests {
                 let metadata_handle = *md;
                 let metadata = *metadata_handle.cast::<TxMetadata>();
                 let channels = std::slice::from_raw_parts(buffs, channel_count).iter().map(|pointer| *pointer as usize).collect();
-                lock(&TX_SEND_OBSERVATIONS).push(TxSendObservation {
-                    vector: buffs as usize,
-                    channels,
-                    metadata,
-                });
+                lock(&TX_SEND_OBSERVATIONS).push(TxSendObservation { vector: buffs as usize, channels, metadata });
             }
         }
         UHD_ERROR_NONE
     }
 
     #[unsafe(no_mangle)]
-    extern "C" fn uhd_tx_metadata_make(
-        handle: *mut uhd_tx_metadata_handle, has_time_spec: bool, full_secs: i64,
-        frac_secs: f64, start_of_burst: bool, end_of_burst: bool,
-    ) -> c_int {
-        if handle.is_null() { return UHD_ERROR_NONE; }
+    extern "C" fn uhd_tx_metadata_make(handle: *mut uhd_tx_metadata_handle, has_time_spec: bool, full_secs: i64, frac_secs: f64, start_of_burst: bool, end_of_burst: bool) -> c_int {
+        if handle.is_null() {
+            return UHD_ERROR_NONE;
+        }
         let metadata = Box::new(TxMetadata { has_time_spec, full_secs, frac_secs, start_of_burst, end_of_burst });
         // SAFETY: the caller supplies a live output slot and frees the returned handle once.
-        unsafe { *handle = Box::into_raw(metadata).cast(); }
+        unsafe {
+            *handle = Box::into_raw(metadata).cast();
+        }
         TX_METADATA_MAKES.fetch_add(1, Ordering::SeqCst);
         UHD_ERROR_NONE
     }
 
     #[unsafe(no_mangle)]
     extern "C" fn uhd_tx_metadata_free(handle: *mut uhd_tx_metadata_handle) -> c_int {
-        if handle.is_null() { return UHD_ERROR_NONE; }
+        if handle.is_null() {
+            return UHD_ERROR_NONE;
+        }
         // SAFETY: every non-null test handle was allocated by `uhd_tx_metadata_make`.
         unsafe {
             if !(*handle).is_null() {
@@ -1341,7 +1321,9 @@ mod ffi_tests {
     unsafe extern "C" fn uhd_async_metadata_free(handle: *mut uhd_async_metadata_handle) -> c_int {
         TX_ASYNC_METADATA_FREES.fetch_add(1, Ordering::SeqCst);
         // SAFETY: the caller supplies a live handle slot; the stub does not inspect the opaque handle.
-        unsafe { *handle = std::ptr::null_mut(); }
+        unsafe {
+            *handle = std::ptr::null_mut();
+        }
         UHD_ERROR_NONE
     }
 
@@ -1349,21 +1331,20 @@ mod ffi_tests {
     unsafe extern "C" fn uhd_tx_streamer_free(handle: *mut uhd_tx_streamer_handle) -> c_int {
         TX_STREAMER_FREES.fetch_add(1, Ordering::SeqCst);
         // SAFETY: the caller supplies a live handle slot; the stub does not inspect the opaque handle.
-        unsafe { *handle = std::ptr::null_mut(); }
+        unsafe {
+            *handle = std::ptr::null_mut();
+        }
         UHD_ERROR_NONE
     }
 
     fn dummy(channels: usize) -> Arc<UhdDevice> {
         let lost = Arc::new(AtomicBool::new(true));
         let mut tx = BTreeMap::new();
-        tx.insert(0, Arc::new(TxStream {
-            h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(),
-            pointers: Mutex::new(vec![std::ptr::null(); channels]), channels, lost: lost.clone(),
-        }));
-        Arc::new(UhdDevice {
-            usrp: std::ptr::null_mut(), args: "ffi-test-no-device".to_owned(), mcr: 200_000_000,
-            control: Mutex::new(()), rx: Mutex::new(BTreeMap::new()), tx: Mutex::new(tx), lost,
-        })
+        tx.insert(
+            0,
+            Arc::new(TxStream { h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(), pointers: Mutex::new(vec![std::ptr::null(); channels]), channels, lost: lost.clone() }),
+        );
+        Arc::new(UhdDevice { usrp: std::ptr::null_mut(), args: "ffi-test-no-device".to_owned(), mcr: 200_000_000, control: Mutex::new(()), rx: Mutex::new(BTreeMap::new()), tx: Mutex::new(tx), lost })
     }
 
     #[test]
@@ -1386,11 +1367,11 @@ mod ffi_tests {
         let observations = lock(&TX_SEND_OBSERVATIONS).clone();
         assert_eq!(observations.len(), 3);
         assert!(observations.iter().all(|send| send.vector == observations[0].vector), "pointer-vector storage changed: {observations:?}");
-        assert_eq!(observations.iter().map(|send| send.channels.clone()).collect::<Vec<_>>(), [
-            vec![timed_0.as_ptr() as usize, timed_1.as_ptr() as usize],
-            vec![continued_0.as_ptr() as usize, continued_1.as_ptr() as usize],
-            vec![tail_0.as_ptr() as usize, tail_1.as_ptr() as usize],
-        ], "the reusable vector preserves logical channel order");
+        assert_eq!(
+            observations.iter().map(|send| send.channels.clone()).collect::<Vec<_>>(),
+            [vec![timed_0.as_ptr() as usize, timed_1.as_ptr() as usize], vec![continued_0.as_ptr() as usize, continued_1.as_ptr() as usize], vec![tail_0.as_ptr() as usize, tail_1.as_ptr() as usize],],
+            "the reusable vector preserves logical channel order"
+        );
         assert_eq!(observations[0].metadata, TxMetadata { has_time_spec: true, full_secs: 1, frac_secs: 0.0, start_of_burst: true, end_of_burst: false });
         assert_eq!(observations[1].metadata, TxMetadata { has_time_spec: false, full_secs: 0, frac_secs: 0.0, start_of_burst: false, end_of_burst: false });
         assert_eq!(observations[2].metadata, TxMetadata { has_time_spec: false, full_secs: 0, frac_secs: 0.0, start_of_burst: false, end_of_burst: true });
@@ -1426,9 +1407,7 @@ mod ffi_tests {
         let long = vec![[0.0, 0.0]; 100];
         let short = [[0.0, 0.0]; 1];
         let longer = vec![[0.0, 0.0]; 101];
-        for samples in [vec![&long[..], &short[..], &long[..]],
-                        vec![&long[..], &long[..], &short[..]],
-                        vec![&long[..], &[][..], &long[..]]] {
+        for samples in [vec![&long[..], &short[..], &long[..]], vec![&long[..], &long[..], &short[..]], vec![&long[..], &[][..], &long[..]]] {
             SEND_CALLS.store(0, Ordering::SeqCst);
             assert!(device.tx_send(0, &samples, None, false, false, Duration::from_millis(1)).is_err());
             assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 0, "short buffers must never reach C");
@@ -1455,25 +1434,27 @@ mod ffi_tests {
         let wave = [[0.0f32, 0.0]; 4];
         assert!(device.tx_send(1, &[&wave], None, false, false, Duration::from_millis(1)).is_err(), "no transmit streamer 1");
         assert!(device.tx_async(1, Duration::ZERO).unwrap().is_none());
-        lock(&device.tx).insert(1, Arc::new(TxStream {
-            h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(),
-            pointers: Mutex::new(vec![std::ptr::null(); 2]), channels: 2, lost: device.lost.clone(),
-        }));
+        lock(&device.tx).insert(
+            1,
+            Arc::new(TxStream { h: std::ptr::null_mut(), call: Mutex::new(()), md: std::ptr::null_mut(), pointers: Mutex::new(vec![std::ptr::null(); 2]), channels: 2, lost: device.lost.clone() }),
+        );
         assert!(device.tx_send(0, &[&wave, &wave], None, false, false, Duration::from_millis(1)).is_err(), "stream 0 has one channel");
         assert!(device.tx_send(1, &[&wave, &wave], None, false, false, Duration::from_millis(1)).is_ok(), "stream 1 has two");
         let mut md = std::ptr::null_mut();
         // SAFETY: made by real libuhd for rx_recv's metadata getters; the receive
         // replacement never dereferences the dummy streamer or sample pointers.
-        unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut md), true).unwrap(); }
-        lock(&device.rx).insert(1, Arc::new(RxStream {
-            h: std::ptr::null_mut(), call: Mutex::new(()), md, channels: 2, spp: 7, lost: device.lost.clone(),
-        }));
+        unsafe {
+            check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut md), true).unwrap();
+        }
+        lock(&device.rx).insert(1, Arc::new(RxStream { h: std::ptr::null_mut(), call: Mutex::new(()), md, channels: 2, spp: 7, lost: device.lost.clone() }));
         assert_eq!(device.rx_packet_samples(1), 7);
         assert_eq!(device.rx_packet_samples(0), 0, "stream 0 has no receive streamer");
         assert!(matches!(device.rx_recv(0, 1, Duration::from_millis(1), false), RxRecv::Failed(_)));
         assert!(matches!(device.rx_recv(1, 1, Duration::from_millis(1), false), RxRecv::Timeout));
         // SAFETY: nothing else holds this metadata; the dummy streamer's Drop is skipped.
-        unsafe { uhd_rx_metadata_free(&mut md); }
+        unsafe {
+            uhd_rx_metadata_free(&mut md);
+        }
     }
 
     #[test]
@@ -1490,19 +1471,24 @@ mod ffi_tests {
 
     #[unsafe(no_mangle)]
     extern "C" fn uhd_rx_streamer_recv(
-        _h: uhd_rx_streamer_handle, _buffs: *mut *mut c_void, _n: usize,
-        _md: *mut uhd_rx_metadata_handle, _timeout: f64, _one_packet: bool, received: *mut usize,
+        _h: uhd_rx_streamer_handle,
+        _buffs: *mut *mut c_void,
+        _n: usize,
+        _md: *mut uhd_rx_metadata_handle,
+        _timeout: f64,
+        _one_packet: bool,
+        received: *mut usize,
     ) -> c_int {
         native_entry();
         // SAFETY: rx_recv supplies a live output slot. No sample pointers read.
-        unsafe { *received = 0; }
+        unsafe {
+            *received = 0;
+        }
         UHD_ERROR_NONE
     }
 
     #[unsafe(no_mangle)]
-    extern "C" fn uhd_rx_streamer_issue_stream_cmd(
-        _h: uhd_rx_streamer_handle, cmd: *const uhd_stream_cmd_t,
-    ) -> c_int {
+    extern "C" fn uhd_rx_streamer_issue_stream_cmd(_h: uhd_rx_streamer_handle, cmd: *const uhd_stream_cmd_t) -> c_int {
         native_entry();
         // SAFETY: `stream_cmd` passes its live stack command for this call.
         let cmd = unsafe { &*cmd };
@@ -1541,13 +1527,12 @@ mod ffi_tests {
     }
 
     #[unsafe(no_mangle)]
-    extern "C" fn uhd_tx_streamer_recv_async_msg(
-        _h: uhd_tx_streamer_handle, _md: *mut uhd_async_metadata_handle,
-        _timeout: f64, valid: *mut bool,
-    ) -> c_int {
+    extern "C" fn uhd_tx_streamer_recv_async_msg(_h: uhd_tx_streamer_handle, _md: *mut uhd_async_metadata_handle, _timeout: f64, valid: *mut bool) -> c_int {
         native_entry();
         // SAFETY: tx_async supplies a live output slot, and reads no metadata on false.
-        unsafe { *valid = false; }
+        unsafe {
+            *valid = false;
+        }
         if ASYNC_ERROR.load(Ordering::SeqCst) { UHD_ERROR_IO } else { UHD_ERROR_NONE }
     }
 
@@ -1555,7 +1540,9 @@ mod ffi_tests {
     extern "C" fn uhd_tx_streamer_last_error(_h: uhd_tx_streamer_handle, buf: *mut c_char, len: usize) -> c_int {
         let text = b"ffi test: async message failed\0";
         // SAFETY: `text` reads the error into a buffer writable for `len` bytes.
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len)); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len));
+        }
         UHD_ERROR_NONE
     }
 
@@ -1577,16 +1564,29 @@ mod ffi_tests {
     fn receive(device: &UhdDevice) {
         assert!(matches!(device.rx_recv(0, 1, Duration::from_secs(1), false), RxRecv::Timeout));
     }
-    fn start(device: &UhdDevice) { device.rx_start(0, 0).unwrap(); }
-    fn report(device: &UhdDevice) { assert!(device.tx_async(0, Duration::from_secs(1)).unwrap().is_none()); }
+    fn start(device: &UhdDevice) {
+        device.rx_start(0, 0).unwrap();
+    }
+    fn report(device: &UhdDevice) {
+        assert!(device.tx_async(0, Duration::from_secs(1)).unwrap().is_none());
+    }
 
-    fn rx_open(device: &UhdDevice) { device.rx_open(0, &[0]).unwrap(); }
-    fn rx_open_then_close(device: &UhdDevice) { device.rx_open(0, &[0]).unwrap(); device.rx_close(0); }
+    fn rx_open(device: &UhdDevice) {
+        device.rx_open(0, &[0]).unwrap();
+    }
+    fn rx_open_then_close(device: &UhdDevice) {
+        device.rx_open(0, &[0]).unwrap();
+        device.rx_close(0);
+    }
 
     fn rx_dummy(lost: bool) -> Arc<UhdDevice> {
         Arc::new(UhdDevice {
-            usrp: std::ptr::null_mut(), args: "ffi-rx-test-no-device".to_owned(), mcr: 200_000_000,
-            control: Mutex::new(()), rx: Mutex::new(BTreeMap::new()), tx: Mutex::new(BTreeMap::new()),
+            usrp: std::ptr::null_mut(),
+            args: "ffi-rx-test-no-device".to_owned(),
+            mcr: 200_000_000,
+            control: Mutex::new(()),
+            rx: Mutex::new(BTreeMap::new()),
+            tx: Mutex::new(BTreeMap::new()),
             lost: Arc::new(AtomicBool::new(lost)),
         })
     }
@@ -1594,7 +1594,9 @@ mod ffi_tests {
     #[unsafe(no_mangle)]
     unsafe extern "C" fn uhd_rx_streamer_make(h: *mut uhd_rx_streamer_handle) -> c_int {
         // SAFETY: the caller supplies a live output slot; the paired free stub owns this box.
-        unsafe { *h = Box::into_raw(Box::new(0u8)) as uhd_rx_streamer_handle; }
+        unsafe {
+            *h = Box::into_raw(Box::new(0u8)) as uhd_rx_streamer_handle;
+        }
         UHD_ERROR_NONE
     }
 
@@ -1602,7 +1604,12 @@ mod ffi_tests {
     unsafe extern "C" fn uhd_rx_streamer_free(h: *mut uhd_rx_streamer_handle) -> c_int {
         RX_STREAM_FREES.fetch_add(1, Ordering::SeqCst);
         // SAFETY: the test open stub allocated this handle once; the caller frees it once.
-        unsafe { if !(*h).is_null() { drop(Box::from_raw(*h as *mut u8)); *h = std::ptr::null_mut(); } }
+        unsafe {
+            if !(*h).is_null() {
+                drop(Box::from_raw(*h as *mut u8));
+                *h = std::ptr::null_mut();
+            }
+        }
         UHD_ERROR_NONE
     }
 
@@ -1622,7 +1629,9 @@ mod ffi_tests {
     unsafe extern "C" fn uhd_rx_streamer_last_error(_h: uhd_rx_streamer_handle, buf: *mut c_char, len: usize) -> c_int {
         let text = b"ffi test: the rx streamer's text\0";
         // SAFETY: `buf` is writable for `len` bytes, as `text` passes it.
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len)); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len));
+        }
         UHD_ERROR_NONE
     }
 
@@ -1645,7 +1654,9 @@ mod ffi_tests {
     #[unsafe(no_mangle)]
     unsafe extern "C" fn uhd_rx_streamer_max_num_samps(_h: uhd_rx_streamer_handle, n: *mut usize) -> c_int {
         // SAFETY: the caller supplies a live output slot.
-        unsafe { *n = 64; }
+        unsafe {
+            *n = 64;
+        }
         UHD_ERROR_NONE
     }
 
@@ -1688,17 +1699,18 @@ mod ffi_tests {
         let mut md = std::ptr::null_mut();
         // SAFETY: made by real libuhd for rx_recv's metadata getters; the receive
         // replacement never dereferences the dummy streamer or sample pointers.
-        unsafe { check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut md), true).unwrap(); }
-        lock(&device.rx).insert(0, Arc::new(RxStream {
-            h: std::ptr::null_mut(), call: Mutex::new(()), md,
-            channels: 1, spp: 1, lost: device.lost.clone(),
-        }));
+        unsafe {
+            check("uhd_rx_metadata_make", uhd_rx_metadata_make(&mut md), true).unwrap();
+        }
+        lock(&device.rx).insert(0, Arc::new(RxStream { h: std::ptr::null_mut(), call: Mutex::new(()), md, channels: 1, spp: 1, lost: device.lost.clone() }));
         pair(&device, receive, receive);
         pair(&device, receive, start);
         pair(&device, send, report);
         pair(&device, report, report);
         // SAFETY: every worker has joined; no further receive call uses this metadata.
-        unsafe { uhd_rx_metadata_free(&mut md); }
+        unsafe {
+            uhd_rx_metadata_free(&mut md);
+        }
         // Dummy handles are marked lost, so their Drop path never frees metadata again.
     }
 
@@ -1717,11 +1729,7 @@ mod ffi_tests {
     #[unsafe(no_mangle)]
     extern "C" fn uhd_subdev_spec_make(h: *mut uhd_subdev_spec_handle, markup: *const c_char) -> uhd_error {
         // SAFETY: `h` is a live output slot and `markup` the caller's C string, as in UHD.
-        let malformed = unsafe { CStr::from_ptr(markup) }
-            .to_string_lossy()
-            .split(' ')
-            .filter(|token| !token.is_empty())
-            .any(|token| token.split(':').count() > 2);
+        let malformed = unsafe { CStr::from_ptr(markup) }.to_string_lossy().split(' ').filter(|token| !token.is_empty()).any(|token| token.split(':').count() > 2);
         SUBDEV_MADE.fetch_add(1, Ordering::SeqCst);
         // SAFETY: the caller's slot is written once, with the handle its free takes back.
         unsafe { *h = Box::into_raw(Box::new(0usize)) as uhd_subdev_spec_handle };
@@ -1764,7 +1772,9 @@ mod ffi_tests {
     extern "C" fn uhd_usrp_last_error(_h: uhd_usrp_handle, buf: *mut c_char, len: usize) -> uhd_error {
         let text = b"ffi test: the usrp set failed\0";
         // SAFETY: `buf` is writable for `len` bytes, as `text` passes it.
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len)); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr() as *const c_char, buf, text.len().min(len));
+        }
         UHD_ERROR_NONE
     }
 
@@ -1795,5 +1805,4 @@ mod ffi_tests {
         assert!(error.message.starts_with("uhd_usrp_set_tx_subdev_spec: UHD error 44: ffi test: the usrp set failed"), "{}", error.message);
         assert_eq!(counts(), (1, 1), "the spec of a failed set is freed once");
     }
-
 }

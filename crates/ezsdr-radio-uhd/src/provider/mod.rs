@@ -3,21 +3,21 @@
 
 mod control;
 mod core;
-mod mode;
-mod rx;
-mod tx;
-#[cfg(test)]
-mod test_support;
 /// VH-8's seeded sequences (spec 22), shared with the other crates' tests by path.
 #[cfg(test)]
 #[path = "../../../ezsdr-radio/tests/generator/mod.rs"]
 mod generator;
+mod mode;
+mod rx;
+#[cfg(test)]
+mod test_support;
+mod tx;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration as Wall, Instant};
 
@@ -25,23 +25,20 @@ use ezsdr_hostmem::HOST_MEMORY;
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::event::{EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
-use ezsdr_kernel::module_api::{
-    ActionReceiver, CoerceReport, Driving, Endpoint, ExecutionClass, ModuleError,
-    ModuleErrorKind, PrepareContext, Provider, ProviderInstance, Requested, Role, StopMode,
-};
+use ezsdr_kernel::module_api::{ActionReceiver, CoerceReport, Driving, Endpoint, ExecutionClass, ModuleError, ModuleErrorKind, PrepareContext, Provider, ProviderInstance, Requested, Role, StopMode};
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::BackPressure;
 use ezsdr_kernel::time::{Duration, SampleClockHandle, TimePoint};
 use ezsdr_radio::channels;
+use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::LateCommandPayload;
 use ezsdr_radio::timeline::Channels;
 use ezsdr_radio::x3xx;
-use ezsdr_radio::kinds;
 use serde_json::{Value as Json, json};
 
-use self::core::{Clock, Core, lock};
 use self::control::Control;
+use self::core::{Clock, Core, lock};
 use self::mode::DescriptionExt;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
@@ -65,11 +62,7 @@ fn section(suffix: &str) -> Namespace {
 
 fn description_surfaces(description: &channels::Description, id: &ResourceId) -> (ezsdr_kernel::module_api::Resource, Duration, Json) {
     let timing = description.timing;
-    (
-        description.tree(id, HOST_MEMORY),
-        Duration::new(ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns),
-        serde_json::to_value(description.envelope()).expect("an envelope"),
-    )
+    (description.tree(id, HOST_MEMORY), Duration::new(ClockDomainId::HOST_MONOTONIC, timing.min_timed_command_lead_ns), serde_json::to_value(description.envelope()).expect("an envelope"))
 }
 
 const JOIN_BOUND: Wall = Wall::from_secs(1);
@@ -149,11 +142,7 @@ fn register_serial(serial: &str) -> Result<SerialGuard, ModuleError> {
 /// The subdev spec markup of a direction's elements (UR-5, H2): `<slot>:<front end>` per
 /// element, in the layout's order, one ASCII space between them (design 33 D5).
 fn subdev_markup(elements: &[(x3xx::Slot, u32)]) -> String {
-    elements
-        .iter()
-        .map(|(slot, fe)| format!("{}:{fe}", if *slot == x3xx::Slot::A { "A" } else { "B" }))
-        .collect::<Vec<_>>()
-        .join(" ")
+    elements.iter().map(|(slot, fe)| format!("{}:{fe}", if *slot == x3xx::Slot::A { "A" } else { "B" })).collect::<Vec<_>>().join(" ")
 }
 
 /// The `(slot, front end)` pairs of a layout's direction, in its order (design 33 D5).
@@ -221,10 +210,7 @@ impl UhdRadio {
         if binding.feed.is_some() {
             return Err(rejected("UR-5: a Provider binding carries no feed"));
         }
-        let allowed: Vec<&str> = x3xx::SELECTOR_KEYS
-            .into_iter()
-            .chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"])
-            .collect();
+        let allowed: Vec<&str> = x3xx::SELECTOR_KEYS.into_iter().chain(["args", "id", "clock_source", "time_source", "block_len", "reopen_on_unlock"]).collect();
         if let Some(name) = binding.selector.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(rejected(format!("UR-5: unsupported selector key `{name}`")));
         }
@@ -236,17 +222,10 @@ impl UhdRadio {
         };
         let args = string("args")?.ok_or_else(|| rejected("UR-5: the selector needs `args`"))?;
         let id = string("id")?.unwrap_or_else(|| "usrp".to_owned());
-        let resource = ResourceId::parse(&id)
-            .ok()
-            .filter(|resource| resource.segments().count() == 1)
-            .ok_or_else(|| rejected("UR-5: selector `id` must be one resource segment"))?;
+        let resource = ResourceId::parse(&id).ok().filter(|resource| resource.segments().count() == 1).ok_or_else(|| rejected("UR-5: selector `id` must be one resource segment"))?;
         let source = |name: &str| -> Result<String, ModuleError> {
             let value = string(name)?.unwrap_or_else(|| "internal".to_owned());
-            if ["internal", "external", "gpsdo"].contains(&value.as_str()) {
-                Ok(value)
-            } else {
-                Err(rejected(format!("UR-5: selector `{name}` must be internal, external or gpsdo")))
-            }
+            if ["internal", "external", "gpsdo"].contains(&value.as_str()) { Ok(value) } else { Err(rejected(format!("UR-5: selector `{name}` must be internal, external or gpsdo"))) }
         };
         let clock_source = source("clock_source")?;
         let epoch = crate::authority::epoch(&clock_source, &source("time_source")?, &args);
@@ -266,10 +245,7 @@ impl UhdRadio {
         let registration = register_serial(&serial)?;
         let mcr = device.master_clock_rate();
         if mcr != MASTER_CLOCK_HZ {
-            return Err(rejected(format!(
-                "UR-5: profile {} needs a 200 MHz master clock; the device runs at {mcr} Hz",
-                x3xx::PROFILE
-            )));
+            return Err(rejected(format!("UR-5: profile {} needs a 200 MHz master clock; the device runs at {mcr} Hz", x3xx::PROFILE)));
         }
         let description = channels::Description::new(&layout, block_len, &profile::terms());
         // UR-5, H1, H2: the device's channel map is set from the layout — one call per
@@ -294,18 +270,12 @@ impl UhdRadio {
         // channels: slot B empty is a channel on UHD's unknown board. The spec set from the
         // elements above is what makes the device's channels those elements' (H1): a device
         // with fewer refuses the spec itself, with UHD's text.
-        let channels::Layout::X3xx { rx, tx, .. } = &layout else {
-            unreachable!("UR-5: a UHD binding's layout is x3xx")
-        };
+        let channels::Layout::X3xx { rx, tx, .. } = &layout else { unreachable!("UR-5: a UHD binding's layout is x3xx") };
         for (dir, name, elements) in [(Dir::Rx, "rx", rx), (Dir::Tx, "tx", tx)] {
             for (chan, element) in elements.iter().enumerate() {
                 let front_end = device.front_end(dir, chan).map_err(|e| rejected(format!("UR-5: {}", e.message)))?;
                 if !front_end_matches(element, &front_end) {
-                    return Err(rejected(format!(
-                        "UR-5: the layout's {name} channel {chan} is `{front_end}`, not `{}` front end {}",
-                        element.front_end.name(),
-                        element.frontend
-                    )));
+                    return Err(rejected(format!("UR-5: the layout's {name} channel {chan} is `{front_end}`, not `{}` front end {}", element.front_end.name(), element.frontend)));
                 }
             }
         }
@@ -472,11 +442,7 @@ impl Provider for UhdRadio {
 
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
         if !matches!(ctx.class, ExecutionClass::HardwareInLoop | ExecutionClass::Hardware) {
-            return Err(ModuleError {
-                kind: ModuleErrorKind::Unsupported,
-                message: format!("UR-12: ezsdr.radio.uhd runs HardwareInLoop or Hardware, not {:?}", ctx.class),
-                detail: Json::Null,
-            });
+            return Err(ModuleError { kind: ModuleErrorKind::Unsupported, message: format!("UR-12: ezsdr.radio.uhd runs HardwareInLoop or Hardware, not {:?}", ctx.class), detail: Json::Null });
         }
         if std::mem::replace(&mut self.prepare_called, true) {
             return Err(rejected("UR-12: prepare was already called; one fragment per instance"));
@@ -532,17 +498,7 @@ impl Provider for UhdRadio {
         let EventSource::Node { node: source_root } = ctx.source else {
             return Err(rejected("KC-8: a Provider's event source root is a node"));
         };
-        let core = Arc::new(Core::new(
-            self.device.clone(),
-            source_root,
-            root,
-            ctx.time.clone(),
-            ctx.clocks.clone(),
-            ctx.events.clone(),
-            ctx.inputs.clone(),
-            links,
-            self.description.clone(),
-        )?);
+        let core = Arc::new(Core::new(self.device.clone(), source_root, root, ctx.time.clone(), ctx.clocks.clone(), ctx.events.clone(), ctx.inputs.clone(), links, self.description.clone())?);
         if let Some(error) = &self.reopened {
             core.timing(json!({ "what": "reopened_on_unlock", "first_error": error }));
         }
@@ -622,13 +578,7 @@ impl Provider for UhdRadio {
     fn start(&mut self, at: Option<TimePoint>) -> Result<(), ModuleError> {
         let (core, actions, config, rx_streams, tx_streams) = {
             let prepared = self.prepared()?;
-            (
-                prepared.core.clone(),
-                prepared.actions.clone(),
-                prepared.config.clone(),
-                prepared.rx.clone(),
-                prepared.tx.clone(),
-            )
+            (prepared.core.clone(), prepared.actions.clone(), prepared.config.clone(), prepared.rx.clone(), prepared.tx.clone())
         };
         let now = core.now();
         let t0 = match at {
@@ -644,8 +594,7 @@ impl Provider for UhdRadio {
         };
         let s = core.start_up.load(Ordering::Acquire);
         if t0 < s {
-            let payload = serde_json::to_value(LateCommandPayload { key: None, requested: core.at(t0), applied: core.at(s) })
-                .expect("a payload");
+            let payload = serde_json::to_value(LateCommandPayload { key: None, requested: core.at(t0), applied: core.at(s) }).expect("a payload");
             core.emit(&core.id, kinds::LATE_COMMAND, Severity::Warning, payload);
             return Err(rejected(format!(
                 "UR-15: the start at {t0} precedes the device's start-up at {s}; the profile needs ezsdr.time.start_lead_ns ≥ {}",
@@ -655,10 +604,8 @@ impl Provider for UhdRadio {
         // RM-25, UR-15: each receive stream's first segment starts at T0 when its streamer
         // is open — it has channels and its port has a link —, its clock registered by
         // uhd-rx at its first block.
-        let rx_first: Vec<Option<(SampleClockHandle, Channels, i64)>> = rx_streams
-            .iter()
-            .map(|stream| stream.handle.as_ref().filter(|_| !core.links(stream.k).is_empty()).map(|handle| (handle.clone(), stream.channels, t0)))
-            .collect();
+        let rx_first: Vec<Option<(SampleClockHandle, Channels, i64)>> =
+            rx_streams.iter().map(|stream| stream.handle.as_ref().filter(|_| !core.links(stream.k).is_empty()).map(|handle| (handle.clone(), stream.channels, t0))).collect();
         let mut start = control::Start { t0, rx: Vec::new(), tx: Vec::new() };
         for stream in &rx_streams {
             start.rx.push(rx_first[stream.k].as_ref().map(|(handle, channels, _)| (*channels, handle.root_ticks_per_tick().num() as i64)));
@@ -796,25 +743,37 @@ impl Provider for UhdRadio {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::device::{FakeConfig, FakeDevice};
-    use crate::ClockMode;
-    use std::sync::Mutex;
     use super::core::stream_key;
+    use super::*;
+    use crate::ClockMode;
+    use crate::device::{FakeConfig, FakeDevice};
+    use std::sync::Mutex;
 
     struct NoActions;
     impl ActionReceiver for NoActions {
-        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { None }
+        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+            None
+        }
     }
 
     /// A receive link that takes nothing, so that the receive side has a stream.
     struct NoLink;
     impl ezsdr_kernel::stream::DataLink for NoLink {
-        fn publish(&self, _block: ezsdr_kernel::stream::BlockRef) -> ezsdr_kernel::stream::PublishOutcome { ezsdr_kernel::stream::PublishOutcome::Accepted }
-        fn receive(&self) -> Option<(ezsdr_kernel::stream::BlockRef, ezsdr_kernel::stream::DropCarry)> { None }
-        fn drops(&self) -> u64 { 0 }
-        fn take_drop_carry(&self) -> ezsdr_kernel::stream::DropCarry { ezsdr_kernel::stream::DropCarry::default() }
-        fn policy(&self) -> BackPressure { BackPressure::DropOldest }
+        fn publish(&self, _block: ezsdr_kernel::stream::BlockRef) -> ezsdr_kernel::stream::PublishOutcome {
+            ezsdr_kernel::stream::PublishOutcome::Accepted
+        }
+        fn receive(&self) -> Option<(ezsdr_kernel::stream::BlockRef, ezsdr_kernel::stream::DropCarry)> {
+            None
+        }
+        fn drops(&self) -> u64 {
+            0
+        }
+        fn take_drop_carry(&self) -> ezsdr_kernel::stream::DropCarry {
+            ezsdr_kernel::stream::DropCarry::default()
+        }
+        fn policy(&self) -> BackPressure {
+            BackPressure::DropOldest
+        }
     }
 
     #[test]
@@ -833,7 +792,8 @@ mod tests {
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let device: Arc<dyn Device> = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
         let (core, _, _, _) = test_support::rig();
@@ -894,7 +854,8 @@ mod tests {
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let (core, device, _time, _events) = test_support::rig();
         let mut radio = UhdRadio::from_binding(&binding, device.clone()).unwrap();
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
@@ -909,33 +870,34 @@ mod tests {
         let calls = device.calls();
         let sends: Vec<_> = calls.iter().filter(|call| call.starts_with("tx_send")).collect();
         assert_eq!(sends, [&"tx_send 0 n=2 at=- sob=true eob=true"], "arm sends only its untimed T3 flush: {calls:?}");
-        assert!(calls.iter().position(|call| call.starts_with("tx_open")).unwrap()
-            < calls.iter().position(|call| call.starts_with("tx_send")).unwrap());
-        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] == true).count(), 1,
-            "the opener consumes the flush acknowledgement");
+        assert!(calls.iter().position(|call| call.starts_with("tx_open")).unwrap() < calls.iter().position(|call| call.starts_with("tx_send")).unwrap());
+        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] == true).count(), 1, "the opener consumes the flush acknowledgement");
         assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the transmit streamer's open: {calls:?}");
     }
 
     #[test]
     fn ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig {
-            clock: ClockMode::Manual, ..FakeConfig::default()
-        }));
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let (core, _, _) = test_support::rig_on(spy.clone(), Vec::new(), 2_000);
         spy.watch(&core);
         let binding: Binding = serde_json::from_value(json!({
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let mut radio = UhdRadio::from_binding(&binding, spy.clone()).unwrap();
-        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root,
-            ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
         radio.prepared = Some(Prepared {
-            core: core.clone(), actions: Arc::new(NoActions), config: BTreeMap::new(), rx: Vec::new(),
+            core: core.clone(),
+            actions: Arc::new(NoActions),
+            config: BTreeMap::new(),
+            rx: Vec::new(),
             tx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }],
         });
-        super::core::assert_tx_open_flush_barrier(core, spy, move || { radio.arm().unwrap(); });
+        super::core::assert_tx_open_flush_barrier(core, spy, move || {
+            radio.arm().unwrap();
+        });
     }
 
     #[test]
@@ -946,7 +908,8 @@ mod tests {
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let candidate = ezsdr_radio::TimingEnvelope {
             min_timed_command_lead_ns: 11_000_001,
             startup_latency_ns: 12_000_002,
@@ -1007,7 +970,8 @@ mod tests {
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let device: Arc<dyn Device> = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
         let (core, _device, _time, _events) = test_support::rig_with_links(vec![Arc::new(NoLink)]);
@@ -1080,7 +1044,8 @@ mod tests {
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let inner = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let device: Arc<dyn Device> = inner.clone();
         let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
@@ -1092,10 +1057,7 @@ mod tests {
             core: core.clone(),
             actions: Arc::new(NoActions),
             config: core.description.defaults(),
-            rx: vec![
-                PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None },
-                PreparedStream { k: 1, handle: None, channels: Channels::first(0), clock: None },
-            ],
+            rx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }, PreparedStream { k: 1, handle: None, channels: Channels::first(0), clock: None }],
             tx: (0..2).map(|k| PreparedStream { k, handle: None, channels: Channels::first(0), clock: None }).collect(),
         });
         radio.fail_next_rx_spawn = true;
@@ -1141,46 +1103,96 @@ mod tests {
     }
 
     impl Device for LostInReceive {
-        fn describe(&self) -> Json { self.inner.describe() }
-        fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity { self.inner.fidelity() }
-        fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-        fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-        fn front_end(&self, dir: Dir, chan: usize) -> Result<String, crate::DeviceError> { self.inner.front_end(dir, chan) }
-        fn serial(&self) -> Result<String, crate::DeviceError> { self.inner.serial() }
-        fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), crate::DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-        fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, crate::DeviceError> { self.inner.rates(dir, chan) }
-        fn set_sources(&self, clock: &str, time: &str) -> Result<(), crate::DeviceError> { self.inner.set_sources(clock, time) }
-        fn set_time_zero(&self, at_next_pps: bool) -> Result<(), crate::DeviceError> { self.inner.set_time_zero(at_next_pps) }
-        fn time_now(&self) -> Result<i64, crate::DeviceError> { self.inner.time_now() }
-        fn ref_locked(&self) -> Result<Option<bool>, crate::DeviceError> { self.inner.ref_locked() }
-        fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<crate::device::Applied, crate::DeviceError> { self.inner.apply(dir, chan, settings, at) }
-        fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> { self.inner.rx_open(stream, channels) }
-        fn rx_start(&self, stream: usize, at: i64) -> Result<(), crate::DeviceError> { self.inner.rx_start(stream, at) }
-        fn rx_start_now(&self, stream: usize) -> Result<(), crate::DeviceError> { self.inner.rx_start_now(stream) }
-        fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
-        fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), crate::DeviceError> { self.inner.rx_stop(stream, at) }
+        fn describe(&self) -> Json {
+            self.inner.describe()
+        }
+        fn fidelity(&self) -> ezsdr_kernel::module_api::Fidelity {
+            self.inner.fidelity()
+        }
+        fn master_clock_rate(&self) -> u64 {
+            self.inner.master_clock_rate()
+        }
+        fn channels(&self, dir: Dir) -> usize {
+            self.inner.channels(dir)
+        }
+        fn front_end(&self, dir: Dir, chan: usize) -> Result<String, crate::DeviceError> {
+            self.inner.front_end(dir, chan)
+        }
+        fn serial(&self) -> Result<String, crate::DeviceError> {
+            self.inner.serial()
+        }
+        fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), crate::DeviceError> {
+            self.inner.set_subdev_spec(dir, markup)
+        }
+        fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, crate::DeviceError> {
+            self.inner.rates(dir, chan)
+        }
+        fn set_sources(&self, clock: &str, time: &str) -> Result<(), crate::DeviceError> {
+            self.inner.set_sources(clock, time)
+        }
+        fn set_time_zero(&self, at_next_pps: bool) -> Result<(), crate::DeviceError> {
+            self.inner.set_time_zero(at_next_pps)
+        }
+        fn time_now(&self) -> Result<i64, crate::DeviceError> {
+            self.inner.time_now()
+        }
+        fn ref_locked(&self) -> Result<Option<bool>, crate::DeviceError> {
+            self.inner.ref_locked()
+        }
+        fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<crate::device::Applied, crate::DeviceError> {
+            self.inner.apply(dir, chan, settings, at)
+        }
+        fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> {
+            self.inner.rx_open(stream, channels)
+        }
+        fn rx_start(&self, stream: usize, at: i64) -> Result<(), crate::DeviceError> {
+            self.inner.rx_start(stream, at)
+        }
+        fn rx_start_now(&self, stream: usize) -> Result<(), crate::DeviceError> {
+            self.inner.rx_start_now(stream)
+        }
+        fn rx_packet_samples(&self, stream: usize) -> usize {
+            self.inner.rx_packet_samples(stream)
+        }
+        fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), crate::DeviceError> {
+            self.inner.rx_stop(stream, at)
+        }
         fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> crate::device::RxRecv {
             if stream == 0 {
                 return crate::device::RxRecv::Failed(crate::DeviceError { lost: true, message: "test: lost in stream 0's receive".to_owned() });
             }
             self.inner.rx_recv(stream, n, timeout, one_packet)
         }
-        fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> { self.inner.tx_open(stream, channels) }
+        fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> {
+            self.inner.tx_open(stream, channels)
+        }
         fn tx_send(&self, stream: usize, samples: &[&[crate::Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, crate::DeviceError> {
             self.inner.tx_send(stream, samples, at, sob, eob, timeout)
         }
-        fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<crate::device::TxReport>, crate::DeviceError> { self.inner.tx_async(stream, timeout) }
-        fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
-        fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-        fn close_streams(&self) { self.inner.close_streams() }
+        fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<crate::device::TxReport>, crate::DeviceError> {
+            self.inner.tx_async(stream, timeout)
+        }
+        fn rx_close(&self, stream: usize) {
+            self.inner.rx_close(stream)
+        }
+        fn tx_close(&self, stream: usize) {
+            self.inner.tx_close(stream)
+        }
+        fn close_streams(&self) {
+            self.inner.close_streams()
+        }
         fn mark_lost(&self) {
             self.inner.mark_lost();
             if let Some(marked) = self.marked.lock().unwrap().take() {
                 let _ = marked.send(());
             }
         }
-        fn host(&self) -> crate::host::HostClock { self.inner.host() }
-        fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
+        fn host(&self) -> crate::host::HostClock {
+            self.inner.host()
+        }
+        fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> {
+            self.inner.raise_thread_priority()
+        }
     }
 
     #[test]
@@ -1191,7 +1203,8 @@ mod tests {
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
             "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
             "selector": { "args": "type=fake-rig",  "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0"] }
-        })).unwrap();
+        }))
+        .unwrap();
         let inner = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let (mark, marked) = mpsc::channel();
         let device: Arc<dyn Device> = Arc::new(LostInReceive { inner: inner.clone(), marked: Mutex::new(Some(mark)) });
@@ -1235,7 +1248,13 @@ mod tests {
         for name in ["uhd-control", "uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"] {
             let (release, wait) = mpsc::channel::<()>();
             senders.push(release);
-            let handle = core.device.host().spawn(name, move || { let _ = wait.recv(); }).unwrap();
+            let handle = core
+                .device
+                .host()
+                .spawn(name, move || {
+                    let _ = wait.recv();
+                })
+                .unwrap();
             threads.push((name.to_owned(), handle));
         }
         let (to_tx, _tx) = mpsc::channel();
@@ -1245,9 +1264,13 @@ mod tests {
         radio.cleanup();
         drop(senders);
         let rejected = &radio.instance.sections[&section("rejected")];
-        let order: Vec<String> = rejected.as_array().unwrap().iter()
+        let order: Vec<String> = rejected
+            .as_array()
+            .unwrap()
+            .iter()
             .filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not join")))
-            .map(|row| row["thread"].as_str().unwrap().to_owned()).collect();
+            .map(|row| row["thread"].as_str().unwrap().to_owned())
+            .collect();
         assert_eq!(order, ["uhd-control", "uhd-tx-s0", "uhd-tx-s1", "uhd-rx-s0", "uhd-rx-s1"], "{rejected}");
     }
 }

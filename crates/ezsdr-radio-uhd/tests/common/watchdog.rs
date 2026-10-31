@@ -39,10 +39,7 @@ impl Watchdog {
     /// [`Self::arm`] on `builder`. A watchdog that cannot start fails its test at once: the
     /// test would otherwise run unguarded and a frozen clock would hang it (R15).
     fn start(builder: std::thread::Builder) -> Watchdog {
-        let bound = std::env::var("EZSDR_TEST_WATCHDOG_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map_or(BOUND, Wall::from_secs);
+        let bound = std::env::var("EZSDR_TEST_WATCHDOG_SECS").ok().and_then(|s| s.parse::<u64>().ok()).map_or(BOUND, Wall::from_secs);
         let what = std::thread::current().name().unwrap_or("a test").to_owned();
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let flag = stop.clone();

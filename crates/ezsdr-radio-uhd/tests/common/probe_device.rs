@@ -50,26 +50,34 @@ pub struct ProbeDevice {
 struct ResumeReaderOnDrop<'a>(&'a ProbeDevice);
 
 impl Drop for ResumeReaderOnDrop<'_> {
-    fn drop(&mut self) { self.0.resume_reader(); }
+    fn drop(&mut self) {
+        self.0.resume_reader();
+    }
 }
 
 pub fn successful_tx_eob(row: &Json) -> bool {
-    if !(row["call"] == "tx_send" && row["eob"].as_bool() == Some(true)) { return false; }
-    let Some(accepted) = row["result"]["accepted_samples"].as_u64() else { return false; };
-    row["sample_counts"].as_array().is_some_and(|counts| {
-        !counts.is_empty() && counts.iter().all(|count| count.as_u64() == Some(accepted))
-    })
+    if !(row["call"] == "tx_send" && row["eob"].as_bool() == Some(true)) {
+        return false;
+    }
+    let Some(accepted) = row["result"]["accepted_samples"].as_u64() else {
+        return false;
+    };
+    row["sample_counts"].as_array().is_some_and(|counts| !counts.is_empty() && counts.iter().all(|count| count.as_u64() == Some(accepted)))
 }
 
 pub fn receive_sample_follows_start(start: &Json, sample: &Json) -> bool {
-    start["call"] == "rx_start" && start["result"].is_null()
-        && sample["call"] == "rx_recv" && sample["outcome"]["kind"] == "samples"
+    start["call"] == "rx_start"
+        && start["result"].is_null()
+        && sample["call"] == "rx_recv"
+        && sample["outcome"]["kind"] == "samples"
         && start["host_after_ns"].as_u64().zip(sample["host_before_ns"].as_u64()).is_some_and(|(finished, begun)| begun >= finished)
         && start["at"].as_i64().zip(sample["outcome"]["first_tick"].as_i64()).is_some_and(|(at, first)| first >= at)
 }
 
 impl Drop for ProbeDevice {
-    fn drop(&mut self) { self.control_log.lock().unwrap().push("drop"); }
+    fn drop(&mut self) {
+        self.control_log.lock().unwrap().push("drop");
+    }
 }
 
 impl ProbeDevice {
@@ -111,8 +119,7 @@ impl ProbeDevice {
     }
 
     pub fn matching_timed_apply(&self, e: i64) -> Option<Json> {
-        self.rows.lock().unwrap().iter().rev()
-            .find(|row| row["call"] == "apply_timed" && row["e"].as_i64() == Some(e)).cloned()
+        self.rows.lock().unwrap().iter().rev().find(|row| row["call"] == "apply_timed" && row["e"].as_i64() == Some(e)).cloned()
     }
 
     pub fn count(&self, call: &str) -> usize {
@@ -146,7 +153,12 @@ impl ProbeDevice {
     /// From now on `rx_recv` returns these in order, then `Timeout`, and never reaches the inner device.
     pub fn script_rx(&self, outcomes: Vec<RxRecv>) {
         let mut outcomes: VecDeque<RxRecv> = outcomes.into();
-        self.script_rx_with(move |_| outcomes.pop_front().unwrap_or_else(|| { std::thread::sleep(Wall::from_millis(1)); RxRecv::Timeout }));
+        self.script_rx_with(move |_| {
+            outcomes.pop_front().unwrap_or_else(|| {
+                std::thread::sleep(Wall::from_millis(1));
+                RxRecv::Timeout
+            })
+        });
     }
 
     /// From now on `rx_recv` returns what `script` says for each call (1-based count), and never reaches the inner
@@ -195,7 +207,9 @@ impl ProbeDevice {
     pub fn pause_reader(&self) {
         let mut gate = self.gate.lock().unwrap();
         gate.paused = true;
-        while gate.active != 0 { gate = self.ready.wait(gate).unwrap(); }
+        while gate.active != 0 {
+            gate = self.ready.wait(gate).unwrap();
+        }
     }
 
     pub fn resume_reader(&self) {
@@ -217,7 +231,11 @@ impl ProbeDevice {
             let result = self.inner.rx_recv(stream, request, timeout, false);
             let after = self.host_ns();
             let outcome = rx_outcome(&result);
-            if outcome["kind"] == "timeout" { idle += 1; } else { idle = 0; }
+            if outcome["kind"] == "timeout" {
+                idle += 1;
+            } else {
+                idle = 0;
+            }
             let row = json!({
                 "call": "device_drain", "stream": stream, "request_samples": request,
                 "packet_samples": packet_samples, "timeout_ns": timeout.as_nanos(),
@@ -233,10 +251,15 @@ impl ProbeDevice {
     fn record(&self, row: Json) {
         let eob = row["call"] == "tx_send" && row["eob"].as_bool().unwrap_or(false);
         let mut rows = self.rows.lock().unwrap();
-        if rows.len() < PROBE_ROW_LIMIT { rows.push(row); }
-        else { self.dropped_rows.fetch_add(1, Ordering::Release); }
+        if rows.len() < PROBE_ROW_LIMIT {
+            rows.push(row);
+        } else {
+            self.dropped_rows.fetch_add(1, Ordering::Release);
+        }
         drop(rows);
-        if eob { self.tx_eob_count.fetch_add(1, Ordering::Release); }
+        if eob {
+            self.tx_eob_count.fetch_add(1, Ordering::Release);
+        }
     }
 
     fn read_time_now(&self, purpose: &str) -> Result<(i64, u64, u64), DeviceError> {
@@ -283,21 +306,43 @@ fn rx_outcome(result: &RxRecv) -> Json {
 }
 
 impl Device for ProbeDevice {
-    fn describe(&self) -> Json { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
+    fn describe(&self) -> Json {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
     fn time_now(&self) -> Result<i64, DeviceError> {
         self.control_log.lock().unwrap().push("time_now");
         self.read_time_now("device_call").map(|(tick, _, _)| tick)
     }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
     fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
         let host_entry_ns = self.host_ns();
         if at.is_some() {
@@ -321,8 +366,7 @@ impl Device for ProbeDevice {
                 }
             }
         }
-        if at.is_none() && self.fail_restoring_apply.load(Ordering::Acquire)
-            && settings.rate.is_some() && settings.freq.is_some() && settings.gain.is_some() && settings.antenna.is_some() {
+        if at.is_none() && self.fail_restoring_apply.load(Ordering::Acquire) && settings.rate.is_some() && settings.freq.is_some() && settings.gain.is_some() && settings.antenna.is_some() {
             self.control_log.lock().unwrap().push("apply_failed");
             return Err(DeviceError::failed("probe: scripted restore failure"));
         }
@@ -339,7 +383,9 @@ impl Device for ProbeDevice {
         }
         self.control_log.lock().unwrap().push(if at.is_some() { "apply_timed" } else { "apply" });
         let result = self.inner.apply(dir, chan, settings, at);
-        if let Some(at) = at { self.record_timed_apply(dir, chan, settings, at, host_entry_ns, &result); }
+        if let Some(at) = at {
+            self.record_timed_apply(dir, chan, settings, at, host_entry_ns, &result);
+        }
         result
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
@@ -361,10 +407,14 @@ impl Device for ProbeDevice {
         self.record(json!({ "call": "rx_start_now", "stream": stream, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result
     }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.inner.rx_packet_samples(stream)
+    }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("rx_stop");
-        if self.fail_rx_stop.load(Ordering::Acquire) { return Err(DeviceError::failed("probe: scripted rx_stop failure")); }
+        if self.fail_rx_stop.load(Ordering::Acquire) {
+            return Err(DeviceError::failed("probe: scripted rx_stop failure"));
+        }
         let before = self.host_ns();
         let result = self.inner.rx_stop(stream, at);
         if result.is_ok() {
@@ -390,7 +440,9 @@ impl Device for ProbeDevice {
         }
         {
             let mut gate = self.gate.lock().unwrap();
-            while gate.paused { gate = self.ready.wait(gate).unwrap(); }
+            while gate.paused {
+                gate = self.ready.wait(gate).unwrap();
+            }
             gate.active += 1;
         }
         let before = self.host_ns();
@@ -415,7 +467,9 @@ impl Device for ProbeDevice {
             let generation = generations.entry(stream).or_default();
             *generation += 1;
             *generation
-        } else { self.tx_generations.lock().unwrap().get(&stream).copied().unwrap_or(0) };
+        } else {
+            self.tx_generations.lock().unwrap().get(&stream).copied().unwrap_or(0)
+        };
         self.record(json!({ "call": "tx_open", "stream": stream, "channels": channels, "generation": generation,
             "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result
@@ -425,8 +479,7 @@ impl Device for ProbeDevice {
         let before = self.host_ns();
         let result = self.inner.tx_send(stream, samples, at, sob, eob, timeout);
         let after = self.host_ns();
-        let tx_flush = at.is_none() && sob && eob && !samples.is_empty()
-            && samples.iter().all(|channel| channel.len() == 2 && channel.iter().all(|sample| *sample == Iq::default()));
+        let tx_flush = at.is_none() && sob && eob && !samples.is_empty() && samples.iter().all(|channel| channel.len() == 2 && channel.iter().all(|sample| *sample == Iq::default()));
         let result_row = match &result {
             Ok(accepted_samples) => json!({ "accepted_samples": accepted_samples }),
             Err(error) => json!({ "error": error.message }),
@@ -436,8 +489,7 @@ impl Device for ProbeDevice {
             "sample_counts": samples.iter().map(|channel| channel.len()).collect::<Vec<_>>(),
             "at": at, "sob": sob, "eob": eob, "tx_flush": tx_flush, "timeout_ns": timeout.as_nanos(), "result": result_row,
         }));
-        if !tx_flush && result.as_ref().is_ok_and(|accepted| *accepted > 0)
-            && self.tx_underflow_after_send.swap(false, Ordering::AcqRel) {
+        if !tx_flush && result.as_ref().is_ok_and(|accepted| *accepted > 0) && self.tx_underflow_after_send.swap(false, Ordering::AcqRel) {
             self.tx_underflow_ready.store(true, Ordering::Release);
         }
         result
@@ -452,11 +504,21 @@ impl Device for ProbeDevice {
         self.control_log.lock().unwrap().push("rx_close");
         self.inner.rx_close(stream)
     }
-    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-    fn close_streams(&self) { self.inner.close_streams() }
-    fn host(&self) -> HostClock { self.inner.host() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
+    fn tx_close(&self, stream: usize) {
+        self.inner.tx_close(stream)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn host(&self) -> HostClock {
+        self.inner.host()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
 }
 
 #[cfg(all(test, not(feature = "uhd")))]
@@ -490,7 +552,9 @@ mod tests {
     fn probe_rows_stop_at_the_limit_and_count_dropped_rows() {
         let inner = Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()));
         let probe = ProbeDevice::new(inner);
-        for index in 0..=PROBE_ROW_LIMIT { probe.record(json!({ "index": index })); }
+        for index in 0..=PROBE_ROW_LIMIT {
+            probe.record(json!({ "index": index }));
+        }
         assert_eq!(probe.rows().len(), PROBE_ROW_LIMIT);
         assert_eq!(probe.dropped_rows(), 1);
     }

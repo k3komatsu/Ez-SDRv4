@@ -5,17 +5,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
-use ezsdr_kernel::binding::{
-    AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation,
-};
+use ezsdr_kernel::binding::{AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::event::{EventKind, Severity};
-use ezsdr_kernel::module_api::{
-    CompileRule, ModuleError, ModuleRegistry, UpdateClass, VerbDecl, Version, VocabularyDescriptor,
-};
+use ezsdr_kernel::module_api::{CompileRule, ModuleError, ModuleRegistry, UpdateClass, VerbDecl, Version, VocabularyDescriptor};
 use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
-use ezsdr_kernel::spec::{
-    CoercionPolicy, Ident, Key, KeyDecl, Namespace, Scalar, Value, ValueKind,
-};
+use ezsdr_kernel::spec::{CoercionPolicy, Ident, Key, KeyDecl, Namespace, Scalar, Value, ValueKind};
 use ezsdr_kernel::stream::{Direction, LatePolicy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -80,16 +74,7 @@ pub mod keys {
     /// The segment a stream key numbers: `s` followed by the stream number (RM-27).
     pub const STREAM: &str = "s";
     /// The leaves of the channel keys (RM-27).
-    pub const CHANNEL_LEAVES: [&str; 8] = [
-        "frequency_hz",
-        "gain_db",
-        "antenna",
-        "stream",
-        "frequency_step_hz",
-        "gain_step_db",
-        "phase_behavior_on_retune",
-        "path_delay_samples",
-    ];
+    pub const CHANNEL_LEAVES: [&str; 8] = ["frequency_hz", "gain_db", "antenna", "stream", "frequency_step_hz", "gain_step_db", "phase_behavior_on_retune", "path_delay_samples"];
     /// The leaf of the stream keys (RM-27).
     pub const STREAM_LEAF: &str = "sample_rate_hz";
 
@@ -146,56 +131,24 @@ pub const fn cancellation_reports(reason: CancelReason) -> bool {
 
 static RADIO_NAMESPACE: OnceLock<Namespace> = OnceLock::new();
 static RF_ENVELOPE_NAMESPACE: OnceLock<Namespace> = OnceLock::new();
-const CHECK_STAGES: &[CheckStage] = &[
-    CheckStage::Validate,
-    CheckStage::Prepare,
-    CheckStage::Runtime,
-];
+const CHECK_STAGES: &[CheckStage] = &[CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime];
 
 fn radio_namespace() -> &'static Namespace {
     RADIO_NAMESPACE.get_or_init(|| Namespace::parse(VOCABULARY).expect("a valid Vocabulary namespace"))
 }
 
 fn rf_envelope_namespace() -> &'static Namespace {
-    RF_ENVELOPE_NAMESPACE.get_or_init(|| {
-        Namespace::parse(RF_ENVELOPE_SECTION).expect("a valid section name")
-    })
+    RF_ENVELOPE_NAMESPACE.get_or_init(|| Namespace::parse(RF_ENVELOPE_SECTION).expect("a valid section name"))
 }
 
-fn key_decl(
-    name: &str,
-    kind: ValueKind,
-    coercible: bool,
-    coercion_default: CoercionPolicy,
-    update_class: Option<UpdateClass>,
-) -> KeyDecl {
-    KeyDecl {
-        key: Key::parse(name).expect("a declared Radio Model key is valid"),
-        indexed: None,
-        kind,
-        coercible,
-        coercion_default,
-        update_class,
-    }
+fn key_decl(name: &str, kind: ValueKind, coercible: bool, coercion_default: CoercionPolicy, update_class: Option<UpdateClass>) -> KeyDecl {
+    KeyDecl { key: Key::parse(name).expect("a declared Radio Model key is valid"), indexed: None, kind, coercible, coercion_default, update_class }
 }
 
 /// A declaration whose segment at `NUMBERED_SEGMENT` is followed by a number (RM-27,
 /// SB-2a).
-fn indexed_key_decl(
-    name: &str,
-    kind: ValueKind,
-    coercible: bool,
-    coercion_default: CoercionPolicy,
-    update_class: Option<UpdateClass>,
-) -> KeyDecl {
-    KeyDecl {
-        key: Key::parse(name).expect("a declared Radio Model key is valid"),
-        indexed: Some(NUMBERED_SEGMENT),
-        kind,
-        coercible,
-        coercion_default,
-        update_class,
-    }
+fn indexed_key_decl(name: &str, kind: ValueKind, coercible: bool, coercion_default: CoercionPolicy, update_class: Option<UpdateClass>) -> KeyDecl {
+    KeyDecl { key: Key::parse(name).expect("a declared Radio Model key is valid"), indexed: Some(NUMBERED_SEGMENT), kind, coercible, coercion_default, update_class }
 }
 
 /// The position of the numbered segment in every RM-27 channel and stream key.
@@ -257,11 +210,7 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
         (COMMAND_REJECTED, Severity::Error, Reaction::MarkArtifact),
     ]
     .into_iter()
-    .map(|(name, severity, default)| EventKindDecl {
-        kind: EventKind::parse(name).expect("a declared radio event kind is valid"),
-        severity,
-        default,
-    })
+    .map(|(name, severity, default)| EventKindDecl { kind: EventKind::parse(name).expect("a declared radio event kind is valid"), severity, default })
     .collect()
 }
 
@@ -274,41 +223,20 @@ pub fn vocabulary() -> VocabularyDescriptor {
         keys: radio_keys(),
         event_kinds: radio_event_kinds(),
         verbs: vec![
-            VerbDecl {
-                verb: Ident::parse("start_repeat").expect("a valid Session verb"),
-                compiles_to: CompileRule::TxBurst {
-                    repeat: true,
-                    late_policy: LatePolicy::SendAsapAndFlag,
-                },
-            },
-            VerbDecl {
-                verb: Ident::parse("send").expect("a valid Session verb"),
-                compiles_to: CompileRule::TxBurst {
-                    repeat: false,
-                    late_policy: LatePolicy::DropAndFlag,
-                },
-            },
-            VerbDecl {
-                verb: Ident::parse(START_RX).expect("a valid Session verb"),
-                compiles_to: CompileRule::Command {},
-            },
+            VerbDecl { verb: Ident::parse("start_repeat").expect("a valid Session verb"), compiles_to: CompileRule::TxBurst { repeat: true, late_policy: LatePolicy::SendAsapAndFlag } },
+            VerbDecl { verb: Ident::parse("send").expect("a valid Session verb"), compiles_to: CompileRule::TxBurst { repeat: false, late_policy: LatePolicy::DropAndFlag } },
+            VerbDecl { verb: Ident::parse(START_RX).expect("a valid Session verb"), compiles_to: CompileRule::Command {} },
         ],
         checks: vec![rf_envelope_namespace().clone()],
     }
 }
 
 /// Registers the descriptor, RF-envelope check and event kinds in RM-1 order (RM-1).
-pub fn register(
-    registry: &mut ModuleRegistry,
-    checks: &mut AdmissionCheckRegistry,
-    kinds: &mut EventKindRegistry,
-) -> Result<(), ModuleError> {
+pub fn register(registry: &mut ModuleRegistry, checks: &mut AdmissionCheckRegistry, kinds: &mut EventKindRegistry) -> Result<(), ModuleError> {
     registry.register_vocabulary(vocabulary())?;
     checks.register(Arc::new(RfEnvelopeCheck));
     for kind in radio_event_kinds() {
-        kinds
-            .register(Some(radio_namespace().clone()), kind)
-            .map_err(|error| ModuleError::rejected(format!("RM-1: {error}")))?;
+        kinds.register(Some(radio_namespace().clone()), kind).map_err(|error| ModuleError::rejected(format!("RM-1: {error}")))?;
     }
     Ok(())
 }
@@ -362,38 +290,18 @@ impl AdmissionCheck for RfEnvelopeCheck {
         CHECK_STAGES
     }
 
-    fn check(
-        &self,
-        section: &serde_json::Value,
-        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _stage: CheckStage,
-    ) -> Vec<Violation> {
+    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
         let envelope: RfEnvelope = match serde_json::from_value(section.clone()) {
             Ok(envelope) => envelope,
             Err(error) => {
-                return vec![Violation {
-                    check: self.section().clone(),
-                    key: None,
-                    requested: None,
-                    reason: format!("RM-19: the section does not parse: {error}"),
-                }];
+                return vec![Violation { check: self.section().clone(), key: None, requested: None, reason: format!("RM-19: the section does not parse: {error}") }];
             }
         };
         if let Some(band) = envelope.allowed_bands.iter().find(|band| band.lo_hz > band.hi_hz) {
-            return vec![Violation {
-                check: self.section().clone(),
-                key: None,
-                requested: None,
-                reason: format!("RM-19: band {}..{} has lo_hz > hi_hz", band.lo_hz, band.hi_hz),
-            }];
+            return vec![Violation { check: self.section().clone(), key: None, requested: None, reason: format!("RM-19: band {}..{} has lo_hz > hi_hz", band.lo_hz, band.hi_hz) }];
         }
 
-        let fragments: BTreeSet<Ident> = effective
-            .keys()
-            .chain(proposed.keys())
-            .cloned()
-            .collect();
+        let fragments: BTreeSet<Ident> = effective.keys().chain(proposed.keys()).cloned().collect();
         let mut violations = Vec::new();
         for fragment in fragments {
             let mut configuration = effective.get(&fragment).cloned().unwrap_or_default();
@@ -442,9 +350,7 @@ pub fn concrete(key: &Key) -> Option<Concrete<'_>> {
         _ => return None,
     };
     if let Some(number) = numbered_index(segment, keys::CHANNEL) {
-        return keys::CHANNEL_LEAVES
-            .contains(&leaf)
-            .then_some(Concrete::Channel { rx, number, leaf });
+        return keys::CHANNEL_LEAVES.contains(&leaf).then_some(Concrete::Channel { rx, number, leaf });
     }
     if leaf == keys::STREAM_LEAF {
         let number = numbered_index(segment, keys::STREAM)?;
@@ -457,11 +363,7 @@ pub fn concrete(key: &Key) -> Option<Concrete<'_>> {
 /// nine ASCII digits, and no leading zero.
 pub(crate) fn numbered_index(segment: &str, word: &str) -> Option<u32> {
     let digits = segment.strip_prefix(word)?;
-    if digits.is_empty()
-        || digits.len() > 9
-        || (digits.len() > 1 && digits.starts_with('0'))
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
-    {
+    if digits.is_empty() || digits.len() > 9 || (digits.len() > 1 && digits.starts_with('0')) || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     digits.parse().ok()
@@ -471,10 +373,7 @@ pub(crate) fn numbered_index(segment: &str, word: &str) -> Option<u32> {
 /// node instead of the device: `target` is `<device>/rx/s<k>` or `<device>/tx/s<k>`, its
 /// `k` written as SB-2a's index. Returns that stream's direction and number, or `None` for
 /// another node. The one place such a target is read.
-pub fn stream_target(
-    device: &ezsdr_kernel::id::ResourceId,
-    target: &ezsdr_kernel::id::ResourceId,
-) -> Option<(Direction, u32)> {
+pub fn stream_target(device: &ezsdr_kernel::id::ResourceId, target: &ezsdr_kernel::id::ResourceId) -> Option<(Direction, u32)> {
     let stream = target.parent()?;
     if stream.parent().as_ref() != Some(device) {
         return None;
@@ -507,11 +406,7 @@ pub enum Addressed {
 /// RM-12, RM-29: what the resolved node `node` of an Action names for `device` — its own
 /// node, one of its streams, or another node. `streams` is how many streams a direction has,
 /// so that a number the instance does not have is another node.
-pub fn addressed(
-    device: &ezsdr_kernel::id::ResourceId,
-    node: Option<&ezsdr_kernel::id::ResourceId>,
-    streams: impl Fn(Direction) -> usize,
-) -> Addressed {
+pub fn addressed(device: &ezsdr_kernel::id::ResourceId, node: Option<&ezsdr_kernel::id::ResourceId>, streams: impl Fn(Direction) -> usize) -> Addressed {
     let Some(node) = node else { return Addressed::Other };
     if node == device {
         return Addressed::Instance;
@@ -526,13 +421,7 @@ pub fn addressed(
 }
 
 /// RM-33's per-channel judgement of a configuration that holds RM-27 channel keys.
-fn check_numbered_configuration(
-    configuration: &BTreeMap<Key, Value>,
-    envelope: &RfEnvelope,
-    fragment: &Ident,
-    check: &RfEnvelopeCheck,
-    violations: &mut Vec<Violation>,
-) {
+fn check_numbered_configuration(configuration: &BTreeMap<Key, Value>, envelope: &RfEnvelope, fragment: &Ident, check: &RfEnvelopeCheck, violations: &mut Vec<Violation>) {
     let mut channels: BTreeMap<(bool, i64), BTreeMap<&str, &Value>> = BTreeMap::new();
     for (key, value) in configuration {
         if let Some(Concrete::Channel { rx: is_rx, number, leaf }) = concrete(key) {
@@ -540,8 +429,7 @@ fn check_numbered_configuration(
         }
     }
     for ((is_rx, number), values) in &channels {
-        let Some(stream) = values.get("stream").and_then(|value| value.as_scalar()).and_then(integer)
-        else {
+        let Some(stream) = values.get("stream").and_then(|value| value.as_scalar()).and_then(integer) else {
             continue;
         };
         if stream < 0 {
@@ -552,29 +440,11 @@ fn check_numbered_configuration(
                 let key = channel_key(false, *number, "frequency_hz");
                 match numeric(value) {
                     Some(frequency) => {
-                        if !envelope
-                            .allowed_bands
-                            .iter()
-                            .any(|band| band.lo_hz <= frequency && frequency <= band.hi_hz)
-                        {
-                            push_numbered_violation(
-                                violations,
-                                check,
-                                fragment,
-                                &key,
-                                Some((*value).clone()),
-                                format!("{frequency} Hz is in no allowed band"),
-                            );
+                        if !envelope.allowed_bands.iter().any(|band| band.lo_hz <= frequency && frequency <= band.hi_hz) {
+                            push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("{frequency} Hz is in no allowed band"));
                         }
                     }
-                    None => push_numbered_violation(
-                        violations,
-                        check,
-                        fragment,
-                        &key,
-                        Some((*value).clone()),
-                        format!("radio.tx.c{number}.frequency_hz is not a number"),
-                    ),
+                    None => push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("radio.tx.c{number}.frequency_hz is not a number")),
                 }
             }
             if let Some(value) = values.get("gain_db") {
@@ -582,34 +452,16 @@ fn check_numbered_configuration(
                 match numeric(value) {
                     Some(gain) => {
                         if let Some(maximum) = envelope.max_gain_db.filter(|maximum| gain > *maximum) {
-                            push_numbered_violation(
-                                violations,
-                                check,
-                                fragment,
-                                &key,
-                                Some((*value).clone()),
-                                format!("gain {gain} dB exceeds {maximum}"),
-                            );
+                            push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("gain {gain} dB exceeds {maximum}"));
                         }
                     }
-                    None => push_numbered_violation(
-                        violations,
-                        check,
-                        fragment,
-                        &key,
-                        Some((*value).clone()),
-                        format!("radio.tx.c{number}.gain_db is not a number"),
-                    ),
+                    None => push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("radio.tx.c{number}.gain_db is not a number")),
                 }
             }
             let enabled = match &envelope.tx_enabled {
                 None => true,
                 Some(TxEnabled::All(enabled)) => *enabled,
-                Some(TxEnabled::PerChannel(list)) => usize::try_from(*number)
-                    .ok()
-                    .and_then(|index| list.get(index))
-                    .copied()
-                    .unwrap_or(false),
+                Some(TxEnabled::PerChannel(list)) => usize::try_from(*number).ok().and_then(|index| list.get(index)).copied().unwrap_or(false),
             };
             if !enabled {
                 push_numbered_violation(
@@ -626,71 +478,28 @@ fn check_numbered_configuration(
     }
 }
 
-fn check_channel_antenna(
-    values: &BTreeMap<&str, &Value>,
-    envelope: &RfEnvelope,
-    fragment: &Ident,
-    check: &RfEnvelopeCheck,
-    is_rx: bool,
-    number: i64,
-    violations: &mut Vec<Violation>,
-) {
+fn check_channel_antenna(values: &BTreeMap<&str, &Value>, envelope: &RfEnvelope, fragment: &Ident, check: &RfEnvelopeCheck, is_rx: bool, number: i64, violations: &mut Vec<Violation>) {
     let Some(value) = values.get("antenna") else {
         return;
     };
     let key = channel_key(is_rx, number, "antenna");
     let Some(antenna) = value.as_scalar().and_then(text) else {
-        push_numbered_violation(
-            violations,
-            check,
-            fragment,
-            &key,
-            Some((*value).clone()),
-            format!("radio.{} antenna is not a string", if is_rx { "rx" } else { "tx" }),
-        );
+        push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("radio.{} antenna is not a string", if is_rx { "rx" } else { "tx" }));
         return;
     };
-    if envelope
-        .antenna_ports
-        .as_ref()
-        .is_some_and(|ports| !ports.iter().any(|port| port == antenna))
-    {
-        push_numbered_violation(
-            violations,
-            check,
-            fragment,
-            &key,
-            Some((*value).clone()),
-            format!("antenna {antenna} is not allowed"),
-        );
+    if envelope.antenna_ports.as_ref().is_some_and(|ports| !ports.iter().any(|port| port == antenna)) {
+        push_numbered_violation(violations, check, fragment, &key, Some((*value).clone()), format!("antenna {antenna} is not allowed"));
     }
 }
 
 /// The concrete key of a numbered channel (RM-33).
 fn channel_key(is_rx: bool, number: i64, leaf: &str) -> Key {
     let direction = if is_rx { "rx" } else { "tx" };
-    Key::parse(&keys::channel(
-        direction,
-        u32::try_from(number).expect("a parsed channel number"),
-        leaf,
-    ))
-    .expect("a declared Radio Model key is valid")
+    Key::parse(&keys::channel(direction, u32::try_from(number).expect("a parsed channel number"), leaf)).expect("a declared Radio Model key is valid")
 }
 
-fn push_numbered_violation(
-    violations: &mut Vec<Violation>,
-    check: &RfEnvelopeCheck,
-    fragment: &Ident,
-    key: &Key,
-    requested: Option<Value>,
-    detail: String,
-) {
-    violations.push(Violation {
-        check: check.section().clone(),
-        requested,
-        key: Some(key.clone()),
-        reason: format!("RM-19: {fragment}: {detail}"),
-    });
+fn push_numbered_violation(violations: &mut Vec<Violation>, check: &RfEnvelopeCheck, fragment: &Ident, key: &Key, requested: Option<Value>, detail: String) {
+    violations.push(Violation { check: check.section().clone(), requested, key: Some(key.clone()), reason: format!("RM-19: {fragment}: {detail}") });
 }
 
 fn numeric(value: &Value) -> Option<f64> {
@@ -744,10 +553,7 @@ impl TimingEnvelope {
     /// place the rule is read; the places that build a description call it.
     pub fn check_start_lead(&self) -> Result<(), String> {
         if self.rx_start_lead_ns < self.release_window_ns {
-            return Err(format!(
-                "RM-6: radio.timing.rx_start_lead_ns {} is below radio.timing.release_window_ns {}",
-                self.rx_start_lead_ns, self.release_window_ns
-            ));
+            return Err(format!("RM-6: radio.timing.rx_start_lead_ns {} is below radio.timing.release_window_ns {}", self.rx_start_lead_ns, self.release_window_ns));
         }
         Ok(())
     }
@@ -831,9 +637,7 @@ pub mod payloads {
 
         /// Reads the hot-path form, refusing another length or an unknown cause (RM-24).
         pub fn from_hot(bytes: &[u8]) -> Result<RxOverflowPayload, String> {
-            let bytes: &[u8; RX_OVERFLOW_HOT_BYTES] = bytes.try_into().map_err(|_| {
-                format!("RM-24: the hot-path form is {RX_OVERFLOW_HOT_BYTES} bytes, not {}", bytes.len())
-            })?;
+            let bytes: &[u8; RX_OVERFLOW_HOT_BYTES] = bytes.try_into().map_err(|_| format!("RM-24: the hot-path form is {RX_OVERFLOW_HOT_BYTES} bytes, not {}", bytes.len()))?;
             let cause = match bytes[0] {
                 0 => RxOverflowCause::Overrun,
                 1 => RxOverflowCause::Sequence,
@@ -856,8 +660,7 @@ pub mod payloads {
                         .ok_or_else(|| "RM-24: the hot-path form holds byte values only".to_owned())?;
                     RxOverflowPayload::from_hot(&bytes)
                 }
-                serde_json::Value::Object(_) => serde_json::from_value(payload.clone())
-                    .map_err(|error| format!("RM-24: {error}")),
+                serde_json::Value::Object(_) => serde_json::from_value(payload.clone()).map_err(|error| format!("RM-24: {error}")),
                 _ => Err("RM-24: a payload is an object or an array of bytes".to_owned()),
             }
         }
@@ -1000,14 +803,11 @@ pub mod payloads {
 /// Generates the twelve committed Radio Model schemas (RM-20, RM-22, RM-24, RM-35).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     use payloads::{
-        AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload,
-        CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload,
-        TimeErrorPayload, TxUnderflowPayload,
+        AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload, TimeErrorPayload, TxUnderflowPayload,
     };
 
     fn of<T: JsonSchema>() -> serde_json::Value {
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>())
-            .expect("a generated schema is JSON")
+        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>()).expect("a generated schema is JSON")
     }
     BTreeMap::from([
         ("rf_envelope", of::<RfEnvelope>()),
@@ -1031,12 +831,7 @@ mod tests {
 
     #[test]
     fn cancellation_reports_only_cold_change() {
-        for (reason, reports) in [
-            (CancelReason::Stop, false),
-            (CancelReason::ProviderStop, false),
-            (CancelReason::Loss, false),
-            (CancelReason::ColdChange, true),
-        ] {
+        for (reason, reports) in [(CancelReason::Stop, false), (CancelReason::ProviderStop, false), (CancelReason::Loss, false), (CancelReason::ColdChange, true)] {
             assert_eq!(cancellation_reports(reason), reports, "{reason:?}");
         }
     }

@@ -19,20 +19,13 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Dispatched, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef,
-    Role, Sink, SinkDescriptor, StepOutcome, StopMode, Version, VersionReq,
-    VocabularyRequirement,
+    ActionReceiver, Dispatched, Endpoint, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef, Role, Sink, SinkDescriptor, StepOutcome, StopMode, Version, VersionReq, VocabularyRequirement,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, OutputReq, Scalar, Value};
-use ezsdr_kernel::stream::{
-    BlockFlags, BlockHeader, ContinuityBuilder, ContinuityMap, DataLink, DropCarry, StreamError,
-};
+use ezsdr_kernel::stream::{BlockFlags, BlockHeader, ContinuityBuilder, ContinuityMap, DataLink, DropCarry, StreamError};
 use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Converted, Duration, TimeAuthority, TimeError, TimePoint};
-use ezsdr_sink::{
-    CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, CAPTURE_WRITTEN, CaptureWrittenPayload, REQUEST_REJECTED,
-    RequestRejectedPayload,
-};
+use ezsdr_sink::{CAPTURE_ARTIFACT_KIND, CAPTURE_SAMPLES, CAPTURE_WRITTEN, CaptureWrittenPayload, REQUEST_REJECTED, RequestRejectedPayload};
 
 const CF32_CONTRACT: &str = "ezsdr.stream.cf32";
 const SC16_CONTRACT: &str = "ezsdr.stream.sc16";
@@ -41,10 +34,7 @@ const SC16_CONTRACT: &str = "ezsdr.stream.sc16";
 const SIGMF_VERSION: &str = "1.2.6";
 
 fn module_ref() -> ModuleRef {
-    ModuleRef {
-        id: ModuleId::parse("ezsdr.sink.capture").expect("a valid Module id"),
-        version: Version::new(1, 2, 0),
-    }
+    ModuleRef { id: ModuleId::parse("ezsdr.sink.capture").expect("a valid Module id"), version: Version::new(1, 2, 0) }
 }
 
 /// The Module descriptor for `ezsdr.sink.capture` 1.2.0 (HD-7; Phase 6, VD-1).
@@ -54,10 +44,7 @@ pub fn descriptor() -> ModuleDescriptor {
         version: Version::new(1, 2, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Sink],
-        vocabularies: vec![VocabularyRequirement {
-            id: Namespace::parse("sink").expect("a valid Vocabulary namespace"),
-            req: VersionReq(Version::new(1, 1, 0)),
-        }],
+        vocabularies: vec![VocabularyRequirement { id: Namespace::parse("sink").expect("a valid Vocabulary namespace"), req: VersionReq(Version::new(1, 1, 0)) }],
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sink.capture 1.2.0")),
     }
 }
@@ -68,10 +55,7 @@ pub fn sink_descriptor() -> SinkDescriptor {
         module: module_ref(),
         kind: Namespace::parse("ezsdr.sink.capture").expect("a valid Sink kind"),
         memory_domains: vec![ezsdr_hostmem::HOST_MEMORY],
-        contracts: vec![
-            DataContractId::parse(CF32_CONTRACT).expect("a valid contract id"),
-            DataContractId::parse(SC16_CONTRACT).expect("a valid contract id"),
-        ],
+        contracts: vec![DataContractId::parse(CF32_CONTRACT).expect("a valid contract id"), DataContractId::parse(SC16_CONTRACT).expect("a valid contract id")],
         artifact_kinds: vec![Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("a valid artifact kind")],
     }
 }
@@ -93,19 +77,7 @@ struct Capture {
 
 impl Capture {
     fn new(id: Option<Ident>, n: u64, at: Option<AbsoluteDeadline>, request: Option<ActionId>) -> Capture {
-        Capture {
-            request,
-            id,
-            n,
-            at,
-            written: 0,
-            file: None,
-            bps: None,
-            contract: None,
-            builders: Vec::new(),
-            builder: None,
-            started: false,
-        }
+        Capture { request, id, n, at, written: 0, file: None, bps: None, contract: None, builders: Vec::new(), builder: None, started: false }
     }
 }
 
@@ -130,26 +102,18 @@ impl CaptureSink {
     /// Builds a capture Sink from its binding, refusing unsupported Module content (HD-8).
     pub fn from_binding(binding: &Binding) -> Result<CaptureSink, ModuleError> {
         if binding.module != module_ref() {
-            return Err(ModuleError::rejected(
-                "HD-8: binding names a different Module version",
-            ));
+            return Err(ModuleError::rejected("HD-8: binding names a different Module version"));
         }
         if binding.profile.is_some() {
-            return Err(ModuleError::rejected(
-                "HD-8: the capture Sink has no profiles",
-            ));
+            return Err(ModuleError::rejected("HD-8: the capture Sink has no profiles"));
         }
         if binding.selector.len() != 1 {
-            return Err(ModuleError::rejected(
-                "HD-8: selector must contain exactly the `dir` string",
-            ));
+            return Err(ModuleError::rejected("HD-8: selector must contain exactly the `dir` string"));
         }
         let dir = match binding.selector.get(&Ident::parse("dir").expect("a valid selector key")) {
             Some(Value::Scalar(Scalar::Str(dir))) => PathBuf::from(dir),
             _ => {
-                return Err(ModuleError::rejected(
-                    "HD-8: selector must contain exactly the `dir` string",
-                ));
+                return Err(ModuleError::rejected("HD-8: selector must contain exactly the `dir` string"));
             }
         };
         Ok(CaptureSink {
@@ -185,12 +149,7 @@ impl CaptureSink {
             time: now,
             severity: Severity::Warning,
             kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
-            payload: serde_json::to_value(RequestRejectedPayload {
-                action,
-                kind: kind.to_owned(),
-                reason,
-            })
-            .expect("a rejection payload is JSON"),
+            payload: serde_json::to_value(RequestRejectedPayload { action, kind: kind.to_owned(), reason }).expect("a rejection payload is JSON"),
         };
         let _ = events.emit_control(event);
     }
@@ -198,48 +157,28 @@ impl CaptureSink {
     fn handle_action(&mut self, dispatched: Dispatched) -> Result<(), ModuleError> {
         let id = dispatched.id;
         match dispatched.action {
-            Action::UpdateParameter { key, value, at, .. }
-                if key.as_str() == CAPTURE_SAMPLES =>
-            {
-                match value {
-                    Value::Scalar(Scalar::Int(n)) if n >= 1 => {
-                        self.queue
-                            .push_back(Capture::new(None, n as u64, at, Some(id)));
-                    }
-                    _ => self.event_for_rejection(
-                        id,
-                        "update_parameter",
-                        "HD-14: sink.capture_samples must be a positive Int".to_owned(),
-                    ),
+            Action::UpdateParameter { key, value, at, .. } if key.as_str() == CAPTURE_SAMPLES => match value {
+                Value::Scalar(Scalar::Int(n)) if n >= 1 => {
+                    self.queue.push_back(Capture::new(None, n as u64, at, Some(id)));
                 }
-            }
-            Action::Stop { target: Some(Target::Output { output }) }
-                if self.output.as_ref() == Some(&output) =>
-            {
+                _ => self.event_for_rejection(id, "update_parameter", "HD-14: sink.capture_samples must be a positive Int".to_owned()),
+            },
+            Action::Stop { target: Some(Target::Output { output }) } if self.output.as_ref() == Some(&output) => {
                 if self.queue.front().is_some_and(|capture| capture.started) {
-                    let carry = self.link.as_ref()
-                        .map_or_else(DropCarry::default, |link| link.take_drop_carry());
+                    let carry = self.link.as_ref().map_or_else(DropCarry::default, |link| link.take_drop_carry());
                     self.finish_front(true, carry)?;
                 }
                 // A discarded request is answered, so its client does not wait out its
                 // timeout (HD-11; Review I, P2-1).
                 for discarded in std::mem::take(&mut self.queue) {
                     if let Some(request) = discarded.request {
-                        self.event_for_rejection(
-                            request,
-                            "update_parameter",
-                            "HD-11: discarded by a Stop for the Sink".to_owned(),
-                        );
+                        self.event_for_rejection(request, "update_parameter", "HD-11: discarded by a Stop for the Sink".to_owned());
                     }
                 }
             }
             other => {
                 let kind = action_kind(&other);
-                self.event_for_rejection(
-                    id,
-                    kind,
-                    format!("HD-14: Action kind `{kind}` is not supported by the capture Sink"),
-                );
+                self.event_for_rejection(id, kind, format!("HD-14: Action kind `{kind}` is not supported by the capture Sink"));
             }
         }
         Ok(())
@@ -247,26 +186,16 @@ impl CaptureSink {
 
     fn process_block(&mut self, block: &ezsdr_kernel::stream::BlockRef, carry: DropCarry) -> Result<(), ModuleError> {
         let recording_before_block = self.queue.front().is_some_and(|capture| capture.started);
-        let carry = if recording_before_block {
-            carry
-        } else {
-            DropCarry::default()
-        };
+        let carry = if recording_before_block { carry } else { DropCarry::default() };
         let header = block.header().clone();
         let bps = match header.contract.as_str() {
             CF32_CONTRACT => 8,
             SC16_CONTRACT => 4,
             contract => {
-                return Err(self.reject(format!(
-                    "HD-10: contract {contract} is not supported by the capture Sink"
-                )));
+                return Err(self.reject(format!("HD-10: contract {contract} is not supported by the capture Sink")));
             }
         };
-        let clocks = self
-            .clocks
-            .as_ref()
-            .expect("prepare installs the ClockRegistry")
-            .clone();
+        let clocks = self.clocks.as_ref().expect("prepare installs the ClockRegistry").clone();
         let mut carry_pending = recording_before_block;
         // A capture that starts in this block: the lower bound its leading gap is
         // clipped to (HD-10).
@@ -282,11 +211,7 @@ impl CaptureSink {
                     Ok(lower) => lower,
                     Err(error) => {
                         if let Some(request) = self.queue.pop_front().and_then(|capture| capture.request) {
-                            self.event_for_rejection(
-                                request,
-                                "update_parameter",
-                                format!("HD-14: capture start time cannot be converted: {error}"),
-                            );
+                            self.event_for_rejection(request, "update_parameter", format!("HD-14: capture start time cannot be converted: {error}"));
                         }
                         continue;
                     }
@@ -299,10 +224,7 @@ impl CaptureSink {
                 self.start_front(bps, header.contract.clone())?;
             }
 
-            let same_contract = self
-                .queue
-                .front()
-                .is_some_and(|capture| capture.contract.as_ref() == Some(&header.contract));
+            let same_contract = self.queue.front().is_some_and(|capture| capture.contract.as_ref() == Some(&header.contract));
             if !same_contract {
                 let trailing_carry = if carry_pending {
                     carry_pending = false;
@@ -315,12 +237,7 @@ impl CaptureSink {
             }
 
             let available = header.len as usize - sample;
-            let needed = self
-                .queue
-                .front()
-                .expect("a capture is queued")
-                .n
-                .saturating_sub(self.queue.front().expect("a capture is queued").written);
+            let needed = self.queue.front().expect("a capture is queued").n.saturating_sub(self.queue.front().expect("a capture is queued").written);
             let take = available.min(usize::try_from(needed).unwrap_or(usize::MAX));
             if take == 0 {
                 self.finish_front(false, DropCarry::default())?;
@@ -342,23 +259,13 @@ impl CaptureSink {
             }
 
             let bytes = interleave(block, bps, sample, sample + take);
-            let expected_bytes = take
-                .checked_mul(header.channels as usize)
-                .and_then(|n| n.checked_mul(bps))
-                .ok_or_else(|| self.reject("HD-10: capture byte count overflows"))?;
+            let expected_bytes = take.checked_mul(header.channels as usize).and_then(|n| n.checked_mul(bps)).ok_or_else(|| self.reject("HD-10: capture byte count overflows"))?;
             if bytes.len() != expected_bytes {
-                return Err(self.reject(
-                    "HD-10: block has no readable host bytes for its declared contract",
-                ));
+                return Err(self.reject("HD-10: block has no readable host bytes for its declared contract"));
             }
             let capture = self.queue.front_mut().expect("a capture is queued");
-            let (path, file) = capture
-                .file
-                .as_mut()
-                .ok_or_else(|| ModuleError::rejected("HD-10: capture file was not opened"))?;
-            file.write_all(&bytes).map_err(|error| {
-                ModuleError::rejected(format!("HD-10: cannot write {}: {error}", path.display()))
-            })?;
+            let (path, file) = capture.file.as_mut().ok_or_else(|| ModuleError::rejected("HD-10: capture file was not opened"))?;
+            file.write_all(&bytes).map_err(|error| ModuleError::rejected(format!("HD-10: cannot write {}: {error}", path.display())))?;
             capture.written = capture.written.saturating_add(take as u64);
             sample += take;
             if capture.written == capture.n {
@@ -369,45 +276,25 @@ impl CaptureSink {
     }
 
     fn start_front(&mut self, bps: usize, contract: DataContractId) -> Result<(), ModuleError> {
-        let output = self
-            .output
-            .as_ref()
-            .ok_or_else(|| ModuleError::rejected("HD-10: output id is missing"))?;
+        let output = self.output.as_ref().ok_or_else(|| ModuleError::rejected("HD-10: output id is missing"))?;
         // HD-16: a requested capture is named by its request's ActionId, the output's own
         // by the output; the Kernel files both under the output (RS-38).
         let front = self.queue.front().expect("a capture is queued");
         let (id, stem) = match (front.request, front.id.clone()) {
             (Some(request), _) => {
-                let id = Ident::parse(&format!("capture_{}", request.0))
-                    .map_err(|error| ModuleError::rejected(format!("HD-10: {error}")))?;
+                let id = Ident::parse(&format!("capture_{}", request.0)).map_err(|error| ModuleError::rejected(format!("HD-10: {error}")))?;
                 let stem = format!("{output}_{id}");
                 (id, stem)
             }
             (None, Some(id)) => (id, output.to_string()),
             (None, None) => return Err(ModuleError::rejected("HD-10: a capture has neither a request nor an id")),
         };
-        let run = self
-            .run
-            .as_ref()
-            .ok_or_else(|| ModuleError::rejected("HD-10: Run id is missing"))?;
-        let safe_run: String = run
-            .as_str()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let run = self.run.as_ref().ok_or_else(|| ModuleError::rejected("HD-10: Run id is missing"))?;
+        let safe_run: String = run.as_str().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
         // HD-15: the capture's file is a SigMF Dataset, whatever its contract.
         let file_name = format!("{safe_run}_{stem}.sigmf-data");
-        let absolute = std::path::absolute(self.dir.join(file_name))
-            .map_err(|error| ModuleError::rejected(format!("HD-10: cannot resolve capture path: {error}")))?;
-        let file = File::create_new(&absolute).map_err(|error| {
-            ModuleError::rejected(format!("HD-10: cannot create {}: {error}", absolute.display()))
-        })?;
+        let absolute = std::path::absolute(self.dir.join(file_name)).map_err(|error| ModuleError::rejected(format!("HD-10: cannot resolve capture path: {error}")))?;
+        let file = File::create_new(&absolute).map_err(|error| ModuleError::rejected(format!("HD-10: cannot create {}: {error}", absolute.display())))?;
         let capture = self.queue.front_mut().expect("a capture is queued");
         capture.id = Some(id);
         capture.file = Some((absolute, file));
@@ -430,15 +317,10 @@ impl CaptureSink {
         let Some((path, mut file)) = capture.file.take() else {
             return Err(ModuleError::rejected("HD-10: started capture has no file"));
         };
-        file.flush()
-            .map_err(|error| ModuleError::rejected(format!("HD-10: cannot flush {}: {error}", path.display())))?;
+        file.flush().map_err(|error| ModuleError::rejected(format!("HD-10: cannot flush {}: {error}", path.display())))?;
         drop(file);
-        let bytes = fs::read(&path)
-            .map_err(|error| ModuleError::rejected(format!("HD-10: cannot read {}: {error}", path.display())))?;
-        let id = capture
-            .id
-            .take()
-            .ok_or_else(|| ModuleError::rejected("HD-10: started capture has no id"))?;
+        let bytes = fs::read(&path).map_err(|error| ModuleError::rejected(format!("HD-10: cannot read {}: {error}", path.display())))?;
+        let id = capture.id.take().ok_or_else(|| ModuleError::rejected("HD-10: started capture has no id"))?;
         self.done.push(ArtifactRef {
             id,
             kind: Namespace::parse(CAPTURE_ARTIFACT_KIND).expect("a valid artifact kind"),
@@ -456,18 +338,12 @@ impl CaptureSink {
         let done = self.done.last().expect("the capture was just recorded");
         if let ([map], Some(contract)) = (done.continuity.as_slice(), capture.contract.as_ref()) {
             let clocks = self.clocks.as_ref().expect("prepare installs the ClockRegistry");
-            let rate = clocks
-                .nominal_rate(map.domain)
-                .map_err(|error| ModuleError::rejected(format!("HD-15: {error}")))?;
+            let rate = clocks.nominal_rate(map.domain).map_err(|error| ModuleError::rejected(format!("HD-15: {error}")))?;
             let meta = sigmf_meta(map, rate, contract, partial).map_err(ModuleError::rejected)?;
             let meta_path = path.with_extension("sigmf-meta");
             let staged = path.with_extension("sigmf-meta.partial");
             let text = serde_json::to_string_pretty(&meta).expect("SigMF metadata is JSON");
-            fs::write(&staged, text)
-                .and_then(|()| fs::rename(&staged, &meta_path))
-                .map_err(|error| {
-                    ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display()))
-                })?;
+            fs::write(&staged, text).and_then(|()| fs::rename(&staged, &meta_path)).map_err(|error| ModuleError::rejected(format!("HD-15: cannot write {}: {error}", meta_path.display())))?;
         }
         self.announce(self.done.last().expect("the capture was just recorded").clone(), capture.request);
         Ok(())
@@ -497,52 +373,34 @@ impl Sink for CaptureSink {
     }
 
     fn prepare(&mut self, fragment: &Fragment, ctx: ezsdr_kernel::module_api::PrepareContext) -> Result<PrepareReport, ModuleError> {
-        let request: OutputReq = serde_json::from_value(fragment.content.clone()).map_err(|error| {
-            ModuleError::rejected(format!("HD-9: fragment content is not an OutputReq: {error}"))
-        })?;
+        let request: OutputReq = serde_json::from_value(fragment.content.clone()).map_err(|error| ModuleError::rejected(format!("HD-9: fragment content is not an OutputReq: {error}")))?;
         let capture_samples = if request.params.is_empty() {
             None
         } else if request.params.len() == 1 {
-            match request
-                .params
-                .get(&Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key"))
-            {
+            match request.params.get(&Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key")) {
                 Some(Value::Scalar(Scalar::Int(n))) if *n >= 1 => Some(*n as u64),
                 Some(_) => {
-                    return Err(ModuleError::rejected(
-                        "HD-9: sink.capture_samples must be a positive Int",
-                    ));
+                    return Err(ModuleError::rejected("HD-9: sink.capture_samples must be a positive Int"));
                 }
                 None => {
-                    return Err(ModuleError::rejected(
-                        "HD-9: params may contain only sink.capture_samples",
-                    ));
+                    return Err(ModuleError::rejected("HD-9: params may contain only sink.capture_samples"));
                 }
             }
         } else {
-            return Err(ModuleError::rejected(
-                "HD-9: params may contain only sink.capture_samples",
-            ));
+            return Err(ModuleError::rejected("HD-9: params may contain only sink.capture_samples"));
         };
 
         if ctx.links.len() != 1 {
-            return Err(ModuleError::rejected(
-                "HD-9: the Sink needs exactly one input link",
-            ));
+            return Err(ModuleError::rejected("HD-9: the Sink needs exactly one input link"));
         }
         let attached = &ctx.links[0];
         if attached.component != fragment.id || attached.port.as_str() != "in" {
-            return Err(ModuleError::rejected(
-                "HD-9: the input link must attach to this fragment's `in` port",
-            ));
+            return Err(ModuleError::rejected("HD-9: the input link must attach to this fragment's `in` port"));
         }
         let Endpoint::StreamIn(link) = &attached.endpoint else {
-            return Err(ModuleError::rejected(
-                "HD-9: the input link must be a StreamIn endpoint",
-            ));
+            return Err(ModuleError::rejected("HD-9: the input link must be a StreamIn endpoint"));
         };
-        fs::create_dir_all(&self.dir)
-            .map_err(|error| ModuleError::rejected(format!("HD-9: cannot create capture directory: {error}")))?;
+        fs::create_dir_all(&self.dir).map_err(|error| ModuleError::rejected(format!("HD-9: cannot create capture directory: {error}")))?;
 
         self.output = Some(request.id.clone());
         self.source = Some(ctx.source);
@@ -558,11 +416,7 @@ impl Sink for CaptureSink {
             self.queue.push_back(Capture::new(Some(request.id), n, None, None));
         }
 
-        Ok(PrepareReport {
-            effective: BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -592,8 +446,7 @@ impl Sink for CaptureSink {
 
     fn stop(&mut self, _mode: StopMode) -> Result<Vec<ArtifactRef>, ModuleError> {
         if self.queue.front().is_some_and(|capture| capture.started) {
-            let carry = self.link.as_ref()
-                .map_or_else(DropCarry::default, |link| link.take_drop_carry());
+            let carry = self.link.as_ref().map_or_else(DropCarry::default, |link| link.take_drop_carry());
             self.finish_front(true, carry)?;
         }
         self.queue.clear();
@@ -627,20 +480,14 @@ fn action_kind(action: &Action) -> &'static str {
 }
 
 /// `at` in the block's SampleClock, rounded up (HD-10).
-fn lower_tick(
-    header: &BlockHeader,
-    at: Option<AbsoluteDeadline>,
-    clocks: &ClockRegistry,
-) -> Result<Option<i64>, TimeError> {
+fn lower_tick(header: &BlockHeader, at: Option<AbsoluteDeadline>, clocks: &ClockRegistry) -> Result<Option<i64>, TimeError> {
     let Some(at) = at else {
         return Ok(None);
     };
     let clock = header.first_sample_time.domain();
     Ok(Some(match clocks.convert(at.time_point, clock)? {
         Converted::Exact { point } => point.ticks_in(clock)?,
-        Converted::Inexact { floor, .. } => {
-            floor.ticks_in(clock)?.checked_add(1).ok_or(TimeError::Overflow)?
-        }
+        Converted::Inexact { floor, .. } => floor.ticks_in(clock)?.checked_add(1).ok_or(TimeError::Overflow)?,
     }))
 }
 
@@ -682,14 +529,10 @@ fn clip_leading_gap(header: &mut BlockHeader, lower: Option<i64>) {
 }
 
 fn sliced_header(header: &BlockHeader, from: usize, len: usize) -> Result<BlockHeader, ModuleError> {
-    let offset = i64::try_from(from)
-        .map_err(|error| ModuleError::rejected(format!("HD-10: sample offset is invalid: {error}")))?;
-    let first_sample_time = header
-        .first_sample_time
-        .checked_add(Duration::new(header.first_sample_time.domain(), offset))
-        .map_err(|error| ModuleError::rejected(format!("HD-10: sample time is invalid: {error}")))?;
-    let len = u32::try_from(len)
-        .map_err(|error| ModuleError::rejected(format!("HD-10: overlap length is invalid: {error}")))?;
+    let offset = i64::try_from(from).map_err(|error| ModuleError::rejected(format!("HD-10: sample offset is invalid: {error}")))?;
+    let first_sample_time =
+        header.first_sample_time.checked_add(Duration::new(header.first_sample_time.domain(), offset)).map_err(|error| ModuleError::rejected(format!("HD-10: sample time is invalid: {error}")))?;
+    let len = u32::try_from(len).map_err(|error| ModuleError::rejected(format!("HD-10: overlap length is invalid: {error}")))?;
     Ok(BlockHeader {
         first_sample_time,
         len,
@@ -702,22 +545,13 @@ fn sliced_header(header: &BlockHeader, from: usize, len: usize) -> Result<BlockH
     })
 }
 
-fn push_continuity(
-    capture: &mut Capture,
-    header: &BlockHeader,
-    carry: DropCarry,
-) -> Result<(), ModuleError> {
+fn push_continuity(capture: &mut Capture, header: &BlockHeader, carry: DropCarry) -> Result<(), ModuleError> {
     if capture.builder.is_none() {
         let domain = header.first_sample_time.domain();
         let channels = header.channels;
         capture.builder = Some((ContinuityBuilder::new(domain, channels, false), domain, channels));
     }
-    let pushed = capture
-        .builder
-        .as_mut()
-        .expect("a continuity builder was created")
-        .0
-        .push(header, carry);
+    let pushed = capture.builder.as_mut().expect("a continuity builder was created").0.push(header, carry);
     match pushed {
         Ok(()) => Ok(()),
         Err(StreamError::DomainChanged { .. } | StreamError::ChannelsChanged { .. }) => {
@@ -727,8 +561,7 @@ fn push_continuity(
             let domain = header.first_sample_time.domain();
             let channels = header.channels;
             let mut next = ContinuityBuilder::new(domain, channels, false);
-            next.push(header, DropCarry::default())
-                .map_err(|error| ModuleError::rejected(format!("HD-10: continuity: {error}")))?;
+            next.push(header, DropCarry::default()).map_err(|error| ModuleError::rejected(format!("HD-10: continuity: {error}")))?;
             capture.builder = Some((next, domain, channels));
             Ok(())
         }

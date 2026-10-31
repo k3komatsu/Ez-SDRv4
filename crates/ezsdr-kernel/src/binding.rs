@@ -9,16 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::contract::PortRef;
 use crate::id::ResourceId;
 use crate::module_api::{IslandDecl, ModuleRef, ProfileRef};
-use crate::spec::{
-    CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, RejectedConstraint,
-    Scalar, SpecError, Value, Warning, check_top_level, check_version,
-};
+use crate::spec::{CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, RejectedConstraint, Scalar, SpecError, Value, Warning, check_top_level, check_version};
 
 /// Tests every candidate so a later kind mismatch is not hidden by an earlier hit (SB-6).
-fn any_evaluating_all<'a>(
-    mut values: impl Iterator<Item = &'a Scalar>,
-    mut predicate: impl FnMut(&Scalar) -> Result<bool, SpecError>,
-) -> Result<bool, SpecError> {
+fn any_evaluating_all<'a>(mut values: impl Iterator<Item = &'a Scalar>, mut predicate: impl FnMut(&Scalar) -> Result<bool, SpecError>) -> Result<bool, SpecError> {
     values.try_fold(false, |found, value| Ok(predicate(value)? | found))
 }
 
@@ -117,22 +111,11 @@ pub struct BindingProfile {
 }
 
 /// Top-level fields a [`BindingProfile`] may carry (SB-21).
-pub const BINDING_TOP_LEVEL: &[&str] = &[
-    "version",
-    "bindings",
-    "authority",
-    "placements",
-    "environment",
-];
+pub const BINDING_TOP_LEVEL: &[&str] = &["version", "bindings", "authority", "placements", "environment"];
 
 /// The four `environment` sections the Kernel reads by name; every other section is
 /// opaque to it (SB-26).
-pub const KERNEL_SECTIONS: &[&str] = &[
-    "ezsdr.time",
-    "ezsdr.rf_path",
-    "ezsdr.capture",
-    "ezsdr.arm_order",
-];
+pub const KERNEL_SECTIONS: &[&str] = &["ezsdr.time", "ezsdr.rf_path", "ezsdr.capture", "ezsdr.arm_order"];
 
 impl BindingProfile {
     /// Parses and validates the envelope: the version (SB-47) and the closed
@@ -142,9 +125,7 @@ impl BindingProfile {
         check_version(doc)?;
         check_top_level(doc, BINDING_TOP_LEVEL)?;
         crate::spec::check_ascii_keys(doc)?;
-        serde_json::from_value(doc.clone()).map_err(|e| SpecError::Structural {
-            reason: format!("SB-21: {e}"),
-        })
+        serde_json::from_value(doc.clone()).map_err(|e| SpecError::Structural { reason: format!("SB-21: {e}") })
     }
 
     /// One `environment` section, or `None`. The Kernel reads the four of
@@ -157,34 +138,20 @@ impl BindingProfile {
         if !KERNEL_SECTIONS.contains(&ns) {
             return None;
         }
-        Namespace::parse(ns)
-            .ok()
-            .and_then(|n| self.environment.get(&n))
+        Namespace::parse(ns).ok().and_then(|n| self.environment.get(&n))
     }
 }
 
 /// `ezsdr.time.start_lead_ns`: the lead between the end of `arm` and the Run's start
 /// instant, in nanoseconds; absent means 0. The one reader of the field, used by
 /// `plan()` and by the coordinator (MA-41, KC-15, KA-8).
-pub fn start_lead_ns(
-    environment: &BTreeMap<Namespace, serde_json::Value>,
-) -> Result<u64, SpecError> {
-    let Some(section) = Namespace::parse("ezsdr.time")
-        .ok()
-        .and_then(|n| environment.get(&n))
-    else {
+pub fn start_lead_ns(environment: &BTreeMap<Namespace, serde_json::Value>) -> Result<u64, SpecError> {
+    let Some(section) = Namespace::parse("ezsdr.time").ok().and_then(|n| environment.get(&n)) else {
         return Ok(0);
     };
     match section.get("start_lead_ns") {
         None => Ok(0),
-        Some(v) => v
-            .as_u64()
-            .filter(|n| *n <= 1u64 << 62)
-            .ok_or_else(|| SpecError::Structural {
-                reason: format!(
-                    "MA-41: ezsdr.time.start_lead_ns must be an integer in 0..=2^62, not {v}"
-                ),
-            }),
+        Some(v) => v.as_u64().filter(|n| *n <= 1u64 << 62).ok_or_else(|| SpecError::Structural { reason: format!("MA-41: ezsdr.time.start_lead_ns must be an integer in 0..=2^62, not {v}") }),
     }
 }
 
@@ -205,11 +172,7 @@ pub fn start_lead_ns(
 pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecError> {
     use std::cmp::Ordering::*;
     let cmp = |a: &Scalar, b: &Scalar| -> Result<std::cmp::Ordering, SpecError> {
-        a.partial_cmp(b).ok_or_else(|| SpecError::KeyShape {
-            key: String::new(),
-            expected: format!("{:?}", a.kind()),
-            found: format!("{:?}", b.kind()),
-        })
+        a.partial_cmp(b).ok_or_else(|| SpecError::KeyShape { key: String::new(), expected: format!("{:?}", a.kind()), found: format!("{:?}", b.kind()) })
     };
     // `Eq` and set membership ask whether two values are **one value**, and SB-6 knows
     // one relation for that: exact numeric comparison, the `Equal` case of the ordering
@@ -236,23 +199,11 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
         (Constraint::Present {}, _) => true,
 
         (Constraint::Eq { value: v }, CapabilityValue::One { value: x }) => same(v, x)?,
-        (Constraint::Eq { value: v }, CapabilityValue::Range { min, max }) => {
-            within(v, Some(min), Some(max))?
-        }
-        (Constraint::Eq { value: v }, CapabilityValue::AnyOf { values: xs }) => {
-            any_evaluating_all(xs.iter(), |x| same(v, x))?
-        }
+        (Constraint::Eq { value: v }, CapabilityValue::Range { min, max }) => within(v, Some(min), Some(max))?,
+        (Constraint::Eq { value: v }, CapabilityValue::AnyOf { values: xs }) => any_evaluating_all(xs.iter(), |x| same(v, x))?,
 
-        (Constraint::Range { min, max }, CapabilityValue::One { value: x }) => {
-            within(x, min.as_ref(), max.as_ref())?
-        }
-        (
-            Constraint::Range { min, max },
-            CapabilityValue::Range {
-                min: cmin,
-                max: cmax,
-            },
-        ) => {
+        (Constraint::Range { min, max }, CapabilityValue::One { value: x }) => within(x, min.as_ref(), max.as_ref())?,
+        (Constraint::Range { min, max }, CapabilityValue::Range { min: cmin, max: cmax }) => {
             // Propagated, not swallowed: a capability declared in the wrong kind is
             // malformed, not merely unsatisfiable (SB-6).
             let above = match min {
@@ -265,33 +216,19 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
             };
             above && below
         }
-        (Constraint::Range { min, max }, CapabilityValue::AnyOf { values: xs }) => {
-            any_evaluating_all(xs.iter(), |x| within(x, min.as_ref(), max.as_ref()))?
-        }
+        (Constraint::Range { min, max }, CapabilityValue::AnyOf { values: xs }) => any_evaluating_all(xs.iter(), |x| within(x, min.as_ref(), max.as_ref()))?,
 
-        (Constraint::Set { values: s }, CapabilityValue::One { value: x }) => {
-            any_evaluating_all(s.iter(), |v| same(v, x))?
-        }
-        (Constraint::Set { values: s }, CapabilityValue::Range { min, max }) => {
-            any_evaluating_all(s.iter(), |v| within(v, Some(min), Some(max)))?
-        }
-        (Constraint::Set { values: s }, CapabilityValue::AnyOf { values: xs }) => {
-            any_evaluating_all(s.iter(), |v| any_evaluating_all(xs.iter(), |x| same(v, x)))?
-        }
+        (Constraint::Set { values: s }, CapabilityValue::One { value: x }) => any_evaluating_all(s.iter(), |v| same(v, x))?,
+        (Constraint::Set { values: s }, CapabilityValue::Range { min, max }) => any_evaluating_all(s.iter(), |v| within(v, Some(min), Some(max)))?,
+        (Constraint::Set { values: s }, CapabilityValue::AnyOf { values: xs }) => any_evaluating_all(s.iter(), |v| any_evaluating_all(xs.iter(), |x| same(v, x)))?,
 
         // Min and Max are satisfied by the corresponding bound of the capability.
         (Constraint::Min { value: v }, CapabilityValue::One { value: x }) => cmp(x, v)? != Less,
         (Constraint::Min { value: v }, CapabilityValue::Range { max, .. }) => cmp(max, v)? != Less,
-        (Constraint::Min { value: v }, CapabilityValue::AnyOf { values: xs }) => {
-            any_evaluating_all(xs.iter(), |x| Ok(cmp(x, v)? != Less))?
-        }
+        (Constraint::Min { value: v }, CapabilityValue::AnyOf { values: xs }) => any_evaluating_all(xs.iter(), |x| Ok(cmp(x, v)? != Less))?,
         (Constraint::Max { value: v }, CapabilityValue::One { value: x }) => cmp(x, v)? != Greater,
-        (Constraint::Max { value: v }, CapabilityValue::Range { min, .. }) => {
-            cmp(min, v)? != Greater
-        }
-        (Constraint::Max { value: v }, CapabilityValue::AnyOf { values: xs }) => {
-            any_evaluating_all(xs.iter(), |x| Ok(cmp(x, v)? != Greater))?
-        }
+        (Constraint::Max { value: v }, CapabilityValue::Range { min, .. }) => cmp(min, v)? != Greater,
+        (Constraint::Max { value: v }, CapabilityValue::AnyOf { values: xs }) => any_evaluating_all(xs.iter(), |x| Ok(cmp(x, v)? != Greater))?,
     })
 }
 
@@ -302,11 +239,7 @@ pub fn satisfies(c: &Constraint, cap: &CapabilityValue) -> Result<bool, SpecErro
 pub fn check_constraint_kind(decl: &KeyDecl, key: &Key, c: &Constraint) -> Result<(), SpecError> {
     for v in c.values() {
         if !crate::spec::kind_accepts(decl.kind, v.kind()) {
-            return Err(SpecError::KeyShape {
-                key: key.to_string(),
-                expected: format!("{:?}", decl.kind),
-                found: format!("{:?}", v.kind()),
-            });
+            return Err(SpecError::KeyShape { key: key.to_string(), expected: format!("{:?}", decl.kind), found: format!("{:?}", v.kind()) });
         }
     }
     Ok(())
@@ -321,11 +254,7 @@ pub(crate) fn check_value_kind(decl: &KeyDecl, key: &Key, value: &Value) -> Resu
     if crate::spec::kind_accepts(decl.kind, value.kind()) {
         return Ok(());
     }
-    Err(SpecError::KeyShape {
-        key: key.to_string(),
-        expected: format!("{:?}", decl.kind),
-        found: format!("{:?}", value.kind()),
-    })
+    Err(SpecError::KeyShape { key: key.to_string(), expected: format!("{:?}", decl.kind), found: format!("{:?}", value.kind()) })
 }
 
 // ---------------------------------------------------------------- admission checks
@@ -382,13 +311,7 @@ pub trait AdmissionCheck: Send + Sync {
     /// Action's key and value, because "before dispatch" means the value has not
     /// been applied and a check given only the current effective configuration
     /// could not see what it is being asked to admit (SB-30).
-    fn check(
-        &self,
-        section: &serde_json::Value,
-        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        stage: CheckStage,
-    ) -> Vec<Violation>;
+    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, stage: CheckStage) -> Vec<Violation>;
 }
 
 /// The checks a runtime registered. The Kernel runs every registered check whose
@@ -416,10 +339,7 @@ impl AdmissionCheckRegistry {
     /// The sections read by the registered checks that judge a running Session's
     /// Actions (SB-29, SB-30's runtime stage; KC-37a).
     pub(crate) fn runtime_sections(&self) -> impl Iterator<Item = &Namespace> {
-        self.checks
-            .iter()
-            .filter(|check| check.stages().contains(&CheckStage::Runtime))
-            .map(|check| check.section())
+        self.checks.iter().filter(|check| check.stages().contains(&CheckStage::Runtime)).map(|check| check.section())
     }
 
     /// Runs every check whose section is present in `environment` and whose stages
@@ -506,10 +426,7 @@ impl AdmissionResult {
     /// Rule: SB-30, SB-35, SB-38.
     pub fn into_result(self) -> Result<AdmissionResult, SpecError> {
         if let Some(r) = self.rejected.first() {
-            return Err(SpecError::NoSingleInstance {
-                name: r.resource.clone(),
-                constraint: format!("{:?} on {}", r.constraint, r.key),
-            });
+            return Err(SpecError::NoSingleInstance { name: r.resource.clone(), constraint: format!("{:?} on {}", r.constraint, r.key) });
         }
         if let Some(v) = self.violations.first() {
             return Err(SpecError::Violation(v.clone()));

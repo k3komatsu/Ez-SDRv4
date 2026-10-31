@@ -15,9 +15,9 @@ fn ov_15_integer_profile_is_exact_at_every_magnitude() {
     // Through a strict RFC 8785 double these lose their last bits, which is why the
     // integer profile is a named deviation (OV-15a).
     for v in [
-        9_007_199_254_740_992i64,     // 2^53
-        9_007_199_254_740_993,        // 2^53 + 1
-        1_700_000_000_000_000_000,    // a realistic epoch-to-UTC offset in nanoseconds
+        9_007_199_254_740_992i64,  // 2^53
+        9_007_199_254_740_993,     // 2^53 + 1
+        1_700_000_000_000_000_000, // a realistic epoch-to-UTC offset in nanoseconds
         i64::MIN,
     ] {
         assert_eq!(canon(json!({ "ticks": v })), format!("{{\"ticks\":{v}}}"));
@@ -77,10 +77,7 @@ fn ov_15_non_finite_is_rejected_not_null() {
     // construction: a non-finite one cannot be built, so it never reaches a hash.
     assert!(Value::num(f64::NAN).is_none());
     assert!(ContentHash::of(&Value::num(1.5).unwrap()).is_ok());
-    assert_ne!(
-        ContentHash::of(&Value::num(1.5).unwrap()).expect("hashes"),
-        ContentHash::of(&Value::num(2.5).unwrap()).expect("hashes")
-    );
+    assert_ne!(ContentHash::of(&Value::num(1.5).unwrap()).expect("hashes"), ContentHash::of(&Value::num(2.5).unwrap()).expect("hashes"));
 
     // `serde_json::Number` still cannot hold one, so `canonical_json` never sees it.
     assert!(serde_json::Number::from_f64(f64::NAN).is_none());
@@ -91,9 +88,7 @@ fn ov_15_non_finite_is_rejected_not_null() {
 #[test]
 fn ov_15_keys_are_sorted_and_whitespace_is_gone() {
     let a = json!({ "b": 1, "a": 2, "c": { "z": 1, "y": 2 } });
-    let b: serde_json::Value =
-        serde_json::from_str("  { \"c\" : { \"y\" : 2 , \"z\" : 1 } , \"a\" : 2 , \"b\" : 1 }  ")
-            .expect("parses");
+    let b: serde_json::Value = serde_json::from_str("  { \"c\" : { \"y\" : 2 , \"z\" : 1 } , \"a\" : 2 , \"b\" : 1 }  ").expect("parses");
     assert_eq!(canon(a.clone()), "{\"a\":2,\"b\":1,\"c\":{\"y\":2,\"z\":1}}");
     assert_eq!(canon(a.clone()), canon(b.clone()));
     assert_eq!(ContentHash::of(&a).expect("hashes"), ContentHash::of(&b).expect("hashes"));
@@ -113,14 +108,8 @@ fn ov_15_strings_use_rfc_8785_escaping() {
 
 #[test]
 fn ov_14_sha256_known_answers() {
-    assert_eq!(
-        ContentHash::of_bytes(b"").as_str(),
-        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
-    assert_eq!(
-        ContentHash::of_bytes(b"abc").as_str(),
-        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
+    assert_eq!(ContentHash::of_bytes(b"").as_str(), "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert_eq!(ContentHash::of_bytes(b"abc").as_str(), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
 
 #[test]
@@ -129,19 +118,12 @@ fn ov_14_content_hash_round_trips() {
     assert_eq!(ContentHash::parse(h.as_str()), Ok(h.clone()));
     assert_eq!(ContentHash::parse("sha256:zz"), Err(HashError::MalformedHash));
     assert_eq!(ContentHash::parse("md5:00"), Err(HashError::MalformedHash));
-    assert_eq!(
-        ContentHash::parse("sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"),
-        Err(HashError::MalformedHash),
-        "the hex is lowercase"
-    );
+    assert_eq!(ContentHash::parse("sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"), Err(HashError::MalformedHash), "the hex is lowercase");
 }
 
 #[test]
 fn ov_16_equal_inputs_hash_equally_across_orders() {
     let items = json!([{ "k": 1, "j": 2 }, { "j": 2, "k": 1 }]);
     let serde_json::Value::Array(pair) = items else { unreachable!() };
-    assert_eq!(
-        ContentHash::of(&pair[0]).expect("hashes"),
-        ContentHash::of(&pair[1]).expect("hashes")
-    );
+    assert_eq!(ContentHash::of(&pair[0]).expect("hashes"), ContentHash::of(&pair[1]).expect("hashes"));
 }

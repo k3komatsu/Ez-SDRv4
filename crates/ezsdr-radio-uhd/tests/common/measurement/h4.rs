@@ -1,7 +1,7 @@
 //! H4 scheduler/submission proxies. These are observations, not wake-up latency or RF execution.
 
-use super::*;
 use super::super as common;
+use super::*;
 use common::probe_device::ProbeDevice;
 use std::time::{Duration as Wall, Instant};
 
@@ -23,9 +23,7 @@ fn h4_gain_vocabulary() -> ezsdr_kernel::module_api::VocabularyDescriptor {
         event_kinds: Vec::new(),
         verbs: vec![ezsdr_kernel::module_api::VerbDecl {
             verb: ezsdr_kernel::spec::Ident::parse("set_rx_gain").expect("valid H4 verb"),
-            compiles_to: ezsdr_kernel::module_api::CompileRule::UpdateParameter {
-                key: ezsdr_kernel::spec::Key::parse("radio.rx.c0.gain_db").expect("declared radio gain key"),
-            },
+            compiles_to: ezsdr_kernel::module_api::CompileRule::UpdateParameter { key: ezsdr_kernel::spec::Key::parse("radio.rx.c0.gain_db").expect("declared radio gain key") },
         }],
         checks: Vec::new(),
     }
@@ -79,8 +77,7 @@ pub fn map_device_tick(anchors: [ClockAnchor; 2], tick: i64, master_clock_hz: u6
     if before.host_before_ns > before.host_after_ns || after.host_before_ns > after.host_after_ns {
         return Err("a host-clock bracket is reversed".to_owned());
     }
-    let device_span = after.device_tick.checked_sub(before.device_tick).filter(|span| *span > 0)
-        .ok_or_else(|| "device-time anchors are missing, reversed or discontinuous".to_owned())?;
+    let device_span = after.device_tick.checked_sub(before.device_tick).filter(|span| *span > 0).ok_or_else(|| "device-time anchors are missing, reversed or discontinuous".to_owned())?;
     let midpoint = |anchor: ClockAnchor| i128::from(anchor.host_before_ns) + (i128::from(anchor.host_after_ns) - i128::from(anchor.host_before_ns)) / 2;
     let h0 = midpoint(before);
     let h1 = midpoint(after);
@@ -95,8 +92,7 @@ pub fn map_device_tick(anchors: [ClockAnchor; 2], tick: i64, master_clock_hz: u6
     let target = h0 + offset * host_span / i128::from(device_span);
     let left_weight = i128::from(after.device_tick - tick);
     let right_weight = i128::from(tick - before.device_tick);
-    let bracket = left_weight * i128::from(before.host_after_ns - before.host_before_ns)
-        + right_weight * i128::from(after.host_after_ns - after.host_before_ns);
+    let bracket = left_weight * i128::from(before.host_after_ns - before.host_before_ns) + right_weight * i128::from(after.host_after_ns - after.host_before_ns);
     let radius = (bracket + 2 * i128::from(device_span) - 1) / (2 * i128::from(device_span)) + 1;
     let lower = i64::try_from(target - radius).map_err(|_| "mapped host time underflow".to_owned())?;
     let upper = i64::try_from(target + radius).map_err(|_| "mapped host time overflow".to_owned())?;
@@ -105,24 +101,32 @@ pub fn map_device_tick(anchors: [ClockAnchor; 2], tick: i64, master_clock_hz: u6
     let after_age_ns = u64::try_from((h1 - target).abs()).map_err(|_| "anchor age overflow".to_owned())?;
     let bracket_width_ns = u64::try_from(i128::from(upper) - i128::from(lower)).map_err(|_| "mapped bracket width overflow".to_owned())?;
     Ok(HostInterval {
-        lower_ns: lower, upper_ns: upper, midpoint_ns, bracket_width_ns,
-        anchor_span_ticks: device_span, anchor_span_host_ns: i64::try_from(host_span).map_err(|_| "host anchor span overflow".to_owned())?,
-        before_age_ns, after_age_ns,
+        lower_ns: lower,
+        upper_ns: upper,
+        midpoint_ns,
+        bracket_width_ns,
+        anchor_span_ticks: device_span,
+        anchor_span_host_ns: i64::try_from(host_span).map_err(|_| "host anchor span overflow".to_owned())?,
+        before_age_ns,
+        after_age_ns,
     })
 }
 
 fn clock_rate_matches(anchors: [ClockAnchor; 2], master_clock_hz: u64) -> bool {
-    if master_clock_hz == 0 { return false; }
+    if master_clock_hz == 0 {
+        return false;
+    }
     let midpoint = |anchor: ClockAnchor| i128::from(anchor.host_before_ns) + (i128::from(anchor.host_after_ns) - i128::from(anchor.host_before_ns)) / 2;
     let host_span = midpoint(anchors[1]) - midpoint(anchors[0]);
     let device_span = i128::from(anchors[1].device_tick) - i128::from(anchors[0].device_tick);
-    if host_span <= 0 || device_span <= 0 { return false; }
+    if host_span <= 0 || device_span <= 0 {
+        return false;
+    }
     let Some(expected) = host_span.checked_mul(i128::from(master_clock_hz)) else { return false };
     let Some(actual) = device_span.checked_mul(1_000_000_000) else { return false };
     let Some(difference) = actual.checked_sub(expected).and_then(i128::checked_abs) else { return false };
     let Some(tolerance) = expected.checked_mul(CLOCK_RATE_TOLERANCE_PPM).map(|value| value / 1_000_000) else { return false };
-    let bracket_ns = (i128::from(anchors[0].host_after_ns - anchors[0].host_before_ns)
-        + i128::from(anchors[1].host_after_ns - anchors[1].host_before_ns)) / 2;
+    let bracket_ns = (i128::from(anchors[0].host_after_ns - anchors[0].host_before_ns) + i128::from(anchors[1].host_after_ns - anchors[1].host_before_ns)) / 2;
     let Some(bracket_tolerance) = bracket_ns.checked_mul(i128::from(master_clock_hz)) else { return false };
     difference <= tolerance + bracket_tolerance
 }
@@ -145,8 +149,14 @@ fn host_to_device_tick(anchors: [ClockAnchor; 2], host_ns: u64, master_clock_hz:
     let d1 = i128::from(anchors[1].device_tick);
     let span = h1 - h0;
     if anchors.iter().any(|anchor| anchor.host_before_ns > anchor.host_after_ns)
-        || span <= 0 || d1 <= d0 || i128::from(host_ns) < h0 || i128::from(host_ns) > h1
-        || !clock_rate_matches(anchors, master_clock_hz) { return None; }
+        || span <= 0
+        || d1 <= d0
+        || i128::from(host_ns) < h0
+        || i128::from(host_ns) > h1
+        || !clock_rate_matches(anchors, master_clock_hz)
+    {
+        return None;
+    }
     i64::try_from(d0 + (i128::from(host_ns) - h0) * (d1 - d0) / span).ok()
 }
 
@@ -167,7 +177,10 @@ pub fn tx_headroom(rows: &[Json], anchors: [ClockAnchor; 2], master_clock_hz: u6
     for row in rows.iter().filter(|row| row["call"] == "tx_send") {
         let generation = row["generation"].as_u64().unwrap_or_default();
         let host_before = row["host_before_ns"].as_u64();
-        let Some(host_before) = host_before else { segment = None; continue };
+        let Some(host_before) = host_before else {
+            segment = None;
+            continue;
+        };
         let Some(call_tick) = host_to_device_tick(anchors, host_before, master_clock_hz) else {
             segment = None;
             results.push(json!({ "stream": row["stream"], "generation": generation, "host_before_ns": host_before,
@@ -191,7 +204,10 @@ pub fn tx_headroom(rows: &[Json], anchors: [ClockAnchor; 2], master_clock_hz: u6
             segment = None;
             continue;
         }
-        let Some(accepted) = row["result"]["accepted_samples"].as_u64() else { segment = None; continue };
+        let Some(accepted) = row["result"]["accepted_samples"].as_u64() else {
+            segment = None;
+            continue;
+        };
         if accepted == 0 || sample_counts.contains(&0) {
             results.push(json!({ "stream": row["stream"], "generation": generation, "host_before_ns": host_before,
                 "status": "discarded_zero_send", "accepted_samples": accepted, "sample_counts": sample_counts }));
@@ -226,18 +242,31 @@ pub fn tx_headroom(rows: &[Json], anchors: [ClockAnchor; 2], master_clock_hz: u6
         }
         let mut cumulative_overflow = false;
         for (index, count) in sample_counts.iter().enumerate() {
-            let Some(total) = cumulative.get_mut(index) else { cumulative_overflow = true; break };
-            let Some(next) = total.checked_add(*count) else { cumulative_overflow = true; break };
+            let Some(total) = cumulative.get_mut(index) else {
+                cumulative_overflow = true;
+                break;
+            };
+            let Some(next) = total.checked_add(*count) else {
+                cumulative_overflow = true;
+                break;
+            };
             *total = next;
         }
-        if cumulative_overflow { segment = None; continue; }
-        if row["eob"].as_bool() == Some(true) { segment = None; }
+        if cumulative_overflow {
+            segment = None;
+            continue;
+        }
+        if row["eob"].as_bool() == Some(true) {
+            segment = None;
+        }
     }
     results
 }
 
 fn distribution(values: &[i64]) -> Json {
-    if values.is_empty() { return json!({ "count": 0, "min_ns": null, "median_ns": null, "p99_ns": null, "max_ns": null }); }
+    if values.is_empty() {
+        return json!({ "count": 0, "min_ns": null, "median_ns": null, "p99_ns": null, "max_ns": null });
+    }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     let p99 = sorted.len().saturating_mul(99).div_ceil(100).saturating_sub(1);
@@ -251,7 +280,9 @@ fn proc_cpu_stat() -> Option<Json> {
 pub fn parse_proc_cpu_stat(text: &str) -> Option<Json> {
     let line = text.lines().find(|line| line.starts_with("cpu "))?;
     let fields: Vec<u64> = line.split_whitespace().skip(1).map(str::parse).collect::<Result<_, _>>().ok()?;
-    if fields.len() < 4 { return None; }
+    if fields.len() < 4 {
+        return None;
+    }
     let total = fields.iter().take(8).try_fold(0u64, |total, value| total.checked_add(*value))?;
     let idle = fields.get(3)?.checked_add(*fields.get(4).unwrap_or(&0))?;
     Some(json!({ "total_ticks": total, "busy_ticks": total.checked_sub(idle)? }))
@@ -265,7 +296,9 @@ fn proc_thread_snapshot() -> Json {
         let stat = std::fs::read_to_string(task.path().join("stat")).ok();
         let status = std::fs::read_to_string(task.path().join("status")).ok();
         if let (Some(tid), Some(stat), Some(status)) = (tid, stat, status) {
-            if let Some(row) = parse_thread_status(tid, &stat, &status) { rows.push(row); }
+            if let Some(row) = parse_thread_status(tid, &stat, &status) {
+                rows.push(row);
+            }
         }
     }
     json!({ "threads": rows })
@@ -299,18 +332,26 @@ fn matching_timed_apply(probe: &ProbeDevice, e: i64) -> Option<Json> {
 }
 
 fn await_timed_apply(probe: &ProbeDevice, e: i64, manual: bool) -> Option<Json> {
-    if manual { return matching_timed_apply(probe, e); }
+    if manual {
+        return matching_timed_apply(probe, e);
+    }
     let deadline = Instant::now() + H4_APPLY_WAIT;
     loop {
-        if let Some(row) = matching_timed_apply(probe, e) { return Some(row); }
-        if Instant::now() >= deadline { return None; }
+        if let Some(row) = matching_timed_apply(probe, e) {
+            return Some(row);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
         std::thread::sleep(Wall::from_millis(1));
     }
 }
 
 /// Runs the Session-to-Provider H4 probe. `updates` is 200 on hardware and small in the fake rehearsal.
 pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<MeasurementGroup, String> {
-    if updates == 0 || updates > H4_DISPATCH_UPDATES { return Err(format!("H4 needs 1..={H4_DISPATCH_UPDATES} timed gain updates")); }
+    if updates == 0 || updates > H4_DISPATCH_UPDATES {
+        return Err(format!("H4 needs 1..={H4_DISPATCH_UPDATES} timed gain updates"));
+    }
     let trials = observation_trials(updates)?;
     let device: Arc<dyn Device> = probe.clone();
     let cpu_before = proc_cpu_stat();
@@ -324,14 +365,17 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     group.conditions.push(Condition {
         id: "h4-rx-gain-with-tx-repeat".to_owned(),
         streams: vec![stream_condition(Direction::Rx, 0, vec![0], H4_RATE_HZ as f64), stream_condition(Direction::Tx, 0, vec![0], H4_RATE_HZ as f64)],
-        concurrent: vec![stream_ref(Direction::Rx, 0), stream_ref(Direction::Tx, 0)], reopened: false,
+        concurrent: vec![stream_ref(Direction::Rx, 0), stream_ref(Direction::Tx, 0)],
+        reopened: false,
     });
     let (mut run, _dir) = h4_candidate_session(device.clone(), timing)?;
     common::past_t0(&mut run, common::ms(100));
     for key in ["radio.rx.s0.sample_rate_hz", "radio.tx.s0.sample_rate_hz"] {
         let value = ezsdr_kernel::spec::Value::num(H4_RATE_HZ as f64).ok_or("invalid H4 sample rate")?;
         let entry = run.submit(common::set(key, value), None).map_err(|error| error.to_string())?;
-        if !common::admitted(&entry) { return Err(format!("H4 stream rate was not admitted for `{key}`: {:?}", entry.outcome)); }
+        if !common::admitted(&entry) {
+            return Err(format!("H4 stream rate was not admitted for `{key}`: {:?}", entry.outcome));
+        }
         common::wait(&mut run, common::ms(20));
     }
     enable_tx(&mut run)?;
@@ -345,8 +389,7 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     let mut thread_snapshot = None;
     let mut stop_after: Option<String> = None;
     for index in 0..updates {
-        let e = first_e.checked_add(i64::try_from(index).map_err(|_| "H4 update index overflow")?.checked_mul(step_ticks).ok_or("H4 update offset overflow")?)
-            .ok_or("H4 target overflow")?;
+        let e = first_e.checked_add(i64::try_from(index).map_err(|_| "H4 update index overflow")?.checked_mul(step_ticks).ok_or("H4 update offset overflow")?).ok_or("H4 target overflow")?;
         let gain = if index % 2 == 0 { 1.0 } else { 0.0 };
         if let Some(reason) = &stop_after {
             dispatch_rows.push(json!({ "index": index, "direction": "rx", "channel": 0, "setting": "gain_db", "e": e,
@@ -384,7 +427,9 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
             "release_window_ns": window_ns, "requested_gain_db": gain, "accepted": true, "session_action": session_action,
             "apply_called": apply.is_some(), "apply": apply.clone() });
         row["clock_anchors"] = json!({ "before": clock_anchor_json(anchor_before), "after": clock_anchor_json(after) });
-        if thread_snapshot.is_none() && apply.is_some() { thread_snapshot = Some(proc_thread_snapshot()); }
+        if thread_snapshot.is_none() && apply.is_some() {
+            thread_snapshot = Some(proc_thread_snapshot());
+        }
         if let (Some(anchor_before), Some(anchor_after), Some(apply_row)) = (anchor_before, after, apply.as_ref()) {
             let anchors = [anchor_before, anchor_after];
             match dispatch_delay(apply_row["host_entry_ns"].as_u64().unwrap_or_default(), e, window_ticks, anchors, master) {
@@ -425,8 +470,8 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         }
     }
     let tx_clock = manifest.clocks.sample_clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/tx/s0"));
-    let tx_sample_clock_underflows = tx_underflows.iter().filter(|event| manifest.clocks.sample_clocks.iter()
-        .any(|clock| clock.stream.to_string().ends_with("usrp/tx/s0") && clock.domain == event.time.domain())).count();
+    let tx_sample_clock_underflows =
+        tx_underflows.iter().filter(|event| manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.to_string().ends_with("usrp/tx/s0") && clock.domain == event.time.domain())).count();
     let mut tx_start_tick = tx_clock.and_then(|clock| (clock.root == root).then(|| clock.origin.ticks_in(root).ok()).flatten());
     let tx_end_tick = tx_clock.and_then(|clock| (clock.root == root).then(|| clock.ended_at.and_then(|end| end.ticks_in(root).ok())).flatten());
     let run_end_tick = manifest.termination.at.and_then(|end| end.ticks_in(root).ok());
@@ -434,15 +479,26 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     tx_end_ticks.extend(tx_end_tick);
     tx_end_ticks.extend(run_end_tick);
     // The repeat's normal stop is an end-of-burst send with no samples (the device may count it as one): not a failed payload send.
-    let incomplete_tx_sends = tx_rows.iter().filter(|row| !(row["eob"] == true && !row["result"]["error"].is_string() && row["sample_counts"].as_array().is_some_and(|counts| counts.iter().all(|count| count.as_u64() == Some(0))))).filter(|row| {
-        let accepted = row["result"]["accepted_samples"].as_u64();
-        let counts = row["sample_counts"].as_array();
-        row["result"]["error"].is_string() || accepted.is_none_or(|accepted| accepted == 0
-            || counts.is_none_or(|counts| counts.is_empty() || counts.iter().any(|count| count.as_u64() != Some(accepted))))
-    }).count();
-    let tx_start_send_ns = tx_rows.iter().find(|row| row["sob"] == true && row["result"]["accepted_samples"].as_u64().is_some_and(|accepted| {
-        accepted > 0 && row["sample_counts"].as_array().is_some_and(|counts| !counts.is_empty() && counts.iter().all(|count| count.as_u64() == Some(accepted)))
-    })).and_then(|row| row["host_after_ns"].as_u64()).and_then(|ns| i64::try_from(ns).ok());
+    let incomplete_tx_sends = tx_rows
+        .iter()
+        .filter(|row| !(row["eob"] == true && !row["result"]["error"].is_string() && row["sample_counts"].as_array().is_some_and(|counts| counts.iter().all(|count| count.as_u64() == Some(0)))))
+        .filter(|row| {
+            let accepted = row["result"]["accepted_samples"].as_u64();
+            let counts = row["sample_counts"].as_array();
+            row["result"]["error"].is_string()
+                || accepted.is_none_or(|accepted| accepted == 0 || counts.is_none_or(|counts| counts.is_empty() || counts.iter().any(|count| count.as_u64() != Some(accepted))))
+        })
+        .count();
+    let tx_start_send_ns = tx_rows
+        .iter()
+        .find(|row| {
+            row["sob"] == true
+                && row["result"]["accepted_samples"]
+                    .as_u64()
+                    .is_some_and(|accepted| accepted > 0 && row["sample_counts"].as_array().is_some_and(|counts| !counts.is_empty() && counts.iter().all(|count| count.as_u64() == Some(accepted))))
+        })
+        .and_then(|row| row["host_after_ns"].as_u64())
+        .and_then(|ns| i64::try_from(ns).ok());
     let mut tx_interval_ambiguous = !underflow_unconvertible.is_empty() || tx_start_tick.is_none();
     let mut tx_mapping_errors = Vec::new();
     let tx_anchors = start_anchor.zip(headroom_after);
@@ -456,13 +512,19 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     }
     if let Some((start, end)) = tx_anchors {
         for row in tx_rows.iter().filter(|row| {
-            row["result"]["error"].is_string() || row["eob"] == true || row["result"]["accepted_samples"].as_u64().is_none_or(|accepted| {
-                accepted == 0 || row["sample_counts"].as_array().is_none_or(|counts| counts.is_empty() || counts.iter().any(|count| count.as_u64() != Some(accepted)))
-            })
+            row["result"]["error"].is_string()
+                || row["eob"] == true
+                || row["result"]["accepted_samples"]
+                    .as_u64()
+                    .is_none_or(|accepted| accepted == 0 || row["sample_counts"].as_array().is_none_or(|counts| counts.is_empty() || counts.iter().any(|count| count.as_u64() != Some(accepted))))
         }) {
             if let Some(ns) = row["host_after_ns"].as_u64() {
-                if let Some(tick) = host_to_device_tick([start, end], ns, master) { tx_end_ticks.push(tick); }
-                else { tx_interval_ambiguous = true; tx_mapping_errors.push("a TX send end could not be mapped to root time".to_owned()); }
+                if let Some(tick) = host_to_device_tick([start, end], ns, master) {
+                    tx_end_ticks.push(tick);
+                } else {
+                    tx_interval_ambiguous = true;
+                    tx_mapping_errors.push("a TX send end could not be mapped to root time".to_owned());
+                }
             }
         }
     } else {
@@ -470,8 +532,12 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         tx_mapping_errors.push("the enclosing host/device clock anchors were unavailable".to_owned());
     }
     let tx_end_tick = tx_end_ticks.into_iter().min();
-    if tx_start_tick.is_none() || tx_end_tick.is_none() { tx_interval_ambiguous = true; }
-    if !underflow_unconvertible.is_empty() || !tx_mapping_errors.is_empty() { tx_interval_ambiguous = true; }
+    if tx_start_tick.is_none() || tx_end_tick.is_none() {
+        tx_interval_ambiguous = true;
+    }
+    if !underflow_unconvertible.is_empty() || !tx_mapping_errors.is_empty() {
+        tx_interval_ambiguous = true;
+    }
     let headroom_rows = match (start_anchor, headroom_after) {
         (Some(start), Some(end)) if underflow_unconvertible.is_empty() => tx_headroom(&tx_rows, [start, end], master, H4_RATE_HZ, &underflow_ticks),
         _ => Vec::new(),
@@ -481,7 +547,9 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     let mut before_tx_count = 0;
     let mut successful_apply_count = 0;
     for row in &mut dispatch_rows {
-        if row["apply_called"] != true || row["apply"]["result"]["error"].is_string() { continue; }
+        if row["apply_called"] != true || row["apply"]["result"]["error"].is_string() {
+            continue;
+        }
         successful_apply_count += 1;
         let Some(entry_ns) = row["apply"]["host_entry_ns"].as_u64() else {
             row["tx_overlap"] = json!("ambiguous");
@@ -520,12 +588,22 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
     let not_submitted_count = dispatch_rows.iter().filter(|row| row["status"] == "not_submitted").count();
     let apply_error_count = dispatch_rows.iter().filter(|row| row["apply"]["result"]["error"].is_string()).count();
     let tx_send_count = tx_send_rows.len();
-    let tx_end_reason = if !underflow_unconvertible.is_empty() { "unconvertible_tx_underflow" }
-        else if !underflow_ticks.is_empty() { "tx_underflow" }
-        else if incomplete_tx_sends > 0 { "incomplete_tx_send" }
-        else { "run_termination" };
-    let partial = stop_after.is_some() || tx_end_tick.is_none() || tx_start_tick.is_none() || tx_interval_ambiguous
-        || incomplete_tx_sends > 0 || !underflow_ticks.is_empty() || probe_rows_dropped > 0
+    let tx_end_reason = if !underflow_unconvertible.is_empty() {
+        "unconvertible_tx_underflow"
+    } else if !underflow_ticks.is_empty() {
+        "tx_underflow"
+    } else if incomplete_tx_sends > 0 {
+        "incomplete_tx_send"
+    } else {
+        "run_termination"
+    };
+    let partial = stop_after.is_some()
+        || tx_end_tick.is_none()
+        || tx_start_tick.is_none()
+        || tx_interval_ambiguous
+        || incomplete_tx_sends > 0
+        || !underflow_ticks.is_empty()
+        || probe_rows_dropped > 0
         || concurrent_dispatch_count != successful_apply_count;
     let mut result = json!({
         "status": if partial { "partial" } else { "complete" },
@@ -561,8 +639,7 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         "clock_note": "host/device affine mapping is INFERRED; anchors must agree with the master clock within 1,000 ppm plus measured bracket uncertainty; bracket widths are not a long-horizon error bound",
     });
     result.as_object_mut().unwrap().append(tx_result.as_object_mut().unwrap());
-    let observations = vec![observation("hw_h4_dispatch", "tests/hardware.rs::hw_h4_dispatch", Some("h4-rx-gain-with-tx-repeat".to_owned()),
-        trials, result)?];
+    let observations = vec![observation("hw_h4_dispatch", "tests/hardware.rs::hw_h4_dispatch", Some("h4-rx-gain-with-tx-repeat".to_owned()), trials, result)?];
     group.observations = observations;
     Ok(group)
 }
@@ -664,7 +741,18 @@ mod tests {
     #[test]
     fn h4_proc_parsers_retain_cpu_and_thread_policy_fields() {
         assert_eq!(parse_proc_cpu_stat("cpu  100 2 3 40 5 6 7 8 9 10\ncpu0 1 2").unwrap()["total_ticks"], 171);
-        let fields = (0..38).map(|index| if index == 14 { "-5" } else if index == 37 { "2" } else { "0" }).collect::<Vec<_>>().join(" ");
+        let fields = (0..38)
+            .map(|index| {
+                if index == 14 {
+                    "-5"
+                } else if index == 37 {
+                    "2"
+                } else {
+                    "0"
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let stat = format!("123 (uhd-tx) R {fields}");
         let parsed = parse_thread_status(123, &stat, "Name:\tuhd-tx\nCpus_allowed_list:\t1-3\n").unwrap();
         assert_eq!((parsed["priority"].as_i64(), parsed["policy"].as_u64(), parsed["cpus_allowed_list"].as_str()), (Some(-5), Some(2), Some("1-3")));

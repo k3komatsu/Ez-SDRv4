@@ -8,19 +8,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{MemoryDomainId, ModuleId};
-use ezsdr_kernel::module_api::{
-    KERNEL_API, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleRef,
-    Role, Version,
-};
-use ezsdr_kernel::stream::{
-    BackPressure, BlockRef, DataLink, DataLinkDecl, DropCarry, PublishOutcome,
-};
+use ezsdr_kernel::module_api::{KERNEL_API, Link, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleRef, Role, Version};
+use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DataLinkDecl, DropCarry, PublishOutcome};
 
 fn module_ref() -> ModuleRef {
-    ModuleRef {
-        id: ModuleId::parse("ezsdr.link.host").expect("a valid Module id"),
-        version: Version::new(1, 0, 0),
-    }
+    ModuleRef { id: ModuleId::parse("ezsdr.link.host").expect("a valid Module id"), version: Version::new(1, 0, 0) }
 }
 
 /// The Module descriptor for `ezsdr.link.host` 1.0.0 (HD-4).
@@ -41,14 +33,9 @@ pub fn link_descriptor() -> LinkDescriptor {
     let host_memory = MemoryDomainId::local(0);
     LinkDescriptor {
         module: module_ref(),
-        kind: ezsdr_kernel::spec::Namespace::parse("ezsdr.link.host")
-            .expect("a valid Link kind"),
+        kind: ezsdr_kernel::spec::Namespace::parse("ezsdr.link.host").expect("a valid Link kind"),
         connects: vec![(host_memory, host_memory)],
-        policies: vec![
-            BackPressure::Block,
-            BackPressure::DropOldest,
-            BackPressure::DropNewest,
-        ],
+        policies: vec![BackPressure::Block, BackPressure::DropOldest, BackPressure::DropNewest],
         cross_process: false,
     }
 }
@@ -61,9 +48,7 @@ pub struct HostLinkModule {
 impl HostLinkModule {
     /// Creates a factory with the Phase 2 host Link descriptor (HD-4).
     pub fn new() -> HostLinkModule {
-        HostLinkModule {
-            descriptor: link_descriptor(),
-        }
+        HostLinkModule { descriptor: link_descriptor() }
     }
 }
 
@@ -80,9 +65,7 @@ impl Link for HostLinkModule {
 
     fn create(&self, decl: &DataLinkDecl) -> Result<Arc<dyn DataLink>, ModuleError> {
         if decl.capacity == 0 {
-            return Err(ModuleError::rejected(
-                "HD-4: a link needs a capacity of at least 1 (SC-19)",
-            ));
+            return Err(ModuleError::rejected("HD-4: a link needs a capacity of at least 1 (SC-19)"));
         }
         Ok(Arc::new(HostLink::new(decl.policy, decl.capacity as usize)))
     }
@@ -100,12 +83,7 @@ pub struct HostLink {
 
 impl HostLink {
     fn new(policy: BackPressure, capacity: usize) -> HostLink {
-        HostLink {
-            policy,
-            capacity,
-            queue: Mutex::new((VecDeque::new(), DropCarry::default())),
-            drops: AtomicU64::new(0),
-        }
+        HostLink { policy, capacity, queue: Mutex::new((VecDeque::new(), DropCarry::default())), drops: AtomicU64::new(0) }
     }
 }
 

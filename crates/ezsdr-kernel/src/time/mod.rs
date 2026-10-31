@@ -20,14 +20,8 @@ use std::fmt;
 #[cfg(feature = "testing")]
 pub use authority::ManualTimeAuthority;
 pub use authority::{ScheduleHandle, TimeAuthority};
-pub use domain::{
-    ClockDomain, ClockDomainKind, ClockRegistry, EpochRef, RATIO_TERM_CAP, SampleClockHandle,
-    SampleClockRecord,
-};
-pub use point::{
-    AbsoluteDeadline, Converted, Duration, ExactConversion, RelativeBudget, Rescaled, TimePoint,
-    UncertainTimePoint,
-};
+pub use domain::{ClockDomain, ClockDomainKind, ClockRegistry, EpochRef, RATIO_TERM_CAP, SampleClockHandle, SampleClockRecord};
+pub use point::{AbsoluteDeadline, Converted, Duration, ExactConversion, RelativeBudget, Rescaled, TimePoint, UncertainTimePoint};
 pub use rational::Rational;
 pub use relation::{ClockRelation, Validity};
 

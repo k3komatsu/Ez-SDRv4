@@ -23,10 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ezsdr_kernel::contract::DataContractId;
 use ezsdr_kernel::id::MemoryDomainId;
-use ezsdr_kernel::stream::{
-    BackPressure, BlockFlags, BlockHeader, BlockRef, BufferRef, ChannelMask, DataLink, Direction,
-    DropCarry, PublishOutcome, SampleBlock,
-};
+use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, BufferRef, ChannelMask, DataLink, Direction, DropCarry, PublishOutcome, SampleBlock};
 use ezsdr_kernel::time::TimePoint;
 
 /// The host memory domain the doubles allocate from.
@@ -46,34 +43,19 @@ pub const CF32_BPS: u32 = 8;
 /// domain, for a block built with `SampleBlock::new` (no host bytes attached).
 pub fn host_buffer(channels: u16, len: u32) -> BufferRef {
     let n = channels as u64 * len as u64 * CF32_BPS as u64;
-    BufferRef {
-        memory_domain: HOST_MEM,
-        handle: 0,
-        len_bytes: n,
-    }
+    BufferRef { memory_domain: HOST_MEM, handle: 0, len_bytes: n }
 }
 
 /// A header with the common defaults; callers override what they are testing.
 pub fn header(t: TimePoint, len: u32, channels: u16) -> BlockHeader {
-    BlockHeader {
-        first_sample_time: t,
-        len,
-        channels,
-        direction: Direction::Rx,
-        valid: ChannelMask::full(channels),
-        flags: BlockFlags::NONE,
-        lost: None,
-        contract: cf32(),
-    }
+    BlockHeader { first_sample_time: t, len, channels, direction: Direction::Rx, valid: ChannelMask::full(channels), flags: BlockFlags::NONE, lost: None, contract: cf32() }
 }
 
 /// A block from a header, with a buffer sized to fit (SC-10a).
 pub fn block(h: BlockHeader) -> BlockRef {
     let n = h.channels as usize * h.len as usize * CF32_BPS as usize;
     let bytes: std::sync::Arc<[u8]> = vec![0u8; n].into();
-    BlockRef::new(
-        SampleBlock::new_host(h, HOST_MEM, bytes, CF32_BPS).expect("a well-formed test block"),
-    )
+    BlockRef::new(SampleBlock::new_host(h, HOST_MEM, bytes, CF32_BPS).expect("a well-formed test block"))
 }
 
 /// An in-memory link implementing all three back-pressure policies.
@@ -166,20 +148,13 @@ pub struct RetryingProducer {
 impl RetryingProducer {
     /// A producer with nothing pending (SC-20a).
     pub fn new() -> RetryingProducer {
-        RetryingProducer {
-            pending: None,
-            delivered: 0,
-            refusals: 0,
-        }
+        RetryingProducer { pending: None, delivered: 0, refusals: 0 }
     }
 
     /// Offers `b` — or the block held over from a previous refusal — to the link.
     /// Returns what the link said.
     pub fn offer(&mut self, link: &dyn DataLink, b: BlockRef) -> PublishOutcome {
-        assert!(
-            self.pending.is_none(),
-            "SC-20a: a refused block must be retried, never dropped"
-        );
+        assert!(self.pending.is_none(), "SC-20a: a refused block must be retried, never dropped");
         match link.publish(b.clone()) {
             PublishOutcome::Full => {
                 self.pending = Some(b);

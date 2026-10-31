@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use ezsdr_kernel::binding::AdmissionCheck;
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, CheckStage};
 use ezsdr_kernel::module_api::{ModuleRegistry, Version};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
-use ezsdr_kernel::binding::AdmissionCheck;
 use ezsdr_sim::{FaultKind, SimRng};
 use serde_json::{Value as JsonValue, json};
 
@@ -31,39 +31,24 @@ fn se_01_register_adds_the_descriptor_and_the_three_checks() {
     assert!(descriptor.keys.is_empty());
     assert!(descriptor.event_kinds.is_empty());
     assert!(descriptor.verbs.is_empty());
-    assert_eq!(
-        descriptor.checks,
-        ["sim.seed", "sim.faults", "sim.channel"].map(|s| Namespace::parse(s).unwrap())
-    );
+    assert_eq!(descriptor.checks, ["sim.seed", "sim.faults", "sim.channel"].map(|s| Namespace::parse(s).unwrap()));
 
-    let environment = BTreeMap::from([
-        (Namespace::parse("sim.seed").unwrap(), json!("bad")),
-        (Namespace::parse("sim.faults").unwrap(), json!({})),
-        (Namespace::parse("sim.channel").unwrap(), json!([])),
-    ]);
-    let violations = checks.run(
-        &environment,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        CheckStage::Validate,
-    );
+    let environment =
+        BTreeMap::from([(Namespace::parse("sim.seed").unwrap(), json!("bad")), (Namespace::parse("sim.faults").unwrap(), json!({})), (Namespace::parse("sim.channel").unwrap(), json!([]))]);
+    let violations = checks.run(&environment, &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate);
     assert_eq!(violations.len(), 3);
     assert_eq!(violations[0].check, Namespace::parse("sim.seed").unwrap());
     assert_eq!(violations[1].check, Namespace::parse("sim.faults").unwrap());
     assert_eq!(violations[2].check, Namespace::parse("sim.channel").unwrap());
     assert!(violations[..2].iter().all(|item| item.reason.starts_with("SE-5: ")));
     assert!(violations[2].reason.starts_with("CH-2: "));
-
 }
 
 #[test]
 fn se_02_seed_reader() {
     assert_eq!(ezsdr_sim::seed(&BTreeMap::new()).unwrap(), 0);
     assert_eq!(ezsdr_sim::seed(&section("sim.seed", json!(42))).unwrap(), 42);
-    assert_eq!(
-        ezsdr_sim::seed(&section("sim.seed", json!(u64::MAX))).unwrap(),
-        u64::MAX
-    );
+    assert_eq!(ezsdr_sim::seed(&section("sim.seed", json!(u64::MAX))).unwrap(), u64::MAX);
     for value in [json!(-1), json!("42"), json!(1.5)] {
         assert!(ezsdr_sim::seed(&section("sim.seed", value)).is_err());
     }
@@ -97,15 +82,7 @@ fn se_03_faults_reader() {
     ] {
         assert!(ezsdr_sim::faults(&section("sim.faults", value)).is_err());
     }
-    assert_eq!(
-        ezsdr_sim::faults(&section(
-            "sim.faults",
-            json!([{"at_ns": 1_u64 << 62, "fault": "rx_overflow", "target": "radio"}])
-        ))
-        .unwrap()[0]
-            .at_ns,
-        1_u64 << 62
-    );
+    assert_eq!(ezsdr_sim::faults(&section("sim.faults", json!([{"at_ns": 1_u64 << 62, "fault": "rx_overflow", "target": "radio"}]))).unwrap()[0].at_ns, 1_u64 << 62);
 }
 
 #[test]
@@ -113,29 +90,9 @@ fn se_05_checks() {
     let radio = Ident::parse("radio").unwrap();
     let effective = BTreeMap::from([(radio.clone(), BTreeMap::<Key, Value>::new())]);
     let empty = BTreeMap::new();
-    let valid = BTreeMap::from([
-        (Namespace::parse("sim.seed").unwrap(), json!(42)),
-        (
-            Namespace::parse("sim.faults").unwrap(),
-            json!([{"at_ns": 2, "fault": "rx_overflow", "target": "radio"}]),
-        ),
-    ]);
-    assert!(ezsdr_sim::SeedCheck
-        .check(
-            &valid[&Namespace::parse("sim.seed").unwrap()],
-            &effective,
-            &empty,
-            CheckStage::Validate
-        )
-        .is_empty());
-    assert!(ezsdr_sim::FaultsCheck
-        .check(
-            &valid[&Namespace::parse("sim.faults").unwrap()],
-            &effective,
-            &empty,
-            CheckStage::Validate
-        )
-        .is_empty());
+    let valid = BTreeMap::from([(Namespace::parse("sim.seed").unwrap(), json!(42)), (Namespace::parse("sim.faults").unwrap(), json!([{"at_ns": 2, "fault": "rx_overflow", "target": "radio"}]))]);
+    assert!(ezsdr_sim::SeedCheck.check(&valid[&Namespace::parse("sim.seed").unwrap()], &effective, &empty, CheckStage::Validate).is_empty());
+    assert!(ezsdr_sim::FaultsCheck.check(&valid[&Namespace::parse("sim.faults").unwrap()], &effective, &empty, CheckStage::Validate).is_empty());
 
     let unknown = json!([{"at_ns": 2, "fault": "rx_overflow", "target": "nobody"}]);
     let violations = ezsdr_sim::FaultsCheck.check(&unknown, &effective, &empty, CheckStage::Validate);

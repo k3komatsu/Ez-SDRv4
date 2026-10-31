@@ -195,11 +195,7 @@ impl Segment {
 /// fails does not cover. The caller passes only the segments its stream's owner really runs: a
 /// refused segment is never in a plan, and a stream that does not receive passes none.
 pub fn covering<'a>(segments: impl IntoIterator<Item = &'a Segment>, channel: u32, t: i64) -> Option<&'a Segment> {
-    segments.into_iter().find(|segment| {
-        segment.config.channels.contains(channel)
-            && segment.origin <= t
-            && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > t))
-    })
+    segments.into_iter().find(|segment| segment.config.channels.contains(channel) && segment.origin <= t && segment.cut.is_none_or(|cut| segment.instant(cut).is_ok_and(|end| end > t)))
 }
 
 /// RM-34: what a line's plan gives RM-34 besides its segments: the receive segments RM-25
@@ -571,16 +567,7 @@ impl Lines {
     /// Panics when the instance holds no line for a stream of a move it books: its lines are
     /// the streams its layout has (RM-29).
     #[allow(clippy::too_many_arguments)] // RM-34's operation: the two streams, the channel, its instant and terms
-    pub fn book_move(
-        &mut self,
-        from: StreamKey,
-        to: StreamKey,
-        channel: u32,
-        at: Option<i64>,
-        now: i64,
-        seq: u64,
-        ready: i64,
-    ) -> Result<(i64, bool), MoveError> {
+    pub fn book_move(&mut self, from: StreamKey, to: StreamKey, channel: u32, at: Option<i64>, now: i64, seq: u64, ready: i64) -> Result<(i64, bool), MoveError> {
         if from == to {
             return Err(MoveError::SameStream);
         }
@@ -594,12 +581,7 @@ impl Lines {
         let asked = at.unwrap_or(now);
         // RM-25: the two lines' `cold` changes received before the move, and each receiving
         // line's start, floor the one instant both lines are booked at (D3's1).
-        let floor = |line: &Line| {
-            line.items
-                .iter()
-                .filter(|item| item.seq < seq && matches!(item.kind, Kind::Cold(_)))
-                .fold(i64::MIN, |e, item| e.max(item.e))
-        };
+        let floor = |line: &Line| line.items.iter().filter(|item| item.seq < seq && matches!(item.kind, Kind::Cold(_))).fold(i64::MIN, |e, item| e.max(item.e));
         let origin = |line: &Line| if line.stream.direction == Direction::Rx { line.stream.origin } else { i64::MIN };
         let base = asked.max(now).max(origin(next.line_mut(from))).max(origin(next.line_mut(to)));
         let e = base.max(floor(next.line_mut(from))).max(floor(next.line_mut(to)));
@@ -615,24 +597,9 @@ impl Lines {
         if to_config.channels.contains(channel) {
             return Err(MoveError::AlreadyInDestination);
         }
-        let from_item = Item {
-            e,
-            seq,
-            ready: now,
-            release: NO_RELEASE,
-            delivered: None,
-            refused: false,
-            kind: Kind::Cold(Config { channels: from_config.channels.without(channel), ratio: from_config.ratio }),
-        };
-        let to_item = Item {
-            e,
-            seq,
-            ready,
-            release: NO_RELEASE,
-            delivered: None,
-            refused: false,
-            kind: Kind::Cold(Config { channels: to_config.channels.with(channel), ratio: to_config.ratio }),
-        };
+        let from_item =
+            Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: from_config.channels.without(channel), ratio: from_config.ratio }) };
+        let to_item = Item { e, seq, ready, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: to_config.channels.with(channel), ratio: to_config.ratio }) };
         next.line_mut(from).book(from_item).map_err(MoveError::Time)?;
         next.line_mut(to).book(to_item).map_err(MoveError::Time)?;
         next.moves.push(Move { seq, e, from, to, channel });
@@ -677,11 +644,7 @@ impl Lines {
 
     /// The line of `stream`.
     fn line_mut(&mut self, stream: StreamKey) -> &mut Line {
-        self.lines
-            .iter_mut()
-            .find(|(key, _)| *key == stream)
-            .map(|(_, line)| line)
-            .unwrap_or_else(|| panic!("RM-34: the instance holds no line for {stream:?}"))
+        self.lines.iter_mut().find(|(key, _)| *key == stream).map(|(_, line)| line).unwrap_or_else(|| panic!("RM-34: the instance holds no line for {stream:?}"))
     }
 
     /// RM-34: the release floor `stream`'s line leaves, from a pruning that folded away a move
@@ -714,9 +677,7 @@ impl Lines {
     /// RM-34: completes requested pruning without folding one side of an unfinished move. The
     /// effective boundaries converge before a move's release is fixed as a destination floor.
     fn prune_requested(&mut self) {
-        let mut boundaries: Vec<(StreamKey, i64)> = self.lines.iter().filter_map(|(stream, _)| {
-            self.prune_before(*stream).map(|before| (*stream, before))
-        }).collect();
+        let mut boundaries: Vec<(StreamKey, i64)> = self.lines.iter().filter_map(|(stream, _)| self.prune_before(*stream).map(|before| (*stream, before))).collect();
         loop {
             let mut next = boundaries.clone();
             for moved in &self.moves {
@@ -733,15 +694,21 @@ impl Lines {
                     }
                 }
             }
-            if next == boundaries { break; }
+            if next == boundaries {
+                break;
+            }
             boundaries = next;
         }
         let boundary = |stream| boundaries.iter().find(|(key, _)| *key == stream).map(|(_, before)| *before);
-        let completed: Vec<(StreamKey, i64)> = self.moves.iter()
-            .filter(|moved| boundary(moved.from).is_some_and(|before| moved.e < before)
-                && boundary(moved.to).is_some_and(|before| moved.e < before)
-                && self.line(moved.from).is_some_and(|line| line.items.iter().any(|item| item.seq == moved.seq))
-                && self.line(moved.to).is_some_and(|line| line.items.iter().any(|item| item.seq == moved.seq)))
+        let completed: Vec<(StreamKey, i64)> = self
+            .moves
+            .iter()
+            .filter(|moved| {
+                boundary(moved.from).is_some_and(|before| moved.e < before)
+                    && boundary(moved.to).is_some_and(|before| moved.e < before)
+                    && self.line(moved.from).is_some_and(|line| line.items.iter().any(|item| item.seq == moved.seq))
+                    && self.line(moved.to).is_some_and(|line| line.items.iter().any(|item| item.seq == moved.seq))
+            })
             .filter_map(|moved| self.line(moved.from).and_then(|line| line.released(moved.channel, moved.seq)).map(|cut| (moved.to, cut)))
             .collect();
         for (to, cut) in completed {
@@ -835,13 +802,7 @@ pub fn later_bound(current: i64, front: Option<i64>) -> i64 {
 }
 
 /// RM-15: applies a burst's late policy when a later handed front passes its target.
-pub fn late_policy_front_outcome<E>(
-    policy: LatePolicy,
-    target: i64,
-    current: i64,
-    front: Option<i64>,
-    late_by: impl FnOnce(i64) -> Result<Duration, E>,
-) -> Result<Option<LateOutcome>, E> {
+pub fn late_policy_front_outcome<E>(policy: LatePolicy, target: i64, current: i64, front: Option<i64>, late_by: impl FnOnce(i64) -> Result<Duration, E>) -> Result<Option<LateOutcome>, E> {
     let Some(front) = front.filter(|front| *front > current && target < *front) else { return Ok(None) };
     let late_by = late_by(front - target)?;
     Ok(Some(match policy {

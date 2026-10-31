@@ -11,12 +11,7 @@ pub struct HeardInterval {
 }
 
 /// Contiguous samples above an amplitude threshold, shifted back by a known loopback delay.
-pub fn heard_intervals(
-    samples: &[(i64, Iq)],
-    ticks_per_sample: i64,
-    amplitude_threshold: f64,
-    delay_samples: i64,
-) -> Vec<HeardInterval> {
+pub fn heard_intervals(samples: &[(i64, Iq)], ticks_per_sample: i64, amplitude_threshold: f64, delay_samples: i64) -> Vec<HeardInterval> {
     let mut intervals = Vec::new();
     let mut current: Option<HeardInterval> = None;
     let delay = delay_samples.saturating_mul(ticks_per_sample);
@@ -66,13 +61,7 @@ pub struct CorrelationOffset {
 }
 
 /// Locate a reference waveform near its expected receive tick, rejecting weak or tied peaks.
-pub fn correlation_offset(
-    samples: &[(i64, Iq)],
-    reference: &[Iq],
-    expected_tick: i64,
-    ticks_per_sample: i64,
-    search_radius_samples: i64,
-) -> CorrelationOffset {
+pub fn correlation_offset(samples: &[(i64, Iq)], reference: &[Iq], expected_tick: i64, ticks_per_sample: i64, search_radius_samples: i64) -> CorrelationOffset {
     let empty = CorrelationOffset { status: CorrelationStatus::NoSignal, matched_tick: None, sample_offset: None, peak: 0.0, second_peak: 0.0, median: 0.0 };
     if reference.is_empty() || ticks_per_sample <= 0 || search_radius_samples < 0 || samples.len() < reference.len() {
         return empty;
@@ -92,7 +81,9 @@ pub fn correlation_offset(
         if run_end - run_start >= reference.len() {
             for start in run_start..=run_end - reference.len() {
                 let tick = samples[start].0;
-                if i128::from(tick) < lower || i128::from(tick) > upper { continue; }
+                if i128::from(tick) < lower || i128::from(tick) > upper {
+                    continue;
+                }
                 let (mut re, mut im) = (0.0f64, 0.0f64);
                 for (received, reference) in samples[start..start + reference.len()].iter().zip(reference) {
                     re += f64::from(received.1[0]) * f64::from(reference[0]) + f64::from(received.1[1]) * f64::from(reference[1]);
@@ -102,7 +93,10 @@ pub fn correlation_offset(
                 magnitudes.push(magnitude);
                 match best {
                     None => best = Some((tick, magnitude)),
-                    Some((_, peak)) if magnitude > peak => { second = peak; best = Some((tick, magnitude)); }
+                    Some((_, peak)) if magnitude > peak => {
+                        second = peak;
+                        best = Some((tick, magnitude));
+                    }
                     Some(_) if magnitude > second => second = magnitude,
                     Some(_) => {}
                 }
@@ -125,7 +119,9 @@ pub fn correlation_offset(
         status,
         matched_tick: (status == CorrelationStatus::Found).then_some(tick),
         sample_offset: (status == CorrelationStatus::Found).then_some(offset),
-        peak, second_peak: second, median,
+        peak,
+        second_peak: second,
+        median,
     }
 }
 
@@ -146,16 +142,20 @@ mod tests {
 
     fn pn(n: usize) -> Vec<Iq> {
         let mut state = 0x1234_5678u32;
-        (0..n).map(|_| {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            [if state >> 30 & 1 == 1 { 0.25 } else { -0.25 }, if state >> 29 & 1 == 1 { 0.25 } else { -0.25 }]
-        }).collect()
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                [if state >> 30 & 1 == 1 { 0.25 } else { -0.25 }, if state >> 29 & 1 == 1 { 0.25 } else { -0.25 }]
+            })
+            .collect()
     }
 
     fn received(reference: &[Iq], at: usize, len: usize) -> Vec<(i64, Iq)> {
         let mut samples = vec![(0.0, [0.0, 0.0]); len];
         for (index, sample) in reference.iter().enumerate() {
-            if at + index < len { samples[at + index].1 = *sample; }
+            if at + index < len {
+                samples[at + index].1 = *sample;
+            }
         }
         samples.into_iter().enumerate().map(|(index, (_, sample))| (index as i64 * 200, sample)).collect()
     }
@@ -183,7 +183,9 @@ mod tests {
     fn correlation_offset_marks_equal_peaks_ambiguous() {
         let reference = pn(64);
         let mut input = received(&reference, 20, 160);
-        for (index, sample) in reference.iter().enumerate() { input[80 + index].1 = *sample; }
+        for (index, sample) in reference.iter().enumerate() {
+            input[80 + index].1 = *sample;
+        }
         let found = correlation_offset(&input, &reference, 60 * 200, 200, 50);
         assert_eq!(found.status, CorrelationStatus::Ambiguous, "{found:?}");
         assert_eq!(found.sample_offset, None);
@@ -193,17 +195,12 @@ mod tests {
     fn heard_intervals_cover_silence_midstream_and_a_truncated_tail() {
         let samples: Vec<_> = (0..8).map(|index| (index * 200, if (2..=3).contains(&index) || index >= 6 { [0.1, 0.0] } else { [0.0, 0.0] })).collect();
         assert!(heard_intervals(&samples[..2], 200, 0.01, 0).is_empty());
-        assert_eq!(heard_intervals(&samples, 200, 0.01, 1), vec![
-            HeardInterval { first_tick: 200, last_tick: 400, samples: 2 },
-            HeardInterval { first_tick: 1_000, last_tick: 1_200, samples: 2 },
-        ]);
+        assert_eq!(heard_intervals(&samples, 200, 0.01, 1), vec![HeardInterval { first_tick: 200, last_tick: 400, samples: 2 }, HeardInterval { first_tick: 1_000, last_tick: 1_200, samples: 2 },]);
     }
 
     #[test]
     fn report_counts_include_all_codes_and_malformed_rows() {
         let reports = vec![json!({"code":"Underflow"}), json!({"code":"BurstAck"}), json!({"code":"Underflow"}), json!({"tick":12})];
-        assert_eq!(count_report_codes(&reports), BTreeMap::from([
-            ("<missing>".to_owned(), 1), ("BurstAck".to_owned(), 1), ("Underflow".to_owned(), 2),
-        ]));
+        assert_eq!(count_report_codes(&reports), BTreeMap::from([("<missing>".to_owned(), 1), ("BurstAck".to_owned(), 1), ("Underflow".to_owned(), 2),]));
     }
 }

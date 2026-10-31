@@ -24,9 +24,7 @@ impl<'de> Deserialize<'de> for NodeId {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let n = u32::deserialize(d)?;
         if n != NodeId::LOCAL.0 {
-            return Err(serde::de::Error::custom(format!(
-                "X7: v4.0 accepts only node 0 (LOCAL), not node {n}"
-            )));
+            return Err(serde::de::Error::custom(format!("X7: v4.0 accepts only node 0 (LOCAL), not node {n}")));
         }
         Ok(NodeId(n))
     }
@@ -35,11 +33,7 @@ impl<'de> Deserialize<'de> for NodeId {
 /// SB-1 at the document boundary (D95): a name type deserialises through its own
 /// `parse`, so a document cannot carry a name a Rust caller could not have built.
 /// `what` names the grammar the refusal reports.
-pub(crate) fn parsed<'de, D, T, E>(
-    d: D,
-    what: &str,
-    parse: impl FnOnce(&str) -> Result<T, E>,
-) -> Result<T, D::Error>
+pub(crate) fn parsed<'de, D, T, E>(d: D, what: &str, parse: impl FnOnce(&str) -> Result<T, E>) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -60,9 +54,7 @@ impl<'de> Deserialize<'de> for ResourceId {
         let raw = Raw::deserialize(d)?;
         // `parse` builds a LOCAL id, which is the only node `raw.node` can hold.
         debug_assert_eq!(raw.node, NodeId::LOCAL);
-        ResourceId::parse(&raw.path).map_err(|e| {
-            serde::de::Error::custom(format!("SB-1: resource path {:?}: {e}", raw.path))
-        })
+        ResourceId::parse(&raw.path).map_err(|e| serde::de::Error::custom(format!("SB-1: resource path {:?}: {e}", raw.path)))
     }
 }
 
@@ -86,10 +78,7 @@ impl fmt::Display for NodeId {
 /// Identifies a `ClockDomain`.
 ///
 /// Rule: TM-11 (`01-time-model.md`), X7.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-    Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClockDomainId {
     /// Owning node; `0`, the local node, throughout v4.0 (X7).
@@ -101,10 +90,7 @@ pub struct ClockDomainId {
 /// Identifies a memory domain a sample block lives in.
 ///
 /// Rule: SC-6 (`02-stream-contract.md`), X7.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-    Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryDomainId {
     /// Owning node; `0`, the local node, throughout v4.0 (X7).
@@ -116,10 +102,7 @@ pub struct MemoryDomainId {
 /// Identifies a scheduling island (`05-module-api.md` MA-27).
 ///
 /// Rule: MA-27, X7.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-    Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IslandId {
     /// Owning node; `0`, the local node, throughout v4.0 (X7).
@@ -131,10 +114,7 @@ pub struct IslandId {
 /// Identifies a data link instance (`DataLinkDecl`).
 ///
 /// Rule: SC-19 (`02-stream-contract.md`), X7.
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
-    Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DataLinkId {
     /// Owning node; `0`, the local node, throughout v4.0 (X7).
@@ -305,11 +285,7 @@ impl ResourceId {
 
     /// True when `self` is `other` or lies underneath it in the composite tree (SB-33).
     pub fn is_within(&self, other: &ResourceId) -> bool {
-        self.node == other.node
-            && self
-                .path
-                .strip_prefix(&other.path)
-                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        self.node == other.node && self.path.strip_prefix(&other.path).is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
     }
 
     /// Appends one segment, validating it (SB-34).
@@ -339,8 +315,7 @@ pub struct ModuleId(String);
 /// that an `ext.<module-id>.<path>` key is parseable for every Module id SB-1 admits
 /// and not only for the ones that also fit `Ident`'s grammar (SB-1, SB-2, MA-34).
 pub(crate) fn is_module_segment(seg: &str) -> bool {
-    !seg.is_empty()
-        && !seg.chars().any(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-'))
+    !seg.is_empty() && !seg.chars().any(|c| !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
 impl ModuleId {
@@ -391,10 +366,7 @@ impl RunId {
     pub fn generate() -> RunId {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         RunId(format!("{}:{:x}:{:x}-{}", NodeId::LOCAL, std::process::id(), nanos, n))
     }

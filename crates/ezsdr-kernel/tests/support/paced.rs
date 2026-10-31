@@ -9,15 +9,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use ezsdr_kernel::event::{Action, Event, EventKind, EventSink, EventSource, Severity};
 use ezsdr_kernel::id::{ClockDomainId, ResourceId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Dispatched, Authority, AuthorityDescriptor, CoerceReport, Endpoint, ModuleError,
-    ModuleRef, Pacing, PrepareContext, Provider, ProviderInstance, StopMode,
+    ActionReceiver, Authority, AuthorityDescriptor, CoerceReport, Dispatched, Endpoint, ModuleError, ModuleRef, Pacing, PrepareContext, Provider, ProviderInstance, StopMode,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::stream::DataLink;
-use ezsdr_kernel::time::{
-    ClockDomain, ClockRegistry, ClockRelation, EpochRef, ManualTimeAuthority, Rational,
-    SampleClockHandle, ScheduleHandle, TimeAuthority, TimeError, TimePoint,
-};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, ClockRelation, EpochRef, ManualTimeAuthority, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimeError, TimePoint};
 
 use super::doubles::TestProvider;
 use super::run_doubles::Probe;
@@ -74,12 +70,7 @@ impl TimeAuthority for WallTime {
         Pacing::Device
     }
     fn governs(&self, domain: ClockDomainId) -> bool {
-        domain == self.root
-            || domain == ClockDomainId::HOST_MONOTONIC
-            || self
-                .registry
-                .get(domain)
-                .is_ok_and(|d| d.root_id() == self.root)
+        domain == self.root || domain == ClockDomainId::HOST_MONOTONIC || self.registry.get(domain).is_ok_and(|d| d.root_id() == self.root)
     }
     fn now(&self, domain: ClockDomainId) -> Result<TimePoint, TimeError> {
         let now = self.elapsed();
@@ -89,10 +80,7 @@ impl TimeAuthority for WallTime {
         if !self.governs(domain) {
             return Err(TimeError::NotGoverned { id: domain });
         }
-        Ok(self
-            .registry
-            .convert(TimePoint::new(self.root, now), domain)?
-            .floor())
+        Ok(self.registry.convert(TimePoint::new(self.root, now), domain)?.floor())
     }
     fn wait_until(&self, t: TimePoint) -> Result<(), TimeError> {
         let target = self.root_ticks(t)?;
@@ -110,10 +98,7 @@ impl TimeAuthority for WallTime {
         let ticks = self.root_ticks(t)?;
         let mut state = self.lock();
         if state.last_fired.is_some_and(|fired| ticks < fired) {
-            return Err(TimeError::InPast {
-                now: TimePoint::new(self.root, self.elapsed()),
-                requested: t,
-            });
+            return Err(TimeError::InPast { now: TimePoint::new(self.root, self.elapsed()), requested: t });
         }
         let seq = state.next_seq;
         state.next_seq += 1;
@@ -152,15 +137,7 @@ impl WallAuthority {
     /// Registers a fresh 1 GHz root and measures its two relations.
     pub fn new(clocks: &Arc<ClockRegistry>, module: ModuleRef) -> (WallAuthority, ClockDomainId) {
         let root = clocks.allocate_id().unwrap();
-        clocks
-            .register(ClockDomain::root(
-                root,
-                Rational::new(1_000_000_000, 1).expect("a valid rate"),
-                EpochRef::Arbitrary {
-                    set_by: "test.wall".to_owned(),
-                },
-            ))
-            .expect("a fresh root");
+        clocks.register(ClockDomain::root(root, Rational::new(1_000_000_000, 1).expect("a valid rate"), EpochRef::Arbitrary { set_by: "test.wall".to_owned() })).expect("a fresh root");
         let time = Arc::new(WallTime {
             registry: clocks.clone(),
             root,
@@ -169,12 +146,7 @@ impl WallAuthority {
             changed: Condvar::new(),
             fire_first: AtomicBool::new(false),
         });
-        let utc = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("after 1970")
-                .as_nanos() as i64
-        };
+        let utc = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after 1970").as_nanos() as i64;
         let before = utc();
         let measured = time.elapsed();
         let after = utc();
@@ -192,21 +164,9 @@ impl WallAuthority {
             )
             .expect("a well-formed relation")
         };
-        let relations = vec![
-            relation(ClockDomainId::HOST_MONOTONIC, measured, 0, 0.0, "test.wall"),
-            relation(
-                ClockDomainId::UTC,
-                before + (after - before) / 2,
-                after - before,
-                1e-4,
-                "test.wall_utc",
-            ),
-        ];
-        let descriptor = AuthorityDescriptor {
-            module,
-            governs: vec![root, ClockDomainId::HOST_MONOTONIC],
-            pacing: Pacing::Device,
-        };
+        let relations =
+            vec![relation(ClockDomainId::HOST_MONOTONIC, measured, 0, 0.0, "test.wall"), relation(ClockDomainId::UTC, before + (after - before) / 2, after - before, 1e-4, "test.wall_utc")];
+        let descriptor = AuthorityDescriptor { module, governs: vec![root, ClockDomainId::HOST_MONOTONIC], pacing: Pacing::Device };
         (WallAuthority { descriptor, time, relations }, root)
     }
 
@@ -255,18 +215,11 @@ impl Authority for WallAuthority {
                 break tick;
             }
             let wait = std::time::Duration::from_nanos((tick - now) as u64);
-            state = time
-                .changed
-                .wait_timeout(state, wait)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            state = time.changed.wait_timeout(state, wait).unwrap_or_else(|e| e.into_inner()).0;
         };
         state.last_fired = Some(tick);
         for _ in 0..ManualTimeAuthority::DEFAULT_CALLBACK_CAP {
-            let due = state
-                .pending
-                .first_key_value()
-                .is_some_and(|(&(t, _), _)| t == tick);
+            let due = state.pending.first_key_value().is_some_and(|(&(t, _), _)| t == tick);
             if !due {
                 break;
             }
@@ -306,19 +259,11 @@ impl ThreadedCtx {
     }
 
     fn now(&self) -> TimePoint {
-        self.time
-            .now(self.time.primary_root())
-            .expect("the primary root is governed")
+        self.time.now(self.time.primary_root()).expect("the primary root is governed")
     }
 
     fn emit(&self, kind: &str, severity: Severity, payload: serde_json::Value) {
-        let _ = self.events.emit_control(Event {
-            source: self.source.clone(),
-            time: self.now(),
-            severity,
-            kind: EventKind::parse(kind).expect("a valid test kind"),
-            payload,
-        });
+        let _ = self.events.emit_control(Event { source: self.source.clone(), time: self.now(), severity, kind: EventKind::parse(kind).expect("a valid test kind"), payload });
     }
 
     /// Carries out one Action before the next `recv()` (MA-14b).
@@ -336,24 +281,14 @@ impl ThreadedCtx {
         if let Some(delay) = self.action_delay {
             std::thread::sleep(delay);
         }
-        if let Action::UpdateParameter {
-            key,
-            value: ezsdr_kernel::spec::Value::Scalar(ezsdr_kernel::spec::Scalar::Int(n)),
-            ..
-        } = &action
-        {
+        if let Action::UpdateParameter { key, value: ezsdr_kernel::spec::Value::Scalar(ezsdr_kernel::spec::Scalar::Int(n)), .. } = &action {
             if key.as_str() == "test.tx_clock" {
                 let stream = self.id.child("tx").expect("a valid stream id");
                 let ratio = Rational::new(*n as u64, 1).expect("a positive ratio");
-                let handle = self
-                    .clocks
-                    .declare_sample_clock(stream, self.time.primary_root(), ratio)
-                    .expect("a fresh clock");
+                let handle = self.clocks.declare_sample_clock(stream, self.time.primary_root(), ratio).expect("a fresh clock");
                 let now = self.now().ticks_in(self.time.primary_root()).unwrap();
                 let origin = (now + n - 1) / n * n;
-                self.clocks
-                    .register_sample_clock(&handle, origin)
-                    .expect("a declared clock");
+                self.clocks.register_sample_clock(&handle, origin).expect("a declared clock");
                 self.record(format!("tx_clock:{origin}"));
             }
         }
@@ -494,10 +429,7 @@ impl Provider for ThreadedProvider {
         self.inner.instance()
     }
 
-    fn coerce(
-        &self,
-        request: &ezsdr_kernel::module_api::Requested,
-    ) -> Result<CoerceReport, ModuleError> {
+    fn coerce(&self, request: &ezsdr_kernel::module_api::Requested) -> Result<CoerceReport, ModuleError> {
         self.inner.coerce(request)
     }
 
@@ -511,10 +443,7 @@ impl Provider for ThreadedProvider {
         if self.publish.is_some() {
             let stream = id.child("rx").expect("a valid stream id");
             let ratio = Rational::new(1000, 1).expect("a valid ratio");
-            let handle = ctx
-                .clocks
-                .declare_sample_clock(stream, ctx.time.primary_root(), ratio)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let handle = ctx.clocks.declare_sample_clock(stream, ctx.time.primary_root(), ratio).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
             self.rx_clock = Some(handle);
         }
         let outs = ctx
@@ -552,14 +481,9 @@ impl Provider for ThreadedProvider {
 
     fn start(&mut self, at: Option<TimePoint>) -> Result<(), ModuleError> {
         self.record("start");
-        let ctx = self
-            .ctx
-            .clone()
-            .ok_or_else(|| ModuleError::rejected("test: not prepared"))?;
+        let ctx = self.ctx.clone().ok_or_else(|| ModuleError::rejected("test: not prepared"))?;
         if let (Some(handle), Some(t0)) = (&self.rx_clock, at) {
-            ctx.clocks
-                .register_sample_clock(handle, t0.ticks_in(handle.root()).map_err(|e| ModuleError::rejected(format!("test: {e}")))?)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            ctx.clocks.register_sample_clock(handle, t0.ticks_in(handle.root()).map_err(|e| ModuleError::rejected(format!("test: {e}")))?).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
         }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
@@ -600,15 +524,9 @@ impl Provider for ThreadedProvider {
                             marked[i] = true;
                         }
                     }
-                    let gate_open = loss
-                        .as_ref()
-                        .is_some_and(|gate| *gate.0.lock().unwrap_or_else(|e| e.into_inner()));
+                    let gate_open = loss.as_ref().is_some_and(|gate| *gate.0.lock().unwrap_or_else(|e| e.into_inner()));
                     if gate_open || lost_after.is_some_and(|after| now >= begun + after) {
-                        ctx.emit(
-                            EventKind::DEVICE_LOST,
-                            Severity::Fatal,
-                            serde_json::json!({ "message": "test: device lost" }),
-                        );
+                        ctx.emit(EventKind::DEVICE_LOST, Severity::Fatal, serde_json::json!({ "message": "test: device lost" }));
                         ctx.record("lost");
                         lost = true;
                     }

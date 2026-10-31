@@ -24,7 +24,7 @@ use ezsdr_kernel::spec::Ident;
 use ezsdr_kernel::stream::{BurstEnd, BurstRecord};
 use ezsdr_kernel::time::TimePoint;
 use serde_json::json;
-use support::{artifact, finish_at, root, section, T0};
+use support::{T0, artifact, finish_at, root, section};
 
 /// The transmit clock starts at arm and the receive clock at T0, 2 s later (MR-9, MR-11),
 /// so transmit tick `2 000 000 + k` is receive sample `k` at 1 Msps.
@@ -97,10 +97,7 @@ impl Default for Ping<'_> {
 fn ping_pong(temp: &rig::TempDir, ping: Ping<'_>) -> (Manifest, Vec<(f32, f32)>) {
     let ((ping_bytes, ping_ref), (pong_bytes, pong_ref)) = waveforms();
     let hash = responder::impl_hash();
-    let mut spec = experiments::ping_pong(
-        ping.pinger, ping.responder, 1.0e6, &ping_ref, &pong_ref, ping.pings[0], ping.turnaround_ns, ping.late_policy, 20_000,
-        (responder::IMPL_ID, &hash),
-    );
+    let mut spec = experiments::ping_pong(ping.pinger, ping.responder, 1.0e6, &ping_ref, &pong_ref, ping.pings[0], ping.turnaround_ns, ping.late_policy, 20_000, (responder::IMPL_ID, &hash));
     for offset in &ping.pings[1..] {
         let mut entry = spec["schedule"][0].clone();
         entry["at"]["offset_ticks"] = json!(offset);
@@ -140,7 +137,13 @@ fn heard(capture: &[(f32, f32)]) -> Option<usize> {
 
 /// A burst record without its clock domains, whose local ids depend on allocation order.
 fn decision(record: &BurstRecord) -> (i64, Option<i64>, Option<i64>, u64, u32) {
-    (record.target.ticks_in(record.target.domain()).unwrap(), record.requested_target.map(|t| t.ticks_in(t.domain()).unwrap()), record.late_by.map(|d| d.ticks_in(d.domain()).unwrap()), record.samples, record.blocks)
+    (
+        record.target.ticks_in(record.target.domain()).unwrap(),
+        record.requested_target.map(|t| t.ticks_in(t.domain()).unwrap()),
+        record.late_by.map(|d| d.ticks_in(d.domain()).unwrap()),
+        record.samples,
+        record.blocks,
+    )
 }
 
 fn clean_stop(manifest: &Manifest) {
@@ -202,9 +205,7 @@ fn v58_09_every_ping_gets_one_pong() {
 fn v58_09_a_pong_short_of_the_lead_is_late_as_on_hardware() {
     // §22: the radio decides a runtime burst's lead against the same envelope as hardware,
     // counted from when it delivered the samples the Reactor reacts to (MR-14, MR-17).
-    let late = |policy: &'static str, turnaround_ns: i64, test: &str| {
-        ping_pong(&rig::TempDir::new(test), Ping { late_policy: policy, turnaround_ns, ..Ping::default() })
-    };
+    let late = |policy: &'static str, turnaround_ns: i64, test: &str| ping_pong(&rig::TempDir::new(test), Ping { late_policy: policy, turnaround_ns, ..Ping::default() });
 
     // A 1 ms turnaround targets 11 046, before the device's 14 000: dropped and flagged.
     let (dropped, capture) = late("drop_and_flag", 1_000_000, "v58-09-drop");
@@ -319,15 +320,8 @@ fn ke_03_a_decision_after_the_stop_is_not_an_abort() {
     // samples reach the responder during the orderly drain (KA-12; RM-16). Dispatch is
     // frozen by then, admit() refuses the PONG with ezsdr.dispatch, and that refusal must
     // not become an abort (KE-3, NX-6).
-    let counting = Implementation {
-        id: responder::IMPL_ID.to_owned(),
-        hash: responder::impl_hash(),
-        make: || Box::new(Counting((responder::implementation().make)())),
-    };
-    let (manifest, _) = ping_pong(
-        &rig::TempDir::new("ke-03-drain"),
-        Ping { pings: &[25_960], stop_at: Some(T0 + 26_040_000), implementation: Some(counting), ..Ping::default() },
-    );
+    let counting = Implementation { id: responder::IMPL_ID.to_owned(), hash: responder::impl_hash(), make: || Box::new(Counting((responder::implementation().make)())) };
+    let (manifest, _) = ping_pong(&rig::TempDir::new("ke-03-drain"), Ping { pings: &[25_960], stop_at: Some(T0 + 26_040_000), implementation: Some(counting), ..Ping::default() });
     // The responder did decide — in the drain, the one place it heard the PING — and the
     // refusal left the stop clean (Review F, P2-6: without the count the test would pass
     // with no decision at all).

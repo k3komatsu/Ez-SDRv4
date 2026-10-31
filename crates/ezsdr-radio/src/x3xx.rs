@@ -17,8 +17,7 @@ pub const PROFILE_VERSION: Version = Version::new(0, 1, 0);
 pub const MASTER_CLOCK_HZ: u64 = 200_000_000;
 /// The selector keys both Providers read (design 33 D5). A Provider adds its own keys to
 /// these, and refuses every other key of its binding.
-pub const SELECTOR_KEYS: [&str; 6] =
-    ["master_clock_hz", "image", "links", "link_gbps", "rx", "tx"];
+pub const SELECTOR_KEYS: [&str; 6] = ["master_clock_hz", "image", "links", "link_gbps", "rx", "tx"];
 
 /// The profile this Module's binding must name (design 33 D5).
 pub fn profile_ref() -> ProfileRef {
@@ -129,9 +128,7 @@ impl Board {
 
     /// The board UHD's front end name `name` names, if this stage describes it (UR-5).
     pub fn of_front_end(name: &str) -> Option<Board> {
-        [Board::Ubx, Board::Obx, Board::Cbx]
-            .into_iter()
-            .find(|board| name.starts_with(board.uhd_name()))
+        [Board::Ubx, Board::Obx, Board::Cbx].into_iter().find(|board| name.starts_with(board.uhd_name()))
     }
 
     /// The tuning range, a `Step` grid of 1 Hz (design 33 D5).
@@ -218,17 +215,7 @@ impl FrontEnd {
 
     /// The front end the selector name `name` names (RM-28).
     pub fn parse(name: &str) -> Option<FrontEnd> {
-        [
-            FrontEnd::Ubx,
-            FrontEnd::Obx,
-            FrontEnd::Cbx,
-            FrontEnd::BasicRx,
-            FrontEnd::LfRx,
-            FrontEnd::BasicTx,
-            FrontEnd::LfTx,
-        ]
-        .into_iter()
-        .find(|front_end| front_end.name() == name)
+        [FrontEnd::Ubx, FrontEnd::Obx, FrontEnd::Cbx, FrontEnd::BasicRx, FrontEnd::LfRx, FrontEnd::BasicTx, FrontEnd::LfTx].into_iter().find(|front_end| front_end.name() == name)
     }
 
     /// The duplex board of the three, when this is one (RM-28).
@@ -406,11 +393,7 @@ pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
 /// The PerformanceEnvelope of an `x3xx` with one `link_gbps` GbE link (RM-7, RM-20).
 pub fn performance(link_gbps: u8) -> PerformanceEnvelope {
     let bytes_per_s = i64::from(link_gbps) * 100_000_000;
-    PerformanceEnvelope {
-        rx_bytes_per_s: bytes_per_s,
-        tx_bytes_per_s: bytes_per_s,
-        wire_bytes_per_sample: 4,
-    }
+    PerformanceEnvelope { rx_bytes_per_s: bytes_per_s, tx_bytes_per_s: bytes_per_s, wire_bytes_per_sample: 4 }
 }
 
 /// The values a Provider's own Module contributes to a `x3xx` description (design 33 D5):
@@ -431,9 +414,7 @@ pub struct ProviderTerms {
 /// `channels::check_layout`.
 pub(crate) fn check_repeat(direction: &str, position: usize, slot: Slot, frontend: u32, name: &str, seen: &[(Slot, u32)]) -> Result<(), String> {
     if seen.contains(&(slot, frontend)) {
-        return Err(format!(
-            "the layout's `{direction}` element at position {position} repeats `{name}` front end {frontend} in slot {slot:?}"
-        ));
+        return Err(format!("the layout's `{direction}` element at position {position} repeats `{name}` front end {frontend} in slot {slot:?}"));
     }
     Ok(())
 }

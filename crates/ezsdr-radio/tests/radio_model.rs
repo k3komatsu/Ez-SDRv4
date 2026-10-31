@@ -10,12 +10,11 @@ use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{CoercionPolicy, Ident, Key, Namespace, Value, ValueKind};
 use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
-use ezsdr_radio::payloads::{
-    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandQueueFullPayload,
-    CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload,
-    TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
-};
 use ezsdr_radio::RfEnvelopeCheck;
+use ezsdr_radio::payloads::{
+    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload, TimeErrorCause, TimeErrorOutcome,
+    TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value as JsonValue, json};
 
@@ -28,21 +27,10 @@ fn envelope_section(value: JsonValue) -> BTreeMap<Namespace, JsonValue> {
 }
 
 fn radio_configuration(values: &[(&str, Value)]) -> BTreeMap<Ident, BTreeMap<Key, Value>> {
-    BTreeMap::from([(
-        Ident::parse("radio").unwrap(),
-        values
-            .iter()
-            .map(|(key, value)| (Key::parse(key).unwrap(), value.clone()))
-            .collect(),
-    )])
+    BTreeMap::from([(Ident::parse("radio").unwrap(), values.iter().map(|(key, value)| (Key::parse(key).unwrap(), value.clone())).collect())])
 }
 
-fn run_check(
-    section: JsonValue,
-    effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-    proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-    stage: CheckStage,
-) -> Vec<Violation> {
+fn run_check(section: JsonValue, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, stage: CheckStage) -> Vec<Violation> {
     let mut checks = AdmissionCheckRegistry::new();
     checks.register(Arc::new(RfEnvelopeCheck));
     checks.run(&envelope_section(section), effective, proposed, stage)
@@ -66,12 +54,7 @@ fn tx_values(channels: usize, frequency_hz: f64, gain_db: f64) -> Vec<(&'static 
     .into_iter()
     .take(channels)
     {
-        values.extend([
-            (stream, Value::from(0_i64)),
-            (frequency, Value::num(frequency_hz).unwrap()),
-            (gain, Value::num(gain_db).unwrap()),
-            (antenna, Value::from("TX/RX".to_owned())),
-        ]);
+        values.extend([(stream, Value::from(0_i64)), (frequency, Value::num(frequency_hz).unwrap()), (gain, Value::num(gain_db).unwrap()), (antenna, Value::from("TX/RX".to_owned()))]);
     }
     values
 }
@@ -87,20 +70,13 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
     let mut kinds = EventKindRegistry::new();
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
 
-    let descriptor = registry
-        .vocabulary(&Namespace::parse("radio").unwrap())
-        .unwrap();
+    let descriptor = registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap();
     assert_eq!(descriptor.id, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.version, Version::new(2, 0, 0));
     assert_eq!(descriptor.prefix, Namespace::parse("radio").unwrap());
     assert_eq!(descriptor.checks, [Namespace::parse("radio.rf_envelope").unwrap()]);
 
-    let violations = checks.run(
-        &envelope_section(json!({"allowed_bands": "not a list"})),
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        CheckStage::Validate,
-    );
+    let violations = checks.run(&envelope_section(json!({"allowed_bands": "not a list"})), &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].check, Namespace::parse("radio.rf_envelope").unwrap());
     assert!(violations[0].reason.starts_with("RM-19: "));
@@ -123,17 +99,7 @@ fn rm_01_register_twice_is_refused() {
 
     assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 34);
     assert_eq!(kinds.kinds().len(), 9);
-    assert_eq!(
-        checks
-            .run(
-                &envelope_section(json!({"allowed_bands": "not a list"})),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                CheckStage::Validate,
-            )
-            .len(),
-        1,
-    );
+    assert_eq!(checks.run(&envelope_section(json!({"allowed_bands": "not a list"})), &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate,).len(), 1,);
 }
 
 #[test]
@@ -185,9 +151,7 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
     ];
     let declarations = ezsdr_radio::vocabulary().keys;
     assert_eq!(declarations.len(), expected.len());
-    for (declaration, (key, kind, coercible, coercion_default, update_class))
-        in declarations.iter().zip(expected)
-    {
+    for (declaration, (key, kind, coercible, coercion_default, update_class)) in declarations.iter().zip(expected) {
         assert_eq!(declaration.key.as_str(), key);
         assert_eq!(declaration.kind, kind);
         assert_eq!(declaration.coercible, coercible);
@@ -233,21 +197,9 @@ fn rm_12_the_verbs_compile_as_declared() {
     let descriptor = ezsdr_radio::vocabulary();
     assert_eq!(descriptor.verbs.len(), 3);
     assert_eq!(descriptor.verbs[0].verb.as_str(), "start_repeat");
-    assert!(matches!(
-        descriptor.verbs[0].compiles_to,
-        CompileRule::TxBurst {
-            repeat: true,
-            late_policy: LatePolicy::SendAsapAndFlag
-        }
-    ));
+    assert!(matches!(descriptor.verbs[0].compiles_to, CompileRule::TxBurst { repeat: true, late_policy: LatePolicy::SendAsapAndFlag }));
     assert_eq!(descriptor.verbs[1].verb.as_str(), "send");
-    assert!(matches!(
-        descriptor.verbs[1].compiles_to,
-        CompileRule::TxBurst {
-            repeat: false,
-            late_policy: LatePolicy::DropAndFlag
-        }
-    ));
+    assert!(matches!(descriptor.verbs[1].compiles_to, CompileRule::TxBurst { repeat: false, late_policy: LatePolicy::DropAndFlag }));
     // RM-12, RM-21: `start_rx` turns a receive stream on again after a `Stop`.
     assert_eq!(descriptor.verbs[2].verb.as_str(), "start_rx");
     assert_eq!(descriptor.verbs[2].compiles_to, CompileRule::Command {});
@@ -282,23 +234,13 @@ fn rm_19_rf_envelope_cases() {
 
     let mut globally_disabled_envelope = base_rf_envelope();
     globally_disabled_envelope["tx_enabled"] = json!(false);
-    let violations = run_check(
-        globally_disabled_envelope,
-        &valid,
-        &empty,
-        CheckStage::Validate,
-    );
+    let violations = run_check(globally_disabled_envelope, &valid, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c0.stream");
 
     let mut short_channel_envelope = base_rf_envelope();
     short_channel_envelope["tx_enabled"] = json!([true]);
-    let violations = run_check(
-        short_channel_envelope,
-        &two_channels,
-        &empty,
-        CheckStage::Validate,
-    );
+    let violations = run_check(short_channel_envelope, &two_channels, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.tx.c1.stream");
 
@@ -318,27 +260,14 @@ fn rm_19_rf_envelope_cases() {
     assert!(!disabled_tx.values().next().unwrap().is_empty(), "this unstreamed channel has settings to skip");
     assert!(run_check(base_rf_envelope(), &disabled_tx, &empty, CheckStage::Validate).is_empty());
 
-    let bad_rx_antenna = radio_configuration(&[
-        ("radio.rx.c0.stream", Value::from(0_i64)),
-        ("radio.rx.c0.antenna", Value::from("J1".to_owned())),
-    ]);
+    let bad_rx_antenna = radio_configuration(&[("radio.rx.c0.stream", Value::from(0_i64)), ("radio.rx.c0.antenna", Value::from("J1".to_owned()))]);
     let violations = run_check(base_rf_envelope(), &bad_rx_antenna, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0].key.as_ref().unwrap().as_str(), "radio.rx.c0.antenna");
 
     let fragments = BTreeMap::from([
-        (
-            Ident::parse("good_radio").unwrap(),
-            radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0))
-                .remove(&Ident::parse("radio").unwrap())
-                .unwrap(),
-        ),
-        (
-            Ident::parse("bad_radio").unwrap(),
-            radio_configuration(&tx_values(1, 2_600_000_000.0, 10.0))
-                .remove(&Ident::parse("radio").unwrap())
-                .unwrap(),
-        ),
+        (Ident::parse("good_radio").unwrap(), radio_configuration(&tx_values(1, 2_450_000_000.0, 10.0)).remove(&Ident::parse("radio").unwrap()).unwrap()),
+        (Ident::parse("bad_radio").unwrap(), radio_configuration(&tx_values(1, 2_600_000_000.0, 10.0)).remove(&Ident::parse("radio").unwrap()).unwrap()),
     ]);
     let violations = run_check(base_rf_envelope(), &fragments, &empty, CheckStage::Validate);
     assert_eq!(violations.len(), 1);
@@ -349,11 +278,7 @@ fn rm_19_rf_envelope_cases() {
 #[test]
 fn rm_19_a_malformed_section_is_one_violation() {
     let empty = BTreeMap::new();
-    for section in [
-        json!({"allowed_bands": "x"}),
-        json!({"allowed_bands": [{"lo_hz": 10.0, "hi_hz": 5.0}]}),
-        json!({"allowed_bands": [], "unknown": true}),
-    ] {
+    for section in [json!({"allowed_bands": "x"}), json!({"allowed_bands": [{"lo_hz": 10.0, "hi_hz": 5.0}]}), json!({"allowed_bands": [], "unknown": true})] {
         let violations = run_check(section, &empty, &empty, CheckStage::Prepare);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].reason.starts_with("RM-19: "));
@@ -384,11 +309,7 @@ fn rm_20_schema_freeze() {
     if !update {
         for entry in std::fs::read_dir(&dir).expect("schemas/radio is readable") {
             let file = entry.expect("a schema directory entry").file_name().to_string_lossy().into_owned();
-            if file.ends_with(".json")
-                && !schemas
-                    .keys()
-                    .any(|name| ezsdr_kernel::schema::file_name(name) == file)
-            {
+            if file.ends_with(".json") && !schemas.keys().any(|name| ezsdr_kernel::schema::file_name(name) == file) {
                 stale.push(format!("{file}: no registered document generates it"));
             }
         }
@@ -420,10 +341,7 @@ where
     assert_eq!(encoded, expected);
     assert_eq!(serde_json::from_value::<T>(encoded.clone()).unwrap(), value);
     let mut with_extra = encoded;
-    with_extra
-        .as_object_mut()
-        .unwrap()
-        .insert("extra".to_owned(), json!(true));
+    with_extra.as_object_mut().unwrap().insert("extra".to_owned(), json!(true));
     assert!(serde_json::from_value::<T>(with_extra).is_err());
 }
 
@@ -431,20 +349,9 @@ where
 fn rm_22_payloads_round_trip() {
     let target = TimePoint::new(ClockDomainId::local(2), 123);
     let target_json = serde_json::to_value(target).unwrap();
+    assert_payload_round_trip(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 3 }, json!({"cause": "overrun", "lost": 3}));
     assert_payload_round_trip(
-        RxOverflowPayload {
-            cause: RxOverflowCause::Overrun,
-            lost: 3,
-        },
-        json!({"cause": "overrun", "lost": 3}),
-    );
-    assert_payload_round_trip(
-        TimeErrorPayload {
-            cause: TimeErrorCause::UnclosedBurst,
-            outcome: TimeErrorOutcome::PlanViolation,
-            late_by_ns: 7,
-            target,
-        },
+        TimeErrorPayload { cause: TimeErrorCause::UnclosedBurst, outcome: TimeErrorOutcome::PlanViolation, late_by_ns: 7, target },
         json!({
             "cause": "unclosed_burst",
             "outcome": "plan_violation",
@@ -453,61 +360,26 @@ fn rm_22_payloads_round_trip() {
         }),
     );
     assert_payload_round_trip(
-        LateCommandPayload {
-            key: None,
-            requested: target,
-            applied: TimePoint::new(ClockDomainId::local(2), 124),
-        },
+        LateCommandPayload { key: None, requested: target, applied: TimePoint::new(ClockDomainId::local(2), 124) },
         json!({
             "key": null,
             "requested": target_json,
             "applied": {"domain": {"node": 0, "local": 2}, "ticks": 124}
         }),
     );
+    assert_payload_round_trip(CommandQueueFullPayload { key: Key::parse("radio.tx.c0.frequency_hz").unwrap(), depth: 8 }, json!({"key": "radio.tx.c0.frequency_hz", "depth": 8}));
     assert_payload_round_trip(
-        CommandQueueFullPayload {
-            key: Key::parse("radio.tx.c0.frequency_hz").unwrap(),
-            depth: 8,
-        },
-        json!({"key": "radio.tx.c0.frequency_hz", "depth": 8}),
-    );
-    assert_payload_round_trip(
-        CommandRejectedPayload {
-            action: Some(ezsdr_kernel::event::ActionId(7)),
-            kind: "tx_burst".to_owned(),
-            reason: "bad waveform".to_owned(),
-        },
+        CommandRejectedPayload { action: Some(ezsdr_kernel::event::ActionId(7)), kind: "tx_burst".to_owned(), reason: "bad waveform".to_owned() },
         json!({"action": 7, "kind": "tx_burst", "reason": "bad waveform"}),
     );
-    assert_payload_round_trip(
-        CommandRejectedPayload {
-            action: None,
-            kind: "tx_burst".to_owned(),
-            reason: "cancelled".to_owned(),
-        },
-        json!({"kind": "tx_burst", "reason": "cancelled"}),
-    );
+    assert_payload_round_trip(CommandRejectedPayload { action: None, kind: "tx_burst".to_owned(), reason: "cancelled".to_owned() }, json!({"kind": "tx_burst", "reason": "cancelled"}));
     // VE-3 (radio 1.3.0).
-    assert_payload_round_trip(
-        TxUnderflowPayload { cause: TxUnderflowCause::Starved },
-        json!({"cause": "starved"}),
-    );
-    assert_payload_round_trip(
-        TxUnderflowPayload { cause: TxUnderflowCause::Lost },
-        json!({"cause": "lost"}),
-    );
+    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Starved }, json!({"cause": "starved"}));
+    assert_payload_round_trip(TxUnderflowPayload { cause: TxUnderflowCause::Lost }, json!({"cause": "lost"}));
     assert_payload_round_trip(AlignmentErrorPayload { lost: 12 }, json!({"lost": 12}));
+    assert_payload_round_trip(ClockLostPayload { reference: ClockReference::Frequency }, json!({"reference": "frequency"}));
     assert_payload_round_trip(
-        ClockLostPayload { reference: ClockReference::Frequency },
-        json!({"reference": "frequency"}),
-    );
-    assert_payload_round_trip(
-        TimeErrorPayload {
-            cause: TimeErrorCause::Late,
-            outcome: TimeErrorOutcome::LateAtDevice,
-            late_by_ns: 0,
-            target,
-        },
+        TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::LateAtDevice, late_by_ns: 0, target },
         json!({"cause": "late", "outcome": "late_at_device", "late_by_ns": 0, "target": target_json}),
     );
 }
@@ -522,11 +394,7 @@ fn rm_24_the_hot_form_round_trips() {
     let overrun = RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 50_000 };
     // Pinned byte for byte: this layout is the contract a hardware Provider meets.
     assert_eq!(overrun.to_hot(), [0, 0x50, 0xc3, 0, 0, 0, 0, 0, 0]);
-    for payload in [
-        overrun,
-        RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: u64::MAX },
-        RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 0 },
-    ] {
+    for payload in [overrun, RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: u64::MAX }, RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 0 }] {
         let bytes = payload.to_hot();
         assert_eq!(bytes.len(), 9);
         assert_eq!(RxOverflowPayload::from_hot(&bytes), Ok(payload));
@@ -568,12 +436,6 @@ fn rm_17_reported_losses_make_one_payload_for_the_block_jump() {
     assert_eq!(rx_overflow_payload(&[], Some(5)), None);
     assert_eq!(rx_overflow_payload(&[RxOverflowCause::Overrun], None), None);
     assert_eq!(rx_overflow_payload(&[RxOverflowCause::Sequence], Some(5)), Some(RxOverflowPayload { cause: RxOverflowCause::Sequence, lost: 5 }));
-    assert_eq!(
-        rx_overflow_payload(&[RxOverflowCause::Sequence, RxOverflowCause::Overrun, RxOverflowCause::Overrun], Some(12)),
-        Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),
-    );
-    assert_eq!(
-        rx_overflow_payload(&[RxOverflowCause::Overrun, RxOverflowCause::Sequence], Some(12)),
-        Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),
-    );
+    assert_eq!(rx_overflow_payload(&[RxOverflowCause::Sequence, RxOverflowCause::Overrun, RxOverflowCause::Overrun], Some(12)), Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),);
+    assert_eq!(rx_overflow_payload(&[RxOverflowCause::Overrun, RxOverflowCause::Sequence], Some(12)), Some(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 12 }),);
 }

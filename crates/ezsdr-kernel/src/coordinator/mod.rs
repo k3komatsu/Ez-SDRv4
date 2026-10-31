@@ -145,34 +145,16 @@ pub struct RunHandle {
 }
 
 /// Parses and starts a Spec Run; parse and hash refusals create no Run (KC-1, KC-5).
-pub fn start_spec_run(
-    spec_doc: &serde_json::Value,
-    profile_doc: &serde_json::Value,
-    assembly: Assembly,
-) -> Result<RunHandle, SpecError> {
+pub fn start_spec_run(spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, assembly: Assembly) -> Result<RunHandle, SpecError> {
     start_spec(spec_doc, profile_doc, assembly, Lease::attached(), None)
 }
 
 /// A Spec Run with its Lease and parent: `start_spec_run`'s, or a child's (KC-37a).
-fn start_spec(
-    spec_doc: &serde_json::Value,
-    profile_doc: &serde_json::Value,
-    assembly: Assembly,
-    lease: Lease,
-    parent: Option<RunId>,
-) -> Result<RunHandle, SpecError> {
+fn start_spec(spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, assembly: Assembly, lease: Lease, parent: Option<RunId>) -> Result<RunHandle, SpecError> {
     let spec = ExperimentSpec::from_json(spec_doc)?;
     let profile = BindingProfile::from_json(profile_doc)?;
     let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;
-    let mut run = pipeline::assemble(
-        RunKind::Spec,
-        spec,
-        spec_section,
-        profile,
-        binding_section,
-        assembly,
-        lease,
-    );
+    let mut run = pipeline::assemble(RunKind::Spec, spec, spec_section, profile, binding_section, assembly, lease);
     run.parent = parent;
     run.pipeline();
     run.settle();
@@ -180,60 +162,25 @@ fn start_spec(
 }
 
 /// Derives and starts an implicit Session Spec after validating the Lease (KC-1, KC-35).
-pub fn connect(
-    profile_doc: &serde_json::Value,
-    assembly: Assembly,
-    lease: Lease,
-) -> Result<RunHandle, SpecError> {
+pub fn connect(profile_doc: &serde_json::Value, assembly: Assembly, lease: Lease) -> Result<RunHandle, SpecError> {
     let profile = BindingProfile::from_json(profile_doc)?;
-    lease.validate().map_err(|e| SpecError::Structural {
-        reason: format!("KC-1: RS-21: {e}"),
-    })?;
-    let providers: BTreeMap<Ident, &dyn Provider> = assembly
-        .providers
-        .iter()
-        .map(|(name, provider)| (name.clone(), &**provider))
-        .collect();
-    let sinks: BTreeMap<Ident, &dyn Sink> = assembly
-        .sinks
-        .iter()
-        .map(|(name, sink)| (name.clone(), &**sink))
-        .collect();
-    let spec = state::contain_all(|| {
-        crate::session::implicit_spec(&profile, &assembly.registry, &providers, &sinks)
-    })
-    .map_err(|_| SpecError::Structural {
-        reason: "KC-30: a Module panicked during validate".to_owned(),
-    })??;
+    lease.validate().map_err(|e| SpecError::Structural { reason: format!("KC-1: RS-21: {e}") })?;
+    let providers: BTreeMap<Ident, &dyn Provider> = assembly.providers.iter().map(|(name, provider)| (name.clone(), &**provider)).collect();
+    let sinks: BTreeMap<Ident, &dyn Sink> = assembly.sinks.iter().map(|(name, sink)| (name.clone(), &**sink)).collect();
+    let spec = state::contain_all(|| crate::session::implicit_spec(&profile, &assembly.registry, &providers, &sinks))
+        .map_err(|_| SpecError::Structural { reason: "KC-30: a Module panicked during validate".to_owned() })??;
     drop((providers, sinks));
     let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;
-    let mut run = pipeline::assemble(
-        RunKind::Session,
-        spec,
-        spec_section,
-        profile,
-        binding_section,
-        assembly,
-        lease,
-    );
+    let mut run = pipeline::assemble(RunKind::Session, spec, spec_section, profile, binding_section, assembly, lease);
     run.pipeline();
     run.settle();
     Ok(run)
 }
 
 /// The Manifest's `spec` and `binding` sections of the parsed documents (KC-45, RS-45).
-fn sections(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    source: Option<ContentHash>,
-) -> Result<(crate::manifest::SpecSection, crate::manifest::BindingSection), SpecError> {
-    let structural = |e: crate::hash::HashError| SpecError::Structural {
-        reason: format!("KC-1: {e}"),
-    };
-    Ok((
-        crate::manifest::SpecSection::of(spec, source).map_err(structural)?,
-        crate::manifest::BindingSection::of(profile).map_err(structural)?,
-    ))
+fn sections(spec: &ExperimentSpec, profile: &BindingProfile, source: Option<ContentHash>) -> Result<(crate::manifest::SpecSection, crate::manifest::BindingSection), SpecError> {
+    let structural = |e: crate::hash::HashError| SpecError::Structural { reason: format!("KC-1: {e}") };
+    Ok((crate::manifest::SpecSection::of(spec, source).map_err(structural)?, crate::manifest::BindingSection::of(profile).map_err(structural)?))
 }
 
 impl RunHandle {
@@ -263,11 +210,7 @@ impl RunHandle {
     }
 
     /// Admits one Session Action before appending it to the action log (KC-28).
-    pub fn submit(
-        &mut self,
-        action: SessionAction,
-        waveform: Option<&[u8]>,
-    ) -> Result<LogEntry, RunHandleError> {
+    pub fn submit(&mut self, action: SessionAction, waveform: Option<&[u8]>) -> Result<LogEntry, RunHandleError> {
         self.check_lease();
         self.ensure_live()?;
         if self.kind() == RunKind::Spec {
@@ -308,11 +251,7 @@ impl RunHandle {
         let cause = self.lease.on_disconnect(&*self.shared.ctx.host_clock);
         self.sync_lease();
         if let Some(cause) = cause {
-            ending::request(
-                &self.shared,
-                crate::run::Termination::Stopped { cause },
-                crate::run::CleanupMode::Orderly,
-            );
+            ending::request(&self.shared, crate::run::Termination::Stopped { cause }, crate::run::CleanupMode::Orderly);
             self.settle();
         }
     }
@@ -320,13 +259,7 @@ impl RunHandle {
     /// Checks the Detached Lease deadline (KC-36).
     pub fn check_lease(&mut self) {
         if self.lease.expired(&*self.shared.ctx.host_clock) {
-            ending::request(
-                &self.shared,
-                crate::run::Termination::Stopped {
-                    cause: crate::run::StopCause::LeaseExpiry {},
-                },
-                crate::run::CleanupMode::Orderly,
-            );
+            ending::request(&self.shared, crate::run::Termination::Stopped { cause: crate::run::StopCause::LeaseExpiry {} }, crate::run::CleanupMode::Orderly);
             self.settle();
         }
     }
@@ -339,11 +272,7 @@ impl RunHandle {
     }
 
     pub(super) fn ensure_live(&self) -> Result<(), RunHandleError> {
-        if let RunState::CleanedUp { termination } = self.state() {
-            Err(RunHandleError::Ended { termination })
-        } else {
-            Ok(())
-        }
+        if let RunState::CleanedUp { termination } = self.state() { Err(RunHandleError::Ended { termination }) } else { Ok(()) }
     }
 
     /// Mirrors a Detached Lease's expiry for the data thread (KC-36 as KG-2 amends it).

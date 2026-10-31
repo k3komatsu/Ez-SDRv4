@@ -1,7 +1,7 @@
 //! Events, counters and the Kernel Action set —
 //! `04-run-and-session.md` RS-26…RS-36, RS-48…RS-52 (Vision §29, §5, §19).
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -19,9 +19,7 @@ use crate::stream::LatePolicy;
 use crate::time::{AbsoluteDeadline, TimePoint};
 
 /// How bad an event is; RS-29 derives a default reaction from it (Vision §29).
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Diagnostic detail.
@@ -41,8 +39,7 @@ pub enum Severity {
 /// every other kind belongs to the Vocabulary or Module that emits it.
 ///
 /// Rule: SB-1, RS-27.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct EventKind(String);
 
@@ -73,14 +70,9 @@ impl EventKind {
         let ok = s.contains('.')
             && s.split('.').all(|seg| {
                 let mut chars = seg.chars();
-                matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                matches!(chars.next(), Some(c) if c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
             });
-        if ok {
-            Ok(EventKind(s.to_owned()))
-        } else {
-            Err(RunError::UnknownEventKind { kind: s.to_owned() })
-        }
+        if ok { Ok(EventKind(s.to_owned())) } else { Err(RunError::UnknownEventKind { kind: s.to_owned() }) }
     }
 
     /// The kind as written (RS-27).
@@ -93,16 +85,10 @@ impl EventKind {
     /// Kernel holding a dozen radio kinds would make the thirteenth a Kernel change
     /// (RS-27).
     pub fn kernel_kinds() -> Vec<EventKind> {
-        [
-            EventKind::EVENTS_DROPPED,
-            EventKind::LINK_BACKPRESSURE,
-            EventKind::PROCESSOR_DEADLINE_MISS,
-            EventKind::DEVICE_LOST,
-            EventKind::STEP_LIVELOCK,
-        ]
-        .into_iter()
-        .map(|s| EventKind(s.to_owned()))
-        .collect()
+        [EventKind::EVENTS_DROPPED, EventKind::LINK_BACKPRESSURE, EventKind::PROCESSOR_DEADLINE_MISS, EventKind::DEVICE_LOST, EventKind::STEP_LIVELOCK]
+            .into_iter()
+            .map(|s| EventKind(s.to_owned()))
+            .collect()
     }
 }
 
@@ -116,9 +102,7 @@ impl fmt::Display for EventKind {
 /// that no role is read off a path segment and no name is reserved for one.
 ///
 /// Rule: RS-31, KC-8.
-#[derive(
-    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventSource {
@@ -160,9 +144,7 @@ impl fmt::Display for EventSource {
 /// per role (KC-23); a name the Spec does not declare in that role is refused.
 ///
 /// Rule: RS-49, KC-23, SB-16.
-#[derive(
-    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Target {
@@ -281,9 +263,7 @@ static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
 // `fetch_update` is deprecated as `try_update` from Rust 1.99, which is above the MSRV.
 #[allow(deprecated)]
 fn next_scope() -> u64 {
-    NEXT_SCOPE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-        .expect("a process cannot exhaust 2^64 event-sink scopes")
+    NEXT_SCOPE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).expect("a process cannot exhaust 2^64 event-sink scopes")
 }
 
 impl EventSource {
@@ -316,13 +296,7 @@ pub trait EventSink: Send + Sync {
     /// Allocates nothing. A payload above [`HOT_PAYLOAD_BYTES`] is
     /// `PayloadTooLarge`, and a handle this sink did not mint is refused
     /// (RS-32, RS-33, RS-34; item 3).
-    fn emit(
-        &self,
-        handle: EventHandle,
-        time: TimePoint,
-        severity: Severity,
-        payload: &[u8],
-    ) -> Result<(), RunError>;
+    fn emit(&self, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError>;
     /// Emits a full-bodied event on the control path (RS-32). A map key that is not
     /// ASCII anywhere in the payload is refused, before the event is counted or
     /// delivered (SB-9a; item 3).
@@ -369,12 +343,7 @@ impl EventCollector {
     /// ring of `ring_depth` bodies.
     ///
     /// Rule: RS-33, RS-34.
-    pub fn new(
-        pairs: &[(EventSource, EventKind)],
-        kinds: &[EventKind],
-        ring_depth: usize,
-        policy: &Policy,
-    ) -> EventCollector {
+    pub fn new(pairs: &[(EventSource, EventKind)], kinds: &[EventKind], ring_depth: usize, policy: &Policy) -> EventCollector {
         let mut sources: Vec<EventSource> = Vec::new();
         let mut source_index = BTreeMap::new();
         let mut kind_list: Vec<EventKind> = kinds.to_vec();
@@ -398,14 +367,12 @@ impl EventCollector {
         // `EVENTS_DROPPED` bodies would land on the fallback row, which reports a
         // different kind, and RS-35's invariant would read as violated for exactly
         // the kind that exists to keep it true (RS-33, RS-38).
-        let mut source_of = |source: EventSource| {
-            match source_index.entry(source.clone()) {
-                Entry::Vacant(entry) => {
-                    sources.push(source);
-                    *entry.insert(sources.len() - 1)
-                }
-                Entry::Occupied(entry) => *entry.get(),
+        let mut source_of = |source: EventSource| match source_index.entry(source.clone()) {
+            Entry::Vacant(entry) => {
+                sources.push(source);
+                *entry.insert(sources.len() - 1)
             }
+            Entry::Occupied(entry) => *entry.get(),
         };
         let fallback_source = source_of(EventSource::Unforeseen);
         let kernel_source = source_of(EventSource::Kernel);
@@ -430,9 +397,7 @@ impl EventCollector {
         });
         let fallback_kind = kind_list.len();
         let unforeseen_kind = EventKind(EventKind::UNFORESEEN.to_owned());
-        kind_index
-            .entry(unforeseen_kind.clone())
-            .or_insert(fallback_kind);
+        kind_index.entry(unforeseen_kind.clone()).or_insert(fallback_kind);
         kind_list.push(unforeseen_kind);
         index.insert((fallback_source, fallback_kind), resolved.len());
         resolved.push((fallback_source, fallback_kind));
@@ -440,20 +405,12 @@ impl EventCollector {
         // RS-29: `None` marks a kind with no entry in the Run's Policy, whose
         // reaction comes from the **event's** severity at emit time — an
         // unregistered kind has no declared severity for the Kernel to look up.
-        let reactions: Vec<Option<Reaction>> =
-            kind_list.iter().map(|k| policy.table.get(k).copied()).collect();
+        let reactions: Vec<Option<Reaction>> = kind_list.iter().map(|k| policy.table.get(k).copied()).collect();
         let counts = resolved.iter().map(|_| AtomicU64::new(0)).collect();
         let dropped = kind_list.iter().map(|_| AtomicU64::new(0)).collect();
         // 0 = nothing, 1 = stop, 2 = abort (RS-36).
         let escalate: Vec<AtomicU8> = kind_list.iter().map(|_| AtomicU8::new(0)).collect();
-        let empty = EventRecord {
-            row: 0,
-            kind: 0,
-            time: TimePoint::new(crate::id::ClockDomainId::HOST_MONOTONIC, 0),
-            severity: Severity::Debug,
-            len: 0,
-            payload: [0; HOT_PAYLOAD_BYTES],
-        };
+        let empty = EventRecord { row: 0, kind: 0, time: TimePoint::new(crate::id::ClockDomainId::HOST_MONOTONIC, 0), severity: Severity::Debug, len: 0, payload: [0; HOT_PAYLOAD_BYTES] };
         let collector = EventCollector {
             scope: next_scope(),
             sources,
@@ -466,11 +423,7 @@ impl EventCollector {
             dropped,
             escalate,
             reactions,
-            ring: Mutex::new(Ring {
-                slots: vec![empty; ring_depth.max(1)].into_boxed_slice(),
-                head: 0,
-                len: 0,
-            }),
+            ring: Mutex::new(Ring { slots: vec![empty; ring_depth.max(1)].into_boxed_slice(), head: 0, len: 0 }),
             control: Mutex::new(Vec::new()),
         };
         // RS-32: on some platforms `Mutex` boxes its OS primitive at the first
@@ -485,15 +438,7 @@ impl EventCollector {
 
     /// The whole counter table, including rows whose count is zero (RS-33, RS-38).
     pub fn counters(&self) -> Vec<CounterRow> {
-        self.pairs
-            .iter()
-            .enumerate()
-            .map(|(i, (s, k))| CounterRow {
-                source: self.sources[*s].clone(),
-                kind: self.kinds[*k].clone(),
-                count: self.counts[i].load(Ordering::Relaxed),
-            })
-            .collect()
+        self.pairs.iter().enumerate().map(|(i, (s, k))| CounterRow { source: self.sources[*s].clone(), kind: self.kinds[*k].clone(), count: self.counts[i].load(Ordering::Relaxed) }).collect()
     }
 
     /// The strongest pending reaction when the hot path dropped a stopping body.
@@ -502,22 +447,22 @@ impl EventCollector {
     /// discarded and the Run would continue on a device that is gone (RS-36). A
     /// queued body raises no flag: it is reacted to when it is drained (KC-31).
     pub fn escalation(&self) -> Option<(EventKind, Reaction)> {
-        self.escalate.iter().enumerate().filter_map(|(i, f)| match f.load(Ordering::Relaxed) {
+        self.escalate
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| match f.load(Ordering::Relaxed) {
                 1 => Some((self.kinds[i].clone(), Reaction::Stop)),
                 2 => Some((self.kinds[i].clone(), Reaction::Abort)),
                 _ => None,
-            }).max_by_key(|(_, reaction)| *reaction == Reaction::Abort)
+            })
+            .max_by_key(|(_, reaction)| *reaction == Reaction::Abort)
     }
 
     /// The reaction to one emission: the kind's Policy entry when it has one, and
     /// otherwise RS-29's severity-derived default. An unregistered kind carries no
     /// declared severity, so only the event itself can supply it (RS-26, RS-29).
     fn reaction(&self, kind: usize, severity: Severity) -> Reaction {
-        self.reactions
-            .get(kind)
-            .copied()
-            .flatten()
-            .unwrap_or_else(|| Policy::by_severity(severity))
+        self.reactions.get(kind).copied().flatten().unwrap_or_else(|| Policy::by_severity(severity))
     }
 
     /// Raises the escalation flag when the reaction is `stop` or `abort`, for a body the
@@ -546,9 +491,7 @@ impl EventCollector {
         let records: Vec<EventRecord> = {
             let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
             let n = ring.len;
-            let out = (0..n)
-                .map(|i| ring.slots[(ring.head + i) % ring.slots.len()])
-                .collect::<Vec<_>>();
+            let out = (0..n).map(|i| ring.slots[(ring.head + i) % ring.slots.len()]).collect::<Vec<_>>();
             ring.head = 0;
             ring.len = 0;
             out
@@ -560,20 +503,10 @@ impl EventCollector {
                 time: r.time,
                 severity: r.severity,
                 kind: self.kinds[r.kind as usize].clone(),
-                payload: serde_json::Value::Array(
-                    r.payload[..r.len as usize]
-                        .iter()
-                        .map(|b| serde_json::Value::from(*b))
-                        .collect(),
-                ),
+                payload: serde_json::Value::Array(r.payload[..r.len as usize].iter().map(|b| serde_json::Value::from(*b)).collect()),
             })
             .collect();
-        out.extend(
-            self.control
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .drain(..),
-        );
+        out.extend(self.control.lock().unwrap_or_else(|e| e.into_inner()).drain(..));
         let dropped_kind = EventKind(EventKind::EVENTS_DROPPED.to_owned());
         for (i, d) in self.dropped.iter().enumerate() {
             let count = d.swap(0, Ordering::Relaxed);
@@ -604,10 +537,7 @@ impl EventCollector {
     /// or another view minted; that is refused here, where it enters, rather than
     /// counted or panicked on (RS-32, MA-9; pre-freeze item 3).
     fn check_handle(&self, scope: u64, handle: EventHandle) -> Result<&AtomicU64, RunError> {
-        if handle.scope != scope
-            || handle.kind as usize >= self.kinds.len()
-            || handle.row as usize >= self.counts.len()
-        {
+        if handle.scope != scope || handle.kind as usize >= self.kinds.len() || handle.row as usize >= self.counts.len() {
             return Err(RunError::ForeignEventHandle);
         }
         Ok(&self.counts[handle.row as usize])
@@ -638,14 +568,7 @@ impl EventCollector {
 
     /// The hot-path body for `scope`: counts, then queues the body if the ring has
     /// room. Allocates nothing (RS-32, RS-34).
-    fn emit_scoped(
-        &self,
-        scope: u64,
-        handle: EventHandle,
-        time: TimePoint,
-        severity: Severity,
-        payload: &[u8],
-    ) -> Result<(), RunError> {
+    fn emit_scoped(&self, scope: u64, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError> {
         if payload.len() > HOT_PAYLOAD_BYTES {
             return Err(RunError::PayloadTooLarge);
         }
@@ -686,19 +609,14 @@ impl EventCollector {
     /// so a key that OV-15 cannot canonicalise cannot reach the log or the sealed
     /// Manifest through this path.
     fn check_payload_keys(payload: &serde_json::Value) -> Result<(), RunError> {
-        crate::spec::check_ascii_keys(payload)
-            .map_err(|_| RunError::PayloadKeyNotAscii { position: "payload".to_owned() })
+        crate::spec::check_ascii_keys(payload).map_err(|_| RunError::PayloadKeyNotAscii { position: "payload".to_owned() })
     }
 
     /// A root-bound view for one Module's `prepare` (RS-32, RS-33, MA-6; item 3):
     /// the counters, ring and queues stay here, and the view adds this instance's
     /// source root and one scope id of its own.
     pub fn view(self: &Arc<Self>, root: EventSource) -> Arc<dyn EventSink> {
-        Arc::new(SinkView {
-            collector: Arc::clone(self),
-            scope: next_scope(),
-            root,
-        })
+        Arc::new(SinkView { collector: Arc::clone(self), scope: next_scope(), root })
     }
 }
 
@@ -715,21 +633,12 @@ struct SinkView {
 impl EventSink for SinkView {
     fn resolve(&self, source: &EventSource, kind: &EventKind) -> Result<EventHandle, RunError> {
         if !self.root.covers(source) {
-            return Err(RunError::EventSourceOutsideRoot {
-                root: self.root.clone(),
-                source: source.clone(),
-            });
+            return Err(RunError::EventSourceOutsideRoot { root: self.root.clone(), source: source.clone() });
         }
         Ok(self.collector.mint(self.scope, source, kind))
     }
 
-    fn emit(
-        &self,
-        handle: EventHandle,
-        time: TimePoint,
-        severity: Severity,
-        payload: &[u8],
-    ) -> Result<(), RunError> {
+    fn emit(&self, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError> {
         self.collector.emit_scoped(self.scope, handle, time, severity, payload)
     }
 
@@ -738,10 +647,7 @@ impl EventSink for SinkView {
         // own root or, for a Provider, a node below it; `kernel` and `unforeseen` are
         // no Module's to name. The ASCII check stays the collector's (item 4).
         if !self.root.covers(&event.source) {
-            return Err(RunError::EventSourceOutsideRoot {
-                root: self.root.clone(),
-                source: event.source.clone(),
-            });
+            return Err(RunError::EventSourceOutsideRoot { root: self.root.clone(), source: event.source.clone() });
         }
         self.collector.emit_control(event)
     }
@@ -754,13 +660,7 @@ impl EventSink for EventCollector {
         Ok(self.mint(self.scope, source, kind))
     }
 
-    fn emit(
-        &self,
-        handle: EventHandle,
-        time: TimePoint,
-        severity: Severity,
-        payload: &[u8],
-    ) -> Result<(), RunError> {
+    fn emit(&self, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError> {
         self.emit_scoped(self.scope, handle, time, severity, payload)
     }
 
@@ -778,8 +678,7 @@ impl EventSink for EventCollector {
 // ---------------------------------------------------------------- the Kernel Action set
 
 /// Identifies one dispatched Action inside a Run (RS-15).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct ActionId(pub u64);
 
@@ -886,11 +785,7 @@ impl Action {
     /// What an Action addresses; `Abort` addresses the Run (RS-49).
     pub fn target(&self) -> Option<&Target> {
         match self {
-            Action::TxBurst { target, .. }
-            | Action::SetTimer { target, .. }
-            | Action::UpdateParameter { target, .. }
-            | Action::Command { target, .. }
-            | Action::Emit { target, .. } => Some(target),
+            Action::TxBurst { target, .. } | Action::SetTimer { target, .. } | Action::UpdateParameter { target, .. } | Action::Command { target, .. } | Action::Emit { target, .. } => Some(target),
             Action::Stop { target } => target.as_ref(),
             Action::Abort { .. } => None,
         }
@@ -969,23 +864,14 @@ impl ActionTemplate {
     /// the Spec itself in its role (RS-49a, SB-16).
     pub fn target(&self) -> Option<&Target> {
         match self {
-            ActionTemplate::TxBurst { target, .. }
-            | ActionTemplate::SetTimer { target, .. }
-            | ActionTemplate::UpdateParameter { target, .. }
-            | ActionTemplate::Command { target, .. } => Some(target),
+            ActionTemplate::TxBurst { target, .. } | ActionTemplate::SetTimer { target, .. } | ActionTemplate::UpdateParameter { target, .. } | ActionTemplate::Command { target, .. } => Some(target),
             ActionTemplate::Stop { target } => target.as_ref(),
         }
     }
 
     /// True when `resolve` needs a deadline; the others ignore it (RS-49a).
     pub fn is_timed(&self) -> bool {
-        matches!(
-            self,
-            ActionTemplate::TxBurst { .. }
-                | ActionTemplate::SetTimer { .. }
-                | ActionTemplate::UpdateParameter { .. }
-                | ActionTemplate::Command { .. }
-        )
+        matches!(self, ActionTemplate::TxBurst { .. } | ActionTemplate::SetTimer { .. } | ActionTemplate::UpdateParameter { .. } | ActionTemplate::Command { .. })
     }
 }
 
@@ -1036,45 +922,15 @@ impl PendingAction {
 /// `ActionTemplate` is the only public spelling of a scheduled Action (RS-49a).
 pub(crate) fn resolve_template(template: ActionTemplate, at: AbsoluteDeadline) -> PendingAction {
     match template {
-        ActionTemplate::TxBurst {
-            target,
-            waveform,
-            repeat,
-            late_policy,
-            metadata,
-        } => PendingAction::Action(Action::TxBurst {
-            target,
-            waveform,
-            repeat,
-            at,
-            requested_at: None,
-            late_policy,
-            metadata,
-        }),
-        ActionTemplate::SetTimer { target, token } => {
-            PendingAction::Action(Action::SetTimer { target, at, token })
+        ActionTemplate::TxBurst { target, waveform, repeat, late_policy, metadata } => {
+            PendingAction::Action(Action::TxBurst { target, waveform, repeat, at, requested_at: None, late_policy, metadata })
         }
+        ActionTemplate::SetTimer { target, token } => PendingAction::Action(Action::SetTimer { target, at, token }),
         // RS-49a, KC-17: a scheduled parameter change is timed, and its class comes
         // from the Spec's declaration at admission; `Action::UpdateParameter.class`
         // has no value to state here (pre-freeze item 3).
-        ActionTemplate::UpdateParameter { target, key, value } => {
-            PendingAction::Update(PendingUpdate {
-                target,
-                key,
-                value,
-                at: Some(at),
-            })
-        }
-        ActionTemplate::Command {
-            target,
-            verb,
-            params,
-        } => PendingAction::Action(Action::Command {
-            target,
-            verb,
-            params,
-            at: Some(at),
-        }),
+        ActionTemplate::UpdateParameter { target, key, value } => PendingAction::Update(PendingUpdate { target, key, value, at: Some(at) }),
+        ActionTemplate::Command { target, verb, params } => PendingAction::Action(Action::Command { target, verb, params, at: Some(at) }),
         ActionTemplate::Stop { target } => PendingAction::Action(Action::Stop { target }),
     }
 }
@@ -1094,10 +950,7 @@ mod tests {
     }
 
     fn target() -> Target {
-        Target::Resource {
-            resource: Ident::parse("radio").expect("a well-formed Ident"),
-            path: String::new(),
-        }
+        Target::Resource { resource: Ident::parse("radio").expect("a well-formed Ident"), path: String::new() }
     }
 
     #[test]
@@ -1105,33 +958,15 @@ mod tests {
         // Two declarations of one kind keep the first index. In-crate, because the
         // handle's index is private now (item 3) and no public behaviour distinguishes
         // the second index; the planned pair still shares the one counter row.
-        let policy = crate::policy::EventKindRegistry::with_kernel_kinds()
-            .compile(&BTreeMap::new())
-            .expect("compiles");
-        let source = EventSource::Node {
-            node: crate::id::ResourceId::parse("radio").expect("a node"),
-        };
+        let policy = crate::policy::EventKindRegistry::with_kernel_kinds().compile(&BTreeMap::new()).expect("compiles");
+        let source = EventSource::Node { node: crate::id::ResourceId::parse("radio").expect("a node") };
         let kind = EventKind::parse("test.custom").expect("parses");
         let declared_kinds = [kind.clone(), kind.clone()];
-        let collector = EventCollector::new(
-            &[(source.clone(), kind.clone())],
-            &declared_kinds,
-            8,
-            &policy,
-        );
-        let handle = collector
-            .resolve(&source, &kind)
-            .expect("the Kernel's own sink resolves any source");
-        assert_eq!(
-            handle.kind, 0,
-            "duplicate kinds use the first declared index"
-        );
+        let collector = EventCollector::new(&[(source.clone(), kind.clone())], &declared_kinds, 8, &policy);
+        let handle = collector.resolve(&source, &kind).expect("the Kernel's own sink resolves any source");
+        assert_eq!(handle.kind, 0, "duplicate kinds use the first declared index");
         collector.emit(handle, t(0), Severity::Info, &[]).expect("emits");
-        let row = collector
-            .counters()
-            .into_iter()
-            .find(|row| row.source == source && row.kind == kind)
-            .expect("the planned pair exists");
+        let row = collector.counters().into_iter().find(|row| row.source == source && row.kind == kind).expect("the planned pair exists");
         assert_eq!(row.count, 1);
     }
 
@@ -1141,11 +976,7 @@ mod tests {
         // template has no field for one — and `arm` resolves it to the class-pending
         // request that admission completes. `resolve_template` therefore cannot
         // produce a finished `Action::UpdateParameter` for it.
-        let template = ActionTemplate::UpdateParameter {
-            target: target(),
-            key: Key::parse("test.gain").expect("a well-formed Key"),
-            value: Value::from(true),
-        };
+        let template = ActionTemplate::UpdateParameter { target: target(), key: Key::parse("test.gain").expect("a well-formed Key"), value: Value::from(true) };
         assert!(template.is_timed());
         let deadline = AbsoluteDeadline::new(t(555));
         match resolve_template(template, deadline) {
@@ -1180,17 +1011,9 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         match resolve_template(template, deadline) {
-            PendingAction::Action(Action::TxBurst {
-                at,
-                requested_at,
-                repeat,
-                ..
-            }) => {
+            PendingAction::Action(Action::TxBurst { at, requested_at, repeat, .. }) => {
                 assert_eq!(at, deadline, "the resolved deadline is substituted");
-                assert_eq!(
-                    requested_at, None,
-                    "a Spec's schedule states the instant; nothing is coerced"
-                );
+                assert_eq!(requested_at, None, "a Spec's schedule states the instant; nothing is coerced");
                 assert!(!repeat, "every other field survives the substitution");
             }
             other => panic!("a TxBurst template resolves to a TxBurst: {other:?}"),

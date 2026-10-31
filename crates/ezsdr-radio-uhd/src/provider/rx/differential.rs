@@ -21,12 +21,12 @@ use ezsdr_kernel::module_api::{Fidelity, StopMode};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{ManualTimeAuthority, Rational, TimePoint};
 use ezsdr_radio::kinds;
-use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Segment, Stream, NO_RELEASE, plan};
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Segment, Stream, plan};
 use generator::{Change, Fault, Op, Sequence, Terms};
 
-use super::{Rx, RxCmd, Turn};
 use super::super::control::ColdConfig;
-use super::super::core::{booked_stream, Core, lock};
+use super::super::core::{Core, booked_stream, lock};
+use super::{Rx, RxCmd, Turn};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxReport};
 use crate::profile::DELIVERY_ALLOWANCE_NS;
 
@@ -180,7 +180,8 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     // What is booked: every command received before `Provider::stop`, and its end of the
     // stream, and booked before a loss, and the loss; a refused change marked as such (RM-25).
     let stop = extra.stop.filter(|(at, _)| loss.is_none_or(|loss| *at < loss));
-    let mut booked: Vec<Item> = items.iter()
+    let mut booked: Vec<Item> = items
+        .iter()
         .filter(|item| stop.is_none_or(|(at, _)| item.ready <= at && !matches!(item.kind, Kind::End { .. })))
         .filter(|item| matches!(item.kind, Kind::End { .. }) || loss.is_none_or(|loss| item.ready + extra.lag < loss))
         .map(|item| Item { refused: observed.refused.contains(&item.seq), ..*item })
@@ -230,9 +231,11 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     let begun = |segment: &Segment, by: i64| observed.calls.iter().any(|(at, call)| *at < by && call.strip_prefix("rx_start ") == Some(segment.origin.to_string().as_str()));
     let delivered = |index: usize, by: i64| -> i64 {
         let bound = loss.map_or(by, |loss| loss.min(by));
-        blocks(&all[index], &hits[index], extra).iter()
+        blocks(&all[index], &hits[index], extra)
+            .iter()
             .take_while(|(first, len, _, _)| all[index].instant(first + i64::from(*len)).unwrap() + extra.latency < bound)
-            .last().map_or(0, |(first, len, _, _)| first + i64::from(*len))
+            .last()
+            .map_or(0, |(first, len, _, _)| first + i64::from(*len))
     };
     let mut floor = false;
     let mut cuts: Vec<Option<i64>> = vec![None; all.len()];
@@ -261,9 +264,7 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     }
     // A segment the last plan does not have, never begun, never ran.
     let last = &plans.last().expect("a plan").1;
-    let kept: Vec<usize> = (0..all.len())
-        .filter(|index| cuts[*index] != Some(0) && (cuts[*index].is_some() || last.iter().any(|s| key(s) == key(&all[*index]))))
-        .collect();
+    let kept: Vec<usize> = (0..all.len()).filter(|index| cuts[*index] != Some(0) && (cuts[*index].is_some() || last.iter().any(|s| key(s) == key(&all[*index])))).collect();
     let segments: Vec<Segment> = kept.iter().map(|index| Segment { cut: cuts[*index], ..all[*index] }).collect();
     let hits: Vec<Vec<(i64, Fault)>> = kept.iter().map(|index| hits[*index].clone()).collect();
     for segment in &segments {
@@ -289,7 +290,10 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     let mut cut_off = false;
     for (index, segment) in segments.iter().enumerate() {
         let full = blocks(segment, &hits[index], extra);
-        let got: Vec<Block> = observed.clocks.iter().position(|(origin, _)| *origin == segment.origin)
+        let got: Vec<Block> = observed
+            .clocks
+            .iter()
+            .position(|(origin, _)| *origin == segment.origin)
             .map(|clock| observed.blocks.iter().filter(|(c, _)| *c == clock).map(|(_, block)| *block).collect())
             .unwrap_or_default();
         let whole = !cut_off && got == full;
@@ -404,10 +408,18 @@ impl DataLink for Headers {
         lock(&self.0).push(block.header().clone());
         PublishOutcome::Accepted
     }
-    fn receive(&self) -> Option<(BlockRef, DropCarry)> { None }
-    fn drops(&self) -> u64 { 0 }
-    fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
-    fn policy(&self) -> BackPressure { BackPressure::DropOldest }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        None
+    }
+    fn drops(&self) -> u64 {
+        0
+    }
+    fn take_drop_carry(&self) -> DropCarry {
+        DropCarry::default()
+    }
+    fn policy(&self) -> BackPressure {
+        BackPressure::DropOldest
+    }
 }
 
 /// What happens at an instant, besides the device's packets.
@@ -543,21 +555,47 @@ struct Scripted {
 }
 
 impl Device for Scripted {
-    fn describe(&self) -> serde_json::Value { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
+    fn describe(&self) -> serde_json::Value {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
     /// Sol R07 (plan 30 §4.2): a test wrapper forwards the inner device's host clock, or it
     /// would inherit the real one and the Authority's and the fake's clocks would disagree.
-    fn host(&self) -> crate::HostClock { self.inner.host() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { Ok(lock(&self.world).now) }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
+    fn host(&self) -> crate::HostClock {
+        self.inner.host()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        Ok(lock(&self.world).now)
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
 
     /// The FakeDevice's, which refuses a rate once when asked to (`WrongRate`); the receive
     /// rate it applied starts the next stream.
@@ -670,7 +708,10 @@ impl Device for Scripted {
         // The first fault on this stream not yet reported: at its sample, or cutting the
         // packet short there.
         let end = run.end;
-        let fault = world.faults.iter().enumerate()
+        let fault = world
+            .faults
+            .iter()
+            .enumerate()
             .filter(|(_, (f, _, fired))| !fired && *f >= origin && end.is_none_or(|end| *f < end))
             .map(|(index, (f, _, _))| (((f - origin + step - 1) / step).max(k), index))
             .min()
@@ -700,7 +741,7 @@ impl Device for Scripted {
         }
         if ready > world.horizon {
             let horizon = world.horizon;
-                world.advance(horizon);
+            world.advance(horizon);
             world.done = true;
             return RxRecv::Timeout;
         }
@@ -715,16 +756,30 @@ impl Device for Scripted {
         RxRecv::Samples { first_tick: origin + k * step, samples }
     }
 
-    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> { self.inner.tx_open(stream, channels) }
+    fn tx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
+        self.inner.tx_open(stream, channels)
+    }
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
         self.inner.tx_send(stream, samples, at, sob, eob, timeout)
     }
-    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> { self.inner.tx_async(stream, timeout) }
-    fn rx_close(&self, stream: usize) { self.inner.rx_close(stream) }
-    fn tx_close(&self, stream: usize) { self.inner.tx_close(stream) }
-    fn close_streams(&self) { self.inner.close_streams() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> { self.inner.raise_thread_priority() }
+    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> {
+        self.inner.tx_async(stream, timeout)
+    }
+    fn rx_close(&self, stream: usize) {
+        self.inner.rx_close(stream)
+    }
+    fn tx_close(&self, stream: usize) {
+        self.inner.tx_close(stream)
+    }
+    fn close_streams(&self) {
+        self.inner.close_streams()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), crate::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
 }
 
 /// Runs a sequence's receive plans on uhd-rx: each command booked `lag` after its receipt, the
@@ -840,10 +895,13 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
     }
     Observed {
         clocks: rx_clocks.iter().map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect(),
-        blocks: headers.iter().map(|h| {
-            let clock = rx_clocks.iter().position(|r| r.domain == h.first_sample_time.domain()).expect("a block on a receive clock");
-            (clock, (h.first_sample_time.ticks_in(rx_clocks[clock].domain).unwrap(), h.len, h.flags, h.lost))
-        }).collect(),
+        blocks: headers
+            .iter()
+            .map(|h| {
+                let clock = rx_clocks.iter().position(|r| r.domain == h.first_sample_time.domain()).expect("a block on a receive clock");
+                (clock, (h.first_sample_time.ticks_in(rx_clocks[clock].domain).unwrap(), h.len, h.flags, h.lost))
+            })
+            .collect(),
         stops: rec.applied.iter().filter(|r| r["key"] == "rx_stop").map(|r| (r["at"]["ticks"].as_i64().unwrap(), r["issued"]["ticks"].as_i64().unwrap())).collect(),
         refused: w.refused.clone(),
         refusable: extra.refuse.map_or(0, |rate| device.inner.calls().iter().filter(|c| c.starts_with(&format!("apply rx 0 rate={rate} "))).count()),

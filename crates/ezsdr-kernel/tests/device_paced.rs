@@ -19,10 +19,7 @@ use ezsdr_kernel::run::{CleanupStep, Lease, RunState, Stage, StopCause, SystemHo
 use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockRegistry, Duration, TimePoint};
-use support::{
-    Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider,
-    ThreadedProvider, WallAuthority, mref, ns, run_checks, run_kinds, run_registry,
-};
+use support::{Probe, RecordingSink, SimAuthority, SteppedProvider, TestLinkModule, TestProvider, ThreadedProvider, WallAuthority, mref, ns, run_checks, run_kinds, run_registry};
 
 // ---------------------------------------------------------------- fixtures
 
@@ -147,11 +144,7 @@ fn count(probe: &Probe, prefix: &str) -> usize {
 }
 
 fn stepped_on(probe: &Probe) -> Vec<String> {
-    probe
-        .with_prefix("rec:step_on:")
-        .into_iter()
-        .map(|line| line.trim_start_matches("rec:step_on:").to_owned())
-        .collect()
+    probe.with_prefix("rec:step_on:").into_iter().map(|line| line.trim_start_matches("rec:step_on:").to_owned()).collect()
 }
 
 fn kind(s: &str) -> EventKind {
@@ -170,11 +163,7 @@ fn kg_01_a_device_paced_run_reaches_running() {
     let manifest = manifest_of(run);
     assert_eq!(manifest.run.execution_class, Some(ExecutionClass::HardwareInLoop));
     assert!(!manifest.run.deterministic);
-    let calls: Vec<_> = probe
-        .with_prefix("radio:")
-        .into_iter()
-        .filter(|line| ["radio:prepare", "radio:arm", "radio:start", "radio:stop", "radio:cleanup"].contains(&line.as_str()))
-        .collect();
+    let calls: Vec<_> = probe.with_prefix("radio:").into_iter().filter(|line| ["radio:prepare", "radio:arm", "radio:start", "radio:stop", "radio:cleanup"].contains(&line.as_str())).collect();
     assert_eq!(calls, ["radio:prepare", "radio:arm", "radio:start", "radio:stop", "radio:cleanup"]);
 }
 
@@ -194,15 +183,9 @@ fn kg_01_the_hardware_class_reaches_running() {
 fn kg_01_a_stepped_provider_is_refused_in_a_device_paced_class() {
     let probe = Probe::new();
     let rig = paced();
-    let assembly = provider(
-        rig.assembly,
-        "radio",
-        SteppedProvider::new("p", TestProvider::new("radio", 2), &probe),
-    );
+    let assembly = provider(rig.assembly, "radio", SteppedProvider::new("p", TestProvider::new("radio", 2), &probe));
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
-    assert!(
-        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan, .. } })
-    );
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan, .. } }));
     let manifest = manifest_of(run);
     assert!(failure(&manifest).starts_with("KC-2a: radio is a stepped Provider"), "{}", failure(&manifest));
     assert!(!probe.lines().iter().any(|line| line.starts_with("p:prepare")));
@@ -215,13 +198,7 @@ fn executor_docs() -> (serde_json::Value, serde_json::Value) {
     component.id = Ident::parse("c1").unwrap();
     component.implementation.id = "c1".to_owned();
     // MA-39: an Island with a real-time policy needs a budget on every component.
-    component.timing.budget = Some(
-        ezsdr_kernel::time::RelativeBudget::new(ezsdr_kernel::time::Duration::new(
-            ClockDomainId::HOST_MONOTONIC,
-            1_000_000,
-        ))
-        .unwrap(),
-    );
+    component.timing.budget = Some(ezsdr_kernel::time::RelativeBudget::new(ezsdr_kernel::time::Duration::new(ClockDomainId::HOST_MONOTONIC, 1_000_000)).unwrap());
     spec["graph"] = serde_json::json!({ "components": { "c1": component } });
     let mut profile = profile_one();
     profile["bindings"]["exec"] = serde_json::json!({
@@ -242,27 +219,15 @@ fn island_docs(field: &str, value: serde_json::Value) -> (serde_json::Value, ser
 
 #[test]
 fn kg_01_an_island_with_an_rt_policy_is_refused() {
-    for (field, value) in [
-        ("rt_policy", serde_json::json!({ "sched": "fifo", "priority": 10 })),
-        ("affinity", serde_json::json!([1])),
-    ] {
+    for (field, value) in [("rt_policy", serde_json::json!({ "sched": "fifo", "priority": 10 })), ("affinity", serde_json::json!([1]))] {
         let probe = Probe::new();
         let (spec, profile) = island_docs(field, value);
         let mut assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
-        assembly.executors.insert(
-            Ident::parse("exec").unwrap(),
-            Box::new(support::ProbeExecutor::new("x", &probe)),
-        );
+        assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe)));
         let run = start_spec_run(&spec, &profile, assembly).unwrap();
-        assert!(
-            matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan, .. } }),
-            "{field}"
-        );
+        assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Plan, .. } }), "{field}");
         let reason = failure(&manifest_of(run));
-        assert_eq!(
-            reason,
-            format!("KC-2a: island_0 declares {field}, which a device-paced class does not apply before Phase 10")
-        );
+        assert_eq!(reason, format!("KC-2a: island_0 declares {field}, which a device-paced class does not apply before Phase 10"));
     }
 }
 
@@ -270,11 +235,7 @@ fn kg_01_an_island_with_an_rt_policy_is_refused() {
 
 fn publishing_spec_run(probe: &Probe, sink_double: RecordingSink) -> RunHandle {
     let (spec, profile) = output_docs(64);
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", probe).publishing(100, Wall::from_millis(1)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", probe).publishing(100, Wall::from_millis(1)));
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, probe)).unwrap();
     running(&run);
     run
@@ -312,11 +273,7 @@ fn simulation_run(probe: &Probe) -> (RunHandle, ClockDomainId) {
     let (authority, root) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
     let (spec, mut profile) = output_docs(64);
     profile["environment"] = serde_json::json!({});
-    let assembly = provider(
-        assembly_with(Box::new(authority), clocks),
-        "radio",
-        SteppedProvider::new("p", TestProvider::new("radio", 2), probe).publishing_every(10),
-    );
+    let assembly = provider(assembly_with(Box::new(authority), clocks), "radio", SteppedProvider::new("p", TestProvider::new("radio", 2), probe).publishing_every(10));
     let sink_double = RecordingSink::new("rec", probe).recording_threads();
     (start_spec_run(&spec, &profile, sink(assembly, sink_double, probe)).unwrap(), root)
 }
@@ -343,10 +300,7 @@ fn kg_02_the_simulation_class_starts_no_thread() {
     let _ = manifest_of(run);
     let threads = stepped_on(&probe);
     assert!(!threads.is_empty());
-    assert!(
-        threads.iter().all(|t| !t.ends_with(":ezsdr-data") && !t.ends_with(":ezsdr-bounded")),
-        "{threads:?}"
-    );
+    assert!(threads.iter().all(|t| !t.ends_with(":ezsdr-data") && !t.ends_with(":ezsdr-bounded")), "{threads:?}");
 }
 
 #[test]
@@ -393,11 +347,7 @@ fn session(assembly: Assembly, profile: &serde_json::Value) -> RunHandle {
 #[test]
 fn kg_02_wait_for_returns_when_the_data_thread_delivers() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).marking("test.MARK", Wall::from_millis(30)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).marking("test.MARK", Wall::from_millis(30)));
     let mut run = session(assembly, &profile_one());
     let horizon = after(&run, Wall::from_secs(5));
     let begun = Instant::now();
@@ -412,12 +362,7 @@ fn kg_02_wait_for_returns_when_the_data_thread_delivers() {
 fn stopping_kinds() -> EventKindRegistry {
     let mut kinds = run_kinds();
     for name in ["test.first", "test.second"] {
-        kinds
-            .register(
-                Some(ns("test")),
-                EventKindDecl { kind: kind(name), default: Reaction::Stop, severity: ezsdr_kernel::event::Severity::Info },
-            )
-            .unwrap();
+        kinds.register(Some(ns("test")), EventKindDecl { kind: kind(name), default: Reaction::Stop, severity: ezsdr_kernel::event::Severity::Info }).unwrap();
     }
     kinds
 }
@@ -428,27 +373,15 @@ fn kg_02_the_first_delivered_stopping_event_is_the_termination_cause() {
     // keeps `delivered` and the reactions in one order either way.
     let mut registry_vocabulary = support::test_vocabulary();
     for name in ["test.first", "test.second"] {
-        registry_vocabulary.event_kinds.push(EventKindDecl {
-            kind: kind(name),
-            default: Reaction::Stop,
-            severity: ezsdr_kernel::event::Severity::Info,
-        });
+        registry_vocabulary.event_kinds.push(EventKindDecl { kind: kind(name), default: Reaction::Stop, severity: ezsdr_kernel::event::Severity::Info });
     }
     for _ in 0..50 {
         let probe = Probe::new();
         let mut rig = paced();
         rig.assembly.kinds = stopping_kinds();
         rig.assembly.registry = registry_with(registry_vocabulary.clone());
-        let assembly = provider(
-            rig.assembly,
-            "a",
-            ThreadedProvider::new("a", "a", &probe).marking("test.first", Wall::from_millis(20)),
-        );
-        let assembly = provider(
-            assembly,
-            "b",
-            ThreadedProvider::new("b", "b", &probe).marking("test.second", Wall::from_millis(20)),
-        );
+        let assembly = provider(rig.assembly, "a", ThreadedProvider::new("a", "a", &probe).marking("test.first", Wall::from_millis(20)));
+        let assembly = provider(assembly, "b", ThreadedProvider::new("b", "b", &probe).marking("test.second", Wall::from_millis(20)));
         let profile = serde_json::json!({
             "version": 1,
             "bindings": {
@@ -468,18 +401,8 @@ fn kg_02_the_first_delivered_stopping_event_is_the_termination_cause() {
             }
         }
         let manifest = manifest_of(run);
-        let first = manifest
-            .events
-            .delivered
-            .iter()
-            .find(|event| event.kind == kind("test.first") || event.kind == kind("test.second"))
-            .expect("a stopping event was delivered")
-            .kind
-            .clone();
-        assert_eq!(
-            manifest.termination.reason,
-            Termination::Stopped { cause: StopCause::Policy { event: first } }
-        );
+        let first = manifest.events.delivered.iter().find(|event| event.kind == kind("test.first") || event.kind == kind("test.second")).expect("a stopping event was delivered").kind.clone();
+        assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: first } });
     }
 }
 
@@ -487,14 +410,8 @@ fn registry_with(vocabulary: ezsdr_kernel::module_api::VocabularyDescriptor) -> 
     let mut registry = ezsdr_kernel::module_api::ModuleRegistry::new();
     registry.register_vocabulary(vocabulary).unwrap();
     for (descriptor, factories) in [
-        (
-            support::test_provider_descriptor(),
-            ezsdr_kernel::module_api::Factories { provider: true, authority: true, ..Default::default() },
-        ),
-        (
-            support::test_sink_descriptor(),
-            ezsdr_kernel::module_api::Factories { sink: true, ..Default::default() },
-        ),
+        (support::test_provider_descriptor(), ezsdr_kernel::module_api::Factories { provider: true, authority: true, ..Default::default() }),
+        (support::test_sink_descriptor(), ezsdr_kernel::module_api::Factories { sink: true, ..Default::default() }),
     ] {
         registry.register(descriptor, factories).unwrap();
     }
@@ -556,10 +473,7 @@ fn kg_02_a_detached_lease_expires_while_no_call_runs() {
     run.disconnect();
     assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
     let manifest = manifest_of(run);
-    assert_eq!(
-        manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::LeaseExpiry {} }
-    );
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
 }
 
 fn detached_session(probe: &Probe, ttl_ms: u64) -> RunHandle {
@@ -590,10 +504,7 @@ fn kc_36_renew_moves_the_deadline_the_data_thread_checks() {
     assert!(!provider_stopped(&probe), "{:?}", probe.lines());
     running(&run);
     assert!(probe.wait_for("radio:stop", Wall::from_secs(1)));
-    assert_eq!(
-        manifest_of(run).termination.reason,
-        Termination::Stopped { cause: StopCause::LeaseExpiry {} }
-    );
+    assert_eq!(manifest_of(run).termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
 }
 
 #[test]
@@ -608,22 +519,13 @@ fn kc_36_adopt_clears_the_deadline_the_data_thread_checks() {
     std::thread::sleep(Wall::from_millis(300));
     assert!(!provider_stopped(&probe), "{:?}", probe.lines());
     running(&run);
-    assert_eq!(
-        manifest_of(run).termination.reason,
-        Termination::Stopped { cause: StopCause::Client {} }
-    );
+    assert_eq!(manifest_of(run).termination.reason, Termination::Stopped { cause: StopCause::Client {} });
 }
 
 // ---------------------------------------------------------------- KG-3
 
 fn lost_device_session(probe: &Probe) -> RunHandle {
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", probe)
-            .publishing(100, Wall::from_millis(1))
-            .losing_device(Wall::from_millis(20)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", probe).publishing(100, Wall::from_millis(1)).losing_device(Wall::from_millis(20)));
     let assembly = sink(assembly, RecordingSink::new("rec", probe), probe);
     session(assembly, &session_sink_profile())
 }
@@ -634,10 +536,7 @@ fn kg_03_a_fatal_event_stops_the_providers_without_a_client_call() {
     let run = lost_device_session(&probe);
     assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
     let manifest = manifest_of(run);
-    assert_eq!(
-        manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
-    );
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
     assert_eq!(count(&probe, "radio:stop"), 1);
 }
 
@@ -672,10 +571,7 @@ fn kc_32_a_disconnect_after_a_policy_stop_is_dropped() {
     assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
     run.disconnect();
     let manifest = manifest_of(run);
-    assert_eq!(
-        manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
-    );
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
     assert!(manifest.termination.also.is_empty(), "{:?}", manifest.termination.also);
 }
 
@@ -688,11 +584,7 @@ fn kg_03_an_abort_stops_the_data_thread() {
     let _ = manifest_of(run);
     let lines = probe.lines();
     let stop = lines.iter().position(|line| line == "radio:stop").unwrap();
-    assert!(
-        !lines[stop..].iter().any(|line| line.starts_with("rec:step:")),
-        "{:?}",
-        &lines[stop..]
-    );
+    assert!(!lines[stop..].iter().any(|line| line.starts_with("rec:step:")), "{:?}", &lines[stop..]);
 }
 
 #[test]
@@ -716,11 +608,7 @@ fn kg_03_a_step_done_early_is_not_repeated() {
         assert_eq!(count(&probe, &format!("{name}:stop")), 1, "{name}");
         assert_eq!(count(&probe, &format!("{name}:cleanup")), 1, "{name}");
     }
-    assert!(
-        !manifest.termination.cleanup_failures.iter().any(|f| f.step == CleanupStep::StopProviders),
-        "{:?}",
-        manifest.termination.cleanup_failures
-    );
+    assert!(!manifest.termination.cleanup_failures.iter().any(|f| f.step == CleanupStep::StopProviders), "{:?}", manifest.termination.cleanup_failures);
 }
 
 #[test]
@@ -740,10 +628,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
     profile["placements"]["links"].as_array_mut().unwrap().push(link);
     let at = 20_000_000;
     let mut assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
-    assembly.sinks.insert(
-        Ident::parse("rec2").unwrap(),
-        Box::new(RecordingSink::new("rec2", &probe).panicking_step_at(at)),
-    );
+    assembly.sinks.insert(Ident::parse("rec2").unwrap(), Box::new(RecordingSink::new("rec2", &probe).panicking_step_at(at)));
     let sink_double = RecordingSink::new("rec", &probe).failing_step_at(at, ModuleErrorKind::DeviceLost);
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
     running(&run);
@@ -760,13 +645,7 @@ fn kc_30_a_panic_after_a_device_lost_in_one_pass_fails_the_run() {
 fn kg_03_step_3_runs_a_final_round_over_the_sinks() {
     let probe = Probe::new();
     let (spec, profile) = output_docs(64);
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe)
-            .publishing(100, Wall::from_millis(1))
-            .with_stop_tail(2),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).with_stop_tail(2));
     let sink_double = RecordingSink::new("rec", &probe).recording_threads();
     let run = start_spec_run(&spec, &profile, sink(assembly, sink_double, &probe)).unwrap();
     running(&run);
@@ -776,13 +655,7 @@ fn kg_03_step_3_runs_a_final_round_over_the_sinks() {
     let lines = probe.lines();
     let stop = lines.iter().position(|line| line == "radio:stop").unwrap();
     let sink_stop = lines.iter().position(|line| line == "rec:stop:Orderly").unwrap();
-    assert!(
-        lines[stop..sink_stop]
-            .iter()
-            .any(|line| line.starts_with("rec:step_on:") && !line.ends_with(&data)),
-        "{:?}",
-        &lines[stop..sink_stop]
-    );
+    assert!(lines[stop..sink_stop].iter().any(|line| line.starts_with("rec:step_on:") && !line.ends_with(&data)), "{:?}", &lines[stop..sink_stop]);
     let last_tail = lines.iter().rposition(|line| line == "radio:tail").unwrap();
     assert!(lines[last_tail..sink_stop].iter().any(|line| line.starts_with("rec:block:")));
 }
@@ -794,13 +667,7 @@ fn kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop() {
     // tail the Provider delivers in step 2 reaches the Sink with no call running, and
     // the Run stays `Running` until the control thread's cleanup.
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe)
-            .publishing(100, Wall::from_millis(1))
-            .with_stop_tail(2),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).with_stop_tail(2));
     let assembly = sink(assembly, RecordingSink::new("rec", &probe).recording_threads(), &probe);
     let lease = Lease::detached(50, false, "token", &SystemHostClock::new()).unwrap();
     let mut run = connect(&session_sink_profile(), assembly, lease).unwrap();
@@ -818,29 +685,14 @@ fn kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop() {
     assert!(steps.iter().all(|line| line.ends_with(":ezsdr-data")), "{steps:?}");
     assert!(!lines.iter().any(|line| line.starts_with("rec:stop:")), "{lines:?}");
     let manifest = manifest_of(run);
-    assert_eq!(
-        manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::LeaseExpiry {} }
-    );
-    assert!(
-        manifest
-            .run
-            .transitions
-            .iter()
-            .any(|t| matches!(t.state, RunState::Stopping { mode: ezsdr_kernel::run::CleanupMode::Orderly })),
-        "{:?}",
-        manifest.run.transitions
-    );
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::LeaseExpiry {} });
+    assert!(manifest.run.transitions.iter().any(|t| matches!(t.state, RunState::Stopping { mode: ezsdr_kernel::run::CleanupMode::Orderly })), "{:?}", manifest.run.transitions);
 }
 
 #[test]
 fn kg_03_a_cancelled_horizon_wakes_the_control_loop() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(20)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(20)));
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     running(&run);
     let begun = Instant::now();
@@ -853,11 +705,7 @@ fn kg_03_a_cancelled_horizon_wakes_the_control_loop() {
 #[test]
 fn kg_03_dropping_a_live_device_paced_handle_cleans_up() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)));
     let assembly = sink(assembly, RecordingSink::new("rec", &probe), &probe);
     let run = session(assembly, &session_sink_profile());
     std::thread::sleep(Wall::from_millis(20));
@@ -872,11 +720,7 @@ fn kg_03_dropping_a_live_device_paced_handle_cleans_up() {
 // ---------------------------------------------------------------- KG-4
 
 fn gain(value: f64) -> SessionAction {
-    SessionAction::SetParameter {
-        target: support::target("radio"),
-        key: Key::parse("test.gain").unwrap(),
-        value: Value::num(value).unwrap(),
-    }
+    SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(value).unwrap() }
 }
 
 fn admitted(entry: &ezsdr_kernel::session::LogEntry) -> bool {
@@ -886,11 +730,7 @@ fn admitted(entry: &ezsdr_kernel::session::LogEntry) -> bool {
 #[test]
 fn kg_04_a_session_call_returns_after_the_provider_has_finished() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).with_action_delay(Wall::from_millis(30)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).with_action_delay(Wall::from_millis(30)));
     let mut run = session(assembly, &profile_one());
     let entry = run.submit(gain(3.0), None).unwrap();
     assert!(admitted(&entry), "{entry:?}");
@@ -905,18 +745,14 @@ fn kg_04_every_action_of_one_call_is_finished() {
     let probe = Probe::new();
     let (mut spec, profile) = output_docs(64);
     let radio = serde_json::to_value(support::target("radio")).unwrap();
-    let entry = |value: f64| serde_json::json!({
-        "at": { "clock": "radio", "offset_ticks": 0 },
-        "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": value, }
-    });
+    let entry = |value: f64| {
+        serde_json::json!({
+            "at": { "clock": "radio", "offset_ticks": 0 },
+            "action": { "kind": "update_parameter", "target": radio, "key": "test.gain", "value": value, }
+        })
+    };
     spec["schedule"] = serde_json::json!([entry(1.0), entry(2.0)]);
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe)
-            .publishing(100, Wall::from_millis(1))
-            .with_action_delay(Wall::from_millis(30)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).with_action_delay(Wall::from_millis(30)));
     let mut run = start_spec_run(&spec, &profile, sink(assembly, RecordingSink::new("rec", &probe), &probe)).unwrap();
     running(&run);
     let t0 = run.start_instant().unwrap();
@@ -931,28 +767,10 @@ fn kg_04_the_next_admission_sees_the_state_the_previous_action_made() {
         let probe = Probe::new();
         let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
         let mut run = session(assembly, &profile_one());
-        let clock = run
-            .submit(
-                SessionAction::SetParameter {
-                    target: support::target("radio"),
-                    key: Key::parse("test.tx_clock").unwrap(),
-                    value: Value::from(10),
-                },
-                None,
-            )
-            .unwrap();
+        let clock = run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.tx_clock").unwrap(), value: Value::from(10) }, None).unwrap();
         assert!(admitted(&clock), "{clock:?}");
         let burst = run
-            .submit(
-                SessionAction::Vocabulary {
-                    ns: ns("test"),
-                    verb: Ident::parse("start_repeat").unwrap(),
-                    target: support::target("radio/tx"),
-                    at: None,
-                    params: BTreeMap::new(),
-                },
-                Some(&[0u8; 80]),
-            )
+            .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&[0u8; 80]))
             .unwrap();
         assert!(admitted(&burst), "{burst:?}");
         let _ = manifest_of(run);
@@ -962,11 +780,7 @@ fn kg_04_the_next_admission_sees_the_state_the_previous_action_made() {
 #[test]
 fn kg_04_a_provider_that_never_finishes_fails_the_run() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).never_finishing(),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).never_finishing());
     let mut run = session(assembly, &profile_one());
     let begun = Instant::now();
     let _ = run.submit(gain(1.0), None);
@@ -983,23 +797,14 @@ fn kc_21a_an_end_requested_during_the_wait_ends_it() {
     // Action and loses its device 100 ms after the start; the end the data thread
     // requests ends the wait long before the 5 s budget.
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe)
-            .never_finishing()
-            .losing_device(Wall::from_millis(100)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).never_finishing().losing_device(Wall::from_millis(100)));
     let mut run = session(assembly, &profile_one());
     let begun = Instant::now();
     let _ = run.submit(gain(1.0), None);
     assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
     assert!(probe.lines().iter().any(|line| line == "radio:took:UpdateParameter"));
     let manifest = manifest_of(run);
-    assert_eq!(
-        manifest.termination.reason,
-        Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } }
-    );
+    assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Policy { event: kind(EventKind::DEVICE_LOST) } });
 }
 
 #[test]
@@ -1008,13 +813,7 @@ fn rs_16_an_action_the_freeze_discards_is_undelivered() {
     // device loss requests the end, the Session logs the Action admitted, and RS-6
     // step 1 discards it from the queue. The termination section names it (RS-16).
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe)
-            .deaf()
-            .losing_device(Wall::from_millis(100)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).deaf().losing_device(Wall::from_millis(100)));
     let mut run = session(assembly, &profile_one());
     let entry = run.submit(gain(1.0), None).unwrap();
     let Outcome::Admitted { dispatched, .. } = entry.outcome else { panic!("{entry:?}") };
@@ -1029,22 +828,12 @@ fn rs_16_a_sink_action_the_freeze_discards_is_undelivered() {
     // F24's window for a Sink: a recorder's verb queued for a recorder that never
     // takes it is discarded by RS-6 step 1 and named in `undelivered` (RS-16).
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(100)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(100)));
     let assembly = sink(assembly, RecordingSink::new("rec", &probe).deaf(), &probe);
     let mut run = session(assembly, &session_sink_profile());
     let entry = run
         .submit(
-            SessionAction::Vocabulary {
-                ns: ns("test"),
-                verb: Ident::parse("sweep").unwrap(),
-                target: Target::Output { output: Ident::parse("rec").unwrap() },
-                at: None,
-                params: BTreeMap::new(),
-            },
+            SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("sweep").unwrap(), target: Target::Output { output: Ident::parse("rec").unwrap() }, at: None, params: BTreeMap::new() },
             None,
         )
         .unwrap();
@@ -1062,32 +851,16 @@ fn kc_21a_a_module_s_own_submission_is_not_waited_for() {
     // it; the data thread goes on stepping the Executor all the same.
     let probe = Probe::new();
     let (spec, profile) = executor_docs();
-    let mut assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).never_finishing(),
-    );
-    let action = Action::UpdateParameter {
-        target: support::target("radio"),
-        key: Key::parse("test.gain").unwrap(),
-        value: Value::num(3.0).unwrap(),
-        class: UpdateClass::HardwareTimed,
-        at: None,
-    };
-    assembly.executors.insert(
-        Ident::parse("exec").unwrap(),
-        Box::new(support::ProbeExecutor::new("x", &probe).submitting(action)),
-    );
+    let mut assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).never_finishing());
+    let action = Action::UpdateParameter { target: support::target("radio"), key: Key::parse("test.gain").unwrap(), value: Value::num(3.0).unwrap(), class: UpdateClass::HardwareTimed, at: None };
+    assembly.executors.insert(Ident::parse("exec").unwrap(), Box::new(support::ProbeExecutor::new("x", &probe).submitting(action)));
     let run = start_spec_run(&spec, &profile, assembly).unwrap();
     running(&run);
     assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_millis(500)));
     std::thread::sleep(Wall::from_millis(100));
     running(&run);
     let lines = probe.lines();
-    let submitted = lines
-        .iter()
-        .position(|line| line.starts_with("x:submit:"))
-        .expect("the submission returned");
+    let submitted = lines.iter().position(|line| line.starts_with("x:submit:")).expect("the submission returned");
     assert!(lines[submitted].starts_with("x:submit:ok:"), "{}", lines[submitted]);
     let later = lines[submitted..].iter().filter(|line| line.starts_with("x:step:")).count();
     assert!(later >= 2, "{:?}", &lines[submitted..]);
@@ -1113,13 +886,7 @@ impl AdmissionCheck for Gate {
     fn stages(&self) -> &[CheckStage] {
         &self.stages
     }
-    fn check(
-        &self,
-        _section: &serde_json::Value,
-        _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _stage: CheckStage,
-    ) -> Vec<Violation> {
+    fn check(&self, _section: &serde_json::Value, _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
         let mut fired = self.fired.lock().unwrap();
         if !*fired {
             *fired = true;
@@ -1137,31 +904,15 @@ fn kg_04_no_action_is_dispatched_after_the_freeze() {
     let loss = Arc::new((Mutex::new(false), Condvar::new()));
     let mut rig = paced();
     let mut checks = AdmissionCheckRegistry::new();
-    checks.register(Arc::new(Gate {
-        section: ns("test.gate"),
-        stages: vec![CheckStage::Runtime],
-        loss: loss.clone(),
-        probe: probe.clone(),
-        fired: Mutex::new(false),
-    }));
+    checks.register(Arc::new(Gate { section: ns("test.gate"), stages: vec![CheckStage::Runtime], loss: loss.clone(), probe: probe.clone(), fired: Mutex::new(false) }));
     rig.assembly.checks = checks;
-    let assembly = provider(
-        rig.assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe)
-            .losing_device_on(loss)
-            .draining_after_stop(Wall::from_millis(50)),
-    );
+    let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device_on(loss).draining_after_stop(Wall::from_millis(50)));
     let mut profile = profile_one();
     profile["environment"]["test.gate"] = serde_json::json!({});
     let mut run = session(assembly, &profile);
     let _ = run.submit(gain(2.0), None);
     let _ = manifest_of(run);
-    assert!(
-        !probe.lines().iter().any(|line| line.starts_with("radio:after_stop:")),
-        "{:?}",
-        probe.lines()
-    );
+    assert!(!probe.lines().iter().any(|line| line.starts_with("radio:after_stop:")), "{:?}", probe.lines());
 }
 
 #[test]
@@ -1171,11 +922,7 @@ fn kg_04_a_simulation_session_does_not_wait() {
     let probe = Probe::new();
     let clocks = Arc::new(ClockRegistry::new());
     let (authority, _) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
-    let assembly = provider(
-        assembly_with(Box::new(authority), clocks),
-        "radio",
-        SteppedProvider::new("p", TestProvider::new("radio", 2), &probe),
-    );
+    let assembly = provider(assembly_with(Box::new(authority), clocks), "radio", SteppedProvider::new("p", TestProvider::new("radio", 2), &probe));
     let mut profile = profile_one();
     profile["environment"] = serde_json::json!({});
     let mut run = session(assembly, &profile);
@@ -1210,19 +957,12 @@ fn kg_05_a_device_paced_spec_run_ends_at_its_scheduled_stop() {
         "at": { "clock": "radio", "offset_ticks": 30_000 },
         "action": { "kind": "stop", "target": null }
     }]);
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)));
     let mut run = start_spec_run(&spec, &profile_one(), assembly).unwrap();
     running(&run);
     let begun = Instant::now();
     let result = run.run_until_end(after(&run, Wall::from_secs(5)));
-    assert!(
-        matches!(result, Err(RunHandleError::Ended { termination: Termination::Completed {} })),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(RunHandleError::Ended { termination: Termination::Completed {} })), "{result:?}");
     assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
 }
 
@@ -1231,44 +971,24 @@ fn kg_05_a_device_paced_spec_run_ends_at_its_scheduled_stop() {
 #[test]
 fn kg_06_a_prepare_that_hangs_fails_the_run_within_its_budget() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).with_prepare_delay(Wall::from_secs(30)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).with_prepare_delay(Wall::from_secs(30)));
     let begun = Instant::now();
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     assert!(begun.elapsed() < Wall::from_secs(12), "{:?}", begun.elapsed());
-    assert!(
-        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } })
-    );
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Prepare, .. } }));
     let manifest = manifest_of(run);
     assert!(failure(&manifest).starts_with("KC-12a: prepare of radio"), "{}", failure(&manifest));
-    assert!(
-        manifest
-            .termination
-            .cleanup_failures
-            .iter()
-            .any(|f| f.fragment.as_ref().is_some_and(|id| id.as_str() == "radio")),
-        "{:?}",
-        manifest.termination.cleanup_failures
-    );
+    assert!(manifest.termination.cleanup_failures.iter().any(|f| f.fragment.as_ref().is_some_and(|id| id.as_str() == "radio")), "{:?}", manifest.termination.cleanup_failures);
 }
 
 #[test]
 fn kg_06_an_arm_that_hangs_fails_the_run_within_its_budget() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).with_arm_delay(Wall::from_secs(30)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).with_arm_delay(Wall::from_secs(30)));
     let begun = Instant::now();
     let run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     assert!(begun.elapsed() < Wall::from_secs(12), "{:?}", begun.elapsed());
-    assert!(
-        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } })
-    );
+    assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }));
     let manifest = manifest_of(run);
     assert!(failure(&manifest).starts_with("KC-12a: arm of radio"), "{}", failure(&manifest));
 }
@@ -1278,11 +998,7 @@ fn kg_06_the_simulation_class_prepares_on_the_callers_thread() {
     let probe = Probe::new();
     let clocks = Arc::new(ClockRegistry::new());
     let (authority, _) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
-    let assembly = provider(
-        assembly_with(Box::new(authority), clocks),
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe),
-    );
+    let assembly = provider(assembly_with(Box::new(authority), clocks), "radio", ThreadedProvider::new("radio", "radio", &probe));
     let mut profile = profile_one();
     profile["environment"] = serde_json::json!({});
     let run = start_spec_run(&spec_one(), &profile, assembly).unwrap();
@@ -1339,10 +1055,7 @@ fn kc_15_an_overflow_of_l_or_of_t0_fails_arm() {
     // i64::MAX.
     let t0 = armed_at(&[("radio/a", cap)], i64::MAX - cap as i64 + 8, 1_000);
     for (name, run) in [("L", l), ("T0", t0)] {
-        assert!(
-            matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }),
-            "{name}"
-        );
+        assert!(matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Arm, .. } }), "{name}");
         assert_eq!(failure(&manifest_of(run)), "KC-15: overflow", "{name}");
     }
 }
@@ -1387,10 +1100,7 @@ fn tm_16c_a_paced_authority_accepts_an_instant_already_passed() {
     assert_eq!(authority.next_wakeup(), Some(passed));
     assert!(begun.elapsed() < Wall::from_millis(5));
     let before = TimePoint::new(root, fired.ticks_in(root).unwrap() - 1);
-    assert!(matches!(
-        time.schedule(before, Box::new(|_| {})),
-        Err(ezsdr_kernel::time::TimeError::InPast { .. })
-    ));
+    assert!(matches!(time.schedule(before, Box::new(|_| {})), Err(ezsdr_kernel::time::TimeError::InPast { .. })));
 }
 
 // ---------------------------------------------------------------- KG-10
@@ -1398,32 +1108,15 @@ fn tm_16c_a_paced_authority_accepts_an_instant_already_passed() {
 #[test]
 fn kg_10_a_device_lost_from_a_provider_thread_aborts_the_run() {
     let probe = Probe::new();
-    let assembly = provider(
-        paced().assembly,
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(20)),
-    );
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).losing_device(Wall::from_millis(20)));
     let mut run = start_spec_run(&spec_one(), &profile_one(), assembly).unwrap();
     let begun = Instant::now();
     let result = run.run_until_end(after(&run, Wall::from_secs(5)));
     assert!(begun.elapsed() < Wall::from_secs(1), "{:?}", begun.elapsed());
     let lost = kind(EventKind::DEVICE_LOST);
-    assert_eq!(
-        result,
-        Err(RunHandleError::Ended {
-            termination: Termination::Stopped { cause: StopCause::Policy { event: lost.clone() } }
-        })
-    );
+    assert_eq!(result, Err(RunHandleError::Ended { termination: Termination::Stopped { cause: StopCause::Policy { event: lost.clone() } } }));
     let manifest = manifest_of(run);
-    assert!(
-        manifest
-            .run
-            .transitions
-            .iter()
-            .any(|t| matches!(t.state, RunState::Stopping { mode: ezsdr_kernel::run::CleanupMode::Abort })),
-        "{:?}",
-        manifest.run.transitions
-    );
+    assert!(manifest.run.transitions.iter().any(|t| matches!(t.state, RunState::Stopping { mode: ezsdr_kernel::run::CleanupMode::Abort })), "{:?}", manifest.run.transitions);
     let radio = support::node_source("radio");
     assert!(manifest.events.delivered.iter().any(|e| e.kind == lost && e.source == radio));
 }
@@ -1438,10 +1131,7 @@ fn kg_11_a_device_paced_run_records_its_root_s_relations() {
     let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());
     assert_eq!(manifest.clocks.relations, relations);
-    assert_eq!(
-        relations.iter().map(|r| r.target()).collect::<Vec<_>>(),
-        [ClockDomainId::HOST_MONOTONIC, ClockDomainId::UTC]
-    );
+    assert_eq!(relations.iter().map(|r| r.target()).collect::<Vec<_>>(), [ClockDomainId::HOST_MONOTONIC, ClockDomainId::UTC]);
     assert!(relations.iter().all(|r| r.source() == rig.root));
 }
 
@@ -1468,11 +1158,7 @@ fn kg_11_a_simulation_run_records_none() {
     let clocks = Arc::new(ClockRegistry::new());
     let (authority, _) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
     let relations = paced().relations;
-    let assembly = provider(
-        assembly_with(Box::new(RelatingSim(authority, relations)), clocks),
-        "radio",
-        TestProvider::new("radio", 2),
-    );
+    let assembly = provider(assembly_with(Box::new(RelatingSim(authority, relations)), clocks), "radio", TestProvider::new("radio", 2));
     let mut profile = profile_one();
     profile["environment"] = serde_json::json!({});
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile, assembly).unwrap());
@@ -1521,13 +1207,7 @@ fn kg_11_a_device_paced_run_without_a_utc_relation_says_so() {
     let assembly = provider(rig.assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());
     assert!(manifest.clocks.relations.is_empty());
-    assert_eq!(
-        tm_18_failures(&manifest),
-        [
-            "TM-18: a relation whose source is not the primary root",
-            "TM-18: the Authority published no relation of its root to utc"
-        ]
-    );
+    assert_eq!(tm_18_failures(&manifest), ["TM-18: a relation whose source is not the primary root", "TM-18: the Authority published no relation of its root to utc"]);
 }
 
 /// A device-paced Authority whose `relations()` panics (KC-45).
@@ -1555,11 +1235,7 @@ fn kc_45_an_authority_whose_relations_panic_records_none_and_says_so() {
     let probe = Probe::new();
     let clocks = Arc::new(ClockRegistry::new());
     let (authority, _) = WallAuthority::new(&clocks, mref("ezsdr.test.provider"));
-    let assembly = provider(
-        assembly_with(Box::new(PanickingRelations(authority)), clocks),
-        "radio",
-        ThreadedProvider::new("radio", "radio", &probe),
-    );
+    let assembly = provider(assembly_with(Box::new(PanickingRelations(authority)), clocks), "radio", ThreadedProvider::new("radio", "radio", &probe));
     let manifest = manifest_of(start_spec_run(&spec_one(), &profile_one(), assembly).unwrap());
     assert_eq!(manifest.run.execution_class, Some(ExecutionClass::HardwareInLoop));
     assert_eq!(manifest.termination.reason, Termination::Stopped { cause: StopCause::Client {} });
@@ -1577,9 +1253,7 @@ fn kg_12_run_child_is_refused_in_a_device_paced_session() {
     let child_probe = Probe::new();
     let child = provider(paced().assembly, "radio", ThreadedProvider::new("child", "radio", &child_probe));
     let mut driven = false;
-    let (entry, manifest) = run
-        .run_child(&spec_one(), &profile_one(), child, &mut |_| driven = true)
-        .unwrap();
+    let (entry, manifest) = run.run_child(&spec_one(), &profile_one(), child, &mut |_| driven = true).unwrap();
     assert!(manifest.is_none());
     assert!(!driven);
     match &entry.outcome {

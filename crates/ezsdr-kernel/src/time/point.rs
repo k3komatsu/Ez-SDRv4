@@ -133,10 +133,7 @@ impl TimePoint {
         if self.domain != d.domain {
             return Err(TimeError::DomainMismatch { expected: self.domain, found: d.domain });
         }
-        self.ticks
-            .checked_add(d.ticks)
-            .map(|ticks| TimePoint { domain: self.domain, ticks })
-            .ok_or(TimeError::Overflow)
+        self.ticks.checked_add(d.ticks).map(|ticks| TimePoint { domain: self.domain, ticks }).ok_or(TimeError::Overflow)
     }
 
     /// Subtracts a duration of the same domain, checked (TM-7, TM-8).
@@ -144,37 +141,23 @@ impl TimePoint {
         if self.domain != d.domain {
             return Err(TimeError::DomainMismatch { expected: self.domain, found: d.domain });
         }
-        self.ticks
-            .checked_sub(d.ticks)
-            .map(|ticks| TimePoint { domain: self.domain, ticks })
-            .ok_or(TimeError::Overflow)
+        self.ticks.checked_sub(d.ticks).map(|ticks| TimePoint { domain: self.domain, ticks }).ok_or(TimeError::Overflow)
     }
 
     /// The elapsed time from `other` to `self`; `DomainMismatch` across domains (TM-6, TM-7).
     pub fn checked_sub(self, other: TimePoint) -> Result<Duration, TimeError> {
         self.same_domain(other)?;
-        self.ticks
-            .checked_sub(other.ticks)
-            .map(|ticks| Duration { domain: self.domain, ticks })
-            .ok_or(TimeError::Overflow)
+        self.ticks.checked_sub(other.ticks).map(|ticks| Duration { domain: self.domain, ticks }).ok_or(TimeError::Overflow)
     }
 
     /// The raw tick count, after one domain check. The only access to the integer,
     /// so the check happens at ingress and the hot loop is raw `i64` (TM-6, T3).
     pub fn ticks_in(self, domain: ClockDomainId) -> Result<i64, TimeError> {
-        if self.domain == domain {
-            Ok(self.ticks)
-        } else {
-            Err(TimeError::DomainMismatch { expected: domain, found: self.domain })
-        }
+        if self.domain == domain { Ok(self.ticks) } else { Err(TimeError::DomainMismatch { expected: domain, found: self.domain }) }
     }
 
     fn same_domain(self, other: TimePoint) -> Result<(), TimeError> {
-        if self.domain == other.domain {
-            Ok(())
-        } else {
-            Err(TimeError::DomainMismatch { expected: self.domain, found: other.domain })
-        }
+        if self.domain == other.domain { Ok(()) } else { Err(TimeError::DomainMismatch { expected: self.domain, found: other.domain }) }
     }
 }
 
@@ -204,19 +187,12 @@ impl Duration {
         if self.domain != other.domain {
             return Err(TimeError::DomainMismatch { expected: self.domain, found: other.domain });
         }
-        self.ticks
-            .checked_add(other.ticks)
-            .map(|ticks| Duration { domain: self.domain, ticks })
-            .ok_or(TimeError::Overflow)
+        self.ticks.checked_add(other.ticks).map(|ticks| Duration { domain: self.domain, ticks }).ok_or(TimeError::Overflow)
     }
 
     /// The raw tick count, after one domain check (TM-6).
     pub fn ticks_in(self, domain: ClockDomainId) -> Result<i64, TimeError> {
-        if self.domain == domain {
-            Ok(self.ticks)
-        } else {
-            Err(TimeError::DomainMismatch { expected: domain, found: self.domain })
-        }
+        if self.domain == domain { Ok(self.ticks) } else { Err(TimeError::DomainMismatch { expected: domain, found: self.domain }) }
     }
 }
 
@@ -269,10 +245,7 @@ impl RelativeBudget {
     /// domain in which an Executor measures elapsed processing time (TM-15).
     pub fn new(duration: Duration) -> Result<RelativeBudget, TimeError> {
         if duration.domain != ClockDomainId::HOST_MONOTONIC {
-            return Err(TimeError::DomainMismatch {
-                expected: ClockDomainId::HOST_MONOTONIC,
-                found: duration.domain,
-            });
+            return Err(TimeError::DomainMismatch { expected: ClockDomainId::HOST_MONOTONIC, found: duration.domain });
         }
         if duration.ticks <= 0 {
             return Err(TimeError::Malformed { field: "duration", why: "is not positive" });
@@ -288,10 +261,7 @@ impl RelativeBudget {
     /// Anchors the budget at a `host.monotonic` arrival instant (TM-15).
     pub fn deadline_from(self, arrival: TimePoint) -> Result<AbsoluteDeadline, TimeError> {
         if arrival.domain != ClockDomainId::HOST_MONOTONIC {
-            return Err(TimeError::DomainMismatch {
-                expected: ClockDomainId::HOST_MONOTONIC,
-                found: arrival.domain,
-            });
+            return Err(TimeError::DomainMismatch { expected: ClockDomainId::HOST_MONOTONIC, found: arrival.domain });
         }
         Ok(AbsoluteDeadline { time_point: arrival.checked_add(self.duration)? })
     }
@@ -338,17 +308,9 @@ impl ExactConversion {
     /// and `o = 0`. Registration (TM-3) is what bounds these terms.
     ///
     /// Rule: TM-4.
-    pub(crate) fn build(
-        from: ClockDomainId,
-        to: ClockDomainId,
-        (n_from, d_from, o_from): (u64, u64, i64),
-        (n_to, d_to, o_to): (u64, u64, i64),
-    ) -> Result<ExactConversion, TimeError> {
+    pub(crate) fn build(from: ClockDomainId, to: ClockDomainId, (n_from, d_from, o_from): (u64, u64, i64), (n_to, d_to, o_to): (u64, u64, i64)) -> Result<ExactConversion, TimeError> {
         let origin_delta = (o_from as i128).checked_sub(o_to as i128).ok_or(TimeError::Overflow)?;
-        let a = origin_delta
-            .checked_mul(d_from as i128)
-            .and_then(|v| v.checked_mul(d_to as i128))
-            .ok_or(TimeError::Overflow)?;
+        let a = origin_delta.checked_mul(d_from as i128).and_then(|v| v.checked_mul(d_to as i128)).ok_or(TimeError::Overflow)?;
         let n = (n_from as u128).checked_mul(d_to as u128).ok_or(TimeError::Overflow)?;
         let d = (d_from as u128).checked_mul(n_to as u128).ok_or(TimeError::Overflow)?;
         Ok(ExactConversion { from, to, a, n, d })
@@ -368,10 +330,7 @@ impl ExactConversion {
     /// outside `i64` fails with `Overflow` (TM-4, TM-8).
     pub fn apply(&self, t: TimePoint) -> Result<Converted, TimeError> {
         let ticks = t.ticks_in(self.from)?;
-        let numerator = (ticks as i128)
-            .checked_mul(self.n as i128)
-            .and_then(|v| v.checked_add(self.a))
-            .ok_or(TimeError::Overflow)?;
+        let numerator = (ticks as i128).checked_mul(self.n as i128).and_then(|v| v.checked_add(self.a)).ok_or(TimeError::Overflow)?;
         let d = self.d as i128;
         // Euclidean division: the floor is the largest tick at or before the true
         // instant for negative values too, and the remainder lands in [0, d).

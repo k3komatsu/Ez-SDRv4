@@ -383,8 +383,9 @@
   "id": "M39",
   "name": "MR-31 channel bound",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                if let Some(coupling) = spec.couplings.iter().find(|c| {\n                    (c.tx == f.id && i64::from(c.tx_channel) >= tx_max)",
-  "new": "                if let Some(coupling) = spec.couplings.iter().find(|c| {\n                    false && (c.tx == f.id && i64::from(c.tx_channel) >= tx_max)",
+  "old": "c|",
+  "new": "c| false &&",
+  "scope": "fn prepare",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_31"

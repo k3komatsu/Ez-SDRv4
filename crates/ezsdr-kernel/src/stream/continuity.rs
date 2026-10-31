@@ -132,9 +132,7 @@ pub struct ContinuityBuilder {
 
 /// Ticks from `start` to `end` in `domain`, 0 when `end` is not later (SC-31d).
 fn span(domain: ClockDomainId, start: TimePoint, end: TimePoint) -> u64 {
-    end.checked_sub(start)
-        .and_then(|d| d.ticks_in(domain))
-        .map_or(0, |n| n.max(0) as u64)
+    end.checked_sub(start).and_then(|d| d.ticks_in(domain)).map_or(0, |n| n.max(0) as u64)
 }
 
 /// The cause a flag set and a `lost` count imply, `Mixed` aside (SC-31).
@@ -226,8 +224,7 @@ impl ContinuityBuilder {
             // Contiguous, so there is no Gap to record the carry in; it is held whole
             // for the next one (SC-30b). A first block's carry is not: it is recorded
             // at the first block (below), never in a later Gap.
-            std::cmp::Ordering::Equal
-                if !h.flags.contains(BlockFlags::GAP_BEFORE) && !(first && !carried.is_empty()) => {}
+            std::cmp::Ordering::Equal if !h.flags.contains(BlockFlags::GAP_BEFORE) && !(first && !carried.is_empty()) => {}
             // A jump; a first block's `GAP_BEFORE` whose `lost` is absent, recorded as a
             // zero-extent gap at the block (SC-13); or a first block's carry, recorded
             // as a zero-extent gap at the block that keeps the known counts (SC-30b).
@@ -237,20 +234,10 @@ impl ContinuityBuilder {
                     return Err(StreamError::JumpWithoutGapFlag);
                 }
                 let cause = match cause_from_flags(flags, lost) {
-                    GapCause::Stream {}
-                        if lost.is_some_and(|n| n < jump) && carried.blocks == 0 && !self.lossless =>
-                    {
-                        GapCause::Mixed { stream_lost: lost.unwrap_or(0) }
-                    }
+                    GapCause::Stream {} if lost.is_some_and(|n| n < jump) && carried.blocks == 0 && !self.lossless => GapCause::Mixed { stream_lost: lost.unwrap_or(0) },
                     cause => cause,
                 };
-                self.gaps.push(Gap {
-                    start: expected,
-                    len: jump,
-                    lost,
-                    cause,
-                    link_dropped: carried.blocks,
-                });
+                self.gaps.push(Gap { start: expected, len: jump, lost, cause, link_dropped: carried.blocks });
                 // Cleared only here, where a Gap carries it (SC-30b, SC-30c).
                 self.pending_carry = DropCarry::default();
                 // SC-31d: a pending break ends where the stream gap begins; the
@@ -351,15 +338,7 @@ impl ContinuityBuilder {
                 self.valid[i].push(seg);
             }
         }
-        ContinuityMap {
-            domain: self.domain,
-            channels: self.channels,
-            valid: self.valid,
-            gaps: self.gaps,
-            channel_gaps: self.channel_gaps,
-            first: self.first.unwrap_or(zero),
-            end,
-        }
+        ContinuityMap { domain: self.domain, channels: self.channels, valid: self.valid, gaps: self.gaps, channel_gaps: self.channel_gaps, first: self.first.unwrap_or(zero), end }
     }
 }
 

@@ -3,16 +3,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::binding::{
-    AdmissionResult, BindingProfile, CheckStage, Violation, check_constraint_kind,
-    check_value_kind,
-};
+use crate::binding::{AdmissionResult, BindingProfile, CheckStage, Violation, check_constraint_kind, check_value_kind};
 use crate::event::Target;
 use crate::id::ResourceId;
 use crate::module_api::{ModuleRef, ModuleRegistry, Role};
-use crate::spec::{
-    Constraint, ExperimentSpec, Ident, Key, KeyedEntry, Namespace, SpecError, Value,
-};
+use crate::spec::{Constraint, ExperimentSpec, Ident, Key, KeyedEntry, Namespace, SpecError, Value};
 
 use super::CompileInputs;
 
@@ -21,11 +16,7 @@ use super::CompileInputs;
 /// rather than trusting a result's `violations` (SB-39, D99).
 ///
 /// Rule: SB-30.
-pub(super) fn requested_violations(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    inputs: &CompileInputs<'_>,
-) -> Vec<Violation> {
+pub(super) fn requested_violations(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Vec<Violation> {
     // SB-30 (KA-4): one entry per fragment, never merged, so that two fragments naming
     // one key are each judged by their own value. A need's `Eq` values do not join its
     // resource's entry (item 3): a need is a resolution to a node, not a value this
@@ -47,19 +38,10 @@ pub(super) fn requested_violations(
     for o in &spec.outputs {
         requested.insert(o.id.clone(), o.params.clone());
     }
-    inputs.checks.run(
-        &profile.environment,
-        &requested,
-        &BTreeMap::new(),
-        CheckStage::Validate,
-    )
+    inputs.checks.run(&profile.environment, &requested, &BTreeMap::new(), CheckStage::Validate)
 }
 
-pub(super) fn validate(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    inputs: &CompileInputs<'_>,
-) -> Result<AdmissionResult, SpecError> {
+pub(super) fn validate(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Result<AdmissionResult, SpecError> {
     check_structure(spec, profile, inputs)?;
     let mut out = AdmissionResult::default();
     // SB-34: node -> the resource name that bound it, so a collision can name both.
@@ -105,33 +87,18 @@ pub(super) fn validate(
                 (Some(n), _) => n,
                 // Every satisfying node is taken and exclusive: refused as a
                 // resource is (SB-34), naming the binder.
-                (None, Some(n)) => {
-                    return Err(SpecError::NodeAlreadyBound {
-                        node: n.id.to_string(),
-                        first: taken[&n.id].clone(),
-                        second: need_name.clone(),
-                    })
-                }
-                (None, None) => {
-                    return Err(SpecError::NoSingleInstance {
-                        name: need_name.clone(),
-                        constraint: format!("needs {}", need.kind),
-                    })
-                }
+                (None, Some(n)) => return Err(SpecError::NodeAlreadyBound { node: n.id.to_string(), first: taken[&n.id].clone(), second: need_name.clone() }),
+                (None, None) => return Err(SpecError::NoSingleInstance { name: need_name.clone(), constraint: format!("needs {}", need.kind) }),
             };
             taken.insert(resolved.id.clone(), need_name.clone());
             // SB-36: a need's name is scoped to its resource, so the resolution is
             // filed under both.
-            out.needs
-                .entry(name.clone())
-                .or_default()
-                .insert(need_name.clone(), resolved.id.clone());
+            out.needs.entry(name.clone()).or_default().insert(need_name.clone(), resolved.id.clone());
         }
     }
 
     // The registered admission checks, against the requested configuration (SB-30).
-    out.violations
-        .extend(requested_violations(spec, profile, inputs));
+    out.violations.extend(requested_violations(spec, profile, inputs));
 
     // SB-15 and SB-17 run **after** matching, because a resource endpoint's port is
     // one the *bound node* declares (MA-10) and `matched` does not exist before it.
@@ -142,11 +109,7 @@ pub(super) fn validate(
     // rejected would not be a dry run (Vision §52).
     for previewed in out.coercions_preview.clone() {
         let c = &previewed.coercion;
-        let policy = super::coercion::coercion_policy(
-            spec.policies.coercion.get(&c.key).copied(),
-            inputs.is_session,
-            inputs.registry.key_decl(&c.key),
-        );
+        let policy = super::coercion::coercion_policy(spec.policies.coercion.get(&c.key).copied(), inputs.is_session, inputs.registry.key_decl(&c.key));
         match super::coercion::apply_coercion(policy, c) {
             Ok(None) => {}
             Ok(Some(w)) => out.warnings.push(w),
@@ -166,20 +129,11 @@ pub(super) fn validate(
 /// [`supplied`](super::supplied); an entry under any other name is never looked at (SB-22).
 ///
 /// Rule: SB-22, SB-22a…SB-22g, SB-24, SB-3.
-pub(super) fn check_bindings(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    inputs: &CompileInputs<'_>,
-) -> Result<(), SpecError> {
+pub(super) fn check_bindings(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
     let registry = inputs.registry;
     let authority = &profile.authority;
     let rides = spec.resources.contains_key(authority);
-    let executors: BTreeSet<&Ident> = profile
-        .placements
-        .islands
-        .iter()
-        .map(|i| &i.executor)
-        .collect();
+    let executors: BTreeSet<&Ident> = profile.placements.islands.iter().map(|i| &i.executor).collect();
 
     // SB-22a: one namespace over the six kinds of name of SB-T1. `PortRef.component`
     // resolves a component before a resource and a feed's consumer end is `{output
@@ -187,32 +141,16 @@ pub(super) fn check_bindings(
     // is `island_<local>` and a dedicated Authority's is its name, so those are taken
     // too (D85; the Authority's since D96). One executor may serve several Islands, and
     // `authority` may be a resource, which the Authority then rides on (SB-24).
-    let island_ids: Vec<Ident> = profile
-        .placements
-        .islands
-        .iter()
-        .filter_map(|i| Ident::parse(&format!("island_{}", i.id.local)).ok())
-        .collect();
+    let island_ids: Vec<Ident> = profile.placements.islands.iter().filter_map(|i| Ident::parse(&format!("island_{}", i.id.local)).ok()).collect();
     let own_authority = (!rides).then_some(authority);
     let mut names: BTreeMap<&Ident, &str> = BTreeMap::new();
     let sets = spec
         .resources
         .keys()
         .map(|n| (n, "a resource"))
-        .chain(
-            spec.graph
-                .components
-                .keys()
-                .map(|n| (n, "a graph component")),
-        )
+        .chain(spec.graph.components.keys().map(|n| (n, "a graph component")))
         .chain(spec.outputs.iter().map(|o| (&o.id, "an output id")))
-        .chain(
-            profile
-                .placements
-                .islands
-                .iter()
-                .map(|i| (&i.executor, "an Island executor")),
-        )
+        .chain(profile.placements.islands.iter().map(|i| (&i.executor, "an Island executor")))
         .chain(island_ids.iter().map(|n| (n, "an Island fragment id")))
         .chain(own_authority.map(|a| (a, "the `authority` binding")));
     for (name, set) in sets {
@@ -220,14 +158,7 @@ pub(super) fn check_bindings(
             if first == "an Island executor" && set == first {
                 continue;
             }
-            return Err(SpecError::DuplicateBindingName {
-                name: name.clone(),
-                sets: if first == set {
-                    format!("{set} declared twice")
-                } else {
-                    format!("{first} and {set}")
-                },
-            });
+            return Err(SpecError::DuplicateBindingName { name: name.clone(), sets: if first == set { format!("{set} declared twice") } else { format!("{first} and {set}") } });
         }
     }
     // One slot at a time: bound (SB-22d), to a Module holding its role (SB-22e), with
@@ -237,18 +168,10 @@ pub(super) fn check_bindings(
         if bound == reported {
             return Ok(());
         }
-        Err(SpecError::Structural {
-            reason: format!(
-                "SB-22f: binding {name} names Module {} {}, but its {what} is {} {}",
-                bound.id, bound.version, reported.id, reported.version
-            ),
-        })
+        Err(SpecError::Structural { reason: format!("SB-22f: binding {name} names Module {} {}, but its {what} is {} {}", bound.id, bound.version, reported.id, reported.version) })
     };
     for name in spec.resources.keys() {
-        let binding = profile
-            .bindings
-            .get(name)
-            .ok_or_else(|| SpecError::UnboundResource { name: name.clone() })?;
+        let binding = profile.bindings.get(name).ok_or_else(|| SpecError::UnboundResource { name: name.clone() })?;
         require_role(registry, name, &binding.module, Role::Provider)?;
         let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
         version(name, "Provider instance", &binding.module, &instance.module)?;
@@ -267,49 +190,32 @@ pub(super) fn check_bindings(
     }
     for output in &spec.outputs {
         let name = &output.id;
-        let binding = profile
-            .bindings
-            .get(name)
-            .ok_or_else(|| SpecError::Structural {
-                reason: format!("SB-22d: output {name} has no binding (UnboundOutput)"),
-            })?;
+        let binding = profile.bindings.get(name).ok_or_else(|| SpecError::Structural { reason: format!("SB-22d: output {name} has no binding (UnboundOutput)") })?;
         require_role(registry, name, &binding.module, Role::Sink)?;
         let d = super::supplied(inputs.sinks, name, "Sink instance")?.descriptor();
         version(name, "Sink instance", &binding.module, &d.module)?;
         // MA-25 / D86: a Sink that reads from no memory domain cannot satisfy the
         // shared feed reachability rule (MA-39).
         if d.memory_domains.is_empty() {
-            return Err(SpecError::Structural {
-                reason: format!(
-                    "MA-25: output {name}'s Sink declares no memory domain it reads from"
-                ),
-            });
+            return Err(SpecError::Structural { reason: format!("MA-25: output {name}'s Sink declares no memory domain it reads from") });
         }
     }
     for name in &executors {
-        let binding = profile.bindings.get(*name).ok_or_else(|| SpecError::Structural {
-            reason: format!("SB-22d: an Island names executor {name}, which the profile does not bind (UnboundExecutor)"),
-        })?;
+        let binding =
+            profile.bindings.get(*name).ok_or_else(|| SpecError::Structural { reason: format!("SB-22d: an Island names executor {name}, which the profile does not bind (UnboundExecutor)") })?;
         require_role(registry, name, &binding.module, Role::Executor)?;
         let d = super::supplied(inputs.executors, name, "ExecutorDescriptor")?;
         version(name, "Executor instance", &binding.module, &d.module)?;
         // MA-18 / D86: admission reads `memory_domains`; an Executor that reaches
         // none can host no component.
         if d.memory_domains.is_empty() {
-            return Err(SpecError::Structural {
-                reason: format!("MA-18: executor {name} declares no memory domain it can reach"),
-            });
+            return Err(SpecError::Structural { reason: format!("MA-18: executor {name} declares no memory domain it can reach") });
         }
     }
     // SB-24: `authority` names a binding whose Module holds Authority — a resource the
     // Authority rides on as much as a slot of its own — and whose supplied descriptor
     // names that binding's version (SB-22e, D98).
-    let binding = profile
-        .bindings
-        .get(authority)
-        .ok_or_else(|| SpecError::Structural {
-            reason: format!("SB-24: `authority` names {authority}, which is not a binding"),
-        })?;
+    let binding = profile.bindings.get(authority).ok_or_else(|| SpecError::Structural { reason: format!("SB-24: `authority` names {authority}, which is not a binding") })?;
     require_role(registry, authority, &binding.module, Role::Authority)?;
     let a = super::supplied(inputs.authorities, authority, "AuthorityDescriptor")?;
     version(authority, "Authority", &binding.module, &a.module)?;
@@ -321,22 +227,14 @@ pub(super) fn check_bindings(
     for (name, b) in &profile.bindings {
         let output = spec.outputs.iter().find(|o| &o.id == name);
         let refused = match (&b.feed, output) {
-            (Some(_), _) if !inputs.is_session => Some(
-                "carries `feed`, which only a Session profile may; a Spec Run declares it in `outputs[]`",
-            ),
-            (Some(feed), Some(o)) if o.feed != *feed => {
-                Some("carries a `feed` that is not its output's")
-            }
+            (Some(_), _) if !inputs.is_session => Some("carries `feed`, which only a Session profile may; a Spec Run declares it in `outputs[]`"),
+            (Some(feed), Some(o)) if o.feed != *feed => Some("carries a `feed` that is not its output's"),
             (Some(_), None) => Some("carries `feed` and fills no Sink slot"),
-            (None, Some(_)) if inputs.is_session => {
-                Some("fills a Session's Sink slot and carries no `feed`")
-            }
+            (None, Some(_)) if inputs.is_session => Some("fills a Session's Sink slot and carries no `feed`"),
             _ => None,
         };
         if let Some(why) = refused {
-            return Err(SpecError::Structural {
-                reason: format!("SB-22g: binding {name} {why}"),
-            });
+            return Err(SpecError::Structural { reason: format!("SB-22g: binding {name} {why}") });
         }
     }
 
@@ -349,16 +247,10 @@ pub(super) fn check_bindings(
     // description and the Manifest could not reproduce it.
     let mut by_description: BTreeMap<(ModuleRef, String), (&Ident, &ResourceId)> = BTreeMap::new();
     let mut paths: BTreeMap<ResourceId, &Ident> = BTreeMap::new();
-    for (name, binding) in profile
-        .bindings
-        .iter()
-        .filter(|(n, _)| spec.resources.contains_key(*n))
-    {
+    for (name, binding) in profile.bindings.iter().filter(|(n, _)| spec.resources.contains_key(*n)) {
         let instance = super::supplied(inputs.providers, name, "Provider instance")?.instance();
         let description = binding_description(binding)?;
-        let duplicate_description = if let Some((first, first_id)) =
-            by_description.insert(description, (name, &instance.id))
-        {
+        let duplicate_description = if let Some((first, first_id)) = by_description.insert(description, (name, &instance.id)) {
             if *first_id != instance.id {
                 return Err(SpecError::Structural {
                     reason: format!(
@@ -374,12 +266,7 @@ pub(super) fn check_bindings(
         };
         for node in instance.tree.walk_iter() {
             if !node.ports.is_empty() && node.memory_domains.is_empty() {
-                return Err(SpecError::Structural {
-                    reason: format!(
-                        "MA-10: Provider node {} has ports but declares no memory domain",
-                        node.id
-                    ),
-                });
+                return Err(SpecError::Structural { reason: format!("MA-10: Provider node {} has ports but declares no memory domain", node.id) });
             }
             if !duplicate_description {
                 if let Some(first) = paths.insert(node.id.clone(), name) {
@@ -401,15 +288,8 @@ pub(super) fn check_bindings(
     // reference could be an unregistered version and still reach the Manifest, which
     // records the profile (RS-38). Last, so that a misspelt output binding is
     // `UnboundOutput` and a stray `feed` is SB-22g's.
-    if let Some(name) = profile.bindings.keys().find(|n| {
-        !spec.resources.contains_key(*n)
-            && !spec.outputs.iter().any(|o| &o.id == *n)
-            && !executors.contains(n)
-            && *n != authority
-    }) {
-        return Err(SpecError::Structural {
-            reason: format!("SB-22d: binding {name} plays no role in this Run"),
-        });
+    if let Some(name) = profile.bindings.keys().find(|n| !spec.resources.contains_key(*n) && !spec.outputs.iter().any(|o| &o.id == *n) && !executors.contains(n) && *n != authority) {
+        return Err(SpecError::Structural { reason: format!("SB-22d: binding {name} plays no role in this Run") });
     }
     Ok(())
 }
@@ -421,11 +301,7 @@ pub(super) fn check_bindings(
 /// them calls a Provider's `coerce`, so running them twice changes nothing.
 ///
 /// Rule: SB-T4.
-pub(super) fn check_structure(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    inputs: &CompileInputs<'_>,
-) -> Result<(), SpecError> {
+pub(super) fn check_structure(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
     spec.check_key_prefixes()?;
     check_keys(spec, inputs)?;
     // SB-11: `requirements.vocabularies` lists the Vocabulary **majors** this Spec's
@@ -433,12 +309,7 @@ pub(super) fn check_structure(
     // the registered `test 1.0.0` and SB-11's list was a field with no reader — the
     // same shape D40 withdrew `constraints_hit` for.
     for req in &spec.requirements.vocabularies {
-        let v = inputs
-            .registry
-            .vocabulary(&req.id)
-            .ok_or_else(|| SpecError::Structural {
-                reason: format!("SB-11: Vocabulary {} is not registered", req.id),
-            })?;
+        let v = inputs.registry.vocabulary(&req.id).ok_or_else(|| SpecError::Structural { reason: format!("SB-11: Vocabulary {} is not registered", req.id) })?;
         if v.version.major != req.major {
             return Err(SpecError::Structural {
                 reason: format!(
@@ -450,12 +321,7 @@ pub(super) fn check_structure(
         }
     }
     for kind in spec.policies.failure.keys() {
-        inputs
-            .kinds
-            .require(kind)
-            .map_err(|_| SpecError::Structural {
-                reason: format!("SB-18: event kind {kind} is not registered"),
-            })?;
+        inputs.kinds.require(kind).map_err(|_| SpecError::Structural { reason: format!("SB-18: event kind {kind} is not registered") })?;
     }
     check_bindings(spec, profile, inputs)?;
     // MA-37: a descriptor is validated before anything reads its ports or its
@@ -465,8 +331,7 @@ pub(super) fn check_structure(
     // before it (review P2-5).
     let contract_ids = inputs.contracts.ids();
     for c in spec.graph.components.values() {
-        c.validate(&contract_ids)
-            .map_err(|e| SpecError::Structural { reason: e.message })?;
+        c.validate(&contract_ids).map_err(|e| SpecError::Structural { reason: e.message })?;
     }
     // SB-16: a `SpecTime` is "a resource name plus an offset in **that resource's**
     // stream clock", so the name must be one the Spec declares. Nothing read
@@ -474,21 +339,14 @@ pub(super) fn check_structure(
     // the entry left no trace in the plan.
     for entry in &spec.schedule {
         if !spec.resources.contains_key(&entry.at.clock) {
-            return Err(SpecError::Structural {
-                reason: format!(
-                    "SB-16: schedule entry's clock {} is not a resource this Spec declares",
-                    entry.at.clock
-                ),
-            });
+            return Err(SpecError::Structural { reason: format!("SB-16: schedule entry's clock {} is not a resource this Spec declares", entry.at.clock) });
         }
         // SB-16, KC-23 (item 3): the target is classified first, so a target the Spec
         // does not declare in its role is refused before anything reads a class.
         // `validate` is the one classifier; the runtime routing is built from this
         // validated plan (review P2-4).
         if let Some(target) = entry.action.target() {
-            spec.classify_target(target).map_err(|reason| SpecError::Structural {
-                reason: format!("SB-16: schedule entry's target {reason}"),
-            })?;
+            spec.classify_target(target).map_err(|reason| SpecError::Structural { reason: format!("SB-16: schedule entry's target {reason}") })?;
         }
         // RS-52 (item 3): a scheduled `UpdateParameter` states no class — the
         // ActionTemplate has no `class` field — so there is no equality for
@@ -500,11 +358,7 @@ pub(super) fn check_structure(
         // the same gap there.
         if let crate::event::ActionTemplate::UpdateParameter { target, key, .. } = &entry.action {
             if spec.declared_class(target, key, inputs.registry).is_none() {
-                return Err(SpecError::Structural {
-                    reason: format!(
-                        "RS-52: schedule entry updates {key}, which declares no update class"
-                    ),
-                });
+                return Err(SpecError::Structural { reason: format!("RS-52: schedule entry updates {key}, which declares no update class") });
             }
         }
     }
@@ -527,9 +381,7 @@ pub(super) fn check_structure(
 fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
     for entry in spec.keyed_entries() {
         let key = *match &entry {
-            KeyedEntry::Constraint { key, .. }
-            | KeyedEntry::Output { key, .. }
-            | KeyedEntry::Coercion { key } => key,
+            KeyedEntry::Constraint { key, .. } | KeyedEntry::Output { key, .. } | KeyedEntry::Coercion { key } => key,
             KeyedEntry::ScheduledUpdate { target, key, .. } => {
                 if matches!(target, Target::Component { .. }) {
                     // MA-34 (item 3): a component's parameter key is owned by the
@@ -547,26 +399,15 @@ fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), S
             // On a segment boundary: `starts_with` alone made
             // `ext.ezsdr.test.providerx.thing` "owned" by `ezsdr.test.provider`, and a
             // single-segment id such as `ezsdr` would own every `ext.ezsdr.*` key.
-            let owner = key
-                .as_str()
-                .strip_prefix("ext.")
-                .expect("is_extension means the key starts with one `ext.`");
-            let owned = |id: &str| {
-                owner
-                    .strip_prefix(id)
-                    .is_some_and(|rest| rest.starts_with('.'))
-            };
+            let owner = key.as_str().strip_prefix("ext.").expect("is_extension means the key starts with one `ext.`");
+            let owned = |id: &str| owner.strip_prefix(id).is_some_and(|rest| rest.starts_with('.'));
             if !inputs.registry.modules().any(|m| owned(m.id.as_str())) {
-                return Err(SpecError::UnknownKeyPrefix {
-                    key: format!("{key}: MA-34: no registered Module owns this `ext.` prefix"),
-                });
+                return Err(SpecError::UnknownKeyPrefix { key: format!("{key}: MA-34: no registered Module owns this `ext.` prefix") });
             }
             continue;
         }
         let Some(d) = inputs.registry.key_decl(key) else {
-            return Err(SpecError::UnknownKeyPrefix {
-                key: format!("{key}: MA-34: no registered Vocabulary declares this key"),
-            });
+            return Err(SpecError::UnknownKeyPrefix { key: format!("{key}: MA-34: no registered Vocabulary declares this key") });
         };
         match &entry {
             KeyedEntry::Constraint { constraint, .. } => {
@@ -584,18 +425,9 @@ fn check_keys(spec: &ExperimentSpec, inputs: &CompileInputs<'_>) -> Result<(), S
 /// A binding's description `(module, selector, profile)`, which is an instance's
 /// identity (SB-3): two bindings with equal descriptions name one instance. Shared by
 /// `validate` and the coordinator's grouping (KC-4), so the two cannot disagree.
-pub(crate) fn binding_description(
-    binding: &crate::binding::Binding,
-) -> Result<(ModuleRef, String), SpecError> {
+pub(crate) fn binding_description(binding: &crate::binding::Binding) -> Result<(ModuleRef, String), SpecError> {
     let json = |e: serde_json::Error| SpecError::Structural { reason: format!("SB-3: a binding description: {e}") };
-    Ok((
-        binding.module.clone(),
-        format!(
-            "{}|{}",
-            serde_json::to_string(&binding.selector).map_err(json)?,
-            serde_json::to_string(&binding.profile).map_err(json)?
-        ),
-    ))
+    Ok((binding.module.clone(), format!("{}|{}", serde_json::to_string(&binding.selector).map_err(json)?, serde_json::to_string(&binding.profile).map_err(json)?)))
 }
 
 /// SB-22e: the registered Module a binding names holds `role`. A version that is not
@@ -605,37 +437,20 @@ pub(crate) fn binding_description(
 /// different errors.
 ///
 /// Rule: SB-22e, MA-1.
-pub(crate) fn require_role(
-    registry: &ModuleRegistry,
-    name: &Ident,
-    module: &ModuleRef,
-    role: Role,
-) -> Result<(), SpecError> {
-    let Some(m) = registry
-        .modules()
-        .find(|m| crate::module_api::is_module(m, module))
-    else {
+pub(crate) fn require_role(registry: &ModuleRegistry, name: &Ident, module: &ModuleRef, role: Role) -> Result<(), SpecError> {
+    let Some(m) = registry.modules().find(|m| crate::module_api::is_module(m, module)) else {
         return Err(not_registered(name, module));
     };
     if m.roles.contains(&role) {
         return Ok(());
     }
-    Err(SpecError::WrongBindingRole {
-        name: name.clone(),
-        expected: format!("{role:?}"),
-        module: format!("{} {}", module.id, module.version),
-    })
+    Err(SpecError::WrongBindingRole { name: name.clone(), expected: format!("{role:?}"), module: format!("{} {}", module.id, module.version) })
 }
 
 /// SB-22e's refusal of a Module version nobody registered, shared with the Session
 /// derivation so that one condition has one error on both Run kinds.
 pub(crate) fn not_registered(name: &Ident, module: &ModuleRef) -> SpecError {
-    SpecError::Structural {
-        reason: format!(
-            "SB-22e: binding {name} names Module {} {}, which is not registered",
-            module.id, module.version
-        ),
-    }
+    SpecError::Structural { reason: format!("SB-22e: binding {name} names Module {} {}, which is not registered", module.id, module.version) }
 }
 
 /// SB-39's guard: an `AdmissionResult` is this Run's only if `matched` holds exactly
@@ -647,33 +462,20 @@ pub(crate) fn not_registered(name: &Ident, module: &ModuleRef) -> SpecError {
 /// read is still checked (D107).
 ///
 /// Rule: SB-39, SB-36, SB-30.
-pub(super) fn admission_is_this_runs(
-    spec: &ExperimentSpec,
-    inputs: &CompileInputs<'_>,
-    admission: &AdmissionResult,
-) -> Result<(), String> {
-    let declares = |resource: &Ident, node: &ResourceId| {
-        inputs
-            .providers
-            .get(resource)
-            .is_some_and(|p| p.instance().tree.walk_iter().any(|n| n.id == *node))
-    };
+pub(super) fn admission_is_this_runs(spec: &ExperimentSpec, inputs: &CompileInputs<'_>, admission: &AdmissionResult) -> Result<(), String> {
+    let declares = |resource: &Ident, node: &ResourceId| inputs.providers.get(resource).is_some_and(|p| p.instance().tree.walk_iter().any(|n| n.id == *node));
     let not_this_runs = |why: String| format!("this `AdmissionResult` is not this Run's: {why}");
     for (name, req) in &spec.resources {
         let Some(node) = admission.matched.get(name) else {
             return Err(not_this_runs(format!("{name} has no matched node")));
         };
         if !declares(name, node) {
-            return Err(not_this_runs(format!(
-                "{name}'s matched node {node} is not one its bound instance declares"
-            )));
+            return Err(not_this_runs(format!("{name}'s matched node {node} is not one its bound instance declares")));
         }
         let resolved = admission.needs.get(name);
         for need in req.needs.keys() {
             let Some(node) = resolved.and_then(|needs| needs.get(need)) else {
-                return Err(not_this_runs(format!(
-                    "{name}'s need {need} has no matched node"
-                )));
+                return Err(not_this_runs(format!("{name}'s need {need} has no matched node")));
             };
             if !spec.resources.keys().any(|r| declares(r, node)) {
                 return Err(not_this_runs(format!(
@@ -682,20 +484,11 @@ pub(super) fn admission_is_this_runs(
                 )));
             }
         }
-        if let Some(extra) = resolved
-            .into_iter()
-            .flat_map(|needs| needs.keys())
-            .find(|need| !req.needs.contains_key(*need))
-        {
+        if let Some(extra) = resolved.into_iter().flat_map(|needs| needs.keys()).find(|need| !req.needs.contains_key(*need)) {
             return Err(not_this_runs(format!("{extra} is not a need of {name}")));
         }
     }
-    if let Some(extra) = admission
-        .matched
-        .keys()
-        .chain(admission.needs.keys())
-        .find(|k| !spec.resources.contains_key(*k))
-    {
+    if let Some(extra) = admission.matched.keys().chain(admission.needs.keys()).find(|k| !spec.resources.contains_key(*k)) {
         return Err(not_this_runs(format!("{extra} is not a resource of this Spec")));
     }
     Ok(())

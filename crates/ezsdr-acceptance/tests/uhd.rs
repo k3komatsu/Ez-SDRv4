@@ -25,8 +25,8 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::BurstRecord;
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
-use serde_json::{json, Value as Json};
-use support::{artifact, finish_at, modules, root, section, spec_run, T0, output, resource};
+use serde_json::{Value as Json, json};
+use support::{T0, artifact, finish_at, modules, output, resource, root, section, spec_run};
 
 /// Root ticks per millisecond: the X310's 200 MHz master clock (UR-7).
 const MS: i64 = 200_000;
@@ -158,7 +158,11 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
     assert_eq!(bursts[0].samples, 1_000);
     let clock = manifest.clocks.sample_clocks.iter().find(|r| r.domain == bursts[0].target.domain()).expect("the burst's SampleClock");
     let n = clock.root_ticks_per_tick.num() as i64;
-    assert_eq!(clock.origin.ticks_in(clock.origin.domain()).unwrap() + bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap() * n, t0.ticks_in(t0.domain()).unwrap() + 5_000 * n, "5 000 samples after T0");
+    assert_eq!(
+        clock.origin.ticks_in(clock.origin.domain()).unwrap() + bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap() * n,
+        t0.ticks_in(t0.domain()).unwrap() + 5_000 * n,
+        "5 000 samples after T0"
+    );
     assert!(!manifest.events.delivered.iter().any(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
 
@@ -182,13 +186,7 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
     let wave = pn(1_000);
     let (bytes, _) = experiments::waveform_of(&wave);
     admitted(&mut run, set("radio.tx.c0.stream", Value::from(0)), None);
-    let repeat = SessionAction::Vocabulary {
-        ns: Namespace::parse("radio").unwrap(),
-        verb: Ident::parse("start_repeat").unwrap(),
-        target: resource("radio/tx/s0"),
-        at: None,
-        params: BTreeMap::new(),
-    };
+    let repeat = SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: BTreeMap::new() };
     admitted(&mut run, repeat, Some(&bytes));
     let from = run.events(0).len();
     let now = run.now();

@@ -12,9 +12,9 @@ use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
 use ezsdr_kernel::spec::Key;
 use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
-use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey, NO_RELEASE};
 use ezsdr_radio::kinds;
+use ezsdr_radio::payloads::CommandRejectedPayload;
+use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, NO_RELEASE, StreamKey};
 use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
@@ -35,11 +35,15 @@ pub(crate) struct Locked<'a, T> {
 
 impl<T> std::ops::Deref for Locked<'_, T> {
     type Target = T;
-    fn deref(&self) -> &T { &self.guard }
+    fn deref(&self) -> &T {
+        &self.guard
+    }
 }
 
 impl<T> std::ops::DerefMut for Locked<'_, T> {
-    fn deref_mut(&mut self) -> &mut T { &mut self.guard }
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
 }
 
 impl<T> Drop for Locked<'_, T> {
@@ -104,7 +108,9 @@ pub(crate) struct SegmentKey {
 pub(crate) enum RxDevice {
     #[default]
     Off,
-    Armed { at: i64 },
+    Armed {
+        at: i64,
+    },
     Streaming,
     Flushing,
     Uncertain,
@@ -139,20 +145,36 @@ pub(crate) struct RxChain {
 }
 
 impl RxChain {
-    pub fn device(&self) -> RxDevice { self.device }
-    pub fn segment(&self) -> Option<SegmentKey> { self.segment }
-    pub fn cut(&self) -> Option<i64> { self.intent.cut }
-    pub fn end_now(&self) -> bool { self.intent.end_now }
-    pub fn terminate(&self) -> Option<StopMode> { self.intent.terminate }
-    pub fn debt(&self) -> &[RxEntry] { &self.debt }
-    pub fn left(&self) -> &[RxEntry] { &self.left }
-    pub fn latest(&self) -> &BTreeMap<usize, RxEntry> { &self.latest }
-    pub fn restore(&self) -> &Restore { &self.restore }
+    pub fn device(&self) -> RxDevice {
+        self.device
+    }
+    pub fn segment(&self) -> Option<SegmentKey> {
+        self.segment
+    }
+    pub fn cut(&self) -> Option<i64> {
+        self.intent.cut
+    }
+    pub fn end_now(&self) -> bool {
+        self.intent.end_now
+    }
+    pub fn terminate(&self) -> Option<StopMode> {
+        self.intent.terminate
+    }
+    pub fn debt(&self) -> &[RxEntry] {
+        &self.debt
+    }
+    pub fn left(&self) -> &[RxEntry] {
+        &self.left
+    }
+    pub fn latest(&self) -> &BTreeMap<usize, RxEntry> {
+        &self.latest
+    }
+    pub fn restore(&self) -> &Restore {
+        &self.restore
+    }
 
     pub fn eligible(&self, segment: SegmentKey, instant: i64) -> bool {
-        self.segment == Some(segment)
-            && matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming)
-            && instant >= segment.origin
+        self.segment == Some(segment) && matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming) && instant >= segment.origin
     }
 
     pub fn adopt_start(&mut self, segment: SegmentKey, at: i64) {
@@ -172,7 +194,9 @@ impl RxChain {
                 Ok(())
             }
             Err(error) => {
-                if error.lost { self.device = RxDevice::Lost; }
+                if error.lost {
+                    self.device = RxDevice::Lost;
+                }
                 Err(error)
             }
         }
@@ -186,7 +210,9 @@ impl RxChain {
                 Ok(())
             }
             Err(error) => {
-                if error.lost { self.device = RxDevice::Lost; }
+                if error.lost {
+                    self.device = RxDevice::Lost;
+                }
                 Err(error)
             }
         }
@@ -202,7 +228,9 @@ impl RxChain {
         self.intent.cut = Some(self.intent.cut.map_or(cut, |old| old.min(cut)));
     }
 
-    pub fn request_end_now(&mut self) { self.intent.end_now = true; }
+    pub fn request_end_now(&mut self) {
+        self.intent.end_now = true;
+    }
 
     pub fn request_terminate(&mut self, mode: StopMode) {
         self.intent.terminate.get_or_insert(mode);
@@ -224,7 +252,9 @@ impl RxChain {
             }
             Err(error) => {
                 self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel);
-                if error.lost { self.device = RxDevice::Lost; }
+                if error.lost {
+                    self.device = RxDevice::Lost;
+                }
                 Err(error)
             }
         }
@@ -233,7 +263,10 @@ impl RxChain {
     pub fn stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
         assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));
         match result {
-            Ok(()) => { self.device = RxDevice::Off; Ok(()) }
+            Ok(()) => {
+                self.device = RxDevice::Off;
+                Ok(())
+            }
             Err(error) => {
                 self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };
                 Err(error)
@@ -244,9 +277,14 @@ impl RxChain {
     pub fn flush_start_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
         assert!(matches!(self.device, RxDevice::Off));
         match result {
-            Ok(()) => { self.device = RxDevice::Flushing; Ok(()) }
+            Ok(()) => {
+                self.device = RxDevice::Flushing;
+                Ok(())
+            }
             Err(error) => {
-                if error.lost { self.device = RxDevice::Lost; }
+                if error.lost {
+                    self.device = RxDevice::Lost;
+                }
                 Err(error)
             }
         }
@@ -255,7 +293,10 @@ impl RxChain {
     pub fn flush_stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
         assert!(matches!(self.device, RxDevice::Flushing));
         match result {
-            Ok(()) => { self.device = RxDevice::Off; Ok(()) }
+            Ok(()) => {
+                self.device = RxDevice::Off;
+                Ok(())
+            }
             Err(error) => {
                 self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };
                 Err(error)
@@ -301,7 +342,9 @@ impl RxChain {
     }
 
     pub fn abandon_unowned(&mut self) {
-        if self.device != RxDevice::Lost { self.device = RxDevice::Uncertain; }
+        if self.device != RxDevice::Lost {
+            self.device = RxDevice::Uncertain;
+        }
         self.segment = None;
         self.intent.end_now = true;
         self.intent.terminate.get_or_insert(StopMode::Abort);
@@ -314,7 +357,10 @@ impl RxChain {
     pub fn take_restore(&mut self) -> Option<BTreeMap<usize, f64>> {
         match std::mem::replace(&mut self.restore, Restore::Done) {
             Restore::Planned(values) => Some(values),
-            other => { self.restore = other; None }
+            other => {
+                self.restore = other;
+                None
+            }
         }
     }
 
@@ -328,14 +374,12 @@ impl RxChain {
 impl Clock {
     /// The root tick of sample `k`.
     pub fn instant(&self, k: i64) -> i64 {
-        i64::try_from(i128::from(self.origin) + i128::from(k) * i128::from(self.n))
-            .expect("a representable stream instant")
+        i64::try_from(i128::from(self.origin) + i128::from(k) * i128::from(self.n)).expect("a representable stream instant")
     }
 
     /// The first sample at or after root tick `t`.
     pub fn at_or_after(&self, t: i64) -> i64 {
-        i64::try_from((i128::from(t) - i128::from(self.origin) + i128::from(self.n) - 1)
-            .div_euclid(i128::from(self.n))).expect("a representable sample index")
+        i64::try_from((i128::from(t) - i128::from(self.origin) + i128::from(self.n) - 1).div_euclid(i128::from(self.n))).expect("a representable sample index")
     }
 }
 
@@ -477,11 +521,15 @@ pub(crate) enum Phase {
 
 impl Default for Phase {
     /// `StreamState::default` is the state before `start`: nothing begun, but not idle.
-    fn default() -> Phase { Phase::Pending }
+    fn default() -> Phase {
+        Phase::Pending
+    }
 }
 
 impl Phase {
-    pub(crate) fn is_idle(self) -> bool { matches!(self, Phase::Idle) }
+    pub(crate) fn is_idle(self) -> bool {
+        matches!(self, Phase::Idle)
+    }
     pub(crate) fn active(self) -> Option<Segment> {
         match self {
             Phase::Active { segment, .. } => segment,
@@ -579,7 +627,9 @@ impl Streams {
     #[must_use]
     pub fn claim_owner(&mut self, stream: StreamKey, seq: Option<u64>) -> Option<Claim> {
         let claims = &mut self.stream_mut(stream).claims;
-        if claims.holder != Holder::Free { return None; }
+        if claims.holder != Holder::Free {
+            return None;
+        }
         claims.holder = Holder::Owner { seq };
         Some(Claim { stream, holder: Holder::Owner { seq } })
     }
@@ -591,7 +641,9 @@ impl Streams {
         let idle = self.is_idle(stream);
         let active = self.active(stream).is_some();
         let state = self.stream_mut(stream);
-        if state.claims.holder != Holder::Free || !idle || active { return None; }
+        if state.claims.holder != Holder::Free || !idle || active {
+            return None;
+        }
         state.claims.holder = Holder::Release;
         Some(Claim { stream, holder: Holder::Release })
     }
@@ -601,7 +653,9 @@ impl Streams {
     #[must_use]
     pub fn claim_from_none(&mut self, stream: StreamKey) -> Option<Claim> {
         let claims = &mut self.stream_mut(stream).claims;
-        if claims.holder != Holder::Free { return None; }
+        if claims.holder != Holder::Free {
+            return None;
+        }
         claims.holder = Holder::FromNone;
         Some(Claim { stream, holder: Holder::FromNone })
     }
@@ -617,7 +671,9 @@ impl Streams {
     /// its holder is not `Free` or a read is already in flight.
     pub fn begin_read(&mut self, stream: StreamKey) -> bool {
         let claims = &mut self.stream_mut(stream).claims;
-        if claims.holder != Holder::Free || claims.reading { return false; }
+        if claims.holder != Holder::Free || claims.reading {
+            return false;
+        }
         claims.reading = true;
         true
     }
@@ -824,15 +880,17 @@ impl Streams {
     pub fn planned(&self, stream: StreamKey) -> Vec<Planned> {
         let Some(line) = self.lines.line(stream) else { return Vec::new() };
         let state = self.stream(stream);
-        line.plan.iter().enumerate().map(|(index, segment)| {
-            Planned {
+        line.plan
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| Planned {
                 segment: *segment,
                 k: stream.1 as usize,
                 settings: segment.by.and_then(|by| state.configs.get(&by)).cloned(),
                 refused: segment.by.is_some_and(|by| line.items.iter().any(|item| item.seq == by && item.refused)),
                 clock: (stream.0 == Direction::Tx).then(|| state.clocks.get(index).map(|(clock, _)| *clock)).flatten(),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// What the owner of `stream` does before it begins a segment that holds `set`, begun by
@@ -855,21 +913,26 @@ impl Streams {
     /// Another stream's recorded streamer owns any channel in `set` (D2, D3).
     pub fn held_elsewhere(&self, stream: StreamKey, set: Channels) -> Option<StreamKey> {
         (0..self.count(dir_of(stream))).map(|k| stream_key(dir_of(stream), k)).find(|other| {
-            *other != stream && match self.stream(*other).set {
-                DeviceSet::Open(open) => open.iter().any(|channel| set.contains(channel)),
-                DeviceSet::Unknown => false,
-            }
+            *other != stream
+                && match self.stream(*other).set {
+                    DeviceSet::Open(open) => open.iter().any(|channel| set.contains(channel)),
+                    DeviceSet::Unknown => false,
+                }
         })
     }
 
     /// An earlier, unprocessed segment owns the channel before `origin` (A2's finite chain).
     pub fn needed_before(&self, stream: StreamKey, set: Channels, origin: i64) -> bool {
         (0..self.count(dir_of(stream))).map(|k| stream_key(dir_of(stream), k)).any(|other| {
-            if other == stream { return false; }
+            if other == stream {
+                return false;
+            }
             let state = self.stream(other);
             self.planned(other).iter().any(|planned| {
                 let identity = (planned.segment.origin, planned.segment.config, planned.segment.by);
-                planned.segment.origin <= origin && !planned.refused && !state.completed.contains(&identity)
+                planned.segment.origin <= origin
+                    && !planned.refused
+                    && !state.completed.contains(&identity)
                     && !planned.segment.cut.is_some_and(|cut| planned.segment.instant(cut).is_ok_and(|end| end <= planned.segment.origin))
                     && planned.segment.config.channels.iter().any(|channel| set.contains(channel))
             })
@@ -879,15 +942,15 @@ impl Streams {
     /// A move destination waits only for its source's configuration of that same move.
     pub fn move_source_busy(&self, stream: StreamKey, seq: Option<u64>) -> bool {
         let Some(seq) = seq else { return false };
-        self.lines.move_lines(seq).is_some_and(|(from, to)| {
-            to == stream && self.holder(from) == Holder::Owner { seq: Some(seq) }
-        })
+        self.lines.move_lines(seq).is_some_and(|(from, to)| to == stream && self.holder(from) == Holder::Owner { seq: Some(seq) })
     }
 
     /// Records a segment its owner finished carrying out.
     pub fn complete(&mut self, stream: StreamKey, segment: (i64, Config, Option<u64>)) {
         let completed = &mut self.stream_mut(stream).completed;
-        if !completed.contains(&segment) { completed.push(segment); }
+        if !completed.contains(&segment) {
+            completed.push(segment);
+        }
     }
 
     /// The record of an open of `stream`'s streamer: the set it is open on, or unknown after a
@@ -937,8 +1000,7 @@ impl Streams {
                 core.command_rejected(None, "update_parameter", &format!("UR-25: {error}"));
             }
         }
-        let planned: Vec<_> = self.lines.line(stream).into_iter().flat_map(|line| &line.plan)
-            .map(|segment| (segment.origin, segment.config, segment.by)).collect();
+        let planned: Vec<_> = self.lines.line(stream).into_iter().flat_map(|line| &line.plan).map(|segment| (segment.origin, segment.config, segment.by)).collect();
         self.stream_mut(stream).completed.retain(|done| planned.contains(done));
     }
 
@@ -975,14 +1037,16 @@ impl Streams {
             let mut rows = Vec::new();
             for k in 0..self.count(dir) {
                 let Some(line) = self.lines.line(stream_key(dir, k)) else { continue };
-                rows.extend(line.plan.iter().map(|segment| json!({
-                    "stream": k,
-                    "sequence": segment.by,
-                    "origin": segment.origin,
-                    "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
-                    "channels": segment.config.channels.iter().collect::<Vec<u32>>(),
-                    "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
-                })));
+                rows.extend(line.plan.iter().map(|segment| {
+                    json!({
+                        "stream": k,
+                        "sequence": segment.by,
+                        "origin": segment.origin,
+                        "end": segment.cut.and_then(|cut| segment.instant(cut).ok()),
+                        "channels": segment.config.channels.iter().collect::<Vec<u32>>(),
+                        "ticks_per_sample": [segment.config.ratio.num(), segment.config.ratio.den()],
+                    })
+                }));
             }
             rows
         };
@@ -1002,30 +1066,11 @@ pub(crate) struct Records {
 
 impl Default for Records {
     fn default() -> Self {
-        let stats = [
-            "rx_blocks",
-            "rx_samples",
-            "rx_overflows",
-            "rx_errors",
-            "rx_off_lattice",
-            "rx_overlapping",
-            "rx_before_origin",
-            "link_drops_seen",
-            "tx_bursts",
-            "tx_samples",
-            "tx_errors",
-        ]
-        .into_iter()
-        .map(|name| (name, 0))
-        .collect();
-        Records {
-            applied: Vec::new(),
-            bursts: Vec::new(),
-            device_async: Vec::new(),
-            rejected: Vec::new(),
-            timing: Vec::new(),
-            stats,
-        }
+        let stats = ["rx_blocks", "rx_samples", "rx_overflows", "rx_errors", "rx_off_lattice", "rx_overlapping", "rx_before_origin", "link_drops_seen", "tx_bursts", "tx_samples", "tx_errors"]
+            .into_iter()
+            .map(|name| (name, 0))
+            .collect();
+        Records { applied: Vec::new(), bursts: Vec::new(), device_async: Vec::new(), rejected: Vec::new(), timing: Vec::new(), stats }
     }
 }
 
@@ -1221,13 +1266,7 @@ impl Core {
 
     /// A control-path event from `source` at `time` (RM-11, UR-20).
     pub fn emit_at(&self, source: &ResourceId, kind: &str, severity: Severity, payload: Json, time: TimePoint) {
-        let event = Event {
-            source: EventSource::Node { node: source.clone() },
-            time,
-            severity,
-            kind: EventKind::parse(kind).expect("a radio kind"),
-            payload,
-        };
+        let event = Event { source: EventSource::Node { node: source.clone() }, time, severity, kind: EventKind::parse(kind).expect("a radio kind"), payload };
         if let Err(error) = self.events.emit_control(event) {
             self.reject_note(json!({ "event_not_emitted": kind, "error": error.to_string() }));
         }
@@ -1241,8 +1280,7 @@ impl Core {
     /// refuses it as it takes it, and its reason recorded (UR-21, UR-30, RM-22).
     pub fn command_rejected(&self, id: Option<ActionId>, kind: &str, reason: &str) {
         self.reject_note(json!({ "kind": kind, "reason": reason, "at": self.at(self.now()) }));
-        let payload = serde_json::to_value(CommandRejectedPayload { action: id, kind: kind.to_owned(), reason: reason.to_owned() })
-            .expect("a payload");
+        let payload = serde_json::to_value(CommandRejectedPayload { action: id, kind: kind.to_owned(), reason: reason.to_owned() }).expect("a payload");
         self.emit(&self.id, kinds::COMMAND_REJECTED, Severity::Error, payload);
     }
 
@@ -1270,12 +1308,7 @@ impl Core {
         // Before anything can free it: a lost device is never freed (F4).
         self.device.mark_lost();
         self.timing(json!({ "what": "device_lost", "message": message, "at": at }));
-        self.emit(
-            &self.id,
-            EventKind::DEVICE_LOST,
-            Severity::Fatal,
-            json!({ "message": message }),
-        );
+        self.emit(&self.id, EventKind::DEVICE_LOST, Severity::Fatal, json!({ "message": message }));
     }
 
     /// A device failure: `DEVICE_LOST` when the device is gone, else the reason.
@@ -1348,11 +1381,7 @@ impl Core {
             let applied = self.device.apply(dir, *chan, settings, None)?;
             let at = self.at(self.now());
             let mut rec = lock(&self.rec);
-            for (name, claimed, read) in [
-                ("sample_rate_hz", Some(rate), applied.rate),
-                ("frequency_hz", settings.freq, applied.freq),
-                ("gain_db", settings.gain, applied.gain),
-            ] {
+            for (name, claimed, read) in [("sample_rate_hz", Some(rate), applied.rate), ("frequency_hz", settings.freq, applied.freq), ("gain_db", settings.gain, applied.gain)] {
                 rec.applied.push(json!({
                     "key": self.description.applied_key(dir, *chan, k, name), "channel": chan,
                     "claimed": claimed, "read_back": read, "difference": claimed.map(|c| read - c), "at": at,
@@ -1378,9 +1407,7 @@ impl Core {
                 }
             }
         }
-        decimation(self.mcr, rate)
-            .map(|n| n as i64)
-            .ok_or_else(|| DeviceError::failed(format!("UR-12: {rate} S/s is no decimation of {} Hz", self.mcr)))
+        decimation(self.mcr, rate).map(|n| n as i64).ok_or_else(|| DeviceError::failed(format!("UR-12: {rate} S/s is no decimation of {} Hz", self.mcr)))
     }
 
     /// UR-13, UR-36: the device's open of `k`'s streamer of `dir` on `set`; the record is the
@@ -1458,17 +1485,16 @@ impl Core {
                 break;
             }
             let remaining = until.saturating_sub(host.now());
-            if remaining.is_zero() { break; }
+            if remaining.is_zero() {
+                break;
+            }
             match self.device.tx_async(stream, remaining) {
                 Ok(Some(report)) => {
                     if host.now() >= until {
                         self.stash_tx_report(stream, report);
                         break;
                     }
-                    if report.code == TxCode::BurstAck
-                        && expected.contains(&report.channel)
-                        && acknowledged.insert(report.channel)
-                    {
+                    if report.code == TxCode::BurstAck && expected.contains(&report.channel) && acknowledged.insert(report.channel) {
                         ack_tick = match (ack_tick, report.tick) {
                             (Some(old), Some(tick)) => Some(old.max(tick)),
                             (None, tick) => tick,
@@ -1489,7 +1515,9 @@ impl Core {
                 Err(error) => {
                     let first = lock(&self.rec).stats.get("tx_errors").is_none_or(|n| *n == 0);
                     self.stat("tx_errors", 1);
-                    if first { self.reject_note(json!({ "call": "tx_async", "error": error.message })); }
+                    if first {
+                        self.reject_note(json!({ "call": "tx_async", "error": error.message }));
+                    }
                     host.sleep(until.saturating_sub(host.now()).min(Wall::from_millis(1)));
                 }
             }
@@ -1559,7 +1587,9 @@ impl Core {
 
     fn open_device_locked(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         self.probe("open", None);
-        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, "open"); }
+        if dir == Dir::Rx {
+            self.assert_rx_chain_reusable(k, "open");
+        }
         let device_gate = self.lock_device_gate();
         if self.is_lost() {
             return Err(DeviceError { lost: true, message: "UR-29: the device is lost before opening a streamer".to_owned() });
@@ -1598,9 +1628,13 @@ impl Core {
     }
 
     pub fn close_device(&self, dir: Dir, k: usize) {
-        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, "close"); }
+        if dir == Dir::Rx {
+            self.assert_rx_chain_reusable(k, "close");
+        }
         let _device_gate = self.lock_device_gate();
-        if self.is_lost() { return; }
+        if self.is_lost() {
+            return;
+        }
         match dir {
             Dir::Rx => self.device.rx_close(k),
             Dir::Tx => self.device.tx_close(k),
@@ -1619,7 +1653,9 @@ impl Core {
 
     #[cfg(test)]
     pub fn assert_rx_chains_reusable(&self) {
-        for k in 0..self.rx_chain.len() { self.assert_rx_chain_reusable(k, "close_streams"); }
+        for k in 0..self.rx_chain.len() {
+            self.assert_rx_chain_reusable(k, "close_streams");
+        }
     }
 
     /// Releases an idle stream's streamer only when another line still has an unprocessed
@@ -1628,11 +1664,17 @@ impl Core {
         let stream = stream_key(dir, k);
         let claim = {
             let mut streams = lock(&self.streams);
-            if self.is_lost() { return false; }
+            if self.is_lost() {
+                return false;
+            }
             let state = streams.stream(stream);
-            if !streams.is_idle(stream) || streams.active(stream).is_some() { return false; }
+            if !streams.is_idle(stream) || streams.active(stream).is_some() {
+                return false;
+            }
             let DeviceSet::Open(set) = state.set else { return false };
-            if !streams.needed_before(stream, set, i64::MAX) { return false; }
+            if !streams.needed_before(stream, set, i64::MAX) {
+                return false;
+            }
             let Some(claim) = streams.claim_release(stream) else { return false };
             claim
         };
@@ -1657,7 +1699,9 @@ impl Core {
         let mut waiting_since = None;
         loop {
             let streams = lock(&self.streams);
-            if self.is_lost() || streams.stop.is_some() { return None; }
+            if self.is_lost() || streams.stop.is_some() {
+                return None;
+            }
             let current = streams.planned(stream).into_iter().find(|planned| planned.segment == expected.segment)?;
             if current.refused {
                 return None;
@@ -1667,16 +1711,16 @@ impl Core {
                     return None;
                 }
             }
-            if streams.held_elsewhere(stream, current.set()).is_none()
-                && !streams.needed_before(stream, current.set(), current.segment.origin)
-                && !streams.move_source_busy(stream, current.segment.by)
+            if streams.held_elsewhere(stream, current.set()).is_none() && !streams.needed_before(stream, current.set(), current.segment.origin) && !streams.move_source_busy(stream, current.segment.by)
             {
                 return Some(current);
             }
             let first_wait = waiting_since.is_none();
             waiting_since.get_or_insert(streams.seq);
             drop(streams);
-            if first_wait { self.probe("wait_release", None); }
+            if first_wait {
+                self.probe("wait_release", None);
+            }
             self.device.host().sleep(POLL);
         }
     }
@@ -1690,15 +1734,24 @@ impl Core {
         let stream = stream_key(dir, k);
         let (mut current, mut step, release_first, claim) = {
             let mut streams = lock(&self.streams);
-            if self.is_lost() { return Ok(false); }
-            if streams.holder(stream) != Holder::Free { return Ok(false); }
+            if self.is_lost() {
+                return Ok(false);
+            }
+            if streams.holder(stream) != Holder::Free {
+                return Ok(false);
+            }
             let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };
-            if current.refused { return Ok(false); }
+            if current.refused {
+                return Ok(false);
+            }
             let step = streams.owner_step(stream, current.set(), current.segment.by);
-            if step == Owner::Nothing { return Ok(true); }
-            let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()
-                || streams.needed_before(stream, current.set(), current.segment.origin)
-                || streams.move_source_busy(stream, current.segment.by));
+            if step == Owner::Nothing {
+                return Ok(true);
+            }
+            let release_first = step == Owner::Open
+                && (streams.held_elsewhere(stream, current.set()).is_some()
+                    || streams.needed_before(stream, current.set(), current.segment.origin)
+                    || streams.move_source_busy(stream, current.segment.by));
             let Some(claim) = streams.claim_owner(stream, current.segment.by) else { return Ok(false) };
             (current, step, release_first, claim)
         };
@@ -1758,11 +1811,7 @@ impl Core {
 }
 
 #[cfg(test)]
-pub(super) fn assert_tx_open_flush_barrier(
-    core: Arc<Core>,
-    spy: Arc<super::test_support::LockSpy>,
-    open: impl FnOnce() + Send + 'static,
-) {
+pub(super) fn assert_tx_open_flush_barrier(core: Arc<Core>, spy: Arc<super::test_support::LockSpy>, open: impl FnOnce() + Send + 'static) {
     let gate = spy.stop_after("tx_send");
     let host = core.device.host();
     let opener = host.spawn("tx-open-route", open).unwrap();
@@ -1770,10 +1819,12 @@ pub(super) fn assert_tx_open_flush_barrier(
     assert!(core.tx_dsp_gates[0].is_held(), "the opener must hold the timed-DSP gate through its flush acknowledgement");
 
     let core_ = core.clone();
-    let timed = host.spawn("timed-tx-dsp", move || {
-        let _dsp = core_.lock_tx_dsp(&[0]);
-        core_.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
-    }).unwrap();
+    let timed = host
+        .spawn("timed-tx-dsp", move || {
+            let _dsp = core_.lock_tx_dsp(&[0]);
+            core_.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
+        })
+        .unwrap();
     let deadline = std::time::Instant::now() + Wall::from_secs(10);
     while core.tx_dsp_gates[0].waiters() == 0 && std::time::Instant::now() < deadline {
         std::thread::yield_now();
@@ -1796,7 +1847,9 @@ mod tests {
     use super::*;
     use ezsdr_kernel::time::Rational;
 
-    fn rx_segment() -> SegmentKey { SegmentKey { by: Some(7), origin: 100 } }
+    fn rx_segment() -> SegmentKey {
+        SegmentKey { by: Some(7), origin: 100 }
+    }
 
     fn rx_entry(seq: u64) -> RxEntry {
         RxEntry { order: (100, seq), channel: 0, value: 1.001e9, accepted_at: Some(101) }
@@ -1856,15 +1909,27 @@ mod tests {
         for prior in [RxDevice::Armed { at: 90 }, RxDevice::Streaming] {
             for outcome in [0, 1, 2] {
                 let mut chain = RxChain { device: prior, segment: Some(rx_segment()), ..RxChain::default() };
-                let actual = chain.restart_result(120, match outcome {
-                    0 => Ok(()),
-                    1 => Err(DeviceError::failed("scripted refusal")),
-                    _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
-                });
+                let actual = chain.restart_result(
+                    120,
+                    match outcome {
+                        0 => Ok(()),
+                        1 => Err(DeviceError::failed("scripted refusal")),
+                        _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
+                    },
+                );
                 match outcome {
-                    0 => { assert!(actual.is_ok()); assert_eq!(chain.device(), RxDevice::Armed { at: 120 }); }
-                    1 => { assert!(actual.is_err()); assert_eq!(chain.device(), prior); }
-                    _ => { assert!(actual.unwrap_err().lost); assert_eq!(chain.device(), RxDevice::Lost); }
+                    0 => {
+                        assert!(actual.is_ok());
+                        assert_eq!(chain.device(), RxDevice::Armed { at: 120 });
+                    }
+                    1 => {
+                        assert!(actual.is_err());
+                        assert_eq!(chain.device(), prior);
+                    }
+                    _ => {
+                        assert!(actual.unwrap_err().lost);
+                        assert_eq!(chain.device(), RxDevice::Lost);
+                    }
                 }
                 assert_eq!(chain.segment(), Some(rx_segment()));
             }
@@ -1887,11 +1952,15 @@ mod tests {
         for outcome in [0, 1, 2] {
             let mut chain = RxChain::default();
             chain.adopt_start(rx_segment(), 90);
-            let result = chain.hand(rx_entry(1), || match outcome {
-                0 => Ok(()),
-                1 => Err(DeviceError::failed("scripted refusal")),
-                _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
-            }, || 105);
+            let result = chain.hand(
+                rx_entry(1),
+                || match outcome {
+                    0 => Ok(()),
+                    1 => Err(DeviceError::failed("scripted refusal")),
+                    _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
+                },
+                || 105,
+            );
             match outcome {
                 0 => {
                     assert!(result.is_ok());
@@ -1926,7 +1995,11 @@ mod tests {
                 1 => Err(DeviceError::failed("scripted refusal")),
                 _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
             });
-            let expected = match outcome { 0 => RxDevice::Off, 1 => RxDevice::Uncertain, _ => RxDevice::Lost };
+            let expected = match outcome {
+                0 => RxDevice::Off,
+                1 => RxDevice::Uncertain,
+                _ => RxDevice::Lost,
+            };
             assert_eq!(chain.device(), expected);
             assert_eq!(chain.segment(), Some(rx_segment()));
             assert_eq!(result.is_ok(), outcome == 0);
@@ -1947,10 +2020,7 @@ mod tests {
         let mut chain = RxChain::default();
         assert!(chain.flush_start_result(Err(DeviceError { lost: true, message: "start loss".to_owned() })).is_err());
         assert_eq!(chain.device(), RxDevice::Lost);
-        for (error, expected) in [
-            (DeviceError::failed("stop refusal"), RxDevice::Uncertain),
-            (DeviceError { lost: true, message: "stop loss".to_owned() }, RxDevice::Lost),
-        ] {
+        for (error, expected) in [(DeviceError::failed("stop refusal"), RxDevice::Uncertain), (DeviceError { lost: true, message: "stop loss".to_owned() }, RxDevice::Lost)] {
             let mut chain = RxChain::default();
             chain.flush_start_result(Ok(())).unwrap();
             assert!(chain.flush_stop_result(Err(error)).is_err());
@@ -1963,9 +2033,13 @@ mod tests {
         for device in [RxDevice::Off, RxDevice::Uncertain, RxDevice::Lost] {
             let entry = rx_entry(1);
             let mut chain = RxChain {
-                device, intent: RxIntent { cut: Some(80), end_now: true, terminate: Some(StopMode::Abort) },
-                segment: Some(rx_segment()), debt: vec![entry.clone()], latest: BTreeMap::from([(0, entry.clone())]),
-                restore: Restore::Planned(BTreeMap::from([(0, 1e9)])), left: Vec::new(),
+                device,
+                intent: RxIntent { cut: Some(80), end_now: true, terminate: Some(StopMode::Abort) },
+                segment: Some(rx_segment()),
+                debt: vec![entry.clone()],
+                latest: BTreeMap::from([(0, entry.clone())]),
+                restore: Restore::Planned(BTreeMap::from([(0, 1e9)])),
+                left: Vec::new(),
             };
             assert_eq!(chain.finish().as_slice(), std::slice::from_ref(&entry));
             assert_eq!(chain.device(), device);
@@ -2032,42 +2106,54 @@ mod tests {
         use crate::provider::test_support::LockSpy;
         use std::sync::Arc;
 
-        let spy = Arc::new(LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual, ..FakeConfig::default()
-        }));
+        let spy = Arc::new(LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
         spy.watch(&core);
         let gate = spy.stop_before("tx_async");
-        let opener = core.device.host().spawn("tx-flush-open", {
-            let core = core.clone();
-            move || { core.open_tx_device(0, Channels::first(1)).unwrap(); }
-        }).unwrap();
+        let opener = core
+            .device
+            .host()
+            .spawn("tx-flush-open", {
+                let core = core.clone();
+                move || {
+                    core.open_tx_device(0, Channels::first(1)).unwrap();
+                }
+            })
+            .unwrap();
         gate.wait();
         assert!(core.tx_report_gates[0].is_held(), "the opener must own async reports through its flush acknowledgement");
 
         let (done, finished) = std::sync::mpsc::channel();
-        let timed = core.device.host().spawn("timed-tx-dsp", {
-            let core = core.clone();
-            move || {
-                let _dsp = core.lock_tx_dsp(&[0]);
-                core.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
-                let _ = done.send(());
-            }
-        }).unwrap();
+        let timed = core
+            .device
+            .host()
+            .spawn("timed-tx-dsp", {
+                let core = core.clone();
+                move || {
+                    let _dsp = core.lock_tx_dsp(&[0]);
+                    core.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
+                    let _ = done.send(());
+                }
+            })
+            .unwrap();
         let shutdown_stream = stream_key(Dir::Tx, 0);
         let (shutdown_started, shutdown_start) = std::sync::mpsc::channel();
         lock(&core.streams).begin_shutdown_read(shutdown_stream);
         let (shutdown_done, shutdown_report) = std::sync::mpsc::channel();
-        let shutdown = core.device.host().spawn("shutdown-tx-report", {
-            let core = core.clone();
-            move || {
-                let _ = shutdown_started.send(());
-                let _reports = core.lock_tx_reports(0);
-                let report = core.device.tx_async(0, Wall::ZERO).unwrap();
-                lock(&core.streams).end_read(shutdown_stream);
-                let _ = shutdown_done.send(report);
-            }
-        }).unwrap();
+        let shutdown = core
+            .device
+            .host()
+            .spawn("shutdown-tx-report", {
+                let core = core.clone();
+                move || {
+                    let _ = shutdown_started.send(());
+                    let _reports = core.lock_tx_reports(0);
+                    let report = core.device.tx_async(0, Wall::ZERO).unwrap();
+                    lock(&core.streams).end_read(shutdown_stream);
+                    let _ = shutdown_done.send(report);
+                }
+            })
+            .unwrap();
         shutdown_start.recv_timeout(Wall::from_secs(2)).unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(2);
         while core.tx_report_gates[0].waiters() == 0 && spy.seen("tx_async") == 1 && std::time::Instant::now() < deadline {
@@ -2139,8 +2225,7 @@ mod tests {
     fn ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct() {
         use crate::device::{FakeConfig, FakeFault};
 
-        let (core, device, _time, _events) = super::super::test_support::rig_with(
-            FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }, Vec::new());
+        let (core, device, _time, _events) = super::super::test_support::rig_with(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }, Vec::new());
         device.tx_open(0, &[0, 1]).unwrap();
         let result = core.tx_flush(0, &[0, 1]);
         assert!(result.acknowledged, "both channel-position acks are required: {:?}", lock(&core.rec).device_async);
@@ -2166,10 +2251,16 @@ mod tests {
         spy.watch(&core);
         let gate = spy.stop_after("tx_async");
         let (done, finished) = std::sync::mpsc::channel();
-        let opener = core.device.host().spawn("late-tx-flush-ack", {
-            let core = core.clone();
-            move || { let _ = done.send(core.open_tx_device(0, Channels::first(1))); }
-        }).unwrap();
+        let opener = core
+            .device
+            .host()
+            .spawn("late-tx-flush-ack", {
+                let core = core.clone();
+                move || {
+                    let _ = done.send(core.open_tx_device(0, Channels::first(1)));
+                }
+            })
+            .unwrap();
         gate.wait();
         std::thread::sleep(Wall::from_millis(120));
         gate.release();
@@ -2177,11 +2268,9 @@ mod tests {
 
         let flush = finished.recv().unwrap().unwrap();
         assert!(!flush.acknowledged, "an ack read returned after the total deadline completed T3");
-        assert!(core.take_stashed_tx_report(0).is_some_and(|report| report.code == TxCode::BurstAck),
-            "the late ack remains available to the report owner");
+        assert!(core.take_stashed_tx_report(0).is_some_and(|report| report.code == TxCode::BurstAck), "the late ack remains available to the report owner");
         assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1);
-        assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true),
-            "a late ack is not recorded as a timely flush ack");
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true), "a late ack is not recorded as a timely flush ack");
     }
 
     #[test]
@@ -2195,10 +2284,16 @@ mod tests {
         spy.watch(&core);
         let gate = spy.stop_before("tx_async");
         let (done, result_rx) = std::sync::mpsc::channel();
-        let opener = core.device.host().spawn("tx-flush-stop", {
-            let core = core.clone();
-            move || { let _ = done.send(core.open_tx_device(0, Channels::first(1))); }
-        }).unwrap();
+        let opener = core
+            .device
+            .host()
+            .spawn("tx-flush-stop", {
+                let core = core.clone();
+                move || {
+                    let _ = done.send(core.open_tx_device(0, Channels::first(1)));
+                }
+            })
+            .unwrap();
         gate.wait();
         lock(&core.streams).stop = Some((core.now(), StopMode::Orderly));
         gate.release();
@@ -2236,8 +2331,7 @@ mod tests {
         let next_start = 6_000_000;
         device.tx_send(0, &[&old_burst], Some(next_start), true, true, Wall::ZERO).unwrap();
         device.set_time(next_start);
-        assert_eq!(device.dsp_log(Dir::Tx, 0).last(), Some(&(next_start, 1.00005e9, true)),
-            "the old timed value later overrides the new configuration on the next timed burst");
+        assert_eq!(device.dsp_log(Dir::Tx, 0).last(), Some(&(next_start, 1.00005e9, true)), "the old timed value later overrides the new configuration on the next timed burst");
     }
 
     fn cfg(channels: u32) -> Config {
@@ -2245,15 +2339,7 @@ mod tests {
     }
 
     fn line(direction: Direction) -> Line {
-        Line::new(timeline::Stream {
-            direction,
-            origin: 0,
-            config: cfg(1),
-            lead: 0,
-            call: 2_000,
-            release_window: 0,
-            allowance: 0,
-        })
+        Line::new(timeline::Stream { direction, origin: 0, config: cfg(1), lead: 0, call: 2_000, release_window: 0, allowance: 0 })
     }
 
     fn two_by_two_with_device() -> (Arc<Core>, Arc<crate::device::FakeDevice>) {
@@ -2278,15 +2364,17 @@ mod tests {
         let (core, device) = two_by_two_with_device();
         let (from, to) = (stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 0));
         let ratio = Rational::new(200, 1).unwrap();
-        let rx_line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: core.ticks(core.description.timing.release_window_ns),
-            allowance: 0,
-        });
+        let rx_line = |channels| {
+            Line::new(timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels, ratio },
+                lead: 0,
+                call: 0,
+                release_window: core.ticks(core.description.timing.release_window_ns),
+                allowance: 0,
+            })
+        };
         device.rx_open(0, &[0]).unwrap();
         device.rx_open(1, &[1]).unwrap();
         let mut streams = lock(&core.streams);
@@ -2374,20 +2462,22 @@ mod tests {
     #[test]
     fn ur_34_a_device_loss_waits_for_an_admitted_streamer_open_and_close() {
         for (call, opening) in [("rx_open", true), ("rx_close", false)] {
-            let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-                clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
-            }));
+            let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
             let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
             spy.watch(&core);
             let gate = spy.stop_before(call);
             let call_core = core.clone();
-            let call_thread = core.device.host().spawn("streamer-lifecycle", move || {
-                if opening {
-                    call_core.open_device(Dir::Rx, 0, Channels::first(1)).unwrap();
-                } else {
-                    call_core.close_device(Dir::Rx, 0);
-                }
-            }).unwrap();
+            let call_thread = core
+                .device
+                .host()
+                .spawn("streamer-lifecycle", move || {
+                    if opening {
+                        call_core.open_device(Dir::Rx, 0, Channels::first(1)).unwrap();
+                    } else {
+                        call_core.close_device(Dir::Rx, 0);
+                    }
+                })
+                .unwrap();
             gate.wait();
 
             let (waiting, reached) = std::sync::mpsc::channel();
@@ -2406,8 +2496,7 @@ mod tests {
             loss_thread.join().unwrap();
 
             let log = spy.log();
-            let call = log.iter().position(|entry| entry == if opening { "rx_open 0 [0]" } else { "rx_close 0" })
-                .unwrap_or_else(|| panic!("{call}: {log:?}"));
+            let call = log.iter().position(|entry| entry == if opening { "rx_open 0 [0]" } else { "rx_close 0" }).unwrap_or_else(|| panic!("{call}: {log:?}"));
             let marked_lost = log.iter().position(|entry| entry == "mark_lost").unwrap_or_else(|| panic!("no mark_lost: {log:?}"));
             assert!(call < marked_lost, "the admitted call completed before loss publication: {log:?}");
             let before = log.len();
@@ -2419,9 +2508,7 @@ mod tests {
 
     #[test]
     fn ur_34_a_rate_read_waiting_for_device_gate_does_not_call_after_loss() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default()
-        }));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
         spy.watch(&core);
         let (entered, reached) = std::sync::mpsc::channel();
@@ -2433,9 +2520,13 @@ mod tests {
         });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let reader = core.device.host().spawn("rate-read", move || {
-            let _ = done.send(worker.check_rates(Dir::Rx, 0));
-        }).unwrap();
+        let reader = core
+            .device
+            .host()
+            .spawn("rate-read", move || {
+                let _ = done.send(worker.check_rates(Dir::Rx, 0));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the rate read passed its first loss check before waiting for the gate");
         core.device_lost("test loss");
         let _ = resume.send(());
@@ -2449,15 +2540,7 @@ mod tests {
         let (core, _device) = two_by_two_with_device();
         let (a, b, c) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 2));
         let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: 0,
-            allowance: 0,
-        });
+        let line = |channels| Line::new(timeline::Stream { direction: Direction::Rx, origin: 0, config: Config { channels, ratio }, lead: 0, call: 0, release_window: 0, allowance: 0 });
         let (middle, destination) = {
             let mut streams = lock(&core.streams);
             *streams = Streams::with_streams(3, 1);
@@ -2479,12 +2562,18 @@ mod tests {
             (middle, destination)
         };
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-finite-chain", move || {
-            let _ = done.send(worker.await_release(Dir::Rx, c.1 as usize, &destination));
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-finite-chain", move || {
+                let _ = done.send(worker.await_release(Dir::Rx, c.1 as usize, &destination));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "C waits for B's finite segment despite B's Unknown device set");
         assert!(result_rx.try_recv().is_err(), "the destination did not pass B's unfinished segment");
         {
@@ -2506,12 +2595,18 @@ mod tests {
             streams.claim_owner(from, Some(seq)).expect("the source is free")
         };
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-move-source", move || {
-            let _ = done.send(worker.await_release(Dir::Rx, to.1 as usize, &next));
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-move-source", move || {
+                let _ = done.send(worker.await_release(Dir::Rx, to.1 as usize, &next));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination reached its source wait");
         assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "it did not open during the source configure: {:?}", device.calls());
         {
@@ -2533,15 +2628,17 @@ mod tests {
         let (core, device) = two_by_two_with_device();
         let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
         let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: core.ticks(core.description.timing.release_window_ns),
-            allowance: 0,
-        });
+        let line = |channels| {
+            Line::new(timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels, ratio },
+                lead: 0,
+                call: 0,
+                release_window: core.ticks(core.description.timing.release_window_ns),
+                allowance: 0,
+            })
+        };
         device.rx_open(0, &[0]).unwrap();
         let (next, claim) = {
             let mut streams = lock(&core.streams);
@@ -2558,12 +2655,18 @@ mod tests {
             (next, claim)
         };
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-move-destination", move || {
-            let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &next));
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-move-destination", move || {
+                let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &next));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination waits when the source released the moved channel but still configures the move");
         assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the destination stayed unopened: {:?}", device.calls());
         {
@@ -2625,10 +2728,18 @@ mod tests {
     fn ur_34_a_waited_open_reloads_a_move_refused_while_it_waits() {
         let (core, device, next, from, to, seq) = waiting_move();
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-test", move || { let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next)); }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-test", move || {
+                let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its device wait");
         let mark = device.calls().len();
         {
@@ -2648,15 +2759,17 @@ mod tests {
         let (core, device) = two_by_two_with_device();
         let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
         let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: core.ticks(core.description.timing.release_window_ns),
-            allowance: 0,
-        });
+        let line = |channels| {
+            Line::new(timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels, ratio },
+                lead: 0,
+                call: 0,
+                release_window: core.ticks(core.description.timing.release_window_ns),
+                allowance: 0,
+            })
+        };
         device.rx_open(0, &[0]).unwrap();
         let stale = {
             let mut streams = lock(&core.streams);
@@ -2683,25 +2796,24 @@ mod tests {
         let (core, device) = two_by_two_with_device();
         let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
         let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: core.ticks(core.description.timing.release_window_ns),
-            allowance: 0,
-        });
+        let line = |channels| {
+            Line::new(timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels, ratio },
+                lead: 0,
+                call: 0,
+                release_window: core.ticks(core.description.timing.release_window_ns),
+                allowance: 0,
+            })
+        };
         device.rx_open(0, &[0]).unwrap();
         let next = {
             let mut streams = lock(&core.streams);
             streams.lines.insert(from, line(Channels::first(1)));
             streams.lines.insert(to, line(Channels::first(0)));
             let seq = streams.next_seq();
-            assert!(streams.book(&core, to, Item {
-                e: 10_000, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false,
-                kind: Kind::Cold(Config { channels: Channels::first(1), ratio }),
-            }));
+            assert!(streams.book(&core, to, Item { e: 10_000, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }));
             streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
             let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
             streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
@@ -2709,29 +2821,39 @@ mod tests {
             streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).unwrap()
         };
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let expected = next.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-replan", move || {
-            let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &expected));
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-replan", move || {
+                let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &expected));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination reaches its source wait");
         let changed_by = {
             let mut streams = lock(&core.streams);
             let seq = streams.next_seq();
-            assert!(streams.book(&core, to, Item {
-                e: next.segment.origin + 5_000,
-                seq,
-                ready: core.now(),
-                release: NO_RELEASE,
-                delivered: None,
-                refused: false,
-                kind: Kind::Cold(Config {
-                    channels: next.segment.config.channels,
-                    ratio: Rational::new(100, 1).unwrap(),
-                }),
-            }), "the destination plan changes without a refusal");
+            assert!(
+                streams.book(
+                    &core,
+                    to,
+                    Item {
+                        e: next.segment.origin + 5_000,
+                        seq,
+                        ready: core.now(),
+                        release: NO_RELEASE,
+                        delivered: None,
+                        refused: false,
+                        kind: Kind::Cold(Config { channels: next.segment.config.channels, ratio: Rational::new(100, 1).unwrap() }),
+                    }
+                ),
+                "the destination plan changes without a refusal"
+            );
             let new = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).expect("the accepted replacement segment");
             assert!(new.segment.origin > next.segment.origin && new.segment.config.ratio == Rational::new(100, 1).unwrap() && !new.refused);
             streams.record_open(from, None);
@@ -2762,10 +2884,18 @@ mod tests {
     fn ur_34_a_waited_open_ends_at_device_loss_without_closing_after_loss() {
         let (core, device, next, _from, _to, _seq) = waiting_move();
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-loss-wait", move || { let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next)); }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-loss-wait", move || {
+                let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
         core.device_lost("test: lost while waiting for a streamer");
         owner.join().unwrap();
@@ -2780,10 +2910,18 @@ mod tests {
     fn ur_34_a_waited_open_ends_at_provider_stop_without_opening() {
         let (core, device, next, _from, _to, _seq) = waiting_move();
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-stop-wait", move || { let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next)); }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-stop-wait", move || {
+                let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
         {
             let mut streams = lock(&core.streams);
@@ -2802,15 +2940,7 @@ mod tests {
         let (core, device) = two_by_two_with_device();
         let (from, to) = (stream_key(Dir::Tx, 1), stream_key(Dir::Tx, 0));
         let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Tx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 1_000,
-            call: 0,
-            release_window: 0,
-            allowance: 0,
-        });
+        let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: Config { channels, ratio }, lead: 1_000, call: 0, release_window: 0, allowance: 0 });
         device.tx_open(1, &[0]).unwrap();
         let (source, next) = {
             let mut streams = lock(&core.streams);
@@ -2823,7 +2953,11 @@ mod tests {
             streams.changed(&core, to);
             streams.stream_mut(to).configs.insert(move_seq, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
             let cold_seq = streams.next_seq();
-            assert!(streams.book(&core, to, Item { e: 20_000, seq: cold_seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }));
+            assert!(streams.book(
+                &core,
+                to,
+                Item { e: 20_000, seq: cold_seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }
+            ));
             streams.changed(&core, to);
             let source = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).expect("the old source segment");
             let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(move_seq)).expect("the moved transmit segment");
@@ -2832,11 +2966,19 @@ mod tests {
         };
 
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let worker = core.clone();
         let next_for_owner = next.clone();
         let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("tx-stop-with-later-cold", move || { let _ = done.send(worker.owner_configure(Dir::Tx, 0, &next_for_owner)); }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("tx-stop-with-later-cold", move || {
+                let _ = done.send(worker.owner_configure(Dir::Tx, 0, &next_for_owner));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the transmit owner reached its release wait");
         let still_planned = {
             let mut streams = lock(&core.streams);
@@ -2869,12 +3011,34 @@ mod tests {
             let core = two_by_two();
             let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
             let ms = |n: i64| core.ticks(n * 1_000_000);
-            let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: Config { channels, ratio: Rational::new(200, 1).unwrap() }, lead: ms(50), call: 0, release_window: 0, allowance: 0 });
+            let line = |channels| {
+                Line::new(timeline::Stream {
+                    direction: Direction::Tx,
+                    origin: 0,
+                    config: Config { channels, ratio: Rational::new(200, 1).unwrap() },
+                    lead: ms(50),
+                    call: 0,
+                    release_window: 0,
+                    allowance: 0,
+                })
+            };
             let mut streams = lock(&core.streams);
             streams.lines.insert(from, line(Channels::first(1)));
             streams.lines.insert(to, line(Channels::first(0)));
             let seq = streams.next_seq();
-            assert!(streams.book(&core, from, Item { e: ms(100), seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() }) }));
+            assert!(streams.book(
+                &core,
+                from,
+                Item {
+                    e: ms(100),
+                    seq,
+                    ready: 0,
+                    release: NO_RELEASE,
+                    delivered: None,
+                    refused: false,
+                    kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() })
+                }
+            ));
             if refuse {
                 assert!(streams.refuse(&core, from, seq));
             }
@@ -2904,15 +3068,7 @@ mod tests {
         let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
         let ratio = Rational::new(200, 1).unwrap();
         let config = |channels| Config { channels, ratio };
-        let line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Tx,
-            origin: 0,
-            config: config(channels),
-            lead: core.ticks(50_000_000),
-            call: 0,
-            release_window: 0,
-            allowance: 0,
-        });
+        let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: config(channels), lead: core.ticks(50_000_000), call: 0, release_window: 0, allowance: 0 });
         {
             let mut streams = lock(&core.streams);
             streams.lines.insert(from, line(Channels::first(2)));
@@ -3304,15 +3460,7 @@ mod tests {
         let mut streams = Streams::with_streams(2, 1);
         let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
         let ratio = Rational::new(200, 1).unwrap();
-        let rx_line = |channels| Line::new(timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: 0,
-            allowance: 0,
-        });
+        let rx_line = |channels| Line::new(timeline::Stream { direction: Direction::Rx, origin: 0, config: Config { channels, ratio }, lead: 0, call: 0, release_window: 0, allowance: 0 });
         streams.lines.insert(from, rx_line(Channels::first(2)));
         streams.lines.insert(to, rx_line(Channels::first(1)));
         streams.lines.book_move(from, to, 1, Some(10_000), 0, 7, 0).unwrap();
@@ -3359,5 +3507,4 @@ mod tests {
         assert_eq!(lock(&core.streams).stream(from).set, DeviceSet::Open(Channels::first(1)), "no close is recorded");
         assert!(!device.calls()[before..].iter().any(|call| call == "rx_close 1"), "{:?}", device.calls());
     }
-
 }

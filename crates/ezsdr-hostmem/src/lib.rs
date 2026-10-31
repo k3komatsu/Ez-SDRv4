@@ -22,10 +22,7 @@ pub struct HostPool {
 impl HostPool {
     /// Creates a pool whose reusable slots hold `slot_bytes` bytes (HD-2).
     pub fn new(slot_bytes: usize) -> HostPool {
-        HostPool {
-            slot_bytes,
-            slots: Vec::new(),
-        }
+        HostPool { slot_bytes, slots: Vec::new() }
     }
 
     /// Fills and returns a shared buffer, reusing only an unreferenced slot (HD-2).
@@ -57,14 +54,7 @@ impl HostPool {
 }
 
 /// Writes one planar `cf32` sample in little-endian real/imaginary order (HD-3).
-pub fn write_cf32(
-    buf: &mut [u8],
-    len: usize,
-    channel: usize,
-    index: usize,
-    re: f32,
-    im: f32,
-) {
+pub fn write_cf32(buf: &mut [u8], len: usize, channel: usize, index: usize, re: f32, im: f32) {
     let offset = (channel * len + index) * CF32_BYTES;
     buf[offset..offset + 4].copy_from_slice(&re.to_le_bytes());
     buf[offset + 4..offset + CF32_BYTES].copy_from_slice(&im.to_le_bytes());
@@ -74,21 +64,12 @@ pub fn write_cf32(
 pub fn read_cf32(buf: &[u8], len: usize, channel: usize, index: usize) -> (f32, f32) {
     let offset = (channel * len + index) * CF32_BYTES;
     let re = f32::from_le_bytes(buf[offset..offset + 4].try_into().expect("four real bytes"));
-    let im = f32::from_le_bytes(
-        buf[offset + 4..offset + CF32_BYTES]
-            .try_into()
-            .expect("four imaginary bytes"),
-    );
+    let im = f32::from_le_bytes(buf[offset + 4..offset + CF32_BYTES].try_into().expect("four imaginary bytes"));
     (re, im)
 }
 
 /// Copies a sample range from planar host bytes into channel-interleaved order (HD-3).
-pub fn interleave(
-    block: &SampleBlock,
-    bytes_per_sample: usize,
-    from: usize,
-    to: usize,
-) -> Vec<u8> {
+pub fn interleave(block: &SampleBlock, bytes_per_sample: usize, from: usize, to: usize) -> Vec<u8> {
     let header = block.header();
     let Some(bytes) = block.host_bytes() else {
         return Vec::new();

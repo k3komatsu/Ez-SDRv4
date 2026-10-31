@@ -73,21 +73,13 @@ impl EventKindRegistry {
         let mut reg = EventKindRegistry::new();
         let kind = |s: &str| EventKind::parse(s).expect("a Kernel kind is well formed");
         for (k, default, severity) in [
-            (EventKind::EVENTS_DROPPED, Reaction::MarkArtifact, Severity::Warning,
-            ),
-            (EventKind::LINK_BACKPRESSURE, Reaction::MarkArtifact, Severity::Warning,
-            ),
-            (EventKind::PROCESSOR_DEADLINE_MISS, Reaction::MarkArtifact, Severity::Warning,
-            ),
+            (EventKind::EVENTS_DROPPED, Reaction::MarkArtifact, Severity::Warning),
+            (EventKind::LINK_BACKPRESSURE, Reaction::MarkArtifact, Severity::Warning),
+            (EventKind::PROCESSOR_DEADLINE_MISS, Reaction::MarkArtifact, Severity::Warning),
             (EventKind::DEVICE_LOST, Reaction::Abort, Severity::Fatal),
             (EventKind::STEP_LIVELOCK, Reaction::Abort, Severity::Fatal),
         ] {
-            reg.register(
-                None,
-                EventKindDecl { kind: kind(k), default, severity,
-                },
-            )
-            .expect("the Kernel's own kinds do not collide");
+            reg.register(None, EventKindDecl { kind: kind(k), default, severity }).expect("the Kernel's own kinds do not collide");
         }
         reg
     }
@@ -95,17 +87,9 @@ impl EventKindRegistry {
     /// Registers a kind. `owner` is the namespace of the Vocabulary or Module that
     /// emits it, or `None` for the Kernel's own. A kind outside its owner's
     /// namespace is refused (RS-27, RS-39).
-    pub fn register(
-        &mut self,
-        owner: Option<Namespace>,
-        decl: EventKindDecl,
-    ) -> Result<(), RunError> {
+    pub fn register(&mut self, owner: Option<Namespace>, decl: EventKindDecl) -> Result<(), RunError> {
         if let Some(ns) = &owner {
-            let owned = decl
-                .kind
-                .as_str()
-                .strip_prefix(ns.as_str())
-                .is_some_and(|suffix| suffix.starts_with('.'));
+            let owned = decl.kind.as_str().strip_prefix(ns.as_str()).is_some_and(|suffix| suffix.starts_with('.'));
             if !owned {
                 return Err(RunError::SectionNamespaceForbidden { ns: ns.to_string() });
             }
@@ -113,8 +97,7 @@ impl EventKindRegistry {
         if self.decls.contains_key(&decl.kind) {
             // Not "unknown": RS-27 refuses a *second* declaration so that one
             // Vocabulary cannot overwrite another's default reaction and severity.
-            return Err(RunError::EventKindAlreadyRegistered { kind: decl.kind.to_string(),
-            });
+            return Err(RunError::EventKindAlreadyRegistered { kind: decl.kind.to_string() });
         }
         self.owners.insert(decl.kind.clone(), owner);
         self.decls.insert(decl.kind.clone(), decl);
@@ -129,8 +112,7 @@ impl EventKindRegistry {
     /// Refuses an unregistered kind, so that a misspelling in `policies.failure` is
     /// an error rather than a silently ineffective entry (SB-18).
     pub fn require(&self, kind: &EventKind) -> Result<&EventKindDecl, RunError> {
-        self.get(kind).ok_or_else(|| RunError::UnknownEventKind { kind: kind.to_string(),
-        })
+        self.get(kind).ok_or_else(|| RunError::UnknownEventKind { kind: kind.to_string() })
     }
 
     /// Every registered kind, in order (RS-33, RS-38).
@@ -140,14 +122,11 @@ impl EventKindRegistry {
 
     /// Compiles the Run's Policy: the Spec's `policies.failure` overrides, then each
     /// kind's declared default (RS-26, RS-28, SB-18).
-    pub fn compile(
-        &self,
-        overrides: &BTreeMap<EventKind, Reaction>) -> Result<Policy, RunError> {
+    pub fn compile(&self, overrides: &BTreeMap<EventKind, Reaction>) -> Result<Policy, RunError> {
         for kind in overrides.keys() {
             self.require(kind)?;
         }
-        let mut table: BTreeMap<EventKind, Reaction> =
-            self.decls.iter().map(|(k, d)| (k.clone(), d.default)).collect();
+        let mut table: BTreeMap<EventKind, Reaction> = self.decls.iter().map(|(k, d)| (k.clone(), d.default)).collect();
         let severities = self.decls.iter().map(|(k, d)| (k.clone(), d.severity)).collect();
         table.extend(overrides.iter().map(|(k, r)| (k.clone(), *r)));
         Ok(Policy { table, severities })

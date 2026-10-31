@@ -20,7 +20,7 @@ use ezsdr_radio::timeline::{Channels, Config, StreamKey};
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{stream_key, Clock, Core, Holder, Restore, RxChain, RxDevice, RxEntry, SegmentKey, lock};
+use super::core::{Clock, Core, Holder, Restore, RxChain, RxDevice, RxEntry, SegmentKey, lock, stream_key};
 use super::mode::DescriptionExt;
 use crate::device::{Dir, Iq, RxRecv};
 use crate::host::HostClock;
@@ -126,7 +126,9 @@ impl Rx {
         if let Some(stream) = stream.as_ref() {
             let mut chain = core.rx_chain[k].lock();
             let mut streams = lock(&core.streams);
-            let active = streams.planned(key).into_iter()
+            let active = streams
+                .planned(key)
+                .into_iter()
                 .find(|planned| planned.segment.origin == stream.clock.origin && planned.segment.config == stream.config)
                 .map(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by));
             let segment = SegmentKey { by: active.and_then(|active| active.2), origin: stream.clock.origin };
@@ -178,12 +180,13 @@ impl Rx {
         let mut chain = self.core.rx_chain[self.k].lock();
         let streams = lock(&self.core.streams);
         refresh_intent(&mut chain, &streams, key, stream);
-        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected)
-            && self.core.now() >= stream.clock.origin;
+        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected) && self.core.now() >= stream.clock.origin;
         let end_now = chain.end_now();
         drop(streams);
         drop(chain);
-        if done || end_now { self.try_end(); }
+        if done || end_now {
+            self.try_end();
+        }
     }
 
     pub fn run(mut self) {
@@ -287,12 +290,14 @@ impl Rx {
         let flush_deadline = pending.then(|| rx_drain_deadline(&self.core, self.k, clock.n, cut, chain.debt())).flatten();
         if let Some(deadline) = flush_deadline {
             let flush_at = deadline - i128::from(self.core.ticks(DELIVERY_ALLOWANCE_NS));
-            if i128::from(self.core.now()) < flush_at { return; }
+            if i128::from(self.core.now()) < flush_at {
+                return;
+            }
         }
-        let restore_needed = provider_stop.is_some_and(|(at, _)| chain.latest().values().any(|entry| {
-            entry.order.0 > at || entry.accepted_at.is_some_and(|accepted| accepted > at)
-        }));
-        if restore_needed && matches!(chain.restore(), Restore::NotAsked) { return; }
+        let restore_needed = provider_stop.is_some_and(|(at, _)| chain.latest().values().any(|entry| entry.order.0 > at || entry.accepted_at.is_some_and(|accepted| accepted > at)));
+        if restore_needed && matches!(chain.restore(), Restore::NotAsked) {
+            return;
+        }
 
         let mut stopped = !active;
         if active {
@@ -307,7 +312,9 @@ impl Rx {
                 }
                 Err(error) => {
                     self.core.device_failed(None, "update_parameter", &error);
-                    if provider_stop.is_some() { self.skip_restore_rx(&mut chain, &format!("receive stop failed; restore was not attempted: {}", error.message)); }
+                    if provider_stop.is_some() {
+                        self.skip_restore_rx(&mut chain, &format!("receive stop failed; restore was not attempted: {}", error.message));
+                    }
                 }
             }
         }
@@ -343,9 +350,13 @@ impl Rx {
                 while !chain.debt().is_empty() && i128::from(self.core.now()) < deadline && !self.core.is_lost() {
                     let left = (deadline - i128::from(self.core.now())).max(0);
                     let timeout_ns = left * 1_000_000_000 / i128::from(self.core.mcr);
-                    if timeout_ns < 1_000_000 { break; }
+                    if timeout_ns < 1_000_000 {
+                        break;
+                    }
                     let len = bounded_read_len(call, packet, left, sample_ticks);
-                    if len == 0 { break; }
+                    if len == 0 {
+                        break;
+                    }
                     let timeout = Wall::from_nanos(timeout_ns.min(u64::MAX as i128) as u64);
                     match self.core.device.rx_recv(self.k, len, timeout, true) {
                         RxRecv::Samples { first_tick, samples } => chain.consume(sample_ticks, channels, first_tick, &samples),
@@ -384,8 +395,9 @@ impl Rx {
             if matches!(chain.device(), RxDevice::Off) {
                 drop(chain);
                 self.restore_rx();
+            } else {
+                self.skip_restore_rx(&mut chain, "receive chain was not safely stopped; restore was not attempted");
             }
-            else { self.skip_restore_rx(&mut chain, "receive chain was not safely stopped; restore was not attempted"); }
         }
     }
 
@@ -402,7 +414,9 @@ impl Rx {
                     self.core.reject_note(json!({ "clock_not_ended": error.to_string() }));
                 }
             }
-            if let Some(active) = streams.finished(key) { streams.complete(key, active); }
+            if let Some(active) = streams.finished(key) {
+                streams.complete(key, active);
+            }
             let by = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config)).and_then(|segment| segment.by);
             streams.prune(key, by);
         }
@@ -422,13 +436,18 @@ impl Rx {
         let restore = self.core.rx_chain[self.k].lock().take_restore();
         let Some(restore) = restore else { return };
         self.core.probe("rx_restore_before_chain_scan", None);
-        let elsewhere: Vec<_> = (0..self.core.rx_chain.len()).filter(|&k| k != self.k).flat_map(|k| {
-            let chain = self.core.rx_chain[k].lock();
-            chain.debt().iter().chain(chain.left()).cloned().collect::<Vec<_>>()
-        }).collect();
+        let elsewhere: Vec<_> = (0..self.core.rx_chain.len())
+            .filter(|&k| k != self.k)
+            .flat_map(|k| {
+                let chain = self.core.rx_chain[k].lock();
+                chain.debt().iter().chain(chain.left()).cloned().collect::<Vec<_>>()
+            })
+            .collect();
         let chain = self.core.rx_chain[self.k].lock();
         for (channel, value) in restore {
-            if self.core.is_lost() { return; }
+            if self.core.is_lost() {
+                return;
+            }
             let local = chain.debt().iter().chain(chain.left()).find(|entry| entry.channel == channel).cloned();
             let other = elsewhere.iter().find(|entry| entry.channel == channel).cloned();
             if let Some(entry) = local.or(other) {
@@ -444,7 +463,9 @@ impl Rx {
                 Err(error) => {
                     self.record_restore_failure(channel, value, &error.message);
                     self.core.device_failed(None, "rx_restore", &error);
-                    if error.lost { return; }
+                    if error.lost {
+                        return;
+                    }
                 }
             }
         }
@@ -537,7 +558,9 @@ impl Rx {
             }
             Err(error) => {
                 let stop = self.core.device.rx_stop(self.k, None);
-                if let Err(stop_error) = chain.stop_result(stop) { self.core.device_failed(None, "update_parameter", &stop_error); }
+                if let Err(stop_error) = chain.stop_result(stop) {
+                    self.core.device_failed(None, "update_parameter", &stop_error);
+                }
                 let entries = chain.finish();
                 self.report_leftovers(entries, "receive segment could not register its sample clock");
                 drop(chain);
@@ -554,9 +577,13 @@ impl Rx {
         let mut streams = lock(&self.core.streams);
         self.core.probe("refused_booking", Some(&streams));
         let refused = next.segment.by.is_some_and(|by| streams.refuse(&self.core, key, by));
-        if let Some(claim) = claim { streams.give_back(claim); }
+        if let Some(claim) = claim {
+            streams.give_back(claim);
+        }
         drop(streams);
-        if !refused { self.from = next.segment.origin.saturating_add(1); }
+        if !refused {
+            self.from = next.segment.origin.saturating_add(1);
+        }
         self.core.device_failed(None, "update_parameter", &error);
     }
 
@@ -587,8 +614,7 @@ impl Rx {
         let chain = self.core.rx_chain[self.k].lock();
         let Some(cut) = chain.cut() else { return RECV_TIMEOUT };
         let left = i128::from(cut) + i128::from(quiet_span(&self.core, stream)) - i128::from(self.core.now());
-        let ns = (left.max(0) * 1_000_000_000 / i128::from(self.core.mcr))
-            .clamp(1_000_000, RECV_TIMEOUT.as_nanos() as i128);
+        let ns = (left.max(0) * 1_000_000_000 / i128::from(self.core.mcr)).clamp(1_000_000, RECV_TIMEOUT.as_nanos() as i128);
         let ns = rx_drain_deadline(&self.core, self.k, stream.clock.n, cut, chain.debt())
             .map_or(ns, |deadline| ns.min((deadline - i128::from(self.core.now())).max(0) * 1_000_000_000 / i128::from(self.core.mcr)));
         Wall::from_nanos(ns.min(u64::MAX as i128) as u64)
@@ -625,26 +651,20 @@ impl Rx {
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays. The new start
                 // waits the profile's start lead from now (spec 20, VF-6).
-                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))), stream.config.ratio) {
+                let restart = match ezsdr_radio::timeline::lattice(
+                    now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))),
+                    stream.config.ratio,
+                ) {
                     Ok(restart) => restart,
                     Err(error) => return self.core.command_rejected(None, "start", &format!("UR-17: {error}")),
                 };
-                let payload = serde_json::to_value(LateCommandPayload {
-                    key: None,
-                    requested: self.core.at(stream.start),
-                    applied: self.core.at(restart),
-                })
-                .expect("a payload");
+                let payload = serde_json::to_value(LateCommandPayload { key: None, requested: self.core.at(stream.start), applied: self.core.at(restart) }).expect("a payload");
                 stream.report(Pending::MissedStart);
                 self.core.emit(&self.core.stream_node(Dir::Rx, self.k), kinds::LATE_COMMAND, Severity::Warning, payload);
                 self.core.timing(json!({ "what": "rx_restart", "requested": stream.start, "at": restart }));
                 let result = {
                     let mut chain = self.core.rx_chain[self.k].lock();
-                    if self.core.is_lost() || chain.device() == RxDevice::Lost {
-                        None
-                    } else {
-                        Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))
-                    }
+                    if self.core.is_lost() || chain.device() == RxDevice::Lost { None } else { Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart))) }
                 };
                 match result {
                     None => self.try_end(),
@@ -667,9 +687,7 @@ impl Rx {
         let quiet = self.host.now().saturating_sub(self.last_samples) >= Wall::from_nanos(self.core.ns(span).max(0) as u64);
         let cut = self.core.rx_chain[self.k].lock().cut();
         let ended = cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));
-        let lost = cut.is_none_or(|cut| now < cut)
-            && i128::from(now) > i128::from(stream.start) + i128::from(self.core.mcr)
-            && self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(1);
+        let lost = cut.is_none_or(|cut| now < cut) && i128::from(now) > i128::from(stream.start) + i128::from(self.core.mcr) && self.host.now().saturating_sub(self.last_samples) > Wall::from_secs(1);
         if ended {
             self.core.rx_chain[self.k].lock().request_end_now();
             self.try_end();
@@ -764,11 +782,14 @@ impl Rx {
             stream.expected = k + len;
             let at = TimePoint::new(clock.domain, expected);
             let lost_n = lost.unwrap_or(0);
-            let reports: Vec<_> = pending.iter().filter_map(|pending| match pending {
-                Pending::Overrun => Some(RxOverflowCause::Overrun),
-                Pending::Sequence => Some(RxOverflowCause::Sequence),
-                Pending::Alignment | Pending::MissedStart => None,
-            }).collect();
+            let reports: Vec<_> = pending
+                .iter()
+                .filter_map(|pending| match pending {
+                    Pending::Overrun => Some(RxOverflowCause::Overrun),
+                    Pending::Sequence => Some(RxOverflowCause::Sequence),
+                    Pending::Alignment | Pending::MissedStart => None,
+                })
+                .collect();
             if let Some(payload) = ezsdr_radio::payloads::rx_overflow_payload(&reports, lost) {
                 // UR-20: one hot-path event for the block's whole reported loss.
                 if let Err(error) = self.core.events.emit(self.core.overflow(self.k), at, Severity::Warning, &payload.to_hot()) {
@@ -852,7 +873,9 @@ fn refresh_intent(chain: &mut RxChain, streams: &super::core::Streams, key: Stre
 
 /// Keep each UHD receive to one packet and to no more samples than fit before the deadline.
 fn bounded_read_len(requested: usize, packet: usize, remaining_ticks: i128, sample_ticks: i64) -> usize {
-    if remaining_ticks <= 0 { return 0; }
+    if remaining_ticks <= 0 {
+        return 0;
+    }
     let by_time = usize::try_from((remaining_ticks / i128::from(sample_ticks)).max(1)).unwrap_or(usize::MAX);
     requested.min(if packet == 0 { requested } else { packet }).min(by_time)
 }
@@ -869,20 +892,22 @@ mod differential;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::control::ColdConfig;
+    use super::super::core::{Phase, RxDevice, Streams};
+    use super::*;
     use crate::device::Device;
     use ezsdr_kernel::module_api::Link;
     use ezsdr_kernel::stream::BackPressure;
     use ezsdr_kernel::stream::{ContinuityBuilder, DropCarry, GapCause};
     use ezsdr_radio::payloads::RxOverflowPayload;
-    use ezsdr_radio::timeline::{Item, Kind, Line, Segment, NO_RELEASE};
+    use ezsdr_radio::timeline::{Item, Kind, Line, NO_RELEASE, Segment};
     use std::collections::BTreeMap;
-    use super::super::core::{Phase, RxDevice, Streams};
 
     struct NoActions;
     impl ezsdr_kernel::module_api::ActionReceiver for NoActions {
-        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> { None }
+        fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
+            None
+        }
     }
 
     fn link() -> Arc<dyn ezsdr_kernel::stream::DataLink> {
@@ -930,15 +955,18 @@ mod tests {
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
         let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
         let config = Config { channels: Channels::first(channels as u32), ratio: Rational::new(200, 1).unwrap() };
-        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 0), Line::new(ezsdr_radio::timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config,
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
-            call: core.block_len as i64,
-            release_window: core.ticks(core.description.timing.release_window_ns),
-            allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
-        }));
+        lock(&core.streams).lines.insert(
+            stream_key(Dir::Rx, 0),
+            Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config,
+                lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
+                call: core.block_len as i64,
+                release_window: core.ticks(core.description.timing.release_window_ns),
+                allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
+            }),
+        );
         (handle, clock)
     }
 
@@ -984,7 +1012,9 @@ mod tests {
     }
 
     fn device_at_spy(core: &Core, time: &ezsdr_kernel::time::ManualTimeAuthority, device: &super::super::test_support::LockSpy, ticks: i64) {
-        if core.now() < ticks { time.advance_to(core.at(ticks)).unwrap(); }
+        if core.now() < ticks {
+            time.advance_to(core.at(ticks)).unwrap();
+        }
         device.set_time(ticks);
         assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks));
     }
@@ -1003,13 +1033,17 @@ mod tests {
         provider_stop_at: Option<i64>,
     ) -> (Rx, super::super::test_support::Frozen) {
         let device_at = |ticks| {
-            if core.now() < ticks { time.advance_to(core.at(ticks)).unwrap(); }
+            if core.now() < ticks {
+                time.advance_to(core.at(ticks)).unwrap();
+            }
             device.set_time(ticks);
             assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks));
         };
         let stalled = device.rx_recv(k, core.block_len, Wall::ZERO, false);
         assert!(matches!(&stalled, RxRecv::Timeout), "the old receive flow stalls: {stalled:?}; calls={:?}", device.log());
-        if provider_stop_at.is_none() { core.rx_chain[k].lock().request_cut(cut); }
+        if provider_stop_at.is_none() {
+            core.rx_chain[k].lock().request_cut(cut);
+        }
         let release = instant - core.ticks(core.description.timing.release_window_ns);
         device_at(release);
         control.release();
@@ -1033,10 +1067,14 @@ mod tests {
         device_at(i64::try_from(flush_at).unwrap());
         let gate = device.stop_after("rx_recv");
         let (done, finished) = std::sync::mpsc::channel();
-        let worker = core.device.host().spawn("rx-leftover-drain", move || {
-            rx.try_end();
-            let _ = done.send(rx);
-        }).unwrap();
+        let worker = core
+            .device
+            .host()
+            .spawn("rx-leftover-drain", move || {
+                rx.try_end();
+                let _ = done.send(rx);
+            })
+            .unwrap();
         drop(frozen);
         gate.wait();
         let frozen = super::super::test_support::Frozen::on(device.host());
@@ -1076,7 +1114,9 @@ mod tests {
             RxEntry { order: (0, 1), channel: 0, value: 1.0, accepted_at: Some(200) },
             RxEntry { order: (0, 2), channel: 0, value: 2.0, accepted_at: Some(200) },
             RxEntry { order: (0, 3), channel: 1, value: 3.0, accepted_at: Some(0) },
-        ] { accept_entry(&mut chain, entry); }
+        ] {
+            accept_entry(&mut chain, entry);
+        }
         let clock = Clock { domain: ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, origin: 0, n: 200 };
         let channels = Channels::first(2);
         let samples = vec![vec![[0.0, 0.0]; 1], vec![[0.0, 0.0]; 1]];
@@ -1093,11 +1133,7 @@ mod tests {
         // Owner path: the timed handover is accepted first, a later cold booking cuts the
         // segment before its instant, and the block spanning the cut drains the DDC without
         // publishing its tail. A 20 ms receive call makes the minimum 3 ms lead observable.
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(20_000),
-            ..Default::default()
-        }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, rx_packet: Some(20_000), ..Default::default() }));
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.rx_start_lead_ns = 3_000_000;
         let output = link();
@@ -1113,11 +1149,7 @@ mod tests {
         config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
         rx_start[0] = Some((Channels::first(1), 200));
-        let start = super::super::control::Start {
-            t0,
-            rx: rx_start,
-            tx: vec![None; core.description.stream_count(Dir::Tx)],
-        };
+        let start = super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] };
         let (to_tx, _tx) = std::sync::mpsc::channel();
         let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
         lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
@@ -1166,11 +1198,7 @@ mod tests {
 
     #[test]
     fn ur_24_a_stop_decision_waits_for_a_gated_timed_rx_handover() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            command_queue: 64,
-            ..Default::default()
-        }));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
         let output = link();
         let (core, time, _) = super::super::test_support::rig_on(spy.clone(), vec![output.clone()], 2_000);
         spy.watch(&core);
@@ -1196,8 +1224,12 @@ mod tests {
         rx.receive(samples(t0, 2_000));
 
         let e = t0 + ticks(5);
-        control.book_timed(ezsdr_kernel::event::ActionId(1), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(1),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))),
+        );
         let cut = t0 + ticks(8);
         book(&core, cut, 2, Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }));
         let release_at = e - ticks(core.description.timing.release_window_ns / 1_000_000);
@@ -1205,20 +1237,28 @@ mod tests {
         spy.set_time(release_at);
         let gate = spy.stop_after("apply");
         let (control_done, control_returned) = std::sync::mpsc::channel();
-        let control_thread = core.device.host().spawn("rx-d9b-handover", move || {
-            control.release();
-            let _ = control_done.send(control);
-        }).unwrap();
+        let control_thread = core
+            .device
+            .host()
+            .spawn("rx-d9b-handover", move || {
+                control.release();
+                let _ = control_done.send(control);
+            })
+            .unwrap();
         gate.wait();
 
         let after_e = e + ticks(1);
         time.advance_to(core.at(after_e)).unwrap();
         spy.set_time(after_e);
         let (owner_done, owner_returned) = std::sync::mpsc::channel();
-        let owner_thread = core.device.host().spawn("rx-d9b-stop", move || {
-            rx.receive(samples(after_e, 2_000));
-            let _ = owner_done.send(rx);
-        }).unwrap();
+        let owner_thread = core
+            .device
+            .host()
+            .spawn("rx-d9b-stop", move || {
+                rx.receive(samples(after_e, 2_000));
+                let _ = owner_done.send(rx);
+            })
+            .unwrap();
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
         while !(core.rx_chain[0].is_held() && core.rx_chain[0].waiters() > 0) && std::time::Instant::now() < deadline {
             std::thread::yield_now();
@@ -1273,8 +1313,12 @@ mod tests {
         let e = t0 + ticks(100);
         let cut = e + ticks(10);
         book(&core, cut, 2, Kind::Stop);
-        control.book_timed(ezsdr_kernel::event::ActionId(1), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(1),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))),
+        );
         let release_at = e - core.ticks(core.description.timing.release_window_ns);
         super::super::test_support::device_at(&core, &time, &device, release_at);
         core.rx_chain[0].lock().request_cut(cut);
@@ -1289,20 +1333,30 @@ mod tests {
             let _ = owner_resume.lock().unwrap().recv();
         });
         let (owner_done, owner_returned) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-finish-frequency-race", move || {
-            rx.try_end();
-            drop(to_rx);
-            let _ = owner_done.send(rx);
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-finish-frequency-race", move || {
+                rx.try_end();
+                drop(to_rx);
+                let _ = owner_done.send(rx);
+            })
+            .unwrap();
         owner_at_finish.recv_timeout(Wall::from_secs(10)).expect("the stopped owner reached completion");
 
         let (control_ready, control_at_apply) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "before_timed_apply", move |_| { let _ = control_ready.send(()); });
+        super::super::test_support::probe(&core, "before_timed_apply", move |_| {
+            let _ = control_ready.send(());
+        });
         let (control_done, control_returned) = std::sync::mpsc::channel();
-        let control_thread = core.device.host().spawn("rx-late-frequency", move || {
-            control.release();
-            let _ = control_done.send(());
-        }).unwrap();
+        let control_thread = core
+            .device
+            .host()
+            .spawn("rx-late-frequency", move || {
+                control.release();
+                let _ = control_done.send(());
+            })
+            .unwrap();
         control_at_apply.recv_timeout(Wall::from_secs(10)).expect("control reached the timed handover");
         let deadline = std::time::Instant::now() + Wall::from_secs(10);
         while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline {
@@ -1325,17 +1379,15 @@ mod tests {
 
     #[test]
     fn ur_24_provider_stop_drains_after_s_then_restores_the_frequency_in_force_at_s() {
-        let device = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(1_000),
-            ..Default::default()
-        }));
+        let device = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, rx_packet: Some(1_000), ..Default::default() }));
         let output = link();
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         device.watch(&core);
         let frozen = super::super::test_support::Frozen::on(device.host());
         let device_at = |ticks| {
-            if core.now() < ticks { time.advance_to(core.at(ticks)).unwrap(); }
+            if core.now() < ticks {
+                time.advance_to(core.at(ticks)).unwrap();
+            }
             device.set_time(ticks);
             assert_eq!((core.now(), device.time_now().unwrap()), (ticks, ticks));
         };
@@ -1401,7 +1453,11 @@ mod tests {
         assert!(rx.stream.is_none());
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the stream consumed both timed values before stopping");
         let restored_at = device.time_now().unwrap();
-        assert!(device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at <= restored_at && *value == a && !timed), "the device is restored before another Run can configure it: {:?}", device.dsp_log(Dir::Rx, 0));
+        assert!(
+            device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at <= restored_at && *value == a && !timed),
+            "the device is restored before another Run can configure it: {:?}",
+            device.dsp_log(Dir::Rx, 0)
+        );
         let rec = lock(&core.rec);
         let restores: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
         assert_eq!(restores.len(), 1, "restoration happens once, after the pending value is drained: {restores:?}");
@@ -1412,7 +1468,11 @@ mod tests {
         let consumed = order.iter().rposition(|call| *call == "rx_recv").unwrap();
         let restored = order.iter().rposition(|call| *call == "apply").unwrap();
         assert!(consumed < restored, "the flush receive returned before the restore apply: {order:?}");
-        assert!(device.rx_apply_pending().iter().any(|(channel, at, value, pending)| *channel == 0 && at.is_none() && *value == a && *pending == 0), "the restore apply observed the DDC entry consumed: {:?}", device.rx_apply_pending());
+        assert!(
+            device.rx_apply_pending().iter().any(|(channel, at, value, pending)| *channel == 0 && at.is_none() && *value == a && *pending == 0),
+            "the restore apply observed the DDC entry consumed: {:?}",
+            device.rx_apply_pending()
+        );
         let published = received(&output);
         assert_eq!(published.iter().map(|(_, _, len)| *len).sum::<u32>(), ((at_s - t0) / 200) as u32, "the pre-S prefix is published");
         assert_eq!(published.iter().map(|(_, tick, _)| *tick).collect::<Vec<_>>(), [0, 2_000, 4_000, 6_000]);
@@ -1421,21 +1481,14 @@ mod tests {
 
     #[test]
     fn ur_24_multichannel_abort_keeps_overflow_and_drain_samples_off_the_link() {
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            ..Default::default()
-        }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let output = link();
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         let _frozen = super::super::test_support::Frozen::of(&device);
         device.set_time(core.now());
         let (mut rx, clock) = rx(&core, 2);
         device.rx_start(0, 0).unwrap();
-        let entries = [
-            (core.ticks(1_000_000), 1, 0, 1.001e9),
-            (core.ticks(2_000_000), 2, 1, 1.002e9),
-            (core.ticks(2_000_000), 3, 1, 1.003e9),
-        ];
+        let entries = [(core.ticks(1_000_000), 1, 0, 1.001e9), (core.ticks(2_000_000), 2, 1, 1.002e9), (core.ticks(2_000_000), 3, 1, 1.003e9)];
         {
             let mut chain = core.rx_chain[0].lock();
             for &(at, seq, channel, value) in &entries {
@@ -1465,15 +1518,8 @@ mod tests {
 
     #[test]
     fn ur_24_fake_ddc_distinguishes_host_silence_from_a_stalled_ddc() {
-        for (fault, pending) in [
-            (crate::device::FakeFault::Silence(Wall::ZERO), 0),
-            (crate::device::FakeFault::RxFlowStall(Wall::ZERO), 1),
-        ] {
-            let device = crate::device::FakeDevice::new(crate::device::FakeConfig {
-                clock: crate::ClockMode::Manual,
-                faults: vec![fault],
-                ..Default::default()
-            });
+        for (fault, pending) in [(crate::device::FakeFault::Silence(Wall::ZERO), 0), (crate::device::FakeFault::RxFlowStall(Wall::ZERO), 1)] {
+            let device = crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault], ..Default::default() });
             let _frozen = super::super::test_support::Frozen::of(&device);
             device.set_time(0);
             device.rx_open(0, &[0]).unwrap();
@@ -1555,10 +1601,12 @@ mod tests {
             let recv_gate = (!near_deadline).then(|| spy.stop_before("rx_recv"));
             let (done, finished) = std::sync::mpsc::channel();
             let host = core.device.host();
-            let worker = host.spawn("rx-d9b-flush", move || {
-                rx.try_end();
-                let _ = done.send(rx);
-            }).unwrap();
+            let worker = host
+                .spawn("rx-d9b-flush", move || {
+                    rx.try_end();
+                    let _ = done.send(rx);
+                })
+                .unwrap();
             start_gate.wait();
             assert_eq!(spy.seen("rx_stop"), 1, "the cut stop precedes the one flush");
             assert_eq!(spy.seen("rx_start"), 1);
@@ -1621,13 +1669,11 @@ mod tests {
             faults: vec![crate::device::FakeFault::RxFlowStall(Wall::ZERO), crate::device::FakeFault::RxFlowStall(Wall::from_micros(1))],
             ..Default::default()
         }));
-        let (core, time, _) = super::super::test_support::rig_on_description(
-            spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let t0 = core.now();
-        let (old, successor) = (Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() });
+        let (old, successor) = (Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() });
         let (cut, e, next_origin) = (t0 + ms(12), t0 + ms(8), t0 + ms(20));
         let config = core.description.defaults();
         let rx_start = {
@@ -1636,17 +1682,24 @@ mod tests {
             starts
         };
         let (to_tx, _tx) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config.clone(), false,
-            super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] });
-        let segments = [
-            Segment { origin: t0, cut: Some((cut - t0) / 200), config: old, by: None },
-            Segment { origin: next_origin, cut: None, config: successor, by: Some(1) },
-        ];
+        let mut control = super::super::control::Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            config.clone(),
+            false,
+            super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] },
+        );
+        let segments = [Segment { origin: t0, cut: Some((cut - t0) / 200), config: old, by: None }, Segment { origin: next_origin, cut: None, config: successor, by: Some(1) }];
         let frozen = super::super::test_support::Frozen::on(spy.host());
         device_at_spy(&core, &time, &spy, t0);
         let (mut rx, clock) = rx_with_plan(&core, &segments);
-        control.book_timed(ezsdr_kernel::event::ActionId(1), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(1),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))),
+        );
         let (rx_after_drain, frozen) = fail_drain_to_left(&core, &time, &spy, &mut control, frozen, rx, 0, e, cut, None);
         rx = rx_after_drain;
         assert_eq!(core.rx_chain[0].lock().latest().get(&0).map(|entry| entry.value), Some(1.001e9));
@@ -1667,8 +1720,12 @@ mod tests {
         drop(chain);
 
         let (at_s, future) = (t0 + ms(39), t0 + ms(40));
-        control.book_timed(ezsdr_kernel::event::ActionId(2), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.002e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(future))));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(2),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.002e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(future))),
+        );
         device_at_spy(&core, &time, &spy, future - core.ticks(core.description.timing.release_window_ns));
         control.release();
         assert_eq!(core.rx_chain[0].lock().latest().get(&0).map(|entry| entry.value), Some(1.002e9));
@@ -1705,8 +1762,7 @@ mod tests {
             faults: vec![crate::device::FakeFault::RxFlowStall(Wall::ZERO), crate::device::FakeFault::RxFlowStall(Wall::from_micros(1))],
             ..Default::default()
         }));
-        let (core, time, _) = super::super::test_support::rig_on_description(
-            spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let t0 = core.now();
@@ -1715,19 +1771,24 @@ mod tests {
         let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
         rx_start[0] = Some((Channels::first(1), 200));
         let (to_tx, _tx) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false,
-            super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] });
-        let segment = Segment {
-            origin: t0,
-            cut: None,
-            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            by: None,
-        };
+        let mut control = super::super::control::Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            config,
+            false,
+            super::super::control::Start { t0, rx: rx_start, tx: vec![None; core.description.stream_count(Dir::Tx)] },
+        );
+        let segment = Segment { origin: t0, cut: None, config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, by: None };
         let frozen = super::super::test_support::Frozen::on(spy.host());
         device_at_spy(&core, &time, &spy, t0);
         let (rx, _) = rx_with_plan(&core, &[segment]);
-        control.book_timed(ezsdr_kernel::event::ActionId(1), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(1),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))),
+        );
         let (mut rx, frozen) = fail_drain_to_left(&core, &time, &spy, &mut control, frozen, rx, 0, e, cut, None);
 
         assert_eq!(core.rx_chain[0].lock().left().len(), 1, "the earlier failed drain left the value on its owning chain");
@@ -1754,19 +1815,18 @@ mod tests {
 
     #[test]
     fn ur_24_a_local_leftover_blocks_restore() {
-        let (core, device, _, _) = super::super::test_support::rig_with(
-            crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() },
-            vec![link()],
-        );
+        let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let t0 = core.now();
         let instant = t0 + core.ticks(8_000_000);
         let mut chain = core.rx_chain[0].lock();
-        chain.hand(
-            RxEntry { order: (instant, 1), channel: 0, value: 1.001e9, accepted_at: None },
-            || core.device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(instant)).map(|_| ()),
-            || core.now(),
-        ).unwrap();
+        chain
+            .hand(
+                RxEntry { order: (instant, 1), channel: 0, value: 1.001e9, accepted_at: None },
+                || core.device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(instant)).map(|_| ()),
+                || core.now(),
+            )
+            .unwrap();
         chain.stop_result(core.device.rx_stop(0, None)).unwrap();
         chain.plan_restore(BTreeMap::from([(0, 1e9)]));
         rx.finish_locked(&mut chain);
@@ -1790,8 +1850,7 @@ mod tests {
             ..Default::default()
         }));
         let links = vec![vec![link()], vec![link()]];
-        let (core, time, _) = super::super::test_support::rig_on_description_links(
-            spy.clone(), links, BTreeMap::new(), layout_description());
+        let (core, time, _) = super::super::test_support::rig_on_description_links(spy.clone(), links, BTreeMap::new(), layout_description());
         spy.watch(&core);
         let frozen = super::super::test_support::Frozen::on(spy.host());
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -1801,17 +1860,32 @@ mod tests {
         config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         config.insert(super::super::core::key("radio.rx.c1.stream"), ezsdr_kernel::spec::Value::from(-1));
         let (to_tx, _tx) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false,
-            super::super::control::Start { t0, rx: vec![Some((old, 200)), None], tx: vec![None; core.description.stream_count(Dir::Tx)] });
+        let mut control = super::super::control::Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            config,
+            false,
+            super::super::control::Start { t0, rx: vec![Some((old, 200)), None], tx: vec![None; core.description.stream_count(Dir::Tx)] },
+        );
         let target = super::super::test_support::target_of(&core.id);
-        control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1),
+        control.book(ezsdr_kernel::module_api::Dispatched::new(
+            ezsdr_kernel::event::ActionId(1),
             ezsdr_kernel::event::Action::UpdateParameter {
-                target: target.clone(), key: super::super::core::key("radio.rx.c0.stream"), value: ezsdr_kernel::spec::Value::from(1),
+                target: target.clone(),
+                key: super::super::core::key("radio.rx.c0.stream"),
+                value: ezsdr_kernel::spec::Value::from(1),
                 class: ezsdr_kernel::module_api::UpdateClass::Cold,
                 at: Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(cut))),
-            }, Some(core.id.clone())));
-        control.book_timed(ezsdr_kernel::event::ActionId(2), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))));
+            },
+            Some(core.id.clone()),
+        ));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(2),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.001e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(e))),
+        );
         device_at_spy(&core, &time, &spy, t0);
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(200, 1).unwrap()).unwrap();
         spy.rx_open(0, &[0]).unwrap();
@@ -1826,7 +1900,9 @@ mod tests {
         }
         assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the stale DDC value is still on the moved channel before destination configure");
 
-        let destination = lock(&core.streams).planned(stream_key(Dir::Rx, 1)).into_iter()
+        let destination = lock(&core.streams)
+            .planned(stream_key(Dir::Rx, 1))
+            .into_iter()
             .find(|planned| planned.segment.config.channels == Channels::first(1) && planned.segment.origin > cut)
             .expect("the move plans channel 0 on stream 1");
         assert!(!rx.begin(), "the completed source has no segment after its channel moves");
@@ -1846,8 +1922,12 @@ mod tests {
         assert_eq!(core.rx_chain[0].lock().left().len(), 1, "sample evidence on stream 1 cannot remove stream 0's reported leftover");
 
         let (at_s, future) = (destination.segment.origin + ms(19), destination.segment.origin + ms(20));
-        control.book_timed(ezsdr_kernel::event::ActionId(3), super::super::core::key("radio.rx.c0.frequency_hz"),
-            ezsdr_kernel::spec::Value::num(1.002e9).unwrap(), Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(future))));
+        control.book_timed(
+            ezsdr_kernel::event::ActionId(3),
+            super::super::core::key("radio.rx.c0.frequency_hz"),
+            ezsdr_kernel::spec::Value::num(1.002e9).unwrap(),
+            Some(ezsdr_kernel::time::AbsoluteDeadline::new(core.at(future))),
+        );
         device_at_spy(&core, &time, &spy, future - core.ticks(core.description.timing.release_window_ns));
         control.release();
         assert_eq!(core.rx_chain[1].lock().debt().len(), 1, "the destination owns its new timed value");
@@ -1862,7 +1942,9 @@ mod tests {
 
         device_at_spy(&core, &time, &spy, future + ms(2));
         for _ in 0..30 {
-            if core.rx_chain[1].lock().debt().is_empty() { break; }
+            if core.rx_chain[1].lock().debt().is_empty() {
+                break;
+            }
             let samples = spy.rx_recv(1, 2_000, Wall::ZERO, false);
             assert!(matches!(&samples, RxRecv::Samples { .. }), "the final in-flight value gets sample evidence: {samples:?}");
             rx1.receive(samples);
@@ -1877,11 +1959,19 @@ mod tests {
         assert_eq!(core.rx_chain[0].lock().left().len(), 1);
         let rejected = lock(&core.rec).rejected.clone();
         assert_eq!(rejected.iter().filter(|row| row["call"] == "rx_drain").count(), 1);
-        assert!(rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("remains on an RX chain"))), "restore sees the old chain's leftover: {rejected:?}");
+        assert!(
+            rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("remains on an RX chain"))),
+            "restore sees the old chain's leftover: {rejected:?}"
+        );
         let restores: Vec<_> = lock(&core.rec).applied.iter().filter(|row| row["restore"] == true).cloned().collect();
         assert_eq!(restores.len(), 1, "the blocked restore is reported once: {restores:?}");
         assert!(restores[0]["read_back"].is_null() && restores[0]["error"].is_string(), "the restore was not applied over the old chain's leftover: {restores:?}");
-        assert_eq!(spy.dsp_log(Dir::Rx, 0).last().map(|(_, value, timed)| (*value, *timed)), Some((1.002e9, true)), "inspect destination state before another configure: {:?}", spy.dsp_log(Dir::Rx, 0));
+        assert_eq!(
+            spy.dsp_log(Dir::Rx, 0).last().map(|(_, value, timed)| (*value, *timed)),
+            Some((1.002e9, true)),
+            "inspect destination state before another configure: {:?}",
+            spy.dsp_log(Dir::Rx, 0)
+        );
         drop(rx);
     }
 
@@ -1930,10 +2020,14 @@ mod tests {
 
         let gate = spy.stop_after("rx_recv");
         let (done, finished) = std::sync::mpsc::channel();
-        let worker = core.device.host().spawn("rx-short-packet-deadline", move || {
-            rx.turn();
-            let _ = done.send(rx);
-        }).unwrap();
+        let worker = core
+            .device
+            .host()
+            .spawn("rx-short-packet-deadline", move || {
+                rx.turn();
+                let _ = done.send(rx);
+            })
+            .unwrap();
         gate.wait();
         let returned_at = spy.time_now().unwrap();
         assert_eq!(returned_at, now + core.ticks(7_000_000), "the one-packet receive returned after 500 samples and delivery latency");
@@ -1951,11 +2045,7 @@ mod tests {
 
     #[test]
     fn ur_24_a_far_future_cut_keeps_pre_cut_receives_multi_packet() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(500),
-            ..Default::default()
-        }));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, rx_packet: Some(500), ..Default::default() }));
         let output = link();
         let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![output.clone()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
@@ -1971,15 +2061,18 @@ mod tests {
         let (first_done, first_turn) = std::sync::mpsc::channel();
         let (second_done, second_turn) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
-        let worker = spy.host().spawn("rx-far-future-cut", move || {
-            turns.recv().unwrap();
-            rx.turn();
-            first_done.send(()).unwrap();
-            turns.recv().unwrap();
-            rx.turn();
-            second_done.send(rx).unwrap();
-            let _ = released.recv();
-        }).unwrap();
+        let worker = spy
+            .host()
+            .spawn("rx-far-future-cut", move || {
+                turns.recv().unwrap();
+                rx.turn();
+                first_done.send(()).unwrap();
+                turns.recv().unwrap();
+                rx.turn();
+                second_done.send(rx).unwrap();
+                let _ = released.recv();
+            })
+            .unwrap();
         drop(frozen);
 
         turn.send(()).unwrap();
@@ -2055,7 +2148,11 @@ mod tests {
         assert_eq!((chain.left()[0].order, chain.left()[0].channel, chain.left()[0].value), (entry.order, entry.channel, entry.value));
         drop(chain);
         let rec = lock(&core.rec);
-        assert!(rec.rejected.iter().any(|row| row["call"] == "rx_drain" && row["channel"] == 0 && row["error"].as_str().is_some_and(|error| error.contains("unconsumed DDC value"))), "{:?}", rec.rejected);
+        assert!(
+            rec.rejected.iter().any(|row| row["call"] == "rx_drain" && row["channel"] == 0 && row["error"].as_str().is_some_and(|error| error.contains("unconsumed DDC value"))),
+            "{:?}",
+            rec.rejected
+        );
         assert!(rec.rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("restore was not attempted"))), "{:?}", rec.rejected);
         let skipped: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
         assert_eq!(skipped.len(), 1, "{skipped:?}");
@@ -2064,11 +2161,7 @@ mod tests {
 
     #[test]
     fn ur_24_provider_stop_skips_restore_when_flush_stop_fails() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(1_000),
-            ..Default::default()
-        }));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, rx_packet: Some(1_000), ..Default::default() }));
         let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let frozen = super::super::test_support::Frozen::on(spy.host());
@@ -2077,9 +2170,7 @@ mod tests {
         core.device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
         core.device.rx_start(0, 0).unwrap();
         let stop_at = core.now();
-        let entry = super::super::core::RxEntry {
-            order: (stop_at + core.ticks(3_000_000), 1), channel: 0, value: 1.001e9, accepted_at: Some(stop_at),
-        };
+        let entry = super::super::core::RxEntry { order: (stop_at + core.ticks(3_000_000), 1), channel: 0, value: 1.001e9, accepted_at: Some(stop_at) };
         core.device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(entry.value), ..Default::default() }, Some(entry.order.0)).unwrap();
         {
             let mut streams = lock(&core.streams);
@@ -2099,10 +2190,12 @@ mod tests {
         let gate = spy.stop_after("rx_stop");
         let (done, finished) = std::sync::mpsc::channel();
         let host = core.device.host();
-        let worker = host.spawn("rx-d9b-final-stop", move || {
-            rx.try_end();
-            let _ = done.send(rx);
-        }).unwrap();
+        let worker = host
+            .spawn("rx-d9b-final-stop", move || {
+                rx.try_end();
+                let _ = done.send(rx);
+            })
+            .unwrap();
         gate.wait();
         assert_eq!(spy.seen("rx_stop"), 1, "the gated stop is the successful cut stop");
         spy.refuse_rx_stop(crate::DeviceError::failed("test: scripted final rx_stop refusal"));
@@ -2126,16 +2219,16 @@ mod tests {
         let skipped: Vec<_> = rec.applied.iter().filter(|row| row["restore"] == true).collect();
         assert_eq!(skipped.len(), 1, "the skipped restore is recorded: {skipped:?}");
         assert!(skipped[0]["error"].as_str().is_some_and(|error| error.contains("receive stop failed; restore was not attempted")), "{skipped:?}");
-        assert!(rec.rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("receive stop failed; restore was not attempted"))), "{:?}", rec.rejected);
+        assert!(
+            rec.rejected.iter().any(|row| row["call"] == "rx_restore" && row["error"].as_str().is_some_and(|error| error.contains("receive stop failed; restore was not attempted"))),
+            "{:?}",
+            rec.rejected
+        );
     }
 
     #[test]
     fn ur_24_a_loss_during_rx_flush_finishes_without_recovery_calls() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(2_000),
-            ..Default::default()
-        }));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, rx_packet: Some(2_000), ..Default::default() }));
         let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let frozen = super::super::test_support::Frozen::on(spy.host());
@@ -2179,12 +2272,8 @@ mod tests {
 
     #[test]
     fn ur_24_a_loss_during_rx_receive_finishes_without_recovery_calls() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            ..Default::default()
-        }));
-        let (core, _time, events) = super::super::test_support::rig_on_description(
-            spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, _time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let _frozen = super::super::test_support::Frozen::on(spy.host());
         spy.set_time(core.now());
@@ -2211,13 +2300,8 @@ mod tests {
 
     #[test]
     fn ur_24_a_loss_published_before_rx_recv_skips_the_device_call() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            command_queue: 64,
-            ..Default::default()
-        }));
-        let (core, time, events) = super::super::test_support::rig_on_description(
-            spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
+        let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let _frozen = super::super::test_support::Frozen::on(spy.host());
 
@@ -2225,19 +2309,14 @@ mod tests {
         config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         let (to_tx, _) = std::sync::mpsc::channel();
         let mut control = super::super::control::Control::new(
-            core.clone(), Arc::new(NoActions), vec![to_tx], config, false,
-            super::super::control::Start {
-                t0: 0,
-                rx: vec![Some((Channels::first(1), 200)); core.description.stream_count(Dir::Rx)],
-                tx: vec![None; core.description.stream_count(Dir::Tx)],
-            },
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            config,
+            false,
+            super::super::control::Start { t0: 0, rx: vec![Some((Channels::first(1), 200)); core.description.stream_count(Dir::Rx)], tx: vec![None; core.description.stream_count(Dir::Tx)] },
         );
-        let segment = Segment {
-            origin: 0,
-            cut: None,
-            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            by: None,
-        };
+        let segment = Segment { origin: 0, cut: None, config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, by: None };
         let (mut rx, _) = rx_with_plan(&core, &[segment]);
 
         let window = core.ticks(core.description.timing.release_window_ns);
@@ -2269,10 +2348,13 @@ mod tests {
             let _ = waiting.lock().unwrap().recv();
         });
         let (returned, turn_result) = std::sync::mpsc::channel();
-        let owner = spy.host().spawn("rx-loss-before-recv", move || {
-            let turn = rx.turn();
-            let _ = returned.send((rx, turn));
-        }).unwrap();
+        let owner = spy
+            .host()
+            .spawn("rx-loss-before-recv", move || {
+                let turn = rx.turn();
+                let _ = returned.send((rx, turn));
+            })
+            .unwrap();
         at_probe.recv_timeout(Wall::from_secs(10)).expect("RX passed its early loss check");
 
         device_at_spy(&core, &time, &spy, entries[2] - window);
@@ -2296,13 +2378,9 @@ mod tests {
         assert_eq!(chain.left().iter().map(|entry| entry.order.0).collect::<Vec<_>>(), entries[..2]);
         assert_eq!(chain.segment(), None);
         drop(chain);
-        let reported: Vec<_> = lock(&core.rec).rejected.iter()
-            .filter(|row| row["call"] == "rx_drain")
-            .map(|row| row["at"].as_i64().unwrap())
-            .collect();
+        let reported: Vec<_> = lock(&core.rec).rejected.iter().filter(|row| row["call"] == "rx_drain").map(|row| row["at"].as_i64().unwrap()).collect();
         assert_eq!(reported, entries[..2], "each outstanding DDC entry is reported once");
-        assert_eq!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter()
-            .filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1);
+        assert_eq!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1);
     }
 
     #[test]
@@ -2357,12 +2435,8 @@ mod tests {
     fn ur_24_a_parallel_rx_restore_checks_do_not_nest_chain_locks() {
         use std::sync::Barrier;
 
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            ..Default::default()
-        }));
-        let (core, _, _) = super::super::test_support::rig_on_description_links(
-            device.clone(), vec![vec![link()], vec![link()]], BTreeMap::new(), layout_description());
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
+        let (core, _, _) = super::super::test_support::rig_on_description_links(device.clone(), vec![vec![link()], vec![link()]], BTreeMap::new(), layout_description());
         let at = core.now();
         lock(&core.streams).stop = Some((at, StopMode::Orderly));
         core.rx_chain[0].lock().plan_restore(BTreeMap::from([(0, 1.001e9)]));
@@ -2371,20 +2445,30 @@ mod tests {
         let gate = Arc::new(Barrier::new(3));
         super::super::test_support::probe(&core, "rx_restore_before_chain_scan", {
             let gate = gate.clone();
-            move |_| { gate.wait(); }
+            move |_| {
+                gate.wait();
+            }
         });
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let mut rx0 = rx_owner_on(&core, 0);
         let done = done_tx.clone();
-        let owner0 = core.device.host().spawn("rx-restore-0", move || {
-            rx0.finish();
-            done.send(0).unwrap();
-        }).unwrap();
+        let owner0 = core
+            .device
+            .host()
+            .spawn("rx-restore-0", move || {
+                rx0.finish();
+                done.send(0).unwrap();
+            })
+            .unwrap();
         let mut rx1 = rx_owner_on(&core, 1);
-        let owner1 = core.device.host().spawn("rx-restore-1", move || {
-            rx1.finish();
-            done_tx.send(1).unwrap();
-        }).unwrap();
+        let owner1 = core
+            .device
+            .host()
+            .spawn("rx-restore-1", move || {
+                rx1.finish();
+                done_tx.send(1).unwrap();
+            })
+            .unwrap();
 
         gate.wait();
         let mut done = [done_rx.recv_timeout(Wall::from_secs(10)).unwrap(), done_rx.recv_timeout(Wall::from_secs(10)).unwrap()];
@@ -2411,8 +2495,9 @@ mod tests {
         assert!(core.is_lost());
         assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
         assert!(!inner.calls().iter().any(|call| call.starts_with("rx_start")), "the lost owner began a segment: {:?}", inner.calls());
-        assert!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
-            .any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST));
+        assert!(
+            events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST)
+        );
     }
 
     #[test]
@@ -2421,15 +2506,7 @@ mod tests {
         let from = stream_key(Dir::Rx, 1);
         let to = stream_key(Dir::Rx, 0);
         let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(ezsdr_radio::timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels, ratio },
-            lead: 0,
-            call: 0,
-            release_window: 0,
-            allowance: 0,
-        });
+        let line = |channels| Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: 0, config: Config { channels, ratio }, lead: 0, call: 0, release_window: 0, allowance: 0 });
         device.rx_open(1, &[1]).unwrap();
         {
             let mut streams = lock(&core.streams);
@@ -2449,12 +2526,18 @@ mod tests {
         rx.from = next.segment.origin;
         let from_cursor = rx.cursor();
         let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| { let _ = entered.send(()); });
+        super::super::test_support::probe(&core, "wait_release", move |_| {
+            let _ = entered.send(());
+        });
         let (done, finished) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-wait-stop", move || {
-            let began = rx.begin();
-            let _ = done.send((began, rx.cursor()));
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-wait-stop", move || {
+                let began = rx.begin();
+                let _ = done.send((began, rx.cursor()));
+            })
+            .unwrap();
         assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
         {
             let mut streams = lock(&core.streams);
@@ -2468,8 +2551,10 @@ mod tests {
         assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "the removed segment was not opened: {:?}", device.calls());
         assert_eq!(lock(&core.streams).holder(to), Holder::Free);
         assert!(!lock(&core.streams).line(to).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "Stop is not a device refusal");
-        assert!(!events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter()
-            .any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "Stop interruption emits no refusal");
+        assert!(
+            !events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED),
+            "Stop interruption emits no refusal"
+        );
     }
 
     fn rate(rate: u64) -> Kind {
@@ -2481,10 +2566,12 @@ mod tests {
     }
 
     fn received(link: &Arc<dyn ezsdr_kernel::stream::DataLink>) -> Vec<(ClockDomainId, i64, u32)> {
-        std::iter::from_fn(|| link.receive().map(|(b, _)| b)).map(|block| {
-            let t = block.header().first_sample_time;
-            (t.domain(), t.ticks_in(t.domain()).unwrap(), block.header().len) // own domain: each block's clock is returned beside its ticks
-        }).collect()
+        std::iter::from_fn(|| link.receive().map(|(b, _)| b))
+            .map(|block| {
+                let t = block.header().first_sample_time;
+                (t.domain(), t.ticks_in(t.domain()).unwrap(), block.header().len) // own domain: each block's clock is returned beside its ticks
+            })
+            .collect()
     }
 
     use ezsdr_kernel::id::ClockDomainId;
@@ -2522,7 +2609,12 @@ mod tests {
         // only from that cut. The owners carry it out: A releases its streamer at e₁, B
         // receives its own segment through e₂ and its owner's release lets C open, and C
         // starts after B's close. On the controlled clock the two instants are fixed.
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, front_ends: vec!["UBX", "BasicRX"], ..crate::device::FakeConfig::default() }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            command_queue: 64,
+            front_ends: vec!["UBX", "BasicRX"],
+            ..crate::device::FakeConfig::default()
+        }));
         let link1 = link();
         let links = vec![vec![link()], vec![link1.clone()], vec![link()]];
         let (core, time, events) = super::super::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), mixed_description());
@@ -2539,17 +2631,31 @@ mod tests {
         values.insert(key("radio.rx.c1.stream"), ezsdr_kernel::spec::Value::from(0));
         values.insert(key("radio.rx.c2.stream"), ezsdr_kernel::spec::Value::from(-1));
         let (to_tx, _tx) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            super::super::control::Start { t0: 0, rx: vec![Some((c1, 100)), None, None], tx: vec![None] });
+        let mut control = super::super::control::Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            super::super::control::Start { t0: 0, rx: vec![Some((c1, 100)), None, None], tx: vec![None] },
+        );
         lock(&core.streams).search(stream_key(Dir::Rx, 0), true);
         device.rx_open(0, &[1]).unwrap();
         lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(c1));
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, Rational::new(100, 1).unwrap()).unwrap();
         let target = super::super::test_support::target_of(&core.id);
         for (id, value, instant) in [(1, 1, 100), (2, 2, 250)] {
-            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(id),
-                ezsdr_kernel::event::Action::UpdateParameter { target: target.clone(), key: key("radio.rx.c1.stream"), value: ezsdr_kernel::spec::Value::from(value), class: ezsdr_kernel::module_api::UpdateClass::Cold, at: at(instant) },
-                Some(core.id.clone())));
+            control.book(ezsdr_kernel::module_api::Dispatched::new(
+                ezsdr_kernel::event::ActionId(id),
+                ezsdr_kernel::event::Action::UpdateParameter {
+                    target: target.clone(),
+                    key: key("radio.rx.c1.stream"),
+                    value: ezsdr_kernel::spec::Value::from(value),
+                    class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                    at: at(instant),
+                },
+                Some(core.id.clone()),
+            ));
         }
         let middle = lock(&core.streams).planned(stream_key(Dir::Rx, 1)).into_iter().find(|planned| planned.segment.cut.is_some()).expect("B's finite segment");
         let b_origin = middle.segment.origin;
@@ -2561,57 +2667,69 @@ mod tests {
         // A: its old segment through e₁, then its own release.
         let (a_done, a_finished) = std::sync::mpsc::channel();
         let worker = core.clone();
-        let a = core.device.host().spawn("rx-chain-A", move || {
-            let (_to_rx, cmds) = std::sync::mpsc::channel();
-            std::mem::forget(_to_rx);
-            let mut rx = Rx::new(worker, 0, cmds, Some((handle, c1, 0)), None);
-            let (mut tick, mut delivered) = (0i64, 0i64);
-            while delivered < 200_000 {
-                let n = (200_000 - delivered).min(2_000);
-                rx.receive(samples(tick, n as usize));
-                tick += n * 100;
-                delivered += n;
-            }
-            let began = rx.begin();
-            let _ = a_done.send(began);
-        }).expect("a participant thread");
+        let a = core
+            .device
+            .host()
+            .spawn("rx-chain-A", move || {
+                let (_to_rx, cmds) = std::sync::mpsc::channel();
+                std::mem::forget(_to_rx);
+                let mut rx = Rx::new(worker, 0, cmds, Some((handle, c1, 0)), None);
+                let (mut tick, mut delivered) = (0i64, 0i64);
+                while delivered < 200_000 {
+                    let n = (200_000 - delivered).min(2_000);
+                    rx.receive(samples(tick, n as usize));
+                    tick += n * 100;
+                    delivered += n;
+                }
+                let began = rx.begin();
+                let _ = a_done.send(began);
+            })
+            .expect("a participant thread");
         // B: opens behind A's release, receives its finite segment through its cut, releases.
         let (b_done, b_finished) = std::sync::mpsc::channel();
         let worker = core.clone();
-        let b = core.device.host().spawn("rx-chain-B", move || {
-            let (_to_rx, cmds) = std::sync::mpsc::channel();
-            std::mem::forget(_to_rx);
-            let mut rx = Rx::new(worker.clone(), 1, cmds, None, None);
-            let opened = rx.begin();
-            // The clock stood still from the start's issue to this read: the worker is a busy
-            // participant (M1, M3), so the instant below is the one the start was issued at.
-            let started_at = worker.device.time_now().expect("the device's time");
-            let origin = rx.stream.as_ref().map(|stream| stream.clock.origin).unwrap_or(b_origin);
-            let (mut tick, mut delivered) = (origin, 0i64);
-            while delivered < b_cut {
-                let n = (b_cut - delivered).min(2_000);
-                rx.receive(samples(tick, n as usize));
-                tick += n * 200;
-                delivered += n;
-            }
-            let released = rx.begin();
-            let _ = b_done.send((opened, released, started_at));
-        }).expect("a participant thread");
+        let b = core
+            .device
+            .host()
+            .spawn("rx-chain-B", move || {
+                let (_to_rx, cmds) = std::sync::mpsc::channel();
+                std::mem::forget(_to_rx);
+                let mut rx = Rx::new(worker.clone(), 1, cmds, None, None);
+                let opened = rx.begin();
+                // The clock stood still from the start's issue to this read: the worker is a busy
+                // participant (M1, M3), so the instant below is the one the start was issued at.
+                let started_at = worker.device.time_now().expect("the device's time");
+                let origin = rx.stream.as_ref().map(|stream| stream.clock.origin).unwrap_or(b_origin);
+                let (mut tick, mut delivered) = (origin, 0i64);
+                while delivered < b_cut {
+                    let n = (b_cut - delivered).min(2_000);
+                    rx.receive(samples(tick, n as usize));
+                    tick += n * 200;
+                    delivered += n;
+                }
+                let released = rx.begin();
+                let _ = b_done.send((opened, released, started_at));
+            })
+            .expect("a participant thread");
         // C: opens behind B's release. It is the last owner, so it stays a participant past its
         // result until the test holds the clock again (M1): A and B cannot stay, since the
         // release wait of the owner behind each sleeps on the very clock they would freeze.
         let (c_done, c_finished) = std::sync::mpsc::channel();
         let (release_c, c_release) = std::sync::mpsc::channel();
         let worker = core.clone();
-        let c = core.device.host().spawn("rx-chain-C", move || {
-            let (_to_rx, cmds) = std::sync::mpsc::channel();
-            std::mem::forget(_to_rx);
-            let mut rx = Rx::new(worker.clone(), 2, cmds, None, None);
-            let began = rx.begin();
-            let started_at = worker.device.time_now().expect("the device's time");
-            let _ = c_done.send((began, rx.stream.as_ref().map(|stream| stream.clock.origin), started_at));
-            let _ = c_release.recv();
-        }).expect("a participant thread");
+        let c = core
+            .device
+            .host()
+            .spawn("rx-chain-C", move || {
+                let (_to_rx, cmds) = std::sync::mpsc::channel();
+                std::mem::forget(_to_rx);
+                let mut rx = Rx::new(worker.clone(), 2, cmds, None, None);
+                let began = rx.begin();
+                let started_at = worker.device.time_now().expect("the device's time");
+                let _ = c_done.send((began, rx.stream.as_ref().map(|stream| stream.clock.origin), started_at));
+                let _ = c_release.recv();
+            })
+            .expect("a participant thread");
         // The waits poll the device's clock, so it must run from here on — with every worker a
         // participant already, so no clock time passes before one of them starts (M1).
         drop(_frozen);
@@ -2663,15 +2781,18 @@ mod tests {
         let link = link();
         let (core, _device, _time, events) = super::super::test_support::rig_with_links_on(1, vec![link.clone()], layout_description());
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
-        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            lead: 0,
-            call: 2_000,
-            release_window: 0,
-            allowance: 0,
-        }));
+        lock(&core.streams).lines.insert(
+            stream_key(Dir::Rx, 1),
+            Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
+                lead: 0,
+                call: 2_000,
+                release_window: 0,
+                allowance: 0,
+            }),
+        );
         let (to_rx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(to_rx);
         let mut rx = Rx::new(core.clone(), 1, cmds, Some((handle, Channels::first(1), 0)), None);
@@ -2680,9 +2801,8 @@ mod tests {
         rx.receive(samples(clock.instant(2), 2));
         let block = link.receive().expect("the block after the overflow").0;
         assert_eq!(block.header().flags, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED);
-        let got: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW)
-            .collect();
+        let got: Vec<_> =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].source, ezsdr_kernel::event::EventSource::Node { node: ezsdr_kernel::id::ResourceId::parse("usrp/rx/s1").unwrap() });
         assert_eq!(got[0].time, TimePoint::new(clock.domain, 0));
@@ -2697,11 +2817,26 @@ mod tests {
             (Vec::new(), BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, None, false),
             (vec![RxRecv::Alignment], BlockFlags::GAP_BEFORE | BlockFlags::ALIGNMENT, None, true),
             (vec![RxRecv::Overflow { out_of_sequence: true }], BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Sequence), false),
-            (vec![RxRecv::Alignment, RxRecv::Overflow { out_of_sequence: true }, RxRecv::Alignment], BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT, Some(RxOverflowCause::Sequence), true),
+            (
+                vec![RxRecv::Alignment, RxRecv::Overflow { out_of_sequence: true }, RxRecv::Alignment],
+                BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY | BlockFlags::ALIGNMENT,
+                Some(RxOverflowCause::Sequence),
+                true,
+            ),
             (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Alignment], BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::ALIGNMENT, Some(RxOverflowCause::Overrun), true),
-            (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Overflow { out_of_sequence: true }], BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Overrun), false),
+            (
+                vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Overflow { out_of_sequence: true }],
+                BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED | BlockFlags::SEQ_DISCONTINUITY,
+                Some(RxOverflowCause::Overrun),
+                false,
+            ),
             (vec![RxRecv::Overflow { out_of_sequence: false }, RxRecv::Overflow { out_of_sequence: false }], BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(RxOverflowCause::Overrun), false),
-            (vec![RxRecv::Overflow { out_of_sequence: true }, RxRecv::Overflow { out_of_sequence: true }], BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(RxOverflowCause::Sequence), false),
+            (
+                vec![RxRecv::Overflow { out_of_sequence: true }, RxRecv::Overflow { out_of_sequence: true }],
+                BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY,
+                Some(RxOverflowCause::Sequence),
+                false,
+            ),
         ] {
             let link = link();
             let (core, _, _, events) = super::super::test_support::rig_with_links(vec![link.clone()]);
@@ -2713,7 +2848,9 @@ mod tests {
             let block = link.receive().expect("the block after the reports").0;
             assert_eq!((block.header().flags, block.header().lost), (flags, Some(2)));
             assert_eq!(block.header().valid, ezsdr_kernel::stream::ChannelMask::full(2), "a whole-stream gap");
-            let got: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
+            let got: Vec<_> = events
+                .drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
+                .into_iter()
                 .filter(|e| [kinds::ALIGNMENT_ERROR, kinds::RX_OVERFLOW].contains(&e.kind.as_str()))
                 .collect();
             for event in &got {
@@ -2728,7 +2865,9 @@ mod tests {
             }
             let alignments: Vec<_> = got.iter().filter(|event| event.kind.as_str() == kinds::ALIGNMENT_ERROR).collect();
             assert_eq!(alignments.len(), if alignment { 1 } else { 0 }, "{got:?}");
-            if alignment { assert_eq!(alignments[0].payload["lost"], 2); }
+            if alignment {
+                assert_eq!(alignments[0].payload["lost"], 2);
+            }
         }
     }
 
@@ -2744,10 +2883,7 @@ mod tests {
         let link = link();
         let (core, _, _, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
         let (mut rx, clock) = rx(&core, 2);
-        rx.receive(RxRecv::Samples {
-            first_tick: clock.origin,
-            samples: (0..2).map(|channel| (0..3).map(|index| value(channel, index)).collect()).collect(),
-        });
+        rx.receive(RxRecv::Samples { first_tick: clock.origin, samples: (0..2).map(|channel| (0..3).map(|index| value(channel, index)).collect()).collect() });
         let block = link.receive().expect("the block").0;
         let bytes = block.host_bytes().expect("a host block");
         assert_eq!((block.header().len, block.header().channels), (3, 2));
@@ -2777,8 +2913,7 @@ mod tests {
         assert!(expected > clock.origin + lead, "the lead was measured from the origin, not the decision");
         let row = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").expect("the restart row").clone();
         assert_eq!(row["at"].as_i64(), Some(expected), "{row}");
-        let late: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
+        let late: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
         assert_eq!(late.len(), 1, "{late:?}");
         let payload: LateCommandPayload = serde_json::from_value(late[0].payload.clone()).unwrap();
         assert_eq!(payload.applied.ticks_in(core.root).unwrap(), expected, "{payload:?}");
@@ -2803,8 +2938,7 @@ mod tests {
         let header = block.header().clone();
         assert_eq!(header.first_sample_time, TimePoint::new(clock.domain, 5_000));
         assert_eq!((header.len, header.flags, header.lost), (2_000, BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED, Some(5_000)));
-        let got: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
+        let got: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
         assert_eq!(got.len(), 1, "one event for one report: {got:?}");
         let payload = RxOverflowPayload::from_payload(&got[0].payload).unwrap();
         assert_eq!(payload, RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 5_000 });
@@ -2858,10 +2992,7 @@ mod tests {
         let overflows: Vec<_> = events.iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).collect();
         assert_eq!(overflows.len(), 1, "{events:?}");
         assert_eq!(overflows[0].time, TimePoint::new(clock.domain, 0));
-        assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), RxOverflowPayload {
-            cause: RxOverflowCause::Overrun,
-            lost: block.header().lost.unwrap(),
-        });
+        assert_eq!(RxOverflowPayload::from_payload(&overflows[0].payload).unwrap(), RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: block.header().lost.unwrap() });
     }
 
     #[test]
@@ -2876,8 +3007,7 @@ mod tests {
         rx.receive(samples(clock.instant(4), 2));
         let jump = link.receive().expect("the later unreported jump arrived").0;
         assert_eq!((jump.header().flags, jump.header().lost), (BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY, Some(2)));
-        assert_eq!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
-            .iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).count(), 0);
+        assert_eq!(events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == kinds::RX_OVERFLOW).count(), 0);
     }
 
     #[test]
@@ -2917,12 +3047,18 @@ mod tests {
         assert!(core.owner_configure(Dir::Rx, 0, &next).unwrap(), "the segment is configured before the lock race");
         let chain = core.rx_chain[0].lock();
         let (done, returned) = std::sync::mpsc::channel();
-        let owner = core.device.host().spawn("rx-begin-loss-recheck", move || {
-            let began = rx.begin();
-            let _ = done.send((began, rx));
-        }).unwrap();
+        let owner = core
+            .device
+            .host()
+            .spawn("rx-begin-loss-recheck", move || {
+                let began = rx.begin();
+                let _ = done.send((began, rx));
+            })
+            .unwrap();
         let deadline = Instant::now() + Wall::from_secs(10);
-        while core.rx_chain[0].waiters() == 0 && Instant::now() < deadline { std::thread::yield_now(); }
+        while core.rx_chain[0].waiters() == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(core.rx_chain[0].waiters() > 0, "begin passed its pre-lock loss check and reached the chain lock");
 
         core.device_lost("test: loss after begin's pre-lock check");
@@ -2958,15 +3094,18 @@ mod tests {
         let origin = core.ticks(10_000_000);
         // A stream with no channel before the change, so that the plan's one segment is the
         // change's, at `origin`.
-        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 0), Line::new(ezsdr_radio::timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels: Channels::first(0), ratio: Rational::new(200, 1).unwrap() },
-            lead: 0,
-            call: 2_000,
-            release_window: 0,
-            allowance: 0,
-        }));
+        lock(&core.streams).lines.insert(
+            stream_key(Dir::Rx, 0),
+            Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels: Channels::first(0), ratio: Rational::new(200, 1).unwrap() },
+                lead: 0,
+                call: 2_000,
+                release_window: 0,
+                allowance: 0,
+            }),
+        );
         book(&core, origin, 1, rate(1_000_000));
         let (to_rx, cmds) = std::sync::mpsc::channel();
         let mut rx = Rx::new(core.clone(), 0, cmds, None, None);
@@ -3014,15 +3153,18 @@ mod tests {
             streams.delivered(stream_key(Dir::Rx, 0), 0, config, 700);
         }
         let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
-        lock(&core.streams).lines.insert(stream_key(Dir::Rx, 1), Line::new(ezsdr_radio::timeline::Stream {
-            direction: Direction::Rx,
-            origin: 0,
-            config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            lead: 0,
-            call: 2_000,
-            release_window: 0,
-            allowance: 0,
-        }));
+        lock(&core.streams).lines.insert(
+            stream_key(Dir::Rx, 1),
+            Line::new(ezsdr_radio::timeline::Stream {
+                direction: Direction::Rx,
+                origin: 0,
+                config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
+                lead: 0,
+                call: 2_000,
+                release_window: 0,
+                allowance: 0,
+            }),
+        );
         let (to_rx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(to_rx);
         device.rx_open(1, &[0]).unwrap();
@@ -3031,10 +3173,7 @@ mod tests {
         let mut rx = Rx::new(core.clone(), 1, cmds, Some((handle, Channels::first(1), 0)), None);
         {
             let streams = lock(&core.streams);
-            assert_eq!(streams.phase(stream_key(Dir::Rx, 1)), Phase::Active {
-                segment: Some((0, config, None)),
-                delivered: Some((0, config, 0)),
-            }, "the T0 stream begins at its planned segment");
+            assert_eq!(streams.phase(stream_key(Dir::Rx, 1)), Phase::Active { segment: Some((0, config, None)), delivered: Some((0, config, 0)) }, "the T0 stream begins at its planned segment");
             assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((0, config, 700)), "stream 0's floor stands");
         }
         core.rx_chain[1].lock().stop_result(device.rx_stop(1, None)).unwrap();
@@ -3060,15 +3199,7 @@ mod tests {
         let handle = core.clocks.declare_sample_clock(node, core.root, config.ratio).unwrap();
         {
             let mut streams = lock(&core.streams);
-            streams.lines.insert(key, Line::new(ezsdr_radio::timeline::Stream {
-                direction: Direction::Rx,
-                origin: t0,
-                config,
-                lead: 0,
-                call: 2_000,
-                release_window: 0,
-                allowance: 0,
-            }));
+            streams.lines.insert(key, Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: t0, config, lead: 0, call: 2_000, release_window: 0, allowance: 0 }));
         }
         core.device.rx_open(0, &[0]).unwrap();
         lock(&core.streams).record_open(key, Some(Channels::first(1)));
@@ -3106,7 +3237,8 @@ mod tests {
             rx.receive(samples(clock.instant(first), n));
         }
         let blocks: Vec<_> = std::iter::from_fn(|| link.receive().map(|(b, _)| b))
-            .map(|block| (block.header().first_sample_time.ticks_in(clock.domain).unwrap(), block.header().len, block.header().flags, block.header().lost)).collect();
+            .map(|block| (block.header().first_sample_time.ticks_in(clock.domain).unwrap(), block.header().len, block.header().flags, block.header().lost))
+            .collect();
         assert_eq!(blocks, [(0, 2_000, BlockFlags::NONE, None), (2_000, 1_000, BlockFlags::NONE, None), (3_000, 1_000, BlockFlags::NONE, None)]);
         assert_eq!(lock(&core.rec).stats["rx_overlapping"], 2);
     }
@@ -3153,12 +3285,7 @@ mod tests {
         // abort ends the stream at the first sample not yet delivered as soon as uhd-rx reads
         // it, a stream already cut later included. The clock ends at the stream's end; the
         // device is stopped once.
-        for (mode, delivered, end, stop) in [
-            (StopMode::Orderly, 300, 1_000, true),
-            (StopMode::Abort, 1_000, 1_000, true),
-            (StopMode::Abort, 300, 300, true),
-            (StopMode::Abort, 300, 300, false),
-        ] {
+        for (mode, delivered, end, stop) in [(StopMode::Orderly, 300, 1_000, true), (StopMode::Abort, 1_000, 1_000, true), (StopMode::Abort, 300, 300, true), (StopMode::Abort, 300, 300, false)] {
             let link = link();
             let (core, device, time, _) = super::super::test_support::rig_with_links(vec![link.clone()]);
             let (mut rx, clock) = rx(&core, 1);
@@ -3204,7 +3331,8 @@ mod tests {
         // The device's clock is held at 0, so the next segment's start is issued strictly
         // before its instant and the device delivers rather than reports a missed start.
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
-        let (core, time, _events) = super::super::test_support::rig_on_description_links(device.clone(), vec![Vec::new(), vec![link.clone()]], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let (core, time, _events) =
+            super::super::test_support::rig_on_description_links(device.clone(), vec![Vec::new(), vec![link.clone()]], BTreeMap::new(), super::super::test_support::default_description(2_000));
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         super::super::test_support::device_at(&core, &time, &device, 0);
         let stream = core.id.child("rx/s1").unwrap();
@@ -3213,19 +3341,8 @@ mod tests {
         let config = Config { channels: Channels::first(2).without(0), ratio: Rational::new(200, 1).unwrap() };
         {
             let mut streams = lock(&core.streams);
-            let mut line = Line::new(ezsdr_radio::timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config,
-                lead: 0,
-                call: 0,
-                release_window: 0,
-                allowance: 0,
-            });
-            line.plan = vec![
-                Segment { origin: 0, cut: Some(5_000), config, by: None },
-                Segment { origin: clock.instant(5_000), cut: None, config, by: Some(1) },
-            ];
+            let mut line = Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: 0, config, lead: 0, call: 0, release_window: 0, allowance: 0 });
+            line.plan = vec![Segment { origin: 0, cut: Some(5_000), config, by: None }, Segment { origin: clock.instant(5_000), cut: None, config, by: Some(1) }];
             streams.lines.insert(stream_key(Dir::Rx, 1), line);
             streams.stream_mut(stream_key(Dir::Rx, 1)).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
         }
@@ -3281,8 +3398,14 @@ mod tests {
         values.insert(key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         values.insert(key("radio.rx.c1.stream"), ezsdr_kernel::spec::Value::from(1));
         let (to_tx, _tx) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            super::super::control::Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))], tx: vec![None] });
+        let mut control = super::super::control::Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            super::super::control::Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))], tx: vec![None] },
+        );
         lock(&core.streams).search(stream_key(Dir::Rx, 0), true);
         lock(&core.streams).search(stream_key(Dir::Rx, 1), true);
         let (c0, c1) = (Channels::first(1), Channels::first(2).without(0));
@@ -3297,12 +3420,19 @@ mod tests {
         let h1 = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 1), core.root, Rational::new(200, 1).unwrap()).unwrap();
         let target = super::super::test_support::target_of(&core.id);
         for (id, name, value) in [(1, "radio.rx.c0.stream", 1), (2, "radio.rx.c1.stream", 0)] {
-            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(id),
-                ezsdr_kernel::event::Action::UpdateParameter { target: target.clone(), key: key(name), value: ezsdr_kernel::spec::Value::from(value), class: ezsdr_kernel::module_api::UpdateClass::Cold, at: at(100) },
-                Some(core.id.clone())));
+            control.book(ezsdr_kernel::module_api::Dispatched::new(
+                ezsdr_kernel::event::ActionId(id),
+                ezsdr_kernel::event::Action::UpdateParameter {
+                    target: target.clone(),
+                    key: key(name),
+                    value: ezsdr_kernel::spec::Value::from(value),
+                    class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                    at: at(100),
+                },
+                Some(core.id.clone()),
+            ));
         }
-        let rejected = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter()
-            .filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect::<Vec<_>>();
+        let rejected = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect::<Vec<_>>();
         assert!(rejected.is_empty(), "{rejected:?} {:?}", device.calls());
         let moves: Vec<_> = lock(&core.rec).timing.iter().filter(|row| row["what"] == "move").cloned().collect();
         assert_eq!(moves.len(), 2, "{moves:?}");
@@ -3311,24 +3441,28 @@ mod tests {
         for (k, (handle, channels)) in [(0, (h0, c0)), (1, (h1, c1))] {
             let worker = core.clone();
             let (done, finished) = std::sync::mpsc::channel();
-            let owner = core.device.host().spawn("rx-swap", move || {
-                let (_to_rx, cmds) = std::sync::mpsc::channel();
-                std::mem::forget(_to_rx);
-                let mut rx = Rx::new(worker.clone(), k, cmds, Some((handle, channels, 0)), None);
-                // The old segment through its cut: 2 000-sample blocks up to sample 100 000.
-                let (mut tick, mut delivered) = (0i64, 0i64);
-                while delivered < 100_000 {
-                    let n = (100_000 - delivered).min(2_000);
-                    rx.receive(samples(tick, n as usize));
-                    tick += n * 200;
-                    delivered += n;
-                }
-                let began = rx.begin();
-                // The clock stood still from the start's issue to this read: the worker is a
-                // busy participant (M1, M3).
-                let started_at = worker.device.time_now().expect("the device's time");
-                let _ = done.send((began, rx.stream.as_ref().map(|stream| (stream.clock.domain, stream.clock.origin)), started_at));
-            }).expect("a participant thread");
+            let owner = core
+                .device
+                .host()
+                .spawn("rx-swap", move || {
+                    let (_to_rx, cmds) = std::sync::mpsc::channel();
+                    std::mem::forget(_to_rx);
+                    let mut rx = Rx::new(worker.clone(), k, cmds, Some((handle, channels, 0)), None);
+                    // The old segment through its cut: 2 000-sample blocks up to sample 100 000.
+                    let (mut tick, mut delivered) = (0i64, 0i64);
+                    while delivered < 100_000 {
+                        let n = (100_000 - delivered).min(2_000);
+                        rx.receive(samples(tick, n as usize));
+                        tick += n * 200;
+                        delivered += n;
+                    }
+                    let began = rx.begin();
+                    // The clock stood still from the start's issue to this read: the worker is a
+                    // busy participant (M1, M3).
+                    let started_at = worker.device.time_now().expect("the device's time");
+                    let _ = done.send((began, rx.stream.as_ref().map(|stream| (stream.clock.domain, stream.clock.origin)), started_at));
+                })
+                .expect("a participant thread");
             owners.push((owner, finished));
         }
         // The waits poll the device's clock, so it must run from here on — with both owners
@@ -3363,8 +3497,11 @@ mod tests {
         // Each old segment's completion is its own owner's, not the test's.
         let done = lock(&core.streams);
         for k in 0..2 {
-            assert!(done.stream(stream_key(Dir::Rx, k)).completed.iter().any(|(origin, _, by)| *origin == 0 && by.is_none()),
-                "stream {k}'s old segment is not completed by its owner: {:?}", done.stream(stream_key(Dir::Rx, k)).completed);
+            assert!(
+                done.stream(stream_key(Dir::Rx, k)).completed.iter().any(|(origin, _, by)| *origin == 0 && by.is_none()),
+                "stream {k}'s old segment is not completed by its owner: {:?}",
+                done.stream(stream_key(Dir::Rx, k)).completed
+            );
         }
     }
 
@@ -3389,14 +3526,28 @@ mod tests {
         values.insert(key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         values.insert(key("radio.rx.c1.stream"), ezsdr_kernel::spec::Value::from(-1));
         let (to_tx, _tx) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
-            super::super::control::Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), None], tx: vec![None, None] });
+        let mut control = super::super::control::Control::new(
+            core.clone(),
+            Arc::new(NoActions),
+            vec![to_tx],
+            values,
+            false,
+            super::super::control::Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), None], tx: vec![None, None] },
+        );
         lock(&core.streams).search(stream_key(Dir::Rx, 0), true);
         let target = super::super::test_support::target_of(&core.id);
         for (id, name, value) in [(1, "radio.rx.c0.stream", -1), (2, "radio.rx.c1.stream", 0)] {
-            control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(id),
-                ezsdr_kernel::event::Action::UpdateParameter { target: target.clone(), key: key(name), value: ezsdr_kernel::spec::Value::from(value), class: ezsdr_kernel::module_api::UpdateClass::Cold, at: at(100) },
-                Some(core.id.clone())));
+            control.book(ezsdr_kernel::module_api::Dispatched::new(
+                ezsdr_kernel::event::ActionId(id),
+                ezsdr_kernel::event::Action::UpdateParameter {
+                    target: target.clone(),
+                    key: key(name),
+                    value: ezsdr_kernel::spec::Value::from(value),
+                    class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                    at: at(100),
+                },
+                Some(core.id.clone()),
+            ));
         }
         let plan = lock(&core.streams).planned(stream_key(Dir::Rx, 0));
         let cut = plan.iter().find(|planned| planned.segment.cut.is_some()).expect("the cut").segment;
@@ -3446,7 +3597,12 @@ mod tests {
         assert_eq!(block.header().first_sample_time, TimePoint::new(domain, 0), "the block is not the new clock's first samples");
         let (len, channels) = (block.header().len, block.header().channels);
         let bytes = block.host_bytes().expect("a host block");
-        let samples: Vec<Iq> = (0..len as usize).map(|i| { let (re, im) = ezsdr_hostmem::read_cf32(bytes, len as usize, 0, i); [re, im] }).collect();
+        let samples: Vec<Iq> = (0..len as usize)
+            .map(|i| {
+                let (re, im) = ezsdr_hostmem::read_cf32(bytes, len as usize, 0, i);
+                [re, im]
+            })
+            .collect();
         assert_eq!((channels, len), (1, 2_000), "{:?}", block.header());
         assert_eq!(samples[..3], wave[..3], "the delivered block is not channel 1's: {:?}", &samples[..3]);
         assert!(samples.iter().all(|sample| sample[1] == 0.125), "the delivered block is not channel 1's: {:?}", &samples[..3]);
@@ -3680,10 +3836,8 @@ mod tests {
         // successor begun before its origin. The receive wait is bounded by the cut and its
         // quiet span, not by the 100 ms timeout that would carry the switch past e2. On the
         // controlled clock: the last block and the cut are fixed instants.
-        let (core, device, time, _) = super::super::test_support::rig_with(crate::device::FakeConfig {
-            faults: vec![crate::device::FakeFault::Silence(Wall::ZERO)],
-            ..Default::default()
-        }, vec![link()]);
+        let (core, device, time, _) =
+            super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![crate::device::FakeFault::Silence(Wall::ZERO)], ..Default::default() }, vec![link()]);
         let (mut rx, clock) = rx(&core, 1);
         rx.host = crate::host::HostClock::manual();
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -4001,10 +4155,16 @@ mod tests {
         core.device_lost("test");
         let ends = |stream: StreamKey| -> Vec<(i64, u64, bool)> {
             let streams = lock(&core.streams);
-            streams.line(stream).expect("the line").items.iter().filter_map(|item| match item.kind {
-                Kind::End { abort } => Some((item.e, item.seq, abort)),
-                _ => None,
-            }).collect()
+            streams
+                .line(stream)
+                .expect("the line")
+                .items
+                .iter()
+                .filter_map(|item| match item.kind {
+                    Kind::End { abort } => Some((item.e, item.seq, abort)),
+                    _ => None,
+                })
+                .collect()
         };
         let loss = core.ticks(2_000_000);
         assert_eq!(ends(rx_key), [(loss, 0, false)], "the receive line");
@@ -4036,13 +4196,31 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.lines.insert(tx_key, tx_line(&core));
             streams.stream_mut(tx_key).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
-            assert!(streams.book(&core, tx_key, Item { e: ms(20), seq: 1, ready: ms(20), release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() }) }));
+            assert!(streams.book(
+                &core,
+                tx_key,
+                Item {
+                    e: ms(20),
+                    seq: 1,
+                    ready: ms(20),
+                    release: NO_RELEASE,
+                    delivered: None,
+                    refused: false,
+                    kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() })
+                }
+            ));
         }
         let snapshot = |key: StreamKey| -> Held {
             let streams = lock(&core.streams);
-            (streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
-             streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut, planned.segment.config.channels.iter().collect::<Vec<u32>>(), planned.segment.by)).collect(),
-             streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect())
+            (
+                streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
+                streams
+                    .planned(key)
+                    .into_iter()
+                    .map(|planned| (planned.segment.origin, planned.segment.cut, planned.segment.config.channels.iter().collect::<Vec<u32>>(), planned.segment.by))
+                    .collect(),
+                streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect(),
+            )
         };
         let before = snapshot(tx_key);
         assert_eq!((before.0.len(), before.1.len(), before.2.len()), (1, 2, 2), "the transmit line holds its change, its two segments and its clocks: {before:?}");
@@ -4069,23 +4247,44 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         {
             let mut streams = lock(&core.streams);
-            streams.lines.insert(other, Line::new(ezsdr_radio::timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config: Config { channels: Channels::first(0).with(1), ratio: Rational::new(200, 1).unwrap() },
-                lead: 0,
-                call: 0,
-                release_window: 0,
-                allowance: 0,
-            }));
+            streams.lines.insert(
+                other,
+                Line::new(ezsdr_radio::timeline::Stream {
+                    direction: Direction::Rx,
+                    origin: 0,
+                    config: Config { channels: Channels::first(0).with(1), ratio: Rational::new(200, 1).unwrap() },
+                    lead: 0,
+                    call: 0,
+                    release_window: 0,
+                    allowance: 0,
+                }),
+            );
             streams.stream_mut(other).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
-            assert!(streams.book(&core, other, Item { e: ms(30), seq: 1, ready: ms(30), release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(0).with(1), ratio: Rational::new(100, 1).unwrap() }) }));
+            assert!(streams.book(
+                &core,
+                other,
+                Item {
+                    e: ms(30),
+                    seq: 1,
+                    ready: ms(30),
+                    release: NO_RELEASE,
+                    delivered: None,
+                    refused: false,
+                    kind: Kind::Cold(Config { channels: Channels::first(0).with(1), ratio: Rational::new(100, 1).unwrap() })
+                }
+            ));
         }
         let snapshot = |key: StreamKey| -> Held {
             let streams = lock(&core.streams);
-            (streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
-             streams.planned(key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut, planned.segment.config.channels.iter().collect::<Vec<u32>>(), planned.segment.by)).collect(),
-             streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect())
+            (
+                streams.line(key).expect("a line").items.iter().map(|item| (item.e, item.seq, item.refused)).collect(),
+                streams
+                    .planned(key)
+                    .into_iter()
+                    .map(|planned| (planned.segment.origin, planned.segment.cut, planned.segment.config.channels.iter().collect::<Vec<u32>>(), planned.segment.by))
+                    .collect(),
+                streams.stream(key).clocks.iter().map(|(clock, ended)| (clock.origin, *ended)).collect(),
+            )
         };
         let before = snapshot(other);
         assert_eq!((before.0.len(), before.1.len()), (1, 2), "stream 1 holds its change and its two segments: {before:?}");
@@ -4111,10 +4310,7 @@ mod tests {
         assert_eq!(rx.turn(), Turn::Busy);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let key = stream_key(Dir::Rx, 0);
-        let configs = [
-            Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() },
-            Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() },
-        ];
+        let configs = [Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() }, Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() }];
         {
             let mut streams = lock(&core.streams);
             let mut line = streams.line(key).expect("the receive line").clone();
@@ -4185,5 +4381,4 @@ mod tests {
         drop(streams);
         assert_eq!(device.calls().iter().filter(|call| call.starts_with("rx_start")).count(), 1, "only the initial start: {:?}", device.calls());
     }
-
 }

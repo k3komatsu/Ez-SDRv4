@@ -5,40 +5,25 @@ mod support;
 use std::sync::Arc;
 
 use ezsdr_kernel::event::EventCollector;
-use ezsdr_kernel::module_api::{
-    Authority, Pacing, PrepareContext, Provider, StopMode,
-};
+use ezsdr_kernel::module_api::{Authority, Pacing, PrepareContext, Provider, StopMode};
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::Policy;
 use ezsdr_kernel::time::{ClockRegistry, Duration, RelativeBudget, TimePoint};
-use support::{
-    Probe, QueueReceiver, SimAuthority, SteppedProvider, TestProvider, TestSubmitter, id, mref,
-};
+use support::{Probe, QueueReceiver, SimAuthority, SteppedProvider, TestProvider, TestSubmitter, id, mref};
 
 #[test]
 fn ma_44_the_run_doubles_record_their_calls() {
     let probe = Probe::new();
     let clocks = Arc::new(ClockRegistry::new());
-    let (authority, root) =
-        SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
+    let (authority, root) = SimAuthority::new(&clocks, mref("ezsdr.test.provider"), Pacing::FreeRunning);
     let time = authority.time();
     let events = Arc::new(EventCollector::new(&[], &[], 4096, &Policy::default()));
     let queue = Arc::new(QueueReceiver::new());
     let submitter = Arc::new(TestSubmitter::new());
-    let host_budget = RelativeBudget::new(Duration::new(
-        ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC,
-        1_000_000_000,
-    ))
-    .expect("a host-monotonic test budget");
+    let host_budget = RelativeBudget::new(Duration::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 1_000_000_000)).expect("a host-monotonic test budget");
     let mut context = PrepareContext::testing(support::node_source("radio"), time, clocks, events, queue, submitter);
     context.host_budget = host_budget;
-    let fragment = Fragment {
-        id: id("radio"),
-        instance: mref("ezsdr.test.provider"),
-        role: ezsdr_kernel::module_api::Role::Provider,
-        content: serde_json::json!({}),
-        after: Vec::new(),
-    };
+    let fragment = Fragment { id: id("radio"), instance: mref("ezsdr.test.provider"), role: ezsdr_kernel::module_api::Role::Provider, content: serde_json::json!({}), after: Vec::new() };
     let t0 = TimePoint::new(root, 0);
     let mut provider = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe);
     provider.prepare(&fragment, context).expect("prepares");
@@ -48,17 +33,5 @@ fn ma_44_the_run_doubles_record_their_calls() {
     provider.stop(StopMode::Orderly).expect("stops");
     provider.cleanup();
 
-    assert_eq!(
-        probe.lines(),
-        [
-            "p:prepare:radio",
-            "source:p:node radio",
-            "p:arm",
-            "p:start:0",
-            "p:step:0",
-            "p:now:0",
-            "p:stop:Orderly",
-            "p:cleanup",
-        ]
-    );
+    assert_eq!(probe.lines(), ["p:prepare:radio", "source:p:node radio", "p:arm", "p:start:0", "p:step:0", "p:now:0", "p:stop:Orderly", "p:cleanup",]);
 }

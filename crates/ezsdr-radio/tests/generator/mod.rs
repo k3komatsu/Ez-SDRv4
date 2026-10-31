@@ -7,7 +7,7 @@
 
 use ezsdr_kernel::stream::Direction;
 use ezsdr_kernel::time::Rational;
-use ezsdr_radio::timeline::{Channels, Item, Kind, Stream, NO_RELEASE};
+use ezsdr_radio::timeline::{Channels, Item, Kind, NO_RELEASE, Stream};
 
 /// The most a sequence exercises: a sequence holds its own class's operation or fault and
 /// may hold any earlier class's. The order is how far today's Providers stray from the
@@ -31,8 +31,7 @@ pub enum Class {
 }
 
 /// Every class, in order.
-pub const CLASSES: [Class; 7] =
-    [Class::Timed, Class::TxCold, Class::Fault, Class::RxCold, Class::Stop, Class::Loss, Class::StartRx];
+pub const CLASSES: [Class; 7] = [Class::Timed, Class::TxCold, Class::Fault, Class::RxCold, Class::Stop, Class::Loss, Class::StartRx];
 
 /// The rates a change picks on a device whose rates are decimations of 200 MHz.
 pub const RATES: [u64; 5] = [400_000, 500_000, 1_000_000, 2_000_000, 5_000_000];
@@ -165,10 +164,15 @@ impl Sequence {
     /// inside the release window (RM-21, design 38 D2 (1)); a `Stop` and a `start_rx` at
     /// their receipt.
     pub fn schedule(&self, terms: &Terms) -> Vec<Entry> {
-        let mut entries: Vec<Entry> = self.faults.iter().enumerate().map(|(index, (at, _))| {
-            let e = terms.t0 + terms.ticks(*at);
-            Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
-        }).collect();
+        let mut entries: Vec<Entry> = self
+            .faults
+            .iter()
+            .enumerate()
+            .map(|(index, (at, _))| {
+                let e = terms.t0 + terms.ticks(*at);
+                Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
+            })
+            .collect();
         let mut floor = [i64::MIN; 2];
         let mut timed: Vec<i64> = Vec::new();
         for (index, (round, op)) in self.ops().enumerate() {
@@ -261,21 +265,14 @@ pub fn sequence(seed: u64, rates: &[u64]) -> Sequence {
         Class::Timed => Op::Timed { direction: rng.direction(), gain_db: 0.5 * rng.below(64) as f64, at_ns: at(rng) },
         Class::TxCold | Class::RxCold => Op::Cold {
             direction: if kind == Class::TxCold { Direction::Tx } else { Direction::Rx },
-            change: if rng.below(2) == 0 {
-                Change::Channels(rng.below(3) as u16)
-            } else {
-                Change::Rate(rates[rng.below(rates.len() as u64) as usize])
-            },
+            change: if rng.below(2) == 0 { Change::Channels(rng.below(3) as u16) } else { Change::Rate(rates[rng.below(rates.len() as u64) as usize]) },
             at_ns: at(rng),
         },
         Class::Stop => Op::Stop { device: rng.below(4) == 0 },
         _ => Op::StartRx,
     };
     // The Action kinds the class may hold; faults are drawn apart.
-    let kinds: Vec<Class> = [Class::Timed, Class::TxCold, Class::RxCold, Class::Stop, Class::StartRx]
-        .into_iter()
-        .filter(|kind| *kind <= class)
-        .collect();
+    let kinds: Vec<Class> = [Class::Timed, Class::TxCold, Class::RxCold, Class::Stop, Class::StartRx].into_iter().filter(|kind| *kind <= class).collect();
     let mut instant = 0;
     let mut rounds: Vec<(i64, Vec<Op>)> = Vec::new();
     for _ in 0..2 + rng.below(4) {
@@ -284,10 +281,12 @@ pub fn sequence(seed: u64, rates: &[u64]) -> Sequence {
             1 => 100 * rng.below(100) as i64,
             _ => 100_000 * rng.below(800) as i64,
         };
-        let ops = (0..1 + rng.below(3)).map(|_| {
-            let kind = kinds[rng.below(kinds.len() as u64) as usize];
-            op(&mut rng, kind)
-        }).collect();
+        let ops = (0..1 + rng.below(3))
+            .map(|_| {
+                let kind = kinds[rng.below(kinds.len() as u64) as usize];
+                op(&mut rng, kind)
+            })
+            .collect();
         rounds.push((instant, ops));
     }
     if kinds.contains(&class) {

@@ -122,17 +122,12 @@ impl Server {
             return match request {
                 Request::Hello { protocol } if SUPPORTED.contains(&protocol) => {
                     self.greeted = true;
-                    Handled::ok(Response::Hello {
-                        protocol,
-                        server: format!("ezsdr-server {}", env!("CARGO_PKG_VERSION")),
-                        kernel_api: ezsdr_kernel::module_api::KERNEL_API.to_string(),
-                    })
+                    Handled::ok(Response::Hello { protocol, server: format!("ezsdr-server {}", env!("CARGO_PKG_VERSION")), kernel_api: ezsdr_kernel::module_api::KERNEL_API.to_string() })
                 }
-                Request::Hello { protocol } => Handled::error(ProtocolError {
-                    supported: Some(SUPPORTED.to_vec()),
-                    ..ProtocolError::new(ErrorKind::UnsupportedProtocol, format!("EA-3: protocol {protocol} is not supported"))
-                })
-                .exiting(),
+                Request::Hello { protocol } => {
+                    Handled::error(ProtocolError { supported: Some(SUPPORTED.to_vec()), ..ProtocolError::new(ErrorKind::UnsupportedProtocol, format!("EA-3: protocol {protocol} is not supported")) })
+                        .exiting()
+                }
                 _ => fail(ErrorKind::Protocol, "EA-3: the first request must be hello").exiting(),
             };
         }
@@ -228,11 +223,7 @@ impl Server {
             let manifest = run.finish();
             let termination = manifest.termination.reason.clone();
             let _ = self.write_manifest("manifest.json", &manifest);
-            return Handled::error(ProtocolError {
-                termination: Some(termination),
-                ..ProtocolError::new(ErrorKind::Ended, "EA-10: the Session ended while it was being connected")
-            })
-            .exiting();
+            return Handled::error(ProtocolError { termination: Some(termination), ..ProtocolError::new(ErrorKind::Ended, "EA-10: the Session ended while it was being connected") }).exiting();
         };
         let response = Response::Connected {
             run: run.id(),
@@ -263,14 +254,7 @@ impl Server {
         }
     }
 
-    fn run_child(
-        &mut self,
-        spec: serde_json::Value,
-        profile: Option<serde_json::Value>,
-        sizes: Vec<u64>,
-        duration_ns: Option<u64>,
-        body: Vec<u8>,
-    ) -> Handled {
+    fn run_child(&mut self, spec: serde_json::Value, profile: Option<serde_json::Value>, sizes: Vec<u64>, duration_ns: Option<u64>, body: Vec<u8>) -> Handled {
         let Some(live) = self.live.as_mut() else {
             return fail(ErrorKind::Protocol, "EA-4: no Session is connected");
         };
@@ -290,11 +274,7 @@ impl Server {
         }
         let profile = profile.unwrap_or_else(|| without_feeds(&live.profile));
         // A device-paced Session's child would open the device again (EA-14, KG-12).
-        let assembled = if live.device_paced {
-            Ok(catalogue::empty_assembly())
-        } else {
-            assemble(&profile, inputs, self.config.implementations.clone(), self.config.open_device.as_ref())
-        };
+        let assembled = if live.device_paced { Ok(catalogue::empty_assembly()) } else { assemble(&profile, inputs, self.config.implementations.clone(), self.config.open_device.as_ref()) };
         let assembly = match assembled {
             Ok(assembly) => assembly,
             Err(message) => return fail(ErrorKind::Refused, message),
@@ -316,9 +296,7 @@ impl Server {
             };
             let horizon = match duration_ns {
                 Some(ns) => match ticks(&clocks, t0, ns) {
-                    Some(ticks) => t0
-                        .checked_add(Duration::new(t0.domain(), ticks))
-                        .unwrap_or(TimePoint::new(t0.domain(), i64::MAX)),
+                    Some(ticks) => t0.checked_add(Duration::new(t0.domain(), ticks)).unwrap_or(TimePoint::new(t0.domain(), i64::MAX)),
                     None => return,
                 },
                 None => TimePoint::new(t0.domain(), i64::MAX),
@@ -415,10 +393,9 @@ fn count(run: &RunHandle) -> usize {
 
 fn run_error(error: RunHandleError) -> Handled {
     match error {
-        RunHandleError::Ended { termination } => Handled::error(ProtocolError {
-            termination: Some(termination.clone()),
-            ..ProtocolError::new(ErrorKind::Ended, format!("the Run has ended: {termination:?}"))
-        }),
+        RunHandleError::Ended { termination } => {
+            Handled::error(ProtocolError { termination: Some(termination.clone()), ..ProtocolError::new(ErrorKind::Ended, format!("the Run has ended: {termination:?}")) })
+        }
         RunHandleError::Malformed { error } => fail(ErrorKind::Malformed, error.to_string()),
         RunHandleError::NotOnPrimaryRoot { t } => fail(ErrorKind::NotOnPrimaryRoot, format!("{t} is not on the Authority's primary root")),
         RunHandleError::NotSession => fail(ErrorKind::Protocol, "the request is available only on a Session"),
@@ -465,13 +442,7 @@ fn advance(live: &mut Live, to: Option<TimePoint>, by: Option<Duration>) -> Hand
     }
 }
 
-fn wait_for(
-    live: &mut Live,
-    kinds: &[ezsdr_kernel::event::EventKind],
-    from: usize,
-    within: Option<Duration>,
-    until: Option<TimePoint>,
-) -> Handled {
+fn wait_for(live: &mut Live, kinds: &[ezsdr_kernel::event::EventKind], from: usize, within: Option<Duration>, until: Option<TimePoint>) -> Handled {
     let horizon = match (within, until) {
         (Some(within), None) => match later(live, within) {
             Ok(horizon) => horizon,
@@ -481,24 +452,14 @@ fn wait_for(
         _ => return fail(ErrorKind::Protocol, "EA-4: wait_for takes exactly one of within and until"),
     };
     match live.run.wait_for(kinds, from, horizon) {
-        Ok(index) => Handled::ok(Response::Waited {
-            index,
-            event: index.and_then(|index| live.run.events(index).into_iter().next()),
-            now: live.run.now(),
-            horizon,
-            events: count(&live.run),
-        }),
+        Ok(index) => Handled::ok(Response::Waited { index, event: index.and_then(|index| live.run.events(index).into_iter().next()), now: live.run.now(), horizon, events: count(&live.run) }),
         Err(error) => run_error(error),
     }
 }
 
 /// Whether a Spec document schedules `Stop {}`, which ends a Run (EA-14, KC-33).
 fn schedules_a_stop(spec: &serde_json::Value) -> bool {
-    spec["schedule"].as_array().is_some_and(|entries| {
-        entries.iter().any(|entry| {
-            entry["action"]["kind"] == "stop" && entry["action"].get("target").is_none_or(serde_json::Value::is_null)
-        })
-    })
+    spec["schedule"].as_array().is_some_and(|entries| entries.iter().any(|entry| entry["action"]["kind"] == "stop" && entry["action"].get("target").is_none_or(serde_json::Value::is_null)))
 }
 
 /// The Session's profile with every `feed` removed: a child's profile (EA-14).

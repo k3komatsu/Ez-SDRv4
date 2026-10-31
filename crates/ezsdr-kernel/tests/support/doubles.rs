@@ -15,20 +15,14 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Dispatched, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor, ComponentImpl,
-    ComponentKind, ComponentRequires, ComponentTiming, Driving, Executor,
-    ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError,
-    ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance,
-    RejectedRequest, Requested, Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode,
-    UpdateClass, VerbDecl, Version, VocabularyDescriptor,
+    ActionReceiver, ActionSubmitter, CoerceReport, CompileRule, ComponentDescriptor, ComponentImpl, ComponentKind, ComponentRequires, ComponentTiming, Dispatched, Driving, Executor,
+    ExecutorDescriptor, Fidelity, IslandDecl, LinkDescriptor, ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef, ParamDecl, PrepareContext, Provider, ProviderInstance, RejectedRequest,
+    Requested, Resource, Role, Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VerbDecl, Version, VocabularyDescriptor,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::policy::{EventKindDecl, Reaction};
 use ezsdr_kernel::run::{CleanupMode, CleanupOps, CleanupStep, HostClock};
-use ezsdr_kernel::spec::{
-    CapabilityValue, Coercion, CoercionPolicy, Constraint, Ident, Key, KeyDecl, Namespace, Value,
-    ValueKind, Warning,
-};
+use ezsdr_kernel::spec::{CapabilityValue, Coercion, CoercionPolicy, Constraint, Ident, Key, KeyDecl, Namespace, Value, ValueKind, Warning};
 use ezsdr_kernel::time::TimePoint;
 
 /// Parses an [`Ident`] from a literal known to be well formed.
@@ -69,10 +63,7 @@ pub fn mid(s: &str) -> ModuleId {
 
 /// The exact version every test Module registers, as a binding pins it (SB-22, D78).
 pub fn mref(s: &str) -> ModuleRef {
-    ModuleRef {
-        id: mid(s),
-        version: Version::new(1, 0, 0),
-    }
+    ModuleRef { id: mid(s), version: Version::new(1, 0, 0) }
 }
 
 /// A placeholder content hash for descriptors that need one (MA-37).
@@ -91,30 +82,9 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
         version: Version::new(1, 0, 0),
         prefix: ns("test"),
         keys: vec![
-            KeyDecl {
-                key: key("test.count"),
-                indexed: None,
-                kind: ValueKind::Int,
-                coercible: false,
-                coercion_default: CoercionPolicy::Reject,
-                update_class: None,
-            },
-            KeyDecl {
-                key: key("test.grid"),
-                indexed: None,
-                kind: ValueKind::Num,
-                coercible: true,
-                coercion_default: CoercionPolicy::Reject,
-                update_class: None,
-            },
-            KeyDecl {
-                key: key("test.flag"),
-                indexed: None,
-                kind: ValueKind::Bool,
-                coercible: false,
-                coercion_default: CoercionPolicy::Warn,
-                update_class: None,
-            },
+            KeyDecl { key: key("test.count"), indexed: None, kind: ValueKind::Int, coercible: false, coercion_default: CoercionPolicy::Reject, update_class: None },
+            KeyDecl { key: key("test.grid"), indexed: None, kind: ValueKind::Num, coercible: true, coercion_default: CoercionPolicy::Reject, update_class: None },
+            KeyDecl { key: key("test.flag"), indexed: None, kind: ValueKind::Bool, coercible: false, coercion_default: CoercionPolicy::Warn, update_class: None },
             // A Provider parameter that *is* changeable during a Run, which is what
             // SB-2's `update_class` exists for: the Vocabulary declares the class,
             // because a Provider's parameters are Vocabulary keys and never a
@@ -162,36 +132,14 @@ pub fn test_vocabulary() -> VocabularyDescriptor {
             },
         ],
         event_kinds: vec![
-            EventKindDecl {
-                kind: EventKind::parse("test.custom").expect("a valid kind"),
-                default: Reaction::Continue,
-                severity: ezsdr_kernel::event::Severity::Info,
-            },
+            EventKindDecl { kind: EventKind::parse("test.custom").expect("a valid kind"), default: Reaction::Continue, severity: ezsdr_kernel::event::Severity::Info },
             // What `ThreadedProvider` emits from its own thread (spec 19 §0).
-            EventKindDecl {
-                kind: EventKind::parse("test.MARK").expect("a valid kind"),
-                default: Reaction::Continue,
-                severity: ezsdr_kernel::event::Severity::Info,
-            },
+            EventKindDecl { kind: EventKind::parse("test.MARK").expect("a valid kind"), default: Reaction::Continue, severity: ezsdr_kernel::event::Severity::Info },
         ],
         verbs: vec![
-            VerbDecl {
-                verb: id("capture"),
-                compiles_to: CompileRule::UpdateParameter {
-                    key: key("test.capture"),
-                },
-            },
-            VerbDecl {
-                verb: id("start_repeat"),
-                compiles_to: CompileRule::TxBurst {
-                    repeat: true,
-                    late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
-                },
-            },
-            VerbDecl {
-                verb: id("sweep"),
-                compiles_to: CompileRule::Command {},
-            },
+            VerbDecl { verb: id("capture"), compiles_to: CompileRule::UpdateParameter { key: key("test.capture") } },
+            VerbDecl { verb: id("start_repeat"), compiles_to: CompileRule::TxBurst { repeat: true, late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag } },
+            VerbDecl { verb: id("sweep"), compiles_to: CompileRule::Command {} },
         ],
         checks: vec![ns("test.limits")],
     }
@@ -213,14 +161,7 @@ impl Default for TestLimitsCheck {
 impl TestLimitsCheck {
     /// A check that runs at all three points of SB-30.
     pub fn new() -> TestLimitsCheck {
-        TestLimitsCheck {
-            section: ns("test.limits"),
-            stages: vec![
-                CheckStage::Validate,
-                CheckStage::Prepare,
-                CheckStage::Runtime,
-            ],
-        }
+        TestLimitsCheck { section: ns("test.limits"), stages: vec![CheckStage::Validate, CheckStage::Prepare, CheckStage::Runtime] }
     }
 }
 
@@ -233,21 +174,9 @@ impl AdmissionCheck for TestLimitsCheck {
         &self.stages
     }
 
-    fn check(
-        &self,
-        section: &serde_json::Value,
-        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _stage: CheckStage,
-    ) -> Vec<Violation> {
-        let ceiling = section
-            .get("max_grid")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(f64::INFINITY);
-        let gate = section
-            .get("gate")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Key::parse(s).ok());
+    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
+        let ceiling = section.get("max_grid").and_then(|v| v.as_f64()).unwrap_or(f64::INFINITY);
+        let gate = section.get("gate").and_then(|v| v.as_str()).and_then(|s| Key::parse(s).ok());
         // SB-30 (KA-4): each fragment's configuration overlaid with what is proposed
         // for that fragment.
         let mut names: std::collections::BTreeSet<&Ident> = effective.keys().collect();
@@ -258,10 +187,7 @@ impl AdmissionCheck for TestLimitsCheck {
             if let Some(p) = proposed.get(name) {
                 merged.extend(p.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
-            if gate
-                .as_ref()
-                .is_some_and(|gate| !matches!(merged.get(gate), Some(Value::Scalar(Scalar::Bool(true)))))
-            {
+            if gate.as_ref().is_some_and(|gate| !matches!(merged.get(gate), Some(Value::Scalar(Scalar::Bool(true))))) {
                 continue;
             }
             for (k, v) in merged.iter().filter(|(k, _)| k.as_str() == "test.grid") {
@@ -271,14 +197,7 @@ impl AdmissionCheck for TestLimitsCheck {
                     _ => continue,
                 };
                 if n > ceiling {
-                    out.push(Violation {
-                        check: ns("test.limits"),
-                        key: Some(k.clone()),
-                        requested: Some(v.clone()),
-                        reason: format!(
-                            "{name}: test.grid {n} exceeds the declared ceiling {ceiling}"
-                        ),
-                    });
+                    out.push(Violation { check: ns("test.limits"), key: Some(k.clone()), requested: Some(v.clone()), reason: format!("{name}: test.grid {n} exceeds the declared ceiling {ceiling}") });
                 }
             }
         }
@@ -354,14 +273,7 @@ impl TestProvider {
         let line = |root: &ResourceId, n: u32| Resource {
             id: root.child(&n.to_string()).expect("a valid child path"),
             kind: ns("test.line"),
-            capabilities: [(
-                key("test.count"),
-                CapabilityValue::One {
-                    value: Scalar::from(count),
-                },
-            )]
-            .into_iter()
-            .collect(),
+            capabilities: [(key("test.count"), CapabilityValue::One { value: Scalar::from(count) })].into_iter().collect(),
             children: Vec::new(),
             memory_domains: vec![MemoryDomainId::local(0)],
             // A line is one physical channel: exclusive, like SB-34's default.
@@ -371,54 +283,28 @@ impl TestProvider {
             // root below carries `cf32` under the same port name, so a test can tell
             // whether SB-15 resolved the port on the bound node or on some other.
             ports: vec![
-                Port {
-                    name: id("rx"),
-                    direction: PortDirection::Out,
-                    contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal"),
-                },
+                Port { name: id("rx"), direction: PortDirection::Out, contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal") },
                 // The TX end of Vision §7's `PHY Processor -> Radio Port`: a link
                 // whose **consumer** is a resource port, which is the case the plan's
                 // `links` resolved to a default contract rather than to this one.
-                Port {
-                    name: id("tx"),
-                    direction: PortDirection::In,
-                    contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal"),
-                },
+                Port { name: id("tx"), direction: PortDirection::In, contract: DataContractId::parse("ezsdr.stream.sc16").expect("a valid literal") },
             ],
         };
         TestProvider {
             instance: ProviderInstance {
                 id: root.clone(),
-                module: ModuleRef {
-                    id: mid("ezsdr.test.provider"),
-                    version: Version::new(1, 0, 0),
-                },
+                module: ModuleRef { id: mid("ezsdr.test.provider"), version: Version::new(1, 0, 0) },
                 profile: None,
                 tree: Resource {
                     id: root.clone(),
                     kind: ns("test.device"),
                     capabilities: [
-                        (
-                            key("test.count"),
-                            CapabilityValue::One {
-                                value: Scalar::from(count),
-                            },
-                        ),
+                        (key("test.count"), CapabilityValue::One { value: Scalar::from(count) }),
                         // A grid is a discrete set: a declared continuous range
                         // could not express "multiples of 20", so SB-7's coercion
                         // path would never be reached.
-                        (
-                            key("test.grid"),
-                            CapabilityValue::AnyOf {
-                                values: vec![Scalar::try_from(20.0).unwrap(), Scalar::try_from(40.0).unwrap(), Scalar::try_from(100.0).unwrap()],
-                            },
-                        ),
-                        (
-                            key("test.flag"),
-                            CapabilityValue::AnyOf {
-                                values: vec![Scalar::from(true), Scalar::from(false)],
-                            },
-                        ),
+                        (key("test.grid"), CapabilityValue::AnyOf { values: vec![Scalar::try_from(20.0).unwrap(), Scalar::try_from(40.0).unwrap(), Scalar::try_from(100.0).unwrap()] }),
+                        (key("test.flag"), CapabilityValue::AnyOf { values: vec![Scalar::from(true), Scalar::from(false)] }),
                     ]
                     .into_iter()
                     .collect(),
@@ -426,12 +312,7 @@ impl TestProvider {
                     shareable: false,
                     // The device-level stream endpoint, which a Session's implicit
                     // Spec binds because RS-12 takes the instance's root kind.
-                    ports: vec![Port {
-                        name: id("rx"),
-                        direction: PortDirection::Out,
-                        contract: DataContractId::parse("ezsdr.stream.cf32")
-                            .expect("a valid literal"),
-                    }],
+                    ports: vec![Port { name: id("rx"), direction: PortDirection::Out, contract: DataContractId::parse("ezsdr.stream.cf32").expect("a valid literal") }],
                     memory_domains: vec![MemoryDomainId::local(0)],
                 },
                 fidelity: Fidelity::NONE,
@@ -495,13 +376,8 @@ impl TestProvider {
     /// `test.line` sub-resources, so a key a fixture named — a numbered one such as
     /// `test.item0` (SB-2a) — is matched at either level.
     pub fn with_capability(mut self, name: &str, value: i64) -> TestProvider {
-        let capability = CapabilityValue::One {
-            value: Scalar::from(value),
-        };
-        self.instance
-            .tree
-            .capabilities
-            .insert(key(name), capability.clone());
+        let capability = CapabilityValue::One { value: Scalar::from(value) };
+        self.instance.tree.capabilities.insert(key(name), capability.clone());
         for line in &mut self.instance.tree.children {
             line.capabilities.insert(key(name), capability.clone());
         }
@@ -521,12 +397,7 @@ impl TestProvider {
     pub fn with_asymmetric_lines(mut self, first: i64, second: i64) -> TestProvider {
         for (i, child) in self.instance.tree.children.iter_mut().enumerate() {
             let n = if i == 0 { first } else { second };
-            child.capabilities.insert(
-                key("test.count"),
-                CapabilityValue::One {
-                    value: Scalar::from(n),
-                },
-            );
+            child.capabilities.insert(key("test.count"), CapabilityValue::One { value: Scalar::from(n) });
         }
         self
     }
@@ -542,12 +413,7 @@ impl TestProvider {
     /// so that a Spec's `needs` can constrain it (SB-30, KA-4).
     pub fn with_line_grid(mut self) -> TestProvider {
         for line in &mut self.instance.tree.children {
-            line.capabilities.insert(
-                key("test.grid"),
-                CapabilityValue::AnyOf {
-                    values: vec![Scalar::try_from(20.0).unwrap(), Scalar::try_from(40.0).unwrap(), Scalar::try_from(100.0).unwrap()],
-                },
-            );
+            line.capabilities.insert(key("test.grid"), CapabilityValue::AnyOf { values: vec![Scalar::try_from(20.0).unwrap(), Scalar::try_from(40.0).unwrap(), Scalar::try_from(100.0).unwrap()] });
         }
         self
     }
@@ -664,11 +530,7 @@ impl TestProvider {
 
     pub fn fail_if(&self, phase: FailAt) -> Result<(), ModuleError> {
         if self.fail_at == phase {
-            return Err(ModuleError {
-                kind: ModuleErrorKind::Rejected,
-                message: format!("injected failure at {phase:?}"),
-                detail: serde_json::Value::Null,
-            });
+            return Err(ModuleError { kind: ModuleErrorKind::Rejected, message: format!("injected failure at {phase:?}"), detail: serde_json::Value::Null });
         }
         Ok(())
     }
@@ -702,25 +564,13 @@ impl Provider for TestProvider {
         }
         let mut report = CoerceReport::default();
         if self.stray_coercion {
-            report.coercions.push(Coercion {
-                key: key("test.flag"),
-                requested: Value::from(false),
-                applied: Value::from(true),
-                reason: "a key the request does not name".to_owned(),
-            });
+            report.coercions.push(Coercion { key: key("test.flag"), requested: Value::from(false), applied: Value::from(true), reason: "a key the request does not name".to_owned() });
         }
         for (k, c) in &request.constraints {
             let Constraint::Eq { value: v } = c else {
                 continue;
             };
-            let step = if k.as_str() == "test.grid" {
-                self.grid
-            } else {
-                self.snaps
-                    .iter()
-                    .find(|(name, _)| name == k)
-                    .map(|(_, step)| *step)
-            };
+            let step = if k.as_str() == "test.grid" { self.grid } else { self.snaps.iter().find(|(name, _)| name == k).map(|(_, step)| *step) };
             if let Some(step) = step {
                 // An `Int` snaps as the `Num` that names the same number, which the
                 // double records as a coercion: another kind is another value (SB-6).
@@ -735,12 +585,7 @@ impl Provider for TestProvider {
                 let snapped = (x / step).round() * step;
                 report.applied.insert(k.clone(), Value::num(snapped).unwrap());
                 if kind_only || (snapped - x).abs() > f64::EPSILON {
-                    report.coercions.push(Coercion {
-                        key: k.clone(),
-                        requested: v.clone().into(),
-                        applied: Value::num(snapped).unwrap(),
-                        reason: format!("snapped to a multiple of {step}"),
-                    });
+                    report.coercions.push(Coercion { key: k.clone(), requested: v.clone().into(), applied: Value::num(snapped).unwrap(), reason: format!("snapped to a multiple of {step}") });
                 }
                 continue;
             }
@@ -755,20 +600,12 @@ impl Provider for TestProvider {
             if let (Some(count), Some(grid)) = (number("test.count"), number("test.grid")) {
                 if count * grid > limit {
                     report.applied.remove(&key("test.grid"));
-                    report.rejected.push(RejectedRequest {
-                        key: key("test.grid"),
-                        requested: request.constraints[&key("test.grid")].clone(),
-                        reason: format!("the joint limit {limit} is exceeded"),
-                    });
+                    report.rejected.push(RejectedRequest { key: key("test.grid"), requested: request.constraints[&key("test.grid")].clone(), reason: format!("the joint limit {limit} is exceeded") });
                 }
             }
         }
         if self.stray_rejection {
-            report.rejected.push(RejectedRequest {
-                key: key("test.flag"),
-                requested: Constraint::Present {},
-                reason: "a key the request does not name".to_owned(),
-            });
+            report.rejected.push(RejectedRequest { key: key("test.flag"), requested: Constraint::Present {}, reason: "a key the request does not name".to_owned() });
         }
         if let Some(key) = &self.omit_applied {
             report.applied.remove(key);
@@ -776,11 +613,7 @@ impl Provider for TestProvider {
         Ok(report)
     }
 
-    fn prepare(
-        &mut self,
-        f: &Fragment,
-        _ctx: PrepareContext,
-    ) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, f: &Fragment, _ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
         self.record("prepare");
         self.fail_if(FailAt::Prepare)?;
         // MA-12: the report's coercions equal what `coerce` returned for the same
@@ -793,18 +626,10 @@ impl Provider for TestProvider {
             Ok(request) => self.coerce(&request)?,
             Err(_) => CoerceReport::default(),
         };
-        let coercions = if self.prepare_disagrees {
-            Vec::new()
-        } else {
-            report.coercions
-        };
+        let coercions = if self.prepare_disagrees { Vec::new() } else { report.coercions };
         let mut effective = report.applied;
         effective.extend(self.effective.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Ok(PrepareReport {
-            effective,
-            coercions,
-            warnings: Vec::<Warning>::new(),
-        })
+        Ok(PrepareReport { effective, coercions, warnings: Vec::<Warning>::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -840,10 +665,7 @@ pub fn test_provider_descriptor() -> ModuleDescriptor {
         // every fixture that plans, and SB-24 reads the role off the descriptor of the
         // Module the profile binds, as MA-25 does for a Sink.
         roles: vec![Role::Provider, Role::Authority],
-        vocabularies: vec![ezsdr_kernel::module_api::VocabularyRequirement {
-            id: ns("test"),
-            req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
-        }],
+        vocabularies: vec![ezsdr_kernel::module_api::VocabularyRequirement { id: ns("test"), req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)) }],
         impl_hash: Some(some_hash("ezsdr.test.provider")),
     }
 }
@@ -892,20 +714,9 @@ impl Executor for TestExecutor {
         &self.descriptor
     }
 
-    fn prepare(
-        &mut self,
-        _island: &IslandDecl,
-        ctx: PrepareContext,
-    ) -> Result<PrepareReport, ModuleError> {
-        self.prepared_components
-            .lock()
-            .expect("lock")
-            .push(ctx.components);
-        Ok(PrepareReport {
-            effective: BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+    fn prepare(&mut self, _island: &IslandDecl, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
+        self.prepared_components.lock().expect("lock").push(ctx.components);
+        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -992,16 +803,8 @@ impl Sink for TestSink {
         &self.descriptor
     }
 
-    fn prepare(
-        &mut self,
-        _f: &Fragment,
-        _ctx: PrepareContext,
-    ) -> Result<PrepareReport, ModuleError> {
-        Ok(PrepareReport {
-            effective: BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+    fn prepare(&mut self, _f: &Fragment, _ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
+        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -1050,10 +853,7 @@ pub fn test_executor_descriptor() -> ModuleDescriptor {
         version: Version::new(1, 0, 0),
         kernel_api: Version::new(4, 0, 0),
         roles: vec![Role::Executor],
-        vocabularies: vec![ezsdr_kernel::module_api::VocabularyRequirement {
-            id: ns("test"),
-            req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)),
-        }],
+        vocabularies: vec![ezsdr_kernel::module_api::VocabularyRequirement { id: ns("test"), req: ezsdr_kernel::module_api::VersionReq(Version::new(1, 0, 0)) }],
         impl_hash: Some(some_hash("ezsdr.test.executor")),
     }
 }
@@ -1075,15 +875,8 @@ pub fn test_link_descriptor() -> LinkDescriptor {
     LinkDescriptor {
         module: mref("ezsdr.test.link"),
         kind: ns("test.link"),
-        connects: vec![
-            (MemoryDomainId::local(0), MemoryDomainId::local(1)),
-            (MemoryDomainId::local(1), MemoryDomainId::local(0)),
-        ],
-        policies: vec![
-            ezsdr_kernel::stream::BackPressure::Block,
-            ezsdr_kernel::stream::BackPressure::DropOldest,
-            ezsdr_kernel::stream::BackPressure::DropNewest,
-        ],
+        connects: vec![(MemoryDomainId::local(0), MemoryDomainId::local(1)), (MemoryDomainId::local(1), MemoryDomainId::local(0))],
+        policies: vec![ezsdr_kernel::stream::BackPressure::Block, ezsdr_kernel::stream::BackPressure::DropOldest, ezsdr_kernel::stream::BackPressure::DropNewest],
         cross_process: false,
     }
 }
@@ -1093,26 +886,11 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
     ComponentDescriptor {
         id: id("recorder"),
         kind: ComponentKind::Processor,
-        ports: vec![Port {
-            name: id("in"),
-            direction: PortDirection::In,
-            contract,
-        }],
-        params: vec![ParamDecl {
-            key: key("test.capture"),
-            schema: serde_json::json!({ "type": "boolean" }),
-            update_class: Some(UpdateClass::BlockBoundary),
-            default: Value::from(false),
-        }],
+        ports: vec![Port { name: id("in"), direction: PortDirection::In, contract }],
+        params: vec![ParamDecl { key: key("test.capture"), schema: serde_json::json!({ "type": "boolean" }), update_class: Some(UpdateClass::BlockBoundary), default: Value::from(false) }],
         timing: ComponentTiming::default(),
-        requires: ComponentRequires {
-            executor_kind: ns("any"),
-        },
-        implementation: ComponentImpl {
-            kind: ns("test.impl"),
-            id: "recorder".to_owned(),
-            hash: some_hash("recorder"),
-        },
+        requires: ComponentRequires { executor_kind: ns("any") },
+        implementation: ComponentImpl { kind: ns("test.impl"), id: "recorder".to_owned(), hash: some_hash("recorder") },
     }
 }
 
@@ -1121,11 +899,7 @@ pub fn recorder_component(contract: DataContractId) -> ComponentDescriptor {
 pub fn source_component(contract: DataContractId) -> ComponentDescriptor {
     let mut c = recorder_component(contract.clone());
     c.id = id("source");
-    c.ports = vec![Port {
-        name: id("out"),
-        direction: PortDirection::Out,
-        contract,
-    }];
+    c.ports = vec![Port { name: id("out"), direction: PortDirection::Out, contract }];
     c.implementation.id = "source".to_owned();
     c
 }
@@ -1211,11 +985,7 @@ pub struct TestSubmitter {
 impl TestSubmitter {
     /// A submitter admitting everything (MA-14a).
     pub fn new() -> TestSubmitter {
-        TestSubmitter {
-            delivered: Mutex::new(Vec::new()),
-            ceiling: None,
-            next: AtomicU64::new(0),
-        }
+        TestSubmitter { delivered: Mutex::new(Vec::new()), ceiling: None, next: AtomicU64::new(0) }
     }
 
     /// A submitter refusing a `TxBurst` whose `test.limits` metadata exceeds the
@@ -1272,12 +1042,7 @@ pub struct RecordingCleanup {
 impl RecordingCleanup {
     /// A cleanup that records and always succeeds (RS-6).
     pub fn new() -> RecordingCleanup {
-        RecordingCleanup {
-            log: Mutex::new(Vec::new()),
-            fail: None,
-            wedge: None,
-            deadline_ms: 200,
-        }
+        RecordingCleanup { log: Mutex::new(Vec::new()), fail: None, wedge: None, deadline_ms: 200 }
     }
 
     /// Makes `step` return an error (RS-6).
@@ -1294,12 +1059,7 @@ impl RecordingCleanup {
 
     /// The steps attempted, in order (RS-6).
     pub fn steps(&self) -> Vec<CleanupStep> {
-        self.log
-            .lock()
-            .expect("lock")
-            .iter()
-            .map(|(s, _, _)| *s)
-            .collect()
+        self.log.lock().expect("lock").iter().map(|(s, _, _)| *s).collect()
     }
 
     /// The `(step, fragment)` pairs attempted, in order (RS-8).
@@ -1315,24 +1075,14 @@ impl Default for RecordingCleanup {
 }
 
 impl CleanupOps for RecordingCleanup {
-    fn perform(
-        &self,
-        step: CleanupStep,
-        fragment: Option<&Ident>,
-        mode: CleanupMode,
-    ) -> Result<(), ModuleError> {
-        self.log
-            .lock()
-            .expect("lock")
-            .push((step, fragment.cloned(), mode));
+    fn perform(&self, step: CleanupStep, fragment: Option<&Ident>, mode: CleanupMode) -> Result<(), ModuleError> {
+        self.log.lock().expect("lock").push((step, fragment.cloned(), mode));
         if self.wedge == Some(step) {
             // RS-8a: a step that never returns must not stop the sequence.
             std::thread::sleep(std::time::Duration::from_secs(30));
         }
         if self.fail == Some(step) {
-            return Err(ModuleError::rejected(format!(
-                "injected failure at {step:?}"
-            )));
+            return Err(ModuleError::rejected(format!("injected failure at {step:?}")));
         }
         Ok(())
     }

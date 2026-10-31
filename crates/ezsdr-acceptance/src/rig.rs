@@ -10,7 +10,7 @@ use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::module_api::{ModuleRef, Version};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 /// A test-specific temporary capture directory that is removed on drop.
 pub struct TempDir(pub PathBuf);
@@ -20,11 +20,7 @@ impl TempDir {
     pub fn new(test: &str) -> TempDir {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let safe: String = test.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-        let path = std::env::temp_dir().join(format!(
-            "ezsdr-acc-{}-{safe}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-        ));
+        let path = std::env::temp_dir().join(format!("ezsdr-acc-{}-{safe}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),));
         fs::create_dir_all(&path).expect("create capture directory");
         TempDir(path)
     }
@@ -44,11 +40,7 @@ fn layout(profile: &str, selector: JsonValue) -> JsonValue {
 
 /// A profile document: `x3xx` 0.1.0, or `ideal` 2.0.0 (design 33 D5).
 fn profile_json(name: &str) -> JsonValue {
-    let version = if name == "x3xx" {
-        json!({ "major": 0, "minor": 1, "patch": 0 })
-    } else {
-        json!({ "major": 2, "minor": 0, "patch": 0 })
-    };
+    let version = if name == "x3xx" { json!({ "major": 0, "minor": 1, "patch": 0 }) } else { json!({ "major": 2, "minor": 0, "patch": 0 }) };
     json!({ "name": name, "version": version })
 }
 
@@ -127,19 +119,24 @@ pub fn link_session_profile(profile: &str, tx: &str, rx: &str, dir: &Path, envir
 }
 
 fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path, environment: JsonValue, session: bool) -> JsonValue {
-    let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
-        "selector": layout(profile, json!({ "id": id, "block_len_jitter": jitter })),
-        "profile": profile_json(profile)
-    });
+    let radio = |id: String, jitter: bool| {
+        json!({
+            "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
+            "selector": layout(profile, json!({ "id": id, "block_len_jitter": jitter })),
+            "profile": profile_json(profile)
+        })
+    };
     let mut bindings = serde_json::Map::new();
     bindings.insert(tx.to_owned(), radio("dev_tx".to_owned(), false));
     bindings.insert(rx.to_owned(), radio("dev_rx".to_owned(), rx_jitter));
     bindings.insert("rec".to_owned(), recorder(dir, session.then_some(rx)));
-    bindings.insert("sim".to_owned(), json!({
-        "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
-        "selector": {}
-    }));
+    bindings.insert(
+        "sim".to_owned(),
+        json!({
+            "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
+            "selector": {}
+        }),
+    );
     json!({
         "version": 1,
         "bindings": bindings,
@@ -156,23 +153,31 @@ fn link_document(profile: &str, tx: &str, rx: &str, rx_jitter: bool, dir: &Path,
 /// Executor `exec` running the Island that holds `responder`, and `environment` (with the
 /// rig's time section). `jitter` turns on the responder radio's block-length jitter.
 pub fn ping_pong_profile(profile: &str, pinger: &str, responder_radio: &str, jitter: bool, dir: &Path, environment: JsonValue) -> JsonValue {
-    let radio = |id: String, jitter: bool| json!({
-        "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
-        "selector": layout(profile, json!({ "id": id, "block_len_jitter": jitter })),
-        "profile": profile_json(profile)
-    });
+    let radio = |id: String, jitter: bool| {
+        json!({
+            "module": { "id": "ezsdr.radio.mock", "version": { "major": 2, "minor": 0, "patch": 0 } },
+            "selector": layout(profile, json!({ "id": id, "block_len_jitter": jitter })),
+            "profile": profile_json(profile)
+        })
+    };
     let mut bindings = serde_json::Map::new();
     bindings.insert(pinger.to_owned(), radio(format!("dev_{pinger}"), false));
     bindings.insert(responder_radio.to_owned(), radio(format!("dev_{responder_radio}"), jitter));
     bindings.insert("rec".to_owned(), recorder(dir, None));
-    bindings.insert("exec".to_owned(), json!({
-        "module": { "id": "ezsdr.exec.native", "version": { "major": 1, "minor": 0, "patch": 0 } },
-        "selector": {}
-    }));
-    bindings.insert("sim".to_owned(), json!({
-        "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
-        "selector": {}
-    }));
+    bindings.insert(
+        "exec".to_owned(),
+        json!({
+            "module": { "id": "ezsdr.exec.native", "version": { "major": 1, "minor": 0, "patch": 0 } },
+            "selector": {}
+        }),
+    );
+    bindings.insert(
+        "sim".to_owned(),
+        json!({
+            "module": { "id": "ezsdr.sim-engine", "version": { "major": 1, "minor": 0, "patch": 0 } },
+            "selector": {}
+        }),
+    );
     json!({
         "version": 1,
         "bindings": bindings,
@@ -244,26 +249,36 @@ pub fn determinism_projection(manifest: &Manifest) -> JsonValue {
         match value {
             JsonValue::Object(object) => {
                 object.remove("host_utc_nanos");
-                for value in object.values_mut() { strip_utc(value); }
+                for value in object.values_mut() {
+                    strip_utc(value);
+                }
             }
             JsonValue::Array(values) => values.iter_mut().for_each(strip_utc),
             _ => {}
         }
     }
     let mut value = serde_json::to_value(manifest).expect("Manifest serializes");
-    if let Some(object) = value.as_object_mut() { object.remove("hash"); }
-    if let Some(run) = value.get_mut("run").and_then(JsonValue::as_object_mut) { run.remove("id"); }
+    if let Some(object) = value.as_object_mut() {
+        object.remove("hash");
+    }
+    if let Some(run) = value.get_mut("run").and_then(JsonValue::as_object_mut) {
+        run.remove("id");
+    }
     // `artifacts` is `{output: [ArtifactRef]}` (RS-38).
     if let Some(outputs) = value.get_mut("artifacts").and_then(JsonValue::as_object_mut) {
         for artifact in outputs.values_mut().filter_map(JsonValue::as_array_mut).flatten() {
-            if let Some(object) = artifact.as_object_mut() { object.remove("uri"); }
+            if let Some(object) = artifact.as_object_mut() {
+                object.remove("uri");
+            }
         }
     }
     // A `sink.CAPTURE_WRITTEN` event carries its artifact, and so its Run-unique URI
     // (Phase 6, VD-1).
     if let Some(events) = value.pointer_mut("/events/delivered").and_then(JsonValue::as_array_mut) {
         for event in events {
-            if let Some(object) = event.pointer_mut("/payload/artifact").and_then(JsonValue::as_object_mut) { object.remove("uri"); }
+            if let Some(object) = event.pointer_mut("/payload/artifact").and_then(JsonValue::as_object_mut) {
+                object.remove("uri");
+            }
         }
     }
     strip_utc(&mut value);
@@ -281,18 +296,12 @@ pub fn read_capture(artifact: &ArtifactRef, channels: usize) -> Vec<Vec<(f32, f3
     for frame in bytes.chunks_exact(frame_bytes) {
         for (channel, samples) in output.iter_mut().enumerate() {
             let offset = channel * 8;
-            samples.push((
-                f32::from_le_bytes(frame[offset..offset + 4].try_into().expect("real sample")),
-                f32::from_le_bytes(frame[offset + 4..offset + 8].try_into().expect("imaginary sample")),
-            ));
+            samples.push((f32::from_le_bytes(frame[offset..offset + 4].try_into().expect("real sample")), f32::from_le_bytes(frame[offset + 4..offset + 8].try_into().expect("imaginary sample"))));
         }
     }
     output
 }
 
 fn link_module() -> ModuleRef {
-    ModuleRef {
-        id: ezsdr_link_host::descriptor().id,
-        version: Version::new(1, 0, 0),
-    }
+    ModuleRef { id: ezsdr_link_host::descriptor().id, version: Version::new(1, 0, 0) }
 }

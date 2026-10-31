@@ -18,11 +18,7 @@ pub const DEFAULT_BLOCK_LEN: u32 = 2_000;
 /// D5): its 5 ms command lead (the device lead plus the delivery allowance) and its
 /// streamed-from-host repeat, to which neither Replay's size nor its alignment applies.
 pub fn terms() -> ProviderTerms {
-    ProviderTerms {
-        min_timed_command_lead_ns: DEVICE_LEAD_NS + DELIVERY_ALLOWANCE_NS,
-        repeat_max_samples: u64::from(u32::MAX),
-        repeat_align_samples: 1,
-    }
+    ProviderTerms { min_timed_command_lead_ns: DEVICE_LEAD_NS + DELIVERY_ALLOWANCE_NS, repeat_max_samples: u64::from(u32::MAX), repeat_align_samples: 1 }
 }
 
 /// The profile this Module's binding must name (UR-9, design 33 D5).
@@ -32,7 +28,7 @@ pub fn profile_ref() -> ProfileRef {
 
 #[cfg(test)]
 mod tests {
-    use super::{terms, DEVICE_LEAD_NS};
+    use super::{DEVICE_LEAD_NS, terms};
 
     #[test]
     fn tx_in_flight_window_covers_device_lead() {

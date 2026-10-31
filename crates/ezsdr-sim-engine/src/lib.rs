@@ -8,15 +8,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId};
-use ezsdr_kernel::module_api::{
-    Authority, AuthorityDescriptor, KERNEL_API, ModuleDescriptor, ModuleError,
-    ModuleRef, Pacing, Role, Version, VersionReq, VocabularyRequirement,
-};
+use ezsdr_kernel::module_api::{Authority, AuthorityDescriptor, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef, Pacing, Role, Version, VersionReq, VocabularyRequirement};
 use ezsdr_kernel::spec::Namespace;
-use ezsdr_kernel::time::{
-    ClockDomain, ClockRegistry, Converted, EpochRef, Rational, ScheduleHandle, TimeAuthority,
-    TimeError, TimePoint,
-};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Converted, EpochRef, Rational, ScheduleHandle, TimeAuthority, TimeError, TimePoint};
 
 use ezsdr_sim::{VIRTUAL_EPOCH, VIRTUAL_TICK_RATE_HZ};
 
@@ -48,17 +42,12 @@ impl EngineTime {
             return Err(TimeError::NotGoverned { id: point.domain() });
         }
         // host.monotonic is driven as the root's own ticks (TM-16a1).
-        if let Ok(ticks) = point
-            .ticks_in(self.root)
-            .or_else(|_| point.ticks_in(ClockDomainId::HOST_MONOTONIC))
-        {
+        if let Ok(ticks) = point.ticks_in(self.root).or_else(|_| point.ticks_in(ClockDomainId::HOST_MONOTONIC)) {
             return Ok(ticks);
         }
         match self.clocks.convert(point, self.root)? {
             Converted::Exact { point } => point.ticks_in(self.root),
-            Converted::Inexact { floor, .. } if round_up => {
-                floor.ticks_in(self.root)?.checked_add(1).ok_or(TimeError::Overflow)
-            }
+            Converted::Inexact { floor, .. } if round_up => floor.ticks_in(self.root)?.checked_add(1).ok_or(TimeError::Overflow),
             Converted::Inexact { floor, .. } => Err(TimeError::Inexact { floor }),
         }
     }
@@ -74,12 +63,7 @@ impl TimeAuthority for EngineTime {
     }
 
     fn governs(&self, domain: ClockDomainId) -> bool {
-        domain == self.root
-            || domain == ClockDomainId::HOST_MONOTONIC
-            || self
-                .clocks
-                .get(domain)
-                .is_ok_and(|clock| clock.root_id() == self.root)
+        domain == self.root || domain == ClockDomainId::HOST_MONOTONIC || self.clocks.get(domain).is_ok_and(|clock| clock.root_id() == self.root)
     }
 
     fn now(&self, domain: ClockDomainId) -> Result<TimePoint, TimeError> {
@@ -90,10 +74,7 @@ impl TimeAuthority for EngineTime {
         if domain == self.root || domain == ClockDomainId::HOST_MONOTONIC {
             return Ok(TimePoint::new(domain, ticks));
         }
-        Ok(self
-            .clocks
-            .convert(TimePoint::new(self.root, ticks), domain)?
-            .floor())
+        Ok(self.clocks.convert(TimePoint::new(self.root, ticks), domain)?.floor())
     }
 
     fn wait_until(&self, point: TimePoint) -> Result<(), TimeError> {
@@ -105,37 +86,23 @@ impl TimeAuthority for EngineTime {
         Ok(())
     }
 
-    fn schedule(
-        &self,
-        point: TimePoint,
-        callback: Callback,
-    ) -> Result<ScheduleHandle, TimeError> {
+    fn schedule(&self, point: TimePoint, callback: Callback) -> Result<ScheduleHandle, TimeError> {
         let tick = self.root_tick(point, false)?;
         let mut state = lock(&self.state);
         if tick < state.now {
-            return Err(TimeError::InPast {
-                now: TimePoint::new(self.root, state.now),
-                requested: point,
-            });
+            return Err(TimeError::InPast { now: TimePoint::new(self.root, state.now), requested: point });
         }
         let seq = state.next_seq;
         state.next_seq += 1;
         state.pending.insert((tick, seq), callback);
-        Ok(ScheduleHandle {
-            root: self.root,
-            ticks: tick,
-            seq,
-        })
+        Ok(ScheduleHandle { root: self.root, ticks: tick, seq })
     }
 
     fn cancel(&self, handle: ScheduleHandle) -> bool {
         if handle.root != self.root {
             return false;
         }
-        lock(&self.state)
-            .pending
-            .remove(&(handle.ticks, handle.seq))
-            .is_some()
+        lock(&self.state).pending.remove(&(handle.ticks, handle.seq)).is_some()
     }
 }
 
@@ -146,10 +113,7 @@ pub struct SimEngine {
 }
 
 fn module_ref() -> ModuleRef {
-    ModuleRef {
-        id: ModuleId::parse("ezsdr.sim-engine").expect("the Simulation Engine id is valid"),
-        version: Version::new(1, 0, 0),
-    }
+    ModuleRef { id: ModuleId::parse("ezsdr.sim-engine").expect("the Simulation Engine id is valid"), version: Version::new(1, 0, 0) }
 }
 
 /// Describes and registers `ezsdr.sim-engine` 1.0.0 (SE-8).
@@ -159,10 +123,7 @@ pub fn descriptor() -> ModuleDescriptor {
         version: Version::new(1, 0, 0),
         kernel_api: KERNEL_API,
         roles: vec![Role::Authority],
-        vocabularies: vec![VocabularyRequirement {
-            id: Namespace::parse("sim").expect("a valid Vocabulary namespace"),
-            req: VersionReq(Version::new(1, 0, 0)),
-        }],
+        vocabularies: vec![VocabularyRequirement { id: Namespace::parse("sim").expect("a valid Vocabulary namespace"), req: VersionReq(Version::new(1, 0, 0)) }],
         impl_hash: Some(ContentHash::of_bytes(b"ezsdr.sim-engine 1.0.0")),
     }
 }
@@ -172,38 +133,13 @@ impl SimEngine {
     pub fn new(clocks: Arc<ClockRegistry>) -> Result<SimEngine, TimeError> {
         let root = clocks.allocate_id()?;
         let tick_rate = Rational::new(VIRTUAL_TICK_RATE_HZ, 1)?;
-        clocks.register(ClockDomain::root(
-            root,
-            tick_rate,
-            EpochRef::Arbitrary {
-                set_by: VIRTUAL_EPOCH.to_owned(),
-            },
-        ))?;
-        let descriptor = AuthorityDescriptor {
-            module: module_ref(),
-            governs: vec![root, ClockDomainId::HOST_MONOTONIC],
-            pacing: Pacing::FreeRunning,
-        };
-        Ok(SimEngine {
-            time: Arc::new(EngineTime {
-                clocks,
-                root,
-                state: Mutex::new(State {
-                    now: 0,
-                    pending: BTreeMap::new(),
-                    next_seq: 0,
-                }),
-                woken: Condvar::new(),
-            }),
-            descriptor,
-        })
+        clocks.register(ClockDomain::root(root, tick_rate, EpochRef::Arbitrary { set_by: VIRTUAL_EPOCH.to_owned() }))?;
+        let descriptor = AuthorityDescriptor { module: module_ref(), governs: vec![root, ClockDomainId::HOST_MONOTONIC], pacing: Pacing::FreeRunning };
+        Ok(SimEngine { time: Arc::new(EngineTime { clocks, root, state: Mutex::new(State { now: 0, pending: BTreeMap::new(), next_seq: 0 }), woken: Condvar::new() }), descriptor })
     }
 
     /// Creates an Engine for its exact empty-selector, profile-free binding (SE-9).
-    pub fn from_binding(
-        binding: &Binding,
-        clocks: Arc<ClockRegistry>,
-    ) -> Result<SimEngine, ModuleError> {
+    pub fn from_binding(binding: &Binding, clocks: Arc<ClockRegistry>) -> Result<SimEngine, ModuleError> {
         if binding.module != module_ref() {
             return Err(ModuleError::rejected("SE-9: binding names another Module"));
         }

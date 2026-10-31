@@ -34,8 +34,7 @@ pub fn file_name(name: &str) -> String {
 }
 
 fn schema_of<T: JsonSchema>() -> serde_json::Value {
-    serde_json::to_value(generator().into_root_schema_for::<T>())
-        .expect("a generated schema is JSON")
+    serde_json::to_value(generator().into_root_schema_for::<T>()).expect("a generated schema is JSON")
 }
 
 /// Inserts one entry per document type. Only the inserts are generated: the function

@@ -11,27 +11,19 @@ use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, IslandId, MemoryDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::manifest::ArtifactRef;
 use ezsdr_kernel::module_api::{
-    ActionReceiver, Dispatched, ActionSubmitter, Authority, AuthorityDescriptor, CoerceReport, Endpoint,
-    Executor, ExecutorDescriptor, Factories, IslandDecl, Link, LinkDescriptor, ModuleError,
-    ModuleErrorKind, ModuleRef, ModuleRegistry, Pacing, PrepareContext, Provider, ProviderInstance,
-    Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VocabularyDescriptor,
+    ActionReceiver, ActionSubmitter, Authority, AuthorityDescriptor, CoerceReport, Dispatched, Endpoint, Executor, ExecutorDescriptor, Factories, IslandDecl, Link, LinkDescriptor, ModuleError,
+    ModuleErrorKind, ModuleRef, ModuleRegistry, Pacing, PrepareContext, Provider, ProviderInstance, Sink, SinkDescriptor, StepOutcome, StopMode, UpdateClass, VocabularyDescriptor,
 };
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::run::StopCause;
 use ezsdr_kernel::spec::Ident;
-use ezsdr_kernel::stream::{
-    BackPressure, BlockRef, ContinuityMap, DataLink, DataLinkDecl, DropCarry, PublishOutcome,
-};
-use ezsdr_kernel::time::{
-    ClockDomain, EpochRef, ManualTimeAuthority, Rational, SampleClockHandle, ScheduleHandle,
-    TimeAuthority, TimeError, TimePoint,
-};
+use ezsdr_kernel::stream::{BackPressure, BlockRef, ContinuityMap, DataLink, DataLinkDecl, DropCarry, PublishOutcome};
+use ezsdr_kernel::time::{ClockDomain, EpochRef, ManualTimeAuthority, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimeError, TimePoint};
 
 use super::doubles::{
-    FailAt, TestExecutor, TestLimitsCheck, TestProvider, id, mref, ns, test_executor_descriptor,
-    test_link_descriptor, test_link_module_descriptor, test_provider_descriptor,
-    test_sink_descriptor, test_vocabulary,
+    FailAt, TestExecutor, TestLimitsCheck, TestProvider, id, mref, ns, test_executor_descriptor, test_link_descriptor, test_link_module_descriptor, test_provider_descriptor, test_sink_descriptor,
+    test_vocabulary,
 };
 use super::{MemLink, block, header};
 
@@ -48,10 +40,7 @@ impl Probe {
     /// Appends one observation.
     pub fn record(&self, line: impl Into<String>) {
         let (lines, changed) = &*self.0;
-        lines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(line.into());
+        lines.lock().unwrap_or_else(|e| e.into_inner()).push(line.into());
         changed.notify_all();
     }
 
@@ -62,14 +51,7 @@ impl Probe {
 
     /// Copies observations with the given prefix in order.
     pub fn with_prefix(&self, prefix: &str) -> Vec<String> {
-        self.0
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter(|line| line.starts_with(prefix))
-            .cloned()
-            .collect()
+        self.0.0.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|line| line.starts_with(prefix)).cloned().collect()
     }
 
     /// Waits for an exact observation without polling.
@@ -83,29 +65,16 @@ impl Probe {
         let (lines, changed) = &*self.0;
         let mut lines = lines.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if lines
-                .iter()
-                .filter(|observed| observed.as_str() == line)
-                .count()
-                >= count
-            {
+            if lines.iter().filter(|observed| observed.as_str() == line).count() >= count {
                 return true;
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return false;
             }
-            let (next, result) = changed
-                .wait_timeout(lines, remaining)
-                .unwrap_or_else(|e| e.into_inner());
+            let (next, result) = changed.wait_timeout(lines, remaining).unwrap_or_else(|e| e.into_inner());
             lines = next;
-            if result.timed_out()
-                && lines
-                    .iter()
-                    .filter(|observed| observed.as_str() == line)
-                    .count()
-                    < count
-            {
+            if result.timed_out() && lines.iter().filter(|observed| observed.as_str() == line).count() < count {
                 return false;
             }
         }
@@ -131,31 +100,12 @@ pub struct SimAuthority {
 
 impl SimAuthority {
     /// Allocates and registers a 1 GHz test root, then builds its manual clock.
-    pub fn new(
-        clocks: &Arc<ezsdr_kernel::time::ClockRegistry>,
-        module: ModuleRef,
-        pacing: Pacing,
-    ) -> (SimAuthority, ClockDomainId) {
+    pub fn new(clocks: &Arc<ezsdr_kernel::time::ClockRegistry>, module: ModuleRef, pacing: Pacing) -> (SimAuthority, ClockDomainId) {
         let tick_rate = Rational::new(1_000_000_000, 1).expect("the test root rate is valid");
         let root = clocks.allocate_id().unwrap();
-        clocks
-            .register(ClockDomain::root(
-                root,
-                tick_rate,
-                EpochRef::Arbitrary {
-                    set_by: "test.sim".to_owned(),
-                },
-            ))
-            .expect("the allocated test root is fresh");
-        let inner = Arc::new(
-            ManualTimeAuthority::new(clocks.clone(), root, &[], pacing)
-                .expect("the registered test root is valid"),
-        );
-        let descriptor = AuthorityDescriptor {
-            module,
-            governs: vec![root, ClockDomainId::HOST_MONOTONIC],
-            pacing,
-        };
+        clocks.register(ClockDomain::root(root, tick_rate, EpochRef::Arbitrary { set_by: "test.sim".to_owned() })).expect("the allocated test root is fresh");
+        let inner = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], pacing).expect("the registered test root is valid"));
+        let descriptor = AuthorityDescriptor { module, governs: vec![root, ClockDomainId::HOST_MONOTONIC], pacing };
         (
             SimAuthority {
                 inner,
@@ -194,12 +144,7 @@ impl SimAuthority {
     }
 
     /// Blocks cleanup's next-wakeup query until the test releases the gate.
-    pub fn blocking_next_wakeup(
-        mut self,
-        gate: Arc<(Mutex<bool>, Condvar)>,
-        after_release: TimePoint,
-        probe: &Probe,
-    ) -> SimAuthority {
+    pub fn blocking_next_wakeup(mut self, gate: Arc<(Mutex<bool>, Condvar)>, after_release: TimePoint, probe: &Probe) -> SimAuthority {
         self.next_wakeup_gate = Some(gate);
         self.next_wakeup_after_gate = Some(after_release);
         self.next_wakeup_probe = Some(probe.clone());
@@ -232,8 +177,7 @@ impl Authority for SimAuthority {
     }
 
     fn time(&self) -> Arc<dyn TimeAuthority> {
-        if self.panic_now || self.panic_now_at.is_some() || self.panic_schedule || self.panic_cancel
-        {
+        if self.panic_now || self.panic_now_at.is_some() || self.panic_schedule || self.panic_cancel {
             Arc::new(FaultingTime {
                 inner: self.inner.clone(),
                 panic_now: self.panic_now,
@@ -258,10 +202,7 @@ impl Authority for SimAuthority {
             while !*released {
                 released = changed.wait(released).unwrap_or_else(|e| e.into_inner());
             }
-            if !self
-                .next_wakeup_after_gate_returned
-                .swap(true, Ordering::AcqRel)
-            {
+            if !self.next_wakeup_after_gate_returned.swap(true, Ordering::AcqRel) {
                 if let Some(probe) = &self.next_wakeup_probe {
                     let call = self.next_wakeup_calls.fetch_add(1, Ordering::SeqCst) + 1;
                     probe.record(format!("a:next_wakeup_returned:{call}"));
@@ -310,11 +251,7 @@ impl TimeAuthority for FaultingTime {
     fn wait_until(&self, t: TimePoint) -> Result<(), TimeError> {
         self.inner.wait_until(t)
     }
-    fn schedule(
-        &self,
-        t: TimePoint,
-        f: Box<dyn FnOnce(TimePoint) + Send>,
-    ) -> Result<ScheduleHandle, TimeError> {
+    fn schedule(&self, t: TimePoint, f: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ScheduleHandle, TimeError> {
         if self.panic_schedule {
             panic!("test: panic in TimeAuthority::schedule");
         }
@@ -339,14 +276,10 @@ impl TimeAuthority for FaultingTime {
 pub fn check_event_view(probe: &Probe, name: &str, ctx: &PrepareContext) -> Option<EventHandle> {
     let kind = EventKind::parse("test.custom").expect("a test kind");
     let own = ctx.events.resolve(&ctx.source, &kind);
-    let other = other_source(&ctx.source)
-        .is_none_or(|source| ctx.events.resolve(&source, &kind).is_err());
+    let other = other_source(&ctx.source).is_none_or(|source| ctx.events.resolve(&source, &kind).is_err());
     let kernel = ctx.events.resolve(&EventSource::Kernel, &kind).is_err();
     let unforeseen = ctx.events.resolve(&EventSource::Unforeseen, &kind).is_err();
-    probe.record(format!(
-        "events:{name}:own={}:other={other}:kernel={kernel}:unforeseen={unforeseen}",
-        own.is_ok()
-    ));
+    probe.record(format!("events:{name}:own={}:other={other}:kernel={kernel}:unforeseen={unforeseen}", own.is_ok()));
     own.ok()
 }
 
@@ -354,16 +287,9 @@ pub fn check_event_view(probe: &Probe, name: &str, ctx: &PrepareContext) -> Opti
 /// sibling, another output, another Island.
 fn other_source(root: &EventSource) -> Option<EventSource> {
     match root {
-        EventSource::Node { node } => ResourceId::parse(&format!("{}-other", node.path()))
-            .ok()
-            .map(|node| EventSource::Node { node }),
-        EventSource::Output { output } => Ident::parse(&format!("{output}other"))
-            .ok()
-            .map(|output| EventSource::Output { output }),
-        EventSource::Island { island } => island
-            .local
-            .checked_add(100)
-            .map(|local| EventSource::Island { island: IslandId::local(local) }),
+        EventSource::Node { node } => ResourceId::parse(&format!("{}-other", node.path())).ok().map(|node| EventSource::Node { node }),
+        EventSource::Output { output } => Ident::parse(&format!("{output}other")).ok().map(|output| EventSource::Output { output }),
+        EventSource::Island { island } => island.local.checked_add(100).map(|local| EventSource::Island { island: IslandId::local(local) }),
         _ => None,
     }
 }
@@ -481,13 +407,7 @@ impl SteppedProvider {
     }
 
     /// Declares a SampleClock on the supplied root at `prepare`.
-    pub fn declaring_on(
-        mut self,
-        stream: &str,
-        root: ClockDomainId,
-        num: u64,
-        den: u64,
-    ) -> SteppedProvider {
+    pub fn declaring_on(mut self, stream: &str, root: ClockDomainId, num: u64, den: u64) -> SteppedProvider {
         self.declare.push((stream.to_owned(), num, den));
         self.declare_roots.insert(stream.to_owned(), root);
         self
@@ -507,29 +427,15 @@ impl SteppedProvider {
 
     /// Emits one control-path event at or after the given primary-root tick.
     pub fn emitting(mut self, kind: &str, severity: Severity, at: i64) -> SteppedProvider {
-        self.emit = Some((
-            EventKind::parse(kind).expect("the test event kind is valid"),
-            severity,
-            at,
-        ));
+        self.emit = Some((EventKind::parse(kind).expect("the test event kind is valid"), severity, at));
         self
     }
 
     /// Emits one event whose time is a point of `domain` rather than the round's
     /// primary-root instant (KC-42): a domain the primary root cannot be converted to
     /// makes the mark's own conversion fail.
-    pub fn emitting_in_domain(
-        mut self,
-        kind: &str,
-        severity: Severity,
-        at: i64,
-        domain: ClockDomainId,
-    ) -> SteppedProvider {
-        self.emit = Some((
-            EventKind::parse(kind).expect("the test event kind is valid"),
-            severity,
-            at,
-        ));
+    pub fn emitting_in_domain(mut self, kind: &str, severity: Severity, at: i64, domain: ClockDomainId) -> SteppedProvider {
+        self.emit = Some((EventKind::parse(kind).expect("the test event kind is valid"), severity, at));
         self.emit_domain = Some(domain);
         self
     }
@@ -585,11 +491,7 @@ impl SteppedProvider {
     }
 
     /// Blocks one step until the test releases its gate (KA-12).
-    pub fn blocking_step_at(
-        mut self,
-        tick: i64,
-        gate: Arc<(Mutex<bool>, Condvar)>,
-    ) -> SteppedProvider {
+    pub fn blocking_step_at(mut self, tick: i64, gate: Arc<(Mutex<bool>, Condvar)>) -> SteppedProvider {
         self.block_step_at = Some(tick);
         self.step_gate = Some(gate);
         self
@@ -615,36 +517,18 @@ impl SteppedProvider {
     }
 
     fn record(&self, event: impl AsRef<str>) {
-        self.probe
-            .record(format!("{}:{}", self.name, event.as_ref()));
+        self.probe.record(format!("{}:{}", self.name, event.as_ref()));
     }
 
     fn schedule_noop(&self, ticks: i64) -> Result<(), ModuleError> {
-        let time = self
-            .time
-            .as_ref()
-            .ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
-        time.schedule(TimePoint::new(time.primary_root(), ticks), Box::new(|_| {}))
-            .map(|_| ())
-            .map_err(|e| ModuleError::rejected(format!("test: {e}")))
+        let time = self.time.as_ref().ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
+        time.schedule(TimePoint::new(time.primary_root(), ticks), Box::new(|_| {})).map(|_| ()).map_err(|e| ModuleError::rejected(format!("test: {e}")))
     }
 
     fn publish(&self, until: TimePoint) -> Result<(), ModuleError> {
-        let clocks = self
-            .clocks
-            .as_ref()
-            .ok_or_else(|| ModuleError::rejected("test: no clock registry"))?;
-        let primary = self
-            .time
-            .as_ref()
-            .ok_or_else(|| ModuleError::rejected("test: no time handle"))?
-            .primary_root();
-        let domain = self
-            .handles
-            .first()
-            .filter(|handle| clocks.is_registered(handle.id()))
-            .map(|handle| handle.id())
-            .unwrap_or(primary);
+        let clocks = self.clocks.as_ref().ok_or_else(|| ModuleError::rejected("test: no clock registry"))?;
+        let primary = self.time.as_ref().ok_or_else(|| ModuleError::rejected("test: no time handle"))?.primary_root();
+        let domain = self.handles.first().filter(|handle| clocks.is_registered(handle.id())).map(|handle| handle.id()).unwrap_or(primary);
         let u = until.ticks_in(primary).expect("a primary-root instant");
         let sample = block(header(TimePoint::new(domain, u), 10, 1));
         for link in &self.outs {
@@ -687,11 +571,7 @@ impl SteppedProvider {
                 Action::TxBurst { at, waveform, .. } => {
                     let t = at.time_point;
                     self.record(format!("burst_at:{}", t.ticks_in(t.domain()).unwrap()));
-                    let found = self
-                        .inputs
-                        .as_ref()
-                        .and_then(|inputs| inputs.get(&waveform.hash))
-                        .map_or_else(|| "missing".to_owned(), |bytes| bytes.len().to_string());
+                    let found = self.inputs.as_ref().and_then(|inputs| inputs.get(&waveform.hash)).map_or_else(|| "missing".to_owned(), |bytes| bytes.len().to_string());
                     self.record(format!("burst_input:{found}"));
                 }
                 _ => {}
@@ -706,23 +586,14 @@ impl Provider for SteppedProvider {
         self.inner.instance()
     }
 
-    fn coerce(
-        &self,
-        request: &ezsdr_kernel::module_api::Requested,
-    ) -> Result<CoerceReport, ModuleError> {
+    fn coerce(&self, request: &ezsdr_kernel::module_api::Requested) -> Result<CoerceReport, ModuleError> {
         self.inner.coerce(request)
     }
 
     fn prepare(&mut self, f: &Fragment, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
         self.record(format!("prepare:{}", f.id));
         if let Some(cause) = self.prepare_abort.take() {
-            ctx.actions_out
-                .submit(Action::Abort {
-                    cause: StopCause::Abort { message: cause },
-                })
-                .map_err(|violations| {
-                    ModuleError::rejected(format!("test: Abort refused: {violations:?}"))
-                })?;
+            ctx.actions_out.submit(Action::Abort { cause: StopCause::Abort { message: cause } }).map_err(|violations| ModuleError::rejected(format!("test: Abort refused: {violations:?}")))?;
         }
         self.time = Some(ctx.time.clone());
         self.clocks = Some(ctx.clocks.clone());
@@ -749,25 +620,13 @@ impl Provider for SteppedProvider {
             if let Some(link) = link {
                 self.outs.push(link);
             }
-            self.record(format!(
-                "links:{}.{}:{direction}",
-                attached.component, attached.port
-            ));
+            self.record(format!("links:{}.{}:{direction}", attached.component, attached.port));
         }
         for (stream, num, den) in &self.declare {
-            let stream_id = ResourceId::parse(stream)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
-            let root = self
-                .declare_roots
-                .get(stream)
-                .copied()
-                .unwrap_or_else(|| ctx.time.primary_root());
-            let ratio = Rational::new(*num, *den)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
-            let handle = ctx
-                .clocks
-                .declare_sample_clock(stream_id, root, ratio)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let stream_id = ResourceId::parse(stream).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let root = self.declare_roots.get(stream).copied().unwrap_or_else(|| ctx.time.primary_root());
+            let ratio = Rational::new(*num, *den).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let handle = ctx.clocks.declare_sample_clock(stream_id, root, ratio).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
             self.handles.push(handle);
         }
         self.inner.prepare(f, ctx)
@@ -782,55 +641,30 @@ impl Provider for SteppedProvider {
         let Some(clocks) = &self.clocks else {
             return Err(ModuleError::rejected("test: no clock registry"));
         };
-        let origin = time
-            .now(time.primary_root())
-            .and_then(|t| t.ticks_in(time.primary_root()))
-            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?
-            + self.arm_origin_after;
+        let origin = time.now(time.primary_root()).and_then(|t| t.ticks_in(time.primary_root())).map_err(|e| ModuleError::rejected(format!("test: {e}")))? + self.arm_origin_after;
         for stream in &self.register_at_arm {
-            let stream_id = ResourceId::parse(stream)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
-            let handles: Vec<_> = self
-                .handles
-                .iter()
-                .filter(|h| *h.stream() == stream_id)
-                .collect();
+            let stream_id = ResourceId::parse(stream).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let handles: Vec<_> = self.handles.iter().filter(|h| *h.stream() == stream_id).collect();
             if handles.is_empty() {
-                return Err(ModuleError::rejected(format!(
-                    "test: no declared clock for {stream}"
-                )));
+                return Err(ModuleError::rejected(format!("test: no declared clock for {stream}")));
             }
             for handle in handles {
-                clocks
-                    .register_sample_clock(handle, origin)
-                    .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                clocks.register_sample_clock(handle, origin).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
             }
         }
         Ok(())
     }
 
     fn start(&mut self, at: Option<TimePoint>) -> Result<(), ModuleError> {
-        self.record(format!(
-            "start:{}",
-            at.map(|t| t.ticks_in(t.domain()).unwrap().to_string())
-                .unwrap_or_else(|| "none".to_owned())
-        ));
+        self.record(format!("start:{}", at.map(|t| t.ticks_in(t.domain()).unwrap().to_string()).unwrap_or_else(|| "none".to_owned())));
         self.inner.fail_if(FailAt::Start)?;
         for ticks in self.wakeups.clone() {
             self.schedule_noop(ticks)?;
         }
         if let Some(interval) = self.publish_every {
-            let time = self
-                .time
-                .as_ref()
-                .ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
-            let now = time
-                .now(time.primary_root())
-                .and_then(|t| t.ticks_in(time.primary_root()))
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
-            let next = now
-                .checked_add(interval)
-                .ok_or_else(|| ModuleError::rejected("test: publish time overflow"))?;
+            let time = self.time.as_ref().ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
+            let now = time.now(time.primary_root()).and_then(|t| t.ticks_in(time.primary_root())).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let next = now.checked_add(interval).ok_or_else(|| ModuleError::rejected("test: publish time overflow"))?;
             self.next_publish = Some(next);
             self.schedule_noop(next)?;
         }
@@ -868,11 +702,7 @@ impl Provider for SteppedProvider {
         }
         if !self.lost_reported && self.device_lost_at.is_some_and(|t| u >= t) {
             self.lost_reported = true;
-            return Err(ModuleError {
-                kind: ModuleErrorKind::DeviceLost,
-                message: "test: device lost".to_owned(),
-                detail: serde_json::Value::Null,
-            });
+            return Err(ModuleError { kind: ModuleErrorKind::DeviceLost, message: "test: device lost".to_owned(), detail: serde_json::Value::Null });
         }
         if self.step_error_at.is_some_and(|t| u >= t) {
             self.step_error_at = None;
@@ -888,27 +718,16 @@ impl Provider for SteppedProvider {
                         kind: kind.clone(),
                         payload: serde_json::json!({}),
                     };
-                    let sink = self
-                        .events
-                        .as_ref()
-                        .ok_or_else(|| ModuleError::rejected("test: no event sink"))?;
+                    let sink = self.events.as_ref().ok_or_else(|| ModuleError::rejected("test: no event sink"))?;
                     if let Some(n) = self.flood {
-                        let noise = sink.resolve(
-                            &event.source,
-                            &EventKind::parse("test.custom").expect("a valid kind"),
-                        )
-                        .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                        let noise = sink.resolve(&event.source, &EventKind::parse("test.custom").expect("a valid kind")).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                         for _ in 0..n {
-                            sink.emit(noise, until, Severity::Info, &[])
-                                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                            sink.emit(noise, until, Severity::Info, &[]).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                         }
-                        let handle = sink.resolve(&event.source, &event.kind)
-                            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
-                        sink.emit(handle, until, event.severity, &[])
-                            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                        let handle = sink.resolve(&event.source, &event.kind).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                        sink.emit(handle, until, event.severity, &[]).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                     } else {
-                        sink.emit_control(event)
-                            .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+                        sink.emit_control(event).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
                     }
                     self.emitted = true;
                 }
@@ -918,22 +737,17 @@ impl Provider for SteppedProvider {
             self.publish(until)?;
             progressed = true;
             if let Some(interval) = self.publish_every {
-                let next = u
-                    .checked_add(interval)
-                    .ok_or_else(|| ModuleError::rejected("test: publish time overflow"))?;
+                let next = u.checked_add(interval).ok_or_else(|| ModuleError::rejected("test: publish time overflow"))?;
                 self.next_publish = Some(next);
                 self.schedule_noop(next)?;
             }
         }
-        if self.stopped_at.is_some() && self.tail_blocks > 0 && self.next_tail == Some(u)
-        {
+        if self.stopped_at.is_some() && self.tail_blocks > 0 && self.next_tail == Some(u) {
             self.publish(until)?;
             progressed = true;
             self.tail_blocks -= 1;
             if self.tail_blocks > 0 {
-                let next = u
-                    .checked_add(10)
-                    .ok_or_else(|| ModuleError::rejected("test: tail time overflow"))?;
+                let next = u.checked_add(10).ok_or_else(|| ModuleError::rejected("test: tail time overflow"))?;
                 self.next_tail = Some(next);
                 self.schedule_noop(next)?;
             } else {
@@ -954,36 +768,16 @@ impl Provider for SteppedProvider {
             }
         }
         self.inner.fail_if(FailAt::Stop)?;
-        let time = self
-            .time
-            .as_ref()
-            .ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
-        self.stopped_at = Some(
-            time.now(time.primary_root())
-                .and_then(|t| t.ticks_in(time.primary_root()))
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?,
-        );
+        let time = self.time.as_ref().ok_or_else(|| ModuleError::rejected("test: no time handle"))?;
+        self.stopped_at = Some(time.now(time.primary_root()).and_then(|t| t.ticks_in(time.primary_root())).map_err(|e| ModuleError::rejected(format!("test: {e}")))?);
         self.next_publish = None;
         if let Some((kind, severity)) = self.stop_emit.take() {
-            let event = Event {
-                source: self.source.clone().expect("prepared"),
-                time: TimePoint::new(time.primary_root(), self.stopped_at.expect("just set")),
-                severity,
-                kind,
-                payload: serde_json::json!({}),
-            };
-            self.events
-                .as_ref()
-                .ok_or_else(|| ModuleError::rejected("test: no event sink"))?
-                .emit_control(event)
-                .map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
+            let event =
+                Event { source: self.source.clone().expect("prepared"), time: TimePoint::new(time.primary_root(), self.stopped_at.expect("just set")), severity, kind, payload: serde_json::json!({}) };
+            self.events.as_ref().ok_or_else(|| ModuleError::rejected("test: no event sink"))?.emit_control(event).map_err(|e| ModuleError::rejected(format!("test: {e}")))?;
         }
         if mode == StopMode::Orderly && self.tail_blocks > 0 {
-            let next = self
-                .stopped_at
-                .expect("just set")
-                .checked_add(10)
-                .ok_or_else(|| ModuleError::rejected("test: tail time overflow"))?;
+            let next = self.stopped_at.expect("just set").checked_add(10).ok_or_else(|| ModuleError::rejected("test: tail time overflow"))?;
             self.next_tail = Some(next);
             self.schedule_noop(next)?;
         }
@@ -1049,10 +843,7 @@ impl RecordingSink {
                 module: mref("ezsdr.test.sink"),
                 kind: ns("test.recorder"),
                 memory_domains: vec![MemoryDomainId::local(0)],
-                contracts: vec![
-                    ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32")
-                        .expect("SC-4 id"),
-                ],
+                contracts: vec![ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").expect("SC-4 id")],
                 artifact_kinds: vec![ns("test.capture")],
             },
             probe: probe.clone(),
@@ -1121,12 +912,7 @@ impl RecordingSink {
     /// (KC-42). An index with no clock, or one the registry has not registered, makes
     /// the span's conversion fail, as an artifact with no span does.
     pub fn returning_clock_spans(mut self, artifacts: &[(usize, &[(i64, i64)])]) -> RecordingSink {
-        self.clock_spans = Some(
-            artifacts
-                .iter()
-                .map(|(clock, spans)| (*clock, spans.to_vec()))
-                .collect(),
-        );
+        self.clock_spans = Some(artifacts.iter().map(|(clock, spans)| (*clock, spans.to_vec())).collect());
         self
     }
 
@@ -1137,8 +923,7 @@ impl RecordingSink {
     }
 
     fn record(&self, event: impl AsRef<str>) {
-        self.probe
-            .record(format!("{}:{}", self.name, event.as_ref()));
+        self.probe.record(format!("{}:{}", self.name, event.as_ref()));
     }
 }
 
@@ -1166,16 +951,9 @@ impl Sink for RecordingSink {
             if let Some(link) = link {
                 self.ins.push(link);
             }
-            self.record(format!(
-                "links:{}.{}:{direction}",
-                attached.component, attached.port
-            ));
+            self.record(format!("links:{}.{}:{direction}", attached.component, attached.port));
         }
-        Ok(PrepareReport {
-            effective: BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -1198,11 +976,7 @@ impl Sink for RecordingSink {
         if let Some((tick, kind)) = self.fail_step {
             if u >= tick {
                 self.fail_step = None;
-                return Err(ModuleError {
-                    kind,
-                    message: "test: sink step failed".to_owned(),
-                    detail: serde_json::Value::Null,
-                });
+                return Err(ModuleError { kind, message: "test: sink step failed".to_owned(), detail: serde_json::Value::Null });
             }
         }
         if self.panic_step.is_some_and(|tick| u >= tick) {
@@ -1227,16 +1001,10 @@ impl Sink for RecordingSink {
         if self.fail_stop {
             return Err(ModuleError::rejected("test: sink stop failed"));
         }
-        let primary = self
-            .primary
-            .ok_or_else(|| ModuleError::rejected("test: no primary root"))?;
+        let primary = self.primary.ok_or_else(|| ModuleError::rejected("test: no primary root"))?;
         // KC-42: one artifact per group, each with one `ContinuityMap` per span in
         // its own domain; a group with no span is an artifact with no map.
-        let declared = self
-            .clocks
-            .as_ref()
-            .map(|clocks| clocks.declared_sample_clocks())
-            .unwrap_or_default();
+        let declared = self.clocks.as_ref().map(|clocks| clocks.declared_sample_clocks()).unwrap_or_default();
         let groups: Vec<(ClockDomainId, Vec<(i64, i64)>)> = match &self.clock_spans {
             Some(groups) => groups
                 .iter()
@@ -1317,9 +1085,7 @@ impl ProbeExecutor {
     pub fn new(name: &str, probe: &Probe) -> ProbeExecutor {
         ProbeExecutor {
             name: name.to_owned(),
-            descriptor: TestExecutor::new(MemoryDomainId::local(0))
-                .descriptor()
-                .clone(),
+            descriptor: TestExecutor::new(MemoryDomainId::local(0)).descriptor().clone(),
             probe: probe.clone(),
             submit: None,
             then: None,
@@ -1375,11 +1141,7 @@ impl ProbeExecutor {
     }
 
     /// Captures a Provider's coercion count immediately before this Executor submits.
-    pub fn snapshot_coercions_before_submit(
-        mut self,
-        counter: Arc<AtomicU64>,
-        snapshot: Arc<AtomicU64>,
-    ) -> ProbeExecutor {
+    pub fn snapshot_coercions_before_submit(mut self, counter: Arc<AtomicU64>, snapshot: Arc<AtomicU64>) -> ProbeExecutor {
         self.coercion_counter_snapshot = Some((counter, snapshot));
         self
     }
@@ -1399,17 +1161,12 @@ impl ProbeExecutor {
 
     /// Emits once from a caller-selected source during its first step (KC-8).
     pub fn emitting_from(mut self, source: EventSource, kind: &str, severity: Severity) -> ProbeExecutor {
-        self.event = Some((
-            source,
-            EventKind::parse(kind).expect("test event kind is valid"),
-            severity,
-        ));
+        self.event = Some((source, EventKind::parse(kind).expect("test event kind is valid"), severity));
         self
     }
 
     fn record(&self, event: impl AsRef<str>) {
-        self.probe
-            .record(format!("{}:{}", self.name, event.as_ref()));
+        self.probe.record(format!("{}:{}", self.name, event.as_ref()));
     }
 }
 
@@ -1418,17 +1175,8 @@ impl Executor for ProbeExecutor {
         &self.descriptor
     }
 
-    fn prepare(
-        &mut self,
-        island: &IslandDecl,
-        ctx: PrepareContext,
-    ) -> Result<PrepareReport, ModuleError> {
-        let names = ctx
-            .components
-            .keys()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
+    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
+        let names = ctx.components.keys().map(ToString::to_string).collect::<Vec<_>>().join(",");
         self.record(format!("prepare:island_{}:{names}", island.id.local));
         self.out = Some(ctx.actions_out.clone());
         self.actions = Some(ctx.actions.clone());
@@ -1437,29 +1185,15 @@ impl Executor for ProbeExecutor {
             let handle = check_event_view(&self.probe, &self.name, &ctx);
             if let (Some(previous), Some(previous_handle)) = (self.events.as_ref(), self.prev_handle) {
                 let at = TimePoint::new(ctx.time.primary_root(), 0);
-                let own = previous
-                    .emit(previous_handle, at, Severity::Info, &[])
-                    .is_ok();
-                let current_refuses_previous = ctx
-                    .events
-                    .emit(previous_handle, at, Severity::Info, &[])
-                    .is_err();
-                let previous_refuses_current = handle.is_some_and(|current| {
-                    previous.emit(current, at, Severity::Info, &[]).is_err()
-                });
-                self.probe.record(format!(
-                    "events_cross:{}:own={own}:previous_refuses_current={previous_refuses_current}:current_refuses_previous={current_refuses_previous}",
-                    self.name
-                ));
+                let own = previous.emit(previous_handle, at, Severity::Info, &[]).is_ok();
+                let current_refuses_previous = ctx.events.emit(previous_handle, at, Severity::Info, &[]).is_err();
+                let previous_refuses_current = handle.is_some_and(|current| previous.emit(current, at, Severity::Info, &[]).is_err());
+                self.probe.record(format!("events_cross:{}:own={own}:previous_refuses_current={previous_refuses_current}:current_refuses_previous={current_refuses_previous}", self.name));
             }
             self.prev_handle = handle;
         }
         self.events = Some(ctx.events.clone());
-        Ok(PrepareReport {
-            effective: BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -1481,26 +1215,15 @@ impl Executor for ProbeExecutor {
                 self.events
                     .as_ref()
                     .ok_or_else(|| ModuleError::rejected("test: no event sink"))?
-                    .emit_control(Event {
-                        source: source.clone(),
-                        time: until,
-                        severity: *severity,
-                        kind: kind.clone(),
-                        payload: serde_json::json!({}),
-                    })
+                    .emit_control(Event { source: source.clone(), time: until, severity: *severity, kind: kind.clone(), payload: serde_json::json!({}) })
                     .map_err(|error| ModuleError::rejected(format!("test: {error}")))?;
                 self.event_emitted = true;
             }
         }
-        let due = !self.submitted
-            && self.submit.is_some()
-            && self.submit_at.is_none_or(|tick| u >= tick);
+        let due = !self.submitted && self.submit.is_some() && self.submit_at.is_none_or(|tick| u >= tick);
         if due {
             let action = self.submit.take().expect("checked above");
-            let out = self
-                .out
-                .as_ref()
-                .ok_or_else(|| ModuleError::rejected("test: no Action submitter"))?;
+            let out = self.out.as_ref().ok_or_else(|| ModuleError::rejected("test: no Action submitter"))?;
             if let Some((counter, snapshot)) = &self.coercion_counter_snapshot {
                 snapshot.store(counter.load(Ordering::SeqCst), Ordering::SeqCst);
             }
@@ -1509,9 +1232,7 @@ impl Executor for ProbeExecutor {
                     Ok(id) => self.record(format!("submit:ok:{}", id.0)),
                     Err(violations) => {
                         if let Some(into) = &self.refusals {
-                            into.lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .extend(violations.iter().cloned());
+                            into.lock().unwrap_or_else(|e| e.into_inner()).extend(violations.iter().cloned());
                         }
                         if let Some(first) = violations.first() {
                             self.record(format!("submit:err:{}:{}", first.check, first.reason));
@@ -1531,9 +1252,7 @@ impl Executor for ProbeExecutor {
         self.record(format!("stop:{mode:?}"));
         if mode == StopMode::Orderly {
             if let (Some(message), Some(out)) = (self.abort_in_stop.take(), &self.out) {
-                let _ = out.submit(Action::Abort {
-                    cause: StopCause::Abort { message },
-                });
+                let _ = out.submit(Action::Abort { cause: StopCause::Abort { message } });
             }
         }
         Ok(())
@@ -1571,14 +1290,7 @@ pub struct TestLinkModule {
 impl TestLinkModule {
     /// Uses the fixture descriptor.
     pub fn new(probe: &Probe) -> TestLinkModule {
-        TestLinkModule {
-            descriptor: test_link_descriptor(),
-            probe: probe.clone(),
-            panic_descriptor: false,
-            panic_drops: false,
-            seed_drop: false,
-            seed_drop_into: None,
-        }
+        TestLinkModule { descriptor: test_link_descriptor(), probe: probe.clone(), panic_descriptor: false, panic_drops: false, seed_drop: false, seed_drop_into: None }
     }
 
     /// Replaces the descriptor, for refusal tests.
@@ -1623,26 +1335,14 @@ impl Link for TestLinkModule {
     }
 
     fn create(&self, decl: &DataLinkDecl) -> Result<Arc<dyn DataLink>, ModuleError> {
-        self.probe.record(format!(
-            "link:create:{}.{}->{}.{}",
-            decl.from.component, decl.from.port, decl.to.component, decl.to.port
-        ));
+        self.probe.record(format!("link:create:{}.{}->{}.{}", decl.from.component, decl.from.port, decl.to.component, decl.to.port));
         let link = MemLink::new(decl.policy, decl.capacity);
-        if self.seed_drop
-            && self
-                .seed_drop_into
-                .as_ref()
-                .is_none_or(|only| *only == decl.to.component)
-        {
+        if self.seed_drop && self.seed_drop_into.as_ref().is_none_or(|only| *only == decl.to.component) {
             let root = ClockDomainId::local(0);
             assert_eq!(link.publish(block(header(TimePoint::new(root, 0), 10, 1))), PublishOutcome::Accepted);
             assert_eq!(link.publish(block(header(TimePoint::new(root, 10), 10, 1))), PublishOutcome::DroppedOldest);
         }
-        if self.panic_drops {
-            Ok(Arc::new(PanickingDropsLink(link)))
-        } else {
-            Ok(Arc::new(link))
-        }
+        if self.panic_drops { Ok(Arc::new(PanickingDropsLink(link))) } else { Ok(Arc::new(link)) }
     }
 }
 
@@ -1674,21 +1374,10 @@ pub fn run_registry() -> ezsdr_kernel::module_api::ModuleRegistry {
 /// Registry with a valid ModuleId that is not a valid Manifest Namespace (KA-13).
 pub fn run_registry_non_namespace_provider() -> ModuleRegistry {
     let mut registry = ModuleRegistry::new();
-    registry
-        .register_vocabulary(test_vocabulary())
-        .expect("fresh fixture Vocabulary");
+    registry.register_vocabulary(test_vocabulary()).expect("fresh fixture Vocabulary");
     let mut descriptor = test_provider_descriptor();
     descriptor.id = ModuleId::parse("TestProvider").expect("valid ModuleId");
-    registry
-        .register(
-            descriptor,
-            Factories {
-                provider: true,
-                authority: true,
-                ..Factories::default()
-            },
-        )
-        .expect("register Provider and Authority");
+    registry.register(descriptor, Factories { provider: true, authority: true, ..Factories::default() }).expect("register Provider and Authority");
     registry
 }
 
@@ -1696,9 +1385,7 @@ pub fn run_registry_non_namespace_provider() -> ModuleRegistry {
 pub fn run_kinds() -> EventKindRegistry {
     let mut kinds = EventKindRegistry::with_kernel_kinds();
     for decl in test_vocabulary().event_kinds {
-        kinds
-            .register(Some(ns("test")), decl)
-            .expect("fixture event kind is unique");
+        kinds.register(Some(ns("test")), decl).expect("fixture event kind is unique");
     }
     kinds
 }
@@ -1734,48 +1421,11 @@ pub fn run_registry_classed() -> ezsdr_kernel::module_api::ModuleRegistry {
 
 fn fixture_registry(vocabulary: VocabularyDescriptor) -> ezsdr_kernel::module_api::ModuleRegistry {
     let mut registry = ezsdr_kernel::module_api::ModuleRegistry::new();
-    registry
-        .register_vocabulary(vocabulary)
-        .expect("fresh fixture vocabulary");
-    registry
-        .register(
-            test_provider_descriptor(),
-            Factories {
-                provider: true,
-                authority: true,
-                ..Factories::default()
-            },
-        )
-        .expect("register fixture Provider and Authority");
-    registry
-        .register(
-            test_sink_descriptor(),
-            Factories {
-                sink: true,
-                ..Factories::default()
-            },
-        )
-        .expect("register fixture Sink");
-    registry
-        .register(
-            test_executor_descriptor(),
-            Factories {
-                executor: true,
-                ..Factories::default()
-            },
-        )
-        .expect("register fixture Executor");
-    registry
-        .register(
-            test_link_module_descriptor(),
-            Factories {
-                link: true,
-                ..Factories::default()
-            },
-        )
-        .expect("register fixture Link");
-    registry
-        .register_link_descriptor(test_link_descriptor())
-        .expect("fixture Link descriptor");
+    registry.register_vocabulary(vocabulary).expect("fresh fixture vocabulary");
+    registry.register(test_provider_descriptor(), Factories { provider: true, authority: true, ..Factories::default() }).expect("register fixture Provider and Authority");
+    registry.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() }).expect("register fixture Sink");
+    registry.register(test_executor_descriptor(), Factories { executor: true, ..Factories::default() }).expect("register fixture Executor");
+    registry.register(test_link_module_descriptor(), Factories { link: true, ..Factories::default() }).expect("register fixture Link");
+    registry.register_link_descriptor(test_link_descriptor()).expect("fixture Link descriptor");
     registry
 }

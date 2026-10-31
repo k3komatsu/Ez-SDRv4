@@ -34,17 +34,10 @@ pub(super) struct DataThread {
 pub(super) fn start_data_thread(shared: &Arc<Shared>) {
     let stop = Arc::new(AtomicBool::new(false));
     let (thread_shared, thread_stop) = (shared.clone(), stop.clone());
-    match std::thread::Builder::new()
-        .name("ezsdr-data".to_owned())
-        .spawn(move || run(thread_shared, thread_stop))
-    {
+    match std::thread::Builder::new().name("ezsdr-data".to_owned()).spawn(move || run(thread_shared, thread_stop)) {
         Ok(handle) => *lock(&shared.data) = Some(DataThread { stop, handle }),
         Err(error) => {
-            super::ending::request(
-                shared,
-                Termination::Failed { stage: crate::run::Stage::Run, reason: format!("KC-46: the data thread could not start: {error}") },
-                CleanupMode::Abort,
-            );
+            super::ending::request(shared, Termination::Failed { stage: crate::run::Stage::Run, reason: format!("KC-46: the data thread could not start: {error}") }, CleanupMode::Abort);
         }
     }
 }
@@ -75,11 +68,7 @@ fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
         let (progressed, mut requested, delivered) = pass(&shared, &mut failed);
         let deadline = *lock(&shared.lease_deadline);
         if deadline.is_some_and(|at| shared.ctx.host_clock.monotonic_millis() >= at) {
-            requested |= super::ending::request(
-                &shared,
-                Termination::Stopped { cause: StopCause::LeaseExpiry {} },
-                CleanupMode::Orderly,
-            );
+            requested |= super::ending::request(&shared, Termination::Stopped { cause: StopCause::LeaseExpiry {} }, CleanupMode::Orderly);
         }
         if requested && !shared.stopped_early.swap(true, Ordering::AcqRel) {
             stop_early(&shared);
@@ -147,12 +136,7 @@ fn stop_early(shared: &Arc<Shared>) {
     let mode = end_mode(shared).unwrap_or(CleanupMode::Orderly);
     let record = |step: CleanupStep, fragment: Option<&crate::spec::Ident>| {
         if let Err(error) = ops.perform(step, fragment, mode) {
-            lock(&shared.cleanup_failures).push(CleanupFailure {
-                step,
-                fragment: fragment.cloned(),
-                reason: error.message,
-                timed_out: false,
-            });
+            lock(&shared.cleanup_failures).push(CleanupFailure { step, fragment: fragment.cloned(), reason: error.message, timed_out: false });
         }
     };
     record(CleanupStep::FreezeDispatch, None);
@@ -183,12 +167,7 @@ pub(super) fn wake(shared: &Shared, unconditional: bool) {
     match shared.schedule(at, Box::new(clear)) {
         Ok(handle) => *slot = Some(handle),
         Err(_) => {
-            let _ = shared.wake_pending.compare_exchange(
-                generation,
-                0,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+            let _ = shared.wake_pending.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
         }
     }
 }
@@ -211,11 +190,10 @@ pub(super) fn wait_finished(shared: &Shared, dispatched: &[(Inst, u64)]) {
             if remaining.is_zero() {
                 super::ending::request(
                     shared,
-                    Termination::Failed { stage: crate::run::Stage::Run, reason: format!(
-                        "KC-21a: {} did not finish its Actions within {} ms",
-                        shared.first_fragment(inst),
-                        DEFAULT_HOST_BUDGET_NS / 1_000_000
-                    ) },
+                    Termination::Failed {
+                        stage: crate::run::Stage::Run,
+                        reason: format!("KC-21a: {} did not finish its Actions within {} ms", shared.first_fragment(inst), DEFAULT_HOST_BUDGET_NS / 1_000_000),
+                    },
                     CleanupMode::Abort,
                 );
                 return;
@@ -229,29 +207,17 @@ pub(super) fn wait_finished(shared: &Shared, dispatched: &[(Inst, u64)]) {
 
 /// MA-8 enforced (KC-12a): `f` on a worker thread, waited for at most the host
 /// budget. `None` means it did not return in time and was abandoned.
-pub(super) fn bounded<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, ModuleError> + Send + 'static,
-) -> Option<Result<T, ModuleError>> {
+pub(super) fn bounded<T: Send + 'static>(f: impl FnOnce() -> Result<T, ModuleError> + Send + 'static) -> Option<Result<T, ModuleError>> {
     let (tx, rx) = mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("ezsdr-bounded".to_owned())
-        .spawn(move || {
-            let _ = tx.send(contain(f));
-        });
+    let spawned = std::thread::Builder::new().name("ezsdr-bounded".to_owned()).spawn(move || {
+        let _ = tx.send(contain(f));
+    });
     if let Err(error) = spawned {
-        return Some(Err(ModuleError {
-            kind: ModuleErrorKind::Internal,
-            message: format!("KC-12a: no worker thread: {error}"),
-            detail: serde_json::Value::Null,
-        }));
+        return Some(Err(ModuleError { kind: ModuleErrorKind::Internal, message: format!("KC-12a: no worker thread: {error}"), detail: serde_json::Value::Null }));
     }
     match rx.recv_timeout(host_budget()) {
         Ok(result) => Some(result),
         Err(mpsc::RecvTimeoutError::Timeout) => None,
-        Err(mpsc::RecvTimeoutError::Disconnected) => Some(Err(ModuleError {
-            kind: ModuleErrorKind::Internal,
-            message: "a Module panicked".to_owned(),
-            detail: serde_json::Value::Null,
-        })),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Some(Err(ModuleError { kind: ModuleErrorKind::Internal, message: "a Module panicked".to_owned(), detail: serde_json::Value::Null })),
     }
 }

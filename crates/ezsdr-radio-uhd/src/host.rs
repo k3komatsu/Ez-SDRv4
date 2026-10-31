@@ -276,14 +276,7 @@ impl HostClock {
     }
 
     fn new(manual: Option<Mutex<State>>) -> HostClock {
-        HostClock {
-            inner: Arc::new(Inner {
-                origin: Instant::now(),
-                signal: (Mutex::new(0), Condvar::new()),
-                manual,
-                next_lock: AtomicU64::new(0),
-            }),
-        }
+        HostClock { inner: Arc::new(Inner { origin: Instant::now(), signal: (Mutex::new(0), Condvar::new()), manual, next_lock: AtomicU64::new(0) }) }
     }
 
     /// Whether this is a manual clock.
@@ -662,7 +655,7 @@ mod tests {
 
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::sync::mpsc::{Receiver, Sender, channel};
 
     const BOUND: Duration = Duration::from_secs(5);
 

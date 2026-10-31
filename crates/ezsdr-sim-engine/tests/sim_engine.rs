@@ -4,17 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use ezsdr_kernel::binding::Binding;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId};
-use ezsdr_kernel::module_api::{
-    Authority, Factories, ModuleRegistry, Pacing, ProfileRef, Role, Version,
-};
+use ezsdr_kernel::module_api::{Authority, Factories, ModuleRegistry, Pacing, ProfileRef, Role, Version};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{Ident, Namespace, Value};
-use ezsdr_kernel::time::{
-    ClockDomain, ClockDomainKind, ClockRegistry, EpochRef, Rational, TimeAuthority, TimeError,
-    TimePoint,
-};
+use ezsdr_kernel::time::{ClockDomain, ClockDomainKind, ClockRegistry, EpochRef, Rational, TimeAuthority, TimeError, TimePoint};
 use ezsdr_sim::{SimRng, VIRTUAL_EPOCH, VIRTUAL_TICK_RATE_HZ};
-use ezsdr_sim_engine::{descriptor, SimEngine};
+use ezsdr_sim_engine::{SimEngine, descriptor};
 
 fn engine() -> (SimEngine, Arc<ClockRegistry>) {
     let clocks = Arc::new(ClockRegistry::new());
@@ -23,26 +18,17 @@ fn engine() -> (SimEngine, Arc<ClockRegistry>) {
 }
 
 fn module_ref() -> ezsdr_kernel::module_api::ModuleRef {
-    ezsdr_kernel::module_api::ModuleRef {
-        id: ModuleId::parse("ezsdr.sim-engine").unwrap(),
-        version: Version::new(1, 0, 0),
-    }
+    ezsdr_kernel::module_api::ModuleRef { id: ModuleId::parse("ezsdr.sim-engine").unwrap(), version: Version::new(1, 0, 0) }
 }
 
 fn binding() -> Binding {
-    Binding {
-        module: module_ref(),
-        selector: BTreeMap::new(),
-        profile: None,
-        feed: None,
-    }
+    Binding { module: module_ref(), selector: BTreeMap::new(), profile: None, feed: None }
 }
 
 #[test]
 fn se_09_exhausted_clock_ids_refuse_a_new_engine() {
     let clocks = Arc::new(ClockRegistry::new());
-    clocks.register(ClockDomain::root(ClockDomainId::local(u32::MAX - 1),
-        Rational::ONE, EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
+    clocks.register(ClockDomain::root(ClockDomainId::local(u32::MAX - 1), Rational::ONE, EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
     assert!(matches!(SimEngine::new(clocks.clone()), Err(TimeError::LimitExceeded)));
     assert_eq!(clocks.allocate_id(), Err(TimeError::LimitExceeded));
 }
@@ -53,15 +39,7 @@ fn se_08_descriptor_registers() {
     let mut checks = ezsdr_kernel::binding::AdmissionCheckRegistry::new();
     let mut kinds = EventKindRegistry::new();
     ezsdr_sim::register(&mut modules, &mut checks, &mut kinds).unwrap();
-    modules
-        .register(
-            descriptor(),
-            Factories {
-                authority: true,
-                ..Factories::default()
-            },
-        )
-        .unwrap();
+    modules.register(descriptor(), Factories { authority: true, ..Factories::default() }).unwrap();
 
     let registered = modules.modules().next().unwrap();
     assert_eq!(registered.id.as_str(), "ezsdr.sim-engine");
@@ -95,30 +73,15 @@ fn se_09_the_virtual_root_is_registered() {
 
     let mut selector = binding();
     selector.selector.insert(Ident::parse("extra").unwrap(), Value::from(true));
-    assert!(SimEngine::from_binding(&selector, Arc::new(ClockRegistry::new()))
-        .err()
-        .unwrap()
-        .message
-        .starts_with("SE-9: "));
+    assert!(SimEngine::from_binding(&selector, Arc::new(ClockRegistry::new())).err().unwrap().message.starts_with("SE-9: "));
 
     let mut profile = binding();
-    profile.profile = Some(ProfileRef {
-        name: "ideal".to_owned(),
-        version: Version::new(1, 0, 0),
-    });
-    assert!(SimEngine::from_binding(&profile, Arc::new(ClockRegistry::new()))
-        .err()
-        .unwrap()
-        .message
-        .starts_with("SE-9: "));
+    profile.profile = Some(ProfileRef { name: "ideal".to_owned(), version: Version::new(1, 0, 0) });
+    assert!(SimEngine::from_binding(&profile, Arc::new(ClockRegistry::new())).err().unwrap().message.starts_with("SE-9: "));
 
     let mut wrong_module = binding();
     wrong_module.module.id = ModuleId::parse("ezsdr.other").unwrap();
-    assert!(SimEngine::from_binding(&wrong_module, Arc::new(ClockRegistry::new()))
-        .err()
-        .unwrap()
-        .message
-        .starts_with("SE-9: "));
+    assert!(SimEngine::from_binding(&wrong_module, Arc::new(ClockRegistry::new())).err().unwrap().message.starts_with("SE-9: "));
 }
 
 #[test]
@@ -127,66 +90,26 @@ fn se_10_time_authority_contract() {
     let root = engine.root();
     let time = Authority::time(&engine);
     let derived = clocks.allocate_id().unwrap();
-    clocks
-        .register(ClockDomain::derived(
-            derived,
-            root,
-            Rational::new(3, 1).unwrap(),
-            1,
-        ))
-        .unwrap();
+    clocks.register(ClockDomain::derived(derived, root, Rational::new(3, 1).unwrap(), 1)).unwrap();
     let inexact = clocks.allocate_id().unwrap();
-    clocks
-        .register(ClockDomain::derived(
-            inexact,
-            root,
-            Rational::new(2, 3).unwrap(),
-            1,
-        ))
-        .unwrap();
+    clocks.register(ClockDomain::derived(inexact, root, Rational::new(2, 3).unwrap(), 1)).unwrap();
     let unrelated = clocks.allocate_id().unwrap();
-    clocks
-        .register(ClockDomain::root(
-            unrelated,
-            Rational::ONE,
-            EpochRef::Arbitrary {
-                set_by: "test".to_owned(),
-            },
-        ))
-        .unwrap();
+    clocks.register(ClockDomain::root(unrelated, Rational::ONE, EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
 
     time.schedule(TimePoint::new(root, 7), Box::new(|_| {})).unwrap();
     assert_eq!(engine.next_wakeup(), Some(TimePoint::new(root, 7)));
     assert_eq!(time.now(root).unwrap(), TimePoint::new(root, 7));
-    assert_eq!(
-        time.now(ClockDomainId::HOST_MONOTONIC).unwrap(),
-        TimePoint::new(ClockDomainId::HOST_MONOTONIC, 7)
-    );
+    assert_eq!(time.now(ClockDomainId::HOST_MONOTONIC).unwrap(), TimePoint::new(ClockDomainId::HOST_MONOTONIC, 7));
     assert_eq!(time.now(derived).unwrap(), TimePoint::new(derived, 2));
-    assert_eq!(
-        time.now(unrelated),
-        Err(TimeError::NotGoverned { id: unrelated })
-    );
-    assert_eq!(
-        time.schedule(TimePoint::new(root, 5), Box::new(|_| {})),
-        Err(TimeError::InPast {
-            now: TimePoint::new(root, 7),
-            requested: TimePoint::new(root, 5),
-        })
-    );
+    assert_eq!(time.now(unrelated), Err(TimeError::NotGoverned { id: unrelated }));
+    assert_eq!(time.schedule(TimePoint::new(root, 5), Box::new(|_| {})), Err(TimeError::InPast { now: TimePoint::new(root, 7), requested: TimePoint::new(root, 5) }));
     assert!(matches!(
         time.schedule(TimePoint::new(inexact, 1), Box::new(|_| {})),
         Err(TimeError::Inexact { floor }) if floor == TimePoint::new(root, 1)
     ));
-    assert_eq!(
-        time.schedule(TimePoint::new(unrelated, 8), Box::new(|_| {})),
-        Err(TimeError::NotGoverned { id: unrelated })
-    );
+    assert_eq!(time.schedule(TimePoint::new(unrelated, 8), Box::new(|_| {})), Err(TimeError::NotGoverned { id: unrelated }));
     time.wait_until(TimePoint::new(root, 7)).unwrap();
-    assert_eq!(
-        time.wait_until(TimePoint::new(unrelated, 7)),
-        Err(TimeError::NotGoverned { id: unrelated })
-    );
+    assert_eq!(time.wait_until(TimePoint::new(unrelated, 7)), Err(TimeError::NotGoverned { id: unrelated }));
 
     let handle = time.schedule(TimePoint::new(root, 8), Box::new(|_| {})).unwrap();
     assert!(time.cancel(handle));
@@ -202,8 +125,15 @@ fn se_10_cancel_does_not_remove_another_roots_callback() {
     let fired = Arc::new(AtomicUsize::new(0));
     let flag = fired.clone();
     let foreign = a.time().schedule(TimePoint::new(a.root(), 10), Box::new(|_| {})).unwrap();
-    let own = b.time().schedule(TimePoint::new(b.root(), 10),
-        Box::new(move |_| { flag.fetch_add(1, Ordering::SeqCst); })).unwrap();
+    let own = b
+        .time()
+        .schedule(
+            TimePoint::new(b.root(), 10),
+            Box::new(move |_| {
+                flag.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .unwrap();
     assert_ne!(foreign.root, own.root);
     assert_eq!((foreign.ticks, foreign.seq), (own.ticks, own.seq));
     assert!(!b.time().cancel(foreign));
@@ -218,13 +148,9 @@ fn se_10_host_monotonic_advances_in_lockstep() {
     let (engine, _) = engine();
     let time = Authority::time(&engine);
     let root = engine.root();
-    time.schedule(TimePoint::new(root, 1_000_000), Box::new(|_| {}))
-        .unwrap();
+    time.schedule(TimePoint::new(root, 1_000_000), Box::new(|_| {})).unwrap();
     engine.next_wakeup();
-    assert_eq!(
-        time.now(ClockDomainId::HOST_MONOTONIC).unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(),
-        1_000_000
-    );
+    assert_eq!(time.now(ClockDomainId::HOST_MONOTONIC).unwrap().ticks_in(ClockDomainId::HOST_MONOTONIC).unwrap(), 1_000_000);
 }
 
 #[test]
@@ -235,11 +161,7 @@ fn se_11_next_wakeup_order_ties_and_cap() {
     let log = Arc::new(Mutex::new(Vec::<(i64, &'static str)>::new()));
 
     let late_log = log.clone();
-    time.schedule(
-        TimePoint::new(root, 30),
-        Box::new(move |at| late_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "late"))),
-    )
-    .unwrap();
+    time.schedule(TimePoint::new(root, 30), Box::new(move |at| late_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "late")))).unwrap();
     let first_log = log.clone();
     let nested_time = time.clone();
     let nested_log = log.clone();
@@ -259,28 +181,17 @@ fn se_11_next_wakeup_order_ties_and_cap() {
     )
     .unwrap();
     let second_log = log.clone();
-    time.schedule(
-        TimePoint::new(root, 10),
-        Box::new(move |at| second_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "second"))),
-    )
-    .unwrap();
+    time.schedule(TimePoint::new(root, 10), Box::new(move |at| second_log.lock().unwrap_or_else(|e| e.into_inner()).push((at.ticks_in(at.domain()).unwrap(), "second")))).unwrap();
 
     assert_eq!(order_engine.next_wakeup(), Some(TimePoint::new(root, 10)));
-    assert_eq!(
-        *log.lock().unwrap_or_else(|e| e.into_inner()),
-        [(10, "first"), (10, "second"), (10, "nested")]
-    );
+    assert_eq!(*log.lock().unwrap_or_else(|e| e.into_inner()), [(10, "first"), (10, "second"), (10, "nested")]);
     assert_eq!(order_engine.next_wakeup(), Some(TimePoint::new(root, 30)));
     assert_eq!(order_engine.next_wakeup(), None);
 
-    fn self_rescheduling(
-        time: Arc<dyn TimeAuthority>,
-        calls: Arc<AtomicUsize>,
-    ) -> Box<dyn FnOnce(TimePoint) + Send> {
+    fn self_rescheduling(time: Arc<dyn TimeAuthority>, calls: Arc<AtomicUsize>) -> Box<dyn FnOnce(TimePoint) + Send> {
         Box::new(move |at| {
             calls.fetch_add(1, Ordering::Relaxed);
-            time.schedule(at, self_rescheduling(time.clone(), calls.clone()))
-                .unwrap();
+            time.schedule(at, self_rescheduling(time.clone(), calls.clone())).unwrap();
         })
     }
 
@@ -288,11 +199,7 @@ fn se_11_next_wakeup_order_ties_and_cap() {
     let root = engine.root();
     let time = Authority::time(&engine);
     let calls = Arc::new(AtomicUsize::new(0));
-    time.schedule(
-        TimePoint::new(root, 10),
-        self_rescheduling(time.clone(), calls.clone()),
-    )
-    .unwrap();
+    time.schedule(TimePoint::new(root, 10), self_rescheduling(time.clone(), calls.clone())).unwrap();
     assert_eq!(engine.next_wakeup(), Some(TimePoint::new(root, 10)));
     assert_eq!(calls.load(Ordering::Relaxed), 1000);
     assert_eq!(engine.next_wakeup(), Some(TimePoint::new(root, 10)));
@@ -303,10 +210,7 @@ fn se_11_next_wakeup_order_ties_and_cap() {
 fn se_11_empty_is_none_and_moves_nothing() {
     let (engine, _) = engine();
     assert_eq!(engine.next_wakeup(), None);
-    assert_eq!(
-        Authority::time(&engine).now(engine.root()).unwrap(),
-        TimePoint::new(engine.root(), 0)
-    );
+    assert_eq!(Authority::time(&engine).now(engine.root()).unwrap(), TimePoint::new(engine.root(), 0));
 }
 
 #[test]
@@ -329,10 +233,7 @@ fn se_13_two_engines_fed_the_same_schedule_fire_identically() {
             .unwrap();
         }
         while engine.next_wakeup().is_some() {}
-        Arc::try_unwrap(log)
-            .expect("all callback clones have run")
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner())
+        Arc::try_unwrap(log).expect("all callback clones have run").into_inner().unwrap_or_else(|e| e.into_inner())
     }
 
     assert_eq!(firing_log(), firing_log());

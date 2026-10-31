@@ -24,9 +24,7 @@ use crate::id::{ClockDomainId, IslandId, MemoryDomainId, ModuleId, ResourceId, R
 use crate::manifest::ArtifactRef;
 use crate::plan::{Fragment, PrepareReport};
 use crate::policy::EventKindDecl;
-use crate::spec::{
-    CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, Value, Warning,
-};
+use crate::spec::{CapabilityValue, Coercion, Constraint, Ident, Key, KeyDecl, Namespace, Value, Warning};
 use crate::stream::{BackPressure, DataLink, DataLinkDecl};
 use crate::time::{ClockRelation, RelativeBudget, TimeAuthority, TimePoint};
 
@@ -36,19 +34,7 @@ use crate::time::{ClockRelation, RelativeBudget, TimeAuthority, TimePoint};
 /// documents do not, which is decision B7 of `03-spec-and-binding.md`.
 ///
 /// Rule: MA-33, decision B7.
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Version {
     /// Breaking changes.
@@ -62,11 +48,7 @@ pub struct Version {
 impl Version {
     /// A version (MA-33).
     pub const fn new(major: u32, minor: u32, patch: u32) -> Version {
-        Version {
-            major,
-            minor,
-            patch,
-        }
+        Version { major, minor, patch }
     }
 }
 
@@ -77,19 +59,7 @@ impl fmt::Display for Version {
 }
 
 /// A caret requirement over a `Version` (MA-33).
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct VersionReq(pub Version);
 
@@ -103,11 +73,7 @@ impl VersionReq {
         if r.major != v.major {
             return false;
         }
-        if r.major > 0 {
-            (v.minor, v.patch) >= (r.minor, r.patch)
-        } else {
-            v.minor == r.minor && v.patch >= r.patch
-        }
+        if r.major > 0 { (v.minor, v.patch) >= (r.minor, r.patch) } else { v.minor == r.minor && v.patch >= r.patch }
     }
 }
 
@@ -118,19 +84,7 @@ impl VersionReq {
 /// Finding 22 rejects, and Link and Authority have no lifecycle at all.
 ///
 /// Rule: MA-1, MA-2.
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Implements a Resource Model.
@@ -239,19 +193,7 @@ impl ExecutionClass {
 /// same section says every Run records the vector.
 ///
 /// Rule: MA-42.
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvelopeFidelity {
     /// Not modelled at all; an `ideal` Mock profile declares this (Vision §13).
@@ -265,19 +207,7 @@ pub enum EnvelopeFidelity {
 }
 
 /// `none < grid < real` (MA-42).
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CoercionFidelity {
     /// Not modelled.
@@ -289,19 +219,7 @@ pub enum CoercionFidelity {
 }
 
 /// `none < impairment_model < real` (MA-42).
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RfFidelity {
     /// Not modelled.
@@ -313,19 +231,7 @@ pub enum RfFidelity {
 }
 
 /// `none < model < real` (MA-42).
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Debug,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportFidelity {
     /// Not modelled.
@@ -359,27 +265,19 @@ pub struct Fidelity {
 impl Fidelity {
     /// Every aspect `none`, which is what an `ideal` Mock profile declares and what
     /// a Run with no Providers records (MA-42, RS-41).
-    pub const NONE: Fidelity = Fidelity {
-        timing: EnvelopeFidelity::None,
-        continuity: EnvelopeFidelity::None,
-        coercion: CoercionFidelity::None,
-        rf: RfFidelity::None,
-        transport: TransportFidelity::None,
-    };
+    pub const NONE: Fidelity =
+        Fidelity { timing: EnvelopeFidelity::None, continuity: EnvelopeFidelity::None, coercion: CoercionFidelity::None, rf: RfFidelity::None, transport: TransportFidelity::None };
 
     /// The weakest value per aspect, in that aspect's own order. A Run in which no
     /// Provider declares an aspect records `none` for it (MA-42, RS-41).
     pub fn weakest(declared: &[Fidelity]) -> Fidelity {
-        declared.iter().fold(
-            declared.first().copied().unwrap_or(Fidelity::NONE),
-            |a, b| Fidelity {
-                timing: a.timing.min(b.timing),
-                continuity: a.continuity.min(b.continuity),
-                coercion: a.coercion.min(b.coercion),
-                rf: a.rf.min(b.rf),
-                transport: a.transport.min(b.transport),
-            },
-        )
+        declared.iter().fold(declared.first().copied().unwrap_or(Fidelity::NONE), |a, b| Fidelity {
+            timing: a.timing.min(b.timing),
+            continuity: a.continuity.min(b.continuity),
+            coercion: a.coercion.min(b.coercion),
+            rf: a.rf.min(b.rf),
+            transport: a.transport.min(b.transport),
+        })
     }
 }
 
@@ -409,12 +307,7 @@ pub enum UpdateClass {
 
 /// Every update class there is; an Action outside the set is rejected at
 /// admission (MA-37, RS-17).
-pub const UPDATE_CLASSES: &[UpdateClass] = &[
-    UpdateClass::Cold,
-    UpdateClass::BlockBoundary,
-    UpdateClass::AtomicRealtime,
-    UpdateClass::HardwareTimed,
-];
+pub const UPDATE_CLASSES: &[UpdateClass] = &[UpdateClass::Cold, UpdateClass::BlockBoundary, UpdateClass::AtomicRealtime, UpdateClass::HardwareTimed];
 
 /// One declared parameter of a component (MA-36).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -508,21 +401,14 @@ impl ComponentDescriptor {
     ///
     /// Rule: MA-37.
     pub fn validate(&self, contracts: &[DataContractId]) -> Result<(), ModuleError> {
-        let reject = |message: String| ModuleError {
-            kind: ModuleErrorKind::Rejected,
-            message,
-            detail: serde_json::Value::Null,
-        };
+        let reject = |message: String| ModuleError { kind: ModuleErrorKind::Rejected, message, detail: serde_json::Value::Null };
         let mut seen = BTreeSet::new();
         for p in &self.ports {
             if !seen.insert(&p.name) {
                 return Err(reject(format!("MA-37: duplicate port name {:?}", p.name)));
             }
             if !contracts.contains(&p.contract) {
-                return Err(reject(format!(
-                    "MA-37: contract {} is not registered",
-                    p.contract
-                )));
+                return Err(reject(format!("MA-37: contract {} is not registered", p.contract)));
             }
         }
         // A parameter key declared twice in one component would leave whichever
@@ -531,10 +417,7 @@ impl ComponentDescriptor {
         let mut seen_params = BTreeSet::new();
         for p in &self.params {
             if !seen_params.insert(&p.key) {
-                return Err(reject(format!(
-                    "MA-37: duplicate parameter key {:?}",
-                    p.key
-                )));
+                return Err(reject(format!("MA-37: duplicate parameter key {:?}", p.key)));
             }
         }
         // MA-37's "update classes from the closed set" and "an `impl.hash` present"
@@ -634,9 +517,7 @@ pub struct ProviderInstance {
 }
 
 /// A Module by id and version (MA-31).
-#[derive(
-    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleRef {
     /// The Module (SB-1, MA-31).
@@ -664,9 +545,7 @@ pub struct ProfileRef {
 }
 
 /// Whether the coordinator steps this instance (MA-15, MA-30).
-#[derive(
-    Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Driving {
     /// True for a model the coordinator drives; a hardware Provider never receives
@@ -969,11 +848,7 @@ pub struct ModuleError {
 impl ModuleError {
     /// A `Rejected` error naming the rule it failed (MA-40).
     pub fn rejected(message: impl Into<String>) -> ModuleError {
-        ModuleError {
-            kind: ModuleErrorKind::Rejected,
-            message: message.into(),
-            detail: serde_json::Value::Null,
-        }
+        ModuleError { kind: ModuleErrorKind::Rejected, message: message.into(), detail: serde_json::Value::Null }
     }
 }
 
@@ -1167,11 +1042,7 @@ impl PrepareContext {
             inputs: Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new()),
             links: Vec::new(),
             components: BTreeMap::new(),
-            host_budget: RelativeBudget::new(crate::time::Duration::new(
-                ClockDomainId::HOST_MONOTONIC,
-                crate::coordinator::DEFAULT_HOST_BUDGET_NS,
-            ))
-            .expect("a positive budget"),
+            host_budget: RelativeBudget::new(crate::time::Duration::new(ClockDomainId::HOST_MONOTONIC, crate::coordinator::DEFAULT_HOST_BUDGET_NS)).expect("a positive budget"),
         }
     }
 }
@@ -1229,11 +1100,7 @@ pub trait Executor: Send {
     /// What it can run (MA-18).
     fn descriptor(&self) -> &ExecutorDescriptor;
     /// Loads each component by its `impl` identity (MA-19).
-    fn prepare(
-        &mut self,
-        island: &IslandDecl,
-        ctx: PrepareContext,
-    ) -> Result<PrepareReport, ModuleError>;
+    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext) -> Result<PrepareReport, ModuleError>;
     /// Reserves (MA-7).
     fn arm(&mut self) -> Result<(), ModuleError>;
     /// Begins (MA-7).
@@ -1363,15 +1230,8 @@ pub const STEP_ROUND_CAP: usize = 1_000;
 /// (Phase 4, KD-1).
 ///
 /// Rule: MA-30.
-pub fn step_until_quiescent(
-    instances: &mut [SteppedInstance<'_>],
-    until: TimePoint,
-    events: &dyn EventSink,
-) -> Result<usize, ModuleError> {
-    instances.sort_by(|a, b| {
-        (a.inner.role().step_rank(), a.id.as_str())
-            .cmp(&(b.inner.role().step_rank(), b.id.as_str()))
-    });
+pub fn step_until_quiescent(instances: &mut [SteppedInstance<'_>], until: TimePoint, events: &dyn EventSink) -> Result<usize, ModuleError> {
+    instances.sort_by(|a, b| (a.inner.role().step_rank(), a.id.as_str()).cmp(&(b.inner.role().step_rank(), b.id.as_str())));
     let mut failed = vec![false; instances.len()];
     let mut first_error = None;
     for round in 1..=STEP_ROUND_CAP {
@@ -1405,15 +1265,9 @@ pub fn step_until_quiescent(
     // stepping loop", and RS-28 gives it `abort` at `fatal`. Emitting it is what
     // puts it through RS-33's counters, and it is reacted to when drained (KC-31);
     // the returned error is what stops this loop.
-    let kind = crate::event::EventKind::parse(crate::event::EventKind::STEP_LIVELOCK)
-        .expect("a Kernel kind is well formed");
-    let _ = events.emit_control(crate::event::Event {
-        source: EventSource::Kernel,
-        time: until,
-        severity: crate::event::Severity::Fatal,
-        kind,
-        payload: serde_json::json!({ "rounds": STEP_ROUND_CAP }),
-    });
+    let kind = crate::event::EventKind::parse(crate::event::EventKind::STEP_LIVELOCK).expect("a Kernel kind is well formed");
+    let _ =
+        events.emit_control(crate::event::Event { source: EventSource::Kernel, time: until, severity: crate::event::Severity::Fatal, kind, payload: serde_json::json!({ "rounds": STEP_ROUND_CAP }) });
     Err(ModuleError {
         kind: ModuleErrorKind::Internal,
         message: format!("MA-30: {} stepping rounds at one instant", STEP_ROUND_CAP),

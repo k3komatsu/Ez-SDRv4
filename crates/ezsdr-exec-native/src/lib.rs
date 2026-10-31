@@ -16,10 +16,8 @@ use ezsdr_kernel::event::{Action, EventSink, EventSource};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{MemoryDomainId, ModuleId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor,
-    ExecutionClass, Executor, ExecutorDescriptor, InputStore, IslandDecl, KERNEL_API,
-    ModuleDescriptor, ModuleError, ModuleErrorKind, ModuleRef, PrepareContext, Role,
-    StepOutcome, StopMode, Version,
+    ActionReceiver, ActionSubmitter, AttachedPort, ComponentDescriptor, ExecutionClass, Executor, ExecutorDescriptor, InputStore, IslandDecl, KERNEL_API, ModuleDescriptor, ModuleError,
+    ModuleErrorKind, ModuleRef, PrepareContext, Role, StepOutcome, StopMode, Version,
 };
 use ezsdr_kernel::plan::PrepareReport;
 use ezsdr_kernel::spec::{Ident, Namespace};
@@ -37,10 +35,7 @@ pub const IMPL_KIND: &str = "ezsdr.impl.native";
 const ENDING: [&str; 2] = ["ezsdr.dispatch", "ezsdr.run_state"];
 
 fn module_ref() -> ModuleRef {
-    ModuleRef {
-        id: ModuleId::parse(MODULE_ID).expect("a valid Module id"),
-        version: Version::new(1, 0, 0),
-    }
+    ModuleRef { id: ModuleId::parse(MODULE_ID).expect("a valid Module id"), version: Version::new(1, 0, 0) }
 }
 
 /// The Module descriptor for `ezsdr.exec.native` 1.0.0 (NX-1).
@@ -141,18 +136,10 @@ impl NativeExecutor {
         for implementation in implementations {
             let id = implementation.id.clone();
             if table.insert(id.clone(), implementation).is_some() {
-                return Err(ModuleError::rejected(format!(
-                    "NX-3: two implementations are registered as {id}"
-                )));
+                return Err(ModuleError::rejected(format!("NX-3: two implementations are registered as {id}")));
             }
         }
-        Ok(NativeExecutor {
-            descriptor: executor_descriptor(),
-            implementations: table,
-            components: BTreeMap::new(),
-            actions: None,
-            actions_out: None,
-        })
+        Ok(NativeExecutor { descriptor: executor_descriptor(), implementations: table, components: BTreeMap::new(), actions: None, actions_out: None })
     }
 }
 
@@ -161,39 +148,25 @@ impl Executor for NativeExecutor {
         &self.descriptor
     }
 
-    fn prepare(
-        &mut self,
-        island: &IslandDecl,
-        ctx: PrepareContext,
-    ) -> Result<PrepareReport, ModuleError> {
+    fn prepare(&mut self, island: &IslandDecl, ctx: PrepareContext) -> Result<PrepareReport, ModuleError> {
         if ctx.class != ExecutionClass::Simulation {
             return Err(ModuleError {
                 kind: ModuleErrorKind::Unsupported,
-                message: format!(
-                    "NX-4: ezsdr.exec.native 1.0.0 steps its components and runs the Simulation class only, not {:?}",
-                    ctx.class
-                ),
+                message: format!("NX-4: ezsdr.exec.native 1.0.0 steps its components and runs the Simulation class only, not {:?}", ctx.class),
                 detail: serde_json::Value::Null,
             });
         }
         let source = ctx.source.clone();
         for link in &ctx.links {
             if !island.components.iter().any(|entry| entry.component == link.component) {
-                return Err(ModuleError::rejected(format!(
-                    "NX-4: a link end names {}, which is not in this Island",
-                    link.component
-                )));
+                return Err(ModuleError::rejected(format!("NX-4: a link end names {}, which is not in this Island", link.component)));
             }
         }
         for id in island.components.iter().map(|entry| &entry.component) {
             if self.components.contains_key(id) {
-                return Err(ModuleError::rejected(format!(
-                    "NX-4: component {id} is placed twice on this Executor"
-                )));
+                return Err(ModuleError::rejected(format!("NX-4: component {id} is placed twice on this Executor")));
             }
-            let descriptor = ctx.components.get(id).cloned().ok_or_else(|| {
-                ModuleError::rejected(format!("NX-4: no descriptor for component {id}"))
-            })?;
+            let descriptor = ctx.components.get(id).cloned().ok_or_else(|| ModuleError::rejected(format!("NX-4: no descriptor for component {id}")))?;
             let make = self.load(&descriptor)?.make;
             // Kept before its `prepare` runs, so that `stop` and `cleanup` reach a component
             // whose `prepare` failed as MA-7 has them reach every instance that reached it.
@@ -211,11 +184,7 @@ impl Executor for NativeExecutor {
         }
         self.actions = Some(ctx.actions.clone());
         self.actions_out = Some(ctx.actions_out.clone());
-        Ok(PrepareReport {
-            effective: BTreeMap::new(),
-            coercions: Vec::new(),
-            warnings: Vec::new(),
-        })
+        Ok(PrepareReport { effective: BTreeMap::new(), coercions: Vec::new(), warnings: Vec::new() })
     }
 
     fn arm(&mut self) -> Result<(), ModuleError> {
@@ -249,9 +218,7 @@ impl Executor for NativeExecutor {
                     // KC-24 steps 1 and 2: the Run is ending, so the decision came too late
                     // to act on, and the termination already says why. Turning it into a
                     // step error would record a clean stop as an abort (KC-32, KE-3).
-                    Err(violations)
-                        if !violations.is_empty()
-                            && violations.iter().all(|v| ENDING.contains(&v.check.as_str())) => {}
+                    Err(violations) if !violations.is_empty() && violations.iter().all(|v| ENDING.contains(&v.check.as_str())) => {}
                     Err(violations) => {
                         return Err(ModuleError::rejected(format!(
                             "NX-6: component {id}'s {} was refused: {}",
@@ -291,22 +258,14 @@ impl NativeExecutor {
     fn load(&self, descriptor: &ComponentDescriptor) -> Result<&Implementation, ModuleError> {
         let named = &descriptor.implementation;
         if named.kind.as_str() != IMPL_KIND {
-            return Err(ModuleError::rejected(format!(
-                "NX-3: component {} is a {} implementation, and this Executor loads {IMPL_KIND}",
-                descriptor.id, named.kind
-            )));
+            return Err(ModuleError::rejected(format!("NX-3: component {} is a {} implementation, and this Executor loads {IMPL_KIND}", descriptor.id, named.kind)));
         }
-        let implementation = self.implementations.get(&named.id).ok_or_else(|| {
-            ModuleError::rejected(format!(
-                "NX-3: component {} names implementation {}, which this Executor does not have",
-                descriptor.id, named.id
-            ))
-        })?;
+        let implementation = self
+            .implementations
+            .get(&named.id)
+            .ok_or_else(|| ModuleError::rejected(format!("NX-3: component {} names implementation {}, which this Executor does not have", descriptor.id, named.id)))?;
         if implementation.hash != named.hash {
-            return Err(ModuleError::rejected(format!(
-                "NX-3: component {} names {} with hash {}, and this Executor's is {}",
-                descriptor.id, named.id, named.hash, implementation.hash
-            )));
+            return Err(ModuleError::rejected(format!("NX-3: component {} names {} with hash {}, and this Executor's is {}", descriptor.id, named.id, named.hash, implementation.hash)));
         }
         Ok(implementation)
     }

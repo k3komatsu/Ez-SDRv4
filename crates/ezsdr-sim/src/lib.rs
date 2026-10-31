@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use ezsdr_kernel::binding::{AdmissionCheck, AdmissionCheckRegistry, CheckStage, Violation};
-use ezsdr_kernel::module_api::{
-    ModuleError, ModuleRegistry, Version, VocabularyDescriptor,
-};
+use ezsdr_kernel::module_api::{ModuleError, ModuleRegistry, Version, VocabularyDescriptor};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use schemars::JsonSchema;
@@ -81,20 +79,12 @@ pub fn vocabulary() -> VocabularyDescriptor {
         keys: vec![],
         event_kinds: vec![],
         verbs: vec![],
-        checks: vec![
-            seed_namespace().clone(),
-            faults_namespace().clone(),
-            Namespace::parse(channel::CHANNEL_SECTION).expect("a valid section name"),
-        ],
+        checks: vec![seed_namespace().clone(), faults_namespace().clone(), Namespace::parse(channel::CHANNEL_SECTION).expect("a valid section name")],
     }
 }
 
 /// Registers the descriptor, then the seed, fault and channel checks, in that order (SE-1, CH-2).
-pub fn register(
-    registry: &mut ModuleRegistry,
-    checks: &mut AdmissionCheckRegistry,
-    _kinds: &mut EventKindRegistry,
-) -> Result<(), ModuleError> {
+pub fn register(registry: &mut ModuleRegistry, checks: &mut AdmissionCheckRegistry, _kinds: &mut EventKindRegistry) -> Result<(), ModuleError> {
     registry.register_vocabulary(vocabulary())?;
     checks.register(Arc::new(SeedCheck));
     checks.register(Arc::new(FaultsCheck));
@@ -106,21 +96,16 @@ pub fn register(
 pub fn seed(environment: &BTreeMap<Namespace, serde_json::Value>) -> Result<u64, String> {
     match environment.get(seed_namespace()) {
         None => Ok(0),
-        Some(value) => value.as_u64().ok_or_else(|| {
-            format!("SE-2: sim.seed must be an integer in 0..=2^64-1, not {value}")
-        }),
+        Some(value) => value.as_u64().ok_or_else(|| format!("SE-2: sim.seed must be an integer in 0..=2^64-1, not {value}")),
     }
 }
 
 /// Reads `sim.faults` in document order, refusing malformed or out-of-range entries (SE-3).
-pub fn faults(
-    environment: &BTreeMap<Namespace, serde_json::Value>,
-) -> Result<Vec<FaultEntry>, String> {
+pub fn faults(environment: &BTreeMap<Namespace, serde_json::Value>) -> Result<Vec<FaultEntry>, String> {
     let Some(value) = environment.get(faults_namespace()) else {
         return Ok(vec![]);
     };
-    let entries: Vec<FaultEntry> = serde_json::from_value(value.clone())
-        .map_err(|error| format!("SE-3: {error}"))?;
+    let entries: Vec<FaultEntry> = serde_json::from_value(value.clone()).map_err(|error| format!("SE-3: {error}"))?;
     if let Some(entry) = entries.iter().find(|entry| entry.at_ns > (1_u64 << 62)) {
         return Err(format!("SE-3: at_ns {} exceeds 2^62", entry.at_ns));
     }
@@ -132,12 +117,7 @@ fn one_section(section: &Namespace, value: &serde_json::Value) -> BTreeMap<Names
 }
 
 fn violation(check: &Namespace, reason: String) -> Violation {
-    Violation {
-        check: check.clone(),
-        key: None,
-        requested: None,
-        reason,
-    }
+    Violation { check: check.clone(), key: None, requested: None, reason }
 }
 
 impl AdmissionCheck for SeedCheck {
@@ -149,13 +129,7 @@ impl AdmissionCheck for SeedCheck {
         VALIDATE
     }
 
-    fn check(
-        &self,
-        section: &serde_json::Value,
-        _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _stage: CheckStage,
-    ) -> Vec<Violation> {
+    fn check(&self, section: &serde_json::Value, _effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
         match seed(&one_section(self.section(), section)) {
             Ok(_) => vec![],
             Err(reason) => vec![violation(self.section(), format!("SE-5: {reason}"))],
@@ -172,24 +146,13 @@ impl AdmissionCheck for FaultsCheck {
         VALIDATE
     }
 
-    fn check(
-        &self,
-        section: &serde_json::Value,
-        effective: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>,
-        _stage: CheckStage,
-    ) -> Vec<Violation> {
+    fn check(&self, section: &serde_json::Value, effective: &BTreeMap<Ident, BTreeMap<Key, Value>>, _proposed: &BTreeMap<Ident, BTreeMap<Key, Value>>, _stage: CheckStage) -> Vec<Violation> {
         match faults(&one_section(self.section(), section)) {
             Err(reason) => vec![violation(self.section(), format!("SE-5: {reason}"))],
             Ok(entries) => entries
                 .iter()
                 .filter(|entry| !effective.contains_key(&entry.target))
-                .map(|entry| {
-                    violation(
-                        self.section(),
-                        format!("SE-5: fault target {} names no fragment of this Run", entry.target),
-                    )
-                })
+                .map(|entry| violation(self.section(), format!("SE-5: fault target {} names no fragment of this Run", entry.target)))
                 .collect(),
         }
     }
@@ -230,12 +193,7 @@ impl SimRng {
 /// Generates the committed `channel`, `fault_entry` and `seed` schemas (SE-12, CH-10).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     fn of<T: JsonSchema>() -> serde_json::Value {
-        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>())
-            .expect("a generated schema is JSON")
+        serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<T>()).expect("a generated schema is JSON")
     }
-    BTreeMap::from([
-        ("channel", of::<channel::ChannelSpec>()),
-        ("fault_entry", of::<FaultEntry>()),
-        ("seed", of::<u64>()),
-    ])
+    BTreeMap::from([("channel", of::<channel::ChannelSpec>()), ("fault_entry", of::<FaultEntry>()), ("seed", of::<u64>())])
 }

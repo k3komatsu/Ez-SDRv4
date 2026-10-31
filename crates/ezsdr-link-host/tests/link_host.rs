@@ -3,14 +3,9 @@ use std::sync::Arc;
 use ezsdr_kernel::contract::{DataContractId, PortRef};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, DataLinkId, MemoryDomainId, ModuleId};
-use ezsdr_kernel::module_api::{
-    Factories, KERNEL_API, Link, ModuleRef, ModuleRegistry, Role, Version,
-};
+use ezsdr_kernel::module_api::{Factories, KERNEL_API, Link, ModuleRef, ModuleRegistry, Role, Version};
 use ezsdr_kernel::spec::{Ident, Namespace};
-use ezsdr_kernel::stream::{
-    BackPressure, BlockFlags, BlockHeader, BlockRef, ChannelMask, DataLinkDecl, Direction,
-    PublishOutcome, SampleBlock,
-};
+use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, ChannelMask, DataLinkDecl, Direction, PublishOutcome, SampleBlock};
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_link_host::{HostLinkModule, descriptor, link_descriptor};
 
@@ -19,23 +14,14 @@ fn id(name: &str) -> Ident {
 }
 
 fn module_ref() -> ModuleRef {
-    ModuleRef {
-        id: ModuleId::parse("ezsdr.link.host").unwrap(),
-        version: Version::new(1, 0, 0),
-    }
+    ModuleRef { id: ModuleId::parse("ezsdr.link.host").unwrap(), version: Version::new(1, 0, 0) }
 }
 
 fn declaration(policy: BackPressure, capacity: u32) -> DataLinkDecl {
     DataLinkDecl {
         id: DataLinkId::local(3),
-        from: PortRef {
-            component: id("radio"),
-            port: id("rx"),
-        },
-        to: PortRef {
-            component: id("rec"),
-            port: id("in"),
-        },
+        from: PortRef { component: id("radio"), port: id("rx") },
+        to: PortRef { component: id("rec"), port: id("in") },
         contract: DataContractId::parse("ezsdr.stream.cf32").unwrap(),
         policy,
         capacity,
@@ -67,32 +53,17 @@ fn hd_04_descriptor_and_create() {
     assert_eq!(module_descriptor.kernel_api, KERNEL_API);
     assert_eq!(module_descriptor.roles, [Role::Link]);
     assert!(module_descriptor.vocabularies.is_empty());
-    assert_eq!(
-        module_descriptor.impl_hash,
-        Some(ContentHash::of_bytes(b"ezsdr.link.host 1.0.0"))
-    );
+    assert_eq!(module_descriptor.impl_hash, Some(ContentHash::of_bytes(b"ezsdr.link.host 1.0.0")));
 
     let expected = link_descriptor();
     assert_eq!(expected.module, module_ref());
     assert_eq!(expected.kind, Namespace::parse("ezsdr.link.host").unwrap());
-    assert_eq!(
-        expected.connects,
-        [(MemoryDomainId::local(0), MemoryDomainId::local(0))]
-    );
-    assert_eq!(
-        expected.policies,
-        [
-            BackPressure::Block,
-            BackPressure::DropOldest,
-            BackPressure::DropNewest
-        ]
-    );
+    assert_eq!(expected.connects, [(MemoryDomainId::local(0), MemoryDomainId::local(0))]);
+    assert_eq!(expected.policies, [BackPressure::Block, BackPressure::DropOldest, BackPressure::DropNewest]);
     assert!(!expected.cross_process);
 
     let mut registry = ModuleRegistry::new();
-    registry
-        .register(module_descriptor, Factories { link: true, ..Factories::default() })
-        .unwrap();
+    registry.register(module_descriptor, Factories { link: true, ..Factories::default() }).unwrap();
     registry.register_link_descriptor(expected.clone()).unwrap();
     assert_eq!(registry.link_descriptor(&module_ref()), Some(&expected));
 
@@ -103,41 +74,26 @@ fn hd_04_descriptor_and_create() {
         Ok(_) => panic!("HD-4: a zero-capacity Link was created"),
     };
     assert!(error.message.starts_with("HD-4: "));
-    let link = module
-        .create(&declaration(BackPressure::DropNewest, 3))
-        .unwrap();
+    let link = module.create(&declaration(BackPressure::DropNewest, 3)).unwrap();
     assert_eq!(link.policy(), BackPressure::DropNewest);
 }
 
 #[test]
 fn hd_05_policies() {
-    let block_policy = HostLinkModule::new()
-        .create(&declaration(BackPressure::Block, 1))
-        .unwrap();
+    let block_policy = HostLinkModule::new().create(&declaration(BackPressure::Block, 1)).unwrap();
     assert_eq!(block_policy.policy(), BackPressure::Block);
     assert_eq!(block_policy.publish(block(0, BlockFlags::NONE, None)), PublishOutcome::Accepted);
     let retry = block(10, BlockFlags::NONE, None);
-    assert_eq!(
-        block_policy.publish(Arc::clone(&retry)),
-        PublishOutcome::Full
-    );
+    assert_eq!(block_policy.publish(Arc::clone(&retry)), PublishOutcome::Full);
     assert_eq!(block_policy.drops(), 0, "Block never discards or records a drop");
     assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 0);
     assert_eq!(block_policy.publish(retry), PublishOutcome::Accepted);
     assert_eq!(block_policy.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 10);
 
-    let oldest = HostLinkModule::new()
-        .create(&declaration(BackPressure::DropOldest, 1))
-        .unwrap();
+    let oldest = HostLinkModule::new().create(&declaration(BackPressure::DropOldest, 1)).unwrap();
     let carried_flags = BlockFlags::GAP_BEFORE | BlockFlags::RESTARTED;
-    assert_eq!(
-        oldest.publish(block(100, carried_flags, Some(150))),
-        PublishOutcome::Accepted
-    );
-    assert_eq!(
-        oldest.publish(block(200, BlockFlags::NONE, None)),
-        PublishOutcome::DroppedOldest
-    );
+    assert_eq!(oldest.publish(block(100, carried_flags, Some(150))), PublishOutcome::Accepted);
+    assert_eq!(oldest.publish(block(200, BlockFlags::NONE, None)), PublishOutcome::DroppedOldest);
     let (kept, carry) = oldest.receive().unwrap();
     assert_eq!(kept.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 200);
     assert!(carry.flags.contains(BlockFlags::GAP_BEFORE));
@@ -153,30 +109,17 @@ fn hd_05_policies() {
     assert_eq!(oldest.publish(block(400, second_gap, Some(5))), PublishOutcome::DroppedOldest);
     assert_eq!(oldest.publish(block(500, BlockFlags::NONE, None)), PublishOutcome::DroppedOldest);
     let (_, carry) = oldest.receive().unwrap();
-    assert_eq!(
-        carry.flags,
-        BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY
-    );
+    assert_eq!(carry.flags, BlockFlags::GAP_BEFORE | BlockFlags::SEQ_DISCONTINUITY);
     assert_eq!(carry.lost, Some(12));
     assert_eq!(carry.blocks, 2);
     assert_eq!(oldest.drops(), 3);
 
-    let newest = HostLinkModule::new()
-        .create(&declaration(BackPressure::DropNewest, 2))
-        .unwrap();
-    assert_eq!(
-        [0, 10, 20].map(|at| newest.publish(block(at, BlockFlags::NONE, None))),
-        [
-            PublishOutcome::Accepted,
-            PublishOutcome::Accepted,
-            PublishOutcome::DroppedNewest
-        ]
-    );
+    let newest = HostLinkModule::new().create(&declaration(BackPressure::DropNewest, 2)).unwrap();
+    assert_eq!([0, 10, 20].map(|at| newest.publish(block(at, BlockFlags::NONE, None))), [PublishOutcome::Accepted, PublishOutcome::Accepted, PublishOutcome::DroppedNewest]);
     assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 0);
     assert_eq!(newest.receive().unwrap().0.first_sample_time().ticks_in(ClockDomainId::local(7)).unwrap(), 10);
     assert_eq!(newest.drops(), 1);
     assert_eq!(newest.take_drop_carry().blocks, 1);
-
 }
 
 #[test]
@@ -184,9 +127,7 @@ fn hd_05_a_carry_belongs_to_the_block_after_the_drop() {
     // SC-20b: `receive` returns each block with what was dropped immediately before
     // it. DropNewest: the queued head keeps its own gap, and the blocks refused after
     // it go with the next accepted block.
-    let newest = HostLinkModule::new()
-        .create(&declaration(BackPressure::DropNewest, 1))
-        .unwrap();
+    let newest = HostLinkModule::new().create(&declaration(BackPressure::DropNewest, 1)).unwrap();
     newest.publish(block(300, BlockFlags::GAP_BEFORE, Some(100)));
     newest.publish(block(400, BlockFlags::NONE, None));
     newest.publish(block(500, BlockFlags::NONE, None));
@@ -198,9 +139,7 @@ fn hd_05_a_carry_belongs_to_the_block_after_the_drop() {
     assert!(newest.take_drop_carry().is_empty());
 
     // DropOldest: the evicted block's carry goes to the block after it, not the newest.
-    let oldest = HostLinkModule::new()
-        .create(&declaration(BackPressure::DropOldest, 2))
-        .unwrap();
+    let oldest = HostLinkModule::new().create(&declaration(BackPressure::DropOldest, 2)).unwrap();
     for at in [0, 10, 20] {
         oldest.publish(block(at, BlockFlags::NONE, None));
     }

@@ -2,12 +2,10 @@ use ezsdr_kernel::spec::{Ident, Key, Scalar, Value};
 use ezsdr_kernel::stream::Direction;
 use ezsdr_radio::channels::{self, Description};
 use ezsdr_radio::device::Grid;
-use ezsdr_radio::measurement::{
-    compare, GridValue, Load, Record, Source, StreamCondition, StreamRef, ValueRecord, Worst,
-};
-use ezsdr_radio::x3xx::ProviderTerms;
 use ezsdr_radio::measurement;
-use serde_json::{json, Value as JsonValue};
+use ezsdr_radio::measurement::{GridValue, Load, Record, Source, StreamCondition, StreamRef, ValueRecord, Worst, compare};
+use ezsdr_radio::x3xx::ProviderTerms;
+use serde_json::{Value as JsonValue, json};
 
 const FIXTURE: &str = include_str!("fixtures/measurement/records/valid.json");
 const INVALID_COMPARISONS: &str = include_str!("fixtures/measurement/invalid-comparisons.json");
@@ -22,19 +20,11 @@ fn description(record: &Record, terms: ProviderTerms) -> Description {
 }
 
 fn mock_terms() -> ProviderTerms {
-    ProviderTerms {
-        min_timed_command_lead_ns: 2_000_000,
-        repeat_max_samples: 268_435_456,
-        repeat_align_samples: 2,
-    }
+    ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
 }
 
 fn uhd_terms() -> ProviderTerms {
-    ProviderTerms {
-        min_timed_command_lead_ns: 5_000_000,
-        repeat_max_samples: u64::from(u32::MAX),
-        repeat_align_samples: 1,
-    }
+    ProviderTerms { min_timed_command_lead_ns: 5_000_000, repeat_max_samples: u64::from(u32::MAX), repeat_align_samples: 1 }
 }
 
 fn key_of(value: &ValueRecord) -> &str {
@@ -181,13 +171,7 @@ fn rm_35_stream_rate_grid_containment_is_checked() {
     let key = Key::parse("radio.rx.s0.sample_rate_hz").unwrap();
     let profile_grid = measurement::profile_values(&desc).remove(&key).unwrap();
     let index = record.values.iter().position(|value| key_of(value) == key.as_str()).unwrap();
-    record.values[index] = ValueRecord::Measured {
-        key: key.clone(),
-        worst: profile_grid.clone(),
-        trials: 1,
-        condition: "baseline".to_owned(),
-        test: "fixture".to_owned(),
-    };
+    record.values[index] = ValueRecord::Measured { key: key.clone(), worst: profile_grid.clone(), trials: 1, condition: "baseline".to_owned(), test: "fixture".to_owned() };
     assert_clear(&record, &desc);
 
     let Worst::Grid(GridValue::Values { mut values }) = profile_grid else {
@@ -298,15 +282,7 @@ fn rm_35_integer_grid_containment_rejects_inexact_endpoints() {
     let mut desc = description(&record, mock_terms());
     desc.rx[0].frequency = Grid::Integer { lo: 9_007_199_254_740_992, hi: 9_007_199_254_740_993 };
     let key = "radio.rx.c0.frequency_hz";
-    set_worst(
-        &mut record,
-        key,
-        Worst::Grid(GridValue::Step {
-            lo: 9_007_199_254_740_992.0,
-            hi: 9_007_199_254_740_992.0,
-            step: 0.0,
-        }),
-    );
+    set_worst(&mut record, key, Worst::Grid(GridValue::Step { lo: 9_007_199_254_740_992.0, hi: 9_007_199_254_740_992.0, step: 0.0 }));
     assert_rejected(&record, &desc, key, "not a subset");
 }
 
@@ -326,24 +302,15 @@ fn rm_35_values_must_cover_each_comparable_capability_once() {
     assert_rejected(&record, &description(&record, mock_terms()), "radio.full_duplex", "more than once");
 
     let mut record = fixture_record();
-    record.values.push(ValueRecord::Unmeasured {
-        key: Key::parse("radio.perf.unknown").unwrap(),
-        reason: "fixture".to_owned(),
-    });
+    record.values.push(ValueRecord::Unmeasured { key: Key::parse("radio.perf.unknown").unwrap(), reason: "fixture".to_owned() });
     assert_rejected(&record, &description(&record, mock_terms()), "radio.perf.unknown", "unknown");
 
     let mut record = fixture_record();
-    record.values.push(ValueRecord::Unmeasured {
-        key: Key::parse("radio.rx.c0.stream").unwrap(),
-        reason: "fixture".to_owned(),
-    });
+    record.values.push(ValueRecord::Unmeasured { key: Key::parse("radio.rx.c0.stream").unwrap(), reason: "fixture".to_owned() });
     assert_rejected(&record, &description(&record, mock_terms()), "radio.rx.c0.stream", "not recorded");
 
     let mut record = fixture_record();
-    record.values.push(ValueRecord::Unmeasured {
-        key: Key::parse("radio.rx.block_len").unwrap(),
-        reason: "fixture".to_owned(),
-    });
+    record.values.push(ValueRecord::Unmeasured { key: Key::parse("radio.rx.block_len").unwrap(), reason: "fixture".to_owned() });
     assert_rejected(&record, &description(&record, mock_terms()), "radio.rx.block_len", "not recorded");
 }
 
@@ -473,44 +440,24 @@ fn rm_35_conditions_and_references_match_the_layout() {
 #[test]
 fn rm_35_condition_validation_keeps_direction_in_stream_channel_and_concurrent_checks() {
     let mut record = fixture_record();
-    record.selector.insert(
-        Ident::parse("rx").unwrap(),
-        Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]),
-    );
+    record.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]));
     let description = description(&record, mock_terms());
 
     let mut changed = record.clone();
-    changed.conditions[0].streams.push(StreamCondition {
-        direction: Direction::Rx,
-        stream: 2,
-        channels: Vec::new(),
-        sample_rate_hz: 1_000_000.0,
-    });
+    changed.conditions[0].streams.push(StreamCondition { direction: Direction::Rx, stream: 2, channels: Vec::new(), sample_rate_hz: 1_000_000.0 });
     assert_rejected(&changed, &description, "conditions.baseline.streams.2.Rx", "outside this direction");
 
     let mut changed = record.clone();
-    changed.conditions[0].streams.push(StreamCondition {
-        direction: Direction::Rx,
-        stream: 1,
-        channels: vec![1],
-        sample_rate_hz: 1_000_000.0,
-    });
+    changed.conditions[0].streams.push(StreamCondition { direction: Direction::Rx, stream: 1, channels: vec![1], sample_rate_hz: 1_000_000.0 });
     for key in measurement::profile_values(&description).into_keys() {
-        if measurement::rule(key.as_str()).is_some_and(|rule| rule != measurement::Rule::NotCompared)
-            && !changed.values.iter().any(|value| key_of(value) == key.as_str())
-        {
+        if measurement::rule(key.as_str()).is_some_and(|rule| rule != measurement::Rule::NotCompared) && !changed.values.iter().any(|value| key_of(value) == key.as_str()) {
             changed.values.push(ValueRecord::Unmeasured { key, reason: "not measured".to_owned() });
         }
     }
     assert_clear(&changed, &description);
 
     let mut changed = record.clone();
-    changed.conditions[0].streams.push(StreamCondition {
-        direction: Direction::Tx,
-        stream: 1,
-        channels: Vec::new(),
-        sample_rate_hz: 1_000_000.0,
-    });
+    changed.conditions[0].streams.push(StreamCondition { direction: Direction::Tx, stream: 1, channels: Vec::new(), sample_rate_hz: 1_000_000.0 });
     assert_rejected(&changed, &description, "conditions.baseline.streams.1.Tx", "outside this direction");
 
     let mut changed = record.clone();
@@ -530,16 +477,8 @@ fn rm_35_condition_validation_keeps_direction_in_stream_channel_and_concurrent_c
 #[test]
 fn rm_35_a_channel_cannot_belong_to_two_streams_in_one_direction() {
     let mut record = fixture_record();
-    record.selector.insert(
-        Ident::parse("rx").unwrap(),
-        Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]),
-    );
-    record.conditions[0].streams.push(StreamCondition {
-        direction: Direction::Rx,
-        stream: 1,
-        channels: vec![0],
-        sample_rate_hz: 1_000_000.0,
-    });
+    record.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")]));
+    record.conditions[0].streams.push(StreamCondition { direction: Direction::Rx, stream: 1, channels: vec![0], sample_rate_hz: 1_000_000.0 });
     let description = description(&record, mock_terms());
     assert_rejected(&record, &description, "conditions.baseline.streams.1.Rx", "more than one stream");
 }

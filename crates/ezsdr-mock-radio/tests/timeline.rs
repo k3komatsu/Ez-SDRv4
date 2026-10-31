@@ -12,8 +12,7 @@ use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventSource, Target}
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
 use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleErrorKind, ModuleRef, Pacing,
-    PrepareContext, ProfileRef, Provider, Requested, Role, UpdateClass, Version,
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleErrorKind, ModuleRef, Pacing, PrepareContext, ProfileRef, Provider, Requested, Role, UpdateClass, Version,
 };
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
@@ -79,22 +78,18 @@ struct TransitionCounts {
     join_empty_stream: usize,
 }
 
-fn direction_index(direction: Direction) -> usize { usize::from(direction == Direction::Tx) }
+fn direction_index(direction: Direction) -> usize {
+    usize::from(direction == Direction::Tx)
+}
 
-fn add_membership(
-    round: &mut Vec<LayoutOp>,
-    state: &mut [[Option<u32>; 2]; 2],
-    counts: &mut TransitionCounts,
-    direction: Direction,
-    channel: u32,
-    target: i64,
-    at_ns: Option<i64>,
-) {
+fn add_membership(round: &mut Vec<LayoutOp>, state: &mut [[Option<u32>; 2]; 2], counts: &mut TransitionCounts, direction: Direction, channel: u32, target: i64, at_ns: Option<i64>) {
     let direction_index = direction_index(direction);
     let channel_index = channel as usize;
     let before = state[direction_index][channel_index];
     let after = u32::try_from(target).ok();
-    if before == after { return; }
+    if before == after {
+        return;
+    }
     match (before, after) {
         (Some(_), None) => counts.leave += 1,
         (Some(_), Some(_)) => counts.move_between_streams += 1,
@@ -123,16 +118,24 @@ fn layout_sequence(seed: u64, sequence: &Sequence) -> (LayoutSequence, Transitio
             match *op {
                 Op::Stop { device: true } => layout_ops.push(LayoutOp::Stop { device: true, stream: None }),
                 Op::Stop { device: false } => {
-                    for stream in 0..2 { layout_ops.push(LayoutOp::Stop { device: false, stream: Some(stream) }); }
+                    for stream in 0..2 {
+                        layout_ops.push(LayoutOp::Stop { device: false, stream: Some(stream) });
+                    }
                 }
-                Op::StartRx => for stream in 0..2 { layout_ops.push(LayoutOp::StartRx { stream }); },
+                Op::StartRx => {
+                    for stream in 0..2 {
+                        layout_ops.push(LayoutOp::StartRx { stream });
+                    }
+                }
                 Op::Cold { direction, change: Change::Channels(channels), at_ns } => {
                     for channel in 0..2 {
                         add_membership(&mut layout_ops, &mut state, &mut counts, direction, channel, if channel < u32::from(channels) { 0 } else { -1 }, at_ns);
                     }
                 }
                 Op::Cold { direction, change: Change::Rate(rate), at_ns } => {
-                    for stream in 0..2 { layout_ops.push(LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, at_ns }); }
+                    for stream in 0..2 {
+                        layout_ops.push(LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, at_ns });
+                    }
                 }
                 Op::Timed { direction, gain_db, at_ns } => {
                     layout_ops.push(LayoutOp::Timed { direction, channel: 0, gain_db, at_ns });
@@ -142,10 +145,18 @@ fn layout_sequence(seed: u64, sequence: &Sequence) -> (LayoutSequence, Transitio
         rounds.push((*at, layout_ops));
     }
 
-    let latest = sequence.ops().map(|(round, op)| {
-        let at = match op { Op::Cold { at_ns, .. } | Op::Timed { at_ns, .. } => at_ns.unwrap_or(0), _ => 0 };
-        round.max(at)
-    }).max().unwrap_or(0).max(0);
+    let latest = sequence
+        .ops()
+        .map(|(round, op)| {
+            let at = match op {
+                Op::Cold { at_ns, .. } | Op::Timed { at_ns, .. } => at_ns.unwrap_or(0),
+                _ => 0,
+            };
+            round.max(at)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(0);
     let tail = latest + 10 * MS;
     let direction = if seed % 2 == 0 { Direction::Rx } else { Direction::Tx };
     for (offset, channel, stream) in [(0, 0, 0), (1, 1, 1), (10, 0, -1), (20, 0, 1), (30, 1, 0), (40, 0, 0), (50, 1, -1), (60, 1, 1)] {
@@ -163,10 +174,15 @@ fn fractional_tx(sequence: &LayoutSequence) -> bool {
 /// RM-25's layout floor is instance-wide, unlike the old generator's per-direction floor.
 fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
     let terms = terms(profile, Direction::Rx, Channels::first(0));
-    let mut entries: Vec<_> = sequence.faults.iter().enumerate().map(|(index, (at, _))| {
-        let e = terms.t0 + terms.ticks(*at);
-        Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
-    }).collect();
+    let mut entries: Vec<_> = sequence
+        .faults
+        .iter()
+        .enumerate()
+        .map(|(index, (at, _))| {
+            let e = terms.t0 + terms.ticks(*at);
+            Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
+        })
+        .collect();
     let mut floor = i64::MIN;
     let mut timed: Vec<i64> = Vec::new();
     for (index, (round, op)) in sequence.ops().enumerate() {
@@ -212,7 +228,13 @@ impl Record {
         fn from<T: std::fmt::Debug + PartialEq>(name: &str, a: &[T], b: &[T]) {
             if a != b {
                 let first = a.iter().zip(b).position(|(a, b)| a != b).unwrap_or(a.len().min(b.len())).saturating_sub(1);
-                eprintln!("{name} from {first} (lengths {}, {}):\n  expected {:?}\n  observed {:?}", a.len(), b.len(), &a[first.min(a.len())..(first + 4).min(a.len())], &b[first.min(b.len())..(first + 4).min(b.len())]);
+                eprintln!(
+                    "{name} from {first} (lengths {}, {}):\n  expected {:?}\n  observed {:?}",
+                    a.len(),
+                    b.len(),
+                    &a[first.min(a.len())..(first + 4).min(a.len())],
+                    &b[first.min(b.len())..(first + 4).min(b.len())]
+                );
             }
         }
         from("rx_clocks", &self.rx_clocks, &observed.rx_clocks);
@@ -249,10 +271,18 @@ fn terms(profile: &str, direction: Direction, channels: Channels) -> Terms {
     // The transmit clock starts at `arm`, at 0 (RM-25); the receive clock at T0.
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels, ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
-    Terms { t0: T0, root_hz: 1_000_000_000, timed_lead, release_window, stream: Stream { direction, origin, config, lead, call, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance } }
+    Terms {
+        t0: T0,
+        root_hz: 1_000_000_000,
+        timed_lead,
+        release_window,
+        stream: Stream { direction, origin, config, lead, call, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance },
+    }
 }
 
-fn line_key(direction: Direction, stream: u32) -> StreamKey { (direction, stream) }
+fn line_key(direction: Direction, stream: u32) -> StreamKey {
+    (direction, stream)
+}
 
 fn initial_lines(profile: &str) -> Lines {
     let initial = [[Some(0), None], [Some(0), None]];
@@ -260,9 +290,7 @@ fn initial_lines(profile: &str) -> Lines {
     for direction in [Direction::Rx, Direction::Tx] {
         for stream in 0..2 {
             let members = initial[direction_index(direction)];
-            let channels = members.iter().enumerate().fold(Channels::first(0), |set, (channel, member)| {
-                if *member == Some(stream) { set.with(channel as u32) } else { set }
-            });
+            let channels = members.iter().enumerate().fold(Channels::first(0), |set, (channel, member)| if *member == Some(stream) { set.with(channel as u32) } else { set });
             lines.insert(line_key(direction, stream), Line::new(terms(profile, direction, channels).stream));
         }
     }
@@ -295,8 +323,7 @@ fn rm_26_the_timeline_against_mockradio() {
             eprintln!("seed {seed}, {profile}: {sequence:?}");
             expected.show(&observed);
         }
-        let printed = |field: &&str| divergent(profile, sequence.class).contains(field)
-            || (fractional_tx(&sequence) && FRACTIONAL_TX.contains(field));
+        let printed = |field: &&str| divergent(profile, sequence.class).contains(field) || (fractional_tx(&sequence) && FRACTIONAL_TX.contains(field));
         let gated: Vec<_> = diverged.iter().filter(|field| !printed(field)).collect();
         if !gated.is_empty() {
             failed.push(format!("seed {seed}, {profile}, {:?}: {gated:?}", sequence.class));
@@ -313,33 +340,44 @@ fn rm_26_the_timeline_against_mockradio() {
         let equal: Vec<_> = divergent(profile, *class).iter().filter(|field| !fields.contains_key(*field)).collect();
         eprintln!("layer 1, {profile}, {class:?}: {count} sequences; printed {fields:?}; listed but equal {equal:?}");
     }
-    eprintln!("layout membership transitions in 1,000 seeds: leave={}, return={}, move={}, empty-stream join={}", transitions.leave, transitions.return_to_occupied, transitions.move_between_streams, transitions.join_empty_stream);
-    assert!(transitions.leave > 0 && transitions.return_to_occupied > 0 && transitions.move_between_streams > 0 && transitions.join_empty_stream > 0, "each layout membership transition must be generated: {transitions:?}");
+    eprintln!(
+        "layout membership transitions in 1,000 seeds: leave={}, return={}, move={}, empty-stream join={}",
+        transitions.leave, transitions.return_to_occupied, transitions.move_between_streams, transitions.join_empty_stream
+    );
+    assert!(
+        transitions.leave > 0 && transitions.return_to_occupied > 0 && transitions.move_between_streams > 0 && transitions.join_empty_stream > 0,
+        "each layout membership transition must be generated: {transitions:?}"
+    );
     assert!(failed.is_empty(), "{} sequences differ (EZSDR_TIMELINE_SEED=<seed> shows one), the first: {:#?}", failed.len(), &failed[..failed.len().min(20)]);
 }
 
 fn book(lines: &mut Lines, stream: StreamKey, entry: &Entry, kind: Kind) {
-    lines.book(stream, Item { e: entry.e, seq: entry.seq, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind })
+    lines
+        .book(stream, Item { e: entry.e, seq: entry.seq, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind })
         .unwrap_or_else(|error| panic!("timeline refused {stream:?} at {}: {error:?}", entry.e));
 }
 
 fn active_rx(lines: &Lines, entry: &Entry) -> Vec<(u32, Option<u64>)> {
-    (0..2).filter_map(|stream| {
-        let line = lines.line(line_key(Direction::Rx, stream))?;
-        line.plan.iter().find_map(|planned| {
-            line.made(planned.origin, planned.config, entry.e, entry.seq)
-                .unwrap_or_else(|error| panic!("timeline fault query failed for {stream}: {error:?}"))
-                .filter(|segment| segment.cut.is_none() && segment.origin <= entry.e && !segment.config.channels.is_empty())
-                .map(|segment| (stream, segment.by))
+    (0..2)
+        .filter_map(|stream| {
+            let line = lines.line(line_key(Direction::Rx, stream))?;
+            line.plan.iter().find_map(|planned| {
+                line.made(planned.origin, planned.config, entry.e, entry.seq)
+                    .unwrap_or_else(|error| panic!("timeline fault query failed for {stream}: {error:?}"))
+                    .filter(|segment| segment.cut.is_none() && segment.origin <= entry.e && !segment.config.channels.is_empty())
+                    .map(|segment| (stream, segment.by))
+            })
         })
-    }).collect()
+        .collect()
 }
 
 fn book_operation(profile: &str, lines: &mut Lines, entry: &Entry, op: LayoutOp) {
     match op {
         LayoutOp::Stop { device: true, .. } => {
             for direction in [Direction::Rx, Direction::Tx] {
-                for stream in 0..2 { book(lines, line_key(direction, stream), entry, Kind::Stop); }
+                for stream in 0..2 {
+                    book(lines, line_key(direction, stream), entry, Kind::Stop);
+                }
             }
         }
         LayoutOp::Stop { device: false, stream: Some(stream) } => book(lines, line_key(Direction::Rx, stream), entry, Kind::Stop),
@@ -355,7 +393,8 @@ fn book_operation(profile: &str, lines: &mut Lines, entry: &Entry, op: LayoutOp)
             let from = (0..2).find(|index| lines.config_at(line_key(direction, *index), entry.e).channels.contains(channel));
             match (from, u32::try_from(stream).ok()) {
                 (Some(from), Some(to)) if from != to => {
-                    let result = lines.book_move(line_key(direction, from), line_key(direction, to), channel, Some(entry.e), entry.receipt, entry.seq, entry.receipt)
+                    let result = lines
+                        .book_move(line_key(direction, from), line_key(direction, to), channel, Some(entry.e), entry.receipt, entry.seq, entry.receipt)
                         .unwrap_or_else(|error| panic!("timeline refused move c{channel} s{from}->s{to} at {}: {error:?}", entry.e));
                     assert_eq!(result.0, entry.e, "layout move instant");
                 }
@@ -392,7 +431,9 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
     let op_entries: Vec<_> = (0..ops.len()).map(|index| schedule.iter().find(|entry| entry.event == Event::Op(index)).copied().unwrap()).collect();
     for (index, (_, op)) in sequence.ops().enumerate() {
         let entry = op_entries[index];
-        if loss_at.is_some_and(|loss| entry.receipt >= loss) { continue; }
+        if loss_at.is_some_and(|loss| entry.receipt >= loss) {
+            continue;
+        }
         book_operation(profile, &mut lines, &entry, *op);
     }
 
@@ -409,7 +450,9 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
                 if kind == Fault::Loss {
                     fault_rows.push((entry.e, entry.seq, kind, true, None, active));
                     for direction in [Direction::Rx, Direction::Tx] {
-                        for stream in 0..2 { book(&mut lines, line_key(direction, stream), entry, Kind::End { abort: false }); }
+                        for stream in 0..2 {
+                            book(&mut lines, line_key(direction, stream), entry, Kind::End { abort: false });
+                        }
                     }
                     lost_device = true;
                 } else {
@@ -424,8 +467,12 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
                     continue;
                 }
                 match op {
-                    LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, .. } => record.cold.push((format!("radio.{}.s{stream}.sample_rate_hz", side(direction)), rate as f64, entry.e)),
-                    LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream }, .. } => record.cold.push((format!("radio.{}.c{channel}.stream", side(direction)), stream as f64, entry.e)),
+                    LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, .. } => {
+                        record.cold.push((format!("radio.{}.s{stream}.sample_rate_hz", side(direction)), rate as f64, entry.e))
+                    }
+                    LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream }, .. } => {
+                        record.cold.push((format!("radio.{}.c{channel}.stream", side(direction)), stream as f64, entry.e))
+                    }
                     LayoutOp::Timed { direction, channel, gain_db, .. } => record.timed.push((format!("radio.{}.c{channel}.gain_db", side(direction)), gain_db, entry.e)),
                     LayoutOp::Stop { .. } | LayoutOp::StartRx { .. } => {}
                 }
@@ -439,11 +486,12 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
         let segments = &lines.line(line_key(Direction::Rx, stream)).unwrap().plan;
         for segment in segments.iter().filter(|segment| !segment.config.channels.is_empty()) {
             let clock_index = record.rx_clocks.iter().filter(|(number, _, _)| *number == stream).count();
-            let faults: Vec<_> = fault_rows.iter().filter_map(|(at, seq, kind, applied, selected, active)| {
-                if *applied && active.contains(&(stream, segment.by)) {
-                    Some((*at, *seq, if *kind != Fault::Loss && *selected == Some(stream) { Some(*kind) } else { None }))
-                } else { None }
-            }).collect();
+            let faults: Vec<_> = fault_rows
+                .iter()
+                .filter_map(|(at, seq, kind, applied, selected, active)| {
+                    if *applied && active.contains(&(stream, segment.by)) { Some((*at, *seq, if *kind != Fault::Loss && *selected == Some(stream) { Some(*kind) } else { None })) } else { None }
+                })
+                .collect();
             let mut blocks = Vec::new();
             receive(stream, clock_index, segment, &faults, gap, &mut blocks, &mut injected);
             if !blocks.is_empty() {
@@ -453,14 +501,16 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
         }
     }
     for stream in 0..2 {
-        let segments: Vec<_> = lines.line(line_key(Direction::Tx, stream)).unwrap().plan.iter()
-            .filter(|segment| !segment.config.channels.is_empty()).copied().collect();
+        let segments: Vec<_> = lines.line(line_key(Direction::Tx, stream)).unwrap().plan.iter().filter(|segment| !segment.config.channels.is_empty()).copied().collect();
         record.tx_clocks.extend(clocks(stream, &segments));
     }
-    record.faults = fault_rows.into_iter().map(|(_, seq, kind, applied, _, _)| {
-        let lost = if applied { injected.get(&seq).copied().unwrap_or(0) } else { 0 };
-        (name(kind).to_owned(), applied, lost)
-    }).collect();
+    record.faults = fault_rows
+        .into_iter()
+        .map(|(_, seq, kind, applied, _, _)| {
+            let lost = if applied { injected.get(&seq).copied().unwrap_or(0) } else { 0 };
+            (name(kind).to_owned(), applied, lost)
+        })
+        .collect();
     record
 }
 
@@ -488,7 +538,10 @@ fn receive(stream: u32, clock: usize, segment: &Segment, faults: &[(i64, u64, Op
         }
         let Some((f, seq, fault)) = faults.next() else { return };
         let kf = k(*f).max(next);
-        let Some(fault) = fault else { next = kf; continue };
+        let Some(fault) = fault else {
+            next = kf;
+            continue;
+        };
         let kg = match fault {
             Fault::Overrun => k(f + gap).max(kf),
             Fault::Sequence => kf + BLOCK,
@@ -550,10 +603,18 @@ impl DataLink for Headers {
         self.0.lock().unwrap().push(block.header().clone());
         PublishOutcome::Accepted
     }
-    fn receive(&self) -> Option<(BlockRef, DropCarry)> { None }
-    fn drops(&self) -> u64 { 0 }
-    fn take_drop_carry(&self) -> DropCarry { DropCarry::default() }
-    fn policy(&self) -> BackPressure { BackPressure::DropOldest }
+    fn receive(&self) -> Option<(BlockRef, DropCarry)> {
+        None
+    }
+    fn drops(&self) -> u64 {
+        0
+    }
+    fn take_drop_carry(&self) -> DropCarry {
+        DropCarry::default()
+    }
+    fn policy(&self) -> BackPressure {
+        BackPressure::DropOldest
+    }
 }
 
 fn key(name: &str) -> Key {
@@ -592,17 +653,8 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
     } else {
         (Version::new(2, 0, 0), Value::from(2), Value::from(2))
     };
-    let selector = BTreeMap::from([
-        (Ident::parse("id").unwrap(), Value::from("mock".to_owned())),
-        (Ident::parse("rx").unwrap(), rx),
-        (Ident::parse("tx").unwrap(), tx),
-    ]);
-    let binding = Binding {
-        module: module.clone(),
-        selector,
-        profile: Some(ProfileRef { name: profile.to_owned(), version }),
-        feed: None,
-    };
+    let selector = BTreeMap::from([(Ident::parse("id").unwrap(), Value::from("mock".to_owned())), (Ident::parse("rx").unwrap(), rx), (Ident::parse("tx").unwrap(), tx)]);
+    let binding = Binding { module: module.clone(), selector, profile: Some(ProfileRef { name: profile.to_owned(), version }), feed: None };
     let mut mock = MockRadio::from_binding(&binding).unwrap();
     let clocks = Arc::new(ClockRegistry::new());
     clocks.register(ClockDomain::root(ROOT, Rational::new(1_000_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
@@ -618,17 +670,9 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
     let actions = Arc::new(Queue::default());
     let links = [Arc::new(Headers::default()), Arc::new(Headers::default())];
     let faults: Vec<_> = sequence.faults.iter().map(|(at, fault)| serde_json::json!({ "at_ns": at, "fault": name(*fault), "target": "radio" })).collect();
-    let constraints = [("radio.rx.c0.stream", Scalar::from(0)), ("radio.tx.c0.stream", Scalar::from(0))]
-        .map(|(name, value)| (key(name), Constraint::Eq { value }));
+    let constraints = [("radio.rx.c0.stream", Scalar::from(0)), ("radio.tx.c0.stream", Scalar::from(0))].map(|(name, value)| (key(name), Constraint::Eq { value }));
     let ctx = {
-        let mut ctx = PrepareContext::testing(
-            EventSource::Node { node: rid("mock") },
-            auth.clone(),
-            clocks.clone(),
-            events,
-            actions.clone(),
-            Arc::new(NoSubmitter),
-        );
+        let mut ctx = PrepareContext::testing(EventSource::Node { node: rid("mock") }, auth.clone(), clocks.clone(), events, actions.clone(), Arc::new(NoSubmitter));
         ctx.run = RunId::from_string("timeline".to_owned());
         ctx.environment = Arc::new(BTreeMap::from([(Namespace::parse("sim.faults").unwrap(), serde_json::json!(faults))]));
         ctx.inputs = Arc::new(BTreeMap::<ContentHash, Arc<[u8]>>::new());
@@ -664,13 +708,25 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
                 LayoutOp::Stop { device: false, stream: None } => unreachable!(),
                 LayoutOp::StartRx { stream } => Action::Command { target: tgt(&format!("mock/rx/s{stream}")), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
                 LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, at_ns } => Action::UpdateParameter {
-                    target: tgt("mock"), key: key(&format!("radio.{}.s{stream}.sample_rate_hz", side(direction))), value: Value::num(rate as f64).unwrap(), class: UpdateClass::Cold, at: at(at_ns),
+                    target: tgt("mock"),
+                    key: key(&format!("radio.{}.s{stream}.sample_rate_hz", side(direction))),
+                    value: Value::num(rate as f64).unwrap(),
+                    class: UpdateClass::Cold,
+                    at: at(at_ns),
                 },
                 LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream }, at_ns } => Action::UpdateParameter {
-                    target: tgt("mock"), key: key(&format!("radio.{}.c{channel}.stream", side(direction))), value: Value::from(stream), class: UpdateClass::Cold, at: at(at_ns),
+                    target: tgt("mock"),
+                    key: key(&format!("radio.{}.c{channel}.stream", side(direction))),
+                    value: Value::from(stream),
+                    class: UpdateClass::Cold,
+                    at: at(at_ns),
                 },
                 LayoutOp::Timed { direction, channel, gain_db, at_ns } => Action::UpdateParameter {
-                    target: tgt("mock"), key: key(&format!("radio.{}.c{channel}.gain_db", side(direction))), value: Value::num(gain_db).unwrap(), class: UpdateClass::HardwareTimed, at: at(at_ns),
+                    target: tgt("mock"),
+                    key: key(&format!("radio.{}.c{channel}.gain_db", side(direction))),
+                    value: Value::num(gain_db).unwrap(),
+                    class: UpdateClass::HardwareTimed,
+                    at: at(at_ns),
                 },
             });
         }

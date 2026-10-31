@@ -72,12 +72,7 @@ struct PingResponder {
 }
 
 fn param<'a>(ctx: &'a ComponentContext, key: &str) -> Result<&'a Value, ModuleError> {
-    ctx.descriptor
-        .params
-        .iter()
-        .find(|p| p.key.as_str() == key)
-        .map(|p| &p.default)
-        .ok_or_else(|| ModuleError::rejected(format!("responder: parameter {key} is missing")))
+    ctx.descriptor.params.iter().find(|p| p.key.as_str() == key).map(|p| &p.default).ok_or_else(|| ModuleError::rejected(format!("responder: parameter {key} is missing")))
 }
 
 fn wrong(key: &str) -> ModuleError {
@@ -154,9 +149,7 @@ impl Component for PingResponder {
                     continue;
                 }
                 if self.quiet >= self.rearm {
-                    let heard = first
-                        .checked_add(Duration::new(first.domain(), k as i64))
-                        .map_err(|error| ModuleError::rejected(format!("responder: {error}")))?;
+                    let heard = first.checked_add(Duration::new(first.domain(), k as i64)).map_err(|error| ModuleError::rejected(format!("responder: {error}")))?;
                     out.push(self.answer(heard)?);
                 }
                 self.quiet = 0;
@@ -177,14 +170,10 @@ impl PingResponder {
         let clocks = self.clocks.as_ref().expect("prepared");
         let rejected = |error| ModuleError::rejected(format!("responder: {error}"));
         let clock = heard.domain();
-        let turnaround = clocks
-            .rescale(Duration::new(ClockDomainId::HOST_MONOTONIC, self.turnaround_ns), clock)
-            .map_err(rejected)?;
+        let turnaround = clocks.rescale(Duration::new(ClockDomainId::HOST_MONOTONIC, self.turnaround_ns), clock).map_err(rejected)?;
         let turnaround = match turnaround {
             ezsdr_kernel::time::Rescaled::Exact { duration } => duration,
-            ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => {
-                floor.checked_add(Duration::new(clock, 1)).map_err(rejected)?
-            }
+            ezsdr_kernel::time::Rescaled::Inexact { floor, .. } => floor.checked_add(Duration::new(clock, 1)).map_err(rejected)?,
         };
         let at = heard.checked_add(turnaround).map_err(rejected)?;
         Ok(Action::TxBurst {

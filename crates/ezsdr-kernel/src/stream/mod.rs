@@ -16,10 +16,7 @@ use std::fmt;
 
 pub use block::{BlockFlags, BlockHeader, BlockRef, ChannelMask, Direction, SampleBlock};
 pub use buffer::BufferRef;
-pub use burst::{
-    AdmittedTarget, BurstEnd, BurstOpen, BurstRecord, BurstState, BurstStep, BurstTracker,
-    LateOutcome, LatePolicy, admit_burst_target,
-};
+pub use burst::{AdmittedTarget, BurstEnd, BurstOpen, BurstRecord, BurstState, BurstStep, BurstTracker, LateOutcome, LatePolicy, admit_burst_target};
 pub use continuity::{ChannelGap, ContinuityBuilder, ContinuityMap, Gap, GapCause, Segment};
 pub use link::{BackPressure, DataLink, DataLinkDecl, DropCarry, PublishOutcome, check_sink_link};
 
@@ -81,19 +78,12 @@ impl fmt::Display for StreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StreamError::Time(e) => write!(f, "{e}"),
-            StreamError::MissingStartOfBurst => {
-                f.write_str("a transmit block was published while idle without START_OF_BURST")
-            }
+            StreamError::MissingStartOfBurst => f.write_str("a transmit block was published while idle without START_OF_BURST"),
             StreamError::TimeOverlap { expected, got } => {
-                write!(
-                    f,
-                    "block time {got} precedes the previous block's end {expected}"
-                )
+                write!(f, "block time {got} precedes the previous block's end {expected}")
             }
             StreamError::GapFlagWithoutJump => f.write_str("GAP_BEFORE on a contiguous block"),
-            StreamError::JumpWithoutGapFlag => {
-                f.write_str("a time jump with no GAP_BEFORE on a lossless path")
-            }
+            StreamError::JumpWithoutGapFlag => f.write_str("a time jump with no GAP_BEFORE on a lossless path"),
             StreamError::InvalidBlock { reason } => write!(f, "invalid block: {reason}"),
             StreamError::DomainChanged { from, to } => {
                 write!(f, "the SampleClock changed from {from} to {to}")

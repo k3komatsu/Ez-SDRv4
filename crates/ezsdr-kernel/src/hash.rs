@@ -41,14 +41,10 @@ pub enum HashError {
 impl fmt::Display for HashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HashError::NonFiniteNumber => {
-                f.write_str("a non-finite number cannot be canonicalised")
-            }
+            HashError::NonFiniteNumber => f.write_str("a non-finite number cannot be canonicalised"),
             HashError::NonAsciiKey { key } => write!(f, "object key {key:?} is not ASCII"),
             HashError::NotSerialisable { message } => write!(f, "not serialisable: {message}"),
-            HashError::MalformedHash => {
-                f.write_str("a content hash is `sha256:` plus 64 lowercase hex digits")
-            }
+            HashError::MalformedHash => f.write_str("a content hash is `sha256:` plus 64 lowercase hex digits"),
         }
     }
 }
@@ -57,8 +53,7 @@ impl std::error::Error for HashError {}
 
 /// `sha256:<64 lowercase hex>`, matching `^sha256:[0-9a-f]{64}$`. The algorithm is
 /// named in the value so a later algorithm is an additive change (OV-14, SB-1).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct ContentHash(String);
 
@@ -71,9 +66,7 @@ impl<'de> Deserialize<'de> for ContentHash {
 impl ContentHash {
     /// The hash of a document's canonical form (OV-15, OV-16).
     pub fn of<T: Serialize>(value: &T) -> Result<ContentHash, HashError> {
-        let v = serde_json::to_value(value).map_err(|e| HashError::NotSerialisable {
-            message: e.to_string(),
-        })?;
+        let v = serde_json::to_value(value).map_err(|e| HashError::NotSerialisable { message: e.to_string() })?;
         ContentHash::of_value(&v)
     }
 
@@ -150,8 +143,7 @@ fn write_value(v: &serde_json::Value, out: &mut String) -> Result<(), HashError>
             // map to insertion order.
             let mut keys: Vec<&String> = map.keys().collect();
             if let Some(bad) = keys.iter().find(|k| !k.is_ascii()) {
-                return Err(HashError::NonAsciiKey { key: (*bad).clone(),
-                });
+                return Err(HashError::NonAsciiKey { key: (*bad).clone() });
             }
             keys.sort_unstable();
             out.push('{');
@@ -218,11 +210,7 @@ fn ecmascript_number(x: f64) -> Result<String, HashError> {
     } else {
         let e = n - 1;
         let sign_e = if e < 0 { '-' } else { '+' };
-        if k == 1 {
-            format!("{digits}e{sign_e}{}", e.abs())
-        } else {
-            format!("{}.{}e{sign_e}{}", &digits[..1], &digits[1..], e.abs())
-        }
+        if k == 1 { format!("{digits}e{sign_e}{}", e.abs()) } else { format!("{}.{}e{sign_e}{}", &digits[..1], &digits[1..], e.abs()) }
     };
     Ok(format!("{sign}{body}"))
 }

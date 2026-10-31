@@ -7,9 +7,7 @@ use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::stream::Direction;
 use ezsdr_kernel::time::Rational;
 use ezsdr_radio::stream_target;
-use ezsdr_radio::timeline::{
-    Channels, Config, Item, Kind, Line, Lines, MoveError, Segment, Stream, StreamKey, NO_RELEASE, covering, plan,
-};
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Lines, MoveError, NO_RELEASE, Segment, Stream, StreamKey, covering, plan};
 use generator::{CLASSES, Terms};
 
 /// Root ticks per millisecond on the 1 GHz root.
@@ -123,20 +121,8 @@ fn rm_26_each_stream_takes_its_own_directions_start_lead() {
 
     // A restart after a cut starts its own direction's lead after that cut, at 1 MS/s.
     for (direction, lead) in [(Direction::Rx, 50 * MS), (Direction::Tx, 20 * MS)] {
-        let stream = Stream {
-            direction,
-            origin: 0,
-            config: config(1, 1_000_000),
-            lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction),
-            call: 0,
-            release_window: 0,
-            allowance: 0,
-        };
-        assert_eq!(
-            segments(&stream, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))]),
-            [(0, Some(1_000 * MS)), (1_000 * MS + lead, None)],
-            "{direction:?}",
-        );
+        let stream = Stream { direction, origin: 0, config: config(1, 1_000_000), lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction), call: 0, release_window: 0, allowance: 0 };
+        assert_eq!(segments(&stream, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))]), [(0, Some(1_000 * MS)), (1_000 * MS + lead, None)], "{direction:?}",);
     }
 }
 
@@ -154,18 +140,8 @@ fn rm_15_later_bound_combines_the_current_and_handed_front() {
 fn rm_25_a_receive_successor_adds_release_window_before_call_and_lead() {
     let cut = 10 * MS;
     for (lead, expected) in [(3 * MS, cut + 29 * MS), (50 * MS, cut + 76 * MS)] {
-        let stream = Stream {
-            lead,
-            call: 20_000,
-            release_window: 3 * MS,
-            allowance: 3 * MS,
-            ..rx_stream(&[0], 1_000_000)
-        };
-        assert_eq!(
-            segments(&stream, &[item(cut, 1, cut, Kind::Cold(config(1, 1_000_000)))]),
-            [(0, Some(cut)), (expected, None)],
-            "lead {lead}"
-        );
+        let stream = Stream { lead, call: 20_000, release_window: 3 * MS, allowance: 3 * MS, ..rx_stream(&[0], 1_000_000) };
+        assert_eq!(segments(&stream, &[item(cut, 1, cut, Kind::Cold(config(1, 1_000_000)))]), [(0, Some(cut)), (expected, None)], "lead {lead}");
     }
 }
 
@@ -177,16 +153,11 @@ fn rm_15_preemption_front_applies_each_late_policy() {
     use ezsdr_radio::timeline::late_policy_front_outcome;
 
     let late_by = Duration::new(ClockDomainId::HOST_MONOTONIC, 2);
-    assert_eq!(late_policy_front_outcome(LatePolicy::RejectAtPlan, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(),
-        Some(LateOutcome::PlanViolation { late_by }));
-    assert_eq!(late_policy_front_outcome(LatePolicy::SendAsapAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(),
-        Some(LateOutcome::SendAsap { late_by }));
-    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(),
-        Some(LateOutcome::Drop { late_by }));
-    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 11, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), None,
-        "equality with the front is on time");
-    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 11, Some(10), |_| Ok::<_, ()>(late_by)).unwrap(), None,
-        "a front at or before the ordinary bound adds no lateness");
+    assert_eq!(late_policy_front_outcome(LatePolicy::RejectAtPlan, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), Some(LateOutcome::PlanViolation { late_by }));
+    assert_eq!(late_policy_front_outcome(LatePolicy::SendAsapAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), Some(LateOutcome::SendAsap { late_by }));
+    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), Some(LateOutcome::Drop { late_by }));
+    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 11, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), None, "equality with the front is on time");
+    assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 11, Some(10), |_| Ok::<_, ()>(late_by)).unwrap(), None, "a front at or before the ordinary bound adds no lateness");
 }
 
 #[test]
@@ -198,131 +169,162 @@ fn rm_26_the_timeline_cases() {
         assert_eq!(segments(stream, items), expected, "{name}");
     };
     // Appendix C's eleven cases, at 1 MS/s on a 1 GHz root with a 50 ms lead.
-    case("a cold change after a Stop starts nothing (#46)", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(2_000 * MS, 1, 2_000 * MS, fast)],
-        &[(0, Some(1_000 * MS))]);
-    case("a second Stop keeps the first end (VG-1)", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(2_000 * MS, 1, 2_000 * MS, Kind::Stop)],
-        &[(0, Some(1_000 * MS))]);
-    case("a start that arrived first, at 2 s, restarts after a Stop at 1 s", &rx,
+    case("a cold change after a Stop starts nothing (#46)", &rx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(2_000 * MS, 1, 2_000 * MS, fast)], &[(0, Some(1_000 * MS))]);
+    case("a second Stop keeps the first end (VG-1)", &rx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(2_000 * MS, 1, 2_000 * MS, Kind::Stop)], &[(0, Some(1_000 * MS))]);
+    case(
+        "a start that arrived first, at 2 s, restarts after a Stop at 1 s",
+        &rx,
         &[item(2_000 * MS, 0, 500 * MS, Kind::Start), item(1_000 * MS, 1, 1_000 * MS, Kind::Stop)],
-        &[(0, Some(1_000 * MS)), (2_000 * MS, None)]);
-    case("stop(); start() restarts a lead after the cut", &rx,
+        &[(0, Some(1_000 * MS)), (2_000 * MS, None)],
+    );
+    case(
+        "stop(); start() restarts a lead after the cut",
+        &rx,
         &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(1_000 * MS, 1, 1_000 * MS, Kind::Start)],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, None)]);
-    case("start(); stop() does not restart", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Start), item(1_000 * MS, 1, 1_000 * MS, Kind::Stop)],
-        &[(0, Some(1_000 * MS))]);
-    case("0 channels and back at once starts a lead after the cut (#49)", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(config(0, 1_000_000))),
-          item(1_000 * MS, 1, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, None)]);
-    case("a Stop before a pending enable from 0 starts nothing (#52)", &stream(Direction::Rx, 0),
+        &[(0, Some(1_000 * MS)), (1_050 * MS, None)],
+    );
+    case("start(); stop() does not restart", &rx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Start), item(1_000 * MS, 1, 1_000 * MS, Kind::Stop)], &[(0, Some(1_000 * MS))]);
+    case(
+        "0 channels and back at once starts a lead after the cut (#49)",
+        &rx,
+        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(config(0, 1_000_000))), item(1_000 * MS, 1, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))],
+        &[(0, Some(1_000 * MS)), (1_050 * MS, None)],
+    );
+    case(
+        "a Stop before a pending enable from 0 starts nothing (#52)",
+        &stream(Direction::Rx, 0),
         &[item(2_000 * MS, 0, 500 * MS, Kind::Cold(config(1, 1_000_000))), item(1_000 * MS, 1, 1_000 * MS, Kind::Stop)],
-        &[]);
-    case("two quick changes give one restart and no empty clock (#53)", &rx,
+        &[],
+    );
+    case(
+        "two quick changes give one restart and no empty clock (#53)",
+        &rx,
         &[item(1_000 * MS, 0, 900 * MS, fast), item(1_010 * MS, 1, 905 * MS, Kind::Cold(config(2, 2_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
-    case("a Stop between e1 and e2 leaves no clock (#53)", &rx,
-        &[item(1_000 * MS, 0, 900 * MS, fast), item(1_020 * MS, 1, 1_020 * MS, Kind::Stop)],
-        &[(0, Some(1_000 * MS))]);
-    case("an enable 500 ms ahead starts at its instant (VF-6)", &stream(Direction::Rx, 0),
-        &[item(1_500 * MS, 0, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(1_500 * MS, None)]);
-    case("an off-lattice Stop rounds up (#33)", &rx,
-        &[item(1_000 * MS + 1, 0, 1_000 * MS + 1, Kind::Stop)],
-        &[(0, Some(1_000 * MS + 1_000))]);
-    case("a loss at a change's instant comes first, a fault being received first (#48)", &rx,
+        &[(0, Some(1_000 * MS)), (1_100 * MS, None)],
+    );
+    case("a Stop between e1 and e2 leaves no clock (#53)", &rx, &[item(1_000 * MS, 0, 900 * MS, fast), item(1_020 * MS, 1, 1_020 * MS, Kind::Stop)], &[(0, Some(1_000 * MS))]);
+    case("an enable 500 ms ahead starts at its instant (VF-6)", &stream(Direction::Rx, 0), &[item(1_500 * MS, 0, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))], &[(1_500 * MS, None)]);
+    case("an off-lattice Stop rounds up (#33)", &rx, &[item(1_000 * MS + 1, 0, 1_000 * MS + 1, Kind::Stop)], &[(0, Some(1_000 * MS + 1_000))]);
+    case(
+        "a loss at a change's instant comes first, a fault being received first (#48)",
+        &rx,
         &[item(1_000 * MS + 1, 1, 900 * MS, fast), item(1_000 * MS + 1, 0, 0, Kind::End { abort: false })],
-        &[(0, Some(1_000 * MS + 1_000))]);
-    case("a loss after a change's instant and before its origin leaves no new clock (#48)", &rx,
+        &[(0, Some(1_000 * MS + 1_000))],
+    );
+    case(
+        "a loss after a change's instant and before its origin leaves no new clock (#48)",
+        &rx,
         &[item(1_000 * MS - 500, 1, 900 * MS, fast), item(1_000 * MS + 200, 0, 0, Kind::End { abort: false })],
-        &[(0, Some(1_000 * MS))]);
+        &[(0, Some(1_000 * MS))],
+    );
 
     // A rate no whole number of root ticks: 3 MS/s is 1 000/3 ticks a sample, its lattice
     // 1 000 ticks (RM-25).
     let third = Stream { config: config(1, 3_000_000), lead: 0, ..rx };
-    case("a cut on a fractional rate is its sample's instant, rounded up", &third,
-        &[item(500, 0, 500, Kind::Stop)], &[(0, Some(667))]);
+    case("a cut on a fractional rate is its sample's instant, rounded up", &third, &[item(500, 0, 500, Kind::Stop)], &[(0, Some(667))]);
     // The cut is a sample index: the sample at 334 ticks is sample 2 (666.7), not sample 1,
     // whose instant rounds up to 334; read back from 667, it would be sample 3.
     let cut = plan(&third, &[item(334, 0, 334, Kind::Stop)]).unwrap()[0].cut;
     assert_eq!(cut, Some(2), "a fractional cut is its sample's index");
-    case("a restart on a fractional rate starts on its lattice", &third,
-        &[item(500, 0, 500, Kind::Cold(config(1, 3_000_000)))], &[(0, Some(667)), (1_000, None)]);
+    case("a restart on a fractional rate starts on its lattice", &third, &[item(500, 0, 500, Kind::Cold(config(1, 3_000_000)))], &[(0, Some(667)), (1_000, None)]);
 
     // VH-4's ready term: one receive call at the old rate (2 000 samples at 400 kS/s, 5 ms)
     // and 3 ms after the cut, then the lead; an enable from no stream has no call.
     let x310 = Stream { config: config(1, 400_000), call: 2_000, allowance: 3 * MS, ..rx };
-    case("a receive restart waits the call in progress at its cut", &x310,
-        &[item(1_000 * MS, 0, 500 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_058 * MS, None)]);
-    case("a receive enable from no stream waits only the lead", &Stream { config: config(0, 400_000), ..x310 },
+    case("a receive restart waits the call in progress at its cut", &x310, &[item(1_000 * MS, 0, 500 * MS, Kind::Cold(config(1, 1_000_000)))], &[(0, Some(1_000 * MS)), (1_058 * MS, None)]);
+    case(
+        "a receive enable from no stream waits only the lead",
+        &Stream { config: config(0, 400_000), ..x310 },
         &[item(1_000 * MS, 0, 1_000 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(1_050 * MS, None)]);
-    case("a transmit restart has no call term", &Stream { direction: Direction::Tx, ..x310 },
+        &[(1_050 * MS, None)],
+    );
+    case(
+        "a transmit restart has no call term",
+        &Stream { direction: Direction::Tx, ..x310 },
         &[item(1_000 * MS, 0, 500 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, None)]);
+        &[(0, Some(1_000 * MS)), (1_050 * MS, None)],
+    );
 
     // The transmit side: a Stop ends bursts, not the clock; a change booked early still
     // waits the lead after its cut; an empty transmit clock is kept, ended at its origin.
-    case("a transmit enable from no stream waits the lead after it is ready (VH-4)", &stream(Direction::Tx, 0),
+    case(
+        "a transmit enable from no stream waits the lead after it is ready (VH-4)",
+        &stream(Direction::Tx, 0),
         &[item(1_000 * MS, 0, 1_020 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(1_070 * MS, None)]);
+        &[(1_070 * MS, None)],
+    );
     case("a transmit Stop ends no clock", &tx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop)], &[(0, None)]);
-    case("transmit 0 channels and back, booked early, starts a lead after the cut", &tx,
-        &[item(1_000 * MS, 0, 100 * MS, Kind::Cold(config(0, 1_000_000))),
-          item(1_000 * MS, 1, 100 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, None)]);
-    case("a second transmit change before the first's origin cuts at that origin (#57)", &tx,
+    case(
+        "transmit 0 channels and back, booked early, starts a lead after the cut",
+        &tx,
+        &[item(1_000 * MS, 0, 100 * MS, Kind::Cold(config(0, 1_000_000))), item(1_000 * MS, 1, 100 * MS, Kind::Cold(config(1, 1_000_000)))],
+        &[(0, Some(1_000 * MS)), (1_050 * MS, None)],
+    );
+    case(
+        "a second transmit change before the first's origin cuts at that origin (#57)",
+        &tx,
         &[item(1_000 * MS, 0, 500 * MS, fast), item(1_010 * MS, 1, 600 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (1_100 * MS, None)]);
+        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (1_100 * MS, None)],
+    );
 
     // VH-2, RM-25: a refused change is removed from the plan and halts the stream until the next
     // cold change; a receive segment it would have begun runs for planning until that change cuts
     // it, and a transmit clock booked for it ends at its origin.
-    case("a refused receive change halts the stream until the next change", &rx,
+    case(
+        "a refused receive change halts the stream until the next change",
+        &rx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (2_050 * MS, None)]);
-    case("a refused transmit change ends its clock at its origin", &tx,
+        &[(0, Some(1_000 * MS)), (2_050 * MS, None)],
+    );
+    case(
+        "a refused transmit change ends its clock at its origin",
+        &tx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (2_050 * MS, None)]);
-    case("a change within one lead of a refused one counts from the refused segment's cut", &rx,
+        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS)), (2_050 * MS, None)],
+    );
+    case(
+        "a change within one lead of a refused one counts from the refused segment's cut",
+        &rx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_010 * MS, 1, 1_005 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
-    case("start_rx resumes a stream a refused change halted", &rx,
+        &[(0, Some(1_000 * MS)), (1_100 * MS, None)],
+    );
+    case(
+        "start_rx resumes a stream a refused change halted",
+        &rx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_500 * MS, 1, 1_500 * MS, Kind::Start)],
-        &[(0, Some(1_000 * MS)), (1_550 * MS, None)]);
-    case("a refused start_rx starts nothing; the next change resumes the stream", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)),
-          item(3_000 * MS, 2, 3_000 * MS, fast)],
-        &[(0, Some(1_000 * MS)), (3_050 * MS, None)]);
-    case("a refused start_rx starts nothing; the next start_rx does", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)),
-          item(3_000 * MS, 2, 3_000 * MS, Kind::Start)],
-        &[(0, Some(1_000 * MS)), (3_050 * MS, None)]);
-    case("a start_rx on a running stream does nothing", &rx,
-        &[item(1_500 * MS, 0, 1_500 * MS, Kind::Start)], &[(0, None)]);
-    case("a refused start_rx leaves the stream halted", &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))],
-        &[(0, Some(1_000 * MS))]);
+        &[(0, Some(1_000 * MS)), (1_550 * MS, None)],
+    );
+    case(
+        "a refused start_rx starts nothing; the next change resumes the stream",
+        &rx,
+        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(3_000 * MS, 2, 3_000 * MS, fast)],
+        &[(0, Some(1_000 * MS)), (3_050 * MS, None)],
+    );
+    case(
+        "a refused start_rx starts nothing; the next start_rx does",
+        &rx,
+        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(3_000 * MS, 2, 3_000 * MS, Kind::Start)],
+        &[(0, Some(1_000 * MS)), (3_050 * MS, None)],
+    );
+    case("a start_rx on a running stream does nothing", &rx, &[item(1_500 * MS, 0, 1_500 * MS, Kind::Start)], &[(0, None)]);
+    case("a refused start_rx leaves the stream halted", &rx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))], &[(0, Some(1_000 * MS))]);
 
     // RM-16: every cut is at or after the first sample not yet delivered; an abort's is it.
-    case("a Stop's cut is floored at what was delivered", &rx,
-        &[delivered(1_002_000, item(1_000 * MS, 0, 1_000 * MS, Kind::Stop))], &[(0, Some(1_002 * MS))]);
-    case("an abort cuts at the first sample not yet delivered", &rx,
-        &[delivered(700_000, item(1_000 * MS, 0, 1_000 * MS, Kind::End { abort: true }))], &[(0, Some(700 * MS))]);
-    case("an abort that knows nothing delivered cuts at its instant", &rx,
+    case("a Stop's cut is floored at what was delivered", &rx, &[delivered(1_002_000, item(1_000 * MS, 0, 1_000 * MS, Kind::Stop))], &[(0, Some(1_002 * MS))]);
+    case("an abort cuts at the first sample not yet delivered", &rx, &[delivered(700_000, item(1_000 * MS, 0, 1_000 * MS, Kind::End { abort: true }))], &[(0, Some(700 * MS))]);
+    case(
+        "an abort that knows nothing delivered cuts at its instant",
+        &rx,
         &[item(1_000 * MS, 0, 1_000 * MS, Kind::End { abort: true }), item(1_500 * MS, 1, 1_500 * MS, Kind::Start)],
-        &[(0, Some(1_000 * MS))]);
+        &[(0, Some(1_000 * MS))],
+    );
 
     // VH-2: a loss after a booked transmit change orphans its clock, which ends at its
     // origin; the receive side has no clock to end.
     let loss = |stream: &Stream| segments(stream, &[item(1_000 * MS, 1, 500 * MS, fast), item(1_020 * MS, 0, 0, Kind::End { abort: false })]);
     assert_eq!(loss(&tx), [(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS))]);
     assert_eq!(loss(&rx), [(0, Some(1_000 * MS))]);
-    case("a loss ends a running transmit stream's bursts, not its clock", &tx,
-        &[item(1_000 * MS, 0, 0, Kind::End { abort: false }), item(1_500 * MS, 1, 1_500 * MS, fast)], &[(0, None)]);
+    case("a loss ends a running transmit stream's bursts, not its clock", &tx, &[item(1_000 * MS, 0, 0, Kind::End { abort: false }), item(1_500 * MS, 1, 1_500 * MS, fast)], &[(0, None)]);
 
     // VH-2: a `cold` change never takes effect before an earlier-arrived one of its stream,
     // its instant floored at that one's and, at it, after it, on both directions.
@@ -330,24 +332,24 @@ fn rm_26_the_timeline_cases() {
     let late = [early(2_000 * MS, 0, 500 * MS, fast), early(1_000 * MS, 1, 600 * MS, Kind::Cold(config(1, 1_000_000)))];
     assert_eq!(ezsdr_radio::timeline::effective(&late, &late[1]), 2_000 * MS);
     assert_eq!(ezsdr_radio::timeline::effective(&late, &late[0]), 2_000 * MS);
-    case("a receive change that arrives after a later one follows it", &rx, &late,
-        &[(0, Some(2_000 * MS)), (2_100 * MS, None)]);
-    case("a transmit change that arrives after a later one follows it", &tx, &late,
-        &[(0, Some(2_000 * MS)), (2_050 * MS, Some(2_050 * MS)), (2_100 * MS, None)]);
+    case("a receive change that arrives after a later one follows it", &rx, &late, &[(0, Some(2_000 * MS)), (2_100 * MS, None)]);
+    case("a transmit change that arrives after a later one follows it", &tx, &late, &[(0, Some(2_000 * MS)), (2_050 * MS, Some(2_050 * MS)), (2_100 * MS, None)]);
     assert_eq!(plan(&rx, &late).unwrap()[1].config, config(1, 1_000_000), "the later-arrived change is in force");
     assert_eq!(ezsdr_radio::timeline::effective(&late, &item(1_000 * MS, 2, 700 * MS, Kind::Stop)), 1_000 * MS, "a Stop is not floored");
 
     // VH-2: a transmit clock is recorded at booking, so a loss before a change booked ahead of
     // it keeps that change's cut and ends its clock at its origin; receive ends at the loss.
     let booked = [item(1_000 * MS, 1, 500 * MS, fast), item(800 * MS, 0, 0, Kind::End { abort: false })];
-    case("a loss before a booked transmit change keeps its cut", &tx, &booked,
-        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS))]);
+    case("a loss before a booked transmit change keeps its cut", &tx, &booked, &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_050 * MS))]);
     case("a loss before a booked receive change ends the stream at the loss", &rx, &booked, &[(0, Some(800 * MS))]);
     // A refused transmit change whose clock a change booked before the refusal already cut
     // keeps that cut.
-    case("a transmit change booked before a refusal keeps its cut of the refused clock", &tx,
+    case(
+        "a transmit change booked before a refusal keeps its cut of the refused clock",
+        &tx,
         &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_100 * MS, 1, 600 * MS, Kind::Cold(config(1, 1_000_000)))],
-        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_100 * MS)), (1_150 * MS, None)]);
+        &[(0, Some(1_000 * MS)), (1_050 * MS, Some(1_100 * MS)), (1_150 * MS, None)],
+    );
 
     // The configuration a segment runs is its change's.
     let planned = plan(&rx, &[item(1_000 * MS, 0, 900 * MS, fast)]).unwrap();
@@ -771,11 +773,7 @@ fn rm_34_a_move_floors_a_later_start_of_the_destination() {
     lines.book(FROM, item(900 * MS, 4, 900 * MS, Kind::Start)).unwrap();
     let cut = released(&lines, FROM, 1, 2).expect("the source now runs to the move");
     assert_eq!(cut, 1_000_000_334, "the source's sample at or after the move's instant");
-    assert!(
-        by(&lines, TO, 3).origin >= cut + 50 * MS,
-        "the destination's start waits the source's release: {:?}",
-        lanes(&lines, TO),
-    );
+    assert!(by(&lines, TO, 3).origin >= cut + 50 * MS, "the destination's start waits the source's release: {:?}", lanes(&lines, TO),);
 }
 
 /// RM-34, VH-2: the release is held apart from the ready, so a transmit change booked before
@@ -783,10 +781,7 @@ fn rm_34_a_move_floors_a_later_start_of_the_destination() {
 /// after that end.
 #[test]
 fn rm_34_a_move_keeps_a_transmit_clock_booked_before_an_end() {
-    let mut lines = lines_of(
-        Stream { direction: Direction::Tx, ..rx_stream(&[0, 1], 1_000_000) },
-        Stream { direction: Direction::Tx, ..rx_stream(&[], 1_000_000) },
-    );
+    let mut lines = lines_of(Stream { direction: Direction::Tx, ..rx_stream(&[0, 1], 1_000_000) }, Stream { direction: Direction::Tx, ..rx_stream(&[], 1_000_000) });
     // A loss at 800 ms, booked before the move: a change booked before it keeps its clock.
     for stream in [FROM, TO] {
         lines.book(stream, item(800 * MS, 0, 0, Kind::End { abort: false })).unwrap();
@@ -802,9 +797,7 @@ fn rm_34_a_move_keeps_a_transmit_clock_booked_before_an_end() {
     assert_eq!(destination.origin, cut + 50 * MS, "the destination waits the source's release: {:?}", lanes(&lines, TO));
     // The release is not the ready: the item's ready is still its booking, which is what told
     // the replay it was booked before the loss.
-    let moved = |stream: StreamKey| {
-        *lines.line(stream).unwrap().items.iter().find(|item| item.seq == 1).expect("the move is booked on both lines")
-    };
+    let moved = |stream: StreamKey| *lines.line(stream).unwrap().items.iter().find(|item| item.seq == 1).expect("the move is booked on both lines");
     assert_eq!(moved(TO).ready, 500 * MS, "the release is held apart from the ready");
     assert_eq!(moved(TO).release, cut, "the lines hold the release");
     assert_eq!(moved(FROM).release, NO_RELEASE, "no move makes the source release anything");
@@ -1138,10 +1131,7 @@ fn rm_34_the_destination_waits_a_stopped_source_s_cut() {
 /// is cut at its 1 Hz sample, 1 s, which the destination waits too.
 #[test]
 fn rm_34_the_destination_waits_an_ended_source_s_cut() {
-    let mut lines = lines_of(
-        Stream { direction: Direction::Tx, ..rx_bare(&[0], 1) },
-        Stream { direction: Direction::Tx, ..rx_bare(&[], 1_000_000) },
-    );
+    let mut lines = lines_of(Stream { direction: Direction::Tx, ..rx_bare(&[0], 1) }, Stream { direction: Direction::Tx, ..rx_bare(&[], 1_000_000) });
     // The loss is received at the Run's start and takes effect at 100 ms; the move is booked at
     // 50 ms, before it, and takes effect at 200 ms, so it is what cuts the clock there.
     lines.book(FROM, item(100 * MS, 0, 0, Kind::End { abort: false })).unwrap();
@@ -1207,11 +1197,7 @@ fn rm_34_a_move_reads_the_source_s_plan_not_its_arrival_order() {
     lines.book(FROM, item(15 * MS, 2, 15 * MS, Kind::Start)).unwrap();
     lines.book(FROM, item(25 * MS, 3, 25 * MS, Kind::Stop)).unwrap();
     assert!(lines.line(FROM).unwrap().plan.iter().all(|segment| segment.by != Some(1)), "off: the move begins no segment");
-    assert_eq!(
-        planned_at(&lines, FROM),
-        [(0, Some(10 * MS)), (20 * MS, Some(30 * MS))],
-        "the segment the later start ran ends at its next 100 Hz sample",
-    );
+    assert_eq!(planned_at(&lines, FROM), [(0, Some(10 * MS)), (20 * MS, Some(30 * MS))], "the segment the later start ran ends at its next 100 Hz sample",);
     assert_eq!(released(&lines, FROM, 0, 1), Some(30 * MS), "that segment released the channel, though it began after the move was booked");
     assert_eq!(by(&lines, TO, 1).origin, 30 * MS, "the destination waits it: {:?}", lanes(&lines, TO));
 }
@@ -1221,10 +1207,7 @@ fn rm_34_a_move_reads_the_source_s_plan_not_its_arrival_order() {
 /// destination starts at its own instant instead of waiting a clock that never ends.
 #[test]
 fn rm_34_a_move_reads_a_transmit_clock_the_loss_left_running() {
-    let mut lines = lines_of(
-        Stream { direction: Direction::Tx, ..rx_bare(&[0], 1_000_000) },
-        Stream { direction: Direction::Tx, ..rx_bare(&[], 1_000_000) },
-    );
+    let mut lines = lines_of(Stream { direction: Direction::Tx, ..rx_bare(&[0], 1_000_000) }, Stream { direction: Direction::Tx, ..rx_bare(&[], 1_000_000) });
     lines.book(FROM, item(100 * MS, 0, 0, Kind::End { abort: false })).unwrap();
     assert_eq!(planned_at(&lines, FROM), [(0, None)], "a loss cuts no transmit clock");
     // The move is booked after the loss, so the source's item takes effect after it and cuts
@@ -1282,11 +1265,7 @@ fn rm_34_a_move_waits_the_greatest_end_not_the_last_one_read() {
     }
     let (e, _) = lines.book_move(FROM, TO, 0, Some(500 * MS), 500 * MS, 5, 0).unwrap();
     assert_eq!(e, 500 * MS);
-    assert_eq!(
-        planned_at(&lines, FROM),
-        [(0, Some(300 * MS)), (400 * MS, Some(500 * MS))],
-        "the segment with no sample is left out, and the move cuts the one from 400 ms",
-    );
+    assert_eq!(planned_at(&lines, FROM), [(0, Some(300 * MS)), (400 * MS, Some(500 * MS))], "the segment with no sample is left out, and the move cuts the one from 400 ms",);
     assert_eq!(released(&lines, FROM, 0, 5), Some(500 * MS), "the greater end, not the omitted segment's 300 ms");
     assert_eq!(by(&lines, TO, 5).origin, 550 * MS, "the destination waits the greater end and its own lead: {:?}", lanes(&lines, TO));
 }
@@ -1312,10 +1291,7 @@ fn rm_34_a_move_does_not_wait_an_omitted_segment_the_source_gains_after_it() {
 /// and a refused move ends each clock at its origin (VH-2).
 #[test]
 fn rm_34_a_move_books_both_transmit_clocks() {
-    let mut lines = lines_of(
-        Stream { direction: Direction::Tx, ..rx_stream(&[0, 1], 1_000_000) },
-        Stream { direction: Direction::Tx, ..rx_stream(&[2], 2_000_000) },
-    );
+    let mut lines = lines_of(Stream { direction: Direction::Tx, ..rx_stream(&[0, 1], 1_000_000) }, Stream { direction: Direction::Tx, ..rx_stream(&[2], 2_000_000) });
     let (e, _) = lines.book_move(FROM, TO, 1, Some(1_000 * MS), 500 * MS, 0, 500 * MS).unwrap();
     assert_eq!(e, 1_000 * MS);
     assert_eq!(by(&lines, FROM, 0).origin, by(&lines, TO, 0).origin, "both clocks at one instant");
@@ -1444,10 +1420,7 @@ fn check_move(lines: &Lines, from: StreamKey, to: StreamKey, channel: u32, seq: 
         if segment.by.is_some_and(|by| by >= seq) {
             checked += 1;
             if let Some(release) = release {
-                assert!(
-                    segment.origin >= release + lead,
-                    "seed {seed}: a destination segment starts before the source's release: {segment:?}, {release}",
-                );
+                assert!(segment.origin >= release + lead, "seed {seed}: a destination segment starts before the source's release: {segment:?}, {release}",);
             }
         }
     }
@@ -1463,10 +1436,7 @@ fn rm_12_a_stream_node_names_its_direction_and_number() {
     assert_eq!(stream_target(&device, &at("radio/rx/s0")), Some((Direction::Rx, 0)));
     assert_eq!(stream_target(&device, &at("radio/tx/s12")), Some((Direction::Tx, 12)));
     assert_eq!(stream_target(&device, &at("radio/rx/s999999999")), Some((Direction::Rx, 999_999_999)));
-    for rejected in [
-        "radio/rx", "radio/tx", "radio/rx/s", "radio/rx/s01", "radio/rx/s0x",
-        "radio/rx/c0", "radio/rx/s1234567890", "radio/s0", "radio/rx/s0/deeper", "radio/other/s0",
-    ] {
+    for rejected in ["radio/rx", "radio/tx", "radio/rx/s", "radio/rx/s01", "radio/rx/s0x", "radio/rx/c0", "radio/rx/s1234567890", "radio/s0", "radio/rx/s0/deeper", "radio/other/s0"] {
         assert_eq!(stream_target(&device, &at(rejected)), None, "{rejected}");
     }
     assert_eq!(stream_target(&at("other"), &at("radio/rx/s0")), None, "another device");
@@ -1520,11 +1490,7 @@ fn rm_25_the_layout_instant_is_floored_at_every_earlier_cold_change() {
         (Some(50), 0, None, &[10], 50, false),
     ];
     for (at, now, start, earlier, e, late) in cases {
-        assert_eq!(
-            ezsdr_radio::timeline::layout_instant(at, now, start, earlier.iter().copied()),
-            (e, late),
-            "at={at:?} now={now} start={start:?} earlier={earlier:?}"
-        );
+        assert_eq!(ezsdr_radio::timeline::layout_instant(at, now, start, earlier.iter().copied()), (e, late), "at={at:?} now={now} start={start:?} earlier={earlier:?}");
     }
 }
 
@@ -1549,11 +1515,7 @@ fn rm_25_the_timed_instant_is_floored_at_every_booked_command_inside_the_window(
         (Some(10), 10, 0, 0, &[10], 10, false),
     ];
     for (at, now, lead, window, earlier, e, late) in cases {
-        assert_eq!(
-            ezsdr_radio::timeline::timed_instant(at, now, lead, window, earlier.iter().copied()),
-            (e, late),
-            "at={at:?} now={now} lead={lead} window={window} earlier={earlier:?}"
-        );
+        assert_eq!(ezsdr_radio::timeline::timed_instant(at, now, lead, window, earlier.iter().copied()), (e, late), "at={at:?} now={now} lead={lead} window={window} earlier={earlier:?}");
     }
 }
 
@@ -1566,11 +1528,7 @@ fn mr_29_a_receive_link_floors_a_command_at_its_t0() {
     let receive = Line::new(Stream { origin: t0, ..stream(Direction::Rx, 1) });
     assert_eq!(ezsdr_radio::timeline::command_instant(Some(&receive), Some(t0 - 2 * MS), t0 - 3 * MS, 0, false), (t0, false));
     let transmit = Line::new(Stream { origin: t0, ..stream(Direction::Tx, 1) });
-    assert_eq!(
-        ezsdr_radio::timeline::command_instant(Some(&transmit), Some(t0 - 2 * MS), t0 - 3 * MS, 0, false),
-        (t0 - 2 * MS, false),
-        "a transmit link takes `max(at, now)`",
-    );
+    assert_eq!(ezsdr_radio::timeline::command_instant(Some(&transmit), Some(t0 - 2 * MS), t0 - 3 * MS, 0, false), (t0 - 2 * MS, false), "a transmit link takes `max(at, now)`",);
 }
 
 #[test]
@@ -1810,8 +1768,11 @@ fn rm_25_a_refused_segment_runs_for_planning_until_the_next_change_cuts_it() {
     let line = case("S1, C1 refused, C2", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(2_000 * MS, 1, 1_500 * MS, one)], &[(0, Some(1_000 * MS)), (2_050 * MS, None)]);
     assert!(line.halted(1_999 * MS) && !line.halted(2_000 * MS), "halted until C2 takes effect");
     case("C2 inside C1's lead", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_010 * MS, 1, 1_005 * MS, one)], &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
-    case("two refusals", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), refused(item(2_000 * MS, 1, 1_500 * MS, one)), item(3_000 * MS, 2, 2_500 * MS, fast)],
-        &[(0, Some(1_000 * MS)), (3_050 * MS, None)]);
+    case(
+        "two refusals",
+        &[refused(item(1_000 * MS, 0, 500 * MS, fast)), refused(item(2_000 * MS, 1, 1_500 * MS, one)), item(3_000 * MS, 2, 2_500 * MS, fast)],
+        &[(0, Some(1_000 * MS)), (3_050 * MS, None)],
+    );
     case("C2 at C1's instant", &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_000 * MS, 1, 1_000 * MS, one)], &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
 }
 
@@ -1833,8 +1794,11 @@ fn rm_25_a_start_after_a_refusal_begins_from_the_refused_segment_s_cut() {
     // A start before the refused segment's origin cuts it with no sample, at that origin.
     case(&rx, &[refused(item(1_000 * MS, 0, 500 * MS, fast)), item(1_010 * MS, 1, 1_010 * MS, Kind::Start)], &[(0, Some(1_000 * MS)), (1_100 * MS, None)]);
     // A refused start_rx is cut by the next one.
-    case(&rx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(2_500 * MS, 2, 2_500 * MS, Kind::Start)],
-        &[(0, Some(1_000 * MS)), (2_550 * MS, None)]);
+    case(
+        &rx,
+        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(2_500 * MS, 2, 2_500 * MS, Kind::Start)],
+        &[(0, Some(1_000 * MS)), (2_550 * MS, None)],
+    );
     // With a receive call of 2 000 samples and 3 ms: the refused segment (2 MS/s) begins at 1 055
     // ms (S1's 1 MS/s call ends at 1 005), is cut at 1 500, and the call it had in progress is
     // 1 ms and the allowance 3: the new segment begins at 1 554 ms.
@@ -1996,7 +1960,13 @@ fn rm_25_a_booking_adds_no_coverage_before_its_start_lead() {
         let mut lines = lines_of(from, to);
         let half = items.len() / 2;
         for (index, booked) in items.iter().enumerate() {
-            let streams = if index == half { vec![None] } else if index % 2 == 0 { vec![Some(FROM)] } else { vec![Some(TO), Some(FROM)] };
+            let streams = if index == half {
+                vec![None]
+            } else if index % 2 == 0 {
+                vec![Some(FROM)]
+            } else {
+                vec![Some(TO), Some(FROM)]
+            };
             for stream in streams {
                 let b = booked.ready;
                 let before = lines.clone();
@@ -2005,7 +1975,12 @@ fn rm_25_a_booking_adds_no_coverage_before_its_start_lead() {
                     None => lines.book_move(FROM, TO, 1, Some(b), b, 1_000_000 + seed, b).is_ok().then_some(b),
                     Some(key) => {
                         // An item booked after the move arrives after it, whichever line it is for.
-                        let offset = match (key == TO, index > half) { (false, false) => 0, (true, false) => 500_000, (false, true) => 2_000_000, (true, true) => 3_000_000 };
+                        let offset = match (key == TO, index > half) {
+                            (false, false) => 0,
+                            (true, false) => 500_000,
+                            (false, true) => 2_000_000,
+                            (true, true) => 3_000_000,
+                        };
                         let item = Item { refused: booked.seq % 5 == 4, seq: booked.seq + offset, ..*booked };
                         lines.book(key, item).unwrap();
                         Some(b)
@@ -2171,11 +2146,7 @@ fn rm_25_a_transmit_refusal_followed_by_other_items_keeps_the_next_origin() {
     let one = Kind::Cold(config(1, 1_000_000));
     // C1 refused (origin 1 050 ms), C2 refused (begins at 1 250 ms behind C1's virtual cut at
     // 1 200), N at 1 500 ms: begins at 1 550 ms, as with no refusal at all.
-    let repeated = [
-        refused(item(1_000 * MS, 0, 500 * MS, two)),
-        refused(item(1_200 * MS, 1, 1_005 * MS, two)),
-        item(1_500 * MS, 2, 1_300 * MS, one),
-    ];
+    let repeated = [refused(item(1_000 * MS, 0, 500 * MS, two)), refused(item(1_200 * MS, 1, 1_005 * MS, two)), item(1_500 * MS, 2, 1_300 * MS, one)];
     let plain = [item(1_000 * MS, 0, 500 * MS, two), item(1_200 * MS, 1, 1_005 * MS, two), item(1_500 * MS, 2, 1_300 * MS, one)];
     let last = |items: &[Item]| segments(&tx, items).last().copied().unwrap();
     assert_eq!(last(&repeated), (1_550 * MS, None));

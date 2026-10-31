@@ -69,18 +69,7 @@ impl<'de> Deserialize<'de> for ClockRelation {
             valid: Validity,
         }
         let r = Raw::deserialize(d)?;
-        ClockRelation::new(
-            r.source,
-            r.target,
-            r.measured_at,
-            r.offset,
-            r.drift,
-            r.drift_uncertainty,
-            r.uncertainty,
-            r.method,
-            r.valid,
-        )
-        .map_err(|e| serde::de::Error::custom(format!("TM-14: {e}")))
+        ClockRelation::new(r.source, r.target, r.measured_at, r.offset, r.drift, r.drift_uncertainty, r.uncertainty, r.method, r.valid).map_err(|e| serde::de::Error::custom(format!("TM-14: {e}")))
     }
 }
 
@@ -136,17 +125,7 @@ impl ClockRelation {
         if valid.to.is_some_and(|to| to.ticks < valid.from.ticks) {
             return bad("valid.to", "precedes valid.from");
         }
-        Ok(ClockRelation {
-            source,
-            target,
-            measured_at,
-            offset,
-            drift,
-            drift_uncertainty,
-            uncertainty,
-            method,
-            valid,
-        })
+        Ok(ClockRelation { source, target, measured_at, offset, drift, drift_uncertainty, uncertainty, method, valid })
     }
 
     /// The domain being converted from (TM-14).
@@ -213,11 +192,7 @@ impl ClockRelation {
     /// magnitude. The Kernel does not chain relations (decision T13).
     ///
     /// Rule: TM-14.
-    pub fn convert(
-        &self,
-        registry: &ClockRegistry,
-        t: TimePoint,
-    ) -> Result<UncertainTimePoint, TimeError> {
+    pub fn convert(&self, registry: &ClockRegistry, t: TimePoint) -> Result<UncertainTimePoint, TimeError> {
         // `new` fixed the relation's own shape; only `t` is checked here.
         t.ticks_in(self.source)?;
         if t.try_cmp(self.valid.from)? == std::cmp::Ordering::Less {
@@ -234,19 +209,10 @@ impl ClockRelation {
         let had_remainder = matches!(rescaled, Rescaled::Inexact { .. });
 
         let drift_ticks = round_away(delta_t.ticks as f64 * self.drift)?;
-        let nominal = self
-            .offset
-            .checked_add(delta_t)?
-            .checked_add(Duration::new(self.target, drift_ticks))?;
+        let nominal = self.offset.checked_add(delta_t)?.checked_add(Duration::new(self.target, drift_ticks))?;
 
         let drift_error = ceil_non_negative(delta_t.ticks.unsigned_abs() as f64 * self.drift_uncertainty)?;
-        let ticks = self
-            .uncertainty
-            .ticks
-            .checked_add(drift_error)
-            .and_then(|v| v.checked_add(1))
-            .and_then(|v| v.checked_add(i64::from(had_remainder)))
-            .ok_or(TimeError::Overflow)?;
+        let ticks = self.uncertainty.ticks.checked_add(drift_error).and_then(|v| v.checked_add(1)).and_then(|v| v.checked_add(i64::from(had_remainder))).ok_or(TimeError::Overflow)?;
         Ok(UncertainTimePoint { nominal, uncertainty: Duration::new(self.target, ticks) })
     }
 }

@@ -9,18 +9,13 @@ use std::collections::BTreeMap;
 use ezsdr_kernel::binding::satisfies;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
 use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
-use ezsdr_kernel::module_api::{
-    CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource, UpdateClass, Version,
-};
-use ezsdr_kernel::spec::{CapabilityValue, Constraint, Coercion, Ident, Key, Namespace, Scalar, Value};
+use ezsdr_kernel::module_api::{CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource, UpdateClass, Version};
+use ezsdr_kernel::spec::{CapabilityValue, Coercion, Constraint, Ident, Key, Namespace, Scalar, Value};
 
-use crate::device::{coerce_antenna, coerce_numeric, num, rejected, Grid};
+use crate::device::{Grid, coerce_antenna, coerce_numeric, num, rejected};
 use crate::timeline::Channels;
 use crate::x3xx::{self, FrontEnd, Image, ProviderTerms, Slot};
-use crate::{
-    keys, Concrete, PerformanceEnvelope, RadioEnvelope, TimingEnvelope, RX_STREAM_KIND,
-    TX_STREAM_KIND,
-};
+use crate::{Concrete, PerformanceEnvelope, RX_STREAM_KIND, RadioEnvelope, TX_STREAM_KIND, TimingEnvelope, keys};
 
 /// The profile name of a description that has no motherboard (RM-29).
 pub const IDEAL_PROFILE: &str = "ideal";
@@ -132,12 +127,8 @@ fn one_int(selector: &BTreeMap<Ident, Value>, name: &str, allowed: &[i64], defau
         None => Ok(default),
         Some(Value::List(values)) => match values.as_slice() {
             [Scalar::Int(value)] if allowed.contains(value) => Ok(*value),
-            [Scalar::Int(value)] => Err(format!(
-                "the layout's `{name}` at timekeeper 0 must be one of {allowed:?}, not {value}"
-            )),
-            _ => Err(format!(
-                "the layout's `{name}` must be a one-element list, one entry per timekeeper"
-            )),
+            [Scalar::Int(value)] => Err(format!("the layout's `{name}` at timekeeper 0 must be one of {allowed:?}, not {value}")),
+            _ => Err(format!("the layout's `{name}` must be a one-element list, one entry per timekeeper")),
         },
         Some(_) => Err(format!("the layout's `{name}` must be a list of integers")),
     }
@@ -149,27 +140,15 @@ pub fn from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, String
         None => x3xx::MASTER_CLOCK_HZ,
         Some(Value::List(values)) => match values.as_slice() {
             [Scalar::Int(other)] if *other == x3xx::MASTER_CLOCK_HZ as i64 => x3xx::MASTER_CLOCK_HZ,
-            [Scalar::Int(other)] => {
-                return Err(format!(
-                    "the layout's `master_clock_hz` at timekeeper 0 must be {}, not {other}",
-                    x3xx::MASTER_CLOCK_HZ
-                ))
-            }
-            _ => {
-                return Err(format!(
-                    "the layout's `master_clock_hz` must be the one-element list [{}]",
-                    x3xx::MASTER_CLOCK_HZ
-                ))
-            }
+            [Scalar::Int(other)] => return Err(format!("the layout's `master_clock_hz` at timekeeper 0 must be {}, not {other}", x3xx::MASTER_CLOCK_HZ)),
+            _ => return Err(format!("the layout's `master_clock_hz` must be the one-element list [{}]", x3xx::MASTER_CLOCK_HZ)),
         },
         Some(_) => return Err("the layout's `master_clock_hz` must be a list of integers".to_owned()),
     };
     let image = match selector.get(&ident("image")) {
         None => Image::Hg,
         Some(Value::List(values)) => match values.as_slice() {
-            [Scalar::Str(name)] => {
-                Image::parse(name).ok_or_else(|| format!("`{name}` is not an FPGA image; `hg` or `xg`"))?
-            }
+            [Scalar::Str(name)] => Image::parse(name).ok_or_else(|| format!("`{name}` is not an FPGA image; `hg` or `xg`"))?,
             _ => return Err("the layout's `image` must be the one-element list [`hg`|`xg`]".to_owned()),
         },
         Some(_) => return Err("the layout's `image` must be a list of strings".to_owned()),
@@ -179,11 +158,7 @@ pub fn from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, String
 
     let list = |name: &str| -> Result<Vec<Element>, String> {
         let values = match selector.get(&ident(name)) {
-            None => {
-                return Err(format!(
-                    "the `x3xx` selector needs `{name}`, its channel layout"
-                ))
-            }
+            None => return Err(format!("the `x3xx` selector needs `{name}`, its channel layout")),
             Some(Value::List(values)) => values,
             Some(_) => return Err(format!("the layout's `{name}` must be a list of strings")),
         };
@@ -192,9 +167,7 @@ pub fn from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, String
             .enumerate()
             .map(|(position, value)| match value {
                 Scalar::Str(raw) => element(raw, name, position),
-                _ => Err(format!(
-                    "the layout's `{name}` element at position {position} must be a string"
-                )),
+                _ => Err(format!("the layout's `{name}` element at position {position} must be a string")),
             })
             .collect()
     };
@@ -212,12 +185,8 @@ pub fn ideal_from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, 
         match selector.get(&ident(name)) {
             None => Ok(default),
             Some(Value::Scalar(Scalar::Int(value))) if (0..=64).contains(value) => Ok(*value as u32),
-            Some(Value::Scalar(Scalar::Int(value))) => Err(format!(
-                "the `ideal` selector's `{name}` is a channel count in 0…64, not {value}"
-            )),
-            Some(_) => Err(format!(
-                "the `ideal` selector's `{name}` is a channel count, an integer"
-            )),
+            Some(Value::Scalar(Scalar::Int(value))) => Err(format!("the `ideal` selector's `{name}` is a channel count in 0…64, not {value}")),
+            Some(_) => Err(format!("the `ideal` selector's `{name}` is a channel count, an integer")),
         }
     };
     Ok(Layout::Ideal { rx: count("rx", 1)?, tx: count("tx", 0)? })
@@ -228,43 +197,22 @@ pub fn ideal_from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, 
 fn element(raw: &str, direction: &str, position: usize) -> Result<Element, String> {
     let fields: Vec<&str> = raw.split(':').collect();
     let Ok([timekeeper, slot, board, frontend]) = <[&str; 4]>::try_from(fields.as_slice()) else {
-        return Err(format!(
-            "the layout's `{direction}` element at position {position} `{raw}` is not `<timekeeper>:<slot>:<board>:<frontend>`"
-        ));
+        return Err(format!("the layout's `{direction}` element at position {position} `{raw}` is not `<timekeeper>:<slot>:<board>:<frontend>`"));
     };
-    let timekeeper: u32 = timekeeper.parse().map_err(|_| {
-        format!("the layout's `{direction}` element at position {position} `{raw}` has no timekeeper number")
-    })?;
+    let timekeeper: u32 = timekeeper.parse().map_err(|_| format!("the layout's `{direction}` element at position {position} `{raw}` has no timekeeper number"))?;
     if timekeeper != 0 {
-        return Err(format!(
-            "the layout's `{direction}` element at position {position} `{raw}` names timekeeper {timekeeper}; this stage has one device, 0"
-        ));
+        return Err(format!("the layout's `{direction}` element at position {position} `{raw}` names timekeeper {timekeeper}; this stage has one device, 0"));
     }
-    let slot = Slot::parse(slot).ok_or_else(|| {
-        format!("the layout's `{direction}` element at position {position} `{raw}` names slot `{slot}`, not A or B")
-    })?;
-    let front_end = FrontEnd::parse(board).ok_or_else(|| {
-        format!(
-            "the layout's `{direction}` element at position {position} `{raw}` names the board `{board}`, which this stage does not describe"
-        )
-    })?;
-    let frontend: u32 = frontend.parse().map_err(|_| {
-        format!("the layout's `{direction}` element at position {position} `{raw}` has no front end number")
-    })?;
+    let slot = Slot::parse(slot).ok_or_else(|| format!("the layout's `{direction}` element at position {position} `{raw}` names slot `{slot}`, not A or B"))?;
+    let front_end = FrontEnd::parse(board).ok_or_else(|| format!("the layout's `{direction}` element at position {position} `{raw}` names the board `{board}`, which this stage does not describe"))?;
+    let frontend: u32 = frontend.parse().map_err(|_| format!("the layout's `{direction}` element at position {position} `{raw}` has no front end number"))?;
     if !front_end.frontends().contains(&frontend) {
-        return Err(format!(
-            "the layout's `{direction}` element at position {position} `{raw}` names front end {frontend}; `{}` has {:?}",
-            front_end.name(),
-            front_end.frontends()
-        ));
+        return Err(format!("the layout's `{direction}` element at position {position} `{raw}` names front end {frontend}; `{}` has {:?}", front_end.name(), front_end.frontends()));
     }
     let direction_ok = if direction == "rx" { front_end.receives() } else { front_end.transmits() };
     if !direction_ok {
         let carries = if direction == "rx" { "receive" } else { "transmit" };
-        return Err(format!(
-            "the layout's `{direction}` element at position {position} `{raw}` names `{}`, which does not {carries}",
-            front_end.name()
-        ));
+        return Err(format!("the layout's `{direction}` element at position {position} `{raw}` names `{}`, which does not {carries}", front_end.name()));
     }
     Ok(Element { timekeeper, slot, front_end, frontend })
 }
@@ -299,10 +247,7 @@ fn check_layout(layout: &Layout) -> Result<(), String> {
         }
     }
     for (position, rx_element) in rx.iter().enumerate() {
-        let Some(tx_element) = tx
-            .iter()
-            .find(|tx_element| tx_element.slot == rx_element.slot && tx_element.timekeeper == rx_element.timekeeper)
-        else {
+        let Some(tx_element) = tx.iter().find(|tx_element| tx_element.slot == rx_element.slot && tx_element.timekeeper == rx_element.timekeeper) else {
             continue;
         };
         let duplex = rx_element.front_end.board().is_some() || tx_element.front_end.board().is_some();
@@ -326,16 +271,8 @@ fn check_layout(layout: &Layout) -> Result<(), String> {
     let elements: Vec<&Element> = rx.iter().chain(tx.iter()).collect();
     for (position, element) in elements.iter().enumerate() {
         for other in &elements[position + 1..] {
-            if element.timekeeper == other.timekeeper
-                && element.front_end != other.front_end
-                && !x3xx::boards_compatible(element.front_end, other.front_end)
-            {
-                return Err(format!(
-                    "the layout's boards `{}` and `{}` cannot share timekeeper {}'s clocks",
-                    element.front_end.name(),
-                    other.front_end.name(),
-                    element.timekeeper
-                ));
+            if element.timekeeper == other.timekeeper && element.front_end != other.front_end && !x3xx::boards_compatible(element.front_end, other.front_end) {
+                return Err(format!("the layout's boards `{}` and `{}` cannot share timekeeper {}'s clocks", element.front_end.name(), other.front_end.name(), element.timekeeper));
             }
         }
     }
@@ -371,27 +308,22 @@ impl Description {
     fn build(layout: &Layout, block_len: u32, terms: &ProviderTerms, timing: TimingEnvelope) -> Description {
         timing.check_start_lead().unwrap_or_else(|error| panic!("{error}"));
         match layout {
-            Layout::X3xx { master_clock_hz, link_gbps, rx, tx, .. } => {
-                Description {
-                    profile: x3xx::profile_ref(),
-                    rates: Grid::Values(x3xx::rates(*master_clock_hz)),
-                    whole_hertz_rates: false,
-                    rx: rx.iter().map(|element| Channel::of(*element, true, *master_clock_hz)).collect(),
-                    tx: tx.iter().map(|element| Channel::of(*element, false, *master_clock_hz)).collect(),
-                    full_duplex: true,
-                    hardware_time: true,
-                    repeat_max_samples: terms.repeat_max_samples,
-                    repeat_align_samples: terms.repeat_align_samples,
-                    block_len,
-                    timing,
-                    performance: x3xx::performance(*link_gbps),
-                }
-            }
+            Layout::X3xx { master_clock_hz, link_gbps, rx, tx, .. } => Description {
+                profile: x3xx::profile_ref(),
+                rates: Grid::Values(x3xx::rates(*master_clock_hz)),
+                whole_hertz_rates: false,
+                rx: rx.iter().map(|element| Channel::of(*element, true, *master_clock_hz)).collect(),
+                tx: tx.iter().map(|element| Channel::of(*element, false, *master_clock_hz)).collect(),
+                full_duplex: true,
+                hardware_time: true,
+                repeat_max_samples: terms.repeat_max_samples,
+                repeat_align_samples: terms.repeat_align_samples,
+                block_len,
+                timing,
+                performance: x3xx::performance(*link_gbps),
+            },
             Layout::Ideal { rx, tx } => Description {
-                profile: ProfileRef {
-                    name: IDEAL_PROFILE.to_owned(),
-                    version: IDEAL_PROFILE_VERSION,
-                },
+                profile: ProfileRef { name: IDEAL_PROFILE.to_owned(), version: IDEAL_PROFILE_VERSION },
                 rates: Grid::Integer { lo: 1, hi: 1_000_000_000 },
                 whole_hertz_rates: true,
                 rx: (0..*rx).map(|_| Channel::ideal(true)).collect(),
@@ -402,31 +334,21 @@ impl Description {
                 repeat_align_samples: 1,
                 block_len,
                 timing,
-                performance: PerformanceEnvelope {
-                    rx_bytes_per_s: 1_i64 << 62,
-                    tx_bytes_per_s: 1_i64 << 62,
-                    wire_bytes_per_sample: 8,
-                },
+                performance: PerformanceEnvelope { rx_bytes_per_s: 1_i64 << 62, tx_bytes_per_s: 1_i64 << 62, wire_bytes_per_sample: 8 },
             },
         }
     }
 
     /// The envelope a radio Provider records (RM-20).
     pub fn envelope(&self) -> RadioEnvelope {
-        RadioEnvelope {
-            profile: self.profile.clone(),
-            timing: self.timing,
-            performance: self.performance,
-        }
+        RadioEnvelope { profile: self.profile.clone(), timing: self.timing, performance: self.performance }
     }
 
     /// RM-29's tree: one stream node per channel and direction, and one receive port per
     /// receive stream. Channel and timekeeper nodes are not built.
     pub fn tree(&self, device: &ResourceId, memory_domain: MemoryDomainId) -> Resource {
         let stream = |direction: &str, k: usize, kind: &str| Resource {
-            id: device
-                .child(&format!("{direction}/s{k}"))
-                .expect("a valid stream id"),
+            id: device.child(&format!("{direction}/s{k}")).expect("a valid stream id"),
             kind: Namespace::parse(kind).expect("a radio stream kind"),
             capabilities: BTreeMap::new(),
             children: Vec::new(),
@@ -438,10 +360,7 @@ impl Description {
             id: device.clone(),
             kind: Namespace::parse(crate::DEVICE_KIND).expect("the radio device kind"),
             capabilities: self.capabilities(),
-            children: (0..self.rx.len())
-                .map(|k| stream("rx", k, RX_STREAM_KIND))
-                .chain((0..self.tx.len()).map(|k| stream("tx", k, TX_STREAM_KIND)))
-                .collect(),
+            children: (0..self.rx.len()).map(|k| stream("rx", k, RX_STREAM_KIND)).chain((0..self.tx.len()).map(|k| stream("tx", k, TX_STREAM_KIND))).collect(),
             ports: (0..self.rx.len())
                 .map(|k| Port {
                     name: Ident::parse(&format!("rx{k}")).expect("a receive port name"),
@@ -463,40 +382,14 @@ impl Description {
             let count = channels.len() as i64;
             for (number, channel) in channels.iter().enumerate() {
                 let number = number as u32;
-                capabilities.insert(
-                    channel_setting(direction, number, "frequency_hz"),
-                    range(num(channel.frequency.min()), num(channel.frequency.max())),
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "gain_db"),
-                    range(num(channel.gain.min()), num(channel.gain.max())),
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "antenna"),
-                    CapabilityValue::AnyOf {
-                        values: channel.antennas.iter().map(|name| Scalar::from(name.as_str())).collect(),
-                    },
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "stream"),
-                    range(Scalar::Int(-1), Scalar::Int(count - 1)),
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "frequency_step_hz"),
-                    one(num(channel.frequency.step())),
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "gain_step_db"),
-                    one(num(channel.gain.step())),
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "phase_behavior_on_retune"),
-                    one(Scalar::from(channel.phase_behavior_on_retune.as_str())),
-                );
-                capabilities.insert(
-                    channel_setting(direction, number, "path_delay_samples"),
-                    one(Scalar::Int(channel.path_delay_samples)),
-                );
+                capabilities.insert(channel_setting(direction, number, "frequency_hz"), range(num(channel.frequency.min()), num(channel.frequency.max())));
+                capabilities.insert(channel_setting(direction, number, "gain_db"), range(num(channel.gain.min()), num(channel.gain.max())));
+                capabilities.insert(channel_setting(direction, number, "antenna"), CapabilityValue::AnyOf { values: channel.antennas.iter().map(|name| Scalar::from(name.as_str())).collect() });
+                capabilities.insert(channel_setting(direction, number, "stream"), range(Scalar::Int(-1), Scalar::Int(count - 1)));
+                capabilities.insert(channel_setting(direction, number, "frequency_step_hz"), one(num(channel.frequency.step())));
+                capabilities.insert(channel_setting(direction, number, "gain_step_db"), one(num(channel.gain.step())));
+                capabilities.insert(channel_setting(direction, number, "phase_behavior_on_retune"), one(Scalar::from(channel.phase_behavior_on_retune.as_str())));
+                capabilities.insert(channel_setting(direction, number, "path_delay_samples"), one(Scalar::Int(channel.path_delay_samples)));
             }
             for k in 0..channels.len() {
                 capabilities.insert(stream_setting(direction, k as u32), rates(&self.rates));
@@ -505,10 +398,7 @@ impl Description {
         for (name, value) in [
             (keys::FULL_DUPLEX, Scalar::Bool(self.full_duplex)),
             (keys::HARDWARE_TIME, Scalar::Bool(self.hardware_time)),
-            (
-                keys::TX_REPEAT_MAX_SAMPLES,
-                Scalar::Int(i64::try_from(self.repeat_max_samples).expect("a profile limit fits i64")),
-            ),
+            (keys::TX_REPEAT_MAX_SAMPLES, Scalar::Int(i64::try_from(self.repeat_max_samples).expect("a profile limit fits i64"))),
             (keys::TX_REPEAT_ALIGN_SAMPLES, Scalar::Int(self.repeat_align_samples as i64)),
             (keys::RX_BLOCK_LEN, Scalar::Int(i64::from(self.block_len))),
             (keys::MIN_TIMED_COMMAND_LEAD_NS, Scalar::Int(self.timing.min_timed_command_lead_ns)),
@@ -536,25 +426,13 @@ impl Description {
             let channels = direction.channels(self);
             for (number, channel) in channels.iter().enumerate() {
                 let number = number as u32;
-                defaults.insert(
-                    channel_setting(direction, number, "frequency_hz"),
-                    Value::from(num(channel.default_frequency_hz)),
-                );
+                defaults.insert(channel_setting(direction, number, "frequency_hz"), Value::from(num(channel.default_frequency_hz)));
                 defaults.insert(channel_setting(direction, number, "gain_db"), Value::from(num(0.0)));
-                defaults.insert(
-                    channel_setting(direction, number, "antenna"),
-                    Value::from(channel.default_antenna.as_str()),
-                );
-                defaults.insert(
-                    channel_setting(direction, number, "stream"),
-                    Value::from(default_stream(direction, number)),
-                );
+                defaults.insert(channel_setting(direction, number, "antenna"), Value::from(channel.default_antenna.as_str()));
+                defaults.insert(channel_setting(direction, number, "stream"), Value::from(default_stream(direction, number)));
             }
             for k in 0..channels.len() {
-                defaults.insert(
-                    stream_setting(direction, k as u32),
-                    Value::from(num(DEFAULT_SAMPLE_RATE_HZ)),
-                );
+                defaults.insert(stream_setting(direction, k as u32), Value::from(num(DEFAULT_SAMPLE_RATE_HZ)));
             }
         }
         defaults
@@ -582,32 +460,19 @@ impl Description {
     }
 
     /// RM-30's, RM-31's and RM-32's coercion; pure (MA-11).
-    pub fn coerce(
-        &self,
-        device: &ResourceId,
-        request: &Requested,
-    ) -> Result<CoerceReport, ModuleError> {
+    pub fn coerce(&self, device: &ResourceId, request: &Requested) -> Result<CoerceReport, ModuleError> {
         if request.resource != *device {
-            return Err(ModuleError::rejected(format!(
-                "RM-30: the request names {}, not this device",
-                request.resource
-            )));
+            return Err(ModuleError::rejected(format!("RM-30: the request names {}, not this device", request.resource)));
         }
         let mut report = CoerceReport::default();
         let capabilities = self.capabilities();
         for (key, constraint) in &request.constraints {
             match crate::concrete(key) {
-                Some(Concrete::Channel { rx, number, leaf }) => {
-                    self.coerce_channel(Direction::of(rx), number, leaf, key, constraint, &mut report)
-                }
-                Some(Concrete::Stream { rx, number }) => {
-                    self.coerce_stream_rate(Direction::of(rx), number, key, constraint, &mut report)
-                }
+                Some(Concrete::Channel { rx, number, leaf }) => self.coerce_channel(Direction::of(rx), number, leaf, key, constraint, &mut report),
+                Some(Concrete::Stream { rx, number }) => self.coerce_stream_rate(Direction::of(rx), number, key, constraint, &mut report),
                 None => match capabilities.get(key) {
                     Some(capability) => coerce_capability(key, constraint, capability, &mut report),
-                    None => report
-                        .rejected
-                        .push(rejected(key, constraint, "RM-4: not a radio key".to_owned())),
+                    None => report.rejected.push(rejected(key, constraint, "RM-4: not a radio key".to_owned())),
                 },
             }
         }
@@ -623,63 +488,29 @@ impl Description {
             if report.rejected.iter().any(|rejection| rejection.key == key) {
                 continue;
             }
-            let requested = request
-                .constraints
-                .get(&key)
-                .cloned()
-                .unwrap_or(Constraint::Present {});
+            let requested = request.constraints.get(&key).cloned().unwrap_or(Constraint::Present {});
             report.rejected.push(RejectedRequest { key, requested, reason });
         }
         report.warnings.clear();
         Ok(report)
     }
 
-    fn coerce_channel(
-        &self,
-        direction: Direction,
-        number: u32,
-        leaf: &str,
-        key: &Key,
-        constraint: &Constraint,
-        report: &mut CoerceReport,
-    ) {
+    fn coerce_channel(&self, direction: Direction, number: u32, leaf: &str, key: &Key, constraint: &Constraint, report: &mut CoerceReport) {
         let channels = direction.channels(self);
         let Some(channel) = channels.get(number as usize) else {
-            report.rejected.push(rejected(
-                key,
-                constraint,
-                format!("RM-4: no such channel c{number}"),
-            ));
+            report.rejected.push(rejected(key, constraint, format!("RM-4: no such channel c{number}")));
             return;
         };
         let result = match leaf {
-            "frequency_hz" => coerce_numeric(
-                key,
-                constraint,
-                &channel.frequency,
-                Some(&Value::from(num(channel.default_frequency_hz))),
-                false,
-            ),
-            "gain_db" => coerce_numeric(
-                key,
-                constraint,
-                &channel.gain,
-                Some(&Value::from(num(0.0))),
-                false,
-            ),
-            "antenna" => coerce_antenna(
-                constraint,
-                &channel.antennas,
-                Some(&Value::from(channel.default_antenna.as_str())),
-            ),
+            "frequency_hz" => coerce_numeric(key, constraint, &channel.frequency, Some(&Value::from(num(channel.default_frequency_hz))), false),
+            "gain_db" => coerce_numeric(key, constraint, &channel.gain, Some(&Value::from(num(0.0))), false),
+            "antenna" => coerce_antenna(constraint, &channel.antennas, Some(&Value::from(channel.default_antenna.as_str()))),
             "stream" => coerce_stream(constraint, channels.len() as i64 - 1, default_stream(direction, number)),
             _ => {
                 let capability = match leaf {
                     "frequency_step_hz" => CapabilityValue::One { value: num(channel.frequency.step()) },
                     "gain_step_db" => CapabilityValue::One { value: num(channel.gain.step()) },
-                    "phase_behavior_on_retune" => CapabilityValue::One {
-                        value: Scalar::from(channel.phase_behavior_on_retune.as_str()),
-                    },
+                    "phase_behavior_on_retune" => CapabilityValue::One { value: Scalar::from(channel.phase_behavior_on_retune.as_str()) },
                     _ => CapabilityValue::One { value: Scalar::Int(channel.path_delay_samples) },
                 };
                 coerce_capability(key, constraint, &capability, report);
@@ -697,29 +528,12 @@ impl Description {
         }
     }
 
-    fn coerce_stream_rate(
-        &self,
-        direction: Direction,
-        number: u32,
-        key: &Key,
-        constraint: &Constraint,
-        report: &mut CoerceReport,
-    ) {
+    fn coerce_stream_rate(&self, direction: Direction, number: u32, key: &Key, constraint: &Constraint, report: &mut CoerceReport) {
         if number as usize >= direction.channels(self).len() {
-            report.rejected.push(rejected(
-                key,
-                constraint,
-                format!("RM-4: no such stream s{number}"),
-            ));
+            report.rejected.push(rejected(key, constraint, format!("RM-4: no such stream s{number}")));
             return;
         }
-        match coerce_numeric(
-            key,
-            constraint,
-            &self.rates,
-            Some(&Value::from(num(DEFAULT_SAMPLE_RATE_HZ))),
-            self.whole_hertz_rates,
-        ) {
+        match coerce_numeric(key, constraint, &self.rates, Some(&Value::from(num(DEFAULT_SAMPLE_RATE_HZ))), self.whole_hertz_rates) {
             Ok((value, coercion)) => {
                 report.applied.insert(key.clone(), value);
                 if let Some(coercion) = coercion {
@@ -750,10 +564,7 @@ impl Description {
         }
         let key = match crate::concrete(violation)? {
             Concrete::Channel { rx: true, number, leaf: "antenna" } => self.duplex_stream_key(number),
-            Concrete::Stream { rx, .. } => self
-                .direction_keys(Direction::of(rx))
-                .into_iter()
-                .find(|key| request.constraints.contains_key(key)),
+            Concrete::Stream { rx, .. } => self.direction_keys(Direction::of(rx)).into_iter().find(|key| request.constraints.contains_key(key)),
             _ => None,
         }?;
         request.constraints.contains_key(&key).then_some(key)
@@ -765,8 +576,7 @@ impl Description {
         let rx = self.rx.get(number as usize)?.element?;
         self.tx.iter().enumerate().find_map(|(tx_number, tx)| {
             let tx = tx.element?;
-            (tx.timekeeper == rx.timekeeper && tx.slot == rx.slot && tx.front_end == rx.front_end)
-                .then(|| channel_setting(Direction::Tx, tx_number as u32, "stream"))
+            (tx.timekeeper == rx.timekeeper && tx.slot == rx.slot && tx.front_end == rx.front_end).then(|| channel_setting(Direction::Tx, tx_number as u32, "stream"))
         })
     }
 
@@ -774,10 +584,7 @@ impl Description {
     /// membership (RM-32).
     fn direction_keys(&self, direction: Direction) -> Vec<Key> {
         let count = direction.channels(self).len();
-        (0..count)
-            .map(|k| stream_setting(direction, k as u32))
-            .chain((0..count).map(|number| channel_setting(direction, number as u32, "stream")))
-            .collect()
+        (0..count).map(|k| stream_setting(direction, k as u32)).chain((0..count).map(|number| channel_setting(direction, number as u32, "stream"))).collect()
     }
 
     /// RM-31 on `configuration`: every receive channel of a duplex board whose transmit
@@ -798,27 +605,17 @@ impl Description {
                 let Some(rx_element) = rx.element else {
                     continue;
                 };
-                if rx_element.timekeeper != tx_element.timekeeper
-                    || rx_element.slot != tx_element.slot
-                    || rx_element.front_end != tx_element.front_end
-                {
+                if rx_element.timekeeper != tx_element.timekeeper || rx_element.slot != tx_element.slot || rx_element.front_end != tx_element.front_end {
                     continue;
                 }
-                let Some(antenna) = configuration
-                    .get(&channel_setting(Direction::Rx, rx_number as u32, "antenna"))
-                    .and_then(Value::as_scalar)
-                    .and_then(text)
-                else {
+                let Some(antenna) = configuration.get(&channel_setting(Direction::Rx, rx_number as u32, "antenna")).and_then(Value::as_scalar).and_then(text) else {
                     continue;
                 };
                 if antenna == "RX2" {
                     continue;
                 }
                 let key = channel_setting(Direction::Rx, rx_number as u32, "antenna");
-                let reason = format!(
-                    "RM-31: receive channel c{rx_number} of `{}` cannot use antenna {antenna} while transmit channel c{tx_number} is in a stream",
-                    board.name()
-                );
+                let reason = format!("RM-31: receive channel c{rx_number} of `{}` cannot use antenna {antenna} while transmit channel c{tx_number} is in a stream", board.name());
                 if !violations.iter().any(|(existing, _)| *existing == key) {
                     violations.push((key, reason));
                 }
@@ -836,14 +633,8 @@ impl Description {
             let mut need = 0.0;
             let mut first = None;
             for k in 0..count {
-                let members = (0..count)
-                    .filter(|number| stream_of(configuration, direction, *number as u32) == k as i64)
-                    .count();
-                let rate = configuration
-                    .get(&stream_setting(direction, k as u32))
-                    .and_then(Value::as_scalar)
-                    .and_then(numeric)
-                    .unwrap_or(0.0);
+                let members = (0..count).filter(|number| stream_of(configuration, direction, *number as u32) == k as i64).count();
+                let rate = configuration.get(&stream_setting(direction, k as u32)).and_then(Value::as_scalar).and_then(numeric).unwrap_or(0.0);
                 if members > 0 && first.is_none() {
                     first = Some(k as u32);
                 }
@@ -857,10 +648,7 @@ impl Description {
             let Some(k) = first else {
                 continue;
             };
-            violations.push((
-                stream_setting(direction, k),
-                format!("RM-32: {} needs {need} B/s, one link carries {cap}", direction.name()),
-            ));
+            violations.push((stream_setting(direction, k), format!("RM-32: {} needs {need} B/s, one link carries {cap}", direction.name())));
         }
         violations
     }
@@ -887,11 +675,7 @@ impl Channel {
             element: None,
             frequency: Grid::Step { lo: 0.0, hi: 1_000_000_000_000.0, step: 0.0 },
             gain: Grid::Step { lo: -200.0, hi: 200.0, step: 0.0 },
-            antennas: if receive {
-                vec!["RX2".to_owned(), "TX/RX".to_owned()]
-            } else {
-                vec!["TX/RX".to_owned()]
-            },
+            antennas: if receive { vec!["RX2".to_owned(), "TX/RX".to_owned()] } else { vec!["TX/RX".to_owned()] },
             default_antenna: if receive { "RX2" } else { "TX/RX" }.to_owned(),
             phase_behavior_on_retune: "deterministic".to_owned(),
             default_frequency_hz: 1_000_000_000.0,
@@ -910,11 +694,7 @@ enum Direction {
 impl Direction {
     /// The direction an RM-27 key's `rx` flag names (RM-27).
     fn of(rx: bool) -> Direction {
-        if rx {
-            Direction::Rx
-        } else {
-            Direction::Tx
-        }
+        if rx { Direction::Rx } else { Direction::Tx }
     }
 
     fn name(self) -> &'static str {
@@ -976,48 +756,31 @@ fn default_stream(direction: Direction, number: u32) -> i64 {
 }
 
 fn stream_of(effective: &BTreeMap<Key, Value>, direction: Direction, number: u32) -> i64 {
-    effective
-        .get(&channel_setting(direction, number, "stream"))
-        .and_then(Value::as_scalar)
-        .and_then(integer)
-        .unwrap_or(-1)
+    effective.get(&channel_setting(direction, number, "stream")).and_then(Value::as_scalar).and_then(integer).unwrap_or(-1)
 }
 
 fn rates(grid: &Grid) -> CapabilityValue {
     match grid {
-        Grid::Values(values) => CapabilityValue::AnyOf {
-            values: values.iter().rev().map(|rate| num(*rate)).collect(),
-        },
+        Grid::Values(values) => CapabilityValue::AnyOf { values: values.iter().rev().map(|rate| num(*rate)).collect() },
         grid => CapabilityValue::Range { min: num(grid.min()), max: num(grid.max()) },
     }
 }
 
-fn coerce_capability(
-    key: &Key,
-    constraint: &Constraint,
-    capability: &CapabilityValue,
-    report: &mut CoerceReport,
-) {
+fn coerce_capability(key: &Key, constraint: &Constraint, capability: &CapabilityValue, report: &mut CoerceReport) {
     match satisfies(constraint, capability) {
         Ok(true) => {
             if let CapabilityValue::One { value } = capability {
                 report.applied.insert(key.clone(), Value::from(value.clone()));
             }
         }
-        _ => report.rejected.push(rejected(
-            key,
-            constraint,
-            format!("RM-8: the device declares {capability:?}"),
-        )),
+        _ => report.rejected.push(rejected(key, constraint, format!("RM-8: the device declares {capability:?}"))),
     }
 }
 
 fn coerce_stream(constraint: &Constraint, max: i64, default: i64) -> Result<(Value, Option<Coercion>), String> {
     let grid = Grid::Integer { lo: -1, hi: max };
     let number = match constraint {
-        Constraint::Eq { value: Scalar::Int(value) }
-        | Constraint::Min { value: Scalar::Int(value) }
-        | Constraint::Max { value: Scalar::Int(value) } => *value as f64,
+        Constraint::Eq { value: Scalar::Int(value) } | Constraint::Min { value: Scalar::Int(value) } | Constraint::Max { value: Scalar::Int(value) } => *value as f64,
         Constraint::Range { min, max: upper } => {
             let lower = min.as_ref().map(integer_bound).transpose()?.unwrap_or(-1) as f64;
             let upper = upper.as_ref().map(integer_bound).transpose()?.unwrap_or(max) as f64;
@@ -1027,11 +790,7 @@ fn coerce_stream(constraint: &Constraint, max: i64, default: i64) -> Result<(Val
             return Ok((Value::from(value as i64), None));
         }
         Constraint::Set { values } => {
-            let Some(value) = values
-                .iter()
-                .filter_map(|value| integer_bound(value).ok())
-                .find(|value| *value >= -1 && *value <= max)
-            else {
+            let Some(value) = values.iter().filter_map(|value| integer_bound(value).ok()).find(|value| *value >= -1 && *value <= max) else {
                 return Err(format!("RM-8: no stream satisfies {constraint:?}"));
             };
             return Ok((Value::from(value), None));
@@ -1086,17 +845,9 @@ mod tests {
     fn layouts() -> Vec<Layout> {
         let selector = |image: &str, rx: &[&str]| {
             let list = |values: &[&str]| Value::List(values.iter().map(|value| Scalar::from(*value)).collect());
-            BTreeMap::from([
-                (ident("image"), list(&[image])),
-                (ident("rx"), list(rx)),
-                (ident("tx"), list(&["0:A:ubx:0"])),
-            ])
+            BTreeMap::from([(ident("image"), list(&[image])), (ident("rx"), list(rx)), (ident("tx"), list(&["0:A:ubx:0"]))])
         };
-        vec![
-            from_selector(&selector("xg", &["0:A:ubx:0"])).unwrap(),
-            from_selector(&selector("hg", &["0:A:ubx:0", "0:B:basic_rx:0"])).unwrap(),
-            Layout::Ideal { rx: 1, tx: 1 },
-        ]
+        vec![from_selector(&selector("xg", &["0:A:ubx:0"])).unwrap(), from_selector(&selector("hg", &["0:A:ubx:0", "0:B:basic_rx:0"])).unwrap(), Layout::Ideal { rx: 1, tx: 1 }]
     }
 
     fn terms() -> ProviderTerms {

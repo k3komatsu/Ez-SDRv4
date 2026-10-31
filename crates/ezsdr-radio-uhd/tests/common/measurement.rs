@@ -10,22 +10,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration as Wall, Instant};
 
 use ezsdr_kernel::binding::{Binding, BindingProfile};
-use ezsdr_kernel::spec::{Ident, Key};
 use ezsdr_kernel::coordinator::RunHandle;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::run::{Lease, RunState};
+use ezsdr_kernel::spec::{Ident, Key};
 use ezsdr_kernel::stream::{BurstEnd, Direction};
 use ezsdr_kernel::time::{SampleClockRecord, TimePoint};
 use ezsdr_radio::channels;
 use ezsdr_radio::device::Grid;
-use ezsdr_radio::measurement::{
-    self as model, Condition, Device as DeviceRecord, Host, Load, Observation, Record, Rule,
-    Source, StreamCondition, StreamRef, ValueRecord,
-};
+use ezsdr_radio::measurement::{self as model, Condition, Device as DeviceRecord, Host, Load, Observation, Record, Rule, Source, StreamCondition, StreamRef, ValueRecord};
 use ezsdr_radio::x3xx::ProviderTerms;
 use ezsdr_radio_uhd::{Device, Dir, RxRecv, Settings};
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 
 use super::SAFE_TX_HZ;
 
@@ -86,11 +83,7 @@ pub fn metadata_from_env(values: &BTreeMap<String, String>) -> Result<Metadata, 
         mboard: required(REQUIRED_ENV[1])?,
         fpga_image: required(REQUIRED_ENV[2])?,
         uhd_version: None,
-        host: Host {
-            name: required(REQUIRED_ENV[3])?,
-            settings_script: required(REQUIRED_ENV[4])?,
-            settings_version: required(REQUIRED_ENV[5])?,
-        },
+        host: Host { name: required(REQUIRED_ENV[3])?, settings_script: required(REQUIRED_ENV[4])?, settings_version: required(REQUIRED_ENV[5])? },
         load,
         commit: required(REQUIRED_ENV[7])?,
         selector: values.get(SELECTOR_ENV).map(|text| super::parse_selector(text)).transpose()?,
@@ -112,11 +105,7 @@ fn validate_output_path(output: &Path) -> Result<(), String> {
 
 /// Reads the required values from the process environment and applies the same validation.
 pub fn process_metadata() -> Result<Metadata, String> {
-    let values: BTreeMap<String, String> = REQUIRED_ENV
-        .iter()
-        .chain([&SELECTOR_ENV])
-        .filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value)))
-        .collect();
+    let values: BTreeMap<String, String> = REQUIRED_ENV.iter().chain([&SELECTOR_ENV]).filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
     metadata_from_env(&values)
 }
 
@@ -127,11 +116,7 @@ pub fn rehearsal_metadata() -> Metadata {
         mboard: "FakeDevice".to_owned(),
         fpga_image: "not_applicable".to_owned(),
         uhd_version: Some("not_applicable".to_owned()),
-        host: Host {
-            name: "test".to_owned(),
-            settings_script: "test".to_owned(),
-            settings_version: "test".to_owned(),
-        },
+        host: Host { name: "test".to_owned(), settings_script: "test".to_owned(), settings_version: "test".to_owned() },
         load: Load::None,
         commit: "test".to_owned(),
         selector: None,
@@ -141,11 +126,7 @@ pub fn rehearsal_metadata() -> Metadata {
 /// Gets the radio binding from the same profile document used to assemble a Run.
 pub fn radio_binding(document: &Json) -> Result<Binding, String> {
     let profile = BindingProfile::from_json(document).map_err(|error| error.to_string())?;
-    profile
-        .bindings
-        .get(&Ident::parse("radio").map_err(|error| error.to_string())?)
-        .cloned()
-        .ok_or_else(|| "the profile has no radio binding".to_owned())
+    profile.bindings.get(&Ident::parse("radio").map_err(|error| error.to_string())?).cloned().ok_or_else(|| "the profile has no radio binding".to_owned())
 }
 
 /// Builds the Radio Model description for the binding's selector and Provider terms.
@@ -155,14 +136,7 @@ pub fn description(binding: &Binding, block_len: u32, terms: &ProviderTerms) -> 
 }
 
 /// Builds a complete record, replacing only the comparable rows supplied by a measurement group.
-pub fn build_record(
-    source: Source,
-    binding: &Binding,
-    device: &dyn Device,
-    metadata: &Metadata,
-    measurements: MeasurementGroup,
-    description: &channels::Description,
-) -> Result<Record, String> {
+pub fn build_record(source: Source, binding: &Binding, device: &dyn Device, metadata: &Metadata, measurements: MeasurementGroup, description: &channels::Description) -> Result<Record, String> {
     let serial = device.serial().map_err(|error| error.message)?;
     build_record_with_identity(source, binding, device.describe(), serial, metadata, measurements, description)
 }
@@ -178,11 +152,7 @@ pub fn build_record_with_identity(
     measurements: MeasurementGroup,
     description: &channels::Description,
 ) -> Result<Record, String> {
-    let device_uhd_version = device_description
-        .get("uhd_version")
-        .and_then(Json::as_str)
-        .filter(|version| !version.trim().is_empty())
-        .map(str::to_owned);
+    let device_uhd_version = device_description.get("uhd_version").and_then(Json::as_str).filter(|version| !version.trim().is_empty()).map(str::to_owned);
     let uhd_version = match (source, device_uhd_version) {
         (_, Some(version)) => version,
         (Source::Fake, None) => metadata.uhd_version.clone().ok_or_else(|| "FakeDevice rehearsal metadata must provide uhd_version".to_owned())?,
@@ -194,12 +164,7 @@ pub fn build_record_with_identity(
         source,
         profile,
         selector: binding.selector.clone(),
-        device: DeviceRecord {
-            serial,
-            mboard: metadata.mboard.clone(),
-            fpga_image: metadata.fpga_image.clone(),
-            uhd_version,
-        },
+        device: DeviceRecord { serial, mboard: metadata.mboard.clone(), fpga_image: metadata.fpga_image.clone(), uhd_version },
         host: metadata.host.clone(),
         load: metadata.load,
         commit: metadata.commit.clone(),
@@ -227,11 +192,7 @@ fn merge_values(source: Source, description: &channels::Description, measured: V
         if !supplied.insert(key.clone()) {
             return Err(format!("measurement supplied `{}` more than once", key.as_str()));
         }
-        let value = if source == Source::Fake {
-            ValueRecord::Unmeasured { key: key.clone(), reason: "FakeDevice は実機の証拠ではない".to_owned() }
-        } else {
-            value
-        };
+        let value = if source == Source::Fake { ValueRecord::Unmeasured { key: key.clone(), reason: "FakeDevice は実機の証拠ではない".to_owned() } } else { value };
         values.insert(key, value);
     }
     Ok(values.into_values().collect())
@@ -242,10 +203,7 @@ pub fn unmeasured_values(description: &channels::Description) -> Vec<ValueRecord
     model::profile_values(description)
         .keys()
         .filter(|key| model::rule(key.as_str()).is_some_and(|rule| rule != Rule::NotCompared))
-        .map(|key| ValueRecord::Unmeasured {
-            key: key.clone(),
-            reason: unmeasured_reason(key.as_str()).to_owned(),
-        })
+        .map(|key| ValueRecord::Unmeasured { key: key.clone(), reason: unmeasured_reason(key.as_str()).to_owned() })
         .collect()
 }
 
@@ -263,44 +221,27 @@ fn unmeasured_reason(key: &str) -> &'static str {
     }
     match key {
         "radio.timing.command_queue_depth" => "Not measured in this record; Phase 8 stage 3c-2a measures raw Device timed-apply queue back-pressure.",
-        "radio.timing.min_timed_command_lead_ns"
-        | "radio.timing.tx_in_flight_ns"
-        | "radio.timing.rx_start_lead_ns"
-        | "radio.perf.rx_bytes_per_s"
-        | "radio.full_duplex"
-        | "radio.hardware_time" => "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run.",
+        "radio.timing.min_timed_command_lead_ns" | "radio.timing.tx_in_flight_ns" | "radio.timing.rx_start_lead_ns" | "radio.perf.rx_bytes_per_s" | "radio.full_duplex" | "radio.hardware_time" => {
+            "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run."
+        }
         "radio.timing.tx_start_lead_ns" | "radio.perf.tx_bytes_per_s" => "Not measured in this record; the Phase 8 stage 3c-1 hardware measurement has not been run.",
-        "radio.timing.overflow_restart_gap_ns" => "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision.",
+        "radio.timing.overflow_restart_gap_ns" => {
+            "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision."
+        }
         _ => "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required.",
     }
 }
 
 /// Creates a validated observation from a JSON object.
-pub fn observation(
-    name: impl Into<String>,
-    test: impl Into<String>,
-    condition: Option<String>,
-    trials: u32,
-    result: Json,
-) -> Result<Observation, String> {
+pub fn observation(name: impl Into<String>, test: impl Into<String>, condition: Option<String>, trials: u32, result: Json) -> Result<Observation, String> {
     let Json::Object(result) = result else { return Err("an observation result must be a JSON object".to_owned()) };
-    Ok(Observation {
-        name: name.into(),
-        test: test.into(),
-        condition,
-        trials,
-        result: result.into_iter().collect(),
-        note: None,
-    })
+    Ok(Observation { name: name.into(), test: test.into(), condition, trials, result: result.into_iter().collect(), note: None })
 }
 
 /// Appends one result collected by a raw hardware probe to this test thread's record buffer.
 pub fn push_raw_observation(name: &str, trials: u32, result: Json) {
     RAW_OBSERVATIONS.with(|observations| {
-        observations.borrow_mut().push(
-            observation(name, format!("tests/hardware.rs::{name}"), None, trials, result)
-                .unwrap_or_else(|error| panic!("invalid raw observation {name}: {error}")),
-        );
+        observations.borrow_mut().push(observation(name, format!("tests/hardware.rs::{name}"), None, trials, result).unwrap_or_else(|error| panic!("invalid raw observation {name}: {error}")));
     });
 }
 
@@ -321,13 +262,8 @@ thread_local! {
 /// Writes a record once and refuses to replace any existing path.
 pub fn write_record(path: &Path, record: &Record) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(record).map_err(|error| error.to_string())?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| format!("cannot create measurement output {}: {error}", path.display()))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("cannot write measurement output {}: {error}", path.display()))
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path).map_err(|error| format!("cannot create measurement output {}: {error}", path.display()))?;
+    file.write_all(&bytes).map_err(|error| format!("cannot write measurement output {}: {error}", path.display()))
 }
 
 /// Saves a structurally valid record before returning profile-value disagreements to the caller.
@@ -341,14 +277,21 @@ pub fn write_record_before_profile_assert(path: &Path, record: &Record, descript
         }
     }
     let violations = model::compare(record, description);
-    let structural: Vec<_> = violations.iter().filter(|violation| !matches!(violation.reason.as_str(),
-        reason if reason.starts_with("profile value ")
-            || reason.starts_with("profile antenna set ")
-            || reason.starts_with("profile grid is not a subset ")
-            || reason == "profile claims true but the measured result is false"
-            || reason == "profile phase guarantee is stronger than the measured guarantee"
-    )).collect();
-    if !structural.is_empty() { return Err(format!("measurement record validation: {structural:?}")); }
+    let structural: Vec<_> = violations
+        .iter()
+        .filter(|violation| {
+            !matches!(violation.reason.as_str(),
+                reason if reason.starts_with("profile value ")
+                    || reason.starts_with("profile antenna set ")
+                    || reason.starts_with("profile grid is not a subset ")
+                    || reason == "profile claims true but the measured result is false"
+                    || reason == "profile phase guarantee is stronger than the measured guarantee"
+            )
+        })
+        .collect();
+    if !structural.is_empty() {
+        return Err(format!("measurement record validation: {structural:?}"));
+    }
     write_record(path, record)?;
     Ok(violations)
 }
@@ -423,13 +366,7 @@ pub struct TrialEvidence {
 }
 
 impl TrialEvidence {
-    pub fn new(
-        start_tick: i64,
-        end_tick: i64,
-        expected_samples: u64,
-        expected_end_tick: i64,
-        completion: TrialCompletion,
-    ) -> TrialEvidence {
+    pub fn new(start_tick: i64, end_tick: i64, expected_samples: u64, expected_end_tick: i64, completion: TrialCompletion) -> TrialEvidence {
         TrialEvidence {
             start_tick,
             end_tick,
@@ -462,23 +399,11 @@ pub enum TrialClass {
 /// Assigns one event only to a uniquely matching trial; ambiguous and out-of-range evidence fails a trial.
 pub fn attribute_evidence(trials: &mut [TrialEvidence], evidence: TimedEvidence) {
     let (matches, can_attribute): (Vec<usize>, bool) = if let Some((start, end)) = evidence.span {
-        let matches: Vec<usize> = trials
-            .iter()
-            .enumerate()
-            .filter(|(_, trial)| start < trial.end_tick && end > trial.start_tick)
-            .map(|(index, _)| index)
-            .collect();
-        let contained = matches.len() == 1
-            && start >= trials[matches[0]].start_tick
-            && end <= trials[matches[0]].end_tick;
+        let matches: Vec<usize> = trials.iter().enumerate().filter(|(_, trial)| start < trial.end_tick && end > trial.start_tick).map(|(index, _)| index).collect();
+        let contained = matches.len() == 1 && start >= trials[matches[0]].start_tick && end <= trials[matches[0]].end_tick;
         (matches, contained)
     } else if let Some(tick) = evidence.tick {
-        (trials
-            .iter()
-            .enumerate()
-            .filter(|(_, trial)| trial.start_tick <= tick && tick < trial.end_tick)
-            .map(|(index, _)| index)
-            .collect(), true)
+        (trials.iter().enumerate().filter(|(_, trial)| trial.start_tick <= tick && tick < trial.end_tick).map(|(index, _)| index).collect(), true)
     } else {
         (Vec::new(), false)
     };
@@ -486,48 +411,63 @@ pub fn attribute_evidence(trials: &mut [TrialEvidence], evidence: TimedEvidence)
         [index] if can_attribute => trials[*index].evidence.push(evidence.kind),
         [] => mark_unattributable(trials, evidence.tick),
         indexes => {
-            for index in indexes { trials[*index].unattributable = true; }
+            for index in indexes {
+                trials[*index].unattributable = true;
+            }
         }
     }
 }
 
 fn mark_unattributable(trials: &mut [TrialEvidence], tick: Option<i64>) {
-    let target = trials
-        .iter()
-        .rposition(|trial| trial.open)
-        .or_else(|| match tick {
-            Some(tick) if trials.first().is_some_and(|trial| tick < trial.start_tick) => Some(0),
-            Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick).or(Some(0)),
-            None => trials.len().checked_sub(1),
-        });
-    if let Some(index) = target { trials[index].unattributable = true; }
+    let target = trials.iter().rposition(|trial| trial.open).or_else(|| match tick {
+        Some(tick) if trials.first().is_some_and(|trial| tick < trial.start_tick) => Some(0),
+        Some(tick) => trials.iter().rposition(|trial| trial.start_tick <= tick).or(Some(0)),
+        None => trials.len().checked_sub(1),
+    });
+    if let Some(index) = target {
+        trials[index].unattributable = true;
+    }
 }
 
 /// Classifies a trial only after its record, samples, end, and device acknowledgement agree.
 pub fn classify_trial(trial: &TrialEvidence) -> TrialClass {
-    if !trial.admitted { return TrialClass::AdmissionRejection; }
-    if trial.unattributable || trial.evidence.contains(&EvidenceKind::UnknownTimeError) { return TrialClass::Unattributable; }
-    let provider = trial.evidence.iter().any(|evidence| matches!(
-        evidence,
-        EvidenceKind::ProviderTimeError(ProviderTimeError::Drop | ProviderTimeError::SendAsap | ProviderTimeError::Refused | ProviderTimeError::PlanViolation)
-            | EvidenceKind::LateCommand
-            | EvidenceKind::CommandRejected
-            | EvidenceKind::CommandQueueFull
-    ));
-    let device = trial.evidence.iter().any(|evidence| matches!(
-        evidence,
-        EvidenceKind::ProviderTimeError(ProviderTimeError::LateAtDevice)
-            | EvidenceKind::AsyncTimeError
-            | EvidenceKind::Underflow
-            | EvidenceKind::UnderflowInPacket
-            | EvidenceKind::SequenceError
-            | EvidenceKind::SequenceErrorInBurst
-            | EvidenceKind::OtherAsync
-            | EvidenceKind::RxOverflow
-    ));
-    if provider && device { return TrialClass::Unattributable; }
-    if provider { return TrialClass::ProviderFailure; }
-    if device { return TrialClass::DeviceFailure; }
+    if !trial.admitted {
+        return TrialClass::AdmissionRejection;
+    }
+    if trial.unattributable || trial.evidence.contains(&EvidenceKind::UnknownTimeError) {
+        return TrialClass::Unattributable;
+    }
+    let provider = trial.evidence.iter().any(|evidence| {
+        matches!(
+            evidence,
+            EvidenceKind::ProviderTimeError(ProviderTimeError::Drop | ProviderTimeError::SendAsap | ProviderTimeError::Refused | ProviderTimeError::PlanViolation)
+                | EvidenceKind::LateCommand
+                | EvidenceKind::CommandRejected
+                | EvidenceKind::CommandQueueFull
+        )
+    });
+    let device = trial.evidence.iter().any(|evidence| {
+        matches!(
+            evidence,
+            EvidenceKind::ProviderTimeError(ProviderTimeError::LateAtDevice)
+                | EvidenceKind::AsyncTimeError
+                | EvidenceKind::Underflow
+                | EvidenceKind::UnderflowInPacket
+                | EvidenceKind::SequenceError
+                | EvidenceKind::SequenceErrorInBurst
+                | EvidenceKind::OtherAsync
+                | EvidenceKind::RxOverflow
+        )
+    });
+    if provider && device {
+        return TrialClass::Unattributable;
+    }
+    if provider {
+        return TrialClass::ProviderFailure;
+    }
+    if device {
+        return TrialClass::DeviceFailure;
+    }
     let Some(record) = trial.record else { return TrialClass::Incomplete };
     let missing_completion = match trial.completion {
         TrialCompletion::ReceiveCapture => false,
@@ -576,13 +516,13 @@ pub struct CandidateSummary {
 }
 
 /// Applies the successful-suffix lead rule or successful-prefix capacity rule across conditions.
-pub fn summarize_candidates(
-    mode: SummaryMode,
-    candidates: &BTreeMap<String, Vec<CandidateStage>>,
-    required_trials: usize,
-) -> Result<CandidateSummary, String> {
-    if candidates.is_empty() { return Err("at least one condition is required".to_owned()); }
-    if required_trials == 0 { return Err("required_trials must be positive".to_owned()); }
+pub fn summarize_candidates(mode: SummaryMode, candidates: &BTreeMap<String, Vec<CandidateStage>>, required_trials: usize) -> Result<CandidateSummary, String> {
+    if candidates.is_empty() {
+        return Err("at least one condition is required".to_owned());
+    }
+    if required_trials == 0 {
+        return Err("required_trials must be positive".to_owned());
+    }
     let mut common: Option<BTreeSet<u64>> = None;
     let mut eligible_by_condition = BTreeMap::new();
     let mut sorted = BTreeMap::new();
@@ -595,24 +535,19 @@ pub fn summarize_candidates(
         if stages.windows(2).any(|pair| pair[0].value == pair[1].value) {
             return Err(format!("condition `{condition}` repeats a candidate value"));
         }
-        let passing: Vec<bool> = stages
-            .iter()
-            .map(|stage| {
-                stage.trials.len() >= required_trials && stage.trials.iter().all(|trial| *trial == TrialClass::Success)
-            })
-            .collect();
+        let passing: Vec<bool> = stages.iter().map(|stage| stage.trials.len() >= required_trials && stage.trials.iter().all(|trial| *trial == TrialClass::Success)).collect();
         let eligible: BTreeSet<u64> = match mode {
-            SummaryMode::MinimumLead => (0..stages.len())
-                .filter(|index| passing[*index..].iter().all(|passed| *passed))
-                .map(|index| stages[index].value)
-                .collect(),
+            SummaryMode::MinimumLead => (0..stages.len()).filter(|index| passing[*index..].iter().all(|passed| *passed)).map(|index| stages[index].value).collect(),
             SummaryMode::Capacity => {
                 let prefix = passing.iter().take_while(|passed| **passed).count();
                 (0..prefix).map(|index| stages[index].value).collect()
             }
         };
         eligible_by_condition.insert(condition.clone(), eligible.clone());
-        common = Some(match common { Some(common) => common.intersection(&eligible).copied().collect(), None => eligible });
+        common = Some(match common {
+            Some(common) => common.intersection(&eligible).copied().collect(),
+            None => eligible,
+        });
         sorted.insert(condition.clone(), stages);
     }
     let common = common.unwrap_or_default();
@@ -629,10 +564,15 @@ pub fn summarize_candidates(
         SummaryMode::MinimumLead => values.first().copied(),
         SummaryMode::Capacity => values.last().copied(),
     };
-    let limiting_condition = worst.and_then(|worst| eligible_by_condition.iter().find(|(_, eligible)| match mode {
-        SummaryMode::MinimumLead => eligible.range(..worst).next().is_none(),
-        SummaryMode::Capacity => eligible.range((std::ops::Bound::Excluded(worst), std::ops::Bound::Unbounded)).next().is_none(),
-    }).map(|(condition, _)| condition.clone()));
+    let limiting_condition = worst.and_then(|worst| {
+        eligible_by_condition
+            .iter()
+            .find(|(_, eligible)| match mode {
+                SummaryMode::MinimumLead => eligible.range(..worst).next().is_none(),
+                SummaryMode::Capacity => eligible.range((std::ops::Bound::Excluded(worst), std::ops::Bound::Unbounded)).next().is_none(),
+            })
+            .map(|(condition, _)| condition.clone())
+    });
     Ok(CandidateSummary { worst, limiting_condition, unmeasured_reason: None, conditions: counts(&sorted, required_trials) })
 }
 
@@ -659,11 +599,7 @@ pub fn stream_ref(direction: Direction, stream: u32) -> StreamRef {
 
 /// Returns every comparable key as a set for exact-key assertions.
 pub fn comparable_keys(description: &channels::Description) -> BTreeSet<Key> {
-    model::profile_values(description)
-        .keys()
-        .filter(|key| model::rule(key.as_str()).is_some_and(|rule| rule != Rule::NotCompared))
-        .cloned()
-        .collect()
+    model::profile_values(description).keys().filter(|key| model::rule(key.as_str()).is_some_and(|rule| rule != Rule::NotCompared)).cloned().collect()
 }
 
 /// Candidate sweeps and trial counts for one hardware measurement suite.
@@ -734,11 +670,7 @@ impl Default for MeasurementPlan {
 impl MeasurementPlan {
     /// A bounded reopen pass: half of each base count/duration, rounded up and never zero.
     pub fn reopened_plan(&self) -> MeasurementPlan {
-        MeasurementPlan {
-            step_trials: self.step_trials.div_ceil(2).max(1),
-            throughput_seconds: self.throughput_seconds.div_ceil(2).max(1),
-            ..self.clone()
-        }
+        MeasurementPlan { step_trials: self.step_trials.div_ceil(2).max(1), throughput_seconds: self.throughput_seconds.div_ceil(2).max(1), ..self.clone() }
     }
 
     /// Small, deterministic-stage inputs for the FakeDevice record rehearsal.
@@ -788,9 +720,16 @@ impl MeasurementPlan {
         if self.overflow_stall_ms.len() != self.overflow_rates_hz.len() || self.overflow_stall_ms.contains(&0) || self.overflow_after_ms == 0 {
             return Err("overflow rates need one positive stall duration each and a positive pre-stall interval".to_owned());
         }
-        if self.step_trials == 0 || self.overflow_trials == 0 || self.throughput_seconds == 0 || self.loopback_trials == 0
-            || self.interval_ns == 0 || self.queue_trials == 0 || self.queue_ahead_ns == 0 || self.queue_max_calls == 0
-            || self.raw_group_limit_ms == 0 || self.frequency_points < 4
+        if self.step_trials == 0
+            || self.overflow_trials == 0
+            || self.throughput_seconds == 0
+            || self.loopback_trials == 0
+            || self.interval_ns == 0
+            || self.queue_trials == 0
+            || self.queue_ahead_ns == 0
+            || self.queue_max_calls == 0
+            || self.raw_group_limit_ms == 0
+            || self.frequency_points < 4
         {
             return Err("measurement counts, the raw group limit and the inter-trial interval must be positive, with at least 4 frequency points".to_owned());
         }
@@ -834,7 +773,9 @@ impl MeasurementPlan {
         fn count(values: &BTreeMap<String, String>, name: &str, default: u64) -> Result<u64, String> {
             let Some(value) = values.get(name) else { return Ok(default) };
             let parsed = value.parse::<u64>().map_err(|_| format!("{name} must be a positive integer"))?;
-            if parsed == 0 { return Err(format!("{name} must be positive")); }
+            if parsed == 0 {
+                return Err(format!("{name} must be positive"));
+            }
             Ok(parsed)
         }
         let plan = MeasurementPlan {
@@ -845,7 +786,10 @@ impl MeasurementPlan {
             queue_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_QUEUE_TRIALS is too large".to_owned())?,
             queue_max_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_MAX_TRIALS", 15)?).map_err(|_| "EZSDR_MEASURE_QUEUE_MAX_TRIALS is too large".to_owned())?,
             nics: values.get("EZSDR_MEASUREMENT_NICS").or(values.get("EZSDR_BENCH_NIC")).map(|text| text.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
-            tx_waveform_samples: usize::try_from(count(values, "EZSDR_TX_WAVEFORM_SAMPLES", 1_000)?).ok().filter(|samples| *samples > 0).ok_or_else(|| "EZSDR_TX_WAVEFORM_SAMPLES must be a positive count".to_owned())?,
+            tx_waveform_samples: usize::try_from(count(values, "EZSDR_TX_WAVEFORM_SAMPLES", 1_000)?)
+                .ok()
+                .filter(|samples| *samples > 0)
+                .ok_or_else(|| "EZSDR_TX_WAVEFORM_SAMPLES must be a positive count".to_owned())?,
             ..MeasurementPlan::default()
         };
         plan.validate()?;
@@ -854,7 +798,16 @@ impl MeasurementPlan {
 
     /// Reads only the documented environment variables and validates before opening a device.
     pub fn process_env() -> Result<MeasurementPlan, String> {
-        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS", "EZSDR_MEASURE_QUEUE_MAX_TRIALS", "EZSDR_MEASUREMENT_NICS", "EZSDR_BENCH_NIC"];
+        let names = [
+            "EZSDR_MEASURE_STEP_TRIALS",
+            "EZSDR_MEASURE_OVERFLOW_TRIALS",
+            "EZSDR_MEASURE_THROUGHPUT_SECS",
+            "EZSDR_MEASURE_LOOPBACK_TRIALS",
+            "EZSDR_MEASURE_QUEUE_TRIALS",
+            "EZSDR_MEASURE_QUEUE_MAX_TRIALS",
+            "EZSDR_MEASUREMENT_NICS",
+            "EZSDR_BENCH_NIC",
+        ];
         let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
         MeasurementPlan::from_env(&values)
     }
@@ -869,12 +822,20 @@ const QUEUE_TEST: &str = "tests/hardware.rs::hw_measurements_record";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum QueueTrialClass {
-    Success { depth: usize },
+    Success {
+        depth: usize,
+    },
     /// The blocked call's device-time interval straddles the first command time: it may have
     /// waited for the queue or may not. Never a success, never a failure of the trial's kind.
-    Ambiguous { depth: usize },
-    Incomplete { reason: &'static str },
-    DeviceFailure { reason: String },
+    Ambiguous {
+        depth: usize,
+    },
+    Incomplete {
+        reason: &'static str,
+    },
+    DeviceFailure {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -899,9 +860,7 @@ fn queue_device_time_bounds(clock: QueueClock, h_i_ns: u64, master_clock_hz: u64
     Some((clock.d0_tick.checked_add(lower_ticks)?, clock.d0_tick.checked_add(upper_ticks)?))
 }
 
-fn classify_queue_trial(
-    calls: &[QueueCall], clock: QueueClock, first_at: i64, stall_limit_ns: u64, return_limit_ticks: i64, master_clock_hz: u64,
-) -> QueueTrialClass {
+fn classify_queue_trial(calls: &[QueueCall], clock: QueueClock, first_at: i64, stall_limit_ns: u64, return_limit_ticks: i64, master_clock_hz: u64) -> QueueTrialClass {
     let Some(read_duration_ns) = clock.h_after_ns.checked_sub(clock.h_before_ns) else {
         return QueueTrialClass::Incomplete { reason: "the device-time read host interval was invalid" };
     };
@@ -921,8 +880,7 @@ fn classify_queue_trial(
     if calls[..depth].iter().any(|call| call.duration_ns >= QUEUE_CALL_TIME_LIMIT_NS) {
         return QueueTrialClass::Incomplete { reason: "a call before the blocked apply was not short" };
     }
-    if calls[..depth].iter().any(|call| call.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz))
-        .is_none_or(|(_, upper)| upper >= first_at)) {
+    if calls[..depth].iter().any(|call| call.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)).is_none_or(|(_, upper)| upper >= first_at)) {
         return QueueTrialClass::Incomplete { reason: "a call before the blocked apply has an upper device-time bound at or after the first command time" };
     }
     let Some(latest_return_tick) = first_at.checked_add(return_limit_ticks) else {
@@ -1035,7 +993,9 @@ impl RawGroup {
     /// Records the first failure only.
     pub fn fail(&self, reason: impl Into<String>) {
         let mut failure = self.failure.lock().unwrap();
-        if failure.is_none() { *failure = Some(reason.into()); }
+        if failure.is_none() {
+            *failure = Some(reason.into());
+        }
         self.stopped.store(true, Ordering::Release);
     }
 
@@ -1048,9 +1008,7 @@ impl RawGroup {
     }
 
     fn unmeasured(&self, key: Key, what: &str) -> Option<ValueRecord> {
-        self.failure().map(|failure| ValueRecord::Unmeasured {
-            key, reason: format!("Phase 8 stage 3c-2c stopped the raw group before {what} was complete: {failure}."),
-        })
+        self.failure().map(|failure| ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2c stopped the raw group before {what} was complete: {failure}.") })
     }
 }
 
@@ -1078,7 +1036,9 @@ impl RxProgress {
     fn advance(&self, first_tick: i64, end_tick: i64) {
         let mut state = self.state.lock().unwrap();
         state.first_tick.get_or_insert(first_tick);
-        if state.end_tick.is_none_or(|end| end_tick > end) { state.end_tick = Some(end_tick); }
+        if state.end_tick.is_none_or(|end| end_tick > end) {
+            state.end_tick = Some(end_tick);
+        }
         *state.counts.entry("samples").or_default() += 1;
     }
 
@@ -1117,16 +1077,23 @@ fn drain_receiver(device: &dyn Device, raw: &RawGroup, stop: &AtomicBool, progre
 struct StopOnDrop<'a>(&'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {
-    fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
-
 
 fn wait_for_device_tick(device: &dyn Device, raw: &RawGroup, target: i64, timeout: Wall) -> Result<(), String> {
     let start = Instant::now();
     loop {
-        if raw.halted() { return Err(raw.failure().unwrap_or_default()); }
-        if device.time_now().map_err(|error| error.message)? >= target { return Ok(()); }
-        if start.elapsed() >= timeout { return Err(format!("device time did not reach {target} before the wait limit")); }
+        if raw.halted() {
+            return Err(raw.failure().unwrap_or_default());
+        }
+        if device.time_now().map_err(|error| error.message)? >= target {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Err(format!("device time did not reach {target} before the wait limit"));
+        }
         std::thread::sleep(Wall::from_millis(1));
     }
 }
@@ -1136,9 +1103,13 @@ fn wait_for_device_tick(device: &dyn Device, raw: &RawGroup, target: i64, timeou
 fn wait_for_rx_end(raw: &RawGroup, progress: &RxProgress, target: i64, timeout: Wall) -> Result<(), String> {
     let start = Instant::now();
     loop {
-        if raw.halted() { return Err(raw.failure().unwrap_or_default()); }
+        if raw.halted() {
+            return Err(raw.failure().unwrap_or_default());
+        }
         let end = progress.end_tick();
-        if end.is_some_and(|end| end >= target) { return Ok(()); }
+        if end.is_some_and(|end| end >= target) {
+            return Ok(());
+        }
         if start.elapsed() >= timeout {
             return Err(format!("the received samples ended at {end:?}, short of the last command's {target}, within the wait limit; DDC settings may remain queued"));
         }
@@ -1150,16 +1121,24 @@ fn wait_for_rx_end(raw: &RawGroup, progress: &RxProgress, target: i64, timeout: 
 fn wait_for_rx_samples(raw: &RawGroup, progress: &RxProgress, timeout: Wall) -> Result<(), String> {
     let start = Instant::now();
     loop {
-        if raw.halted() { return Err(raw.failure().unwrap_or_default()); }
-        if progress.end_tick().is_some() { return Ok(()); }
-        if start.elapsed() >= timeout { return Err(format!("the started receive stream returned no samples ({})", progress.snapshot()["counts"])); }
+        if raw.halted() {
+            return Err(raw.failure().unwrap_or_default());
+        }
+        if progress.end_tick().is_some() {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Err(format!("the started receive stream returned no samples ({})", progress.snapshot()["counts"]));
+        }
         std::thread::sleep(Wall::from_millis(1));
     }
 }
 
 /// The trial's result when the group has already stopped, before the next device call.
 fn queue_stopped(trial: usize, raw: &RawGroup) -> Option<(QueueTrialClass, Json)> {
-    if !raw.halted() { return None; }
+    if !raw.halted() {
+        return None;
+    }
     let reason = raw.failure().unwrap_or_default();
     Some((QueueTrialClass::DeviceFailure { reason: reason.clone() }, json!({ "trial": trial, "classification": "device_failure", "error": reason })))
 }
@@ -1175,31 +1154,38 @@ fn queue_failed(trial: usize, raw: &RawGroup, label: &str, reason: String) -> (Q
 /// `axi_tag_time.v`, which releases a timed setting only on a sample whose time reaches it). No
 /// setting goes out before the receiver has returned samples, and the receiver is not stopped
 /// before the samples have passed the last command.
-fn queue_trial(
-    device: &dyn Device,
-    operations: &[QueueOperation],
-    plan: &MeasurementPlan,
-    trial: usize,
-    label: &str,
-    raw: &RawGroup,
-) -> Result<(QueueTrialClass, Json), String> {
-    if !queue_streams_rx(operations) { return queue_trial_calls(device, operations, plan, trial, label, raw, None); }
+fn queue_trial(device: &dyn Device, operations: &[QueueOperation], plan: &MeasurementPlan, trial: usize, label: &str, raw: &RawGroup) -> Result<(QueueTrialClass, Json), String> {
+    if !queue_streams_rx(operations) {
+        return queue_trial_calls(device, operations, plan, trial, label, raw, None);
+    }
     let fail = |reason: String| Ok(queue_failed(trial, raw, label, reason));
     let master = device.master_clock_rate();
     let ticks_per_sample = i64::try_from(master / 1_000_000).map_err(|_| "ticks per sample overflow")?.max(1);
-    if let Some(stopped) = queue_stopped(trial, raw) { return Ok(stopped); }
+    if let Some(stopped) = queue_stopped(trial, raw) {
+        return Ok(stopped);
+    }
     if let Err(error) = device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), freq: Some(1e9), gain: Some(0.0), ..Settings::default() }, None) {
         return fail(error.message);
     }
-    if let Some(stopped) = queue_stopped(trial, raw) { return Ok(stopped); }
-    if let Err(error) = device.rx_open(0, &[0]) { return fail(error.message); }
-    if let Some(stopped) = queue_stopped(trial, raw) { return Ok(stopped); }
+    if let Some(stopped) = queue_stopped(trial, raw) {
+        return Ok(stopped);
+    }
+    if let Err(error) = device.rx_open(0, &[0]) {
+        return fail(error.message);
+    }
+    if let Some(stopped) = queue_stopped(trial, raw) {
+        return Ok(stopped);
+    }
     let start = match device.time_now() {
         Ok(now) => now.checked_add(ticks_for_ns(QUEUE_RX_START_LEAD_NS, master)?).ok_or("queue receive start overflow")?,
         Err(error) => return fail(error.message),
     };
-    if let Some(stopped) = queue_stopped(trial, raw) { return Ok(stopped); }
-    if let Err(error) = device.rx_start(0, start) { return fail(error.message); }
+    if let Some(stopped) = queue_stopped(trial, raw) {
+        return Ok(stopped);
+    }
+    if let Err(error) = device.rx_start(0, start) {
+        return fail(error.message);
+    }
     let stop = AtomicBool::new(false);
     let progress = RxProgress::default();
     let outcome = std::thread::scope(|scope| {
@@ -1216,7 +1202,11 @@ fn queue_trial(
     if !raw.halted() {
         match device.rx_stop(0, None) {
             // The deadline can pass during the stop: the close is a new call and is looked at too.
-            Ok(()) => if !raw.halted() { device.rx_close(0) },
+            Ok(()) => {
+                if !raw.halted() {
+                    device.rx_close(0)
+                }
+            }
             Err(error) => {
                 let (failed, failed_row) = queue_failed(trial, raw, label, format!("rx_stop: {}", error.message));
                 row["classification"] = failed_row["classification"].clone();
@@ -1246,18 +1236,16 @@ fn queue_trial_calls(
     let spacing_ticks = ticks_for_ns(QUEUE_SPACING_NS, device.master_clock_rate())?;
     let margin_ticks = ticks_for_ns(QUEUE_DRAIN_MARGIN_NS, device.master_clock_rate())?;
     let return_limit_ticks = ticks_for_ns(QUEUE_CALL_TIME_LIMIT_NS, device.master_clock_rate())?;
-    if let Some(stopped) = queue_stopped(trial, raw) { return Ok(stopped); }
+    if let Some(stopped) = queue_stopped(trial, raw) {
+        return Ok(stopped);
+    }
     let h_before = Instant::now();
     let d0 = match device.time_now() {
         Ok(now) => now,
         Err(error) => return Ok(queue_failed(trial, raw, label, error.message)),
     };
     let h_after = Instant::now();
-    let clock = QueueClock {
-        d0_tick: d0,
-        h_before_ns: 0,
-        h_after_ns: u64::try_from(h_after.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX),
-    };
+    let clock = QueueClock { d0_tick: d0, h_before_ns: 0, h_after_ns: u64::try_from(h_after.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX) };
     let first_at = match d0.checked_add(ahead_ticks) {
         Some(at) => at,
         None => return Ok(queue_failed(trial, raw, label, "queue target tick overflow".to_owned())),
@@ -1273,7 +1261,9 @@ fn queue_trial_calls(
     let mut operational_error: Option<String> = None;
     let read_duration_ns = clock.h_after_ns - clock.h_before_ns;
     if read_duration_ns <= QUEUE_CALL_TIME_LIMIT_NS {
-        if let Some(stopped) = queue_stopped(trial, raw) { return Ok(stopped); }
+        if let Some(stopped) = queue_stopped(trial, raw) {
+            return Ok(stopped);
+        }
         if let Err(error) = device.apply(Dir::Tx, 0, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None) {
             return Ok(queue_failed(trial, raw, label, error.message));
         }
@@ -1284,8 +1274,7 @@ fn queue_trial_calls(
                 break;
             }
             let index = i64::try_from(index).map_err(|_| "queue command count exceeds i64")?;
-            let at = first_at.checked_add(spacing_ticks.checked_mul(index).ok_or("queue command spacing overflow")?)
-                .ok_or("queue command time overflow")?;
+            let at = first_at.checked_add(spacing_ticks.checked_mul(index).ok_or("queue command spacing overflow")?).ok_or("queue command time overflow")?;
             let operation = &operations[index as usize % operations.len()];
             if operation.dir == Dir::Tx && operation.settings.freq.is_some_and(|frequency| !SAFE_TX_HZ.contains(&frequency)) {
                 return Err("queue probe requested a TX frequency outside SAFE_TX_HZ".to_owned());
@@ -1297,7 +1286,9 @@ fn queue_trial_calls(
             let h_i_ns = u64::try_from(h_i.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX);
             let apply_error = applied.as_ref().err().map(|error| error.message.clone());
             let error = apply_error.clone();
-            if applied.is_ok() { last_accepted_at = Some(at); }
+            if applied.is_ok() {
+                last_accepted_at = Some(at);
+            }
             let bounds = queue_device_time_bounds(clock, h_i_ns, master_clock_hz);
             calls.push(QueueCall { duration_ns, h_i_ns: Some(h_i_ns), error: error.clone() });
             rows.push(json!({
@@ -1315,7 +1306,9 @@ fn queue_trial_calls(
                 operational_error = Some(error);
                 break;
             }
-            if duration_ns > stall_limit_ns { break; }
+            if duration_ns > stall_limit_ns {
+                break;
+            }
         }
     }
     let queue_class = classify_queue_trial(&calls, clock, first_at, stall_limit_ns, return_limit_ticks, master_clock_hz);
@@ -1334,15 +1327,27 @@ fn queue_trial_calls(
         }
     }
     let reset_dir = operations.first().map_or(Dir::Rx, |operation| operation.dir);
-    if operational_error.is_none() && raw.halted() { operational_error = raw.failure(); }
-    let untimed_error = if operational_error.is_some() { None } else {
+    if operational_error.is_none() && raw.halted() {
+        operational_error = raw.failure();
+    }
+    let untimed_error = if operational_error.is_some() {
+        None
+    } else {
         let error = device.apply(reset_dir, 0, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None).err().map(|error| error.message);
-        if let Some(error) = &error { raw.fail(format!("queue condition {label}: {error}")); }
+        if let Some(error) = &error {
+            raw.fail(format!("queue condition {label}: {error}"));
+        }
         error
     };
     let class = finish_queue_trial(queue_class, operational_error, untimed_error.clone());
-    let depth = match &class { QueueTrialClass::Success { depth } => Some(*depth), _ => None };
-    let blocked_index = match &class { QueueTrialClass::Success { depth } | QueueTrialClass::Ambiguous { depth } => Some(*depth), _ => None };
+    let depth = match &class {
+        QueueTrialClass::Success { depth } => Some(*depth),
+        _ => None,
+    };
+    let blocked_index = match &class {
+        QueueTrialClass::Success { depth } | QueueTrialClass::Ambiguous { depth } => Some(*depth),
+        _ => None,
+    };
     let class_name = match &class {
         QueueTrialClass::Success { .. } => "success",
         QueueTrialClass::Ambiguous { .. } => "ambiguous",
@@ -1354,21 +1359,24 @@ fn queue_trial_calls(
         QueueTrialClass::DeviceFailure { reason } => Some(reason.clone()),
         QueueTrialClass::Success { .. } | QueueTrialClass::Ambiguous { .. } => None,
     };
-    Ok((class, json!({
-        "trial": trial,
-        "ahead_ns": ahead_ns,
-        "blocked_index": blocked_index,
-        "d0_tick": clock.d0_tick,
-        "h_before_ns": clock.h_before_ns,
-        "h_after_ns": clock.h_after_ns,
-        "h_after_minus_h_before_ns": read_duration_ns,
-        "first_command_tick": first_at,
-        "classification": class_name,
-        "reason": class_reason,
-        "depth": depth,
-        "calls": rows,
-        "untimed_apply_error": untimed_error,
-    })))
+    Ok((
+        class,
+        json!({
+            "trial": trial,
+            "ahead_ns": ahead_ns,
+            "blocked_index": blocked_index,
+            "d0_tick": clock.d0_tick,
+            "h_before_ns": clock.h_before_ns,
+            "h_after_ns": clock.h_after_ns,
+            "h_after_minus_h_before_ns": read_duration_ns,
+            "first_command_tick": first_at,
+            "classification": class_name,
+            "reason": class_reason,
+            "depth": depth,
+            "calls": rows,
+            "untimed_apply_error": untimed_error,
+        }),
+    ))
 }
 
 fn queue_successes(trials: &[QueueTrialClass]) -> usize {
@@ -1384,10 +1392,15 @@ fn summarize_queue_depth(conditions: &[(String, Vec<QueueTrialClass>)], required
     if conditions.iter().any(|(_, trials)| queue_successes(trials) < required_trials) {
         return None;
     }
-    conditions.iter().flat_map(|(condition, trials)| trials.iter().filter_map(move |trial| match trial {
-        QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.len())),
-        QueueTrialClass::Ambiguous { .. } | QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
-    })).min_by_key(|(depth, _, _)| *depth)
+    conditions
+        .iter()
+        .flat_map(|(condition, trials)| {
+            trials.iter().filter_map(move |trial| match trial {
+                QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.len())),
+                QueueTrialClass::Ambiguous { .. } | QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
+            })
+        })
+        .min_by_key(|(depth, _, _)| *depth)
 }
 
 /// The blocked call's number per target delay, from the trials that stalled once in the window
@@ -1411,15 +1424,13 @@ fn queue_index_agreement(trials: &[Json]) -> Json {
 fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize, max_trials: usize) -> Result<ValueRecord, String> {
     let key = Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?;
     Ok(match summarize_queue_depth(conditions, required_trials) {
-        Some((depth, condition, trials)) => ValueRecord::Measured {
-            key, worst: model::Worst::Number(depth as f64), trials: observation_trials(trials)?, condition,
-            test: QUEUE_TEST.to_owned(),
-        },
+        Some((depth, condition, trials)) => ValueRecord::Measured { key, worst: model::Worst::Number(depth as f64), trials: observation_trials(trials)?, condition, test: QUEUE_TEST.to_owned() },
         None => ValueRecord::Unmeasured {
             key,
             reason: format!(
                 "Phase 8 stage 3f did not obtain {required_trials} successful back-pressure trials in every queue condition within at most {max_trials} trials each ({}).",
-                conditions.iter().map(|(condition, trials)| format!("{condition}: {} successes in {} trials", queue_successes(trials), trials.len())).collect::<Vec<_>>().join(", ")),
+                conditions.iter().map(|(condition, trials)| format!("{condition}: {} successes in {} trials", queue_successes(trials), trials.len())).collect::<Vec<_>>().join(", ")
+            ),
         },
     })
 }
@@ -1437,7 +1448,9 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
         let mut classes = Vec::new();
         let mut trials = Vec::new();
         while !queue_condition_done(&classes, plan.queue_trials, plan.queue_max_trials) {
-            if raw.halted() { break; }
+            if raw.halted() {
+                break;
+            }
             let (class, row) = queue_trial(&*device, &operations, plan, classes.len() + 1, &condition.id, raw)?;
             classes.push(class);
             trials.push(row);
@@ -1448,7 +1461,9 @@ pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPl
             condition_trials.push((condition.id.clone(), classes));
             group.conditions.push(condition);
         }
-        if raw.failure().is_some() { break 'conditions; }
+        if raw.failure().is_some() {
+            break 'conditions;
+        }
     }
     group.values.push(match raw.unmeasured(Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?, "the queue-depth trials") {
         Some(value) => value,
@@ -1504,13 +1519,7 @@ struct AntennaReadback {
     error: Option<String>,
 }
 
-fn apply_numeric(
-    device: &dyn Device,
-    dir: Dir,
-    channel: usize,
-    setting: NumericSetting,
-    requested: f64,
-) -> NumericReadback {
+fn apply_numeric(device: &dyn Device, dir: Dir, channel: usize, setting: NumericSetting, requested: f64) -> NumericReadback {
     let settings = match setting {
         NumericSetting::Rate => Settings { rate: Some(requested), ..Settings::default() },
         NumericSetting::Frequency => Settings { freq: Some(requested), ..Settings::default() },
@@ -1542,8 +1551,7 @@ fn apply_antenna(device: &dyn Device, dir: Dir, channel: usize, requested: &str)
 
 fn grid_points(grid: &Grid) -> Result<Vec<f64>, String> {
     match grid {
-        Grid::Values(values) if !values.is_empty() && values.iter().all(|value| value.is_finite())
-            && values.windows(2).all(|pair| pair[0] < pair[1]) => Ok(values.clone()),
+        Grid::Values(values) if !values.is_empty() && values.iter().all(|value| value.is_finite()) && values.windows(2).all(|pair| pair[0] < pair[1]) => Ok(values.clone()),
         Grid::Values(_) => Err("profile Values grid is empty, non-finite or not ascending".to_owned()),
         Grid::Integer { lo, hi } if lo <= hi => Ok((*lo..=*hi).map(|value| value as f64).collect()),
         Grid::Integer { .. } => Err("profile Integer grid has lo > hi".to_owned()),
@@ -1553,7 +1561,9 @@ fn grid_points(grid: &Grid) -> Result<Vec<f64>, String> {
             while value <= *hi {
                 points.push(value);
                 let next = value + step;
-                if next <= value { return Err("profile Step grid did not advance".to_owned()); }
+                if next <= value {
+                    return Err("profile Step grid did not advance".to_owned());
+                }
                 value = next;
             }
             if points.is_empty() { Err("profile Step grid has no points".to_owned()) } else { Ok(points) }
@@ -1572,11 +1582,15 @@ fn fine_gain_points(grid: &Grid) -> Result<Vec<f64>, String> {
     let spacing = step / 5.0;
     let intervals = ((hi - lo) / spacing).floor();
     let count = usize::try_from(intervals as u64).map_err(|_| "gain sweep has too many points")?;
-    let mut points: Vec<_> = (0..=count).map(|index| {
-        let value = lo + index as f64 * step / 5.0;
-        (value * 1_000_000_000.0).round() / 1_000_000_000.0
-    }).collect();
-    if points.last().is_none_or(|last| *last < hi) { points.push((hi * 1_000_000_000.0).round() / 1_000_000_000.0); }
+    let mut points: Vec<_> = (0..=count)
+        .map(|index| {
+            let value = lo + index as f64 * step / 5.0;
+            (value * 1_000_000_000.0).round() / 1_000_000_000.0
+        })
+        .collect();
+    if points.last().is_none_or(|last| *last < hi) {
+        points.push((hi * 1_000_000_000.0).round() / 1_000_000_000.0);
+    }
     Ok(points)
 }
 
@@ -1592,7 +1606,9 @@ fn frequency_sweep_points(grid: &Grid, count: usize) -> Result<Vec<f64>, String>
         let target = lo + (hi - lo) * index as f64 / (count - 1) as f64;
         let wanted = if index % 2 == 0 { (target / 1e6).round() * 1e6 } else { (target / 1e6).floor() * 1e6 + 370_000.0 };
         let point = grid.nearest(wanted.clamp(lo, hi)).ok_or_else(|| format!("profile frequency grid has no value near {wanted}"))?;
-        if point > points[points.len() - 1] && point < hi { points.push(point); }
+        if point > points[points.len() - 1] && point < hi {
+            points.push(point);
+        }
     }
     points.push(hi);
     Ok(points)
@@ -1603,15 +1619,10 @@ const FREQUENCY_STEP_HZ: f64 = 1.0;
 
 /// `frequency_hz` and `frequency_step_hz` from one sweep: a value only if every request was read
 /// back within 0.05 Hz. The points between those sampled are INFERRED (stage 3c-2c).
-fn frequency_values(
-    keys: [&str; 2], points: &[NumericReadback], requests: &[f64], condition: &str, test: &str,
-) -> Result<[ValueRecord; 2], String> {
+fn frequency_values(keys: [&str; 2], points: &[NumericReadback], requests: &[f64], condition: &str, test: &str) -> Result<[ValueRecord; 2], String> {
     let parse = |key: &str| Key::parse(key).map_err(|error| error.to_string());
     let unmeasured = |reason: String| -> Result<[ValueRecord; 2], String> {
-        Ok([
-            ValueRecord::Unmeasured { key: parse(keys[0])?, reason: reason.clone() },
-            ValueRecord::Unmeasured { key: parse(keys[1])?, reason },
-        ])
+        Ok([ValueRecord::Unmeasured { key: parse(keys[0])?, reason: reason.clone() }, ValueRecord::Unmeasured { key: parse(keys[1])?, reason }])
     };
     if let Some(error) = numeric_readback_error(points) {
         return unmeasured(format!("Phase 8 stage 3c-2c frequency read-back failed: {error}."));
@@ -1621,7 +1632,9 @@ fn frequency_values(
     }
     let mut worst = 0.0_f64;
     for point in points {
-        let Some(returned) = point.returned else { return unmeasured(format!("Phase 8 stage 3c-2c frequency request {} had no read-back.", point.requested)); };
+        let Some(returned) = point.returned else {
+            return unmeasured(format!("Phase 8 stage 3c-2c frequency request {} had no read-back.", point.requested));
+        };
         let difference = (returned - point.requested).abs();
         if difference > FREQUENCY_READBACK_TOLERANCE_HZ {
             return unmeasured(format!("Phase 8 stage 3c-2c frequency request {} read back as {returned}, {difference} Hz away (limit {FREQUENCY_READBACK_TOLERANCE_HZ} Hz).", point.requested));
@@ -1632,18 +1645,20 @@ fn frequency_values(
     let trials = observation_trials(points.len())?;
     Ok([
         ValueRecord::Measured {
-            key: parse(keys[0])?, worst: model::Worst::Grid(model::GridValue::Step { lo, hi, step: FREQUENCY_STEP_HZ }),
-            trials, condition: condition.to_owned(), test: test.to_owned(),
+            key: parse(keys[0])?,
+            worst: model::Worst::Grid(model::GridValue::Step { lo, hi, step: FREQUENCY_STEP_HZ }),
+            trials,
+            condition: condition.to_owned(),
+            test: test.to_owned(),
         },
-        ValueRecord::Measured {
-            key: parse(keys[1])?, worst: model::Worst::Number(worst * 2.0),
-            trials, condition: condition.to_owned(), test: test.to_owned(),
-        },
+        ValueRecord::Measured { key: parse(keys[1])?, worst: model::Worst::Number(worst * 2.0), trials, condition: condition.to_owned(), test: test.to_owned() },
     ])
 }
 
 fn observation_number(value: f64) -> f64 {
-    if value == 0.0 { return value; }
+    if value == 0.0 {
+        return value;
+    }
     let exponent = value.abs().log10().floor() as i32;
     let scale = 10.0_f64.powi(12 - exponent);
     (value * scale).round() / scale
@@ -1651,19 +1666,29 @@ fn observation_number(value: f64) -> f64 {
 
 fn numeric_points_json(points: &[NumericReadback]) -> Json {
     // Keep observed decimals stable through serde_json's f64 parse/serialize round trip.
-    json!(points.iter().map(|point| json!({
-        "requested": observation_number(point.requested),
-        "readback": point.returned.map(observation_number),
-        "error": point.error.as_deref(),
-    })).collect::<Vec<_>>())
+    json!(
+        points
+            .iter()
+            .map(|point| json!({
+                "requested": observation_number(point.requested),
+                "readback": point.returned.map(observation_number),
+                "error": point.error.as_deref(),
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn antenna_points_json(points: &[AntennaReadback]) -> Json {
-    json!(points.iter().map(|point| json!({
-        "requested": point.requested,
-        "readback": point.returned.as_deref(),
-        "error": point.error.as_deref(),
-    })).collect::<Vec<_>>())
+    json!(
+        points
+            .iter()
+            .map(|point| json!({
+                "requested": point.requested,
+                "readback": point.returned.as_deref(),
+                "error": point.error.as_deref(),
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn gain_readback_matches(requested: f64, returned: f64) -> bool {
@@ -1678,13 +1703,7 @@ fn numeric_readback_error(points: &[NumericReadback]) -> Option<String> {
     points.iter().find_map(|point| point.error.as_ref().map(|error| format!("request {}: {error}", point.requested)))
 }
 
-fn coercion_grid_value(
-    key: &str,
-    points: &[NumericReadback],
-    condition: &str,
-    test: &str,
-    matches: impl Fn(f64, f64) -> bool,
-) -> Result<ValueRecord, String> {
+fn coercion_grid_value(key: &str, points: &[NumericReadback], condition: &str, test: &str, matches: impl Fn(f64, f64) -> bool) -> Result<ValueRecord, String> {
     let key = Key::parse(key).map_err(|error| error.to_string())?;
     if let Some(error) = numeric_readback_error(points) {
         return Ok(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2a read-back failed: {error}.") });
@@ -1693,10 +1712,7 @@ fn coercion_grid_value(
     if values.is_empty() {
         return Ok(ValueRecord::Unmeasured { key, reason: "Phase 8 stage 3c-2a had no request read back at its requested value.".to_owned() });
     }
-    Ok(ValueRecord::Measured {
-        key, worst: model::Worst::Grid(model::GridValue::Values { values }),
-        trials: observation_trials(points.len())?, condition: condition.to_owned(), test: test.to_owned(),
-    })
+    Ok(ValueRecord::Measured { key, worst: model::Worst::Grid(model::GridValue::Values { values }), trials: observation_trials(points.len())?, condition: condition.to_owned(), test: test.to_owned() })
 }
 
 fn gain_step_value(key: &str, points: &[NumericReadback], condition: &str, test: &str) -> Result<ValueRecord, String> {
@@ -1710,10 +1726,7 @@ fn gain_step_value(key: &str, points: &[NumericReadback], condition: &str, test:
     let Some(step) = values.windows(2).map(|pair| pair[1] - pair[0]).reduce(f64::max) else {
         return Ok(ValueRecord::Unmeasured { key, reason: "Phase 8 stage 3c-2a gain sweep returned fewer than two distinct values.".to_owned() });
     };
-    Ok(ValueRecord::Measured {
-        key, worst: model::Worst::Number(step), trials: observation_trials(points.len())?,
-        condition: condition.to_owned(), test: test.to_owned(),
-    })
+    Ok(ValueRecord::Measured { key, worst: model::Worst::Number(step), trials: observation_trials(points.len())?, condition: condition.to_owned(), test: test.to_owned() })
 }
 
 fn antenna_value(key: &str, points: &[AntennaReadback], condition: &str, test: &str) -> Result<ValueRecord, String> {
@@ -1725,19 +1738,20 @@ fn antenna_value(key: &str, points: &[AntennaReadback], condition: &str, test: &
         return Ok(ValueRecord::Unmeasured { key, reason: "Phase 8 stage 3c-2a returned no antenna read-back.".to_owned() });
     }
     let values = points.iter().filter(|point| point.returned.as_deref() == Some(point.requested.as_str())).map(|point| point.requested.clone()).collect();
-    Ok(ValueRecord::Measured {
-        key, worst: model::Worst::Texts(values), trials: observation_trials(points.len())?,
-        condition: condition.to_owned(), test: test.to_owned(),
-    })
+    Ok(ValueRecord::Measured { key, worst: model::Worst::Texts(values), trials: observation_trials(points.len())?, condition: condition.to_owned(), test: test.to_owned() })
 }
 
 /// The requests in turn, each one an untimed `apply`; the first error, or the group's limit, ends the sweep.
 fn sweep_numeric(device: &dyn Device, raw: &RawGroup, dir: Dir, channel: usize, setting: NumericSetting, requests: &[f64]) -> Vec<NumericReadback> {
     let mut points = Vec::new();
     for requested in requests {
-        if raw.halted() { break; }
+        if raw.halted() {
+            break;
+        }
         let point = apply_numeric(device, dir, channel, setting, *requested);
-        if let Some(error) = &point.error { raw.fail(format!("{} channel {channel} {setting:?} request {requested}: {error}", dir.name())); }
+        if let Some(error) = &point.error {
+            raw.fail(format!("{} channel {channel} {setting:?} request {requested}: {error}", dir.name()));
+        }
         points.push(point);
     }
     points
@@ -1746,9 +1760,13 @@ fn sweep_numeric(device: &dyn Device, raw: &RawGroup, dir: Dir, channel: usize, 
 fn sweep_antenna(device: &dyn Device, raw: &RawGroup, dir: Dir, channel: usize, requests: &[String]) -> Vec<AntennaReadback> {
     let mut points = Vec::new();
     for requested in requests {
-        if raw.halted() { break; }
+        if raw.halted() {
+            break;
+        }
         let point = apply_antenna(device, dir, channel, requested);
-        if let Some(error) = &point.error { raw.fail(format!("{} channel {channel} antenna request {requested}: {error}", dir.name())); }
+        if let Some(error) = &point.error {
+            raw.fail(format!("{} channel {channel} antenna request {requested}: {error}", dir.name()));
+        }
         points.push(point);
     }
     points
@@ -1776,7 +1794,9 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
     for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
         for (channel_index, channel) in channels.iter().enumerate() {
             // The transmitter sits at its safe 1 GHz while the gain and antenna sweeps run.
-            if dir == Dir::Tx { sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Frequency, &[1_000_000_000.0]); }
+            if dir == Dir::Tx {
+                sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Frequency, &[1_000_000_000.0]);
+            }
 
             let gain_key = key_name(dir, channel_index, "gain_db");
             match grid_points(&channel.gain) {
@@ -1786,7 +1806,12 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
                         Some(value) => value,
                         None => coercion_grid_value(&gain_key, &points, condition, test, gain_readback_matches)?,
                     });
-                    group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_gain_db", dir.name(), channel_index), condition, json!({ "points": numeric_points_json(&points) }), points.len())?);
+                    group.observations.push(coercion_observation(
+                        format!("raw_coercion_{}_c{}_gain_db", dir.name(), channel_index),
+                        condition,
+                        json!({ "points": numeric_points_json(&points) }),
+                        points.len(),
+                    )?);
                 }
                 Err(error) => {
                     let key = Key::parse(&gain_key).map_err(|parse| parse.to_string())?;
@@ -1803,7 +1828,12 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
                         Some(value) => value,
                         None => gain_step_value(&gain_step_key, &points, condition, test)?,
                     });
-                    group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_gain_step_db", dir.name(), channel_index), condition, json!({ "points": numeric_points_json(&points) }), points.len())?);
+                    group.observations.push(coercion_observation(
+                        format!("raw_coercion_{}_c{}_gain_step_db", dir.name(), channel_index),
+                        condition,
+                        json!({ "points": numeric_points_json(&points) }),
+                        points.len(),
+                    )?);
                 }
                 Err(error) => {
                     let key = Key::parse(&gain_step_key).map_err(|parse| parse.to_string())?;
@@ -1818,7 +1848,12 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
                 Some(value) => value,
                 None => antenna_value(&antenna_key, &antenna_points, condition, test)?,
             });
-            group.observations.push(coercion_observation(format!("raw_coercion_{}_c{}_antenna", dir.name(), channel_index), condition, json!({ "points": antenna_points_json(&antenna_points) }), antenna_points.len())?);
+            group.observations.push(coercion_observation(
+                format!("raw_coercion_{}_c{}_antenna", dir.name(), channel_index),
+                condition,
+                json!({ "points": antenna_points_json(&antenna_points) }),
+                antenna_points.len(),
+            )?);
 
             // The whole profile grid, both ends and off-MHz points between them, by untimed apply. The
             // transmitter sends nothing (no streamer, gain 0) and is not held to SAFE_TX_HZ here: the
@@ -1827,23 +1862,35 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
             let frequency_name = format!("raw_coercion_{}_c{}_frequency_hz", dir.name(), channel_index);
             match frequency_sweep_points(&channel.frequency, plan.frequency_points) {
                 Ok(requests) => {
-                    if dir == Dir::Tx { sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Gain, &[0.0]); }
+                    if dir == Dir::Tx {
+                        sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Gain, &[0.0]);
+                    }
                     let points = sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Frequency, &requests);
-                    if dir == Dir::Tx { sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Frequency, &[1_000_000_000.0]); }
+                    if dir == Dir::Tx {
+                        sweep_numeric(&*device, raw, dir, channel_index, NumericSetting::Frequency, &[1_000_000_000.0]);
+                    }
                     let values = match raw.unmeasured(Key::parse(&frequency_keys[0]).map_err(|parse| parse.to_string())?, "the frequency sweep") {
                         Some(first) => [first, raw.unmeasured(Key::parse(&frequency_keys[1]).map_err(|parse| parse.to_string())?, "the frequency sweep").expect("the group has stopped")],
                         None => frequency_values([&frequency_keys[0], &frequency_keys[1]], &points, &requests, condition, test)?,
                     };
                     group.values.extend(values);
-                    group.observations.push(coercion_observation(frequency_name, condition, json!({
-                        "points": numeric_points_json(&points),
-                        "tolerance_hz": FREQUENCY_READBACK_TOLERANCE_HZ,
-                        "grid_between_points": "INFERRED: the points between those sampled are taken to read back as the first; the value's step is the profile's 1 Hz",
-                    }), points.len())?);
+                    group.observations.push(coercion_observation(
+                        frequency_name,
+                        condition,
+                        json!({
+                            "points": numeric_points_json(&points),
+                            "tolerance_hz": FREQUENCY_READBACK_TOLERANCE_HZ,
+                            "grid_between_points": "INFERRED: the points between those sampled are taken to read back as the first; the value's step is the profile's 1 Hz",
+                        }),
+                        points.len(),
+                    )?);
                 }
                 Err(error) => {
                     for key in &frequency_keys {
-                        group.values.push(ValueRecord::Unmeasured { key: Key::parse(key).map_err(|parse| parse.to_string())?, reason: format!("Phase 8 stage 3c-2c could not sweep the frequency grid: {error}.") });
+                        group.values.push(ValueRecord::Unmeasured {
+                            key: Key::parse(key).map_err(|parse| parse.to_string())?,
+                            reason: format!("Phase 8 stage 3c-2c could not sweep the frequency grid: {error}."),
+                        });
                     }
                     group.observations.push(coercion_observation(frequency_name, condition, json!({ "error": error, "points": [] }), 1)?);
                 }
@@ -1858,7 +1905,12 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
                         Some(value) => value,
                         None => coercion_grid_value(&rate_key, &points, condition, test, rate_readback_matches)?,
                     });
-                    group.observations.push(coercion_observation(format!("raw_coercion_{}_s{}_sample_rate_hz", dir.name(), channel_index), condition, json!({ "points": numeric_points_json(&points) }), points.len())?);
+                    group.observations.push(coercion_observation(
+                        format!("raw_coercion_{}_s{}_sample_rate_hz", dir.name(), channel_index),
+                        condition,
+                        json!({ "points": numeric_points_json(&points) }),
+                        points.len(),
+                    )?);
                 }
                 Err(error) => {
                     let key = Key::parse(&rate_key).map_err(|parse| parse.to_string())?;
@@ -1877,11 +1929,15 @@ pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Descrip
 pub fn restore_measurement_defaults(device: &dyn Device, description: &channels::Description, raw: &RawGroup) -> Result<(), String> {
     for (dir, channel_list) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
         for (channel_index, channel) in channel_list.iter().enumerate() {
-            if raw.halted() { return Err(format!("the raw group stopped before restoring {dir:?} channel {channel_index}: {}", raw.failure().unwrap_or_default())); }
-            if let Err(error) = device.apply(dir, channel_index, &Settings {
-                rate: Some(channels::DEFAULT_SAMPLE_RATE_HZ), freq: Some(1_000_000_000.0), gain: Some(0.0),
-                antenna: Some(channel.default_antenna.clone()),
-            }, None) {
+            if raw.halted() {
+                return Err(format!("the raw group stopped before restoring {dir:?} channel {channel_index}: {}", raw.failure().unwrap_or_default()));
+            }
+            if let Err(error) = device.apply(
+                dir,
+                channel_index,
+                &Settings { rate: Some(channels::DEFAULT_SAMPLE_RATE_HZ), freq: Some(1_000_000_000.0), gain: Some(0.0), antenna: Some(channel.default_antenna.clone()) },
+                None,
+            ) {
                 let message = format!("could not restore {:?} channel {channel_index}: {}", dir, error.message);
                 raw.fail(message.clone());
                 return Err(message);
@@ -1902,7 +1958,9 @@ struct RawRun<'a> {
 
 impl Drop for RawRun<'_> {
     fn drop(&mut self) {
-        if !self.restored { let _ = restore_measurement_defaults(self.device, self.description, &self.raw); }
+        if !self.restored {
+            let _ = restore_measurement_defaults(self.device, self.description, &self.raw);
+        }
     }
 }
 
@@ -1951,7 +2009,9 @@ impl DeviceLease {
         self.failed = false;
     }
 
-    pub fn is_clean(&self) -> bool { !self.failed }
+    pub fn is_clean(&self) -> bool {
+        !self.failed
+    }
 
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(self.device.as_ref().expect("the lease holds its device until dropped"))
@@ -1987,7 +2047,9 @@ impl DeviceLease {
 impl Drop for DeviceLease {
     fn drop(&mut self) {
         // shortcut: the wedged handle is leaked so its teardown does not touch the control port; a power cycle is needed anyway.
-        if self.failed { std::mem::forget(self.device.take()); }
+        if self.failed {
+            std::mem::forget(self.device.take());
+        }
     }
 }
 
@@ -2003,7 +2065,9 @@ pub fn run_raw_group_leased(lease: &mut DeviceLease, groups: &mut GroupRun, desc
         Ok(group)
     });
     drop(device);
-    if stopped.is_none() && restored.is_none() && groups.failed().is_empty() { lease.mark_clean(); }
+    if stopped.is_none() && restored.is_none() && groups.failed().is_empty() {
+        lease.mark_clean();
+    }
     (stopped, restored)
 }
 
@@ -2031,10 +2095,17 @@ pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static 
 /// The value keys the raw group supplies: queue depth, and each channel's gain, antenna and frequency keys and each stream's rate.
 pub fn raw_group_keys(description: &channels::Description) -> Vec<String> {
     let mut keys = vec!["radio.timing.command_queue_depth".to_owned()];
-    keys.extend(unmeasured_values(description).into_iter().map(|value| match value {
-        ValueRecord::Measured { key, .. } | ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
-    }).filter(|key| ["gain_db", "gain_step_db", "antenna", "frequency_hz", "frequency_step_hz", "sample_rate_hz"].iter().any(|leaf| key.ends_with(&format!(".{leaf}")))
-        && ["radio.rx.", "radio.tx."].iter().any(|prefix| key.starts_with(prefix))));
+    keys.extend(
+        unmeasured_values(description)
+            .into_iter()
+            .map(|value| match value {
+                ValueRecord::Measured { key, .. } | ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
+            })
+            .filter(|key| {
+                ["gain_db", "gain_step_db", "antenna", "frequency_hz", "frequency_step_hz", "sample_rate_hz"].iter().any(|leaf| key.ends_with(&format!(".{leaf}")))
+                    && ["radio.rx.", "radio.tx."].iter().any(|prefix| key.starts_with(prefix))
+            }),
+    );
     keys
 }
 
@@ -2074,7 +2145,9 @@ const SUMMARISED_ARRAY_LEN: usize = 20;
 fn summarise_value(value: &Json, path: &str, sink: &mut Vec<(String, usize, Json)>) -> Json {
     match value {
         Json::Array(rows) if rows.len() > SUMMARISED_ARRAY_LEN => {
-            for (index, row) in rows.iter().enumerate() { sink.push((path.to_owned(), index, row.clone())); }
+            for (index, row) in rows.iter().enumerate() {
+                sink.push((path.to_owned(), index, row.clone()));
+            }
             let mut summary = serde_json::Map::new();
             summary.insert("summarised_rows".to_owned(), json!(rows.len()));
             summary.insert("rows_path".to_owned(), json!(path));
@@ -2089,22 +2162,38 @@ fn summarise_value(value: &Json, path: &str, sink: &mut Vec<(String, usize, Json
             let mut counts = serde_json::Map::new();
             for field in ["class", "classification", "kind", "call", "code", "direction"] {
                 let mut by_value: BTreeMap<String, u64> = BTreeMap::new();
-                for row in rows { if let Some(text) = row.get(field).and_then(Json::as_str) { *by_value.entry(text.to_owned()).or_default() += 1; } }
-                if !by_value.is_empty() { counts.insert(field.to_owned(), json!(by_value)); }
+                for row in rows {
+                    if let Some(text) = row.get(field).and_then(Json::as_str) {
+                        *by_value.entry(text.to_owned()).or_default() += 1;
+                    }
+                }
+                if !by_value.is_empty() {
+                    counts.insert(field.to_owned(), json!(by_value));
+                }
             }
-            if !counts.is_empty() { summary.insert("counts".to_owned(), Json::Object(counts)); }
+            if !counts.is_empty() {
+                summary.insert("counts".to_owned(), Json::Object(counts));
+            }
             let mut ignore = Vec::new();
             let mut small = |row: &Json, label: String| summarise_value(row, &label, &mut ignore);
             summary.insert("first".to_owned(), json!(rows.iter().take(3).enumerate().map(|(i, row)| small(row, format!("{path}[{i}]"))).collect::<Vec<_>>()));
             summary.insert("last".to_owned(), json!(rows.iter().enumerate().skip(rows.len() - 3).map(|(i, row)| small(row, format!("{path}[{i}]"))).collect::<Vec<_>>()));
-            let outliers: Vec<Json> = rows.iter().enumerate()
+            let outliers: Vec<Json> = rows
+                .iter()
+                .enumerate()
                 .filter(|(_, row)| ["error", "apply_error"].iter().any(|field| row.get(*field).is_some_and(|found| !found.is_null())))
-                .take(5).map(|(i, row)| small(row, format!("{path}[{i}]"))).collect();
-            if !outliers.is_empty() { summary.insert("outliers".to_owned(), json!(outliers)); }
+                .take(5)
+                .map(|(i, row)| small(row, format!("{path}[{i}]")))
+                .collect();
+            if !outliers.is_empty() {
+                summary.insert("outliers".to_owned(), json!(outliers));
+            }
             Json::Object(summary)
         }
         Json::Array(rows) => Json::Array(rows.iter().enumerate().map(|(index, row)| summarise_value(row, &format!("{path}[{index}]"), sink)).collect()),
-        Json::Object(fields) => Json::Object(fields.iter().map(|(name, field)| (name.clone(), summarise_value(field, &if path.is_empty() { name.clone() } else { format!("{path}.{name}") }, sink))).collect()),
+        Json::Object(fields) => {
+            Json::Object(fields.iter().map(|(name, field)| (name.clone(), summarise_value(field, &if path.is_empty() { name.clone() } else { format!("{path}.{name}") }, sink))).collect())
+        }
         other => other.clone(),
     }
 }
@@ -2113,11 +2202,15 @@ fn summarise_value(value: &Json, path: &str, sink: &mut Vec<(String, usize, Json
 fn summarise_observation(mut row: Observation, rows_dir: Option<&Path>) -> Observation {
     let mut sink = Vec::new();
     let result = summarise_value(&Json::Object(row.result.clone().into_iter().collect()), "", &mut sink);
-    if let Json::Object(fields) = result { row.result = fields.into_iter().collect(); }
+    if let Json::Object(fields) = result {
+        row.result = fields.into_iter().collect();
+    }
     if let (Some(dir), false) = (rows_dir, sink.is_empty()) {
         let written = std::fs::create_dir_all(dir).and_then(|()| {
             let mut file = std::fs::File::create(dir.join(format!("{}.jsonl", row.name)))?;
-            for (path, index, whole) in &sink { writeln!(file, "{}", json!({ "path": path, "index": index, "row": whole }))?; }
+            for (path, index, whole) in &sink {
+                writeln!(file, "{}", json!({ "path": path, "index": index, "row": whole }))?;
+            }
             Ok(())
         });
         row.note = Some(match written {
@@ -2227,8 +2320,9 @@ impl GroupRun {
     /// A skipped reopen cannot leave the earlier value as if it were the complete evidence.
     pub fn skip_reopened(&mut self, keys: &[String], reason: &str) {
         self.measured.invalidate_values(keys, reason);
-        self.measured.observations.push(observation("provider_reopen", "tests/hardware.rs::hw_measurements_record", None, 1,
-            json!({ "status": "skipped", "reason": reason })).expect("the reopen observation is valid"));
+        self.measured
+            .observations
+            .push(observation("provider_reopen", "tests/hardware.rs::hw_measurements_record", None, 1, json!({ "status": "skipped", "reason": reason })).expect("the reopen observation is valid"));
         self.write_partial();
     }
 
@@ -2281,7 +2375,11 @@ impl GroupRun {
             "observations": self.measured.observations,
         });
         match serde_json::to_vec_pretty(&document) {
-            Ok(bytes) => if let Err(error) = std::fs::write(path, bytes) { println!("partial record {}: {error}", path.display()); },
+            Ok(bytes) => {
+                if let Err(error) = std::fs::write(path, bytes) {
+                    println!("partial record {}: {error}", path.display());
+                }
+            }
             Err(error) => println!("partial record {}: {error}", path.display()),
         }
     }
@@ -2292,7 +2390,9 @@ impl GroupRun {
     }
 
     pub fn remove_partial(&self) {
-        if let Some(path) = &self.partial { let _ = std::fs::remove_file(path); }
+        if let Some(path) = &self.partial {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -2309,7 +2409,9 @@ impl MeasurementGroup {
     pub fn append(&mut self, mut other: MeasurementGroup) -> Result<(), String> {
         for condition in other.conditions.drain(..) {
             if let Some(existing) = self.conditions.iter().find(|row| row.id == condition.id) {
-                if existing != &condition { return Err(format!("measurement condition `{}` changed within one record", condition.id)); }
+                if existing != &condition {
+                    return Err(format!("measurement condition `{}` changed within one record", condition.id));
+                }
             } else {
                 self.conditions.push(condition);
             }
@@ -2329,15 +2431,16 @@ impl MeasurementGroup {
                     found = true;
                 }
             }
-            if !found { self.values.push(ValueRecord::Unmeasured { key: parsed, reason: reason.to_owned() }); }
+            if !found {
+                self.values.push(ValueRecord::Unmeasured { key: parsed, reason: reason.to_owned() });
+            }
         }
     }
 
     fn merge_reopened(&mut self, mut reopened: MeasurementGroup, keys: &[String], mode: ReopenedMerge) -> Result<(), String> {
         reopened.mark_reopened();
         for (index, condition) in reopened.conditions.iter().enumerate() {
-            if reopened.conditions[..index].iter().any(|previous| previous.id == condition.id)
-                || self.conditions.iter().any(|previous| previous.id == condition.id) {
+            if reopened.conditions[..index].iter().any(|previous| previous.id == condition.id) || self.conditions.iter().any(|previous| previous.id == condition.id) {
                 return Err(format!("reopened condition `{}` is duplicated", condition.id));
             }
         }
@@ -2349,11 +2452,14 @@ impl MeasurementGroup {
                 return Err(format!("base measurement must provide exactly one `{key}` value"));
             }
         }
-        let replacements: Vec<_> = keys.iter().map(|key| {
-            let base = self.values.iter().find(|value| record_key(value).as_str() == key).expect("validated base value");
-            let reopened = reopened.values.iter().find(|value| record_key(value).as_str() == key).expect("validated reopened value");
-            combine_reopened_value(base, reopened, key, mode)
-        }).collect();
+        let replacements: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let base = self.values.iter().find(|value| record_key(value).as_str() == key).expect("validated base value");
+                let reopened = reopened.values.iter().find(|value| record_key(value).as_str() == key).expect("validated reopened value");
+                combine_reopened_value(base, reopened, key, mode)
+            })
+            .collect();
         let additions = MeasurementGroup { conditions: reopened.conditions, values: Vec::new(), observations: reopened.observations };
         self.append(additions)?;
         for (key, replacement) in keys.iter().zip(replacements) {
@@ -2371,17 +2477,23 @@ impl MeasurementGroup {
         }
         for value in &mut self.values {
             if let ValueRecord::Measured { condition, .. } = value {
-                if let Some(reopened) = ids.get(condition) { *condition = reopened.clone(); }
+                if let Some(reopened) = ids.get(condition) {
+                    *condition = reopened.clone();
+                }
             }
         }
         for row in &mut self.observations {
             row.name = format!("reopened_{}", row.name);
             if let Some(condition) = row.condition.as_mut() {
-                if let Some(reopened) = ids.get(condition) { *condition = reopened.clone(); }
+                if let Some(reopened) = ids.get(condition) {
+                    *condition = reopened.clone();
+                }
             }
             let mut result = Json::Object(std::mem::take(&mut row.result).into_iter().collect());
             rewrite_condition_ids(&mut result, &ids);
-            if let Json::Object(result) = result { row.result = result.into_iter().collect(); }
+            if let Json::Object(result) = result {
+                row.result = result.into_iter().collect();
+            }
         }
     }
 }
@@ -2393,7 +2505,10 @@ fn record_key(value: &ValueRecord) -> &Key {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReopenedMerge { Minimum, Maximum }
+pub enum ReopenedMerge {
+    Minimum,
+    Maximum,
+}
 
 fn combine_reopened_value(base: &ValueRecord, reopened: &ValueRecord, key: &str, mode: ReopenedMerge) -> ValueRecord {
     let parsed = Key::parse(key).expect("the reopened key is valid");
@@ -2418,9 +2533,21 @@ fn combine_reopened_value(base: &ValueRecord, reopened: &ValueRecord, key: &str,
 
 fn rewrite_condition_ids(value: &mut Json, ids: &BTreeMap<String, String>) {
     match value {
-        Json::String(text) => if let Some(reopened) = ids.get(text) { *text = reopened.clone(); },
-        Json::Array(rows) => for row in rows { rewrite_condition_ids(row, ids); },
-        Json::Object(fields) => for field in fields.values_mut() { rewrite_condition_ids(field, ids); },
+        Json::String(text) => {
+            if let Some(reopened) = ids.get(text) {
+                *text = reopened.clone();
+            }
+        }
+        Json::Array(rows) => {
+            for row in rows {
+                rewrite_condition_ids(row, ids);
+            }
+        }
+        Json::Object(fields) => {
+            for field in fields.values_mut() {
+                rewrite_condition_ids(field, ids);
+            }
+        }
         _ => {}
     }
 }
@@ -2463,11 +2590,8 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
 fn candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, super::TempDir), String> {
     let dir = super::TempDir::new();
     let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), super::bench_envelope(&*device), true);
-    let run = ezsdr_kernel::coordinator::connect(
-        &doc,
-        super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)),
-        Lease::attached(),
-    ).map_err(|error| error.to_string())?;
+    let run = ezsdr_kernel::coordinator::connect(&doc, super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)), Lease::attached())
+        .map_err(|error| error.to_string())?;
     Ok((run, dir))
 }
 
@@ -2484,7 +2608,9 @@ fn root_now(run: &RunHandle) -> Result<(ClockDomainId, i64), String> {
 
 /// Why a Spec Run that validate or prepare refused has no T0: its termination. `None` for a Run that started.
 fn rejected_run_reason(run: &RunHandle) -> Option<String> {
-    if run.start_instant().is_some() { return None; }
+    if run.start_instant().is_some() {
+        return None;
+    }
     Some(match run.state() {
         RunState::CleanedUp { termination } => format!("{termination:?}"),
         other => format!("the Run has no T0 and is {other:?}"),
@@ -2492,9 +2618,11 @@ fn rejected_run_reason(run: &RunHandle) -> Option<String> {
 }
 
 fn stream_clock(run: &RunHandle, direction: Direction) -> Result<SampleClockRecord, String> {
-    let suffix = match direction { Direction::Rx => "usrp/rx/s0", Direction::Tx => "usrp/tx/s0" };
-    run.sample_clocks().into_iter().rev().find(|clock| clock.stream.to_string().ends_with(suffix) && clock.ended_at.is_none())
-        .ok_or_else(|| format!("no active {direction:?} stream-0 SampleClock"))
+    let suffix = match direction {
+        Direction::Rx => "usrp/rx/s0",
+        Direction::Tx => "usrp/tx/s0",
+    };
+    run.sample_clocks().into_iter().rev().find(|clock| clock.stream.to_string().ends_with(suffix) && clock.ended_at.is_none()).ok_or_else(|| format!("no active {direction:?} stream-0 SampleClock"))
 }
 
 fn sample_at_or_after(clock: &SampleClockRecord, root_tick: i64) -> Result<(TimePoint, i64), String> {
@@ -2514,21 +2642,24 @@ fn sample_root_tick(clock: &SampleClockRecord, sample_tick: i64) -> Result<i64, 
     let num = i128::from(clock.root_ticks_per_tick.num());
     let den = i128::from(clock.root_ticks_per_tick.den());
     let scaled = i128::from(sample_tick) * num;
-    if scaled.rem_euclid(den) != 0 { return Err("sample instant is not an integral device tick".to_owned()); }
+    if scaled.rem_euclid(den) != 0 {
+        return Err("sample instant is not an integral device tick".to_owned());
+    }
     i64::try_from(i128::from(origin) + scaled / den).map_err(|_| "sample root tick overflow".to_owned())
 }
 
 fn sample_target(run: &RunHandle, direction: Direction, lead_ns: u64, device: &dyn Device) -> Result<(TimePoint, i64), String> {
     let clock = stream_clock(run, direction)?;
     let (root, now) = root_now(run)?;
-    if root != clock.root { return Err("Run now and stream clock have different roots".to_owned()); }
+    if root != clock.root {
+        return Err("Run now and stream clock have different roots".to_owned());
+    }
     sample_at_or_after(&clock, now.checked_add(ticks_for_ns(lead_ns, device.master_clock_rate())?).ok_or("target root tick overflow")?)
 }
 
 fn effective_lead_ns(target_root: i64, receipt_time: TimePoint, root: ClockDomainId, master_clock_hz: u64) -> Result<(i64, i64), String> {
     let receipt_tick = receipt_time.ticks_in(root).map_err(|error| error.to_string())?;
-    let lead_ns = i64::try_from((i128::from(target_root) - i128::from(receipt_tick)) * 1_000_000_000 / i128::from(master_clock_hz))
-        .map_err(|_| "effective lead overflow".to_owned())?;
+    let lead_ns = i64::try_from((i128::from(target_root) - i128::from(receipt_tick)) * 1_000_000_000 / i128::from(master_clock_hz)).map_err(|_| "effective lead overflow".to_owned())?;
     Ok((receipt_tick, lead_ns))
 }
 
@@ -2539,16 +2670,19 @@ fn advance_root(run: &mut RunHandle, root: ClockDomainId, tick: i64) -> Result<(
 fn enable_tx(run: &mut RunHandle) -> Result<(), String> {
     super::past_t0(run, super::ms(1));
     let entry = run.submit(super::set("radio.tx.c0.stream", ezsdr_kernel::spec::Value::from(0)), None).map_err(|error| error.to_string())?;
-    if !super::admitted(&entry) { return Err(format!("TX stream was not admitted: {:?}", entry.outcome)); }
+    if !super::admitted(&entry) {
+        return Err(format!("TX stream was not admitted: {:?}", entry.outcome));
+    }
     super::past_tx_origin(run);
     Ok(())
 }
 
 fn disable_rx(run: &mut RunHandle) -> Result<(), String> {
     super::past_t0(run, super::ms(1));
-    let entry = run.submit(super::set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None)
-        .map_err(|error| error.to_string())?;
-    if !super::admitted(&entry) { return Err(format!("RX stream disable was not admitted: {:?}", entry.outcome)); }
+    let entry = run.submit(super::set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None).map_err(|error| error.to_string())?;
+    if !super::admitted(&entry) {
+        return Err(format!("RX stream disable was not admitted: {:?}", entry.outcome));
+    }
     super::wait(run, super::ms(100));
     if run.sample_clocks().iter().any(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()) {
         return Err("RX stream remained active during a TX-only measurement".to_owned());
@@ -2558,35 +2692,43 @@ fn disable_rx(run: &mut RunHandle) -> Result<(), String> {
 
 fn start_repeat(run: &mut RunHandle, bytes: &[u8]) -> Result<(), String> {
     let entry = run.submit(super::verb("start_repeat", super::resource("radio/tx/s0"), None, &[]), Some(bytes)).map_err(|error| error.to_string())?;
-    if !super::admitted(&entry) { return Err(format!("repeat was not admitted: {:?}", entry.outcome)); }
+    if !super::admitted(&entry) {
+        return Err(format!("repeat was not admitted: {:?}", entry.outcome));
+    }
     Ok(())
 }
 
-fn tx_trial(
-    run: &mut RunHandle,
-    device: &dyn Device,
-    bytes: &[u8],
-    samples: u64,
-    lead_ns: u64,
-    interval_ns: u64,
-) -> Result<(TrialPlan, i64), String> {
+fn tx_trial(run: &mut RunHandle, device: &dyn Device, bytes: &[u8], samples: u64, lead_ns: u64, interval_ns: u64) -> Result<(TrialPlan, i64), String> {
     let (target, target_root) = sample_target(run, Direction::Tx, lead_ns, device)?;
     let entry = run.submit(super::verb("send", super::resource("radio/tx/s0"), Some(target), &[]), Some(bytes)).map_err(|error| error.to_string())?;
     let clock = stream_clock(run, Direction::Tx)?;
     let (receipt_tick, effective_lead_ns) = effective_lead_ns(target_root, entry.time, clock.root, device.master_clock_rate())?;
     let root = clock.root;
-    let end_sample = target.ticks_in(clock.domain).map_err(|error| error.to_string())?
+    let end_sample = target
+        .ticks_in(clock.domain)
+        .map_err(|error| error.to_string())?
         .checked_add(i64::try_from(samples).map_err(|_| "burst sample count exceeds i64".to_owned())?)
         .ok_or("burst end sample overflow")?;
     let expected_end_tick = sample_root_tick(&clock, end_sample)?;
     let end_tick = expected_end_tick.checked_add(ticks_for_ns(interval_ns, device.master_clock_rate())?).ok_or("trial end tick overflow")?;
     advance_root(run, root, end_tick)?;
-    Ok((TrialPlan {
-        start_tick: receipt_tick, end_tick, admitted: super::admitted(&entry),
-        expected_target: Some(target), expected_samples: samples, expected_end_tick, booked_tick: Some(receipt_tick),
-        completion: TrialCompletion::TransmitBurstAck, requires_preemption_evidence: false,
-        capture_index: None, capture_target: None, cold_capture: false,
-    }, effective_lead_ns))
+    Ok((
+        TrialPlan {
+            start_tick: receipt_tick,
+            end_tick,
+            admitted: super::admitted(&entry),
+            expected_target: Some(target),
+            expected_samples: samples,
+            expected_end_tick,
+            booked_tick: Some(receipt_tick),
+            completion: TrialCompletion::TransmitBurstAck,
+            requires_preemption_evidence: false,
+            capture_index: None,
+            capture_target: None,
+            cold_capture: false,
+        },
+        effective_lead_ns,
+    ))
 }
 
 fn duplex_condition(id: &str) -> Condition {
@@ -2622,7 +2764,9 @@ pub fn measure_min_timed_command_lead(device: Arc<dyn Device>, plan: &Measuremen
         let mut effective = Vec::new();
         for _ in 0..plan.step_trials {
             let (trial, lead) = tx_trial(&mut run, &*device, &bytes, 100, *value, plan.interval_ns)?;
-            if let Some(previous) = trials.last_mut() { previous.end_tick = trial.start_tick; }
+            if let Some(previous) = trials.last_mut() {
+                previous.end_tick = trial.start_tick;
+            }
             trials.push(trial);
             effective.push(Some(lead));
         }
@@ -2637,9 +2781,15 @@ pub fn measure_min_timed_command_lead(device: Arc<dyn Device>, plan: &Measuremen
     let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
     let measured = numeric_value("radio.timing.min_timed_command_lead_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
     Ok(MeasurementGroup {
-        conditions: vec![tx_only_condition(condition)], values: vec![measured],
-        observations: vec![observation("provider_min_timed_command_lead", "tests/hardware.rs::hw_measurements_record", Some(condition.to_owned()), observation_trials(total)?,
-            json!({ "interval_ns": plan.interval_ns, "candidates": rows }))?],
+        conditions: vec![tx_only_condition(condition)],
+        values: vec![measured],
+        observations: vec![observation(
+            "provider_min_timed_command_lead",
+            "tests/hardware.rs::hw_measurements_record",
+            Some(condition.to_owned()),
+            observation_trials(total)?,
+            json!({ "interval_ns": plan.interval_ns, "candidates": rows }),
+        )?],
     })
 }
 
@@ -2663,12 +2813,15 @@ pub fn measure_tx_in_flight(device: Arc<dyn Device>, plan: &MeasurementPlan) -> 
         let mut trials: Vec<TrialPlan> = Vec::new();
         let mut effective = Vec::new();
         for index in 0..plan.step_trials {
-            if index > 0 { start_repeat(&mut run, &repeat)?; }
-            let lead = value.checked_add(device_lead_ns).and_then(|lead| lead.checked_add(delivery_allowance_ns))
-                .and_then(|lead| lead.checked_add(1_000_000)).ok_or("preemption lead overflow")?;
+            if index > 0 {
+                start_repeat(&mut run, &repeat)?;
+            }
+            let lead = value.checked_add(device_lead_ns).and_then(|lead| lead.checked_add(delivery_allowance_ns)).and_then(|lead| lead.checked_add(1_000_000)).ok_or("preemption lead overflow")?;
             let (mut trial, actual) = tx_trial(&mut run, &*device, &burst, 100, lead, plan.interval_ns)?;
             trial.requires_preemption_evidence = true;
-            if let Some(previous) = trials.last_mut() { previous.end_tick = trial.start_tick; }
+            if let Some(previous) = trials.last_mut() {
+                previous.end_tick = trial.start_tick;
+            }
             trials.push(trial);
             effective.push(Some(actual));
         }
@@ -2683,11 +2836,17 @@ pub fn measure_tx_in_flight(device: Arc<dyn Device>, plan: &MeasurementPlan) -> 
     let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
     let measured = numeric_value("radio.timing.tx_in_flight_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
     Ok(MeasurementGroup {
-        conditions: vec![tx_only_condition(condition)], values: vec![measured],
-        observations: vec![observation("provider_tx_in_flight", "tests/hardware.rs::hw_measurements_record", Some(condition.to_owned()), observation_trials(total)?,
+        conditions: vec![tx_only_condition(condition)],
+        values: vec![measured],
+        observations: vec![observation(
+            "provider_tx_in_flight",
+            "tests/hardware.rs::hw_measurements_record",
+            Some(condition.to_owned()),
+            observation_trials(total)?,
             json!({ "interval_ns": plan.interval_ns, "device_lead_ns": device_lead_ns,
                 "delivery_allowance_ns": delivery_allowance_ns,
-                "lead_extra_ns": 1_000_000, "lead_is_inferred": true, "candidates": rows }))?],
+                "lead_extra_ns": 1_000_000, "lead_is_inferred": true, "candidates": rows }),
+        )?],
     })
 }
 
@@ -2696,9 +2855,19 @@ fn companion_inapplicable(device: &Arc<dyn Device>, name: &str) -> Result<Option
     let dir = super::TempDir::new();
     let doc = super::bench_profile(&**device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
     let layout = description(&radio_binding(&doc)?, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms())?;
-    if !layout.rx.is_empty() && !layout.tx.is_empty() { return Ok(None); }
-    Ok(Some(MeasurementGroup { observations: vec![observation(name, "tests/hardware.rs::hw_measurements_record", None, 1,
-        json!({ "status": "skipped_no_opposite_direction", "rx_channels": layout.rx.len(), "tx_channels": layout.tx.len() }))?], ..MeasurementGroup::default() }))
+    if !layout.rx.is_empty() && !layout.tx.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(MeasurementGroup {
+        observations: vec![observation(
+            name,
+            "tests/hardware.rs::hw_measurements_record",
+            None,
+            1,
+            json!({ "status": "skipped_no_opposite_direction", "rx_channels": layout.rx.len(), "tx_channels": layout.tx.len() }),
+        )?],
+        ..MeasurementGroup::default()
+    }))
 }
 
 fn cold_specs() -> [(u64, u64, &'static str); 2] {
@@ -2706,8 +2875,8 @@ fn cold_specs() -> [(u64, u64, &'static str); 2] {
 }
 
 fn capture_action(run: &mut RunHandle, target: TimePoint, samples: i64) -> Result<bool, String> {
-    let entry = run.submit(super::verb("capture", super::output("rec"), Some(target), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(samples))]), None)
-        .map_err(|error| error.to_string())?;
+    let entry =
+        run.submit(super::verb("capture", super::output("rec"), Some(target), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(samples))]), None).map_err(|error| error.to_string())?;
     Ok(super::admitted(&entry))
 }
 
@@ -2725,29 +2894,36 @@ pub fn measure_rx_start_lead_with_tx(device: Arc<dyn Device>, plan: &Measurement
 fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companion_group: bool) -> Result<MeasurementGroup, String> {
     plan.validate()?;
     if companion_group {
-        if let Some(skipped) = companion_inapplicable(&device, "provider_rx_start_lead_with_tx")? { return Ok(skipped); }
+        if let Some(skipped) = companion_inapplicable(&device, "provider_rx_start_lead_with_tx")? {
+            return Ok(skipped);
+        }
     }
     let mut condition_rows = Vec::new();
     let mut candidates: BTreeMap<String, Vec<CandidateStage>> = BTreeMap::new();
     let mut observation_stages = Vec::new();
     let mut total = 0usize;
     let (companion_bytes, _) = super::transmit_waveform(1_000);
-    let specs: Vec<(u64, u64, String, bool)> = cold_specs().iter()
-        .map(|(from, to, id)| (*from, *to, if companion_group { format!("{id}-with-tx") } else { (*id).to_owned() }, companion_group)).collect();
+    let specs: Vec<(u64, u64, String, bool)> =
+        cold_specs().iter().map(|(from, to, id)| (*from, *to, if companion_group { format!("{id}-with-tx") } else { (*id).to_owned() }, companion_group)).collect();
     for (from, to, condition, companion) in specs {
         let condition = condition.as_str();
         let mut stages = Vec::new();
         for value in &plan.rx_start_leads_ns {
             let (mut run, _dir) = candidate_session(device.clone(), candidate_timing("rx_start_lead_ns", *value)?)?;
             super::past_t0(&mut run, super::ms(100));
-            if companion { start_companion_tx(&mut run, &companion_bytes)?; }
+            if companion {
+                start_companion_tx(&mut run, &companion_bytes)?;
+            }
             let (_, run_root) = root_now(&run)?;
             let clock = stream_clock(&run, Direction::Rx)?;
             let root = clock.root;
             if from != 1_000_000 {
-                let entry = run.submit(super::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from as f64).ok_or("invalid initial receive rate")?), None)
+                let entry = run
+                    .submit(super::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from as f64).ok_or("invalid initial receive rate")?), None)
                     .map_err(|error| error.to_string())?;
-                if !super::admitted(&entry) { return Err(format!("initial receive rate was not admitted: {:?}", entry.outcome)); }
+                if !super::admitted(&entry) {
+                    return Err(format!("initial receive rate was not admitted: {:?}", entry.outcome));
+                }
                 let settle = run_root.checked_add(ticks_for_ns(*value + 50_000_000, device.master_clock_rate())?).ok_or("settle target overflow")?;
                 advance_root(&mut run, root, settle)?;
             }
@@ -2764,23 +2940,31 @@ fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
                 let start_capture = sample_root_tick(&active, target_index)?;
                 advance_root(&mut run, root, start_capture.checked_add(ticks_for_ns(40_000_000, device.master_clock_rate())?).ok_or("capture settling overflow")?)?;
                 let (_, booked_tick) = root_now(&run)?;
-                let entry = run.submit(super::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(next_rate as f64).ok_or("invalid receive rate")?), None)
-                    .map_err(|error| error.to_string())?;
+                let entry =
+                    run.submit(super::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(next_rate as f64).ok_or("invalid receive rate")?), None).map_err(|error| error.to_string())?;
                 let admitted = capture_admitted && super::admitted(&entry);
                 let horizon = TimePoint::new(root, booked_tick.checked_add(ticks_for_ns(3_000_000_000, device.master_clock_rate())?).ok_or("capture horizon overflow")?);
                 let written = run.wait_for(&[super::kind("sink.CAPTURE_WRITTEN")], before_events, horizon).map_err(|error| error.to_string())?;
                 let events = run.events(before_events);
-                let written_at = written.and_then(|_| events.iter().find(|event| event.kind == super::kind("sink.CAPTURE_WRITTEN")).map(|event| event.time))
-                    .and_then(|time| time.ticks_in(root).ok());
-                let end_tick = written_at.unwrap_or(root_now(&run)?.1)
-                    .checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("cold trial end overflow")?;
+                let written_at = written.and_then(|_| events.iter().find(|event| event.kind == super::kind("sink.CAPTURE_WRITTEN")).map(|event| event.time)).and_then(|time| time.ticks_in(root).ok());
+                let end_tick = written_at.unwrap_or(root_now(&run)?.1).checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("cold trial end overflow")?;
                 advance_root(&mut run, root, end_tick)?;
-                if let Some(previous) = trial_plans.last_mut() { previous.end_tick = start_tick; }
+                if let Some(previous) = trial_plans.last_mut() {
+                    previous.end_tick = start_tick;
+                }
                 trial_plans.push(TrialPlan {
-                    start_tick, end_tick, admitted, expected_target: None,
-                    expected_samples: count, expected_end_tick: 0, booked_tick: Some(booked_tick), completion: TrialCompletion::ReceiveCapture,
+                    start_tick,
+                    end_tick,
+                    admitted,
+                    expected_target: None,
+                    expected_samples: count,
+                    expected_end_tick: 0,
+                    booked_tick: Some(booked_tick),
+                    completion: TrialCompletion::ReceiveCapture,
                     requires_preemption_evidence: false,
-                    capture_index: Some(index), capture_target: Some(capture_at), cold_capture: true,
+                    capture_index: Some(index),
+                    capture_target: Some(capture_at),
+                    cold_capture: true,
                 });
             }
             let manifest = run.finish();
@@ -2789,7 +2973,9 @@ fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
             stages.push(CandidateStage { value: *value, trials: classes.clone() });
             let effective: Vec<_> = trial_plans.iter().map(|trial| effective_cold_lead_ns(&manifest, trial, device.master_clock_rate())).collect();
             let mut stage_json = cold_candidate_stage_json(condition, *value, &classes, &effective, from, to, plan.step_trials);
-            if companion { stage_json["companion"] = companion_observation(&manifest, Direction::Tx); }
+            if companion {
+                stage_json["companion"] = companion_observation(&manifest, Direction::Tx);
+            }
             observation_stages.push(stage_json);
             total += plan.step_trials;
         }
@@ -2797,15 +2983,30 @@ fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
         condition_rows.push(if companion { companion_condition(condition, Direction::Rx, from, Direction::Tx) } else { rx_condition(condition, from as f64) });
     }
     if companion_group {
-        return Ok(MeasurementGroup { conditions: condition_rows, values: vec![], observations: vec![observation("provider_rx_start_lead_with_tx", "tests/hardware.rs::hw_measurements_record", None, observation_trials(total)?,
-            json!({ "observation_only": true, "interval_ns": plan.interval_ns, "candidates": observation_stages }))?] });
+        return Ok(MeasurementGroup {
+            conditions: condition_rows,
+            values: vec![],
+            observations: vec![observation(
+                "provider_rx_start_lead_with_tx",
+                "tests/hardware.rs::hw_measurements_record",
+                None,
+                observation_trials(total)?,
+                json!({ "observation_only": true, "interval_ns": plan.interval_ns, "candidates": observation_stages }),
+            )?],
+        });
     }
     let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
     let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
     Ok(MeasurementGroup {
-        conditions: condition_rows, values: vec![measured],
-        observations: vec![observation("provider_rx_start_lead", "tests/hardware.rs::hw_measurements_record", None, observation_trials(total)?,
-            json!({ "interval_ns": plan.interval_ns, "candidates": observation_stages }))?],
+        conditions: condition_rows,
+        values: vec![measured],
+        observations: vec![observation(
+            "provider_rx_start_lead",
+            "tests/hardware.rs::hw_measurements_record",
+            None,
+            observation_trials(total)?,
+            json!({ "interval_ns": plan.interval_ns, "candidates": observation_stages }),
+        )?],
     })
 }
 
@@ -2833,7 +3034,9 @@ fn tx_start_trial_class(trial: &TrialEvidence, timing: &Json, origin: Option<i64
     completion.completion = TrialCompletion::ReceiveCapture;
     completion.record = Some(TrialRecord { samples: 0, end_tick: 0 });
     let class = classify_trial(&completion);
-    if class != TrialClass::Success { return (class, origin.and_then(|origin| tx_switch_at(timing, origin))); }
+    if class != TrialClass::Success {
+        return (class, origin.and_then(|origin| tx_switch_at(timing, origin)));
+    }
     let Some(origin) = origin else { return (TrialClass::Incomplete, None) };
     let at = tx_switch_at(timing, origin);
     (if at.is_some_and(|at| at < origin) { TrialClass::Success } else { TrialClass::Incomplete }, at)
@@ -2848,28 +3051,32 @@ fn tx_start_candidate_stage_json(
     transitions: &[[u64; 2]],
     segments: &[(Option<i64>, Option<i64>)],
 ) -> Json {
-    let effective_leads_ns: Vec<_> = segments.iter().map(|(origin, at)| {
-        origin.and_then(|origin| at.and_then(|at| i64::try_from((i128::from(origin) - i128::from(at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()))
-    }).collect();
+    let effective_leads_ns: Vec<_> = segments
+        .iter()
+        .map(|(origin, at)| origin.and_then(|origin| at.and_then(|at| i64::try_from((i128::from(origin) - i128::from(at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok())))
+        .collect();
     let mut stage = candidate_stage_json(condition, value, trials, &effective_leads_ns);
     stage["tx_rate_pair_hz"] = json!([rate_pair_hz.0, rate_pair_hz.1]);
     stage["initial_tx_rate_hz"] = json!(transitions.first().map(|pair| pair[0]));
     stage["trial_transitions_hz"] = json!(transitions);
-    stage["segment_starts"] = json!(segments.iter().enumerate().map(|(index, (origin, at))| json!({
-        "trial": index, "origin_tick": origin, "at_tick": at,
-        "start_lead_ns": origin.and_then(|origin| at.and_then(|at| i64::try_from((i128::from(origin) - i128::from(at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok())),
-        "at_before_origin": origin.zip(*at).map(|(origin, at)| at < origin),
-    })).collect::<Vec<_>>());
-    stage["burst_criterion"] = json!("omitted: the test thread must reserve the burst after the new SampleClock is registered, which can be too close to the origin at the 1 ms candidate; tx_switch.at records configuration completion and clock adoption, not that a transmitted burst started; the measurement uses tx_switch.at < origin and error-free evidence");
+    stage["segment_starts"] = json!(
+        segments
+            .iter()
+            .enumerate()
+            .map(|(index, (origin, at))| json!({
+                "trial": index, "origin_tick": origin, "at_tick": at,
+                "start_lead_ns": origin.and_then(|origin| at.and_then(|at| i64::try_from((i128::from(origin) - i128::from(at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok())),
+                "at_before_origin": origin.zip(*at).map(|(origin, at)| at < origin),
+            }))
+            .collect::<Vec<_>>()
+    );
+    stage["burst_criterion"] = json!(
+        "omitted: the test thread must reserve the burst after the new SampleClock is registered, which can be too close to the origin at the 1 ms candidate; tx_switch.at records configuration completion and clock adoption, not that a transmitted burst started; the measurement uses tx_switch.at < origin and error-free evidence"
+    );
     stage
 }
 
-fn tx_start_value(
-    summary: &CandidateSummary,
-    candidates: &BTreeMap<String, Vec<CandidateStage>>,
-    required_trials: usize,
-    test: &str,
-) -> Result<ValueRecord, String> {
+fn tx_start_value(summary: &CandidateSummary, candidates: &BTreeMap<String, Vec<CandidateStage>>, required_trials: usize, test: &str) -> Result<ValueRecord, String> {
     numeric_value("radio.timing.tx_start_lead_ns", summary, candidates, required_trials, test)
 }
 
@@ -2890,21 +3097,27 @@ pub fn measure_tx_start_lead_with_rx(device: Arc<dyn Device>, plan: &Measurement
 fn tx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companion_group: bool) -> Result<MeasurementGroup, String> {
     plan.validate()?;
     if companion_group {
-        if let Some(skipped) = companion_inapplicable(&device, "provider_tx_start_lead_with_rx")? { return Ok(skipped); }
+        if let Some(skipped) = companion_inapplicable(&device, "provider_tx_start_lead_with_rx")? {
+            return Ok(skipped);
+        }
     }
     let mut conditions = Vec::new();
     let mut candidates = BTreeMap::new();
     let mut observed = Vec::new();
     let mut total = 0usize;
-    let specs: Vec<(u64, u64, String, bool)> = tx_start_specs().iter()
-        .map(|(from, to, id)| (*from, *to, if companion_group { format!("{id}-with-rx") } else { (*id).to_owned() }, companion_group)).collect();
+    let specs: Vec<(u64, u64, String, bool)> =
+        tx_start_specs().iter().map(|(from, to, id)| (*from, *to, if companion_group { format!("{id}-with-rx") } else { (*id).to_owned() }, companion_group)).collect();
     for (from_rate, to_rate, condition, companion) in specs {
         let condition = condition.as_str();
         conditions.push(if companion { companion_condition(condition, Direction::Tx, from_rate, Direction::Rx) } else { tx_rate_condition(condition, from_rate) });
         let mut stages = Vec::new();
         for value in &plan.tx_start_leads_ns {
             let (mut run, _dir) = candidate_session(device.clone(), candidate_timing("tx_start_lead_ns", *value)?)?;
-            if companion { start_companion_rx(&mut run)?; } else { disable_rx(&mut run)?; }
+            if companion {
+                start_companion_rx(&mut run)?;
+            } else {
+                disable_rx(&mut run)?;
+            }
             enable_tx(&mut run)?;
             let initial_clock = stream_clock(&run, Direction::Tx)?;
             if !clock_rate_matches(&initial_clock, 1_000_000) {
@@ -2920,16 +3133,11 @@ fn tx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
                     return Err(format!("TX start-lead condition {condition} is not at either candidate rate"));
                 }
                 let previous = stream_clock(&run, Direction::Tx)?;
-                let entry = run.submit(super::set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(next_rate as f64).ok_or("invalid transmit rate")?), None)
-                    .map_err(|error| error.to_string())?;
+                let entry =
+                    run.submit(super::set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(next_rate as f64).ok_or("invalid transmit rate")?), None).map_err(|error| error.to_string())?;
                 let admitted = super::admitted(&entry);
-                let clock = if admitted {
-                    run.sample_clocks().into_iter().rev().find(|clock| {
-                        clock.stream == previous.stream && clock.domain != previous.domain && clock.ended_at.is_none()
-                    })
-                } else {
-                    None
-                };
+                let clock =
+                    if admitted { run.sample_clocks().into_iter().rev().find(|clock| clock.stream == previous.stream && clock.domain != previous.domain && clock.ended_at.is_none()) } else { None };
                 if let Some(clock) = &clock {
                     if clock.root != previous.root || !clock_rate_matches(clock, next_rate) {
                         return Err(format!("TX cold rate change registered an invalid SampleClock for {next_rate} Hz"));
@@ -2937,20 +3145,35 @@ fn tx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
                 }
                 let origin = clock.as_ref().map(|clock| clock.origin.ticks_in(clock.root).map_err(|error| error.to_string())).transpose()?;
                 let (root, receipt) = root_now(&run)?;
-                if root != previous.root { return Err("TX cold rate change changed the Run root clock".to_owned()); }
+                if root != previous.root {
+                    return Err("TX cold rate change changed the Run root clock".to_owned());
+                }
                 let start_tick = entry.time.ticks_in(root).map_err(|error| error.to_string())?;
                 let interval = ticks_for_ns(plan.interval_ns, device.master_clock_rate())?;
                 let end_tick = origin.unwrap_or(receipt).max(receipt).checked_add(interval).ok_or("TX start trial end overflow")?;
-                if let Some(previous) = plans.last_mut() { previous.end_tick = start_tick; }
+                if let Some(previous) = plans.last_mut() {
+                    previous.end_tick = start_tick;
+                }
                 plans.push(TrialPlan {
-                    start_tick, end_tick, admitted, expected_target: None, expected_samples: 0,
-                    expected_end_tick: 0, booked_tick: Some(start_tick), completion: TrialCompletion::ReceiveCapture,
-                    requires_preemption_evidence: false, capture_index: None, capture_target: None, cold_capture: false,
+                    start_tick,
+                    end_tick,
+                    admitted,
+                    expected_target: None,
+                    expected_samples: 0,
+                    expected_end_tick: 0,
+                    booked_tick: Some(start_tick),
+                    completion: TrialCompletion::ReceiveCapture,
+                    requires_preemption_evidence: false,
+                    capture_index: None,
+                    capture_target: None,
+                    cold_capture: false,
                 });
                 origins.push(origin);
                 transitions.push([current_rate, next_rate]);
                 advance_root(&mut run, root, end_tick)?;
-                if origin.is_some() { current_rate = next_rate; }
+                if origin.is_some() {
+                    current_rate = next_rate;
+                }
             }
             let manifest = run.finish();
             let evidence = evidence_from_manifest(&manifest, &plans)?;
@@ -2964,7 +3187,9 @@ fn tx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
             }
             let segments: Vec<_> = origins.iter().copied().zip(starts.iter().copied()).collect();
             let mut stage_json = tx_start_candidate_stage_json(condition, *value, (from_rate, to_rate), device.master_clock_rate(), &classes, &transitions, &segments);
-            if companion { stage_json["companion"] = companion_observation(&manifest, Direction::Rx); }
+            if companion {
+                stage_json["companion"] = companion_observation(&manifest, Direction::Rx);
+            }
             observed.push(stage_json);
             stages.push(CandidateStage { value: *value, trials: classes });
             total += plan.step_trials;
@@ -2972,18 +3197,34 @@ fn tx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companio
         candidates.insert(condition.to_owned(), stages);
     }
     if companion_group {
-        return Ok(MeasurementGroup { conditions, values: vec![], observations: vec![observation("provider_tx_start_lead_with_rx", "tests/hardware.rs::hw_measurements_record", None, observation_trials(total)?,
-            json!({ "observation_only": true, "interval_ns": plan.interval_ns, "candidates": observed }))?] });
+        return Ok(MeasurementGroup {
+            conditions,
+            values: vec![],
+            observations: vec![observation(
+                "provider_tx_start_lead_with_rx",
+                "tests/hardware.rs::hw_measurements_record",
+                None,
+                observation_trials(total)?,
+                json!({ "observation_only": true, "interval_ns": plan.interval_ns, "candidates": observed }),
+            )?],
+        });
     }
     let summary = summarize_tx_start_lead(&candidates, plan.step_trials)?;
     let measured = tx_start_value(&summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
     Ok(MeasurementGroup {
-        conditions, values: vec![measured],
-        observations: vec![observation("provider_tx_start_lead", "tests/hardware.rs::hw_measurements_record", None, observation_trials(total)?, json!({
-            "interval_ns": plan.interval_ns,
-            "rate_pairs_hz": tx_start_specs().iter().map(|(from, to, _)| [from, to]).collect::<Vec<_>>(),
-            "candidates": observed,
-        }))?],
+        conditions,
+        values: vec![measured],
+        observations: vec![observation(
+            "provider_tx_start_lead",
+            "tests/hardware.rs::hw_measurements_record",
+            None,
+            observation_trials(total)?,
+            json!({
+                "interval_ns": plan.interval_ns,
+                "rate_pairs_hz": tx_start_specs().iter().map(|(from, to, _)| [from, to]).collect::<Vec<_>>(),
+                "candidates": observed,
+            }),
+        )?],
     })
 }
 
@@ -3017,26 +3258,18 @@ struct OverflowTrialEvidence {
 }
 
 fn samples_to_ns_ceil(samples: u64, rate_hz: u64) -> Option<u64> {
-    if rate_hz == 0 { return None; }
+    if rate_hz == 0 {
+        return None;
+    }
     u64::try_from((u128::from(samples) * 1_000_000_000).div_ceil(u128::from(rate_hz))).ok()
 }
 
-fn restart_after_resume_estimate(
-    first_sample: i64,
-    gap_start_sample: i64,
-    gap_len: u64,
-    rate_hz: u64,
-    after_ms: u64,
-    stall_ms: u64,
-) -> OverflowRestartEstimate {
-    let unavailable = |reason: String, gap_end_sample, reader_resume_sample| OverflowRestartEstimate {
-        gap_end_sample, reader_resume_sample, nanoseconds: None, reason: Some(reason),
-    };
+fn restart_after_resume_estimate(first_sample: i64, gap_start_sample: i64, gap_len: u64, rate_hz: u64, after_ms: u64, stall_ms: u64) -> OverflowRestartEstimate {
+    let unavailable = |reason: String, gap_end_sample, reader_resume_sample| OverflowRestartEstimate { gap_end_sample, reader_resume_sample, nanoseconds: None, reason: Some(reason) };
     let Some(duration_ms) = after_ms.checked_add(stall_ms) else {
         return unavailable("reader-resume estimate duration overflow".to_owned(), None, None);
     };
-    let Some(resume_offset) = u128::from(rate_hz).checked_mul(u128::from(duration_ms)).map(|samples| samples.div_ceil(1_000))
-        .and_then(|samples| i64::try_from(samples).ok()) else {
+    let Some(resume_offset) = u128::from(rate_hz).checked_mul(u128::from(duration_ms)).map(|samples| samples.div_ceil(1_000)).and_then(|samples| i64::try_from(samples).ok()) else {
         return unavailable("reader-resume estimate sample conversion overflow".to_owned(), None, None);
     };
     let Some(gap_end_sample) = i64::try_from(gap_len).ok().and_then(|len| gap_start_sample.checked_add(len)) else {
@@ -3050,38 +3283,28 @@ fn restart_after_resume_estimate(
     };
     if restart_samples < 0 {
         // The stall starts after the first block is received, so this early estimate overstates restart-after-resume.
-        return unavailable(
-            format!("gap ends {0} samples before the estimated reader resume", restart_samples.unsigned_abs()),
-            Some(gap_end_sample), Some(reader_resume_sample),
-        );
+        return unavailable(format!("gap ends {0} samples before the estimated reader resume", restart_samples.unsigned_abs()), Some(gap_end_sample), Some(reader_resume_sample));
     }
     match samples_to_ns_ceil(restart_samples as u64, rate_hz) {
-        Some(nanoseconds) => OverflowRestartEstimate {
-            gap_end_sample: Some(gap_end_sample), reader_resume_sample: Some(reader_resume_sample),
-            nanoseconds: Some(nanoseconds), reason: None,
-        },
+        Some(nanoseconds) => OverflowRestartEstimate { gap_end_sample: Some(gap_end_sample), reader_resume_sample: Some(reader_resume_sample), nanoseconds: Some(nanoseconds), reason: None },
         None => unavailable("restart-after-resume time conversion overflow".to_owned(), Some(gap_end_sample), Some(reader_resume_sample)),
     }
 }
 
-fn extract_overflow_trial(
-    events: &Json,
-    artifacts: &Json,
-    clocks: &[SampleClockRecord],
-    rate_hz: u64,
-    after_ms: u64,
-    stall_ms: u64,
-) -> OverflowTrialEvidence {
-    let overflow_rows: Vec<_> = events.as_array().into_iter().flatten()
-        .filter(|event| event["kind"] == "radio.RX_OVERFLOW").collect();
-    let payloads: Vec<_> = overflow_rows.iter().map(|event| {
-        ezsdr_radio::payloads::RxOverflowPayload::from_payload(&event["payload"]).ok()
-    }).collect();
-    let overflow_causes = payloads.iter().map(|payload| match payload.map(|payload| payload.cause) {
-        Some(ezsdr_radio::payloads::RxOverflowCause::Overrun) => "overrun",
-        Some(ezsdr_radio::payloads::RxOverflowCause::Sequence) => "sequence",
-        None => "invalid",
-    }.to_owned()).collect();
+fn extract_overflow_trial(events: &Json, artifacts: &Json, clocks: &[SampleClockRecord], rate_hz: u64, after_ms: u64, stall_ms: u64) -> OverflowTrialEvidence {
+    let overflow_rows: Vec<_> = events.as_array().into_iter().flatten().filter(|event| event["kind"] == "radio.RX_OVERFLOW").collect();
+    let payloads: Vec<_> = overflow_rows.iter().map(|event| ezsdr_radio::payloads::RxOverflowPayload::from_payload(&event["payload"]).ok()).collect();
+    let overflow_causes = payloads
+        .iter()
+        .map(|payload| {
+            match payload.map(|payload| payload.cause) {
+                Some(ezsdr_radio::payloads::RxOverflowCause::Overrun) => "overrun",
+                Some(ezsdr_radio::payloads::RxOverflowCause::Sequence) => "sequence",
+                None => "invalid",
+            }
+            .to_owned()
+        })
+        .collect();
     let payload_lost: Vec<_> = payloads.iter().map(|payload| payload.map(|payload| payload.lost)).collect();
     let artifacts_for_capture = artifacts["rec"].as_array();
     let one_complete_capture = artifacts_for_capture.is_some_and(|rows| rows.len() == 1 && rows[0]["partial"] == false);
@@ -3093,28 +3316,24 @@ fn extract_overflow_trial(
             for gap in map["gaps"].as_array().into_iter().flatten() {
                 let len = gap["len"].as_u64().unwrap_or_default();
                 let cause = gap["cause"]["kind"].as_str().unwrap_or("invalid").to_owned();
-                let start_sample = map_domain.and_then(|domain| {
-                    serde_json::from_value::<TimePoint>(gap["start"].clone()).ok()
-                        .filter(|start| start.domain() == domain)
-                        .and_then(|start| start.ticks_in(domain).ok())
-                });
-                gaps.push(OverflowGap {
-                    cause, start_sample,
-                    len,
-                    lost: gap["lost"].as_u64(),
-                    nanoseconds: samples_to_ns_ceil(len, rate_hz),
-                });
+                let start_sample =
+                    map_domain.and_then(|domain| serde_json::from_value::<TimePoint>(gap["start"].clone()).ok().filter(|start| start.domain() == domain).and_then(|start| start.ticks_in(domain).ok()));
+                gaps.push(OverflowGap { cause, start_sample, len, lost: gap["lost"].as_u64(), nanoseconds: samples_to_ns_ceil(len, rate_hz) });
             }
         }
     }
-    let rate_matches = clocks.iter().filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"))
-        .collect::<Vec<_>>().as_slice().first().is_some_and(|clock| {
-            clocks.iter().filter(|candidate| candidate.stream.to_string().ends_with("usrp/rx/s0")).count() == 1
-                && clock_rate_matches(clock, rate_hz)
-        });
+    let rate_matches = clocks
+        .iter()
+        .filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"))
+        .collect::<Vec<_>>()
+        .as_slice()
+        .first()
+        .is_some_and(|clock| clocks.iter().filter(|candidate| candidate.stream.to_string().ends_with("usrp/rx/s0")).count() == 1 && clock_rate_matches(clock, rate_hz));
     let overflow_gaps: Vec<_> = gaps.iter().filter(|gap| gap.cause == "overflow_restart").collect();
     let capture_first_sample = maps.and_then(|maps| {
-        if maps.len() != 1 { return None; }
+        if maps.len() != 1 {
+            return None;
+        }
         let map = &maps[0];
         let domain = serde_json::from_value::<ClockDomainId>(map["domain"].clone()).ok()?;
         let first = serde_json::from_value::<TimePoint>(map["first"].clone()).ok()?;
@@ -3122,14 +3341,13 @@ fn extract_overflow_trial(
     });
     let restart_after_resume = match (capture_first_sample, overflow_gaps.as_slice()) {
         (Some(first), [gap]) => gap.start_sample.map_or_else(
-            || OverflowRestartEstimate {
-                gap_end_sample: None, reader_resume_sample: None, nanoseconds: None,
-                reason: Some("overflow gap has no sample-clock start".to_owned()),
-            },
+            || OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: None, reason: Some("overflow gap has no sample-clock start".to_owned()) },
             |start| restart_after_resume_estimate(first, start, gap.len, rate_hz, after_ms, stall_ms),
         ),
         _ => OverflowRestartEstimate {
-            gap_end_sample: None, reader_resume_sample: None, nanoseconds: None,
+            gap_end_sample: None,
+            reader_resume_sample: None,
+            nanoseconds: None,
             reason: Some("restart estimate needs one capture map and one overflow_restart gap".to_owned()),
         },
     };
@@ -3144,8 +3362,11 @@ fn extract_overflow_trial(
         && payload_lost.first().copied().flatten() == Some(overflow_gaps[0].len);
     OverflowTrialEvidence {
         class: if valid { TrialClass::Success } else { TrialClass::Incomplete },
-        overflow_count: overflow_rows.len(), overflow_causes, payload_lost,
-        gap_ns: valid.then(|| overflow_gaps[0].nanoseconds).flatten(), gaps,
+        overflow_count: overflow_rows.len(),
+        overflow_causes,
+        payload_lost,
+        gap_ns: valid.then(|| overflow_gaps[0].nanoseconds).flatten(),
+        gaps,
         restart_after_resume,
         sample_clock_rate_matches: rate_matches,
     }
@@ -3163,15 +3384,21 @@ struct OverflowSummary {
 }
 
 fn summarize_overflow_gaps(candidates: &BTreeMap<u64, Vec<OverflowTrialEvidence>>, required_trials: usize) -> Result<OverflowSummary, String> {
-    if candidates.is_empty() { return Err("at least one overflow rate is required".to_owned()); }
-    if required_trials == 0 { return Err("required overflow trials must be positive".to_owned()); }
+    if candidates.is_empty() {
+        return Err("at least one overflow rate is required".to_owned());
+    }
+    if required_trials == 0 {
+        return Err("required overflow trials must be positive".to_owned());
+    }
     let mut successful_by_rate = BTreeMap::new();
     let mut maximum = None::<(u64, u64)>;
     let mut maximum_restart = None::<(u64, u64)>;
     let mut maximum_restart_by_rate = BTreeMap::new();
     let mut insufficient = Vec::new();
     for (rate, trials) in candidates {
-        if *rate == 0 || trials.is_empty() { return Err("overflow rates and trial lists must be nonempty and positive".to_owned()); }
+        if *rate == 0 || trials.is_empty() {
+            return Err("overflow rates and trial lists must be nonempty and positive".to_owned());
+        }
         let successful: Vec<_> = trials.iter().filter(|trial| trial.class == TrialClass::Success).collect();
         successful_by_rate.insert(*rate, successful.len());
         if successful.len() < required_trials {
@@ -3180,29 +3407,37 @@ fn summarize_overflow_gaps(candidates: &BTreeMap<u64, Vec<OverflowTrialEvidence>
         let mut rate_restart_maximum = None;
         for trial in successful {
             if let Some(gap_ns) = trial.gap_ns {
-                if maximum.is_none_or(|(_, current)| gap_ns > current) { maximum = Some((*rate, gap_ns)); }
+                if maximum.is_none_or(|(_, current)| gap_ns > current) {
+                    maximum = Some((*rate, gap_ns));
+                }
             }
             if let Some(restart_ns) = trial.restart_after_resume.nanoseconds {
-                if rate_restart_maximum.is_none_or(|current| restart_ns > current) { rate_restart_maximum = Some(restart_ns); }
-                if maximum_restart.is_none_or(|(_, current)| restart_ns > current) { maximum_restart = Some((*rate, restart_ns)); }
+                if rate_restart_maximum.is_none_or(|current| restart_ns > current) {
+                    rate_restart_maximum = Some(restart_ns);
+                }
+                if maximum_restart.is_none_or(|(_, current)| restart_ns > current) {
+                    maximum_restart = Some((*rate, restart_ns));
+                }
             }
         }
         maximum_restart_by_rate.insert(*rate, rate_restart_maximum);
     }
     let (worst_gap_ns, limiting_rate_hz) = maximum.map_or((None, None), |(rate, gap)| (Some(gap), Some(rate)));
-    let (maximum_restart_after_resume_ns, maximum_restart_rate_hz) =
-        maximum_restart.map_or((None, None), |(rate, gap)| (Some(gap), Some(rate)));
+    let (maximum_restart_after_resume_ns, maximum_restart_rate_hz) = maximum_restart.map_or((None, None), |(rate, gap)| (Some(gap), Some(rate)));
     Ok(OverflowSummary {
-        worst_gap_ns, limiting_rate_hz, maximum_restart_after_resume_ns, maximum_restart_rate_hz,
-        maximum_restart_by_rate, successful_by_rate,
+        worst_gap_ns,
+        limiting_rate_hz,
+        maximum_restart_after_resume_ns,
+        maximum_restart_rate_hz,
+        maximum_restart_by_rate,
+        successful_by_rate,
         unmeasured_reason: (!insufficient.is_empty()).then(|| format!("Insufficient complete overflow trials: {}.", insufficient.join("; "))),
     })
 }
 
 fn overflow_wait_ms(after_ms: u64, stall_ms: u64) -> Result<u64, String> {
     let stall_recovery_ms = stall_ms.checked_mul(2).ok_or("overflow Run horizon overflow")?;
-    2_000u64.checked_add(after_ms).and_then(|ms| ms.checked_add(stall_recovery_ms)).and_then(|ms| ms.checked_add(500))
-        .ok_or_else(|| "overflow Run horizon overflow".to_owned())
+    2_000u64.checked_add(after_ms).and_then(|ms| ms.checked_add(stall_recovery_ms)).and_then(|ms| ms.checked_add(500)).ok_or_else(|| "overflow Run horizon overflow".to_owned())
 }
 
 /// The Run's Manifest and its termination if validate or prepare refused it (it then never ran); `companion` adds a
@@ -3221,10 +3456,11 @@ fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall
         spec = tx_at_channel_zero_frequency(super::with_burst(super::with_tx(spec, COMPANION_RATE_HZ as f64), &waveform, true, "send_asap_and_flag", 0), &*device);
         inputs.insert(waveform.hash.clone(), bytes);
     }
-    let mut run = super::start_spec_run(&spec, &doc, super::assembly(&doc, device.clone(), inputs, |radio| {
-        radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms))
-    })).map_err(|error| error.to_string())?;
-    if let Some(reason) = rejected_run_reason(&run) { return Ok((run.finish(), Some(reason))); }
+    let mut run = super::start_spec_run(&spec, &doc, super::assembly(&doc, device.clone(), inputs, |radio| radio.with_rx_stall(Wall::from_millis(after_ms), Wall::from_millis(stall_ms))))
+        .map_err(|error| error.to_string())?;
+    if let Some(reason) = rejected_run_reason(&run) {
+        return Ok((run.finish(), Some(reason)));
+    }
     let wait_ms = overflow_wait_ms(after_ms, stall_ms)?;
     let wait_ns = wait_ms.checked_mul(1_000_000).ok_or("overflow Run horizon overflow")?;
     let (root, now) = root_now(&run)?;
@@ -3237,7 +3473,9 @@ fn overflow_manifest(device: Arc<dyn Device>, rate_hz: u64, after_ms: u64, stall
 /// that decides no value, so that an error here never discards `measure_overflow_restart_gap`'s result.
 pub fn measure_overflow_restart_gap_with_tx(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
     plan.validate()?;
-    if let Some(skipped) = companion_inapplicable(&device, "provider_overflow_restart_gap_with_tx")? { return Ok(skipped); }
+    if let Some(skipped) = companion_inapplicable(&device, "provider_overflow_restart_gap_with_tx")? {
+        return Ok(skipped);
+    }
     let rate_hz = *plan.overflow_rates_hz.last().ok_or("no overflow rate")?;
     let stall_ms = *plan.overflow_stall_ms.last().ok_or("no overflow stall")?;
     let condition = format!("{}-with-tx", rate_condition(rate_hz));
@@ -3252,16 +3490,23 @@ pub fn measure_overflow_restart_gap_with_tx(device: Arc<dyn Device>, plan: &Meas
     }
     let gap_ns: Vec<_> = trials.iter().filter(|(evidence, ..)| evidence.class == TrialClass::Success).filter_map(|(evidence, ..)| evidence.gap_ns).collect();
     Ok(MeasurementGroup {
-        conditions: vec![companion_condition(&condition, Direction::Rx, rate_hz, Direction::Tx)], values: vec![],
-        observations: vec![observation("provider_overflow_restart_gap_with_tx", "tests/hardware.rs::hw_measurements_record", Some(condition.clone()), observation_trials(plan.overflow_trials)?, json!({
-            "observation_only": true, "rate_hz": rate_hz, "stall_ms": stall_ms, "after_ms": plan.overflow_after_ms, "companion_tx_rate_hz": COMPANION_RATE_HZ,
-            "maximum_gap_ns_of_successful_trials": gap_ns.iter().max(),
-            "trials": trials.iter().enumerate().map(|(index, (evidence, rejection, companion))| json!({
-                "trial": index, "class": trial_class_name(evidence.class), "run_termination": rejection, "companion": companion,
-                "overflow_count": evidence.overflow_count, "payload_lost": evidence.payload_lost, "gap_ns": evidence.gap_ns,
-                "gaps": evidence.gaps.iter().map(|gap| json!({ "cause": gap.cause, "len_samples": gap.len, "lost": gap.lost, "gap_ns": gap.nanoseconds })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-        }))?],
+        conditions: vec![companion_condition(&condition, Direction::Rx, rate_hz, Direction::Tx)],
+        values: vec![],
+        observations: vec![observation(
+            "provider_overflow_restart_gap_with_tx",
+            "tests/hardware.rs::hw_measurements_record",
+            Some(condition.clone()),
+            observation_trials(plan.overflow_trials)?,
+            json!({
+                "observation_only": true, "rate_hz": rate_hz, "stall_ms": stall_ms, "after_ms": plan.overflow_after_ms, "companion_tx_rate_hz": COMPANION_RATE_HZ,
+                "maximum_gap_ns_of_successful_trials": gap_ns.iter().max(),
+                "trials": trials.iter().enumerate().map(|(index, (evidence, rejection, companion))| json!({
+                    "trial": index, "class": trial_class_name(evidence.class), "run_termination": rejection, "companion": companion,
+                    "overflow_count": evidence.overflow_count, "payload_lost": evidence.payload_lost, "gap_ns": evidence.gap_ns,
+                    "gaps": evidence.gaps.iter().map(|gap| json!({ "cause": gap.cause, "len_samples": gap.len, "lost": gap.lost, "gap_ns": gap.nanoseconds })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            }),
+        )?],
     })
 }
 
@@ -3281,9 +3526,10 @@ pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementP
             let (manifest, rejection) = overflow_manifest(device.clone(), *rate_hz, plan.overflow_after_ms, *stall_ms, false)?;
             let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
             let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
-            let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, *rate_hz,
-                plan.overflow_after_ms, *stall_ms);
-            if rejection.is_some() { evidence.class = TrialClass::AdmissionRejection; }
+            let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, *rate_hz, plan.overflow_after_ms, *stall_ms);
+            if rejection.is_some() {
+                evidence.class = TrialClass::AdmissionRejection;
+            }
             rejections.push(rejection);
             trials.push(evidence);
         }
@@ -3292,29 +3538,39 @@ pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementP
         rejection_by_rate.insert(*rate_hz, rejections);
     }
     let summary = summarize_overflow_gaps(&by_rate, plan.overflow_trials)?;
-    let rate_observations: Vec<_> = by_rate.iter().map(|(rate, trials)| json!({
-        "rate_hz": rate,
-        "after_ms": plan.overflow_after_ms,
-        "stall_ms": plan.overflow_stall_ms[plan.overflow_rates_hz.iter().position(|candidate| candidate == rate).unwrap()],
-        "successful_trials": summary.successful_by_rate.get(rate),
-            "required_successful_trials": plan.overflow_trials,
-            "maximum_restart_after_resume_ns": summary.maximum_restart_by_rate.get(rate),
-            "trials": trials.iter().enumerate().map(|(index, trial)| json!({
-                "trial": index, "class": trial_class_name(trial.class),
-                "run_termination": rejection_by_rate[rate][index],
-                "overflow_count": trial.overflow_count, "overflow_causes": trial.overflow_causes,
-                "payload_lost": trial.payload_lost, "sample_clock_rate_matches": trial.sample_clock_rate_matches,
-                "restart_after_resume_ns": trial.restart_after_resume.nanoseconds,
-                "restart_after_resume_reason": trial.restart_after_resume.reason,
-                "gap_end_sample": trial.restart_after_resume.gap_end_sample,
-                "estimated_reader_resume_sample": trial.restart_after_resume.reader_resume_sample,
-                "gaps": trial.gaps.iter().map(|gap| json!({ "cause": gap.cause, "len_samples": gap.len, "lost": gap.lost, "gap_ns": gap.nanoseconds })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-    })).collect();
+    let rate_observations: Vec<_> = by_rate
+        .iter()
+        .map(|(rate, trials)| {
+            json!({
+                "rate_hz": rate,
+                "after_ms": plan.overflow_after_ms,
+                "stall_ms": plan.overflow_stall_ms[plan.overflow_rates_hz.iter().position(|candidate| candidate == rate).unwrap()],
+                "successful_trials": summary.successful_by_rate.get(rate),
+                    "required_successful_trials": plan.overflow_trials,
+                    "maximum_restart_after_resume_ns": summary.maximum_restart_by_rate.get(rate),
+                    "trials": trials.iter().enumerate().map(|(index, trial)| json!({
+                        "trial": index, "class": trial_class_name(trial.class),
+                        "run_termination": rejection_by_rate[rate][index],
+                        "overflow_count": trial.overflow_count, "overflow_causes": trial.overflow_causes,
+                        "payload_lost": trial.payload_lost, "sample_clock_rate_matches": trial.sample_clock_rate_matches,
+                        "restart_after_resume_ns": trial.restart_after_resume.nanoseconds,
+                        "restart_after_resume_reason": trial.restart_after_resume.reason,
+                        "gap_end_sample": trial.restart_after_resume.gap_end_sample,
+                        "estimated_reader_resume_sample": trial.restart_after_resume.reader_resume_sample,
+                        "gaps": trial.gaps.iter().map(|gap| json!({ "cause": gap.cause, "len_samples": gap.len, "lost": gap.lost, "gap_ns": gap.nanoseconds })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     let group = MeasurementGroup {
-        conditions, values: vec![],
-        observations: vec![observation("provider_overflow_restart_gap", "tests/hardware.rs::hw_measurements_record", None,
-            observation_trials(total)?, json!({
+        conditions,
+        values: vec![],
+        observations: vec![observation(
+            "provider_overflow_restart_gap",
+            "tests/hardware.rs::hw_measurements_record",
+            None,
+            observation_trials(total)?,
+            json!({
                 "after_ms": plan.overflow_after_ms,
                 "gap_rule": "gap_ns = ceil(lost_samples * 1e9 / sample_rate_hz)",
                 "gap_scope": "the full RM-17 continuity gap includes loss during the configured reader stall and socket-backlog drain; it is not UHD recovery time alone",
@@ -3326,7 +3582,8 @@ pub fn measure_overflow_restart_gap(device: Arc<dyn Device>, plan: &MeasurementP
                 "maximum_restart_rate_hz": summary.maximum_restart_rate_hz,
                 "unmeasured_reason": summary.unmeasured_reason,
                 "rate_measurements": rate_observations,
-            }))?],
+            }),
+        )?],
     };
     Ok(group)
 }
@@ -3368,7 +3625,10 @@ fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_
             conditions.push(rx_condition(&id, *rate as f64));
             let stage = candidate_stage_json(&id, bytes_per_second, &[TrialClass::AdmissionRejection], &[None]);
             observations.push(observation(
-                format!("provider_rx_throughput_{rate}"), "tests/hardware.rs::hw_measurements_record", Some(id), 1,
+                format!("provider_rx_throughput_{rate}"),
+                "tests/hardware.rs::hw_measurements_record",
+                Some(id),
+                1,
                 json!({ "rate_hz": rate, "duration_secs": plan.throughput_seconds, "run_termination": reason, "stage": stage }),
             )?);
             continue;
@@ -3382,11 +3642,8 @@ fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_
         let packet = device.rx_packet_samples(0).max(1) as u64;
         let manifest = run.finish();
         let actual = super::section(&manifest, "stats")["rx_samples"].as_i64().unwrap_or_default().max(0) as u64;
-        let mut rx_clocks = manifest.clocks.sample_clocks.iter()
-            .filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"));
-        let interval = rx_clocks.next().and_then(|clock| {
-            if rx_clocks.next().is_some() { None } else { expected_rx_samples(clock, *rate, device.master_clock_rate()) }
-        });
+        let mut rx_clocks = manifest.clocks.sample_clocks.iter().filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"));
+        let interval = rx_clocks.next().and_then(|clock| if rx_clocks.next().is_some() { None } else { expected_rx_samples(clock, *rate, device.master_clock_rate()) });
         let (interval_ticks, expected) = interval.map_or((None, None), |(ticks, samples)| (Some(ticks), Some(samples)));
         let overflow = manifest.events.delivered.iter().any(|event| event.kind.as_str() == "radio.RX_OVERFLOW");
         let class = throughput_trial_class(actual, expected, packet, overflow);
@@ -3394,7 +3651,10 @@ fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_
         conditions.push(rx_condition(&id, *rate as f64));
         let stage = candidate_stage_json(&id, bytes_per_second, &[class], &[None]);
         observations.push(observation(
-            format!("provider_rx_throughput_{rate}"), "tests/hardware.rs::hw_measurements_record", Some(id), 1,
+            format!("provider_rx_throughput_{rate}"),
+            "tests/hardware.rs::hw_measurements_record",
+            Some(id),
+            1,
             json!({ "rate_hz": rate, "duration_secs": plan.throughput_seconds, "sample_clock_interval_ticks": interval_ticks,
                 "expected_samples": expected, "actual_samples": actual, "packet_samples": packet,
                 "rx_overflow": overflow, "wire_bytes_per_sample": wire_bytes, "stage": stage }),
@@ -3403,8 +3663,12 @@ fn rx_throughput_group(device: Arc<dyn Device>, plan: &MeasurementPlan, include_
     // The layout's other conditions (two or more channels, a stream each way) are added to the one-channel sweep.
     let extra = if include_multichannel { extra_throughput(&device, plan, Direction::Rx, description.rx.len(), wire_bytes)? } else { ExtraThroughput::default() };
     if !extra.stages.is_empty() {
-        let mut family: Vec<FamilyStage> = plan.rx_rates_hz.iter().zip(&stages)
-            .map(|(rate, stage)| FamilyStage { condition: rate_condition(*rate), family: "rx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() }).collect();
+        let mut family: Vec<FamilyStage> = plan
+            .rx_rates_hz
+            .iter()
+            .zip(&stages)
+            .map(|(rate, stage)| FamilyStage { condition: rate_condition(*rate), family: "rx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() })
+            .collect();
         family.extend(extra.stages);
         let (row, capacity) = throughput_value("radio.perf.rx_bytes_per_s", &family)?;
         conditions.extend(extra.conditions);
@@ -3423,14 +3687,9 @@ fn capacity_value(summary: &CandidateSummary, rates_hz: &[u64], stages: &[Candid
     match summary.worst {
         Some(bytes) => {
             let (rate, stage) = rates_hz.iter().zip(stages).find(|(_, stage)| stage.value == bytes).ok_or("selected throughput candidate has no rate")?;
-            Ok(ValueRecord::Measured {
-                key, worst: model::Worst::Number(bytes as f64), trials: observation_trials(stage.trials.len())?,
-                condition: rate_condition(*rate), test: test.to_owned(),
-            })
+            Ok(ValueRecord::Measured { key, worst: model::Worst::Number(bytes as f64), trials: observation_trials(stage.trials.len())?, condition: rate_condition(*rate), test: test.to_owned() })
         }
-        None => Ok(ValueRecord::Unmeasured {
-            key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No receive-throughput candidate completed a full successful trial.".to_owned()),
-        }),
+        None => Ok(ValueRecord::Unmeasured { key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No receive-throughput candidate completed a full successful trial.".to_owned()) }),
     }
 }
 
@@ -3447,14 +3706,9 @@ fn tx_capacity_value(summary: &CandidateSummary, rates_hz: &[u64], stages: &[Can
     match summary.worst {
         Some(bytes) => {
             let (rate, stage) = rates_hz.iter().zip(stages).find(|(_, stage)| stage.value == bytes).ok_or("selected transmit-throughput candidate has no rate")?;
-            Ok(ValueRecord::Measured {
-                key, worst: model::Worst::Number(bytes as f64), trials: observation_trials(stage.trials.len())?,
-                condition: tx_rate_id(*rate), test: test.to_owned(),
-            })
+            Ok(ValueRecord::Measured { key, worst: model::Worst::Number(bytes as f64), trials: observation_trials(stage.trials.len())?, condition: tx_rate_id(*rate), test: test.to_owned() })
         }
-        None => Ok(ValueRecord::Unmeasured {
-            key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No transmit-throughput candidate completed a full successful trial.".to_owned()),
-        }),
+        None => Ok(ValueRecord::Unmeasured { key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No transmit-throughput candidate completed a full successful trial.".to_owned()) }),
     }
 }
 
@@ -3500,15 +3754,16 @@ struct TxThroughputInput<'a> {
 }
 
 fn samples_for_root_ticks(ticks: i64, rate_hz: u64, master_clock_hz: u64) -> Option<u64> {
-    if ticks < 0 || master_clock_hz == 0 { return None; }
+    if ticks < 0 || master_clock_hz == 0 {
+        return None;
+    }
     let samples = u128::try_from(ticks).ok()?.checked_mul(u128::from(rate_hz))? / u128::from(master_clock_hz);
     u64::try_from(samples).ok()
 }
 
 fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence {
     let TxThroughputInput { stats, async_reports, events, bursts, rejected, clocks, scheduled_target, rate_hz, master_clock_hz, duration_secs, stream } = input;
-    let actual_samples = stats.get("tx_samples").and_then(Json::as_u64)
-        .or_else(|| stats.get("tx_samples").and_then(Json::as_i64).and_then(|samples| u64::try_from(samples).ok()));
+    let actual_samples = stats.get("tx_samples").and_then(Json::as_u64).or_else(|| stats.get("tx_samples").and_then(Json::as_i64).and_then(|samples| u64::try_from(samples).ok()));
     let burst_rows = bursts.as_array().cloned().unwrap_or_default();
     let burst_count = burst_rows.len();
     let burst_blocks: Vec<u64> = burst_rows.iter().filter_map(|row| row["blocks"].as_u64()).collect();
@@ -3517,45 +3772,64 @@ fn tx_throughput_evidence(input: TxThroughputInput<'_>) -> TxThroughputEvidence 
     let tx_suffix = format!("usrp/tx/s{stream}");
     let tx_clocks: Vec<_> = clocks.iter().filter(|clock| clock.stream.to_string().ends_with(&tx_suffix)).collect();
     let tx_clock = (tx_clocks.len() == 1).then(|| tx_clocks[0]);
-    let burst_start_tick = burst_target.and_then(|target| {
-        tx_clock.filter(|clock| clock.domain == target.domain()).and_then(|_| point_root_tick(target, clocks).ok())
-    });
+    let burst_start_tick = burst_target.and_then(|target| tx_clock.filter(|clock| clock.domain == target.domain()).and_then(|_| point_root_tick(target, clocks).ok()));
     let burst_target_matches_schedule = burst_target == Some(scheduled_target);
     let burst_ends_on_stop = burst.is_some_and(|row| serde_json::from_value::<BurstEnd>(row["end"].clone()).ok() == Some(BurstEnd::Stop));
-    let minimum_ack_tick = burst_start_tick.and_then(|start| {
-        duration_secs.checked_mul(master_clock_hz).and_then(|ticks| i64::try_from(ticks).ok()).and_then(|ticks| start.checked_add(ticks))
-    });
+    let minimum_ack_tick = burst_start_tick.and_then(|start| duration_secs.checked_mul(master_clock_hz).and_then(|ticks| i64::try_from(ticks).ok()).and_then(|ticks| start.checked_add(ticks)));
     let minimum_samples = duration_secs.checked_mul(rate_hz);
-    let burst_acks: Vec<_> = async_reports.as_array().into_iter().flatten()
-        .filter(|report| report["code"] == "BurstAck" && report["tx_flush"] != true)
-        .map(|report| report["tick"].as_i64()).collect();
+    let burst_acks: Vec<_> = async_reports.as_array().into_iter().flatten().filter(|report| report["code"] == "BurstAck" && report["tx_flush"] != true).map(|report| report["tick"].as_i64()).collect();
     let burst_ack_count = burst_acks.len();
     let burst_ack_tick = (burst_ack_count == 1).then(|| burst_acks[0]).flatten();
     let ack_elapsed_ticks = burst_ack_tick.zip(burst_start_tick).and_then(|(ack, start)| ack.checked_sub(start));
     let ack_elapsed_samples = ack_elapsed_ticks.and_then(|ticks| samples_for_root_ticks(ticks, rate_hz, master_clock_hz));
-    let tx_samples_minus_ack_elapsed_samples = actual_samples.zip(ack_elapsed_samples).and_then(|(actual, elapsed)| {
-        i64::try_from(i128::from(actual) - i128::from(elapsed)).ok()
-    });
+    let tx_samples_minus_ack_elapsed_samples = actual_samples.zip(ack_elapsed_samples).and_then(|(actual, elapsed)| i64::try_from(i128::from(actual) - i128::from(elapsed)).ok());
     let underflow_events = events.as_array().into_iter().flatten().filter(|event| event["kind"] == "radio.TX_UNDERFLOW").count();
-    let async_failures: Vec<_> = async_reports.as_array().into_iter().flatten()
+    let async_failures: Vec<_> = async_reports
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|report| report["code"].as_str())
         .filter(|code| matches!(*code, "Underflow" | "UnderflowInPacket" | "TimeError") || code.starts_with("SeqError"))
-        .map(str::to_owned).collect();
-    let short_send_rejections: Vec<_> = rejected.as_array().into_iter().flatten()
+        .map(str::to_owned)
+        .collect();
+    let short_send_rejections: Vec<_> = rejected
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|row| row["reason"].as_str())
         .filter(|reason| reason.contains("short send") || reason.contains("send did not complete"))
-        .map(str::to_owned).collect();
+        .map(str::to_owned)
+        .collect();
     let complete_burst = burst_count == 1 && burst_ends_on_stop && burst_target_matches_schedule && burst_start_tick.is_some();
     let enough_samples = actual_samples.zip(minimum_samples).is_some_and(|(actual, minimum)| actual >= minimum);
     let ack_after_minimum = burst_ack_tick.zip(minimum_ack_tick).is_some_and(|(ack, minimum)| ack >= minimum);
-    let class = if underflow_events > 0 || !async_failures.is_empty() || !short_send_rejections.is_empty() { TrialClass::DeviceFailure }
-        else if burst_ack_count > 1 || burst_count > 1 { TrialClass::Unattributable }
-        else if !complete_burst || !enough_samples || !ack_after_minimum { TrialClass::Incomplete }
-        else { TrialClass::Success };
+    let class = if underflow_events > 0 || !async_failures.is_empty() || !short_send_rejections.is_empty() {
+        TrialClass::DeviceFailure
+    } else if burst_ack_count > 1 || burst_count > 1 {
+        TrialClass::Unattributable
+    } else if !complete_burst || !enough_samples || !ack_after_minimum {
+        TrialClass::Incomplete
+    } else {
+        TrialClass::Success
+    };
     TxThroughputEvidence {
-        class, actual_samples, burst_count, burst_blocks, burst_target, burst_start_tick, burst_target_matches_schedule,
-        burst_ack_count, burst_ack_tick, minimum_ack_tick, ack_elapsed_ticks, ack_elapsed_samples,
-        minimum_samples, tx_samples_minus_ack_elapsed_samples, underflow_events, async_failures, short_send_rejections,
+        class,
+        actual_samples,
+        burst_count,
+        burst_blocks,
+        burst_target,
+        burst_start_tick,
+        burst_target_matches_schedule,
+        burst_ack_count,
+        burst_ack_tick,
+        minimum_ack_tick,
+        ack_elapsed_ticks,
+        ack_elapsed_samples,
+        minimum_samples,
+        tx_samples_minus_ack_elapsed_samples,
+        underflow_events,
+        async_failures,
+        short_send_rejections,
     }
 }
 
@@ -3574,10 +3848,10 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
         let (bytes, waveform) = super::waveform_of(&super::pn(plan.tx_waveform_samples));
         let run_dir = super::TempDir::new();
         let profile = super::bench_profile(&*device, &run_dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
-        let spec = tx_at_channel_zero_frequency(super::with_burst(
-            super::with_tx(super::receive_spec(0, *rate as f64, super::bench_hz(&*device), None), *rate as f64),
-            &waveform, true, "send_asap_and_flag", 0,
-        ), &*device);
+        let spec = tx_at_channel_zero_frequency(
+            super::with_burst(super::with_tx(super::receive_spec(0, *rate as f64, super::bench_hz(&*device), None), *rate as f64), &waveform, true, "send_asap_and_flag", 0),
+            &*device,
+        );
         let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.clone())]);
         let mut run = super::spec_run(&spec, &profile, device.clone(), inputs);
         if let Some(reason) = rejected_run_reason(&run) {
@@ -3586,20 +3860,26 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
             conditions.push(tx_rate_condition(&id, *rate));
             let stage = candidate_stage_json(&id, value, &[TrialClass::AdmissionRejection], &[None]);
             observations.push(observation(
-                format!("provider_tx_throughput_{rate}"), "tests/hardware.rs::hw_measurements_record", Some(id), 1,
+                format!("provider_tx_throughput_{rate}"),
+                "tests/hardware.rs::hw_measurements_record",
+                Some(id),
+                1,
                 json!({ "rate_hz": rate, "duration_secs": plan.throughput_seconds, "run_termination": reason, "stage": stage }),
             )?);
             continue;
         }
         let clock = stream_clock(&run, Direction::Tx)?;
-        if !clock_rate_matches(&clock, *rate) { return Err(format!("TX throughput Run declared the wrong SampleClock rate for {rate} Hz")); }
+        if !clock_rate_matches(&clock, *rate) {
+            return Err(format!("TX throughput Run declared the wrong SampleClock rate for {rate} Hz"));
+        }
         let t0 = run.start_instant().ok_or("TX throughput Run has no T0")?;
-        if t0.domain() != clock.root { return Err("TX throughput T0 and SampleClock have different root clocks".to_owned()); }
+        if t0.domain() != clock.root {
+            return Err("TX throughput T0 and SampleClock have different root clocks".to_owned());
+        }
         let t0_tick = t0.ticks_in(clock.root).map_err(|error| error.to_string())?;
         let (scheduled_target, burst_start_root_tick) = sample_at_or_after(&clock, t0_tick)?;
         let duration_ticks = device.master_clock_rate().checked_mul(plan.throughput_seconds).ok_or("TX throughput duration overflow")?;
-        let horizon = burst_start_root_tick.checked_add(i64::try_from(duration_ticks).map_err(|_| "TX throughput horizon overflow")?)
-            .ok_or("TX throughput horizon overflow")?;
+        let horizon = burst_start_root_tick.checked_add(i64::try_from(duration_ticks).map_err(|_| "TX throughput horizon overflow")?).ok_or("TX throughput horizon overflow")?;
         advance_root(&mut run, clock.root, horizon)?;
         let manifest = run.finish();
         let stats = manifest.section(&super::usrp(), "ezsdr.radio.uhd.stats").ok_or("TX throughput Run has no stats section")?;
@@ -3608,15 +3888,27 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
         let rejected = manifest.section(&super::usrp(), "ezsdr.radio.uhd.rejected").ok_or("TX throughput Run has no rejected section")?;
         let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
         let evidence = tx_throughput_evidence(TxThroughputInput {
-            stats, async_reports, events: &events, bursts, rejected, clocks: &manifest.clocks.sample_clocks,
-            scheduled_target, rate_hz: *rate, master_clock_hz: device.master_clock_rate(), duration_secs: plan.throughput_seconds, stream: 0,
+            stats,
+            async_reports,
+            events: &events,
+            bursts,
+            rejected,
+            clocks: &manifest.clocks.sample_clocks,
+            scheduled_target,
+            rate_hz: *rate,
+            master_clock_hz: device.master_clock_rate(),
+            duration_secs: plan.throughput_seconds,
+            stream: 0,
         });
         let value = tx_bytes_per_second(*rate, wire_bytes)?;
         stages.push(CandidateStage { value, trials: vec![evidence.class] });
         conditions.push(tx_rate_condition(&id, *rate));
         let stage = candidate_stage_json(&id, value, &[evidence.class], &[None]);
         observations.push(observation(
-            format!("provider_tx_throughput_{rate}"), "tests/hardware.rs::hw_measurements_record", Some(id), 1,
+            format!("provider_tx_throughput_{rate}"),
+            "tests/hardware.rs::hw_measurements_record",
+            Some(id),
+            1,
             json!({ "rate_hz": rate, "duration_secs": plan.throughput_seconds,
                 "scheduled_burst_target": scheduled_target, "burst_target": evidence.burst_target,
                 "burst_target_matches_schedule": evidence.burst_target_matches_schedule,
@@ -3632,8 +3924,12 @@ pub fn measure_tx_throughput(device: Arc<dyn Device>, plan: &MeasurementPlan) ->
     }
     let extra = extra_throughput(&device, plan, Direction::Tx, tx_description.tx.len(), wire_bytes)?;
     if !extra.stages.is_empty() {
-        let mut family: Vec<FamilyStage> = plan.tx_throughput_rates_hz.iter().zip(&stages)
-            .map(|(rate, stage)| FamilyStage { condition: tx_rate_id(*rate), family: "tx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() }).collect();
+        let mut family: Vec<FamilyStage> = plan
+            .tx_throughput_rates_hz
+            .iter()
+            .zip(&stages)
+            .map(|(rate, stage)| FamilyStage { condition: tx_rate_id(*rate), family: "tx-sweep".to_owned(), bytes: stage.value, class: stage.trials.first().copied() })
+            .collect();
         family.extend(extra.stages);
         let (row, capacity) = throughput_value("radio.perf.tx_bytes_per_s", &family)?;
         conditions.extend(extra.conditions);
@@ -3656,22 +3952,25 @@ fn expected_rx_samples(clock: &SampleClockRecord, rate_hz: u64, master_clock_hz:
     let start = clock.origin.ticks_in(clock.root).ok()?;
     let end = clock.ended_at?.ticks_in(clock.root).ok()?;
     let interval = end.checked_sub(start)?;
-    if interval <= 0 || master_clock_hz == 0 { return None; }
+    if interval <= 0 || master_clock_hz == 0 {
+        return None;
+    }
     let samples = (interval as u128).checked_mul(u128::from(rate_hz))? / u128::from(master_clock_hz);
     Some((interval, u64::try_from(samples).ok()?))
 }
 
 fn throughput_trial_class(actual: u64, expected: Option<u64>, packet: u64, overflow: bool) -> TrialClass {
-    if overflow { TrialClass::DeviceFailure }
-    else if expected.is_some_and(|expected| actual.abs_diff(expected) <= packet) { TrialClass::Success }
-    else { TrialClass::Incomplete }
+    if overflow {
+        TrialClass::DeviceFailure
+    } else if expected.is_some_and(|expected| actual.abs_diff(expected) <= packet) {
+        TrialClass::Success
+    } else {
+        TrialClass::Incomplete
+    }
 }
 
 fn loopback_values(classes: &[TrialClass], exact_starts: &[bool], heard: &[bool]) -> (bool, bool) {
-    (
-        classes.iter().zip(heard).all(|(class, heard)| *class == TrialClass::Success && *heard),
-        classes.iter().zip(exact_starts).all(|(class, exact)| *class == TrialClass::Success && *exact),
-    )
+    (classes.iter().zip(heard).all(|(class, heard)| *class == TrialClass::Success && *heard), classes.iter().zip(exact_starts).all(|(class, exact)| *class == TrialClass::Success && *exact))
 }
 
 /// Provider-path full-duplex and timed-capture rehearsal (UR-34).
@@ -3709,32 +4008,46 @@ pub fn measure_full_duplex(device: Arc<dyn Device>, plan: &MeasurementPlan) -> R
         let horizon = TimePoint::new(root, now.checked_add(ticks_for_ns(3_000_000_000, device.master_clock_rate())?).ok_or("loopback horizon overflow")?);
         let written = run.wait_for(&[super::kind("sink.CAPTURE_WRITTEN")], from_events, horizon).map_err(|error| error.to_string())?;
         let event_rows = run.events(from_events);
-        let end_tick = written.and_then(|_| event_rows.iter().find(|event| event.kind == super::kind("sink.CAPTURE_WRITTEN")).map(|event| event.time))
-            .and_then(|time| time.ticks_in(root).ok()).unwrap_or_else(|| root_now(&run).map_or(now, |(_, tick)| tick));
+        let end_tick = written
+            .and_then(|_| event_rows.iter().find(|event| event.kind == super::kind("sink.CAPTURE_WRITTEN")).map(|event| event.time))
+            .and_then(|time| time.ticks_in(root).ok())
+            .unwrap_or_else(|| root_now(&run).map_or(now, |(_, tick)| tick));
         let interval_end = end_tick.checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("duplex trial end overflow")?;
         advance_root(&mut run, root, interval_end)?;
         let manifest = run.finish();
         let capture = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
-        let capture_ref = manifest.artifacts.get(&Ident::parse("rec").map_err(|error| error.to_string())?)
-            .and_then(|artifacts| artifacts.first());
+        let capture_ref = manifest.artifacts.get(&Ident::parse("rec").map_err(|error| error.to_string())?).and_then(|artifacts| artifacts.first());
         let capture_first = capture_ref.and_then(|artifact| artifact.continuity.first()).map(|map| map.first);
         let exact_start = capture_first == Some(capture_target);
         let samples = capture_ref.and_then(read_capture_samples);
         let found = samples.as_ref().and_then(|samples| super::correlate(samples, &wave)).is_some();
         let mut trial = TrialPlan {
-            start_tick: trial_start, end_tick: end_tick.checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("duplex trial end overflow")?,
-            admitted: capture_admitted, expected_target: None, expected_samples: 5_000,
-            expected_end_tick: 0, booked_tick: Some(now), completion: TrialCompletion::ReceiveCapture,
+            start_tick: trial_start,
+            end_tick: end_tick.checked_add(ticks_for_ns(plan.interval_ns, device.master_clock_rate())?).ok_or("duplex trial end overflow")?,
+            admitted: capture_admitted,
+            expected_target: None,
+            expected_samples: 5_000,
+            expected_end_tick: 0,
+            booked_tick: Some(now),
+            completion: TrialCompletion::ReceiveCapture,
             requires_preemption_evidence: false,
-            capture_index: Some(0), capture_target: Some(capture_target), cold_capture: false,
+            capture_index: Some(0),
+            capture_target: Some(capture_target),
+            cold_capture: false,
         };
         let evidence = evidence_from_sections(
-            super::section(&manifest, "bursts"), super::section(&manifest, "async"), super::section(&manifest, "rejected"),
+            super::section(&manifest, "bursts"),
+            super::section(&manifest, "async"),
+            super::section(&manifest, "rejected"),
             &serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?,
-            &capture, &manifest.clocks.sample_clocks, std::slice::from_mut(&mut trial),
+            &capture,
+            &manifest.clocks.sample_clocks,
+            std::slice::from_mut(&mut trial),
         )?;
         let mut class = classify_trial(&evidence[0]);
-        if !found && class == TrialClass::Success { class = TrialClass::Incomplete; }
+        if !found && class == TrialClass::Success {
+            class = TrialClass::Incomplete;
+        }
         classes.push(class);
         first_matches.push(exact_start);
         heard.push(found);
@@ -3753,27 +4066,36 @@ pub fn measure_full_duplex(device: Arc<dyn Device>, plan: &MeasurementPlan) -> R
             });
         }
         Ok(ValueRecord::Measured {
-            key: Key::parse(key).map_err(|error| error.to_string())?, worst: model::Worst::Boolean(worst),
-            trials: observation_trials(plan.loopback_trials)?, condition: condition.to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+            key: Key::parse(key).map_err(|error| error.to_string())?,
+            worst: model::Worst::Boolean(worst),
+            trials: observation_trials(plan.loopback_trials)?,
+            condition: condition.to_owned(),
+            test: "tests/hardware.rs::hw_measurements_record".to_owned(),
         })
     };
     Ok(MeasurementGroup {
         conditions: vec![duplex_condition(condition)],
         values: vec![value("radio.full_duplex", full_duplex)?, value("radio.hardware_time", hardware_time)?],
-        observations: vec![observation("provider_full_duplex", "tests/hardware.rs::hw_measurements_record", Some(condition.to_owned()), observation_trials(plan.loopback_trials)?,
-            json!({ "interval_ns": plan.interval_ns, "trials": target_rows, "full_duplex": full_duplex, "hardware_time": hardware_time }))?],
+        observations: vec![observation(
+            "provider_full_duplex",
+            "tests/hardware.rs::hw_measurements_record",
+            Some(condition.to_owned()),
+            observation_trials(plan.loopback_trials)?,
+            json!({ "interval_ns": plan.interval_ns, "trials": target_rows, "full_duplex": full_duplex, "hardware_time": hardware_time }),
+        )?],
     })
 }
 
 fn read_capture_samples(artifact: &ArtifactRef) -> Option<Vec<(f32, f32)>> {
-    if artifact.partial { return None; }
+    if artifact.partial {
+        return None;
+    }
     let path = artifact.uri.strip_prefix("file://")?;
     let bytes = std::fs::read(path).ok()?;
-    if bytes.len() % 8 != 0 { return None; }
-    bytes.chunks_exact(8).map(|frame| Some((
-        f32::from_le_bytes(frame[0..4].try_into().ok()?),
-        f32::from_le_bytes(frame[4..8].try_into().ok()?),
-    ))).collect()
+    if bytes.len() % 8 != 0 {
+        return None;
+    }
+    bytes.chunks_exact(8).map(|frame| Some((f32::from_le_bytes(frame[0..4].try_into().ok()?), f32::from_le_bytes(frame[4..8].try_into().ok()?)))).collect()
 }
 
 /// The six Manifest-derived outcomes for one trial. This accepts only immutable JSON sections
@@ -3787,12 +4109,15 @@ pub fn extract_trial_evidence(
     clocks: &[SampleClockRecord],
     plans: &[TrialPlan],
 ) -> Result<Vec<TrialEvidence>, String> {
-    let mut trials: Vec<_> = plans.iter().map(|plan| {
-        let mut trial = TrialEvidence::new(plan.start_tick, plan.end_tick, plan.expected_samples, plan.expected_end_tick, plan.completion);
-        trial.admitted = plan.admitted;
-        trial.requires_preemption_evidence = plan.requires_preemption_evidence;
-        trial
-    }).collect();
+    let mut trials: Vec<_> = plans
+        .iter()
+        .map(|plan| {
+            let mut trial = TrialEvidence::new(plan.start_tick, plan.end_tick, plan.expected_samples, plan.expected_end_tick, plan.completion);
+            trial.admitted = plan.admitted;
+            trial.requires_preemption_evidence = plan.requires_preemption_evidence;
+            trial
+        })
+        .collect();
     if let Some(rows) = bursts.as_array() {
         for burst in rows {
             let Some(target) = serde_json::from_value::<TimePoint>(burst["target"].clone()).ok() else { continue };
@@ -3805,7 +4130,11 @@ pub fn extract_trial_evidence(
                     trials[*index].unattributable = true;
                 } else if end == Some(BurstEnd::Eob) {
                     let clock = clocks.iter().find(|clock| clock.domain == target.domain()).ok_or_else(|| "burst target has no SampleClock record".to_owned())?;
-                    let end_sample = target.ticks_in(target.domain()).map_err(|error| error.to_string())?.checked_add(i64::try_from(samples).map_err(|_| "burst sample count exceeds i64".to_owned())?).ok_or("burst end sample overflow")?;
+                    let end_sample = target
+                        .ticks_in(target.domain())
+                        .map_err(|error| error.to_string())?
+                        .checked_add(i64::try_from(samples).map_err(|_| "burst sample count exceeds i64".to_owned())?)
+                        .ok_or("burst end sample overflow")?;
                     let end_tick = sample_root_tick(clock, end_sample)?;
                     trials[*index].record = Some(TrialRecord { samples, end_tick });
                 } else {
@@ -3817,17 +4146,32 @@ pub fn extract_trial_evidence(
     if let Some(rows) = bursts.as_array() {
         for (index, plan) in plans.iter().enumerate().filter(|(_, plan)| plan.requires_preemption_evidence) {
             let Some(target) = plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()) else { continue };
-            let matching = rows.iter().filter(|burst| {
-                if serde_json::from_value::<BurstEnd>(burst["end"].clone()).ok() != Some(BurstEnd::Eob) { return false; }
-                let Some(repeat_target) = serde_json::from_value::<TimePoint>(burst["target"].clone()).ok() else { return false; };
-                if plan.expected_target == Some(repeat_target) { return false; }
-                let Some(samples) = burst["samples"].as_u64().and_then(|samples| i64::try_from(samples).ok()) else { return false; };
-                let Some(clock) = clocks.iter().find(|clock| clock.domain == repeat_target.domain()) else { return false; };
-                repeat_target.ticks_in(repeat_target.domain()).ok().and_then(|start| start.checked_add(samples))
-                    .and_then(|end| sample_root_tick(clock, end).ok()) == Some(target)
-            }).count();
-            if matching == 1 { trials[index].repeat_ended_at_target = true; }
-            else if matching > 1 { trials[index].unattributable = true; }
+            let matching = rows
+                .iter()
+                .filter(|burst| {
+                    if serde_json::from_value::<BurstEnd>(burst["end"].clone()).ok() != Some(BurstEnd::Eob) {
+                        return false;
+                    }
+                    let Some(repeat_target) = serde_json::from_value::<TimePoint>(burst["target"].clone()).ok() else {
+                        return false;
+                    };
+                    if plan.expected_target == Some(repeat_target) {
+                        return false;
+                    }
+                    let Some(samples) = burst["samples"].as_u64().and_then(|samples| i64::try_from(samples).ok()) else {
+                        return false;
+                    };
+                    let Some(clock) = clocks.iter().find(|clock| clock.domain == repeat_target.domain()) else {
+                        return false;
+                    };
+                    repeat_target.ticks_in(repeat_target.domain()).ok().and_then(|start| start.checked_add(samples)).and_then(|end| sample_root_tick(clock, end).ok()) == Some(target)
+                })
+                .count();
+            if matching == 1 {
+                trials[index].repeat_ended_at_target = true;
+            } else if matching > 1 {
+                trials[index].unattributable = true;
+            }
         }
     }
     for (index, plan) in plans.iter().enumerate() {
@@ -3879,19 +4223,29 @@ pub fn extract_trial_evidence(
                     let tick = report["tick"].as_i64();
                     let Some(tick) = tick else {
                         for (index, plan) in plans.iter().enumerate() {
-                            if plan.completion == TrialCompletion::TransmitBurstAck { trials[index].unattributable = true; }
+                            if plan.completion == TrialCompletion::TransmitBurstAck {
+                                trials[index].unattributable = true;
+                            }
                         }
                         continue;
                     };
-                    let matching: Vec<_> = plans.iter().enumerate().filter(|(_, plan)| {
-                        plan.completion == TrialCompletion::TransmitBurstAck
-                            && plan.start_tick <= tick && tick < plan.end_tick
-                            && plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()).is_some_and(|target| tick >= target)
-                    }).map(|(index, _)| index).collect();
+                    let matching: Vec<_> = plans
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, plan)| {
+                            plan.completion == TrialCompletion::TransmitBurstAck
+                                && plan.start_tick <= tick
+                                && tick < plan.end_tick
+                                && plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()).is_some_and(|target| tick >= target)
+                        })
+                        .map(|(index, _)| index)
+                        .collect();
                     if let [index] = matching.as_slice() {
                         trials[*index].burst_ack_ticks.push(tick);
                     } else {
-                        for index in matching { trials[index].unattributable = true; }
+                        for index in matching {
+                            trials[index].unattributable = true;
+                        }
                     }
                     continue;
                 }
@@ -3909,7 +4263,7 @@ pub fn extract_trial_evidence(
         if trial.completion == TrialCompletion::TransmitBurstAck {
             match trial.burst_ack_ticks.len() {
                 1 => trial.evidence.push(EvidenceKind::BurstAck),
-                0 => {},
+                0 => {}
                 _ => trial.unattributable = true,
             }
         }
@@ -3945,44 +4299,66 @@ fn point_root_tick(point: TimePoint, clocks: &[SampleClockRecord]) -> Result<i64
 
 fn capture_record(artifacts: &Json, clocks: &[SampleClockRecord], plan: &TrialPlan) -> Option<TrialRecord> {
     let artifact = artifacts.get("rec")?.as_array()?.get(plan.capture_index?)?;
-    if artifact.get("partial")?.as_bool()? { return None; }
+    if artifact.get("partial")?.as_bool()? {
+        return None;
+    }
     let maps = artifact.get("continuity")?.as_array()?;
-    if maps.is_empty() { return None; }
+    if maps.is_empty() {
+        return None;
+    }
     let mut samples = 0u64;
     for map in maps {
-        if !map.get("gaps")?.as_array()?.is_empty() || !map.get("channel_gaps")?.as_array()?.is_empty() { return None; }
+        if !map.get("gaps")?.as_array()?.is_empty() || !map.get("channel_gaps")?.as_array()?.is_empty() {
+            return None;
+        }
         let first: TimePoint = serde_json::from_value(map.get("first")?.clone()).ok()?;
         let end: TimePoint = serde_json::from_value(map.get("end")?.clone()).ok()?;
         let domain: ClockDomainId = serde_json::from_value(map.get("domain")?.clone()).ok()?;
-        if first.domain() != domain || end.domain() != domain { return None; }
+        if first.domain() != domain || end.domain() != domain {
+            return None;
+        }
         let len = end.ticks_in(end.domain()).ok()?.checked_sub(first.ticks_in(first.domain()).ok()?)?;
         samples = samples.checked_add(u64::try_from(len).ok()?)?;
     }
-    if samples != plan.expected_samples { return None; }
+    if samples != plan.expected_samples {
+        return None;
+    }
     if plan.cold_capture {
-        if maps.len() != 2 { return None; }
+        if maps.len() != 2 {
+            return None;
+        }
         let capture_first: TimePoint = serde_json::from_value(maps[0].get("first")?.clone()).ok()?;
-        if plan.capture_target.is_some_and(|target| target != capture_first) { return None; }
+        if plan.capture_target.is_some_and(|target| target != capture_first) {
+            return None;
+        }
         let first_domain: ClockDomainId = serde_json::from_value(maps[0].get("domain")?.clone()).ok()?;
         let second_domain: ClockDomainId = serde_json::from_value(maps[1].get("domain")?.clone()).ok()?;
-        if first_domain == second_domain { return None; }
+        if first_domain == second_domain {
+            return None;
+        }
         let old = clocks.iter().find(|clock| clock.domain == first_domain)?;
         let new = clocks.iter().find(|clock| clock.domain == second_domain)?;
-        if old.stream != new.stream || old.root != new.root || !old.stream.to_string().ends_with("usrp/rx/s0") { return None; }
+        if old.stream != new.stream || old.root != new.root || !old.stream.to_string().ends_with("usrp/rx/s0") {
+            return None;
+        }
         let ended = old.ended_at?;
         let ended_root = ended.ticks_in(old.root).ok()?;
-        if new.origin.ticks_in(new.root).ok()? <= ended_root { return None; }
+        if new.origin.ticks_in(new.root).ok()? <= ended_root {
+            return None;
+        }
         let origin_root = old.origin.ticks_in(old.root).ok()?;
         let numerator = i128::from(old.root_ticks_per_tick.num());
         let denominator = i128::from(old.root_ticks_per_tick.den());
         let elapsed = (i128::from(ended_root) - i128::from(origin_root)) * denominator;
-        if elapsed.rem_euclid(numerator) != 0 { return None; }
+        if elapsed.rem_euclid(numerator) != 0 {
+            return None;
+        }
         let e1 = elapsed / numerator;
         let recorded_end: TimePoint = serde_json::from_value(maps[0].get("end")?.clone()).ok()?;
         let new_first: TimePoint = serde_json::from_value(maps[1].get("first")?.clone()).ok()?;
-        if i128::from(recorded_end.ticks_in(first_domain).ok()?) != e1
-            || new_first.ticks_in(second_domain).ok()? != 0
-        { return None; }
+        if i128::from(recorded_end.ticks_in(first_domain).ok()?) != e1 || new_first.ticks_in(second_domain).ok()? != 0 {
+            return None;
+        }
     }
     Some(TrialRecord { samples, end_tick: plan.expected_end_tick })
 }
@@ -3990,16 +4366,14 @@ fn capture_record(artifacts: &Json, clocks: &[SampleClockRecord], plan: &TrialPl
 fn effective_cold_lead_ns(manifest: &Manifest, plan: &TrialPlan, master_clock_hz: u64) -> Option<i64> {
     let booked = plan.booked_tick?;
     let timing = super::section(manifest, "timing").as_array()?;
-    let (row, booked_at) = timing.iter()
+    let (row, booked_at) = timing
+        .iter()
         .filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.s0.sample_rate_hz")
         .filter_map(|row| row["booked_at"].as_i64().map(|tick| (row, tick)))
         .min_by_key(|(_, tick)| i128::from(*tick).abs_diff(i128::from(booked)))?;
     let e = row["e"].as_i64()?;
-    let rx_clocks: Vec<_> = manifest.clocks.sample_clocks.iter()
-        .filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0"))
-        .collect();
-    let old_index = rx_clocks.iter().position(|clock| clock.ended_at
-        .and_then(|ended| ended.ticks_in(clock.root).ok()) == Some(e))?;
+    let rx_clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0")).collect();
+    let old_index = rx_clocks.iter().position(|clock| clock.ended_at.and_then(|ended| ended.ticks_in(clock.root).ok()) == Some(e))?;
     let origin = rx_clocks.get(old_index + 1)?.origin.ticks_in(rx_clocks[old_index + 1].root).ok()?;
     i64::try_from((i128::from(origin) - i128::from(booked_at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()
 }
@@ -4023,10 +4397,7 @@ fn evidence_from_sections(
 fn evidence_from_manifest(manifest: &Manifest, plans: &[TrialPlan]) -> Result<Vec<TrialEvidence>, String> {
     let events = serde_json::to_value(&manifest.events.delivered).map_err(|error| error.to_string())?;
     let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
-    evidence_from_sections(
-        super::section(manifest, "bursts"), super::section(manifest, "async"), super::section(manifest, "rejected"),
-        &events, &artifacts, &manifest.clocks.sample_clocks, plans,
-    )
+    evidence_from_sections(super::section(manifest, "bursts"), super::section(manifest, "async"), super::section(manifest, "rejected"), &events, &artifacts, &manifest.clocks.sample_clocks, plans)
 }
 
 fn trial_class_name(class: TrialClass) -> &'static str {
@@ -4041,59 +4412,35 @@ fn trial_class_name(class: TrialClass) -> &'static str {
 }
 
 fn candidate_stage_json(condition: &str, value: u64, trials: &[TrialClass], effective_leads_ns: &[Option<i64>]) -> Json {
-    let mut counts = BTreeMap::from([
-        ("AdmissionRejection", 0usize), ("ProviderFailure", 0), ("DeviceFailure", 0),
-        ("Incomplete", 0), ("Unattributable", 0), ("Success", 0),
-    ]);
-    for trial in trials { *counts.get_mut(trial_class_name(*trial)).expect("all trial classes are listed") += 1; }
+    let mut counts = BTreeMap::from([("AdmissionRejection", 0usize), ("ProviderFailure", 0), ("DeviceFailure", 0), ("Incomplete", 0), ("Unattributable", 0), ("Success", 0)]);
+    for trial in trials {
+        *counts.get_mut(trial_class_name(*trial)).expect("all trial classes are listed") += 1;
+    }
     json!({ "condition": condition, "candidate": value, "classes": counts, "effective_lead_ns": effective_leads_ns,
         "trials": trials.iter().enumerate().map(|(index, class)| json!({ "trial": index, "class": trial_class_name(*class), "effective_lead_ns": effective_leads_ns.get(index) })).collect::<Vec<_>>() })
 }
 
-fn tx_candidate_stage_json(
-    condition: &str,
-    value: u64,
-    trials: &[TrialClass],
-    effective_leads_ns: &[Option<i64>],
-    evidence: &[TrialEvidence],
-) -> Json {
+fn tx_candidate_stage_json(condition: &str, value: u64, trials: &[TrialClass], effective_leads_ns: &[Option<i64>], evidence: &[TrialEvidence]) -> Json {
     let mut stage = candidate_stage_json(condition, value, trials, effective_leads_ns);
     if let Some(rows) = stage["trials"].as_array_mut() {
         for (row, trial) in rows.iter_mut().zip(evidence) {
             row["expected_end_tick"] = json!(trial.expected_end_tick);
             row["burst_ack_ticks"] = json!(trial.burst_ack_ticks);
-            row["burst_ack_offsets_from_expected_end_ticks"] = json!(trial.burst_ack_ticks.iter()
-                .map(|tick| tick.checked_sub(trial.expected_end_tick)).collect::<Vec<_>>());
+            row["burst_ack_offsets_from_expected_end_ticks"] = json!(trial.burst_ack_ticks.iter().map(|tick| tick.checked_sub(trial.expected_end_tick)).collect::<Vec<_>>());
             row["repeat_ended_at_target"] = json!(trial.repeat_ended_at_target);
         }
     }
     stage
 }
 
-fn cold_candidate_stage_json(
-    condition: &str,
-    value: u64,
-    trials: &[TrialClass],
-    effective_leads_ns: &[Option<i64>],
-    from_rate_hz: u64,
-    to_rate_hz: u64,
-    trial_count: usize,
-) -> Json {
+fn cold_candidate_stage_json(condition: &str, value: u64, trials: &[TrialClass], effective_leads_ns: &[Option<i64>], from_rate_hz: u64, to_rate_hz: u64, trial_count: usize) -> Json {
     let mut stage = candidate_stage_json(condition, value, trials, effective_leads_ns);
     stage["rate_pair_hz"] = json!([from_rate_hz, to_rate_hz]);
-    stage["trial_transitions_hz"] = json!((0..trial_count).map(|index| {
-        if index % 2 == 0 { [from_rate_hz, to_rate_hz] } else { [to_rate_hz, from_rate_hz] }
-    }).collect::<Vec<_>>());
+    stage["trial_transitions_hz"] = json!((0..trial_count).map(|index| { if index % 2 == 0 { [from_rate_hz, to_rate_hz] } else { [to_rate_hz, from_rate_hz] } }).collect::<Vec<_>>());
     stage
 }
 
-fn numeric_value(
-    key: &str,
-    summary: &CandidateSummary,
-    candidates: &BTreeMap<String, Vec<CandidateStage>>,
-    required_trials: usize,
-    test: &str,
-) -> Result<ValueRecord, String> {
+fn numeric_value(key: &str, summary: &CandidateSummary, candidates: &BTreeMap<String, Vec<CandidateStage>>, required_trials: usize, test: &str) -> Result<ValueRecord, String> {
     let key = Key::parse(key).map_err(|error| error.to_string())?;
     let Some(worst) = summary.worst else {
         return Ok(ValueRecord::Unmeasured { key, reason: summary.unmeasured_reason.clone().unwrap_or_else(|| "No candidate satisfies the successful-edge rule.".to_owned()) });
@@ -4101,8 +4448,11 @@ fn numeric_value(
     let condition = summary.limiting_condition.as_deref().ok_or("selected measurement has no limiting condition")?;
     let trials = candidates.get(condition).and_then(|stages| stages.iter().find(|stage| stage.value == worst)).map(|stage| stage.trials.len()).unwrap_or(required_trials);
     Ok(ValueRecord::Measured {
-        key, worst: model::Worst::Number(worst as f64), trials: u32::try_from(trials).map_err(|_| "measured trial count exceeds u32".to_owned())?,
-        condition: condition.to_owned(), test: test.to_owned(),
+        key,
+        worst: model::Worst::Number(worst as f64),
+        trials: u32::try_from(trials).map_err(|_| "measured trial count exceeds u32".to_owned())?,
+        condition: condition.to_owned(),
+        test: test.to_owned(),
     })
 }
 
@@ -4123,18 +4473,14 @@ mod tests {
 
     #[test]
     fn command_queue_depth_requires_backpressure_timing_and_success_in_every_condition() {
-        let call = |duration_ns, h_i_ns, error: Option<&str>| QueueCall {
-            duration_ns, h_i_ns, error: error.map(str::to_owned),
-        };
+        let call = |duration_ns, h_i_ns, error: Option<&str>| QueueCall { duration_ns, h_i_ns, error: error.map(str::to_owned) };
         let clock = QueueClock { d0_tick: 1_000, h_before_ns: 0, h_after_ns: 10 };
         let first_at = 1_100;
         let stall_limit = 1_500_000_000;
         let return_limit_ticks = 100;
         let classify = |calls: &[QueueCall], timing| classify_queue_trial(calls, timing, first_at, stall_limit, return_limit_ticks, 1_000_000_000);
-        assert_eq!(classify(&[call(1_000_000, Some(99), None), call(stall_limit + 1, Some(110), None)], clock),
-            QueueTrialClass::Success { depth: 1 });
-        assert_eq!(classify(&[call(stall_limit + 1, Some(200), None)], QueueClock { h_after_ns: 0, ..clock }),
-            QueueTrialClass::Success { depth: 0 });
+        assert_eq!(classify(&[call(1_000_000, Some(99), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Success { depth: 1 });
+        assert_eq!(classify(&[call(stall_limit + 1, Some(200), None)], QueueClock { h_after_ns: 0, ..clock }), QueueTrialClass::Success { depth: 0 });
         assert!(matches!(classify(&[call(stall_limit, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&vec![call(1_000_000, Some(99), None); 4], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(100_000_001, Some(99), None)], clock), QueueTrialClass::Incomplete { .. }));
@@ -4148,11 +4494,15 @@ mod tests {
         assert!(matches!(classify(&[call(1_000_000, None, None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(QUEUE_CALL_TIME_LIMIT_NS, Some(99), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
         assert!(matches!(classify(&[call(stall_limit + 1, Some(110), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[], QueueClock { h_after_ns: QUEUE_CALL_TIME_LIMIT_NS + 1, ..clock }),
-            QueueTrialClass::Incomplete { reason: "the device-time read took too long to bound the host-clock interval" }));
+        assert!(matches!(
+            classify(&[], QueueClock { h_after_ns: QUEUE_CALL_TIME_LIMIT_NS + 1, ..clock }),
+            QueueTrialClass::Incomplete { reason: "the device-time read took too long to bound the host-clock interval" }
+        ));
         assert!(matches!(classify(&[call(1, Some(110), Some("apply failed"))], clock), QueueTrialClass::DeviceFailure { .. }));
-        assert_eq!(finish_queue_trial(QueueTrialClass::Success { depth: 1 }, None, Some("untimed reset failed".to_owned())),
-            QueueTrialClass::DeviceFailure { reason: "untimed reset failed".to_owned() });
+        assert_eq!(
+            finish_queue_trial(QueueTrialClass::Success { depth: 1 }, None, Some("untimed reset failed".to_owned())),
+            QueueTrialClass::DeviceFailure { reason: "untimed reset failed".to_owned() }
+        );
         let conditions = [
             ("a".to_owned(), vec![QueueTrialClass::Success { depth: 11 }, QueueTrialClass::Success { depth: 9 }]),
             ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Success { depth: 8 }]),
@@ -4181,8 +4531,7 @@ mod tests {
         let stall_limit = 1_500_000_000;
         let classify = |delta_us: i64| {
             let h_i = (first_at + delta_us * 1_000) as u64;
-            let calls = [QueueCall { duration_ns: 1_000_000, h_i_ns: Some(first_at as u64 - 100_000_000), error: None },
-                QueueCall { duration_ns: stall_limit + 1, h_i_ns: Some(h_i), error: None }];
+            let calls = [QueueCall { duration_ns: 1_000_000, h_i_ns: Some(first_at as u64 - 100_000_000), error: None }, QueueCall { duration_ns: stall_limit + 1, h_i_ns: Some(h_i), error: None }];
             classify_queue_trial(&calls, clock, first_at, stall_limit, 100_000_000, 1_000_000_000)
         };
         let readings = [170, 120, 110, 110, 70, 50, 40, 30, 10, -10, -1_400, -2_420];
@@ -4204,11 +4553,14 @@ mod tests {
     #[test]
     fn queue_trials_go_on_until_the_required_successes_or_the_trial_limit() {
         use QueueTrialClass::{Ambiguous, DeviceFailure, Incomplete, Success};
-        let sequence = [Success { depth: 8 }, Ambiguous { depth: 2 }, Incomplete { reason: "x" }, Success { depth: 9 }, DeviceFailure { reason: "y".to_owned() }, Success { depth: 7 }, Success { depth: 8 }];
+        let sequence =
+            [Success { depth: 8 }, Ambiguous { depth: 2 }, Incomplete { reason: "x" }, Success { depth: 9 }, DeviceFailure { reason: "y".to_owned() }, Success { depth: 7 }, Success { depth: 8 }];
         // Mixed trials: the loop's own stop test, applied as the loop applies it, stops at the third success and runs nothing after it.
         let run = |required: usize, max: usize, pool: &[QueueTrialClass]| {
             let mut classes = Vec::new();
-            while !queue_condition_done(&classes, required, max) { classes.push(pool[classes.len()].clone()); }
+            while !queue_condition_done(&classes, required, max) {
+                classes.push(pool[classes.len()].clone());
+            }
             classes
         };
         let stopped = run(3, 15, &sequence);
@@ -4219,10 +4571,27 @@ mod tests {
         assert_eq!(limited.len(), 5);
         assert!(queue_successes(&limited) < 3);
         assert!(summarize_queue_depth(&[("a".to_owned(), limited.clone())], 3).is_none());
-        let reason = match queue_depth_value(&[("a".to_owned(), limited)], 3, 5).unwrap() { ValueRecord::Unmeasured { reason, .. } => reason, other => panic!("{other:?}") };
+        let reason = match queue_depth_value(&[("a".to_owned(), limited)], 3, 5).unwrap() {
+            ValueRecord::Unmeasured { reason, .. } => reason,
+            other => panic!("{other:?}"),
+        };
         // Five successes that took eight trials are recorded as eight trials, the count of the condition that gave the value.
-        let slow = [("a".to_owned(), vec![Ambiguous { depth: 1 }, Success { depth: 9 }, Incomplete { reason: "x" }, Success { depth: 8 }, Ambiguous { depth: 1 }, Success { depth: 8 }, DeviceFailure { reason: "y".to_owned() }, Success { depth: 8 }]),
-            ("b".to_owned(), vec![Success { depth: 12 }, Success { depth: 12 }])];
+        let slow = [
+            (
+                "a".to_owned(),
+                vec![
+                    Ambiguous { depth: 1 },
+                    Success { depth: 9 },
+                    Incomplete { reason: "x" },
+                    Success { depth: 8 },
+                    Ambiguous { depth: 1 },
+                    Success { depth: 8 },
+                    DeviceFailure { reason: "y".to_owned() },
+                    Success { depth: 8 },
+                ],
+            ),
+            ("b".to_owned(), vec![Success { depth: 12 }, Success { depth: 12 }]),
+        ];
         assert!(matches!(queue_depth_value(&slow, 2, 15).unwrap(), ValueRecord::Measured { trials: 8, condition, worst: model::Worst::Number(value), .. } if condition == "a" && value == 8.0));
         assert!(reason.contains("at most 5 trials") && reason.contains("a: 2 successes in 5 trials"), "{reason}");
         assert!(queue_condition_done(&[Success { depth: 1 }], 1, 15));
@@ -4244,32 +4613,23 @@ mod tests {
 
     #[test]
     fn coercion_readbacks_keep_only_exact_gain_rate_and_antenna_values() {
-        let points = vec![
-            NumericReadback { requested: 1.0, returned: Some(1.0 + 1e-13), error: None },
-            NumericReadback { requested: 2.0, returned: Some(2.1), error: None },
-        ];
+        let points = vec![NumericReadback { requested: 1.0, returned: Some(1.0 + 1e-13), error: None }, NumericReadback { requested: 2.0, returned: Some(2.1), error: None }];
         let gain = coercion_grid_value("radio.rx.c0.gain_db", &points, "coercion", "test", gain_readback_matches).unwrap();
         assert!(matches!(gain, ValueRecord::Measured { worst: model::Worst::Grid(model::GridValue::Values { values }), .. } if values == [1.0]));
         let rate = coercion_grid_value("radio.rx.s0.sample_rate_hz", &points, "coercion", "test", rate_readback_matches).unwrap();
         assert!(matches!(rate, ValueRecord::Measured { worst: model::Worst::Grid(model::GridValue::Values { values }), .. } if values == [1.0]));
         assert!(!gain_readback_matches(1.0, 1.0 + 1e-8));
         assert!(!rate_readback_matches(1.0, 1.0 + 1e-10));
-        let failed = coercion_grid_value("radio.rx.c0.gain_db", &[NumericReadback {
-            requested: 3.0, returned: None, error: Some("set_gain failed".to_owned()),
-        }], "coercion", "test", |requested, actual| requested == actual).unwrap();
+        let failed =
+            coercion_grid_value("radio.rx.c0.gain_db", &[NumericReadback { requested: 3.0, returned: None, error: Some("set_gain failed".to_owned()) }], "coercion", "test", |requested, actual| {
+                requested == actual
+            })
+            .unwrap();
         assert!(matches!(failed, ValueRecord::Unmeasured { reason, .. } if reason.contains("set_gain failed")));
 
-        let half_db = (0..=5).map(|index| NumericReadback {
-            requested: index as f64 / 10.0,
-            returned: Some(if index < 3 { 0.0 } else { 0.5 }), error: None,
-        }).collect::<Vec<_>>();
-        let one_db = (0..=5).map(|index| NumericReadback {
-            requested: index as f64 / 5.0,
-            returned: Some(if index < 3 { 0.0 } else { 1.0 }), error: None,
-        }).collect::<Vec<_>>();
-        let uneven = [0.0, 0.5, 1.5].into_iter().map(|value| NumericReadback {
-            requested: value, returned: Some(value), error: None,
-        }).collect::<Vec<_>>();
+        let half_db = (0..=5).map(|index| NumericReadback { requested: index as f64 / 10.0, returned: Some(if index < 3 { 0.0 } else { 0.5 }), error: None }).collect::<Vec<_>>();
+        let one_db = (0..=5).map(|index| NumericReadback { requested: index as f64 / 5.0, returned: Some(if index < 3 { 0.0 } else { 1.0 }), error: None }).collect::<Vec<_>>();
+        let uneven = [0.0, 0.5, 1.5].into_iter().map(|value| NumericReadback { requested: value, returned: Some(value), error: None }).collect::<Vec<_>>();
         assert!(matches!(gain_step_value("radio.rx.c0.gain_step_db", &half_db, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Number(value), .. } if value == 0.5));
         assert!(matches!(gain_step_value("radio.rx.c0.gain_step_db", &one_db, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Number(value), .. } if value == 1.0));
         assert!(matches!(gain_step_value("radio.rx.c0.gain_step_db", &uneven, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Number(value), .. } if value == 1.0));
@@ -4278,9 +4638,10 @@ mod tests {
             AntennaReadback { requested: "TX/RX".to_owned(), returned: Some("RX2".to_owned()), error: None },
         ];
         assert!(matches!(antenna_value("radio.rx.c0.antenna", &antennas, "coercion", "test").unwrap(), ValueRecord::Measured { worst: model::Worst::Texts(values), .. } if values == ["RX2"]));
-        assert!(matches!(antenna_value("radio.rx.c0.antenna", &[AntennaReadback {
-            requested: "RX2".to_owned(), returned: None, error: None,
-        }], "coercion", "test").unwrap(), ValueRecord::Unmeasured { .. }));
+        assert!(matches!(
+            antenna_value("radio.rx.c0.antenna", &[AntennaReadback { requested: "RX2".to_owned(), returned: None, error: None }], "coercion", "test").unwrap(),
+            ValueRecord::Unmeasured { .. }
+        ));
         assert_eq!(fine_gain_points(&Grid::Step { lo: 0.0, hi: 0.5, step: 0.5 }).unwrap(), [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]);
     }
 
@@ -4297,12 +4658,19 @@ mod tests {
         let key = Key::parse("radio.rx.c0.gain_db").unwrap();
         let all = grid_points(&description.rx[0].gain).unwrap();
         let set = |record: &mut Record, values: Vec<f64>| {
-            let row = record.values.iter_mut().find(|row| match row {
-                ValueRecord::Measured { key: found, .. } | ValueRecord::Unmeasured { key: found, .. } => found == &key,
-            }).unwrap();
+            let row = record
+                .values
+                .iter_mut()
+                .find(|row| match row {
+                    ValueRecord::Measured { key: found, .. } | ValueRecord::Unmeasured { key: found, .. } => found == &key,
+                })
+                .unwrap();
             *row = ValueRecord::Measured {
-                key: key.clone(), worst: model::Worst::Grid(model::GridValue::Values { values }), trials: 64,
-                condition: "coercion".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+                key: key.clone(),
+                worst: model::Worst::Grid(model::GridValue::Values { values }),
+                trials: 64,
+                condition: "coercion".to_owned(),
+                test: "tests/hardware.rs::hw_measurements_record".to_owned(),
             };
         };
         set(&mut record, all.clone());
@@ -4310,8 +4678,7 @@ mod tests {
         let mut missing = all;
         missing.retain(|value| *value != 0.5);
         set(&mut record, missing);
-        assert!(model::compare(&record, &description).iter().any(|violation| violation.key == key.as_str()
-            && violation.reason.starts_with("profile grid is not a subset")));
+        assert!(model::compare(&record, &description).iter().any(|violation| violation.key == key.as_str() && violation.reason.starts_with("profile grid is not a subset")));
     }
 
     fn synthetic_clock(domain: ClockDomainId, stream: &str, origin: i64, ended_at: Option<i64>) -> SampleClockRecord {
@@ -4330,10 +4697,18 @@ mod tests {
     fn synthetic_tx_plan(start_tick: i64, end_tick: i64, target_tick: i64) -> TrialPlan {
         let target = TimePoint::new(ClockDomainId::local(21), target_tick);
         TrialPlan {
-            start_tick, end_tick, admitted: true, expected_target: Some(target), expected_samples: 4,
-            expected_end_tick: target_tick + 4, booked_tick: Some(start_tick), completion: TrialCompletion::TransmitBurstAck,
+            start_tick,
+            end_tick,
+            admitted: true,
+            expected_target: Some(target),
+            expected_samples: 4,
+            expected_end_tick: target_tick + 4,
+            booked_tick: Some(start_tick),
+            completion: TrialCompletion::TransmitBurstAck,
             requires_preemption_evidence: false,
-            capture_index: None, capture_target: None, cold_capture: false,
+            capture_index: None,
+            capture_target: None,
+            cold_capture: false,
         }
     }
 
@@ -4352,8 +4727,7 @@ mod tests {
         let receipt = 100;
         let later_post_submit_read = 150;
         assert_eq!(effective_lead_ns(target, TimePoint::new(root, receipt), root, 1_000_000_000).unwrap(), (receipt, 200));
-        assert_eq!(effective_lead_ns(target, TimePoint::new(root, later_post_submit_read), root, 1_000_000_000).unwrap(),
-            (later_post_submit_read, 150));
+        assert_eq!(effective_lead_ns(target, TimePoint::new(root, later_post_submit_read), root, 1_000_000_000).unwrap(), (later_post_submit_read, 150));
     }
 
     #[test]
@@ -4407,10 +4781,7 @@ mod tests {
             assert_eq!(classify_trial(&trial), TrialClass::DeviceFailure, "{error:?}");
         }
         let mut ambiguous = complete(10);
-        ambiguous.evidence.extend([
-            EvidenceKind::ProviderTimeError(ProviderTimeError::Drop),
-            EvidenceKind::AsyncTimeError,
-        ]);
+        ambiguous.evidence.extend([EvidenceKind::ProviderTimeError(ProviderTimeError::Drop), EvidenceKind::AsyncTimeError]);
         assert_eq!(classify_trial(&ambiguous), TrialClass::Unattributable);
     }
 
@@ -4488,17 +4859,13 @@ mod tests {
         let tx_stage = tx_candidate_stage_json("tx-1msps", 1, &[TrialClass::Success], &[Some(3)], &completed);
         assert_eq!(tx_stage["trials"][0]["expected_end_tick"], 104);
         assert_eq!(tx_stage["trials"][0]["burst_ack_offsets_from_expected_end_ticks"], json!([-2]));
-        assert_eq!(classify_trial(&evidence(&plan, &burst, &empty, &empty, &empty)[0]), TrialClass::Incomplete,
-            "a missing ACK does not complete a recorded burst");
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &empty, &empty, &empty)[0]), TrialClass::Incomplete, "a missing ACK does not complete a recorded burst");
         let multiple_acks = json!([{ "code": "BurstAck", "tick": 101 }, { "code": "BurstAck", "tick": 103 }]);
-        assert_eq!(classify_trial(&evidence(&plan, &burst, &multiple_acks, &empty, &empty)[0]), TrialClass::Unattributable,
-            "multiple ACKs in one isolated trial cannot be assigned");
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &multiple_acks, &empty, &empty)[0]), TrialClass::Unattributable, "multiple ACKs in one isolated trial cannot be assigned");
         let before_trial = synthetic_radio_event("radio.RX_OVERFLOW", 89, json!({}));
-        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &before_trial)[0]), TrialClass::Unattributable,
-            "a known failure before the first trial invalidates it");
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &before_trial)[0]), TrialClass::Unattributable, "a known failure before the first trial invalidates it");
         let after_trial = synthetic_radio_event("radio.RX_OVERFLOW", 120, json!({}));
-        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &after_trial)[0]), TrialClass::Unattributable,
-            "a known failure after the last trial invalidates it");
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &after_trial)[0]), TrialClass::Unattributable, "a known failure after the last trial invalidates it");
 
         let mut rejected_plan = plan.clone();
         rejected_plan.admitted = false;
@@ -4515,18 +4882,14 @@ mod tests {
         let tickless = json!([{ "code": "TimeError", "tick": null }]);
         assert_eq!(classify_trial(&evidence(&plan, &empty, &tickless, &empty, &empty)[0]), TrialClass::Unattributable);
         let unknown_time_error = synthetic_radio_event("radio.TIME_ERROR", 95, json!({ "outcome": "future_outcome", "target": plan.expected_target }));
-        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &unknown_time_error)[0]), TrialClass::Unattributable,
-            "an unknown TIME_ERROR outcome cannot be ignored");
+        assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &empty, &unknown_time_error)[0]), TrialClass::Unattributable, "an unknown TIME_ERROR outcome cannot be ignored");
         let short_send = json!([{ "reason": "UR-22: a send did not complete within 1 s" }]);
         assert_eq!(classify_trial(&evidence(&plan, &burst, &ack, &short_send, &empty)[0]), TrialClass::Incomplete);
 
         let first = synthetic_tx_plan(90, 104, 100);
         let second = synthetic_tx_plan(104, 220, 200);
         let crossing_ack = json!([{ "code": "BurstAck", "tick": 104 }]);
-        let crossed = extract_trial_evidence(
-            &synthetic_burst(first.expected_target.unwrap(), 4, "eob"), &crossing_ack, &empty, &empty, &no_artifacts,
-            &clocks, &[first, second],
-        ).unwrap();
+        let crossed = extract_trial_evidence(&synthetic_burst(first.expected_target.unwrap(), 4, "eob"), &crossing_ack, &empty, &empty, &no_artifacts, &clocks, &[first, second]).unwrap();
         assert!(crossed.iter().all(|trial| classify_trial(trial) == TrialClass::Incomplete), "a boundary ACK before the next target cannot complete either trial");
     }
 
@@ -4541,8 +4904,7 @@ mod tests {
         let empty = json!([]);
         let no_artifacts = json!({});
         let no_repeat = extract_trial_evidence(&interrupt, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
-        assert_eq!(classify_trial(&no_repeat[0]), TrialClass::Incomplete,
-            "a complete interrupting burst cannot prove that a repeat was running");
+        assert_eq!(classify_trial(&no_repeat[0]), TrialClass::Incomplete, "a complete interrupting burst cannot prove that a repeat was running");
 
         let repeat = json!([
             { "target": TimePoint::new(ClockDomainId::local(21), 50), "samples": 50, "end": "eob" },
@@ -4562,8 +4924,7 @@ mod tests {
 
         let before = synthetic_radio_event("radio.TX_UNDERFLOW", 89, json!({}));
         let failed_setup = extract_trial_evidence(&repeat, &ack, &empty, &before, &no_artifacts, &clocks, &[plan]).unwrap();
-        assert_eq!(classify_trial(&failed_setup[0]), TrialClass::Unattributable,
-            "an underflow before the first trial is retained against that trial");
+        assert_eq!(classify_trial(&failed_setup[0]), TrialClass::Unattributable, "an underflow before the first trial is retained against that trial");
     }
 
     #[test]
@@ -4574,15 +4935,25 @@ mod tests {
         let new = synthetic_clock(new_domain, "usrp/rx/s0", 250, None);
         let target = TimePoint::new(old_domain, 100);
         let plan = TrialPlan {
-            start_tick: 90, end_tick: 400, admitted: true, expected_target: None, expected_samples: 200,
-            expected_end_tick: 0, booked_tick: Some(150), completion: TrialCompletion::ReceiveCapture,
+            start_tick: 90,
+            end_tick: 400,
+            admitted: true,
+            expected_target: None,
+            expected_samples: 200,
+            expected_end_tick: 0,
+            booked_tick: Some(150),
+            completion: TrialCompletion::ReceiveCapture,
             requires_preemption_evidence: false,
-            capture_index: Some(0), capture_target: Some(target), cold_capture: true,
+            capture_index: Some(0),
+            capture_target: Some(target),
+            cold_capture: true,
         };
-        let map = |domain, first, end| json!({
-            "domain": domain, "gaps": [], "channel_gaps": [],
-            "first": TimePoint::new(domain, first), "end": TimePoint::new(domain, end),
-        });
+        let map = |domain, first, end| {
+            json!({
+                "domain": domain, "gaps": [], "channel_gaps": [],
+                "first": TimePoint::new(domain, first), "end": TimePoint::new(domain, end),
+            })
+        };
         let artifacts = json!({ "rec": [{ "partial": false, "continuity": [map(old_domain, 100, 200), map(new_domain, 0, 100)] }] });
         let empty = json!([]);
         let evidence = extract_trial_evidence(&empty, &empty, &empty, &empty, &artifacts, &[old.clone(), new], std::slice::from_ref(&plan)).unwrap();
@@ -4603,39 +4974,44 @@ mod tests {
         let (interval, expected) = expected_rx_samples(&clock, 1_000, 1_000).unwrap();
         assert_eq!((interval, expected), (1_100, 1_100), "the recorded interval includes delayed shutdown");
         let missing_end = synthetic_clock(ClockDomainId::local(21), "usrp/rx/s0", 100, None);
-        assert_eq!(expected_rx_samples(&missing_end, 1_000, 1_000), None,
-            "without an ended SampleClock there is no measured interval");
+        assert_eq!(expected_rx_samples(&missing_end, 1_000, 1_000), None, "without an ended SampleClock there is no measured interval");
         assert_eq!(throughput_trial_class(1_100, Some(expected), 100, false), TrialClass::Success);
-        assert_eq!(throughput_trial_class(1_200, Some(expected), 100, false), TrialClass::Success,
-            "a one-packet difference is within the permitted tolerance");
-        assert_eq!(throughput_trial_class(900, Some(expected), 100, false), TrialClass::Incomplete,
-            "a sample deficit beyond one packet remains incomplete");
-        assert_eq!(throughput_trial_class(1_100, None, 100, false), TrialClass::Incomplete,
-            "a SampleClock without an end cannot define an expected count");
-        assert_eq!(throughput_trial_class(1_100, Some(expected), 100, true), TrialClass::DeviceFailure,
-            "an overflow fails even with the expected sample count");
+        assert_eq!(throughput_trial_class(1_200, Some(expected), 100, false), TrialClass::Success, "a one-packet difference is within the permitted tolerance");
+        assert_eq!(throughput_trial_class(900, Some(expected), 100, false), TrialClass::Incomplete, "a sample deficit beyond one packet remains incomplete");
+        assert_eq!(throughput_trial_class(1_100, None, 100, false), TrialClass::Incomplete, "a SampleClock without an end cannot define an expected count");
+        assert_eq!(throughput_trial_class(1_100, Some(expected), 100, true), TrialClass::DeviceFailure, "an overflow fails even with the expected sample count");
     }
 
     #[test]
     fn tx_start_lead_requires_an_early_switch_and_no_failure_evidence() {
         let trial = TrialEvidence::new(0, 200, 0, 0, TrialCompletion::ReceiveCapture);
-        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), Some(100)).0, TrialClass::Success,
-            "the permitted start-lead observation is tx_switch.at < origin; no thread-timed burst is reserved");
-        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 100 }]), Some(100)).0, TrialClass::Incomplete,
-            "a switch at the origin is not early");
-        assert_eq!(tx_start_trial_class(&trial, &json!([]), Some(100)).0, TrialClass::Incomplete,
-            "a missing segment-start record is not success");
-        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), None).0, TrialClass::Incomplete,
-            "without a newly registered clock there is no measured origin");
+        assert_eq!(
+            tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), Some(100)).0,
+            TrialClass::Success,
+            "the permitted start-lead observation is tx_switch.at < origin; no thread-timed burst is reserved"
+        );
+        assert_eq!(tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 100 }]), Some(100)).0, TrialClass::Incomplete, "a switch at the origin is not early");
+        assert_eq!(tx_start_trial_class(&trial, &json!([]), Some(100)).0, TrialClass::Incomplete, "a missing segment-start record is not success");
+        assert_eq!(
+            tx_start_trial_class(&trial, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), None).0,
+            TrialClass::Incomplete,
+            "without a newly registered clock there is no measured origin"
+        );
         let mut rejected = trial.clone();
         rejected.admitted = false;
-        assert_eq!(tx_start_trial_class(&rejected, &json!([]), None).0, TrialClass::AdmissionRejection,
-            "a rejected rate-change action is classified instead of aborting the measurement");
+        assert_eq!(tx_start_trial_class(&rejected, &json!([]), None).0, TrialClass::AdmissionRejection, "a rejected rate-change action is classified instead of aborting the measurement");
         let mut failed = trial;
         failed.evidence.push(EvidenceKind::LateCommand);
         assert_eq!(tx_start_trial_class(&failed, &json!([{ "what": "tx_switch", "origin": 100, "at": 99 }]), Some(100)).0, TrialClass::ProviderFailure);
-        let stage = tx_start_candidate_stage_json("cold-390625-1msps", 1_000_000, (390_625, 1_000_000), 200_000_000,
-            &[TrialClass::Success; 2], &[[1_000_000, 390_625], [390_625, 1_000_000]], &[(Some(200), Some(100)), (Some(400), Some(300))]);
+        let stage = tx_start_candidate_stage_json(
+            "cold-390625-1msps",
+            1_000_000,
+            (390_625, 1_000_000),
+            200_000_000,
+            &[TrialClass::Success; 2],
+            &[[1_000_000, 390_625], [390_625, 1_000_000]],
+            &[(Some(200), Some(100)), (Some(400), Some(300))],
+        );
         assert_eq!(stage["tx_rate_pair_hz"], json!([390_625, 1_000_000]));
         assert_eq!(stage["trial_transitions_hz"], json!([[1_000_000, 390_625], [390_625, 1_000_000]]));
         assert!(stage["burst_criterion"].as_str().unwrap().contains("omitted"));
@@ -4643,13 +5019,9 @@ mod tests {
 
     #[test]
     fn tx_start_lead_value_uses_the_successful_suffix_intersection() {
-        let stages = |failed: &[u64]| [1, 2, 5].into_iter().map(|value| CandidateStage {
-            value, trials: vec![if failed.contains(&value) { TrialClass::Incomplete } else { TrialClass::Success }; 2],
-        }).collect();
-        let candidates = BTreeMap::from([
-            ("condition-a".to_owned(), stages(&[1])),
-            ("condition-b".to_owned(), stages(&[1, 2])),
-        ]);
+        let stages =
+            |failed: &[u64]| [1, 2, 5].into_iter().map(|value| CandidateStage { value, trials: vec![if failed.contains(&value) { TrialClass::Incomplete } else { TrialClass::Success }; 2] }).collect();
+        let candidates = BTreeMap::from([("condition-a".to_owned(), stages(&[1])), ("condition-b".to_owned(), stages(&[1, 2]))]);
         let summary = summarize_tx_start_lead(&candidates, 2).unwrap();
         assert!(matches!(tx_start_value(&summary, &candidates, 2, "test").unwrap(), ValueRecord::Measured {
             key, worst: model::Worst::Number(5.0), condition, trials: 2, ..
@@ -4664,9 +5036,11 @@ mod tests {
         let clocks = [clock.clone()];
         let event = |cause: &str, lost: u64| json!([{ "kind": "radio.RX_OVERFLOW", "payload": { "cause": cause, "lost": lost } }]);
         let gap = |len: u64, lost: Json| json!({ "start": TimePoint::new(domain, 2_000), "cause": { "kind": "overflow_restart" }, "len": len, "lost": lost });
-        let artifacts = |gaps: Json| json!({ "rec": [{ "partial": false, "continuity": [{
+        let artifacts = |gaps: Json| {
+            json!({ "rec": [{ "partial": false, "continuity": [{
             "domain": domain, "first": TimePoint::new(domain, 0), "end": TimePoint::new(domain, 3_000), "gaps": gaps, "channel_gaps": []
-        }] }] });
+        }] }] })
+        };
         let extract = |events: &Json, artifacts: &Json, rate| extract_overflow_trial(events, artifacts, &clocks, rate, 1, 1);
         let complete = extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50))])), 1_000_000);
         assert_eq!(complete.class, TrialClass::Success);
@@ -4675,24 +5049,20 @@ mod tests {
         assert_eq!(complete.restart_after_resume.nanoseconds, Some(50_000));
         let mut partial_capture = artifacts(json!([gap(50, json!(50))]));
         partial_capture["rec"][0]["partial"] = json!(true);
-        assert_eq!(extract(&event("overrun", 50), &partial_capture, 1_000_000).class, TrialClass::Incomplete,
-            "a partial capture cannot provide a complete overflow trial");
+        assert_eq!(extract(&event("overrun", 50), &partial_capture, 1_000_000).class, TrialClass::Incomplete, "a partial capture cannot provide a complete overflow trial");
         assert_eq!(samples_to_ns_ceil(1, 3), Some(333_333_334), "fractional sample periods round upward conservatively");
-        assert_eq!(extract(&json!([]), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
-            "a capture gap without exactly one RX_OVERFLOW is not evidence");
-        assert_eq!(extract(&json!([event("overrun", 50)[0].clone(), event("overrun", 50)[0].clone()]),
-            &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
-            "duplicate overflow reports are not collapsed");
-        assert_eq!(extract(&event("sequence", 50), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
-            "a sequence report cannot stand in for an overrun");
+        assert_eq!(extract(&json!([]), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete, "a capture gap without exactly one RX_OVERFLOW is not evidence");
+        assert_eq!(
+            extract(&json!([event("overrun", 50)[0].clone(), event("overrun", 50)[0].clone()]), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class,
+            TrialClass::Incomplete,
+            "duplicate overflow reports are not collapsed"
+        );
+        assert_eq!(extract(&event("sequence", 50), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete, "a sequence report cannot stand in for an overrun");
         assert_eq!(extract(&event("overrun", 50), &artifacts(json!([])), 1_000_000).class, TrialClass::Incomplete);
         assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50)), gap(60, json!(60))])), 1_000_000).class, TrialClass::Incomplete);
-        assert_eq!(extract(&event("overrun", 51), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete,
-            "the event's lost count must equal the continuity gap");
-        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(49))])), 1_000_000).class, TrialClass::Incomplete,
-            "the gap must report losing its entire length");
-        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50))])), 2_000_000).class, TrialClass::Incomplete,
-            "the clock must prove the requested rate");
+        assert_eq!(extract(&event("overrun", 51), &artifacts(json!([gap(50, json!(50))])), 1_000_000).class, TrialClass::Incomplete, "the event's lost count must equal the continuity gap");
+        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(49))])), 1_000_000).class, TrialClass::Incomplete, "the gap must report losing its entire length");
+        assert_eq!(extract(&event("overrun", 50), &artifacts(json!([gap(50, json!(50))])), 2_000_000).class, TrialClass::Incomplete, "the clock must prove the requested rate");
     }
 
     #[test]
@@ -4708,23 +5078,23 @@ mod tests {
 
     #[test]
     fn overflow_wait_horizon_allows_capture_to_finish_after_the_stall() {
-        assert_eq!(overflow_wait_ms(500, 20_000).unwrap(), 43_000,
-            "the horizon includes the TX/RX start lead, pre-stall interval, stall, one stall-length drain allowance, and margin");
+        assert_eq!(overflow_wait_ms(500, 20_000).unwrap(), 43_000, "the horizon includes the TX/RX start lead, pre-stall interval, stall, one stall-length drain allowance, and margin");
         assert!(overflow_wait_ms(500, u64::MAX).is_err(), "horizon arithmetic must reject overflow");
     }
 
     #[test]
     fn overflow_summary_keeps_observations_and_the_key_is_not_a_record_value() {
         let complete = |gap_ns, restart_ns| OverflowTrialEvidence {
-            class: TrialClass::Success, overflow_count: 1, overflow_causes: vec!["overrun".to_owned()],
-            payload_lost: vec![Some(1)], gaps: vec![], gap_ns: Some(gap_ns),
+            class: TrialClass::Success,
+            overflow_count: 1,
+            overflow_causes: vec!["overrun".to_owned()],
+            payload_lost: vec![Some(1)],
+            gaps: vec![],
+            gap_ns: Some(gap_ns),
             restart_after_resume: OverflowRestartEstimate { gap_end_sample: None, reader_resume_sample: None, nanoseconds: Some(restart_ns), reason: None },
             sample_clock_rate_matches: true,
         };
-        let candidates = BTreeMap::from([
-            (1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]),
-            (10_000_000, vec![complete(60_000, 7_000), complete(55_000, 4_000)]),
-        ]);
+        let candidates = BTreeMap::from([(1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]), (10_000_000, vec![complete(60_000, 7_000), complete(55_000, 4_000)])]);
         let summary = summarize_overflow_gaps(&candidates, 2).unwrap();
         assert_eq!((summary.worst_gap_ns, summary.limiting_rate_hz), (Some(60_000), Some(10_000_000)));
         assert_eq!((summary.maximum_restart_after_resume_ns, summary.maximum_restart_rate_hz), (Some(7_000), Some(10_000_000)));
@@ -4733,10 +5103,7 @@ mod tests {
         let mut incomplete = complete(55_000, 8_000);
         incomplete.class = TrialClass::Incomplete;
         incomplete.gap_ns = None;
-        let under_trialed = BTreeMap::from([
-            (1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]),
-            (10_000_000, vec![complete(60_000, 7_000), incomplete]),
-        ]);
+        let under_trialed = BTreeMap::from([(1_000_000, vec![complete(50_000, 5_000), complete(51_000, 6_000)]), (10_000_000, vec![complete(60_000, 7_000), incomplete])]);
         let summary = summarize_overflow_gaps(&under_trialed, 2).unwrap();
         assert_eq!(summary.worst_gap_ns, Some(60_000), "observations retain the maximum even when the required trial count is short");
         assert_eq!(summary.maximum_restart_after_resume_ns, Some(7_000), "incomplete trial estimates are not included in the summary");
@@ -4754,44 +5121,57 @@ mod tests {
         let ack = json!([{ "code": "BurstAck", "tick": 3_100 }]);
         let evaluate = |samples, async_reports: &Json, events: &Json, bursts: &Json, rejected: &Json, scheduled_target| {
             tx_throughput_evidence(TxThroughputInput {
-                stats: &json!({ "tx_samples": samples }), async_reports, events, bursts, rejected,
-                clocks: &[clock.clone()], scheduled_target, rate_hz: 1_000, master_clock_hz: 1_000, duration_secs: 1, stream: 0,
+                stats: &json!({ "tx_samples": samples }),
+                async_reports,
+                events,
+                bursts,
+                rejected,
+                clocks: &[clock.clone()],
+                scheduled_target,
+                rate_hz: 1_000,
+                master_clock_hz: 1_000,
+                duration_secs: 1,
+                stream: 0,
             })
         };
         let complete = evaluate(1_000, &ack, &empty, &bursts, &empty, target);
         assert_eq!(complete.class, TrialClass::Success, "an unended TX SampleClock does not prevent a completed repeat measurement");
-        assert_eq!((complete.burst_start_tick, complete.burst_ack_tick, complete.ack_elapsed_samples,
-            complete.minimum_samples, complete.tx_samples_minus_ack_elapsed_samples), (Some(2_100), Some(3_100), Some(1_000), Some(1_000), Some(0)));
-        assert_eq!(evaluate(1_100, &ack, &empty, &bursts, &empty, target).class, TrialClass::Success,
-            "already-handed-over in-flight samples are not rejected by an upper bound");
-        assert_eq!(evaluate(999, &ack, &empty, &bursts, &empty, target).class, TrialClass::Incomplete,
-            "fewer than D times rate samples cannot pass");
-        assert_eq!(evaluate(1_000, &json!([]), &empty, &bursts, &empty, target).class, TrialClass::Incomplete,
-            "no BurstAck leaves the repeat incomplete");
-        assert_eq!(evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 3_100 }, { "code": "BurstAck", "tick": 3_200 }]),
-            &empty, &bursts, &empty, target).class, TrialClass::Unattributable, "multiple acknowledgements cannot be assigned to one interval");
-        assert_eq!(evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 1_500 }]), &empty, &bursts, &empty, target).class,
-            TrialClass::Incomplete, "an ACK after clock arm but before burst start plus D is too early");
-        assert_eq!(evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 3_099 }]), &empty, &bursts, &empty, target).class,
-            TrialClass::Incomplete, "an ACK after burst start but before the D-second boundary is too early");
-        assert_eq!(evaluate(1_000, &ack, &empty, &bursts, &empty, TimePoint::new(domain, 1_999)).class,
-            TrialClass::Incomplete, "the run must record the scheduled burst target");
+        assert_eq!(
+            (complete.burst_start_tick, complete.burst_ack_tick, complete.ack_elapsed_samples, complete.minimum_samples, complete.tx_samples_minus_ack_elapsed_samples),
+            (Some(2_100), Some(3_100), Some(1_000), Some(1_000), Some(0))
+        );
+        assert_eq!(evaluate(1_100, &ack, &empty, &bursts, &empty, target).class, TrialClass::Success, "already-handed-over in-flight samples are not rejected by an upper bound");
+        assert_eq!(evaluate(999, &ack, &empty, &bursts, &empty, target).class, TrialClass::Incomplete, "fewer than D times rate samples cannot pass");
+        assert_eq!(evaluate(1_000, &json!([]), &empty, &bursts, &empty, target).class, TrialClass::Incomplete, "no BurstAck leaves the repeat incomplete");
+        assert_eq!(
+            evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 3_100 }, { "code": "BurstAck", "tick": 3_200 }]), &empty, &bursts, &empty, target).class,
+            TrialClass::Unattributable,
+            "multiple acknowledgements cannot be assigned to one interval"
+        );
+        assert_eq!(
+            evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 1_500 }]), &empty, &bursts, &empty, target).class,
+            TrialClass::Incomplete,
+            "an ACK after clock arm but before burst start plus D is too early"
+        );
+        assert_eq!(
+            evaluate(1_000, &json!([{ "code": "BurstAck", "tick": 3_099 }]), &empty, &bursts, &empty, target).class,
+            TrialClass::Incomplete,
+            "an ACK after burst start but before the D-second boundary is too early"
+        );
+        assert_eq!(evaluate(1_000, &ack, &empty, &bursts, &empty, TimePoint::new(domain, 1_999)).class, TrialClass::Incomplete, "the run must record the scheduled burst target");
         let underflow = json!([{ "kind": "radio.TX_UNDERFLOW" }]);
-        assert_eq!(evaluate(1_000, &ack, &underflow, &bursts, &empty, target).class, TrialClass::DeviceFailure,
-            "TX_UNDERFLOW fails an otherwise complete interval");
+        assert_eq!(evaluate(1_000, &ack, &underflow, &bursts, &empty, target).class, TrialClass::DeviceFailure, "TX_UNDERFLOW fails an otherwise complete interval");
         for code in ["Underflow", "UnderflowInPacket", "SeqError", "SeqErrorInBurst", "TimeError"] {
-            assert_eq!(evaluate(1_000, &json!([{ "code": code }]), &empty, &bursts, &empty, target).class,
-                TrialClass::DeviceFailure, "{code} is device failure evidence");
+            assert_eq!(evaluate(1_000, &json!([{ "code": code }]), &empty, &bursts, &empty, target).class, TrialClass::DeviceFailure, "{code} is device failure evidence");
         }
-        assert_eq!(evaluate(1_000, &ack, &empty, &bursts, &json!([{ "reason": "short send" }]), target).class, TrialClass::DeviceFailure,
-            "short-send rejections are device failures");
-        assert_eq!(evaluate(1_000, &ack, &empty, &json!([bursts[0].clone(), bursts[0].clone()]), &empty, target).class,
-            TrialClass::Unattributable, "multiple burst records cannot provide one start boundary");
+        assert_eq!(evaluate(1_000, &ack, &empty, &bursts, &json!([{ "reason": "short send" }]), target).class, TrialClass::DeviceFailure, "short-send rejections are device failures");
+        assert_eq!(
+            evaluate(1_000, &ack, &empty, &json!([bursts[0].clone(), bursts[0].clone()]), &empty, target).class,
+            TrialClass::Unattributable,
+            "multiple burst records cannot provide one start boundary"
+        );
         assert_eq!(tx_bytes_per_second(10_000_000, 4).unwrap(), 40_000_000);
-        let stages = vec![
-            CandidateStage { value: 40_000_000, trials: vec![TrialClass::Success] },
-            CandidateStage { value: 80_000_000, trials: vec![TrialClass::DeviceFailure] },
-        ];
+        let stages = vec![CandidateStage { value: 40_000_000, trials: vec![TrialClass::Success] }, CandidateStage { value: 80_000_000, trials: vec![TrialClass::DeviceFailure] }];
         let summary = summarize_tx_throughput(&stages).unwrap();
         assert!(matches!(tx_capacity_value(&summary, &[10_000_000, 20_000_000], &stages, "test").unwrap(), ValueRecord::Measured {
             key, worst: model::Worst::Number(40_000_000.0), condition, ..
@@ -4808,16 +5188,12 @@ mod tests {
 
     #[test]
     fn measured_rows_keep_the_selected_boundary_and_limiting_condition() {
-        let stages = |failed: &[u64]| [1, 2, 3].into_iter().map(|value| CandidateStage {
-            value, trials: vec![if failed.contains(&value) { TrialClass::ProviderFailure } else { TrialClass::Success }; 2],
-        }).collect();
-        let candidates = BTreeMap::from([
-            ("cold-fast".to_owned(), stages(&[1])),
-            ("cold-slow".to_owned(), stages(&[1, 2])),
-        ]);
+        let stages = |failed: &[u64]| {
+            [1, 2, 3].into_iter().map(|value| CandidateStage { value, trials: vec![if failed.contains(&value) { TrialClass::ProviderFailure } else { TrialClass::Success }; 2] }).collect()
+        };
+        let candidates = BTreeMap::from([("cold-fast".to_owned(), stages(&[1])), ("cold-slow".to_owned(), stages(&[1, 2]))]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, 2).unwrap();
-        let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, 2,
-            "tests/hardware.rs::hw_measurements_record").unwrap();
+        let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, 2, "tests/hardware.rs::hw_measurements_record").unwrap();
         assert!(matches!(measured, ValueRecord::Measured {
             key, worst: model::Worst::Number(3.0), trials: 2, condition, test
         } if key.as_str() == "radio.timing.rx_start_lead_ns" && condition == "cold-slow"
@@ -4840,35 +5216,38 @@ mod tests {
     #[test]
     fn candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection() {
         let pass = || CandidateStage { value: 0, trials: vec![TrialClass::Success; 2] };
-        let stages = |values: &[u64], pass_mask: &[bool]| values.iter().zip(pass_mask).map(|(value, passed)| {
-            CandidateStage { value: *value, trials: vec![if *passed { TrialClass::Success } else { TrialClass::ProviderFailure }; 2] }
-        }).collect();
+        let stages = |values: &[u64], pass_mask: &[bool]| {
+            values.iter().zip(pass_mask).map(|(value, passed)| CandidateStage { value: *value, trials: vec![if *passed { TrialClass::Success } else { TrialClass::ProviderFailure }; 2] }).collect()
+        };
         let mut conditions = BTreeMap::from([("load-none".to_owned(), stages(&[1, 2, 3, 4], &[true, false, true, true]))]);
         let lead = summarize_candidates(SummaryMode::MinimumLead, &conditions, 2).unwrap();
         assert_eq!(lead.worst, Some(3));
-        conditions.insert("load-h4".to_owned(), vec![
-            CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure; 2] },
-            CandidateStage { value: 2, trials: vec![TrialClass::Success; 2] },
-            CandidateStage { value: 3, trials: vec![TrialClass::Success, TrialClass::DeviceFailure] },
-            CandidateStage { value: 4, trials: vec![TrialClass::Success; 2] },
-        ]);
+        conditions.insert(
+            "load-h4".to_owned(),
+            vec![
+                CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure; 2] },
+                CandidateStage { value: 2, trials: vec![TrialClass::Success; 2] },
+                CandidateStage { value: 3, trials: vec![TrialClass::Success, TrialClass::DeviceFailure] },
+                CandidateStage { value: 4, trials: vec![TrialClass::Success; 2] },
+            ],
+        );
         let intersection = summarize_candidates(SummaryMode::MinimumLead, &conditions, 2).unwrap();
         assert_eq!(intersection.worst, Some(4), "every trial at a candidate must pass in every condition");
         assert_eq!(intersection.conditions["load-none"].candidates, 4);
 
-        let asymmetric = BTreeMap::from([
-            ("condition-a".to_owned(), stages(&[1, 2, 3], &[true, false, true])),
-            ("condition-b".to_owned(), stages(&[1, 3], &[true, true])),
-        ]);
+        let asymmetric = BTreeMap::from([("condition-a".to_owned(), stages(&[1, 2, 3], &[true, false, true])), ("condition-b".to_owned(), stages(&[1, 3], &[true, true]))]);
         assert_eq!(summarize_candidates(SummaryMode::MinimumLead, &asymmetric, 2).unwrap().worst, Some(3));
         assert_eq!(summarize_candidates(SummaryMode::Capacity, &asymmetric, 2).unwrap().worst, Some(1));
 
         let under_trialed_asymmetric = BTreeMap::from([
-            ("condition-a".to_owned(), vec![
-                CandidateStage { value: 1, trials: vec![TrialClass::Success; 2] },
-                CandidateStage { value: 2, trials: vec![TrialClass::Success] },
-                CandidateStage { value: 3, trials: vec![TrialClass::Success; 2] },
-            ]),
+            (
+                "condition-a".to_owned(),
+                vec![
+                    CandidateStage { value: 1, trials: vec![TrialClass::Success; 2] },
+                    CandidateStage { value: 2, trials: vec![TrialClass::Success] },
+                    CandidateStage { value: 3, trials: vec![TrialClass::Success; 2] },
+                ],
+            ),
             ("condition-b".to_owned(), stages(&[1, 3], &[true, true])),
         ]);
         let lead = summarize_candidates(SummaryMode::MinimumLead, &under_trialed_asymmetric, 2).unwrap();
@@ -4882,10 +5261,8 @@ mod tests {
         let summary = summarize_candidates(SummaryMode::MinimumLead, &none, 2).unwrap();
         assert_eq!(summary.worst, None);
         assert!(!summary.unmeasured_reason.unwrap().is_empty());
-        let under_trialed = BTreeMap::from([("one".to_owned(), vec![
-            CandidateStage { value: 1, trials: vec![TrialClass::Success] },
-            CandidateStage { value: 2, trials: vec![TrialClass::Success; 2] },
-        ])]);
+        let under_trialed =
+            BTreeMap::from([("one".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::Success] }, CandidateStage { value: 2, trials: vec![TrialClass::Success; 2] }])]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &under_trialed, 2).unwrap();
         assert_eq!(summary.worst, Some(2));
         assert_eq!(summary.conditions["one"].under_trialed, 1);
@@ -4893,10 +5270,7 @@ mod tests {
         let summary = summarize_candidates(SummaryMode::Capacity, &under_trialed_only, 2).unwrap();
         assert_eq!(summary.worst, None);
         assert!(summary.unmeasured_reason.as_deref().is_some_and(|reason| !reason.is_empty()));
-        let not_intersecting = BTreeMap::from([
-            ("a".to_owned(), vec![pass()]),
-            ("b".to_owned(), vec![CandidateStage { value: 2, trials: vec![TrialClass::Success; 2] }]),
-        ]);
+        let not_intersecting = BTreeMap::from([("a".to_owned(), vec![pass()]), ("b".to_owned(), vec![CandidateStage { value: 2, trials: vec![TrialClass::Success; 2] }])]);
         let no_intersection = summarize_candidates(SummaryMode::MinimumLead, &not_intersecting, 2).unwrap();
         assert_eq!(no_intersection.worst, None);
         assert!(no_intersection.unmeasured_reason.as_deref().is_some_and(|reason| reason.contains("No candidate value satisfies")));
@@ -4910,54 +5284,29 @@ mod tests {
         let binding = radio_binding(&document).unwrap();
         let uhd = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
         let device = super::super::fake(ezsdr_radio_uhd::FakeConfig::default());
-        let condition = Condition {
-            id: "rx0".to_owned(),
-            streams: vec![stream_condition(Direction::Rx, 0, vec![0], 1e6)],
-            concurrent: vec![],
-            reopened: false,
-        };
+        let condition = Condition { id: "rx0".to_owned(), streams: vec![stream_condition(Direction::Rx, 0, vec![0], 1e6)], concurrent: vec![], reopened: false };
         let observation = observation("raw_probe", "tests/hardware.rs::raw_probe", Some("rx0".to_owned()), 1, serde_json::json!({"lead_ticks": 10})).unwrap();
-        let hardware_error = build_record(
-            Source::Hardware,
-            &binding,
-            &*device,
-            &rehearsal_metadata(),
-            MeasurementGroup::default(),
-            &uhd,
-        ).unwrap_err();
+        let hardware_error = build_record(Source::Hardware, &binding, &*device, &rehearsal_metadata(), MeasurementGroup::default(), &uhd).unwrap_err();
         assert!(hardware_error.contains("uhd_version"), "{hardware_error}");
         let mut no_profile = binding.clone();
         no_profile.profile = None;
-        assert!(build_record(
-            Source::Fake,
-            &no_profile,
-            &*device,
-            &rehearsal_metadata(),
-            MeasurementGroup::default(),
-            &uhd,
-        ).is_err(), "profile must come from the binding");
+        assert!(build_record(Source::Fake, &no_profile, &*device, &rehearsal_metadata(), MeasurementGroup::default(), &uhd,).is_err(), "profile must come from the binding");
         let mut no_fake_version = rehearsal_metadata();
         no_fake_version.uhd_version = None;
-        assert!(build_record(
-            Source::Fake,
-            &binding,
-            &*device,
-            &no_fake_version,
-            MeasurementGroup::default(),
-            &uhd,
-        ).is_err(), "FakeDevice version metadata must be explicit");
-        let record = build_record(
-            Source::Fake,
-            &binding,
-            &*device,
-            &rehearsal_metadata(),
-            MeasurementGroup { conditions: vec![condition], values: vec![], observations: vec![observation] },
-            &uhd,
-        ).unwrap();
-        let keys: BTreeSet<_> = record.values.iter().map(|value| match value {
-            ValueRecord::Unmeasured { key, reason } => { assert!(!reason.trim().is_empty()); key.clone() },
-            ValueRecord::Measured { key, .. } => panic!("3b-1 must not measure {}", key.as_str()),
-        }).collect();
+        assert!(build_record(Source::Fake, &binding, &*device, &no_fake_version, MeasurementGroup::default(), &uhd,).is_err(), "FakeDevice version metadata must be explicit");
+        let record =
+            build_record(Source::Fake, &binding, &*device, &rehearsal_metadata(), MeasurementGroup { conditions: vec![condition], values: vec![], observations: vec![observation] }, &uhd).unwrap();
+        let keys: BTreeSet<_> = record
+            .values
+            .iter()
+            .map(|value| match value {
+                ValueRecord::Unmeasured { key, reason } => {
+                    assert!(!reason.trim().is_empty());
+                    key.clone()
+                }
+                ValueRecord::Measured { key, .. } => panic!("3b-1 must not measure {}", key.as_str()),
+            })
+            .collect();
         assert!(!keys.is_empty());
         assert!(keys.contains(&Key::parse("radio.timing.min_timed_command_lead_ns").unwrap()));
         assert_eq!(keys.len(), record.values.len(), "comparable values are unique");
@@ -4969,10 +5318,16 @@ mod tests {
         assert_eq!(record.observations[0].condition.as_deref(), Some("rx0"));
         assert_eq!(record.observations[0].result["lead_ticks"], 10);
 
-        let reason = |key: &str| record.values.iter().find_map(|value| match value {
-            ValueRecord::Unmeasured { key: found, reason } if found.as_str() == key => Some(reason.as_str()),
-            _ => None,
-        }).expect("the comparable key has an unmeasured reason");
+        let reason = |key: &str| {
+            record
+                .values
+                .iter()
+                .find_map(|value| match value {
+                    ValueRecord::Unmeasured { key: found, reason } if found.as_str() == key => Some(reason.as_str()),
+                    _ => None,
+                })
+                .expect("the comparable key has an unmeasured reason")
+        };
         let queue_reason = reason("radio.timing.command_queue_depth");
         let gain_reason = reason("radio.rx.c0.gain_db");
         let antenna_reason = reason("radio.rx.c0.antenna");
@@ -5005,9 +5360,7 @@ mod tests {
         let duplicate_key = match &duplicate.values[0] {
             ValueRecord::Unmeasured { key, .. } | ValueRecord::Measured { key, .. } => key.as_str(),
         };
-        assert!(model::compare(&duplicate, &uhd).iter().any(|violation| {
-            violation.key == duplicate_key && violation.reason.contains("more than once")
-        }));
+        assert!(model::compare(&duplicate, &uhd).iter().any(|violation| { violation.key == duplicate_key && violation.reason.contains("more than once") }));
 
         let bytes = serde_json::to_vec(&record).unwrap();
         let round_trip: Record = serde_json::from_slice(&bytes).unwrap();
@@ -5041,36 +5394,56 @@ mod tests {
             other => panic!("expected a numeric lead profile, got {other:?}"),
         };
         let value = ValueRecord::Measured {
-            key: key.clone(), worst: model::Worst::Number(profile_value), trials: 1,
-            condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+            key: key.clone(),
+            worst: model::Worst::Number(profile_value),
+            trials: 1,
+            condition: "tx-1msps".to_owned(),
+            test: "tests/hardware.rs::hw_measurements_record".to_owned(),
         };
-        let row = record.values.iter_mut().find(|row| matches!(row,
-            ValueRecord::Unmeasured { key: found, .. } if found == &key)).unwrap();
+        let row = record
+            .values
+            .iter_mut()
+            .find(|row| {
+                matches!(row,
+            ValueRecord::Unmeasured { key: found, .. } if found == &key)
+            })
+            .unwrap();
         *row = value;
         let duplex_key = Key::parse("radio.full_duplex").unwrap();
-        let row = record.values.iter_mut().find(|row| matches!(row,
-            ValueRecord::Unmeasured { key: found, .. } if found == &duplex_key)).unwrap();
+        let row = record
+            .values
+            .iter_mut()
+            .find(|row| {
+                matches!(row,
+            ValueRecord::Unmeasured { key: found, .. } if found == &duplex_key)
+            })
+            .unwrap();
         *row = ValueRecord::Measured {
-            key: duplex_key.clone(), worst: model::Worst::Boolean(false), trials: 1,
-            condition: "duplex-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+            key: duplex_key.clone(),
+            worst: model::Worst::Boolean(false),
+            trials: 1,
+            condition: "duplex-1msps".to_owned(),
+            test: "tests/hardware.rs::hw_measurements_record".to_owned(),
         };
 
         let path = dir.0.join("measurement.json");
         let violations = write_record_before_profile_assert(&path, &record, &description).unwrap();
         assert!(violations.iter().any(|violation| violation.key == key.as_str() && violation.reason.starts_with("profile value ")));
-        assert!(violations.iter().any(|violation| violation.key == duplex_key.as_str()
-            && violation.reason == "profile claims true but the measured result is false"));
+        assert!(violations.iter().any(|violation| violation.key == duplex_key.as_str() && violation.reason == "profile claims true but the measured result is false"));
         let saved: Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(saved, record, "a valid but profile-disagreeing record remains available for diagnosis");
         let invalid_path = dir.0.join("invalid-measurement.json");
         let mut zero_alignment = record.clone();
         let align_key = Key::parse("radio.tx.repeat_align_samples").unwrap();
-        let row = zero_alignment.values.iter_mut().find(|row| matches!(row,
-            ValueRecord::Unmeasured { key: found, .. } if found == &align_key)).unwrap();
-        *row = ValueRecord::Measured {
-            key: align_key, worst: model::Worst::Number(0.0), trials: 1,
-            condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
-        };
+        let row = zero_alignment
+            .values
+            .iter_mut()
+            .find(|row| {
+                matches!(row,
+            ValueRecord::Unmeasured { key: found, .. } if found == &align_key)
+            })
+            .unwrap();
+        *row = ValueRecord::Measured { key: align_key, worst: model::Worst::Number(0.0), trials: 1, condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned() };
         assert!(write_record_before_profile_assert(&invalid_path, &zero_alignment, &description).is_err());
         assert!(!invalid_path.exists(), "a zero alignment is not a profile disagreement and is not written");
         let mut invalid = record;
@@ -5147,7 +5520,14 @@ mod tests {
         let custom = MeasurementPlan::from_env(&values).unwrap();
         assert_eq!((custom.step_trials, custom.overflow_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 3, 4));
         assert_eq!(custom.queue_trials, 2);
-        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASURE_QUEUE_TRIALS", "EZSDR_MEASURE_QUEUE_MAX_TRIALS"] {
+        for name in [
+            "EZSDR_MEASURE_STEP_TRIALS",
+            "EZSDR_MEASURE_OVERFLOW_TRIALS",
+            "EZSDR_MEASURE_THROUGHPUT_SECS",
+            "EZSDR_MEASURE_LOOPBACK_TRIALS",
+            "EZSDR_MEASURE_QUEUE_TRIALS",
+            "EZSDR_MEASURE_QUEUE_MAX_TRIALS",
+        ] {
             for invalid in ["0", "not-a-number"] {
                 assert!(MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), invalid.to_owned())])).is_err(), "{name}={invalid}");
             }
@@ -5181,8 +5561,11 @@ mod tests {
         let description = description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
         let key = Key::parse("radio.timing.min_timed_command_lead_ns").unwrap();
         let measured = ValueRecord::Measured {
-            key: key.clone(), worst: model::Worst::Number(1_000_000.0), trials: 1,
-            condition: "tx-1msps".to_owned(), test: "tests/hardware.rs::hw_measurements_record".to_owned(),
+            key: key.clone(),
+            worst: model::Worst::Number(1_000_000.0),
+            trials: 1,
+            condition: "tx-1msps".to_owned(),
+            test: "tests/hardware.rs::hw_measurements_record".to_owned(),
         };
         let hardware = merge_values(Source::Hardware, &description, vec![measured.clone()]).unwrap();
         assert_eq!(hardware.len(), comparable_keys(&description).len());
@@ -5233,10 +5616,7 @@ mod tests {
         existing.insert(REQUIRED_ENV[0].to_owned(), existing_output.to_string_lossy().into_owned());
         assert!(metadata_from_env(&existing).is_err(), "an existing record is rejected before the hardware entry runs");
         let mut missing_parent = valid.clone();
-        missing_parent.insert(
-            REQUIRED_ENV[0].to_owned(),
-            temp.0.join("missing-parent").join("record.json").to_string_lossy().into_owned(),
-        );
+        missing_parent.insert(REQUIRED_ENV[0].to_owned(), temp.0.join("missing-parent").join("record.json").to_string_lossy().into_owned());
         assert!(metadata_from_env(&missing_parent).is_err(), "a missing output parent is rejected before the hardware entry runs");
 
         let path = temp.0.join("record.json");
@@ -5270,8 +5650,7 @@ mod tests {
         assert_eq!(ids, ["queue-rx-gain", "queue-tx-gain", "queue-rx-frequency"]);
         let streaming: Vec<_> = conditions.iter().map(|(_, operations)| queue_streams_rx(operations)).collect();
         assert_eq!(streaming, [false, false, true]);
-        assert!(conditions.iter().all(|(_, operations)| operations.iter().all(|operation| operation.dir == Dir::Rx || operation.settings.freq.is_none())),
-            "no transmit frequency operation is queued");
+        assert!(conditions.iter().all(|(_, operations)| operations.iter().all(|operation| operation.dir == Dir::Rx || operation.settings.freq.is_none())), "no transmit frequency operation is queued");
         // The value is the least depth over every condition measured, and names the condition that gave it.
         let measured = vec![
             ("queue-rx-gain".to_owned(), vec![QueueTrialClass::Success { depth: 9 }, QueueTrialClass::Success { depth: 12 }]),
@@ -5305,8 +5684,11 @@ mod tests {
             requests.iter().zip(offsets).map(|(requested, offset)| NumericReadback { requested: *requested, returned: Some(requested + offset), error: None }).collect()
         };
         let [frequency, step] = frequency_values(keys, &read([0.0, 0.04, -0.03]), &requests, "raw-device-coercion", "t").unwrap();
-        assert!(matches!(&frequency, ValueRecord::Measured { worst: model::Worst::Grid(model::GridValue::Step { lo, hi, step }), trials: 3, .. }
-            if (*lo, *hi, *step) == (10_000_000.0, 8_400_000_000.0, 1.0)), "{frequency:?}");
+        assert!(
+            matches!(&frequency, ValueRecord::Measured { worst: model::Worst::Grid(model::GridValue::Step { lo, hi, step }), trials: 3, .. }
+            if (*lo, *hi, *step) == (10_000_000.0, 8_400_000_000.0, 1.0)),
+            "{frequency:?}"
+        );
         assert!(matches!(&step, ValueRecord::Measured { worst: model::Worst::Number(value), .. } if (*value - 0.08).abs() < 1e-9), "{step:?}");
         for bad in [[0.0, 0.06, 0.0], [0.0, 0.0, -0.5]] {
             let values = frequency_values(keys, &read(bad), &requests, "raw-device-coercion", "t").unwrap();
@@ -5314,10 +5696,18 @@ mod tests {
         }
         let mut failed = read([0.0; 3]);
         failed[1] = NumericReadback { requested: requests[1], returned: None, error: Some("the apply failed".to_owned()) };
-        assert!(frequency_values(keys, &failed, &requests, "raw-device-coercion", "t").unwrap().iter()
-            .all(|value| matches!(value, ValueRecord::Unmeasured { reason, .. } if reason.contains("the apply failed"))));
+        assert!(
+            frequency_values(keys, &failed, &requests, "raw-device-coercion", "t")
+                .unwrap()
+                .iter()
+                .all(|value| matches!(value, ValueRecord::Unmeasured { reason, .. } if reason.contains("the apply failed")))
+        );
         let short = read([0.0; 3]);
-        assert!(frequency_values(keys, &short[..2], &requests, "raw-device-coercion", "t").unwrap().iter()
-            .all(|value| matches!(value, ValueRecord::Unmeasured { reason, .. } if reason.contains("2 of 3"))));
+        assert!(
+            frequency_values(keys, &short[..2], &requests, "raw-device-coercion", "t")
+                .unwrap()
+                .iter()
+                .all(|value| matches!(value, ValueRecord::Unmeasured { reason, .. } if reason.contains("2 of 3")))
+        );
     }
 }

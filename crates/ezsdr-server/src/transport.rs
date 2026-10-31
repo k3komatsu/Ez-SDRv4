@@ -23,19 +23,13 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
     let mut server = Server::new(config);
     loop {
         let mut line = Vec::new();
-        let read = (&mut input)
-            .take(MAX_HEADER_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)?;
+        let read = (&mut input).take(MAX_HEADER_BYTES as u64 + 1).read_until(b'\n', &mut line)?;
         if read == 0 {
             server.disconnect();
             return Ok(Exit::EndOfInput);
         }
         if line.last() != Some(&b'\n') {
-            let message = if line.len() > MAX_HEADER_BYTES {
-                "EA-2: the header is longer than 16 MiB"
-            } else {
-                "EA-2: the stream ended inside a header"
-            };
+            let message = if line.len() > MAX_HEADER_BYTES { "EA-2: the header is longer than 16 MiB" } else { "EA-2: the stream ended inside a header" };
             write_reply(&mut output, &fail(ErrorKind::Protocol, message))?;
             server.disconnect();
             return Ok(Exit::BadFrame);
@@ -46,10 +40,7 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
         let header: serde_json::Value = match serde_json::from_slice(&line) {
             Ok(header @ serde_json::Value::Object(_)) => header,
             Ok(_) | Err(_) => {
-                write_reply(
-                    &mut output,
-                    &fail(ErrorKind::Protocol, "EA-2: the header is not a JSON object"),
-                )?;
+                write_reply(&mut output, &fail(ErrorKind::Protocol, "EA-2: the header is not a JSON object"))?;
                 server.disconnect();
                 return Ok(Exit::BadFrame);
             }
@@ -59,10 +50,7 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
             Some(value) => match value.as_u64() {
                 Some(n) => n,
                 None => {
-                    write_reply(
-                        &mut output,
-                        &fail(ErrorKind::Protocol, "EA-2: body_bytes is not a count"),
-                    )?;
+                    write_reply(&mut output, &fail(ErrorKind::Protocol, "EA-2: body_bytes is not a count"))?;
                     server.disconnect();
                     return Ok(Exit::BadFrame);
                 }
@@ -70,28 +58,16 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
         };
         // ponytail: no limit on body_bytes; Phase 7's remote listener needs one.
         let mut body = Vec::new();
-        let complete = (&mut input)
-            .take(body_bytes)
-            .read_to_end(&mut body)
-            .is_ok_and(|n| n as u64 == body_bytes);
+        let complete = (&mut input).take(body_bytes).read_to_end(&mut body).is_ok_and(|n| n as u64 == body_bytes);
         if !complete {
-            write_reply(
-                &mut output,
-                &fail(ErrorKind::Protocol, "EA-2: the stream ended inside a body"),
-            )?;
+            write_reply(&mut output, &fail(ErrorKind::Protocol, "EA-2: the stream ended inside a body"))?;
             server.disconnect();
             return Ok(Exit::BadFrame);
         }
         let frame: RequestFrame = match serde_json::from_value(header) {
             Ok(frame) => frame,
             Err(error) => {
-                write_reply(
-                    &mut output,
-                    &fail(
-                        ErrorKind::Protocol,
-                        format!("EA-2: not a request frame: {error}"),
-                    ),
-                )?;
+                write_reply(&mut output, &fail(ErrorKind::Protocol, format!("EA-2: not a request frame: {error}")))?;
                 // Before `hello`, anything but `hello` ends the handshake (EA-3; Review I, P1-B).
                 if !server.greeted() {
                     return Ok(Exit::BadFrame);
@@ -109,10 +85,7 @@ pub fn serve(input: impl BufRead, mut output: impl Write, config: Config) -> io:
 }
 
 fn write_reply(output: &mut impl Write, handled: &Handled) -> io::Result<()> {
-    let frame = ReplyFrame {
-        reply: handled.reply.clone(),
-        body_bytes: handled.body.len() as u64,
-    };
+    let frame = ReplyFrame { reply: handled.reply.clone(), body_bytes: handled.body.len() as u64 };
     let mut line = serde_json::to_vec(&frame).map_err(io::Error::other)?;
     line.push(b'\n');
     output.write_all(&line)?;

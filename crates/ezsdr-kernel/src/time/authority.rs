@@ -56,11 +56,7 @@ pub trait TimeAuthority: Send + Sync {
     /// insertion order, and observe `now()` equal to their fire time while running
     /// under a `FreeRunning` Authority, at or after it under a paced one (TM-16c as
     /// KG-9 amends it).
-    fn schedule(
-        &self,
-        t: TimePoint,
-        f: Box<dyn FnOnce(TimePoint) + Send>,
-    ) -> Result<ScheduleHandle, TimeError>;
+    fn schedule(&self, t: TimePoint, f: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ScheduleHandle, TimeError>;
 
     /// Removes a pending callback, reporting whether it was still pending (TM-16c).
     fn cancel(&self, h: ScheduleHandle) -> bool;
@@ -68,10 +64,7 @@ pub trait TimeAuthority: Send + Sync {
 
 /// Resolves a `TimePoint` in any domain to `(root, root ticks)` (TM-16c).
 #[cfg_attr(not(feature = "testing"), allow(dead_code))]
-pub(crate) fn to_root(
-    registry: &ClockRegistry,
-    t: TimePoint,
-) -> Result<(ClockDomainId, i64), TimeError> {
+pub(crate) fn to_root(registry: &ClockRegistry, t: TimePoint) -> Result<(ClockDomainId, i64), TimeError> {
     let root = registry.get(t.domain)?.root_id();
     if root == t.domain {
         return Ok((root, t.ticks));
@@ -81,10 +74,7 @@ pub(crate) fn to_root(
     // instants collapse onto one root tick. A reading may round (`now` still floors);
     // a firing may not. A caller that wants one converts and rounds itself, rather
     // than having the Kernel pick a rounding on its behalf (§65 #39).
-    Ok((
-        root,
-        registry.conversion(t.domain, root)?.try_exact(t)?.ticks,
-    ))
+    Ok((root, registry.conversion(t.domain, root)?.try_exact(t)?.ticks))
 }
 
 #[cfg(feature = "testing")]
@@ -146,20 +136,12 @@ mod manual {
         /// Simulation class (TM-16a1).
         ///
         /// Rule: TM-16a, TM-16a1, TM-17a.
-        pub fn new(
-            registry: Arc<ClockRegistry>,
-            primary: ClockDomainId,
-            extra_roots: &[ClockDomainId],
-            pacing: Pacing,
-        ) -> Result<ManualTimeAuthority, TimeError> {
+        pub fn new(registry: Arc<ClockRegistry>, primary: ClockDomainId, extra_roots: &[ClockDomainId], pacing: Pacing) -> Result<ManualTimeAuthority, TimeError> {
             let mut roots = BTreeMap::new();
             for id in std::iter::once(&primary).chain(extra_roots) {
                 let domain = registry.get(*id)?;
                 if domain.root_id() != *id {
-                    return Err(TimeError::Unrelated {
-                        a: *id,
-                        b: domain.root_id(),
-                    });
+                    return Err(TimeError::Unrelated { a: *id, b: domain.root_id() });
                 }
                 roots.insert(*id, RootState::default());
             }
@@ -192,10 +174,7 @@ mod manual {
         pub fn next_due(&self) -> Option<TimePoint> {
             let state = self.lock();
             let rs = state.roots.get(&self.primary)?;
-            rs.pending
-                .keys()
-                .next()
-                .map(|(ticks, _)| TimePoint::new(self.primary, *ticks))
+            rs.pending.keys().next().map(|(ticks, _)| TimePoint::new(self.primary, *ticks))
         }
 
         /// The registry this Authority resolves domains against (TM-16c).
@@ -217,20 +196,13 @@ mod manual {
             let mut fired = self.advance_root(root, target)?;
             // TM-16a1: in the Simulation class the Authority drives host.monotonic
             // itself, keeping it in step with the primary root.
-            if self.pacing == Pacing::FreeRunning
-                && root == self.primary
-                && root != ClockDomainId::HOST_MONOTONIC
-            {
-                let host = self
-                    .registry
-                    .rescale(Duration::new(root, target), ClockDomainId::HOST_MONOTONIC)?
-                    .floor();
+            if self.pacing == Pacing::FreeRunning && root == self.primary && root != ClockDomainId::HOST_MONOTONIC {
+                let host = self.registry.rescale(Duration::new(root, target), ClockDomainId::HOST_MONOTONIC)?.floor();
                 // Clamped: `advance_to` on `host.monotonic` itself may already have
                 // moved it past this, and syncing backwards would fail with `InPast`
                 // naming a domain the caller never asked about.
                 let at_least = self.root_now(ClockDomainId::HOST_MONOTONIC)?;
-                fired +=
-                    self.advance_root(ClockDomainId::HOST_MONOTONIC, host.ticks.max(at_least))?;
+                fired += self.advance_root(ClockDomainId::HOST_MONOTONIC, host.ticks.max(at_least))?;
             }
             Ok(fired)
         }
@@ -241,10 +213,7 @@ mod manual {
                 // `host.monotonic` outside the Simulation class (TM-16c).
                 let now = self.root_now(root)?;
                 if target < now {
-                    return Err(TimeError::InPast {
-                        now: TimePoint::new(root, now),
-                        requested: TimePoint::new(root, target),
-                    });
+                    return Err(TimeError::InPast { now: TimePoint::new(root, now), requested: TimePoint::new(root, target) });
                 }
             }
             let mut at_instant = 0usize;
@@ -293,12 +262,7 @@ mod manual {
         }
 
         fn root_now(&self, root: ClockDomainId) -> Result<i64, TimeError> {
-            let queued = self
-                .lock()
-                .roots
-                .get(&root)
-                .map(|rs| rs.now)
-                .ok_or(TimeError::NotGoverned { id: root })?;
+            let queued = self.lock().roots.get(&root).map(|rs| rs.now).ok_or(TimeError::NotGoverned { id: root })?;
             if root == ClockDomainId::HOST_MONOTONIC && self.pacing != Pacing::FreeRunning {
                 // TM-16a1: outside the Simulation class host.monotonic is the real
                 // host clock, which this Authority reads rather than drives. It is
@@ -309,8 +273,7 @@ mod manual {
                 // drives the Authority. A real hardware Authority fires them from
                 // its own timer thread; Phase 1 has no such thread and no test
                 // needs one.
-                let real = i64::try_from(self.host_base.elapsed().as_nanos())
-                    .map_err(|_| TimeError::Overflow)?;
+                let real = i64::try_from(self.host_base.elapsed().as_nanos()).map_err(|_| TimeError::Overflow)?;
                 return Ok(real.max(queued));
             }
             Ok(queued)
@@ -346,10 +309,7 @@ mod manual {
                 return Ok(TimePoint::new(domain, ticks));
             }
             // TM-16c, decision T12: a derived domain's now is the floor conversion.
-            Ok(self
-                .registry
-                .convert(TimePoint::new(root, ticks), domain)?
-                .floor())
+            Ok(self.registry.convert(TimePoint::new(root, ticks), domain)?.floor())
         }
 
         fn wait_until(&self, t: TimePoint) -> Result<(), TimeError> {
@@ -367,11 +327,7 @@ mod manual {
             #[cfg(test)]
             let mut announced = false;
             loop {
-                let now = state
-                    .roots
-                    .get(&root)
-                    .ok_or(TimeError::NotGoverned { id: root })?
-                    .now;
+                let now = state.roots.get(&root).ok_or(TimeError::NotGoverned { id: root })?.now;
                 if now >= target {
                     return Ok(());
                 }
@@ -389,28 +345,18 @@ mod manual {
             }
         }
 
-        fn schedule(
-            &self,
-            t: TimePoint,
-            f: Box<dyn FnOnce(TimePoint) + Send>,
-        ) -> Result<ScheduleHandle, TimeError> {
+        fn schedule(&self, t: TimePoint, f: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ScheduleHandle, TimeError> {
             if !self.governs(t.domain) {
                 return Err(TimeError::NotGoverned { id: t.domain });
             }
             let (root, ticks) = to_root(&self.registry, t)?;
             let now = self.root_now(root)?;
             if ticks < now {
-                return Err(TimeError::InPast {
-                    now: TimePoint::new(root, now),
-                    requested: TimePoint::new(root, ticks),
-                });
+                return Err(TimeError::InPast { now: TimePoint::new(root, now), requested: TimePoint::new(root, ticks) });
             }
             let mut state = self.lock();
             let seq = state.next_seq;
-            let rs = state
-                .roots
-                .get_mut(&root)
-                .ok_or(TimeError::NotGoverned { id: root })?;
+            let rs = state.roots.get_mut(&root).ok_or(TimeError::NotGoverned { id: root })?;
             rs.pending.insert((ticks, seq), f);
             state.next_seq += 1;
             Ok(ScheduleHandle { root, ticks, seq })
@@ -418,10 +364,7 @@ mod manual {
 
         fn cancel(&self, h: ScheduleHandle) -> bool {
             let mut state = self.lock();
-            state
-                .roots
-                .get_mut(&h.root)
-                .is_some_and(|rs| rs.pending.remove(&(h.ticks, h.seq)).is_some())
+            state.roots.get_mut(&h.root).is_some_and(|rs| rs.pending.remove(&(h.ticks, h.seq)).is_some())
         }
     }
 
@@ -440,16 +383,9 @@ mod manual {
         fn sim_authority() -> (ClockDomainId, ManualTimeAuthority) {
             let reg = Arc::new(ClockRegistry::new());
             let root = reg.allocate_id().expect("a free id");
-            reg.register(ClockDomain::root(
-                root,
-                Rational::new(200_000_000, 1).expect("a valid rate"),
-                EpochRef::Arbitrary {
-                    set_by: "sim.manual_authority_test".to_owned(),
-                },
-            ))
-            .expect("the root registers");
-            let auth = ManualTimeAuthority::new(reg, root, &[], Pacing::FreeRunning)
-                .expect("an authority over a registered root");
+            reg.register(ClockDomain::root(root, Rational::new(200_000_000, 1).expect("a valid rate"), EpochRef::Arbitrary { set_by: "sim.manual_authority_test".to_owned() }))
+                .expect("the root registers");
+            let auth = ManualTimeAuthority::new(reg, root, &[], Pacing::FreeRunning).expect("an authority over a registered root");
             (root, auth)
         }
 
@@ -476,16 +412,13 @@ mod manual {
             for i in 0..WAITERS {
                 let (auth, done) = (auth.clone(), done_tx.clone());
                 std::thread::spawn(move || {
-                    auth.wait_until(TimePoint::new(root, 50))
-                        .expect("the instant is reached");
+                    auth.wait_until(TimePoint::new(root, 50)).expect("the instant is reached");
                     done.send(i).expect("the channel lives");
                 });
             }
             drop(done_tx);
             for _ in 0..WAITERS {
-                ready_rx
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("every waiter announces its wait");
+                ready_rx.recv_timeout(Duration::from_secs(10)).expect("every waiter announces its wait");
             }
             drop(auth.lock());
             assert_eq!(auth.advance_to(TimePoint::new(root, 50)), Ok(0));

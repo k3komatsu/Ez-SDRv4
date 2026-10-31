@@ -8,22 +8,13 @@ use crate::contract::ContractRegistry;
 use crate::event::{ActionId, Event, EventCollector, EventKind, EventSource};
 use crate::id::{ClockDomainId, IslandId, ResourceId, RunId};
 use crate::manifest::{ArtifactRef, BindingSection, RunKind, SpecSection};
-use crate::module_api::{
-    ActionReceiver, Authority, Dispatched, Executor, ExecutorDescriptor, ModuleError, ModuleErrorKind,
-    ModuleRef, ModuleRegistry, Provider, Sink,
-};
+use crate::module_api::{ActionReceiver, Authority, Dispatched, Executor, ExecutorDescriptor, ModuleError, ModuleErrorKind, ModuleRef, ModuleRegistry, Provider, Sink};
 use crate::plan::ExecutionPlan;
 use crate::policy::{EventKindRegistry, Policy};
-use crate::run::{
-    CleanupFailure, CleanupMode, HostClock, RunState, RunStateMachine, Stage,
-    Termination,
-};
+use crate::run::{CleanupFailure, CleanupMode, HostClock, RunState, RunStateMachine, Stage, Termination};
 use crate::spec::{ExperimentSpec, Ident, Key, Namespace, Value};
 use crate::stream::DataLinkDecl;
-use crate::time::{
-    ClockRegistry, Converted, Duration, Rescaled, ScheduleHandle, TimeAuthority, TimeError,
-    TimePoint,
-};
+use crate::time::{ClockRegistry, Converted, Duration, Rescaled, ScheduleHandle, TimeAuthority, TimeError, TimePoint};
 
 pub(super) type Slot<T> = Arc<Mutex<Box<T>>>;
 
@@ -45,10 +36,7 @@ struct QueueState {
 
 impl Queue {
     pub(super) fn new() -> Queue {
-        Queue {
-            state: Mutex::new(QueueState::default()),
-            changed: Condvar::new(),
-        }
+        Queue { state: Mutex::new(QueueState::default()), changed: Condvar::new() }
     }
 
     /// Queues one Action and returns how many have been pushed, which is what the
@@ -74,10 +62,7 @@ impl Queue {
     /// Waits at most `timeout` for `finished` to reach `target` (KC-21a).
     pub(super) fn wait_finished_for(&self, target: u64, timeout: std::time::Duration) -> bool {
         let state = lock(&self.state);
-        let (state, _) = self
-            .changed
-            .wait_timeout_while(state, timeout, |state| state.finished < target)
-            .unwrap_or_else(|e| e.into_inner());
+        let (state, _) = self.changed.wait_timeout_while(state, timeout, |state| state.finished < target).unwrap_or_else(|e| e.into_inner());
         state.finished >= target
     }
 }
@@ -235,11 +220,7 @@ pub(super) fn lock<T: ?Sized>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(super) fn contain<T>(f: impl FnOnce() -> Result<T, ModuleError>) -> Result<T, ModuleError> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
-        Err(_) => Err(ModuleError {
-            kind: ModuleErrorKind::Internal,
-            message: "a Module panicked".to_owned(),
-            detail: serde_json::Value::Null,
-        }),
+        Err(_) => Err(ModuleError { kind: ModuleErrorKind::Internal, message: "a Module panicked".to_owned(), detail: serde_json::Value::Null }),
     }
 }
 
@@ -257,49 +238,29 @@ pub(super) fn try_slot<T: ?Sized>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 }
 
 /// `d` rescaled into `to`, rounded up to a whole tick (KC-15, KC-24, RS-19).
-pub(super) fn ceil_rescale(
-    clocks: &ClockRegistry,
-    d: Duration,
-    to: ClockDomainId,
-) -> Result<i64, TimeError> {
+pub(super) fn ceil_rescale(clocks: &ClockRegistry, d: Duration, to: ClockDomainId) -> Result<i64, TimeError> {
     Ok(match clocks.rescale(d, to)? {
         Rescaled::Exact { duration } => duration.ticks_in(to)?,
-        Rescaled::Inexact { floor, .. } => {
-            floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?
-        }
+        Rescaled::Inexact { floor, .. } => floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?,
     })
 }
 
 /// `t` converted into `to`, rounded up (KC-29).
-pub(super) fn ceil_convert(
-    clocks: &ClockRegistry,
-    t: TimePoint,
-    to: ClockDomainId,
-) -> Result<TimePoint, TimeError> {
+pub(super) fn ceil_convert(clocks: &ClockRegistry, t: TimePoint, to: ClockDomainId) -> Result<TimePoint, TimeError> {
     if t.domain() == to {
         return Ok(t);
     }
     Ok(match clocks.convert(t, to)? {
         Converted::Exact { point } => point,
-        Converted::Inexact { floor, .. } => {
-            TimePoint::new(to, floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?)
-        }
+        Converted::Inexact { floor, .. } => TimePoint::new(to, floor.ticks_in(to)?.checked_add(1).ok_or(TimeError::Overflow)?),
     })
 }
 
 /// A cleanup failure of the Manifest step, which is every failure the coordinator
 /// itself records rather than one `run_cleanup` recorded under its own step
 /// (KC-44, KC-30).
-pub(super) fn manifest_failure(
-    fragment: Option<Ident>,
-    reason: impl Into<String>,
-) -> crate::run::CleanupFailure {
-    crate::run::CleanupFailure {
-        step: crate::run::CleanupStep::ReleaseAndWriteManifest,
-        fragment,
-        reason: reason.into(),
-        timed_out: false,
-    }
+pub(super) fn manifest_failure(fragment: Option<Ident>, reason: impl Into<String>) -> crate::run::CleanupFailure {
+    crate::run::CleanupFailure { step: crate::run::CleanupStep::ReleaseAndWriteManifest, fragment, reason: reason.into(), timed_out: false }
 }
 
 impl Shared {
@@ -315,13 +276,9 @@ impl Shared {
                     self.last_now.store(ticks, std::sync::atomic::Ordering::Release);
                     ticks
                 }
-                Err(_) => self.time_failure(
-                    "KC-30: the Authority time handle returned a time outside its primary root",
-                ),
+                Err(_) => self.time_failure("KC-30: the Authority time handle returned a time outside its primary root"),
             },
-            Ok(Err(error)) => self.time_failure(&format!(
-                "KC-30: the Authority time handle failed during now(): {error}"
-            )),
+            Ok(Err(error)) => self.time_failure(&format!("KC-30: the Authority time handle failed during now(): {error}")),
             Err(()) => self.time_failure("KC-30: a Module panicked during now()"),
         }
     }
@@ -341,21 +298,13 @@ impl Shared {
                     RunState::Running {} => Stage::Run,
                     RunState::Stopping { .. } | RunState::CleanedUp { .. } => unreachable!(),
                 };
-                super::ending::request(
-                    self,
-                    Termination::Failed { stage, reason: reason.to_owned() },
-                    CleanupMode::Abort,
-                );
+                super::ending::request(self, Termination::Failed { stage, reason: reason.to_owned() }, CleanupMode::Abort);
             }
         }
         self.last_now.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub(super) fn schedule(
-        &self,
-        at: TimePoint,
-        callback: Box<dyn FnOnce(TimePoint) + Send>,
-    ) -> Result<ScheduleHandle, TimeScheduleError> {
+    pub(super) fn schedule(&self, at: TimePoint, callback: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ScheduleHandle, TimeScheduleError> {
         match contain_all(|| self.time.schedule(at, callback)) {
             Ok(Ok(handle)) => Ok(handle),
             Ok(Err(error)) => Err(TimeScheduleError::Refused(error)),
@@ -386,27 +335,13 @@ impl Shared {
 
     /// The stream's latest registered clock that has not ended: the one a burst
     /// admitted next targets (SC-23, KC-21a, RS-19).
-    pub(super) fn running_clock(
-        &self,
-        stream: &ResourceId,
-    ) -> Option<crate::time::SampleClockRecord> {
-        self.ctx
-            .clocks
-            .sample_clock_records()
-            .into_iter()
-            .rev()
-            .find(|record| record.stream == *stream && record.ended_at.is_none())
+    pub(super) fn running_clock(&self, stream: &ResourceId) -> Option<crate::time::SampleClockRecord> {
+        self.ctx.clocks.sample_clock_records().into_iter().rev().find(|record| record.stream == *stream && record.ended_at.is_none())
     }
 
     /// HardwareInLoop or Hardware: an Authority whose pacing is `Device` (KC-2).
     pub(super) fn device_paced(&self) -> bool {
-        self.routing().is_some_and(|routing| {
-            matches!(
-                routing.plan.class,
-                crate::module_api::ExecutionClass::HardwareInLoop
-                    | crate::module_api::ExecutionClass::Hardware
-            )
-        })
+        self.routing().is_some_and(|routing| matches!(routing.plan.class, crate::module_api::ExecutionClass::HardwareInLoop | crate::module_api::ExecutionClass::Hardware))
     }
 
     pub(super) fn queue(&self, i: Inst) -> &Arc<Queue> {
@@ -426,12 +361,7 @@ impl Shared {
         match i {
             Inst::Provider(n) => EventSource::Node { node: self.providers[n].id.clone() },
             Inst::Sink(n) => EventSource::Output { output: self.sinks[n].output.clone() },
-            Inst::Executor(_) => EventSource::Island {
-                island: self
-                    .routing()
-                    .and_then(|routing| routing.islands.get(fragment).copied())
-                    .expect("KC-8: an Executor fragment names its parsed Island"),
-            },
+            Inst::Executor(_) => EventSource::Island { island: self.routing().and_then(|routing| routing.islands.get(fragment).copied()).expect("KC-8: an Executor fragment names its parsed Island") },
         }
     }
 
@@ -451,10 +381,7 @@ impl Shared {
     pub(super) fn move_to(&self, state: RunState) {
         let at = Some(self.now());
         let result = lock(&self.machine).move_to(state, at, &*self.ctx.host_clock);
-        debug_assert!(
-            result.is_ok(),
-            "coordinator attempted an illegal state transition: {result:?}"
-        );
+        debug_assert!(result.is_ok(), "coordinator attempted an illegal state transition: {result:?}");
     }
 }
 
@@ -480,20 +407,12 @@ impl TimeAuthority for FailedTime {
         domain == self.root || domain == ClockDomainId::HOST_MONOTONIC
     }
     fn now(&self, domain: ClockDomainId) -> Result<TimePoint, TimeError> {
-        if self.governs(domain) {
-            Ok(TimePoint::new(domain, 0))
-        } else {
-            Err(TimeError::NotGoverned { id: domain })
-        }
+        if self.governs(domain) { Ok(TimePoint::new(domain, 0)) } else { Err(TimeError::NotGoverned { id: domain }) }
     }
     fn wait_until(&self, time: TimePoint) -> Result<(), TimeError> {
         Err(TimeError::NotGoverned { id: time.domain() })
     }
-    fn schedule(
-        &self,
-        time: TimePoint,
-        _f: Box<dyn FnOnce(TimePoint) + Send>,
-    ) -> Result<ScheduleHandle, TimeError> {
+    fn schedule(&self, time: TimePoint, _f: Box<dyn FnOnce(TimePoint) + Send>) -> Result<ScheduleHandle, TimeError> {
         Err(TimeError::NotGoverned { id: time.domain() })
     }
     fn cancel(&self, _handle: ScheduleHandle) -> bool {

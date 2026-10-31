@@ -59,10 +59,7 @@ const BOARD_KEYS: [&str; 19] = [
 /// A provider's `coerce` answer for one `Present` constraint, which is its default.
 fn default_of(provider: &dyn Provider, key: &str) -> Value {
     let id = provider.instance().id.clone();
-    let request = Requested {
-        resource: id,
-        constraints: BTreeMap::from([(Key::parse(key).unwrap(), Constraint::Present {})]),
-    };
+    let request = Requested { resource: id, constraints: BTreeMap::from([(Key::parse(key).unwrap(), Constraint::Present {})]) };
     let report = provider.coerce(&request).expect("a Present constraint is coercible");
     report.applied[&Key::parse(key).unwrap()].clone()
 }
@@ -80,11 +77,7 @@ fn d3_the_two_providers_describe_one_layout_alike() {
         let uhd_capabilities = &uhd.instance().tree.capabilities;
         for name in BOARD_KEYS {
             let key = Key::parse(name).unwrap();
-            assert_eq!(
-                mock_capabilities.get(&key),
-                uhd_capabilities.get(&key),
-                "{board}: `{name}` differs between MockRadio and the UHD Module",
-            );
+            assert_eq!(mock_capabilities.get(&key), uhd_capabilities.get(&key), "{board}: `{name}` differs between MockRadio and the UHD Module",);
         }
         // The board's default frequency reaches both directions, the same on both
         // Providers (RM-5, design 33 D12).
@@ -93,10 +86,7 @@ fn d3_the_two_providers_describe_one_layout_alike() {
         }
         if board == "cbx" {
             assert_eq!(default_of(&mock, "radio.rx.c0.frequency_hz"), Value::num(2_450_000_000.0).unwrap());
-            assert_eq!(
-                mock_capabilities[&Key::parse("radio.rx.c0.phase_behavior_on_retune").unwrap()],
-                CapabilityValue::One { value: Scalar::from("random".to_owned()) },
-            );
+            assert_eq!(mock_capabilities[&Key::parse("radio.rx.c0.phase_behavior_on_retune").unwrap()], CapabilityValue::One { value: Scalar::from("random".to_owned()) },);
         } else {
             assert_eq!(default_of(&mock, "radio.rx.c0.frequency_hz"), Value::num(1_000_000_000.0).unwrap());
         }
@@ -154,10 +144,8 @@ fn d3_a_cbx_layout_is_not_coherent_on_either_provider() {
         for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
             let phase = if coherent { "random_unless_timed_tune" } else { "random" };
             assert_eq!(default_of(provider, "radio.rx.c0.phase_behavior_on_retune"), Value::from(phase), "{board}");
-            let request = Requested {
-                resource: provider.instance().id.clone(),
-                constraints: BTreeMap::from([(Key::parse("radio.rx.coherent").unwrap(), Constraint::Eq { value: Scalar::from(true) })]),
-            };
+            let request =
+                Requested { resource: provider.instance().id.clone(), constraints: BTreeMap::from([(Key::parse("radio.rx.coherent").unwrap(), Constraint::Eq { value: Scalar::from(true) })]) };
             let report = provider.coerce(&request).unwrap();
             assert!(report.applied.is_empty(), "{board}");
             assert_eq!(report.rejected.len(), 1, "{board}");

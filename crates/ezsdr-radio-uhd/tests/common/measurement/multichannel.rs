@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use ezsdr_kernel::module_api::Fidelity;
 use ezsdr_radio_uhd::{Applied, DeviceError, HostClock, Iq, TxCode, TxReport};
 
-use super::*;
 use super::super as common;
+use super::*;
 
 const NO_STREAM: usize = usize::MAX;
 const TEST: &str = "tests/hardware.rs::hw_measurements_record";
@@ -34,7 +34,9 @@ thread_local! {
 pub fn with_injected_fault<T>(fault: InjectedFault, body: impl FnOnce() -> T) -> T {
     struct Remove;
     impl Drop for Remove {
-        fn drop(&mut self) { FAULT.with(|cell| cell.set(InjectedFault::default())); }
+        fn drop(&mut self) {
+            FAULT.with(|cell| cell.set(InjectedFault::default()));
+        }
     }
     FAULT.with(|cell| cell.set(fault));
     let _remove = Remove;
@@ -47,12 +49,18 @@ pub fn with_injected_fault<T>(fault: InjectedFault, body: impl FnOnce() -> T) ->
 pub struct Latch(Mutex<Option<String>>);
 
 impl Latch {
-    pub fn new() -> Arc<Latch> { Arc::new(Latch::default()) }
-    pub fn reason(&self) -> Option<String> { self.0.lock().unwrap().clone() }
+    pub fn new() -> Arc<Latch> {
+        Arc::new(Latch::default())
+    }
+    pub fn reason(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
     /// Records `reason` unless the latch already holds one.
     pub fn set(&self, reason: impl Into<String>) {
         let mut held = self.0.lock().unwrap();
-        if held.is_none() { *held = Some(reason.into()); }
+        if held.is_none() {
+            *held = Some(reason.into());
+        }
     }
 }
 
@@ -92,10 +100,7 @@ pub struct GuardedDevice {
 
 impl GuardedDevice {
     pub fn new(inner: Arc<dyn Device>, latch: Arc<Latch>) -> GuardedDevice {
-        GuardedDevice {
-            described: inner.describe(), master_clock: inner.master_clock_rate(), fidelity: inner.fidelity(),
-            inner: Some(inner), latch, open: Mutex::new(BTreeMap::new()),
-        }
+        GuardedDevice { described: inner.describe(), master_clock: inner.master_clock_rate(), fidelity: inner.fidelity(), inner: Some(inner), latch, open: Mutex::new(BTreeMap::new()) }
     }
 
     /// A guard on the installed record latch (a fresh one when none is installed).
@@ -103,14 +108,20 @@ impl GuardedDevice {
         GuardedDevice::new(inner, RECORD_LATCH.with(|cell| cell.borrow().clone()).unwrap_or_default())
     }
 
-    fn inner(&self) -> &Arc<dyn Device> { self.inner.as_ref().expect("the guard holds its device until dropped") }
+    fn inner(&self) -> &Arc<dyn Device> {
+        self.inner.as_ref().expect("the guard holds its device until dropped")
+    }
 
-    pub fn latched(&self) -> Option<String> { self.latch.reason() }
+    pub fn latched(&self) -> Option<String> {
+        self.latch.reason()
+    }
 
     /// Latches when a streamer of this device is still open at the end of a group (UHD aborts on a second open of a front end).
     pub fn latch_if_streamers_open(&self, after: &str) -> Option<String> {
         let open: Vec<String> = self.open.lock().unwrap().keys().map(|(rx, k)| format!("{}{k}", if *rx { "rx" } else { "tx" })).collect();
-        if !open.is_empty() { self.latch.set(format!("{after} left streamers open: {open:?}")); }
+        if !open.is_empty() {
+            self.latch.set(format!("{after} left streamers open: {open:?}"));
+        }
         self.latched()
     }
 
@@ -122,9 +133,15 @@ impl GuardedDevice {
     /// latches (UHD aborts on a front end opened by a second stream while the first holds it). A re-open of the same stream replaces
     /// its entry and is forwarded: `UhdDevice` drops the stream's old streamer first. An empty channel list is channel 0.
     fn open_stream(&self, rx: bool, stream: usize, channels: &[usize], open: impl FnOnce() -> Result<(), DeviceError>) -> Result<(), DeviceError> {
-        if let Some(error) = self.refusal() { return Err(error); }
+        if let Some(error) = self.refusal() {
+            return Err(error);
+        }
         let wanted: Vec<usize> = if channels.is_empty() { vec![0] } else { channels.to_vec() };
-        let held = self.open.lock().unwrap().iter()
+        let held = self
+            .open
+            .lock()
+            .unwrap()
+            .iter()
             .find(|((open_rx, open_stream), held)| *open_rx == rx && *open_stream != stream && held.iter().any(|chan| wanted.contains(chan)))
             .map(|((_, open_stream), held)| (*open_stream, held.clone()));
         if let Some((other, held)) = held {
@@ -133,14 +150,18 @@ impl GuardedDevice {
             return Err(self.refusal().expect("the latch was just set"));
         }
         let result = self.note(open(), false);
-        if result.is_ok() { self.open.lock().unwrap().insert((rx, stream), wanted); }
+        if result.is_ok() {
+            self.open.lock().unwrap().insert((rx, stream), wanted);
+        }
         result
     }
 
     /// Passes `result` on, latching when it is a failure the latch is for: any error of an `apply`, a control timeout or a loss of any call.
     pub fn note<T>(&self, result: Result<T, DeviceError>, apply: bool) -> Result<T, DeviceError> {
         if let Err(error) = &result {
-            if apply || error.lost || is_control_timeout(&error.message) { self.latch.set(format!("{}: {}", if apply { "apply failed" } else { "device call failed" }, error.message)); }
+            if apply || error.lost || is_control_timeout(&error.message) {
+                self.latch.set(format!("{}: {}", if apply { "apply failed" } else { "device call failed" }, error.message));
+            }
         }
         result
     }
@@ -149,44 +170,88 @@ impl GuardedDevice {
 impl Drop for GuardedDevice {
     fn drop(&mut self) {
         // The handle of a latched record is leaked: UHD's teardown reads the device's time and touches its control port.
-        if self.latch.reason().is_some() { std::mem::forget(self.inner.take()); }
+        if self.latch.reason().is_some() {
+            std::mem::forget(self.inner.take());
+        }
     }
 }
 
 macro_rules! refuse_or {
     ($self:ident, $call:expr) => {
-        match $self.refusal() { Some(error) => Err(error), None => $self.note($call, false) }
+        match $self.refusal() {
+            Some(error) => Err(error),
+            None => $self.note($call, false),
+        }
     };
 }
 
 impl Device for GuardedDevice {
-    fn describe(&self) -> Json { self.described.clone() }
-    fn fidelity(&self) -> Fidelity { self.fidelity }
-    fn master_clock_rate(&self) -> u64 { self.master_clock }
-    fn channels(&self, dir: Dir) -> usize { if self.refusal().is_some() { 0 } else { self.inner().channels(dir) } }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { refuse_or!(self, self.inner().front_end(dir, chan)) }
-    fn serial(&self) -> Result<String, DeviceError> { refuse_or!(self, self.inner().serial()) }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { refuse_or!(self, self.inner().set_subdev_spec(dir, markup)) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { refuse_or!(self, self.inner().rates(dir, chan)) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { refuse_or!(self, self.inner().set_sources(clock, time)) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { refuse_or!(self, self.inner().set_time_zero(at_next_pps)) }
-    fn time_now(&self) -> Result<i64, DeviceError> { refuse_or!(self, self.inner().time_now()) }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { refuse_or!(self, self.inner().ref_locked()) }
+    fn describe(&self) -> Json {
+        self.described.clone()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.fidelity
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.master_clock
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        if self.refusal().is_some() { 0 } else { self.inner().channels(dir) }
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        refuse_or!(self, self.inner().front_end(dir, chan))
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        refuse_or!(self, self.inner().serial())
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().set_subdev_spec(dir, markup))
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        refuse_or!(self, self.inner().rates(dir, chan))
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().set_sources(clock, time))
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().set_time_zero(at_next_pps))
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        refuse_or!(self, self.inner().time_now())
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        refuse_or!(self, self.inner().ref_locked())
+    }
     fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        match self.refusal() { Some(error) => Err(error), None => self.note(self.inner().apply(dir, chan, settings, at), true) }
+        match self.refusal() {
+            Some(error) => Err(error),
+            None => self.note(self.inner().apply(dir, chan, settings, at), true),
+        }
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.open_stream(true, stream, channels, || self.inner().rx_open(stream, channels))
     }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { refuse_or!(self, self.inner().rx_start(stream, at)) }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { refuse_or!(self, self.inner().rx_start_now(stream)) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { if self.refusal().is_some() { 0 } else { self.inner().rx_packet_samples(stream) } }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { refuse_or!(self, self.inner().rx_stop(stream, at)) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().rx_start(stream, at))
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().rx_start_now(stream))
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        if self.refusal().is_some() { 0 } else { self.inner().rx_packet_samples(stream) }
+    }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().rx_stop(stream, at))
+    }
     fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
-        if let Some(error) = self.refusal() { return RxRecv::Failed(error); }
+        if let Some(error) = self.refusal() {
+            return RxRecv::Failed(error);
+        }
         let result = self.inner().rx_recv(stream, n, timeout, one_packet);
         if let RxRecv::Failed(error) = &result {
-            if error.lost || is_control_timeout(&error.message) { self.latch.set(format!("device call failed: {}", error.message)); }
+            if error.lost || is_control_timeout(&error.message) {
+                self.latch.set(format!("device call failed: {}", error.message));
+            }
         }
         result
     }
@@ -196,28 +261,42 @@ impl Device for GuardedDevice {
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
         refuse_or!(self, self.inner().tx_send(stream, samples, at, sob, eob, timeout))
     }
-    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> { refuse_or!(self, self.inner().tx_async(stream, timeout)) }
+    fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> {
+        refuse_or!(self, self.inner().tx_async(stream, timeout))
+    }
     fn rx_close(&self, stream: usize) {
-        if self.refusal().is_some() { return; }
+        if self.refusal().is_some() {
+            return;
+        }
         self.open.lock().unwrap().remove(&(true, stream));
         self.inner().rx_close(stream)
     }
     fn tx_close(&self, stream: usize) {
-        if self.refusal().is_some() { return; }
+        if self.refusal().is_some() {
+            return;
+        }
         self.open.lock().unwrap().remove(&(false, stream));
         self.inner().tx_close(stream)
     }
     fn close_streams(&self) {
-        if self.refusal().is_some() { return; }
+        if self.refusal().is_some() {
+            return;
+        }
         self.open.lock().unwrap().clear();
         self.inner().close_streams()
     }
-    fn host(&self) -> HostClock { self.inner().host() }
-    fn mark_lost(&self) { self.inner().mark_lost() }
+    fn host(&self) -> HostClock {
+        self.inner().host()
+    }
+    fn mark_lost(&self) {
+        self.inner().mark_lost()
+    }
     // Not through `refuse_or!`: a refused priority (EPERM is UHD's OS error, which `note` latches as lost) must not poison the guard
     // (UR-23). A latched guard still refuses, like every other call.
     fn raise_thread_priority(&self) -> Result<(), DeviceError> {
-        if let Some(error) = self.refusal() { return Err(error); }
+        if let Some(error) = self.refusal() {
+            return Err(error);
+        }
         self.inner().raise_thread_priority()
     }
 }
@@ -226,13 +305,17 @@ impl Device for GuardedDevice {
 /// not called, and this panics, so the caller's probe or group is recorded as failed.
 pub fn open_record_guard(opener: impl FnOnce() -> Arc<dyn Device>) -> Arc<GuardedDevice> {
     let latch = RECORD_LATCH.with(|cell| cell.borrow().clone()).unwrap_or_default();
-    if let Some(reason) = latch.reason() { panic!("not opening the device: the record's latch holds ({reason})"); }
+    if let Some(reason) = latch.reason() {
+        panic!("not opening the device: the record's latch holds ({reason})");
+    }
     Arc::new(GuardedDevice::new(opener(), latch))
 }
 
 /// `open_record_guard` as a plain `Device`, or just what `opener` opens when no record is running.
 pub fn guard_open(opener: impl FnOnce() -> Arc<dyn Device>) -> Arc<dyn Device> {
-    if RECORD_LATCH.with(|cell| cell.borrow().is_none()) { return opener(); }
+    if RECORD_LATCH.with(|cell| cell.borrow().is_none()) {
+        return opener();
+    }
     open_record_guard(opener)
 }
 
@@ -259,32 +342,68 @@ impl CountingDevice {
         CountingDevice { inner, counts: Mutex::new(Counts::default()), fault: FAULT.with(std::cell::Cell::get), swallowed: AtomicUsize::new(0) }
     }
 
-    pub fn rx_samples(&self, stream: usize) -> u64 { self.counts.lock().unwrap().rx.get(&stream).copied().unwrap_or(0) }
-    pub fn tx_accepted(&self, stream: usize) -> u64 { self.counts.lock().unwrap().tx.get(&stream).copied().unwrap_or(0) }
-    pub fn tx_short_sends(&self, stream: usize) -> u64 { self.counts.lock().unwrap().short.get(&stream).copied().unwrap_or(0) }
-    pub fn swallowed_acks(&self) -> usize { self.swallowed.load(AtomicOrdering::Acquire) }
+    pub fn rx_samples(&self, stream: usize) -> u64 {
+        self.counts.lock().unwrap().rx.get(&stream).copied().unwrap_or(0)
+    }
+    pub fn tx_accepted(&self, stream: usize) -> u64 {
+        self.counts.lock().unwrap().tx.get(&stream).copied().unwrap_or(0)
+    }
+    pub fn tx_short_sends(&self, stream: usize) -> u64 {
+        self.counts.lock().unwrap().short.get(&stream).copied().unwrap_or(0)
+    }
+    pub fn swallowed_acks(&self) -> usize {
+        self.swallowed.load(AtomicOrdering::Acquire)
+    }
     /// The streamers still open, as `rx<k>` / `tx<k>`.
     pub fn open_streams(&self) -> Vec<String> {
         self.counts.lock().unwrap().open.iter().map(|(rx, k)| format!("{}{k}", if *rx { "rx" } else { "tx" })).collect()
     }
     /// Every `rx_open` / `tx_open` in order, as `rx<k>[channels]`.
-    pub fn open_order(&self) -> Vec<String> { self.counts.lock().unwrap().opens.clone() }
+    pub fn open_order(&self) -> Vec<String> {
+        self.counts.lock().unwrap().opens.clone()
+    }
 }
 
 impl Device for CountingDevice {
-    fn describe(&self) -> Json { self.inner.describe() }
-    fn fidelity(&self) -> Fidelity { self.inner.fidelity() }
-    fn master_clock_rate(&self) -> u64 { self.inner.master_clock_rate() }
-    fn channels(&self, dir: Dir) -> usize { self.inner.channels(dir) }
-    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> { self.inner.front_end(dir, chan) }
-    fn serial(&self) -> Result<String, DeviceError> { self.inner.serial() }
-    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> { self.inner.set_subdev_spec(dir, markup) }
-    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> { self.inner.rates(dir, chan) }
-    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> { self.inner.set_sources(clock, time) }
-    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> { self.inner.set_time_zero(at_next_pps) }
-    fn time_now(&self) -> Result<i64, DeviceError> { self.inner.time_now() }
-    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> { self.inner.ref_locked() }
-    fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> { self.inner.apply(dir, chan, settings, at) }
+    fn describe(&self) -> Json {
+        self.inner.describe()
+    }
+    fn fidelity(&self) -> Fidelity {
+        self.inner.fidelity()
+    }
+    fn master_clock_rate(&self) -> u64 {
+        self.inner.master_clock_rate()
+    }
+    fn channels(&self, dir: Dir) -> usize {
+        self.inner.channels(dir)
+    }
+    fn front_end(&self, dir: Dir, chan: usize) -> Result<String, DeviceError> {
+        self.inner.front_end(dir, chan)
+    }
+    fn serial(&self) -> Result<String, DeviceError> {
+        self.inner.serial()
+    }
+    fn set_subdev_spec(&self, dir: Dir, markup: &str) -> Result<(), DeviceError> {
+        self.inner.set_subdev_spec(dir, markup)
+    }
+    fn rates(&self, dir: Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, DeviceError> {
+        self.inner.rates(dir, chan)
+    }
+    fn set_sources(&self, clock: &str, time: &str) -> Result<(), DeviceError> {
+        self.inner.set_sources(clock, time)
+    }
+    fn set_time_zero(&self, at_next_pps: bool) -> Result<(), DeviceError> {
+        self.inner.set_time_zero(at_next_pps)
+    }
+    fn time_now(&self) -> Result<i64, DeviceError> {
+        self.inner.time_now()
+    }
+    fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
+        self.inner.ref_locked()
+    }
+    fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+        self.inner.apply(dir, chan, settings, at)
+    }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         let result = self.inner.rx_open(stream, channels);
         if result.is_ok() {
@@ -294,10 +413,18 @@ impl Device for CountingDevice {
         }
         result
     }
-    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> { self.inner.rx_start(stream, at) }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> { self.inner.rx_start_now(stream) }
-    fn rx_packet_samples(&self, stream: usize) -> usize { self.inner.rx_packet_samples(stream) }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> { self.inner.rx_stop(stream, at) }
+    fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
+        self.inner.rx_start(stream, at)
+    }
+    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_start_now(stream)
+    }
+    fn rx_packet_samples(&self, stream: usize) -> usize {
+        self.inner.rx_packet_samples(stream)
+    }
+    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream, at)
+    }
     fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         if self.fault.starve_rx == Some(stream) {
             self.inner.host().sleep(timeout);
@@ -321,10 +448,14 @@ impl Device for CountingDevice {
     fn tx_send(&self, stream: usize, samples: &[&[Iq]], at: Option<i64>, sob: bool, eob: bool, timeout: Wall) -> Result<usize, DeviceError> {
         let given = samples.first().map_or(0, |channel| channel.len());
         let mut accepted = self.inner.tx_send(stream, samples, at, sob, eob, timeout)?;
-        if self.fault.short_tx == Some(stream) && accepted > 1 { accepted -= 1; }
+        if self.fault.short_tx == Some(stream) && accepted > 1 {
+            accepted -= 1;
+        }
         let mut counts = self.counts.lock().unwrap();
         *counts.tx.entry(stream).or_default() += accepted as u64;
-        if accepted < given { *counts.short.entry(stream).or_default() += 1; }
+        if accepted < given {
+            *counts.short.entry(stream).or_default() += 1;
+        }
         Ok(accepted)
     }
     fn tx_async(&self, stream: usize, timeout: Wall) -> Result<Option<TxReport>, DeviceError> {
@@ -348,9 +479,15 @@ impl Device for CountingDevice {
         self.counts.lock().unwrap().open.clear();
         self.inner.close_streams()
     }
-    fn host(&self) -> HostClock { self.inner.host() }
-    fn mark_lost(&self) { self.inner.mark_lost() }
-    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> { self.inner.raise_thread_priority() }
+    fn host(&self) -> HostClock {
+        self.inner.host()
+    }
+    fn mark_lost(&self) {
+        self.inner.mark_lost()
+    }
+    fn raise_thread_priority(&self) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.raise_thread_priority()
+    }
 }
 
 /// One stream of a stage: the layout's channels it carries and its rate.
@@ -373,9 +510,7 @@ impl Stage {
     /// The bytes per second of `direction`'s streams, which is the value's T (RM-32 budgets each direction alone).
     pub fn bytes(&self, direction: Direction, wire_bytes: u64) -> Option<u64> {
         let streams = if direction == Direction::Rx { &self.rx } else { &self.tx };
-        streams.iter().try_fold(0u64, |total, stream| {
-            total.checked_add(u64::try_from(stream.channels.len()).ok()?.checked_mul(stream.rate_hz)?.checked_mul(wire_bytes)?)
-        })
+        streams.iter().try_fold(0u64, |total, stream| total.checked_add(u64::try_from(stream.channels.len()).ok()?.checked_mul(stream.rate_hz)?.checked_mul(wire_bytes)?))
     }
 
     /// The condition row of this stage (design 41 §2): each stream's channels and rate, and the streams that run together.
@@ -409,9 +544,7 @@ pub fn throughput_stages(direction: Direction, channels: usize, rates: &[u64]) -
     let prefix = if direction == Direction::Rx { "rx" } else { "tx" };
     let mut stages = Vec::new();
     let one = |channels: Vec<usize>, rate_hz: u64| StreamPlan { channels, rate_hz };
-    let place = |direction: Direction, streams: Vec<StreamPlan>| -> (Vec<StreamPlan>, Vec<StreamPlan>) {
-        if direction == Direction::Rx { (streams, Vec::new()) } else { (Vec::new(), streams) }
-    };
+    let place = |direction: Direction, streams: Vec<StreamPlan>| -> (Vec<StreamPlan>, Vec<StreamPlan>) { if direction == Direction::Rx { (streams, Vec::new()) } else { (Vec::new(), streams) } };
     if channels >= 2 {
         for rate in rates {
             let (rx, tx) = place(direction, vec![one((0..channels).collect(), *rate)]);
@@ -470,7 +603,9 @@ pub fn capacity_over_conditions(stages: &[FamilyStage]) -> Capacity {
     // The value names a condition that succeeded at its T: the stage of the stopper's own family and layout that passed at T
     // (its actual id, whatever its rate), else the first that passed there. The stopper is the blocker, recorded apart.
     if let (Some((total, named)), Some((stopper, _))) = (best.as_mut(), blocked) {
-        if let Some(stage) = stages.iter().find(|stage| stage.bytes == *total && stage.family == stopper.family && stage.class == Some(TrialClass::Success)) { *named = stage.condition.clone(); }
+        if let Some(stage) = stages.iter().find(|stage| stage.bytes == *total && stage.family == stopper.family && stage.class == Some(TrialClass::Success)) {
+            *named = stage.condition.clone();
+        }
     }
     let reason = best.is_none().then(|| match &blocker {
         Some(blocker) => format!("No bytes-per-second step passed in every applicable condition: {blocker}."),
@@ -485,14 +620,19 @@ pub fn capacity_over_conditions(stages: &[FamilyStage]) -> Capacity {
         }
     }
     let conditions: Json = by_condition.into_iter().map(|(id, (passed, failed))| (id.to_owned(), json!({ "passed_bytes_per_s": passed, "failed": failed }))).collect::<serde_json::Map<_, _>>().into();
-    let applicable: Json = totals.iter().map(|total| (total.to_string(), json!(stages.iter().filter(|stage| stage.bytes == *total).map(|stage| stage.condition.as_str()).collect::<Vec<_>>()))).collect::<serde_json::Map<_, _>>().into();
+    let applicable: Json = totals
+        .iter()
+        .map(|total| (total.to_string(), json!(stages.iter().filter(|stage| stage.bytes == *total).map(|stage| stage.condition.as_str()).collect::<Vec<_>>())))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
     Capacity {
         observation: json!({
             "rule": "the capacity is the largest T such that every condition that has a stage at a T' <= T succeeded at every such stage; a condition with no stage at a T does not judge it",
             "capacity_bytes_per_s": best.as_ref().map(|(bytes, _)| bytes), "deciding_condition": best.as_ref().map(|(_, id)| id),
             "first_blocker": blocker, "blocker_condition": blocked.map(|(stage, _)| stage.condition.as_str()), "blocker_bytes_per_s": blocked.map(|(_, total)| total), "conditions": conditions, "applicable_conditions_by_bytes_per_s": applicable,
         }),
-        best, reason,
+        best,
+        reason,
     }
 }
 
@@ -501,9 +641,7 @@ pub fn throughput_value(key: &str, stages: &[FamilyStage]) -> Result<(ValueRecor
     let capacity = capacity_over_conditions(stages);
     let key = Key::parse(key).map_err(|error| error.to_string())?;
     let value = match &capacity.best {
-        Some((bytes, condition)) => ValueRecord::Measured {
-            key, worst: model::Worst::Number(*bytes as f64), trials: 1, condition: condition.clone(), test: TEST.to_owned(),
-        },
+        Some((bytes, condition)) => ValueRecord::Measured { key, worst: model::Worst::Number(*bytes as f64), trials: 1, condition: condition.clone(), test: TEST.to_owned() },
         None => ValueRecord::Unmeasured { key, reason: capacity.reason.clone().unwrap_or_default() },
     };
     Ok((value, capacity.observation))
@@ -511,8 +649,12 @@ pub fn throughput_value(key: &str, stages: &[FamilyStage]) -> Result<(ValueRecor
 
 fn worse(first: TrialClass, second: TrialClass) -> TrialClass {
     let rank = |class: TrialClass| match class {
-        TrialClass::AdmissionRejection => 5, TrialClass::ProviderFailure => 4, TrialClass::DeviceFailure => 3,
-        TrialClass::Unattributable => 2, TrialClass::Incomplete => 1, TrialClass::Success => 0,
+        TrialClass::AdmissionRejection => 5,
+        TrialClass::ProviderFailure => 4,
+        TrialClass::DeviceFailure => 3,
+        TrialClass::Unattributable => 2,
+        TrialClass::Incomplete => 1,
+        TrialClass::Success => 0,
     };
     if rank(second) > rank(first) { second } else { first }
 }
@@ -538,11 +680,15 @@ fn nic_counters(nics: &[String]) -> BTreeMap<String, [Option<u64>; 2]> {
 }
 
 fn nic_delta(before: &BTreeMap<String, [Option<u64>; 2]>, after: &BTreeMap<String, [Option<u64>; 2]>) -> Json {
-    after.iter().map(|(nic, now)| {
-        let was = before.get(nic).copied().unwrap_or([None, None]);
-        let diff = |index: usize| now[index].zip(was[index]).and_then(|(now, was)| now.checked_sub(was));
-        (nic.clone(), json!({ "rx_bytes": diff(0), "tx_bytes": diff(1) }))
-    }).collect::<serde_json::Map<_, _>>().into()
+    after
+        .iter()
+        .map(|(nic, now)| {
+            let was = before.get(nic).copied().unwrap_or([None, None]);
+            let diff = |index: usize| now[index].zip(was[index]).and_then(|(now, was)| now.checked_sub(was));
+            (nic.clone(), json!({ "rx_bytes": diff(0), "tx_bytes": diff(1) }))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 
 /// The bench profile of a stage: `bench_profile` with one capture sink and one placement for each receive stream's port.
@@ -566,7 +712,9 @@ fn stage_profile(device: &dyn Device, dir: &common::TempDir, stage: &Stage) -> J
 fn stage_spec(device: &dyn Device, stage: &Stage, waveform: &ArtifactRef) -> Json {
     let eq = |value: Json| json!({ "kind": "eq", "value": value });
     let mut requires = serde_json::Map::new();
-    if stage.rx.is_empty() { requires.insert("radio.rx.c0.stream".to_owned(), eq(json!(-1))); }
+    if stage.rx.is_empty() {
+        requires.insert("radio.rx.c0.stream".to_owned(), eq(json!(-1)));
+    }
     for (direction, name, streams) in [(Dir::Rx, "rx", &stage.rx), (Dir::Tx, "tx", &stage.tx)] {
         for (k, stream) in streams.iter().enumerate() {
             requires.insert(format!("radio.{name}.s{k}.sample_rate_hz"), eq(json!(stream.rate_hz as f64)));
@@ -577,22 +725,32 @@ fn stage_spec(device: &dyn Device, stage: &Stage, waveform: &ArtifactRef) -> Jso
         }
     }
     let sinks = stage.rx.len().max(1);
-    let outputs: Vec<Json> = (0..sinks).map(|k| json!({
-        "id": if k == 0 { "rec".to_owned() } else { format!("rec{k}") }, "kind": "sink.capture", "params": {},
-        "feed": { "port": { "component": "radio", "port": format!("rx{k}") }, "policy": "drop_oldest", "capacity": 64 }
-    })).collect();
-    let schedule: Vec<Json> = (0..stage.tx.len()).map(|k| json!({
-        "at": { "clock": "radio", "offset_ticks": 0 },
-        "action": { "kind": "tx_burst", "target": serde_json::to_value(common::resource(&format!("radio/tx/s{k}"))).unwrap(),
-            "waveform": waveform, "repeat": true, "late_policy": "send_asap_and_flag", "metadata": {} }
-    })).collect();
+    let outputs: Vec<Json> = (0..sinks)
+        .map(|k| {
+            json!({
+                "id": if k == 0 { "rec".to_owned() } else { format!("rec{k}") }, "kind": "sink.capture", "params": {},
+                "feed": { "port": { "component": "radio", "port": format!("rx{k}") }, "policy": "drop_oldest", "capacity": 64 }
+            })
+        })
+        .collect();
+    let schedule: Vec<Json> = (0..stage.tx.len())
+        .map(|k| {
+            json!({
+                "at": { "clock": "radio", "offset_ticks": 0 },
+                "action": { "kind": "tx_burst", "target": serde_json::to_value(common::resource(&format!("radio/tx/s{k}"))).unwrap(),
+                    "waveform": waveform, "repeat": true, "late_policy": "send_asap_and_flag", "metadata": {} }
+            })
+        })
+        .collect();
     let mut spec = json!({
         "version": 1,
         "requirements": { "vocabularies": [{ "id": "radio", "major": 2 }, { "id": "sink", "major": 1 }] },
         "resources": { "radio": { "kind": "radio.device", "requires": requires } },
         "outputs": outputs
     });
-    if !schedule.is_empty() { spec["schedule"] = Json::Array(schedule); }
+    if !schedule.is_empty() {
+        spec["schedule"] = Json::Array(schedule);
+    }
     spec
 }
 
@@ -635,7 +793,11 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     let streams_json = |streams: &[StreamPlan]| streams.iter().map(|stream| json!({ "channels": stream.channels, "rate_hz": stream.rate_hz })).collect::<Vec<_>>();
     let head = json!({ "family": stage.family, "rx_streams": streams_json(&stage.rx), "tx_streams": streams_json(&stage.tx),
         "duration_secs": plan.throughput_seconds, "admission_ceiling_bytes_per_s": performance.rx_bytes_per_s });
-    let with_head = |extra: Json| { let mut row = head.clone(); row.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default()); row };
+    let with_head = |extra: Json| {
+        let mut row = head.clone();
+        row.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+        row
+    };
     if let Some(reason) = rejected_run_reason(&run) {
         return Ok(StageResult { class: TrialClass::AdmissionRejection, left_open: false, observation: with_head(json!({ "run_termination": reason })) });
     }
@@ -648,10 +810,18 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     let mut scheduled = Vec::new();
     for (k, stream) in stage.tx.iter().enumerate() {
         let suffix = format!("usrp/tx/s{k}");
-        let clock = run.sample_clocks().into_iter().rev().find(|clock| clock.stream.to_string().ends_with(&suffix) && clock.ended_at.is_none())
+        let clock = run
+            .sample_clocks()
+            .into_iter()
+            .rev()
+            .find(|clock| clock.stream.to_string().ends_with(&suffix) && clock.ended_at.is_none())
             .ok_or_else(|| format!("no active transmit stream-{k} SampleClock"))?;
-        if !clock_rate_matches(&clock, stream.rate_hz) { return Err(format!("transmit stream {k} declared the wrong SampleClock rate for {} Hz", stream.rate_hz)); }
-        if clock.root != root { return Err("throughput T0 and a SampleClock have different root clocks".to_owned()); }
+        if !clock_rate_matches(&clock, stream.rate_hz) {
+            return Err(format!("transmit stream {k} declared the wrong SampleClock rate for {} Hz", stream.rate_hz));
+        }
+        if clock.root != root {
+            return Err("throughput T0 and a SampleClock have different root clocks".to_owned());
+        }
         let (target, burst_root) = sample_at_or_after(&clock, start)?;
         horizon = horizon.max(burst_root.checked_add(duration_ticks).ok_or("throughput horizon overflow")?);
         scheduled.push((clock.domain, target));
@@ -700,17 +870,24 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
         let ack_channels: BTreeSet<u64> = acks.iter().filter_map(|row| row["channel"].as_u64()).collect();
         let acknowledged = acks.len() == stream.channels.len() && ack_channels.len() == stream.channels.len();
         let first_ack_channel = ack_channels.iter().next().copied();
-        let async_rows: Vec<Json> = stream_rows.iter().copied()
-            .filter(|row| row["code"] != "BurstAck" || (acknowledged && row["channel"].as_u64() == first_ack_channel)).cloned().collect();
-        let burst_rows: Vec<Json> = bursts_all.as_array().into_iter().flatten()
-            .filter(|row| serde_json::from_value::<TimePoint>(row["target"].clone()).is_ok_and(|point| point.domain() == domain)).cloned().collect();
+        let async_rows: Vec<Json> = stream_rows.iter().copied().filter(|row| row["code"] != "BurstAck" || (acknowledged && row["channel"].as_u64() == first_ack_channel)).cloned().collect();
+        let burst_rows: Vec<Json> =
+            bursts_all.as_array().into_iter().flatten().filter(|row| serde_json::from_value::<TimePoint>(row["target"].clone()).is_ok_and(|point| point.domain() == domain)).cloned().collect();
         let accepted = counted.tx_accepted(k);
         let short = counted.tx_short_sends(k);
         // The Provider's rejection notes name no stream, so they are read once for the stage below, not per stream.
         let evidence = tx_throughput_evidence(TxThroughputInput {
-            stats: &json!({ "tx_samples": accepted }), async_reports: &Json::Array(async_rows), events: &events, bursts: &Json::Array(burst_rows),
-            rejected: &json!([]), clocks: &manifest.clocks.sample_clocks, scheduled_target: target, rate_hz: stream.rate_hz, master_clock_hz: master,
-            duration_secs: plan.throughput_seconds, stream: k,
+            stats: &json!({ "tx_samples": accepted }),
+            async_reports: &Json::Array(async_rows),
+            events: &events,
+            bursts: &Json::Array(burst_rows),
+            rejected: &json!([]),
+            clocks: &manifest.clocks.sample_clocks,
+            scheduled_target: target,
+            rate_hz: stream.rate_hz,
+            master_clock_hz: master,
+            duration_secs: plan.throughput_seconds,
+            stream: k,
         });
         let class = if short > 0 { worse(evidence.class, TrialClass::DeviceFailure) } else { evidence.class };
         streams.push(StreamEvidence { direction: Direction::Tx, stream: k, class, detail: json!({
@@ -721,10 +898,18 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
             "class": trial_class_name(class),
         }) });
     }
-    let short_send_rejections: Vec<String> = rejected.as_array().into_iter().flatten().filter_map(|row| row["reason"].as_str())
-        .filter(|reason| reason.contains("short send") || reason.contains("send did not complete")).map(str::to_owned).collect();
+    let short_send_rejections: Vec<String> = rejected
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["reason"].as_str())
+        .filter(|reason| reason.contains("short send") || reason.contains("send did not complete"))
+        .map(str::to_owned)
+        .collect();
     let mut class = stage_class(&streams);
-    if underflow > 0 || overflow || !short_send_rejections.is_empty() || !open.is_empty() || ended_early.is_some() { class = worse(class, TrialClass::DeviceFailure); }
+    if underflow > 0 || overflow || !short_send_rejections.is_empty() || !open.is_empty() || ended_early.is_some() {
+        class = worse(class, TrialClass::DeviceFailure);
+    }
     let observation = with_head(json!({
         "streams": streams.iter().map(|stream| stream.detail.clone()).collect::<Vec<_>>(),
         "run_ended_early": ended_early, "tx_underflow_events": underflow, "rx_overflow": overflow, "short_send_rejections": short_send_rejections, "streamers_left_open": open,
@@ -741,9 +926,11 @@ pub const COMPANION_RATE_HZ: u64 = 10_000_000;
 /// Starts a repeating transmit stream at `COMPANION_RATE_HZ` on a Session.
 pub fn start_companion_tx(run: &mut RunHandle, bytes: &[u8]) -> Result<(), String> {
     enable_tx(run)?;
-    let entry = run.submit(common::set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(COMPANION_RATE_HZ as f64).ok_or("invalid companion rate")?), None)
-        .map_err(|error| error.to_string())?;
-    if !common::admitted(&entry) { return Err(format!("the companion transmit rate was not admitted: {:?}", entry.outcome)); }
+    let entry =
+        run.submit(common::set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(COMPANION_RATE_HZ as f64).ok_or("invalid companion rate")?), None).map_err(|error| error.to_string())?;
+    if !common::admitted(&entry) {
+        return Err(format!("the companion transmit rate was not admitted: {:?}", entry.outcome));
+    }
     common::past_tx_origin(run);
     start_repeat(run, bytes)
 }
@@ -751,9 +938,11 @@ pub fn start_companion_tx(run: &mut RunHandle, bytes: &[u8]) -> Result<(), Strin
 /// Sets the Session's receive stream to `COMPANION_RATE_HZ` and lets it settle.
 pub fn start_companion_rx(run: &mut RunHandle) -> Result<(), String> {
     common::past_t0(run, common::ms(1));
-    let entry = run.submit(common::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(COMPANION_RATE_HZ as f64).ok_or("invalid companion rate")?), None)
-        .map_err(|error| error.to_string())?;
-    if !common::admitted(&entry) { return Err(format!("the companion receive rate was not admitted: {:?}", entry.outcome)); }
+    let entry =
+        run.submit(common::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(COMPANION_RATE_HZ as f64).ok_or("invalid companion rate")?), None).map_err(|error| error.to_string())?;
+    if !common::admitted(&entry) {
+        return Err(format!("the companion receive rate was not admitted: {:?}", entry.outcome));
+    }
     common::wait(run, common::ms(100));
     Ok(())
 }
@@ -763,7 +952,8 @@ pub fn companion_condition(id: &str, subject: Direction, rate_hz: u64, companion
     Condition {
         id: id.to_owned(),
         streams: vec![stream_condition(subject, 0, vec![0], rate_hz as f64), stream_condition(companion, 0, vec![0], COMPANION_RATE_HZ as f64)],
-        concurrent: vec![stream_ref(subject, 0), stream_ref(companion, 0)], reopened: false,
+        concurrent: vec![stream_ref(subject, 0), stream_ref(companion, 0)],
+        reopened: false,
     }
 }
 
@@ -841,15 +1031,21 @@ pub struct DuplexLimits {
 }
 
 fn limit_streams(measured: &MeasurementGroup, key: &str, direction: Direction) -> Result<(String, Vec<StreamPlan>), String> {
-    let condition = measured.values.iter().find_map(|row| match row {
-        ValueRecord::Measured { key: found, condition, .. } if found.as_str() == key => Some(Ok(condition.clone())),
-        ValueRecord::Unmeasured { key: found, reason } if found.as_str() == key => Some(Err(format!("{key} is unmeasured ({reason})"))),
-        _ => None,
-    }).unwrap_or_else(|| Err(format!("{key} was not decided")))?;
+    let condition = measured
+        .values
+        .iter()
+        .find_map(|row| match row {
+            ValueRecord::Measured { key: found, condition, .. } if found.as_str() == key => Some(Ok(condition.clone())),
+            ValueRecord::Unmeasured { key: found, reason } if found.as_str() == key => Some(Err(format!("{key} is unmeasured ({reason})"))),
+            _ => None,
+        })
+        .unwrap_or_else(|| Err(format!("{key} was not decided")))?;
     let row = measured.conditions.iter().find(|row| row.id == condition).ok_or_else(|| format!("{key}'s condition `{condition}` has no condition row"))?;
     let mut streams: Vec<_> = row.streams.iter().filter(|stream| stream.direction == direction).collect();
     streams.sort_by_key(|stream| stream.stream);
-    if streams.is_empty() { return Err(format!("{key}'s condition `{condition}` has no stream in its direction")); }
+    if streams.is_empty() {
+        return Err(format!("{key}'s condition `{condition}` has no stream in its direction"));
+    }
     let plans = streams.iter().map(|stream| StreamPlan { channels: stream.channels.iter().map(|chan| *chan as usize).collect(), rate_hz: stream.sample_rate_hz as u64 }).collect();
     Ok((condition, plans))
 }
@@ -904,10 +1100,13 @@ pub fn measure_duplex_at_limits(device: Arc<dyn Device>, plan: &MeasurementPlan,
 fn duplex_overlap(streams: Option<&Json>, seconds: u64) -> Json {
     let rows: Vec<&Json> = streams.and_then(Json::as_array).into_iter().flatten().collect();
     let of = |direction: &str| rows.iter().filter(|row| row["direction"] == direction).copied().collect::<Vec<_>>();
-    let tx_fraction: Vec<Json> = of("tx").iter().map(|row| {
-        let expected = row["rate_hz"].as_u64().and_then(|rate| rate.checked_mul(seconds));
-        json!({ "stream": row["stream"], "samples_accepted_over_samples_of_the_duration": row["actual_samples"].as_u64().zip(expected).map(|(actual, expected)| actual as f64 / expected as f64) })
-    }).collect();
+    let tx_fraction: Vec<Json> = of("tx")
+        .iter()
+        .map(|row| {
+            let expected = row["rate_hz"].as_u64().and_then(|rate| rate.checked_mul(seconds));
+            json!({ "stream": row["stream"], "samples_accepted_over_samples_of_the_duration": row["actual_samples"].as_u64().zip(expected).map(|(actual, expected)| actual as f64 / expected as f64) })
+        })
+        .collect();
     let rx_span = of("rx").iter().map(|row| row["sample_clock_origin_tick"].as_i64().zip(row["sample_clock_end_tick"].as_i64())).collect::<Option<Vec<_>>>();
     let tx_span = of("tx").iter().map(|row| row["burst_start_tick"].as_i64().zip(row["burst_ack_tick"].as_i64())).collect::<Option<Vec<_>>>();
     let overlap_ticks = rx_span.zip(tx_span).and_then(|(rx, tx)| {
@@ -922,9 +1121,13 @@ fn duplex_overlap(streams: Option<&Json>, seconds: u64) -> Json {
 /// for the next open either (it stayed unlocked until a power cycle on 2026-10-27). The record's latch is set, every later
 /// probe and group is `not run`, and the record is written early. Does nothing outside a record or for any other error.
 pub fn latch_record_on_pll_failure(error: &str) {
-    if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) { return; }
-    RECORD_LATCH.with(|cell| if let Some(latch) = cell.borrow().as_ref() {
-        latch.set(format!("the reference clock's PLL did not lock after the UR-7 retries: {error}; it needs a power cycle"));
+    if !error.contains(ezsdr_radio_uhd::REFERENCE_DID_NOT_LOCK) {
+        return;
+    }
+    RECORD_LATCH.with(|cell| {
+        if let Some(latch) = cell.borrow().as_ref() {
+            latch.set(format!("the reference clock's PLL did not lock after the UR-7 retries: {error}; it needs a power cycle"));
+        }
     });
 }
 
@@ -945,7 +1148,11 @@ mod tests {
         assert_eq!(ids, ["rx-grouped-100m", "rx-grouped-200m", "rx-split-100m", "rx-split-200m", "rx-mixed-200m-100m"]);
         assert!(two.iter().all(|stage| stage.tx.is_empty()), "a receive stage has no transmit stream");
         let mixed = two.last().unwrap();
-        assert_eq!(mixed.rx, [StreamPlan { channels: vec![0], rate_hz: 200_000_000 }, StreamPlan { channels: vec![1], rate_hz: 100_000_000 }], "channel 0 at the higher grid rate, channel 1 at the next lower");
+        assert_eq!(
+            mixed.rx,
+            [StreamPlan { channels: vec![0], rate_hz: 200_000_000 }, StreamPlan { channels: vec![1], rate_hz: 100_000_000 }],
+            "channel 0 at the higher grid rate, channel 1 at the next lower"
+        );
         assert_eq!(mixed.bytes(Direction::Rx, 4), Some(1_200_000_000));
         assert_eq!(two[1].bytes(Direction::Rx, 4), Some(1_600_000_000), "one stream of both channels at 200 MS/s");
         assert_eq!(two[1].rx.len(), 1);
@@ -999,9 +1206,13 @@ mod tests {
     /// The sweep's stages and `throughput_stages`' grouped and split ones for two channels, with their real ids and families, at
     /// 4 wire bytes per sample.
     fn real_stages(rates: &[u64], class: impl Fn(&Stage) -> Option<TrialClass>) -> Vec<FamilyStage> {
-        let mut stages: Vec<FamilyStage> = rates.iter().map(|rate| FamilyStage { condition: format!("rx-{}msps", rate / 1_000_000), family: "rx-sweep".to_owned(), bytes: rate * 4, class: Some(TrialClass::Success) }).collect();
+        let mut stages: Vec<FamilyStage> =
+            rates.iter().map(|rate| FamilyStage { condition: format!("rx-{}msps", rate / 1_000_000), family: "rx-sweep".to_owned(), bytes: rate * 4, class: Some(TrialClass::Success) }).collect();
         stages.extend(throughput_stages(Direction::Rx, 2, rates).iter().filter(|stage| stage.family != "mixed").map(|stage| FamilyStage {
-            condition: stage.id.clone(), family: format!("rx-{}", stage.family), bytes: stage.bytes(Direction::Rx, 4).unwrap(), class: class(stage),
+            condition: stage.id.clone(),
+            family: format!("rx-{}", stage.family),
+            bytes: stage.bytes(Direction::Rx, 4).unwrap(),
+            class: class(stage),
         }));
         stages
     }
@@ -1027,7 +1238,9 @@ mod tests {
         assert_eq!(mixed.best, Some((800, "rx-split-100m".to_owned())));
     }
 
-    fn result_of(class: TrialClass) -> StageResult { StageResult { class, left_open: false, observation: json!({ "family": "split" }) } }
+    fn result_of(class: TrialClass) -> StageResult {
+        StageResult { class, left_open: false, observation: json!({ "family": "split" }) }
+    }
 
     #[test]
     fn a_stage_that_fails_ends_the_climb_and_keeps_the_stages_before_it() {
@@ -1042,7 +1255,8 @@ mod tests {
                     _ if panics => panic!("a stage panicked"),
                     _ => Err("no active transmit stream-1 SampleClock".to_owned()),
                 }
-            }).unwrap();
+            })
+            .unwrap();
             assert_eq!(ran.len(), 3, "the stage after the failed one is not run");
             let classes: Vec<_> = extra.stages.iter().map(|stage| stage.class).collect();
             assert_eq!(classes, [Some(TrialClass::Success), Some(TrialClass::Success), None, None, None], "the stages before keep their class, the failed and the later are `not run`");
@@ -1061,7 +1275,8 @@ mod tests {
         let extra = run_stages(Direction::Rx, stages.into_iter().take(2).collect(), 4, |stage| {
             ran.push(stage.id.clone());
             Ok(StageResult { class: TrialClass::DeviceFailure, left_open: true, observation: json!({}) })
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(ran.len(), 1, "the stage after the open streamer is not run");
         assert_eq!(extra.stages.iter().map(|stage| stage.class).collect::<Vec<_>>(), [Some(TrialClass::DeviceFailure), None]);
     }
@@ -1073,19 +1288,54 @@ mod tests {
         install_record_latch(Some(latch.clone()));
         // A retry that succeeds latches nothing.
         let mut calls = 0;
-        assert!(common::open_with_pll_retries(|| { calls += 1; if calls < 3 { pll() } else { Ok(()) } }, 3, Wall::ZERO).is_ok());
+        assert!(
+            common::open_with_pll_retries(
+                || {
+                    calls += 1;
+                    if calls < 3 { pll() } else { Ok(()) }
+                },
+                3,
+                Wall::ZERO
+            )
+            .is_ok()
+        );
         assert_eq!((calls, latch.reason()), (3, None));
         // An error that is not the PLL's is not retried and does not latch.
         let mut calls = 0;
-        assert!(common::open_with_pll_retries(|| { calls += 1; Err::<(), _>("UR-7: set_sources failed".to_owned()) }, 3, Wall::ZERO).is_err());
+        assert!(
+            common::open_with_pll_retries(
+                || {
+                    calls += 1;
+                    Err::<(), _>("UR-7: set_sources failed".to_owned())
+                },
+                3,
+                Wall::ZERO
+            )
+            .is_err()
+        );
         assert_eq!((calls, latch.reason()), (1, None));
         // A PLL that stays unlocked: the retries are used up, the latch is set, and no later opener is called.
         let mut calls = 0;
-        assert!(common::open_with_pll_retries(|| { calls += 1; pll() }, 3, Wall::ZERO).is_err());
+        assert!(
+            common::open_with_pll_retries(
+                || {
+                    calls += 1;
+                    pll()
+                },
+                3,
+                Wall::ZERO
+            )
+            .is_err()
+        );
         assert_eq!(calls, 4, "the open and three retries");
         assert!(latch.reason().is_some_and(|reason| reason.contains("PLL did not lock") && reason.contains("power cycle")));
         let mut opened = 0;
-        let later = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let _ = open_record_guard(|| { opened += 1; Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default())) }); }));
+        let later = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = open_record_guard(|| {
+                opened += 1;
+                Arc::new(ezsdr_radio_uhd::FakeDevice::new(ezsdr_radio_uhd::FakeConfig::default()))
+            });
+        }));
         assert!(later.is_err() && opened == 0, "a latched record opens nothing");
         // The failed group and the groups after it are in the record, as failures and `not run`.
         let mut groups = GroupRun::new(None);
@@ -1095,7 +1345,9 @@ mod tests {
             Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
             None => Ok(MeasurementGroup::default()),
         });
-        groups.probe("a probe", || { let _ = open_record_guard(|| unreachable!("a latched record opens nothing")); });
+        groups.probe("a probe", || {
+            let _ = open_record_guard(|| unreachable!("a latched record opens nothing"));
+        });
         let names: Vec<_> = groups.failed().iter().map(|(name, error)| (name.as_str(), error.starts_with("not run"))).collect();
         assert_eq!(names, [("first", false), ("second", true), ("a probe", false)]);
         assert!(groups.failed()[2].1.contains("not opening the device"));
@@ -1121,7 +1373,17 @@ mod tests {
         install_record_latch(None);
         // Outside a record the same exhaustion latches nothing.
         let mut calls = 0;
-        assert!(common::open_with_pll_retries(|| { calls += 1; pll() }, 1, Wall::ZERO).is_err());
+        assert!(
+            common::open_with_pll_retries(
+                || {
+                    calls += 1;
+                    pll()
+                },
+                1,
+                Wall::ZERO
+            )
+            .is_err()
+        );
         assert_eq!(record_latch_reason(), None);
     }
 

@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use crate::binding::{AdmissionResult, Binding, BindingProfile};
 use crate::contract::{DataContractId, PortRef};
 use crate::id::{DataLinkId, MemoryDomainId, ResourceId};
-use crate::module_api::{
-    ExecutionClass, ExecutorDescriptor, ModuleRef, Pacing, Requested, RfPath, Role, SinkDescriptor,
-};
+use crate::module_api::{ExecutionClass, ExecutorDescriptor, ModuleRef, Pacing, Requested, RfPath, Role, SinkDescriptor};
 use crate::spec::{ExperimentSpec, Ident, SpecError};
 use crate::stream::{BackPressure, DataLinkDecl};
 
@@ -17,20 +15,8 @@ use super::{CompileInputs, ExecutionPlan, Fragment, IslandContext};
 /// matcher resolved for the Spec resource of the same name. `requested` is absent
 /// only for a binding that names no Spec resource, which SB-22 does not produce for
 /// a Provider (SB-39, SB-44, MA-12).
-fn provider_content(
-    name: &Ident,
-    binding: &Binding,
-    spec: &ExperimentSpec,
-    admission: &AdmissionResult,
-) -> Result<serde_json::Value, SpecError> {
-    let requested = admission.matched.get(name).map(|node| Requested {
-        resource: node.clone(),
-        constraints: spec
-            .resources
-            .get(name)
-            .map(|r| r.requires.clone())
-            .unwrap_or_default(),
-    });
+fn provider_content(name: &Ident, binding: &Binding, spec: &ExperimentSpec, admission: &AdmissionResult) -> Result<serde_json::Value, SpecError> {
+    let requested = admission.matched.get(name).map(|node| Requested { resource: node.clone(), constraints: spec.resources.get(name).map(|r| r.requires.clone()).unwrap_or_default() });
     let json = |e: serde_json::Error| SpecError::Structural { reason: format!("SB-39: {name}'s fragment: {e}") };
     let mut out = serde_json::Map::new();
     out.insert("selector".to_owned(), serde_json::to_value(&binding.selector).map_err(json)?);
@@ -40,12 +26,7 @@ fn provider_content(
     Ok(serde_json::Value::Object(out))
 }
 
-pub(super) fn plan(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    admission: &AdmissionResult,
-    inputs: &CompileInputs<'_>,
-) -> Result<ExecutionPlan, SpecError> {
+pub(super) fn plan(spec: &ExperimentSpec, profile: &BindingProfile, admission: &AdmissionResult, inputs: &CompileInputs<'_>) -> Result<ExecutionPlan, SpecError> {
     super::validation::check_structure(spec, profile, inputs)?;
     // SB-30's first point: "A non-empty violation list fails the stage, and nothing
     // transmits until every check at every applicable stage has passed." `validate`
@@ -54,24 +35,14 @@ pub(super) fn plan(
     // plan. Leaving it to the caller is what left an RF-envelope refusal at the
     // validate point with nothing between it and a transmitter (Vision invariant 42).
     if !admission.is_admitted() {
-        return Err(admission
-            .clone()
-            .into_result()
-            .expect_err("a non-admitted result yields an error"));
+        return Err(admission.clone().into_result().expect_err("a non-admitted result yields an error"));
     }
     // The checks are pure (SB-31), so a result computed for another `environment`
     // is not believed either (SB-39, D99).
-    if let Some(v) = super::validation::requested_violations(spec, profile, inputs)
-        .into_iter()
-        .next()
-    {
+    if let Some(v) = super::validation::requested_violations(spec, profile, inputs).into_iter().next() {
         return Err(SpecError::Violation(v));
     }
-    super::validation::admission_is_this_runs(spec, inputs, admission).map_err(|reason| {
-        SpecError::Structural {
-            reason: format!("SB-39: {reason}"),
-        }
-    })?;
+    super::validation::admission_is_this_runs(spec, inputs, admission).map_err(|reason| SpecError::Structural { reason: format!("SB-39: {reason}") })?;
     super::links::check_endpoints(spec, inputs, &admission.matched)?;
     let authority = profile.authority.clone();
     let pacing = super::supplied(inputs.authorities, &authority, "AuthorityDescriptor")?.pacing;
@@ -80,13 +51,7 @@ pub(super) fn plan(
     // One fragment per slot (SB-T1): a Provider per resource, the Authority when it is
     // a slot of its own, a Sink per output, and an Executor per Island.
     let bound = |name: &Ident| -> Result<ModuleRef, SpecError> {
-        profile
-            .bindings
-            .get(name)
-            .map(|b| b.module.clone())
-            .ok_or_else(|| SpecError::Structural {
-                reason: format!("SB-22d: {name} has no binding"),
-            })
+        profile.bindings.get(name).map(|b| b.module.clone()).ok_or_else(|| SpecError::Structural { reason: format!("SB-22d: {name} has no binding") })
     };
     let mut fragments: Vec<Fragment> = Vec::new();
     let mut edges: Vec<(Ident, Ident)> = Vec::new();
@@ -95,9 +60,7 @@ pub(super) fn plan(
     let mut resources_by_instance = BTreeMap::new();
     for name in spec.resources.keys() {
         if let Some(provider) = inputs.providers.get(name) {
-            resources_by_instance
-                .entry(provider.instance().id.clone())
-                .or_insert_with(|| name.clone());
+            resources_by_instance.entry(provider.instance().id.clone()).or_insert_with(|| name.clone());
         }
     }
     for name in spec.resources.keys() {
@@ -106,13 +69,7 @@ pub(super) fn plan(
         for before in &after {
             edges.push((before.clone(), name.clone()));
         }
-        fragments.push(Fragment {
-            id: name.clone(),
-            instance: binding.module.clone(),
-            role: Role::Provider,
-            content: provider_content(name, binding, spec, admission)?,
-            after,
-        });
+        fragments.push(Fragment { id: name.clone(), instance: binding.module.clone(), role: Role::Provider, content: provider_content(name, binding, spec, admission)?, after });
     }
     // SB-24: an Authority that is a slot of its own gets a fragment of role
     // Authority. It has no lifecycle (MA-2), so this is a record: it is how the
@@ -123,13 +80,7 @@ pub(super) fn plan(
     // Phase 2 call, plan content rather than schema.
     if !spec.resources.contains_key(&authority) {
         let binding = super::supplied(&profile.bindings, &authority, "binding")?;
-        fragments.push(Fragment {
-            id: authority.clone(),
-            instance: binding.module.clone(),
-            role: Role::Authority,
-            content: serde_json::Value::Null,
-            after: Vec::new(),
-        });
+        fragments.push(Fragment { id: authority.clone(), instance: binding.module.clone(), role: Role::Authority, content: serde_json::Value::Null, after: Vec::new() });
     }
     // One fragment per bound output: a Sink is prepared, armed and stepped like any
     // other Module instance (MA-25, MA-30), and it is bound rather than placed, so
@@ -139,9 +90,7 @@ pub(super) fn plan(
             id: output.id.clone(),
             instance: bound(&output.id)?,
             role: Role::Sink,
-            content: serde_json::to_value(output).map_err(|e| SpecError::Structural {
-                reason: format!("SB-39: {}'s fragment: {e}", output.id),
-            })?,
+            content: serde_json::to_value(output).map_err(|e| SpecError::Structural { reason: format!("SB-39: {}'s fragment: {e}", output.id) })?,
             after: Vec::new(),
         });
     }
@@ -150,16 +99,10 @@ pub(super) fn plan(
             // One fragment per Island, not per Executor instance: two Islands may
             // share one Executor (an affinity split), and a fragment id must be
             // unique (SB-22a, SB-39).
-            id: Ident::parse(&format!("island_{}", island.id.local)).map_err(|_| {
-                SpecError::Structural {
-                    reason: "MA-38: island id is not a valid Ident".to_owned(),
-                }
-            })?,
+            id: Ident::parse(&format!("island_{}", island.id.local)).map_err(|_| SpecError::Structural { reason: "MA-38: island id is not a valid Ident".to_owned() })?,
             instance: bound(&island.executor)?,
             role: Role::Executor,
-            content: serde_json::to_value(island).map_err(|e| SpecError::Structural {
-                reason: format!("SB-39: island_{}'s fragment: {e}", island.id.local),
-            })?,
+            content: serde_json::to_value(island).map_err(|e| SpecError::Structural { reason: format!("SB-39: island_{}'s fragment: {e}", island.id.local) })?,
             after: Vec::new(),
         });
     }
@@ -176,23 +119,14 @@ pub(super) fn plan(
         let d = super::supplied(inputs.sinks, &output.id, "Sink instance")?.descriptor();
         sinks.insert(output.id.clone(), d.clone());
     }
-    let graph_links: Vec<(PortRef, PortRef, BackPressure)> = spec
-        .graph
-        .links
-        .iter()
-        .map(|l| (l.from.clone(), l.to.clone(), l.policy))
-        .collect();
+    let graph_links: Vec<(PortRef, PortRef, BackPressure)> = spec.graph.links.iter().map(|l| (l.from.clone(), l.to.clone(), l.policy)).collect();
     let feeds = output_links(spec, inputs, &admission.matched);
-    let feed_links: Vec<(PortRef, PortRef, BackPressure)> = feeds
-        .iter()
-        .map(|d| (d.from.clone(), d.to.clone(), d.policy))
-        .collect();
+    let feed_links: Vec<(PortRef, PortRef, BackPressure)> = feeds.iter().map(|d| (d.from.clone(), d.to.clone(), d.policy)).collect();
     let resource_domains: BTreeMap<Ident, Vec<MemoryDomainId>> = spec
         .resources
         .keys()
         .map(|name| {
-            let node = super::links::bound_resource(name, inputs, &admission.matched)
-                .expect("admission_is_this_runs guarantees a matched node for every Spec resource");
+            let node = super::links::bound_resource(name, inputs, &admission.matched).expect("admission_is_this_runs guarantees a matched node for every Spec resource");
             (name.clone(), node.memory_domains.clone())
         })
         .collect();
@@ -220,14 +154,9 @@ pub(super) fn plan(
     // follows MA-41's clause for the sections the Kernel reads: ignoring a
     // misspelling turns it into agreement.
     if let Some(section) = profile.section("ezsdr.arm_order") {
-        let items = section.as_array().ok_or_else(|| SpecError::Structural {
-            reason: "SB-39: ezsdr.arm_order is present and is not an array".to_owned(),
-        })?;
+        let items = section.as_array().ok_or_else(|| SpecError::Structural { reason: "SB-39: ezsdr.arm_order is present and is not an array".to_owned() })?;
         for item in items {
-            let (Some(b), Some(a)) = (
-                item.get("before").and_then(|v| v.as_str()),
-                item.get("after").and_then(|v| v.as_str()),
-            ) else {
+            let (Some(b), Some(a)) = (item.get("before").and_then(|v| v.as_str()), item.get("after").and_then(|v| v.as_str())) else {
                 return Err(SpecError::Structural {
                     reason: format!(
                         "SB-39: ezsdr.arm_order entry {item} does not name both `before` and \
@@ -241,11 +170,7 @@ pub(super) fn plan(
 
     let names: Vec<Ident> = fragments.iter().map(|f| f.id.clone()).collect();
     let order = super::graph::arm_order(&names, &edges)?;
-    let order_index: BTreeMap<&Ident, usize> = order
-        .iter()
-        .enumerate()
-        .map(|(index, name)| (name, index))
-        .collect();
+    let order_index: BTreeMap<&Ident, usize> = order.iter().enumerate().map(|(index, name)| (name, index)).collect();
     fragments.sort_by_key(|f| order_index.get(&f.id).copied().unwrap_or(usize::MAX));
 
     // The plan carries every data link a Link Module is created for (MA-27a): the
@@ -257,13 +182,7 @@ pub(super) fn plan(
         feed.id = DataLinkId::local(base + i as u32);
         feed
     }));
-    Ok(ExecutionPlan {
-        fragments,
-        links,
-        deps: edges,
-        authority,
-        class,
-    })
+    Ok(ExecutionPlan { fragments, links, deps: edges, authority, class })
 }
 
 /// Derives the ExecutionClass from the environment and cross-checks it against the
@@ -280,16 +199,11 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
             Some("cabled") => RfPath::Cabled,
             Some("over_the_air") => RfPath::OverTheAir,
             other => {
-                return Err(SpecError::Structural {
-                    reason: format!(
-                        "MA-41: ezsdr.rf_path.path must be simulated, cabled or over_the_air, not {other:?}"
-                    ),
-                });
+                return Err(SpecError::Structural { reason: format!("MA-41: ezsdr.rf_path.path must be simulated, cabled or over_the_air, not {other:?}") });
             }
         },
     };
-    let derived = ExecutionClass::derive(pacing, rf)
-        .map_err(|e| SpecError::Structural { reason: e.message })?;
+    let derived = ExecutionClass::derive(pacing, rf).map_err(|e| SpecError::Structural { reason: e.message })?;
 
     // SB-26 lists `ezsdr.time` as a section the Kernel reads, and Vision §8 writes
     // `time: { class: simulation }` in the environment. MA-41's whole argument is
@@ -307,24 +221,13 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
         // agreement.
         let declared = section
             .get("class")
-            .ok_or_else(|| SpecError::Structural {
-                reason: "MA-41: ezsdr.time is present and declares no `class`".to_owned(),
-            })?
+            .ok_or_else(|| SpecError::Structural { reason: "MA-41: ezsdr.time is present and declares no `class`".to_owned() })?
             .as_str()
-            .ok_or_else(|| SpecError::Structural {
-                reason: "MA-41: ezsdr.time.class is not a string".to_owned(),
-            })?;
+            .ok_or_else(|| SpecError::Structural { reason: "MA-41: ezsdr.time.class is not a string".to_owned() })?;
         // MA-41 (KA-8): the section is the closed set `{ class, start_lead_ns }`.
         if let Some(obj) = section.as_object() {
-            if let Some(extra) = obj
-                .keys()
-                .find(|k| !matches!(k.as_str(), "class" | "start_lead_ns"))
-            {
-                return Err(SpecError::Structural {
-                    reason: format!(
-                        "MA-41: ezsdr.time carries the field `{extra}`, which is not class or start_lead_ns"
-                    ),
-                });
+            if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "class" | "start_lead_ns")) {
+                return Err(SpecError::Structural { reason: format!("MA-41: ezsdr.time carries the field `{extra}`, which is not class or start_lead_ns") });
             }
         }
         crate::binding::start_lead_ns(&profile.environment)?;
@@ -351,23 +254,13 @@ fn derive_class(profile: &BindingProfile, pacing: Pacing) -> Result<ExecutionCla
 
 /// The instances this one must be armed after, mapped from `ResourceId`s back to
 /// binding names (SB-39).
-fn arm_after_of(
-    name: &Ident,
-    inputs: &CompileInputs<'_>,
-    resources_by_instance: &BTreeMap<ResourceId, Ident>,
-) -> Vec<Ident> {
+fn arm_after_of(name: &Ident, inputs: &CompileInputs<'_>, resources_by_instance: &BTreeMap<ResourceId, Ident>) -> Vec<Ident> {
     let Some(provider) = inputs.providers.get(name) else {
         return Vec::new();
     };
     // Only resource slots' Providers are read (SB-22); an entry naming an instance
     // this profile does not bind contributes no edge (SB-39, D49).
-    let mut out: Vec<Ident> = provider
-        .instance()
-        .arm_after
-        .iter()
-        .filter_map(|rid| resources_by_instance.get(rid))
-        .cloned()
-        .collect();
+    let mut out: Vec<Ident> = provider.instance().arm_after.iter().filter_map(|rid| resources_by_instance.get(rid)).cloned().collect();
     out.sort();
     out
 }
@@ -376,11 +269,7 @@ fn arm_after_of(
 /// The links that feed the bound Sinks: one per `outputs[]` entry. An output *is*
 /// the declaration of its link, so SC-21's drop-class rule applies to these and not
 /// to `graph.links`, whose consumers are components (SB-17, SC-19, SC-21).
-fn output_links(
-    spec: &ExperimentSpec,
-    inputs: &CompileInputs<'_>,
-    matched: &BTreeMap<Ident, ResourceId>,
-) -> Vec<DataLinkDecl> {
+fn output_links(spec: &ExperimentSpec, inputs: &CompileInputs<'_>, matched: &BTreeMap<Ident, ResourceId>) -> Vec<DataLinkDecl> {
     spec.outputs
         .iter()
         .enumerate()
@@ -388,11 +277,7 @@ fn output_links(
             id: DataLinkId::local(i as u32),
             from: o.feed.port.clone(),
             to: super::links::feed_end(&o.id),
-            contract: super::links::endpoint_port(&o.feed.port, spec, inputs, matched)
-                .map(|(_, c)| c)
-                .unwrap_or_else(|| {
-                    DataContractId::parse("ezsdr.control").expect("a valid literal")
-                }),
+            contract: super::links::endpoint_port(&o.feed.port, spec, inputs, matched).map(|(_, c)| c).unwrap_or_else(|| DataContractId::parse("ezsdr.control").expect("a valid literal")),
             policy: o.feed.policy,
             capacity: o.feed.capacity,
         })
@@ -409,11 +294,7 @@ fn output_links(
 /// rather than a missing one.
 ///
 /// Rule: SB-39, SB-15, SC-3, MA-27.
-fn declared_links(
-    spec: &ExperimentSpec,
-    inputs: &CompileInputs<'_>,
-    matched: &BTreeMap<Ident, ResourceId>,
-) -> Result<Vec<DataLinkDecl>, SpecError> {
+fn declared_links(spec: &ExperimentSpec, inputs: &CompileInputs<'_>, matched: &BTreeMap<Ident, ResourceId>) -> Result<Vec<DataLinkDecl>, SpecError> {
     spec.graph
         .links
         .iter()
@@ -421,22 +302,14 @@ fn declared_links(
         .map(|(i, l)| {
             // `plan` re-ran SB-15 over the same `matched` before this (D99), so a `None`
             // here is unreachable; it stays an error rather than a panic.
-            let (_, contract) = super::links::endpoint_port(&l.to, spec, inputs, matched)
-                .ok_or_else(|| SpecError::Structural {
-                    reason: format!(
-                        "SB-15: link {i}'s consumer {}.{} names no port of a component or of \
+            let (_, contract) = super::links::endpoint_port(&l.to, spec, inputs, matched).ok_or_else(|| SpecError::Structural {
+                reason: format!(
+                    "SB-15: link {i}'s consumer {}.{} names no port of a component or of \
                          a bound node",
-                        l.to.component, l.to.port
-                    ),
-                })?;
-            Ok(DataLinkDecl {
-                id: DataLinkId::local(i as u32),
-                from: l.from.clone(),
-                to: l.to.clone(),
-                contract,
-                policy: l.policy,
-                capacity: l.capacity,
-            })
+                    l.to.component, l.to.port
+                ),
+            })?;
+            Ok(DataLinkDecl { id: DataLinkId::local(i as u32), from: l.from.clone(), to: l.to.clone(), contract, policy: l.policy, capacity: l.capacity })
         })
         .collect()
 }

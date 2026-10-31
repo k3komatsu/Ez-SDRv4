@@ -3,10 +3,7 @@
 use std::collections::BTreeMap;
 
 use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
-use ezsdr_kernel::module_api::{
-    CoerceReport, CoercionFidelity, EnvelopeFidelity, Fidelity, ModuleError, ProfileRef,
-    Requested, Resource, RfFidelity, TransportFidelity,
-};
+use ezsdr_kernel::module_api::{CoerceReport, CoercionFidelity, EnvelopeFidelity, Fidelity, ModuleError, ProfileRef, Requested, Resource, RfFidelity, TransportFidelity};
 use ezsdr_kernel::spec::{Key, Value};
 use ezsdr_kernel::stream::Direction;
 use ezsdr_radio::channels;
@@ -47,11 +44,7 @@ impl Profile {
     /// The values only the Mock contributes to the `x3xx` description (design 33 D5): its
     /// 2 ms lead (INFERRED, measured by Phase 8) and its Replay-like repeat constraints.
     pub fn terms() -> ProviderTerms {
-        ProviderTerms {
-            min_timed_command_lead_ns: 2_000_000,
-            repeat_max_samples: 268_435_456,
-            repeat_align_samples: 2,
-        }
+        ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
     }
 
     pub(crate) fn channels(&self) -> &channels::Description {
@@ -164,22 +157,14 @@ impl Profile {
 
     pub(crate) fn fidelity(&self) -> Fidelity {
         match self.kind {
-            ProfileKind::X3xx => Fidelity {
-                timing: EnvelopeFidelity::Envelope,
-                continuity: EnvelopeFidelity::Envelope,
-                coercion: CoercionFidelity::Grid,
-                rf: RfFidelity::None,
-                transport: TransportFidelity::None,
-            },
+            ProfileKind::X3xx => {
+                Fidelity { timing: EnvelopeFidelity::Envelope, continuity: EnvelopeFidelity::Envelope, coercion: CoercionFidelity::Grid, rf: RfFidelity::None, transport: TransportFidelity::None }
+            }
             ProfileKind::Ideal => Fidelity::NONE,
         }
     }
 
     pub(crate) fn envelope(&self) -> RadioEnvelope {
-        RadioEnvelope {
-            profile: self.profile_ref(),
-            timing: self.timing(),
-            performance: self.performance(),
-        }
+        RadioEnvelope { profile: self.profile_ref(), timing: self.timing(), performance: self.performance() }
     }
 }

@@ -117,10 +117,12 @@ pub struct P4Result {
 }
 
 pub fn tone_1msps(n: usize) -> Vec<Iq> {
-    (0..n).map(|i| {
-        let phase = 2.0 * std::f64::consts::PI * 100e3 * (i as f64 / 1e6);
-        [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32]
-    }).collect()
+    (0..n)
+        .map(|i| {
+            let phase = 2.0 * std::f64::consts::PI * 100e3 * (i as f64 / 1e6);
+            [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32]
+        })
+        .collect()
 }
 
 /// Opens/configures the same 1 Msps, 1 GHz, 0 dB raw loopback used by the bench probes.
@@ -251,7 +253,9 @@ fn reports(device: &dyn Device, wait: Wall) -> Vec<TxReport> {
     let mut out = Vec::new();
     loop {
         let remaining = until.saturating_sub(device.host().now());
-        if remaining.is_zero() { break; }
+        if remaining.is_zero() {
+            break;
+        }
         match device.tx_async(0, remaining.min(Wall::from_millis(10))).unwrap() {
             Some(report) => out.push(report),
             None => break,
@@ -270,7 +274,9 @@ fn flush_two_zeros(device: &dyn Device) -> Vec<TxReport> {
         if let Some(report) = device.tx_async(0, until.saturating_sub(device.host().now()).min(Wall::from_millis(10))).unwrap() {
             let ack = report.code == TxCode::BurstAck && report.channel == 0;
             out.push(report);
-            if ack { break; }
+            if ack {
+                break;
+            }
         }
     }
     out

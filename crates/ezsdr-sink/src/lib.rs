@@ -6,10 +6,7 @@ use std::collections::BTreeMap;
 
 use ezsdr_kernel::binding::AdmissionCheckRegistry;
 use ezsdr_kernel::event::{EventKind, Severity};
-use ezsdr_kernel::module_api::{
-    CompileRule, ModuleError, ModuleRegistry, UpdateClass, VerbDecl, Version,
-    VocabularyDescriptor,
-};
+use ezsdr_kernel::module_api::{CompileRule, ModuleError, ModuleRegistry, UpdateClass, VerbDecl, Version, VocabularyDescriptor};
 use ezsdr_kernel::policy::{EventKindDecl, EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{CoercionPolicy, Ident, Key, KeyDecl, Namespace, ValueKind};
 use schemars::JsonSchema;
@@ -33,16 +30,8 @@ fn sink_namespace() -> Namespace {
 /// The event kinds HD-6 declares, which `vocabulary()` and `register()` both carry.
 fn event_kinds() -> Vec<EventKindDecl> {
     vec![
-        EventKindDecl {
-            kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"),
-            default: Reaction::Continue,
-            severity: Severity::Warning,
-        },
-        EventKindDecl {
-            kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"),
-            default: Reaction::Continue,
-            severity: Severity::Info,
-        },
+        EventKindDecl { kind: EventKind::parse(REQUEST_REJECTED).expect("a valid Sink event kind"), default: Reaction::Continue, severity: Severity::Warning },
+        EventKindDecl { kind: EventKind::parse(CAPTURE_WRITTEN).expect("a valid Sink event kind"), default: Reaction::Continue, severity: Severity::Info },
     ]
 }
 
@@ -66,25 +55,17 @@ pub fn vocabulary() -> VocabularyDescriptor {
             verb: Ident::parse("capture").expect("a valid Session verb"),
             // RS-14, RS-52 (pre-freeze item 3): the rule names the key only; the
             // update class comes from that key's own declaration at admission.
-            compiles_to: CompileRule::UpdateParameter {
-                key: Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key"),
-            },
+            compiles_to: CompileRule::UpdateParameter { key: Key::parse(CAPTURE_SAMPLES).expect("a valid Sink key") },
         }],
         checks: Vec::new(),
     }
 }
 
 /// Registers the Vocabulary and its event kinds under owner `sink` (HD-6).
-pub fn register(
-    registry: &mut ModuleRegistry,
-    _checks: &mut AdmissionCheckRegistry,
-    kinds: &mut EventKindRegistry,
-) -> Result<(), ModuleError> {
+pub fn register(registry: &mut ModuleRegistry, _checks: &mut AdmissionCheckRegistry, kinds: &mut EventKindRegistry) -> Result<(), ModuleError> {
     registry.register_vocabulary(vocabulary())?;
     for decl in event_kinds() {
-        kinds
-            .register(Some(sink_namespace()), decl)
-            .map_err(|error| ModuleError::rejected(format!("HD-6: {error}")))?;
+        kinds.register(Some(sink_namespace()), decl).map_err(|error| ModuleError::rejected(format!("HD-6: {error}")))?;
     }
     Ok(())
 }
@@ -117,21 +98,7 @@ pub struct CaptureWrittenPayload {
 /// Generates the Sink Vocabulary's committed schemas (HD-14, HD-16).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     BTreeMap::from([
-        (
-            "request_rejected_payload",
-            serde_json::to_value(
-                ezsdr_kernel::schema::generator()
-                    .into_root_schema_for::<RequestRejectedPayload>(),
-            )
-            .expect("a generated schema is JSON"),
-        ),
-        (
-            "capture_written_payload",
-            serde_json::to_value(
-                ezsdr_kernel::schema::generator()
-                    .into_root_schema_for::<CaptureWrittenPayload>(),
-            )
-            .expect("a generated schema is JSON"),
-        ),
+        ("request_rejected_payload", serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<RequestRejectedPayload>()).expect("a generated schema is JSON")),
+        ("capture_written_payload", serde_json::to_value(ezsdr_kernel::schema::generator().into_root_schema_for::<CaptureWrittenPayload>()).expect("a generated schema is JSON")),
     ])
 }

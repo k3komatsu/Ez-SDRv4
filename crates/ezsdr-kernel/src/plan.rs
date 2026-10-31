@@ -19,23 +19,14 @@ use serde::{Deserialize, Serialize};
 use crate::binding::LinkPlacement;
 use crate::contract::PortRef;
 use crate::id::MemoryDomainId;
-use crate::module_api::{
-    ComponentDescriptor, ExecutionClass, ExecutorDescriptor, IslandDecl, LinkDescriptor,
-    ModuleError, ModuleRef, Role, SinkDescriptor,
-};
+use crate::module_api::{ComponentDescriptor, ExecutionClass, ExecutorDescriptor, IslandDecl, LinkDescriptor, ModuleError, ModuleRef, Role, SinkDescriptor};
 use crate::spec::{Coercion, CoercionPolicy, Ident, Key, KeyDecl, SpecError, Value, Warning};
 use crate::stream::{BackPressure, DataLinkDecl};
 
 /// What the runtime supplied under a slot's name (SB-22f): the only way a
 /// runtime-supplied map is read, so nothing supplied under another name is (SB-22).
-fn supplied<'m, V>(
-    map: &'m BTreeMap<Ident, V>,
-    name: &Ident,
-    what: &str,
-) -> Result<&'m V, SpecError> {
-    map.get(name).ok_or_else(|| SpecError::Structural {
-        reason: format!("SB-22f: no {what} for binding {name}"),
-    })
+fn supplied<'m, V>(map: &'m BTreeMap<Ident, V>, name: &Ident, what: &str) -> Result<&'m V, SpecError> {
+    map.get(name).ok_or_else(|| SpecError::Structural { reason: format!("SB-22f: no {what} for binding {name}") })
 }
 
 /// One unit of work handed to one Module at `prepare`, in dependency order (SB-39).
@@ -119,11 +110,7 @@ pub fn release_order(arm_order: &[Ident]) -> Vec<Ident> {
 /// interactive Session warns, while a Spec Run takes the Vocabulary's default.
 ///
 /// Rule: SB-45.
-pub fn coercion_policy(
-    spec_override: Option<CoercionPolicy>,
-    is_session: bool,
-    decl: Option<&KeyDecl>,
-) -> CoercionPolicy {
+pub fn coercion_policy(spec_override: Option<CoercionPolicy>, is_session: bool, decl: Option<&KeyDecl>) -> CoercionPolicy {
     coercion::coercion_policy(spec_override, is_session, decl)
 }
 
@@ -132,10 +119,7 @@ pub fn coercion_policy(
 /// three cases it appears in the PrepareReport and in the Manifest.
 ///
 /// Rule: SB-46.
-pub fn apply_coercion(
-    policy: CoercionPolicy,
-    coercion: &Coercion,
-) -> Result<Option<Warning>, SpecError> {
+pub fn apply_coercion(policy: CoercionPolicy, coercion: &Coercion) -> Result<Option<Warning>, SpecError> {
     coercion::apply_coercion(policy, coercion)
 }
 
@@ -230,10 +214,7 @@ pub fn check_cycles(nodes: &[Ident], edges: &[GraphEdge]) -> Result<(), ModuleEr
 /// Vision §52's re-check of applied values.
 ///
 /// Rule: MA-12, SB-30.
-pub fn check_effective_narrows(
-    declared: &crate::spec::CapabilityValue,
-    effective: &crate::spec::CapabilityValue,
-) -> Result<(), ModuleError> {
+pub fn check_effective_narrows(declared: &crate::spec::CapabilityValue, effective: &crate::spec::CapabilityValue) -> Result<(), ModuleError> {
     prepare::check_effective_narrows(declared, effective)
 }
 
@@ -288,11 +269,7 @@ pub struct CompileInputs<'a> {
 /// runs them again rather than presuming that this ran (SB-39, D99).
 ///
 /// Rule: SB-37, SB-38, SB-T4.
-pub fn validate(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    inputs: &CompileInputs<'_>,
-) -> Result<AdmissionResult, SpecError> {
+pub fn validate(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Result<AdmissionResult, SpecError> {
     validation::validate(spec, profile, inputs)
 }
 
@@ -314,12 +291,7 @@ pub fn validate(
 /// for the same request has no request to be about (SB-39, SB-44, MA-12).
 ///
 /// Rule: SB-39, SB-44, MA-12, MA-41.
-pub fn plan(
-    spec: &ExperimentSpec,
-    profile: &BindingProfile,
-    admission: &AdmissionResult,
-    inputs: &CompileInputs<'_>,
-) -> Result<ExecutionPlan, SpecError> {
+pub fn plan(spec: &ExperimentSpec, profile: &BindingProfile, admission: &AdmissionResult, inputs: &CompileInputs<'_>) -> Result<ExecutionPlan, SpecError> {
     compile::plan(spec, profile, admission, inputs)
 }
 

@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::device::Grid;
-use crate::{channels, keys, Concrete};
+use crate::{Concrete, channels, keys};
 
 /// The one measurement-record schema this version reads and writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
@@ -141,19 +141,11 @@ impl GridValue {
 
     fn to_grid(&self) -> Result<Grid, String> {
         let grid = match self {
-            GridValue::Values { values }
-                if !values.is_empty()
-                    && values.iter().all(|value| value.is_finite())
-                    && values.windows(2).all(|pair| pair[0] < pair[1]) =>
-            {
-                Grid::Values(values.clone())
-            }
+            GridValue::Values { values } if !values.is_empty() && values.iter().all(|value| value.is_finite()) && values.windows(2).all(|pair| pair[0] < pair[1]) => Grid::Values(values.clone()),
             GridValue::Values { .. } => return Err("a values grid must be finite, nonempty and ascending".to_owned()),
             GridValue::Integer { lo, hi } if lo <= hi => Grid::Integer { lo: *lo, hi: *hi },
             GridValue::Integer { .. } => return Err("an integer grid has lo > hi".to_owned()),
-            GridValue::Step { lo, hi, step }
-                if lo.is_finite() && hi.is_finite() && step.is_finite() && lo <= hi && *step >= 0.0 =>
-            {
+            GridValue::Step { lo, hi, step } if lo.is_finite() && hi.is_finite() && step.is_finite() && lo <= hi && *step >= 0.0 => {
                 let grid = Grid::Step { lo: *lo, hi: *hi, step: *step };
                 if *step > 0.0 {
                     let first = grid.at_or_above(*lo);
@@ -304,10 +296,7 @@ pub fn rule(key: &str) -> Option<Rule> {
 
     match key {
         keys::FULL_DUPLEX | keys::HARDWARE_TIME => return Some(TrueImplies),
-        keys::TX_REPEAT_MAX_SAMPLES
-        | keys::COMMAND_QUEUE_DEPTH
-        | keys::RX_BYTES_PER_S
-        | keys::TX_BYTES_PER_S => return Some(UpperBound),
+        keys::TX_REPEAT_MAX_SAMPLES | keys::COMMAND_QUEUE_DEPTH | keys::RX_BYTES_PER_S | keys::TX_BYTES_PER_S => return Some(UpperBound),
         keys::TX_REPEAT_ALIGN_SAMPLES => return Some(Multiple),
         keys::MIN_TIMED_COMMAND_LEAD_NS
         | keys::STARTUP_LATENCY_NS
@@ -322,8 +311,7 @@ pub fn rule(key: &str) -> Option<Rule> {
     }
 
     match crate::concrete(&Key::parse(key).ok()?)? {
-        Concrete::Channel { leaf: "frequency_hz" | "gain_db" | "antenna", .. }
-        | Concrete::Stream { .. } => Some(Subset),
+        Concrete::Channel { leaf: "frequency_hz" | "gain_db" | "antenna", .. } | Concrete::Stream { .. } => Some(Subset),
         Concrete::Channel { leaf: "frequency_step_hz" | "gain_step_db", .. } => Some(LowerBound),
         Concrete::Channel { leaf: "phase_behavior_on_retune", .. } => Some(Guarantee),
         Concrete::Channel { leaf: "path_delay_samples", .. } => Some(Equal),
@@ -338,8 +326,7 @@ pub fn profile_values(description: &channels::Description) -> BTreeMap<Key, Wors
         .capabilities()
         .keys()
         .map(|key| {
-            let value = profile_value(description, key)
-                .unwrap_or_else(|| panic!("no profile value for capability {}", key.as_str()));
+            let value = profile_value(description, key).unwrap_or_else(|| panic!("no profile value for capability {}", key.as_str()));
             (key.clone(), value)
         })
         .collect()
@@ -519,11 +506,7 @@ fn compare_value(key: &str, rule: Rule, profile: &Worst, measured: &Worst) -> Re
         Worst::Number(value) if exact_f64(*value) => Some(*value),
         _ => None,
     };
-    let numbers = || {
-        number(profile)
-            .zip(number(measured))
-            .ok_or_else(|| "comparison requires finite numeric values below the exact f64 limit".to_owned())
-    };
+    let numbers = || number(profile).zip(number(measured)).ok_or_else(|| "comparison requires finite numeric values below the exact f64 limit".to_owned());
     match rule {
         Rule::LowerBound => {
             let (profile, measured) = numbers()?;
@@ -534,8 +517,7 @@ fn compare_value(key: &str, rule: Rule, profile: &Worst, measured: &Worst) -> Re
             if profile <= measured { Ok(()) } else { Err(format!("profile value {profile} exceeds measured value {measured}")) }
         }
         Rule::Subset if key.ends_with(".antenna") => match (profile, measured) {
-            (Worst::Texts(profile), Worst::Texts(measured))
-                if profile.iter().all(|value| measured.contains(value)) => Ok(()),
+            (Worst::Texts(profile), Worst::Texts(measured)) if profile.iter().all(|value| measured.contains(value)) => Ok(()),
             (Worst::Texts(_), Worst::Texts(_)) => Err("profile antenna set is not a subset of the measured set".to_owned()),
             _ => Err("antenna comparison requires name sets".to_owned()),
         },
@@ -593,8 +575,7 @@ fn grid_subset(profile: &Grid, measured: &Grid) -> bool {
         Grid::Values(values) => values.iter().all(|value| measured.contains(*value)),
         Grid::Integer { lo, hi } => match measured {
             Grid::Integer { lo: measured_lo, hi: measured_hi } => lo >= measured_lo && hi <= measured_hi,
-            Grid::Values(values) => integer_values(*lo, *hi, values.len())
-                .is_some_and(|values| values.iter().all(|value| measured.contains(*value))),
+            Grid::Values(values) => integer_values(*lo, *hi, values.len()).is_some_and(|values| values.iter().all(|value| measured.contains(*value))),
             Grid::Step { lo: measured_lo, hi: measured_hi, step } => {
                 let lo = *lo as f64;
                 let hi = *hi as f64;
@@ -608,8 +589,7 @@ fn grid_subset(profile: &Grid, measured: &Grid) -> bool {
             }
         },
         Grid::Step { lo, hi, step } => match measured {
-            Grid::Values(values) => stepped_values(*lo, *hi, *step, values.len())
-                .is_some_and(|values| values.iter().all(|value| measured.contains(*value))),
+            Grid::Values(values) => stepped_values(*lo, *hi, *step, values.len()).is_some_and(|values| values.iter().all(|value| measured.contains(*value))),
             Grid::Integer { lo: measured_lo, hi: measured_hi } => {
                 if *step == 0.0 {
                     return *lo == *hi && lo.fract() == 0.0 && *lo >= *measured_lo as f64 && *hi <= *measured_hi as f64;
@@ -696,22 +676,15 @@ mod tests {
 
     use ezsdr_kernel::spec::{Ident, Key, Scalar, Value};
 
-    use super::{profile_values, rule, GridValue, Rule, Worst};
+    use super::{GridValue, Rule, Worst, profile_values, rule};
     use crate::channels::{self, Description};
     use crate::x3xx::ProviderTerms;
 
     #[test]
     fn rm_35_every_profile_capability_has_one_rule_and_one_value() {
-        let selector = BTreeMap::from([
-            (Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
-            (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])),
-        ]);
+        let selector = BTreeMap::from([(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")])), (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0")]))]);
         let layout = channels::from_selector(&selector).unwrap();
-        let terms = ProviderTerms {
-            min_timed_command_lead_ns: 2_000_000,
-            repeat_max_samples: 268_435_456,
-            repeat_align_samples: 2,
-        };
+        let terms = ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 };
         let description = Description::new(&layout, 2_000, &terms);
         let capabilities = description.capabilities();
         profile_values(&description);
@@ -731,11 +704,7 @@ mod tests {
             (Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:obx:0")])),
         ]);
         let layout = channels::from_selector(&selector).unwrap();
-        let description = Description::new(
-            &layout,
-            2_000,
-            &ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 },
-        );
+        let description = Description::new(&layout, 2_000, &ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 });
         let values = profile_values(&description);
         let frequency = values.get(&Key::parse("radio.rx.c1.frequency_hz").unwrap()).unwrap();
         assert!(matches!(frequency, Worst::Grid(GridValue::Step { hi, .. }) if *hi == 8_400_000_000.0));

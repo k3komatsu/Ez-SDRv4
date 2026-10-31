@@ -19,8 +19,7 @@ use crate::stream::BackPressure;
 /// normalisation, so the canonical form of OV-15 stays byte-comparable.
 ///
 /// Rule: SB-1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct Ident(String);
 
@@ -28,8 +27,7 @@ pub struct Ident(String);
 /// matching `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`.
 ///
 /// Rule: SB-1.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct Namespace(String);
 
@@ -41,8 +39,7 @@ pub struct Namespace(String);
 /// never interprets the meaning (audit Finding 7).
 ///
 /// Rule: SB-1, SB-2, MA-34.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct Key(String);
 
@@ -54,11 +51,7 @@ fn parse_segment(seg: &str) -> bool {
 impl Ident {
     /// Parses an identifier (SB-1).
     pub fn parse(s: &str) -> Result<Ident, SpecError> {
-        if parse_segment(s) {
-            Ok(Ident(s.to_owned()))
-        } else {
-            Err(SpecError::UnknownField { path: s.to_owned() })
-        }
+        if parse_segment(s) { Ok(Ident(s.to_owned())) } else { Err(SpecError::UnknownField { path: s.to_owned() }) }
     }
 
     /// The name as written (SB-1).
@@ -70,11 +63,7 @@ impl Ident {
 impl Namespace {
     /// Parses a dotted namespace (SB-1).
     pub fn parse(s: &str) -> Result<Namespace, SpecError> {
-        if s.split('.').all(parse_segment) {
-            Ok(Namespace(s.to_owned()))
-        } else {
-            Err(SpecError::UnknownField { path: s.to_owned() })
-        }
+        if s.split('.').all(parse_segment) { Ok(Namespace(s.to_owned())) } else { Err(SpecError::UnknownField { path: s.to_owned() }) }
     }
 
     /// The namespace as written (SB-1).
@@ -84,11 +73,7 @@ impl Namespace {
 
     /// True when `self` is `other` or lies under it, on segment boundaries (SB-2).
     pub fn is_under(&self, other: &Namespace) -> bool {
-        self.0 == other.0
-            || self
-                .0
-                .strip_prefix(&other.0)
-                .is_some_and(|suffix| suffix.starts_with('.'))
+        self.0 == other.0 || self.0.strip_prefix(&other.0).is_some_and(|suffix| suffix.starts_with('.'))
     }
 }
 
@@ -101,16 +86,9 @@ impl Key {
         // `ext.` key to `Ident`'s grammar made MA-34's escape hatch unusable for every
         // Module whose id contains a dash or a capital — refused at `parse`, before
         // any rule could run (SB-1, SB-2, MA-34).
-        let ok = if let Some(rest) = s.strip_prefix("ext.") {
-            rest.split('.').count() >= 2 && rest.split('.').all(crate::id::is_module_segment)
-        } else {
-            segments >= 2 && s.split('.').all(parse_segment)
-        };
-        if ok {
-            Ok(Key(s.to_owned()))
-        } else {
-            Err(SpecError::UnknownKeyPrefix { key: s.to_owned() })
-        }
+        let ok =
+            if let Some(rest) = s.strip_prefix("ext.") { rest.split('.').count() >= 2 && rest.split('.').all(crate::id::is_module_segment) } else { segments >= 2 && s.split('.').all(parse_segment) };
+        if ok { Ok(Key(s.to_owned())) } else { Err(SpecError::UnknownKeyPrefix { key: s.to_owned() }) }
     }
 
     /// The key as written (SB-2).
@@ -120,9 +98,7 @@ impl Key {
 
     /// True when the key sits under `prefix` (SB-2, MA-34).
     pub fn has_prefix(&self, prefix: &Namespace) -> bool {
-        self.0
-            .strip_prefix(prefix.as_str())
-            .is_some_and(|suffix| suffix.starts_with('.'))
+        self.0.strip_prefix(prefix.as_str()).is_some_and(|suffix| suffix.starts_with('.'))
     }
 
     /// The `ext.<module-id>` escape prefix (MA-34).
@@ -183,8 +159,7 @@ impl Finite {
 
 impl<'de> Deserialize<'de> for Finite {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Finite::new(f64::deserialize(d)?)
-            .ok_or_else(|| serde::de::Error::custom("SB-4: a number must be finite"))
+        Finite::new(f64::deserialize(d)?).ok_or_else(|| serde::de::Error::custom("SB-4: a number must be finite"))
     }
 }
 
@@ -297,11 +272,7 @@ impl Value {
     pub fn check_ascii_keys(&self, path: &str) -> Result<(), SpecError> {
         match self {
             Value::Map(items) => match items.keys().find(|k| !k.is_ascii()) {
-                Some(bad) => Err(SpecError::KeyShape {
-                    key: format!("{path}.{bad}"),
-                    expected: "an ASCII key, which OV-15 canonicalises".into(),
-                    found: "a non-ASCII key".into(),
-                }),
+                Some(bad) => Err(SpecError::KeyShape { key: format!("{path}.{bad}"), expected: "an ASCII key, which OV-15 canonicalises".into(), found: "a non-ASCII key".into() }),
                 None => Ok(()),
             },
             _ => Ok(()),
@@ -536,10 +507,7 @@ pub struct KeyDecl {
 /// Whether `s` is the decimal index a numbered segment carries (SB-2a): one to nine
 /// ASCII digits, and no leading zero (`0` itself is an index).
 fn is_index(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 9
-        && s.bytes().all(|b| b.is_ascii_digit())
-        && (s.len() == 1 || !s.starts_with('0'))
+    !s.is_empty() && s.len() <= 9 && s.bytes().all(|b| b.is_ascii_digit()) && (s.len() == 1 || !s.starts_with('0'))
 }
 
 /// Whether `word` followed by an index spells `concrete` (SB-2a).
@@ -565,14 +533,7 @@ impl KeyDecl {
         let decl = self.segments();
         let segments: Vec<&str> = key.as_str().split('.').collect();
         let numbered = self.numbered();
-        decl.len() == segments.len()
-            && segments.iter().enumerate().all(|(j, s)| {
-                if numbered == Some(j) {
-                    is_index_of(s, decl[j])
-                } else {
-                    *s == decl[j]
-                }
-            })
+        decl.len() == segments.len() && segments.iter().enumerate().all(|(j, s)| if numbered == Some(j) { is_index_of(s, decl[j]) } else { *s == decl[j] })
     }
 
     /// Whether two declarations cover one concrete key (SB-2a): the same number of
@@ -851,24 +812,12 @@ pub const SUPPORTED_VERSIONS: &[u32] = &[1];
 /// Top-level fields an [`ExperimentSpec`] may carry. An unknown one is
 /// `UnknownField`, not a warning: v3's configuration accreted keys nobody removed
 /// (SB-9).
-pub const SPEC_TOP_LEVEL: &[&str] = &[
-    "version",
-    "requirements",
-    "resources",
-    "inputs",
-    "graph",
-    "schedule",
-    "outputs",
-    "policies",
-    "extensions",
-];
+pub const SPEC_TOP_LEVEL: &[&str] = &["version", "requirements", "resources", "inputs", "graph", "schedule", "outputs", "policies", "extensions"];
 
 /// Field names a Spec may not carry at any depth outside `extensions` and any
 /// `schema` (D19, D30). A Spec naming an Executor cannot be promoted to a host that
 /// lacks one, which is the regression re-review R21 caught (SB-13, decision B3).
-pub const PLACEMENT_FIELDS: &[&str] =
-    &["placements", "placement", "executor", "memory_domain", "island",
-];
+pub const PLACEMENT_FIELDS: &[&str] = &["placements", "placement", "executor", "memory_domain", "island"];
 
 /// The one field name SB-13 reports as `EnvironmentInSpec` rather than
 /// `PlacementInSpec` (SB-13).
@@ -989,23 +938,17 @@ impl fmt::Display for SpecError {
             SpecError::UnknownKeyPrefix { key } => {
                 write!(f, "key {key:?} has a prefix no declared Vocabulary owns")
             }
-            SpecError::KeyShape { key, expected, found,
-            } => {
+            SpecError::KeyShape { key, expected, found } => {
                 write!(f, "key {key:?} wanted {expected} and found {found}")
             }
             SpecError::UnboundResource { name } => write!(f, "resource {name} has no binding"),
             SpecError::DuplicateBindingName { name, sets } => {
-                write!(
-                    f,
-                    "SB-22a: {name} collides as {sets}; resource, component, output, Island executor, Island fragment and `authority` names form one namespace"
-                )
+                write!(f, "SB-22a: {name} collides as {sets}; resource, component, output, Island executor, Island fragment and `authority` names form one namespace")
             }
-            SpecError::WrongBindingRole { name, expected, module,
-            } => {
+            SpecError::WrongBindingRole { name, expected, module } => {
                 write!(f, "SB-22e: {name} needs a Module holding the {expected} role; {module} does not")
             }
-            SpecError::NodeAlreadyBound { node, first, second,
-            } => {
+            SpecError::NodeAlreadyBound { node, first, second } => {
                 write!(
                     f,
                     "SB-34: {second} wants node {node}, which {first} already binds and which \
@@ -1042,9 +985,7 @@ pub(crate) fn check_ascii_keys(doc: &serde_json::Value) -> Result<(), SpecError>
         serde_json::Value::Object(map) => {
             for (k, v) in map {
                 if !k.is_ascii() {
-                    return Err(SpecError::UnknownField {
-                        path: format!("{k}: OV-15 canonicalises only ASCII object keys"),
-                    });
+                    return Err(SpecError::UnknownField { path: format!("{k}: OV-15 canonicalises only ASCII object keys") });
                 }
                 check_ascii_keys(v)?;
             }
@@ -1057,25 +998,17 @@ pub(crate) fn check_ascii_keys(doc: &serde_json::Value) -> Result<(), SpecError>
 
 /// Checks a document's `version` against [`SUPPORTED_VERSIONS`] (SB-10, SB-47).
 pub fn check_version(doc: &serde_json::Value) -> Result<u32, SpecError> {
-    let found = doc
-        .get("version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| SpecError::UnknownField { path: "version".to_owned(),
-            })?;
+    let found = doc.get("version").and_then(|v| v.as_u64()).ok_or_else(|| SpecError::UnknownField { path: "version".to_owned() })?;
     let found = u32::try_from(found).unwrap_or(u32::MAX);
     if found == 0 || !SUPPORTED_VERSIONS.contains(&found) {
-        return Err(SpecError::UnsupportedVersion {
-            found,
-            supported: SUPPORTED_VERSIONS.to_vec(),
-        });
+        return Err(SpecError::UnsupportedVersion { found, supported: SUPPORTED_VERSIONS.to_vec() });
     }
     Ok(found)
 }
 
 /// Refuses a top-level field outside `allowed` (SB-9, SB-21).
 pub fn check_top_level(doc: &serde_json::Value, allowed: &[&str]) -> Result<(), SpecError> {
-    let map = doc.as_object().ok_or_else(|| SpecError::UnknownField { path: "$".to_owned(),
-    })?;
+    let map = doc.as_object().ok_or_else(|| SpecError::UnknownField { path: "$".to_owned() })?;
     match map.keys().find(|k| !allowed.contains(&k.as_str())) {
         Some(k) => Err(SpecError::UnknownField { path: k.clone() }),
         None => Ok(()),
@@ -1110,10 +1043,7 @@ pub fn check_no_placement(doc: &serde_json::Value) -> Result<(), SpecError> {
                 }
                 Ok(())
             }
-            serde_json::Value::Array(items) => items
-                .iter()
-                .enumerate()
-                .try_for_each(|(i, child)| walk(child, &format!("{path}[{i}]"))),
+            serde_json::Value::Array(items) => items.iter().enumerate().try_for_each(|(i, child)| walk(child, &format!("{path}[{i}]"))),
             _ => Ok(()),
         }
     }
@@ -1133,9 +1063,7 @@ impl ExperimentSpec {
         check_top_level(doc, SPEC_TOP_LEVEL)?;
         check_no_placement(doc)?;
         check_ascii_keys(doc)?;
-        serde_json::from_value(doc.clone())
-            .map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}"),
-            })
+        serde_json::from_value(doc.clone()).map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}") })
     }
 
     /// Refuses a key whose prefix belongs to no Vocabulary this Spec declares in
@@ -1144,13 +1072,10 @@ impl ExperimentSpec {
     /// check and `validate`'s declaration check cannot see different positions
     /// (pre-freeze item 3).
     pub fn check_key_prefixes(&self) -> Result<(), SpecError> {
-        let declared: Vec<&Namespace> =
-            self.requirements.vocabularies.iter().map(|v| &v.id).collect();
+        let declared: Vec<&Namespace> = self.requirements.vocabularies.iter().map(|v| &v.id).collect();
         for entry in self.keyed_entries() {
             let key = match &entry {
-                KeyedEntry::Constraint { key, .. }
-                | KeyedEntry::Output { key, .. }
-                | KeyedEntry::Coercion { key } => *key,
+                KeyedEntry::Constraint { key, .. } | KeyedEntry::Output { key, .. } | KeyedEntry::Coercion { key } => *key,
                 // A component's parameter key is owned by the component that declares
                 // it: no Vocabulary prefix is required (pre-freeze item 3).
                 KeyedEntry::ScheduledUpdate { target, key, .. } => {
@@ -1179,8 +1104,7 @@ impl ExperimentSpec {
                     return Err(format!("{target} is not declared by this Spec"));
                 }
                 if !path.is_empty() {
-                    ResourceId::parse(path)
-                        .map_err(|error| format!("{target}: {error}"))?;
+                    ResourceId::parse(path).map_err(|error| format!("{target}: {error}"))?;
                 }
                 Ok(())
             }
@@ -1208,24 +1132,10 @@ impl ExperimentSpec {
     /// no class is declared, and every caller refuses it. This is the one reference
     /// to a declared update class, shared by `validate()` and admission (pre-freeze
     /// item 3).
-    pub(crate) fn declared_class(
-        &self,
-        target: &Target,
-        key: &Key,
-        registry: &ModuleRegistry,
-    ) -> Option<UpdateClass> {
+    pub(crate) fn declared_class(&self, target: &Target, key: &Key, registry: &ModuleRegistry) -> Option<UpdateClass> {
         match target {
-            Target::Component { component } => self
-                .graph
-                .components
-                .get(component)?
-                .params
-                .iter()
-                .find(|p| &p.key == key)?
-                .update_class,
-            Target::Resource { .. } | Target::Output { .. } => {
-                registry.key_decl(key)?.update_class
-            }
+            Target::Component { component } => self.graph.components.get(component)?.params.iter().find(|p| &p.key == key)?.update_class,
+            Target::Resource { .. } | Target::Output { .. } => registry.key_decl(key)?.update_class,
         }
     }
 
@@ -1238,27 +1148,12 @@ impl ExperimentSpec {
             req.requires
                 .iter()
                 .map(|(key, constraint)| KeyedEntry::Constraint { key, constraint })
-                .chain(req.needs.values().flat_map(|sub| {
-                    sub.requires
-                        .iter()
-                        .map(|(key, constraint)| KeyedEntry::Constraint { key, constraint })
-                }))
+                .chain(req.needs.values().flat_map(|sub| sub.requires.iter().map(|(key, constraint)| KeyedEntry::Constraint { key, constraint })))
         });
-        let outputs = self.outputs.iter().flat_map(|output| {
-            output
-                .params
-                .iter()
-                .map(|(key, value)| KeyedEntry::Output { key, value })
-        });
-        let coercion = self
-            .policies
-            .coercion
-            .keys()
-            .map(|key| KeyedEntry::Coercion { key });
+        let outputs = self.outputs.iter().flat_map(|output| output.params.iter().map(|(key, value)| KeyedEntry::Output { key, value }));
+        let coercion = self.policies.coercion.keys().map(|key| KeyedEntry::Coercion { key });
         let schedule = self.schedule.iter().filter_map(|entry| match &entry.action {
-            crate::event::ActionTemplate::UpdateParameter { target, key, value, .. } => {
-                Some(KeyedEntry::ScheduledUpdate { target, key, value })
-            }
+            crate::event::ActionTemplate::UpdateParameter { target, key, value, .. } => Some(KeyedEntry::ScheduledUpdate { target, key, value }),
             _ => None,
         });
         resources.chain(outputs).chain(coercion).chain(schedule)
