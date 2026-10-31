@@ -1,0 +1,247 @@
+{
+  "verdict": "FAIL",
+  "reasons": [
+    "rules: exit 1",
+    "rules: 2 problem(s) against HEAD",
+    "mutation: not killed, and not a survivor (only SURVIVED may be known): {'maintenance/P995': 'NOT FOUND: old occurs 2 times', 'maintenance/P998': 'NOT FOUND: old occurs 0 times'}"
+  ],
+  "started": "2026-10-31T10:05:07+00:00",
+  "finished": "2026-10-31T10:29:30+00:00",
+  "identity": {
+    "before": {
+      "head": "1277f58655c5268cf8a2e5f4133ad0b083b9c1b5",
+      "status": [
+        " M crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/tone.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M crates/ezsdr-radio-uhd/tests/hardware.rs",
+        " M handoff.md",
+        " M plan/phase8/bench.md",
+        "?? plan/phase8/tools/ssh-drop-driver.py",
+        "?? plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "untracked": [
+        "plan/phase8/tools/ssh-drop-driver.py",
+        "plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "sha256": "a6784d964a75a4b2a099e068d8596fbc838e622a64d7715b6da241a9a721cfec"
+    },
+    "after": {
+      "head": "1277f58655c5268cf8a2e5f4133ad0b083b9c1b5",
+      "status": [
+        " M crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/tone.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M crates/ezsdr-radio-uhd/tests/hardware.rs",
+        " M handoff.md",
+        " M plan/phase8/bench.md",
+        "?? plan/phase8/tools/ssh-drop-driver.py",
+        "?? plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "untracked": [
+        "plan/phase8/tools/ssh-drop-driver.py",
+        "plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "sha256": "a6784d964a75a4b2a099e068d8596fbc838e622a64d7715b6da241a9a721cfec"
+    }
+  },
+  "toolchain": {
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "docker_image": "sha256:71605cc62e3069080f9bdc7f7c60175f79b58faa21958c2da0ac4c0057ab143d",
+    "cargo_target_volume": "ezsdr-v4-cargo-target-4c403447f1f8",
+    "python314": "Python 3.14.4",
+    "python39": "Python 3.9.25"
+  },
+  "steps": [
+    {
+      "name": "fmt",
+      "command": "cargo fmt --all --check",
+      "exit": 0,
+      "seconds": 1.1,
+      "counts": {
+        "diffs": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/fmt.log",
+      "ok": true
+    },
+    {
+      "name": "test",
+      "command": "cargo test --workspace --no-fail-fast",
+      "exit": 0,
+      "seconds": 145.6,
+      "counts": {
+        "passed": 2164,
+        "failed": 0,
+        "results": 68,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/test.log",
+      "ok": true
+    },
+    {
+      "name": "clippy",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 2.0,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/clippy.log",
+      "ok": true
+    },
+    {
+      "name": "rules",
+      "command": "python3 plan/maintenance/tools/rules.py --base HEAD",
+      "exit": 1,
+      "seconds": 2.0,
+      "counts": {
+        "problems": 2,
+        "base": "HEAD"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/rules.log",
+      "ok": false
+    },
+    {
+      "name": "rules-self-test",
+      "command": "python3 plan/maintenance/tools/rules.py --self-test",
+      "exit": 0,
+      "seconds": 0.0,
+      "counts": {
+        "ok": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/rules-self-test.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-clippy",
+      "command": "docker run --rm --user 1001:1001 -v ~/local_work/Ez-SDRv4:/work -v ezsdr-v4-cargo-target-4c403447f1f8:/cargo-target -w /work ezsdr-v4-dev:uhd4.10 cargo clippy -p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 0.7,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/uhd-clippy.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-test",
+      "command": "docker run --rm --user 1001:1001 -v ~/local_work/Ez-SDRv4:/work -v ezsdr-v4-cargo-target-4c403447f1f8:/cargo-target -w /work ezsdr-v4-dev:uhd4.10 cargo test -p ezsdr-radio-uhd --features uhd --lib --test uhd_api",
+      "exit": 0,
+      "seconds": 27.8,
+      "counts": {
+        "passed": 593,
+        "failed": 0,
+        "results": 2,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/uhd-test.log",
+      "ok": true
+    },
+    {
+      "name": "hw-build",
+      "command": "docker run --rm --user 1001:1001 -v ~/local_work/Ez-SDRv4:/work -v ezsdr-v4-cargo-target-4c403447f1f8:/cargo-target -w /work ezsdr-v4-dev:uhd4.10 cargo test -p ezsdr-radio-uhd --features uhd --test hardware --no-run",
+      "exit": 0,
+      "seconds": 0.5,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/hw-build.log",
+      "ok": true
+    },
+    {
+      "name": "py314",
+      "command": "cargo build -p ezsdr-server && EZSDR_SERVER=~/.cache/cargo-target/Ez-SDRv4/debug/ezsdr-server ~/.cache/ezsdr-venv/bin/python -m unittest discover -s python/tests",
+      "exit": 0,
+      "seconds": 9.4,
+      "counts": {
+        "ran": 57,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/py314.log",
+      "ok": true
+    },
+    {
+      "name": "py39",
+      "command": "docker run --rm --user 1001:1001 -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e EZSDR_SERVER=/srv/ezsdr-server -v ~/local_work/Ez-SDRv4:/work:ro -v ~/.cache/cargo-target/Ez-SDRv4/debug/ezsdr-server:/srv/ezsdr-server:ro -w /work python:3.9-slim sh -c 'pip -q install --user numpy && python -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 10.8,
+      "counts": {
+        "ran": 57,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/py39.log",
+      "ok": true
+    },
+    {
+      "name": "mutation",
+      "command": "REMOTE_SSH='ssh -o BatchMode=yes' python3 plan/maintenance/tools/remote/remote_mutate.py all sim02:8,sim03:8",
+      "exit": 1,
+      "seconds": 1262.9,
+      "counts": {
+        "passed": 2004,
+        "total": 2007
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate/mutation.log",
+      "ok": false
+    }
+  ],
+  "mutation": {
+    "lists": {
+      "maintenance": {
+        "passed": 1628,
+        "total": 1630
+      },
+      "phase3": {
+        "passed": 83,
+        "total": 83
+      },
+      "phase4": {
+        "passed": 38,
+        "total": 38
+      },
+      "phase5": {
+        "passed": 29,
+        "total": 29
+      },
+      "phase6": {
+        "passed": 63,
+        "total": 63
+      },
+      "phase7": {
+        "passed": 163,
+        "total": 164
+      }
+    },
+    "not_killed": [
+      "maintenance/P995",
+      "maintenance/P998",
+      "phase7/G09"
+    ],
+    "known": [
+      "phase7/G09"
+    ],
+    "unexpected": [],
+    "baseline_failed": [],
+    "broken": {
+      "maintenance/P995": "NOT FOUND: old occurs 2 times",
+      "maintenance/P998": "NOT FOUND: old occurs 0 times"
+    },
+    "missing": [],
+    "missing_ids": [],
+    "notes": [],
+    "remote_exit": 1,
+    "hosts": "sim02:8,sim03:8",
+    "images": {
+      "sim02": "sha256:9c16b68d42f984dea02cde44bcdfd2263de8a2f56aa53e4ecec22eadeb162614",
+      "sim03": "sha256:1549fcdc047fac039973ab016ad6fefd250be51a7b1ab2d53b22b6ae025f696a"
+    }
+  }
+}

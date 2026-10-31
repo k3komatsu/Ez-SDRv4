@@ -7,6 +7,17 @@
 /// Ticks of the master clock in a millisecond (200 MHz).
 const MS: i64 = 200_000;
 
+/// Ticks of a 25-sample window at 1 Msps.
+const SPAN: i64 = 25 * 200;
+
+/// The outcome of a claim about the tone: PASS and INCONCLUSIVE pass the test; FAIL is evidence against the claim.
+#[derive(Debug)]
+pub enum Verdict {
+    Pass(String),
+    Inconclusive(String),
+    Fail(String),
+}
+
 /// What a capture says about a tone that may shift at `e` (design note 42's probes): the windows
 /// of 25 samples (a tone's coherence, not its magnitude: the loopback attenuates a 0.4 tone to
 /// about 0.008), the power of the noise before the burst, how many windows carry the tone on
@@ -60,12 +71,7 @@ pub fn window_tone(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> (f64, f64) {
 /// possible shift at `e`: the noise floor from the windows before the burst, signal windows inside
 /// it with coherence over 0.5 and power over 4 × floor, and the first run of three off `base_hz`.
 pub fn classify_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], burst_start: i64, burst_end: i64, e: i64, base_hz: f64) -> ToneReport {
-    const SPAN: i64 = 25 * 200;
-    // A window is 25 samples one tick spacing apart: one that straddles a hole in the capture
-    // (the packets' timestamps jump across missing samples) is dropped.
-    let windows: Vec<(i64, f64, f64, f64)> = samples
-        .chunks_exact(25)
-        .filter(|w| w[24].0 - w[0].0 == 24 * 200)
+    let windows: Vec<(i64, f64, f64, f64)> = contiguous_windows(samples)
         .map(|w| {
             let (coherence, hz) = window_tone(w);
             (w[0].0, coherence, hz, w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / 25.0)
@@ -81,7 +87,7 @@ pub fn classify_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], burst_start: i64, b
     // The move is dated only when the window before the first shifted one is a base window that
     // ends where the shifted one begins; a hole or a run of windows that carry no tone is a gap.
     // Off the base already in the burst's first window is a move at or before it (D9 F7), not a gap.
-    let gapped = first_shifted.is_some_and(|i| if i == 0 { signal[0].0 != inside[0].0 } else { signal[i].0 - (signal[i - 1].0 + SPAN) > 0 });
+    let gapped = first_shifted.is_some_and(|i| if i == 0 { signal[0].0 != inside[0].0 } else { !move_is_dated(signal[i - 1].0, signal[i].0) });
     ToneReport {
         floor,
         gapped,
@@ -94,6 +100,69 @@ pub fn classify_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], burst_start: i64, b
         // Three windows in a row more than 25 kHz off (the probes' shifts are 50 kHz): one noisy
         // window is not a move.
         moves_at: first_shifted.filter(|_| !gapped).map(|i| signal[i].0 - e),
+    }
+}
+
+/// The 25-sample windows of `samples` whose ticks are one spacing apart: a window that straddles a hole in the capture (the
+/// packets' timestamps jump across missing samples) is dropped.
+pub fn contiguous_windows(samples: &[(i64, ezsdr_radio_uhd::Iq)]) -> impl Iterator<Item = &[(i64, ezsdr_radio_uhd::Iq)]> {
+    samples.chunks_exact(25).filter(|w| w[24].0 - w[0].0 == 24 * 200)
+}
+
+/// Whether a move whose first shifted window starts at `at` is dated by the window before it, which starts at `before`: that
+/// window must end where `at` begins. A hole or a window without the tone between them leaves the move undated.
+fn move_is_dated(before: i64, at: i64) -> bool {
+    at == before + SPAN
+}
+
+/// The median window frequency in `[from, to)`.
+pub fn median_freq(freqs: &[(i64, f64)], from: i64, to: i64) -> Option<f64> {
+    let mut f: Vec<f64> = freqs.iter().filter(|(t, _)| *t >= from && *t < to).map(|(_, f)| *f).collect();
+    f.sort_by(f64::total_cmp);
+    f.get(f.len() / 2).copied()
+}
+
+/// The first window that begins a run of three windows all more than 25 kHz off `base_hz` (`windows` are `(start, hz)` in
+/// order), and whether that move is dated: the base window before the run ends where the run begins.
+fn first_move(windows: &[(i64, f64)], base_hz: f64) -> Option<(i64, bool)> {
+    let i = windows.windows(3).position(|w| w.iter().all(|(_, hz)| (hz - base_hz).abs() > 25e3) && w[2].0 - w[0].0 == 2 * SPAN)?;
+    let dated = i > 0 && (windows[i - 1].1 - base_hz).abs() <= 25e3 && move_is_dated(windows[i - 1].0, windows[i].0);
+    Some((windows[i].0, dated))
+}
+
+/// What a receive segment (ticks `from`..`to`) shows of the 100 kHz tone: the base throughout when there is no change (`e` None);
+/// the base up to `e`, then 50 kHz, with the move dated and within 25 000 ticks of `e` when there is one.
+pub fn segment_tone_verdict(blocks: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, to: i64, e: Option<i64>) -> Verdict {
+    let freqs: Vec<(i64, f64)> = contiguous_windows(blocks)
+        .filter_map(|w| {
+            let (coherence, hz) = window_tone(w);
+            (coherence > 0.5).then_some((w[0].0, hz))
+        })
+        .collect();
+    let Some(base) = median_freq(&freqs, from + 5 * MS, e.unwrap_or(to) - MS) else {
+        return Verdict::Inconclusive("no coherent tone in the segment's windows before e".to_owned());
+    };
+    let inside: Vec<(i64, f64)> = freqs.iter().copied().filter(|(t, _)| (from..to).contains(t)).collect();
+    let moved = first_move(&inside, base);
+    let moved_at = moved.map(|(at, _)| at);
+    match e {
+        None if (base - 100e3).abs() <= 10e3 && moved.is_none() => Verdict::Pass(format!("the tone holds at {base:.0} Hz")),
+        None => Verdict::Fail(format!("the tone is at {base:.0} Hz and moved at {moved_at:?}, with no change applied in this segment")),
+        Some(e) => match median_freq(&freqs, e + 5 * MS, to - MS) {
+            None => Verdict::Inconclusive("no coherent tone after e".to_owned()),
+            Some(after) => {
+                let steady = (base - 100e3).abs() <= 10e3 && (after - 50e3).abs() <= 10e3;
+                match moved {
+                    Some((at, false)) if steady => {
+                        Verdict::Inconclusive(format!("the tone moved at {at} ticks, but samples are missing between its last base window and the first shifted one: the move is not dated"))
+                    }
+                    Some((at, true)) if steady && (at - e).abs() <= 25_000 => {
+                        Verdict::Pass(format!("{base:.0} Hz before e, {after:.0} Hz after it, the move {:.1} µs from e", (at - e) as f64 / 200.0))
+                    }
+                    _ => Verdict::Fail(format!("{base:.0} Hz before e, {after:.0} Hz after it, the move at {moved_at:?} for e {e}")),
+                }
+            }
+        },
     }
 }
 

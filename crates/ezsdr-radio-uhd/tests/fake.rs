@@ -9670,6 +9670,35 @@ fn the_tone_classifier_finds_an_attenuated_shift_in_noise() {
 }
 
 #[test]
+fn the_segment_tone_moves_only_on_contiguous_samples() {
+    // No hardware: a 60 ms receive segment of a 0.4 tone at 100 kHz that moves to 50 kHz at `move_at`, with samples missing in
+    // `hole`. The verdict is for a change applied at e = 20 ms.
+    let (from, to, e) = (0i64, 60 * 200_000i64, 20 * 200_000i64);
+    let segment = |move_at: i64, hole: Option<(i64, i64)>| -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        let mut phase = 0.0f64;
+        (0..to / 200)
+            .map(|i| {
+                let t = from + i * 200;
+                phase += 2.0 * std::f64::consts::PI * (if t >= move_at { 50e3 } else { 100e3 }) / 1e6;
+                (t, [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32])
+            })
+            .filter(|(t, _)| !hole.is_some_and(|(a, b)| *t >= a && *t < b))
+            .collect()
+    };
+    let verdict = |move_at, hole| tone::segment_tone_verdict(&segment(move_at, hole), from, to, Some(e));
+    assert!(matches!(verdict(e, None), tone::Verdict::Pass(_)), "a move at e, no hole");
+    // Sol's counterexample: samples missing from e − 2 ms to e, the tone moving at e − 1 ms, the capture resuming at e on 50 kHz.
+    // The move cannot be dated, so it is not a PASS.
+    assert!(matches!(verdict(e - ms(1), Some((e - ms(2), e))), tone::Verdict::Inconclusive(msg) if msg.contains("not dated")));
+    // The same hole around a move at e: the hole hides the window that would date it.
+    assert!(matches!(verdict(e, Some((e - ms(2), e))), tone::Verdict::Inconclusive(_)));
+    // A hole after the move does not hide it.
+    assert!(matches!(verdict(e, Some((e + ms(20), e + ms(22)))), tone::Verdict::Pass(_)));
+    // A dated move 1 ms early is a FAIL.
+    assert!(matches!(verdict(e - ms(1), None), tone::Verdict::Fail(_)));
+}
+
+#[test]
 fn the_p6_loopback_count_needs_a_baseline_and_a_captured_continuation() {
     // No hardware: queued tone 0.002 from `start` to `queued_end`, a continuation after `next`, 1 sample per 200 ticks.
     let (start, queued_end) = (0i64, 20_000 * 200);

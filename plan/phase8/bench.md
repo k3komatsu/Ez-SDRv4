@@ -4,7 +4,7 @@ Phase 8 の BP0〜BP5 を実行する手順．shake-out の観測は診断用で
 
 ## 機材と RF 安全
 
-- 対象は X300 #1（serial `347D545`，slot A に OBX，`addr=192.168.40.36`）と #2（serial `347D541`，slot A に UBX 等，`addr=192.168.40.37`）．NIC はそれぞれ `enp1s0f0np0`・`enp1s0f1np1`．実際の配線と serial を probe で確認する．同時接続は同じ `/24` の経路が重なるため，必要な `/32` route を owner が用意していない限り一台ずつ使う．
+- 対象は X300 #1（serial `347D545`，slot A に OBX，`addr=192.168.40.36`）と #2（serial `347D541`，slot A に UBX 等，`addr=192.168.47.37`）．NIC はそれぞれ `enp1s0f1np1`・`enp1s0f0np0`．実際の配線と serial を probe で確認する．同時接続は同じ `/24` の経路が重なるため，必要な `/32` route を owner が用意していない限り一台ずつ使う．
 - 送信する全ての段で，該当 board の **TX/RX → 30 dB 以上・18 GHz 定格の attenuator → 同じ board の RX2** を接続する．att は最大 TX 出力に対して十分な最大入力電力定格と余裕があることを銘板・仕様で確認し，型番と電力定格を記録する．アンテナはつながない．この日の装置では 40 dB attenuator を使用した．gain 0 dB，波形振幅 0.5 以下，通常の loopback は 1 GHz を使う．
 - coercion の TX gain sweep は **streamer を開かず，LO を 1 GHz にした状態で最大 gain まで**試す．ただし CBX の下限は 1.2 GHz なので，CBX では「1 GHz」は 1.1〜1.2 GHz に clip される（UHD は error を出さない．#1 の未知の board の cleanup が 0.0 Hz を読んだ例が shake-out 4 にある）．coercion の TX frequency read-back は **全周波数範囲の格子**（OBX 10 MHz–8.4 GHz，UBX 10 MHz–6 GHz，CBX 1.2–6 GHz．gain 0，sample を送らない）を読む（`SAFE_TX_HZ` の範囲ではない）．古い試験（`pn`）が送る波形の振幅は 0.566 までで，0.5 以下なのは 3c-3a 以降の送信（`transmit_waveform`）．いずれの送信条件も上記 attenuator が必要で，RF safety の例外ではない（仕様 41 §8）．
 - `run-record.sh` は各実行で接続を質問し，`yes` 以外なら Docker や装置を使わず停止する．確認を省略する option はない．
@@ -105,8 +105,8 @@ EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=40 \
 
 | | X300 #1 | X300 #2 |
 |---|---|---|
-| serial / addr | 347D545 / `addr=192.168.40.36` | 347D541 / `addr=192.168.40.37` |
-| NIC | `enp1s0f0np0` | `enp1s0f1np1` |
+| serial / addr | 347D545 / `addr=192.168.40.36` | 347D541 / `addr=192.168.47.37` |
+| NIC | `enp1s0f1np1` | `enp1s0f0np0` |
 | 盤 | slot A OBX，slot B 空 | slot A UBX-160 v2（32BC76F），slot B CBX（329AACB） |
 | FPGA | UHD 4.10 HG（39.3，git d375d68） | 同じ（2026-10-20 に書き換え済み） |
 
@@ -233,3 +233,156 @@ docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(i
 - repo へ写すのは**完了した最終の BP2/BP3 の `measurement.json` だけ**：`crates/ezsdr-radio/measurements/<日付>-<serial>-<構成>.json`（41 §2）．shake-out，`.partial.json`，P4〜P7・MA-1・benchmark_rate の log は写さない．写す前に owner と確認．
 - orchestrator に返すもの：commit hash，run directory の path，各ブロックの結果（完走 / 止まった場所と最後の log 行），`probe.log`（FPGA，serial）と `ref_locked`，att の型番・電力定格，電源 cycle の有無，P4〜P7 と MA-1 の出力，benchmark_rate の summary，`measurement.json` の観測の要約（overflow gap の最大・最小，queue depth と `ambiguous_trials`，coercion の格子，throughput の最大成功段，同時運転の 1 組の verdict）．bench-results.md への追記は orchestrator．
 - 結果から出る owner の決め：overflow_restart_gap_ns と RM-17（最大と最小の差が最大の半分以下ならその最大を値に）；R4 の採否（P6）；R2 の要否（P4）；F7（P5）；MA-1（MockRadio の MR-34 をそろえる段階の前に，位相のばらつきの 2 通りの差）；受信・送信の throughput の値（profile 1000 MB/s）は 2 channel の結果を待って段階 4 で決める．
+
+## 2026-11-01 の手順（D9b-1a・D9b-2・L1・L2 の実機確認，#70・#72）
+
+`<COMMIT>` は D9b-1a・D9b-2・L1・L2 と本日の試験（`hardware.rs` の `hw_p72_…`・`hw_p70_…`・`hw_p4_…`・`hw_l1_…`・`hw_noise_floor_receive`，`hw_txp_b0_send_sizes` の修正，`hw_b9_transmit_only_session` の `EZSDR_B9_SECONDS`，`plan/phase8/tools/ssh-drop-tx.sh`）が入った commit（orchestrator が決める）．書いていないことは「未確認」．出典：この文書の上，[bench-results.md](bench-results.md)（2026-10-28，10-29），[39 §6](39-dsp-timed-commands.md)，[44 §3–§4](44-device-chain-state.md)，handoff §3（現在の構成）．
+
+### 構成と順番
+
+上の古い節のアドレスと NIC は 2026-10-29 より前の配線のもの．この節はこの表に従う．
+
+| | 機材 | 接続 | att |
+|---|---|---|---|
+| #1 | X300＋OBX（slot A） | `addr=192.168.40.36`，NIC `enp1s0f1np1`，`--subnet 40` | 40 dB |
+| #2 | X300＋UBX（slot A）・CBX（slot B） | `addr=192.168.47.37`，NIC `enp1s0f0np0`，`--subnet 47` | 各 30 dB |
+
+- 2 台は同時につながない（owner）．機材の順は **#2（(a)・(b)・(c)・(e)）→ 盤を替えて #1（(a)・(b)・(c)・(d)・(f)）**．ブロックの番号は見出しの順で，実行は上の機材の順．
+- 試験はすべて slot A（OBX／UBX）で行う．CBX（slot B）は 1.2 GHz 以上で `SAFE_TX_HZ`（999.5〜1000.5 MHz）の外なので，この日は流さない．
+- 注意：上の表の address と NIC は handoff §3（2026-10-29 の構成）に合わせた．段階 3e の節の表も同じ値に直した．(a) で `bench-host.sh` と `uhd_usrp_probe` が通らなければ止めて owner へ．
+- 基準は内部（`internal`）．#1 から #2 への PPS と 10 MHz は配線済みだが，この日の試験は使わない．
+- 時間は表の下の合計に入れた estimate．初回の build（volume が冷たい）は数分から十数分の追加（estimate）．
+
+### 共通の準備（送信しない）
+
+```sh
+cd <COMMIT の tree>                      # main tree で commit を checkout した状態．git status が clean であること
+mkdir -p ~/.cache/ezsdr-bench/$(date +%F)
+hw() { # $1 = 試験名．EZSDR_UHD_ARGS は呼ぶ前に機材ごとに export する．失敗なら非 0 を返す
+  local log=~/.cache/ezsdr-bench/$(date +%F)/$1.log status=0
+  docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,size=4g \
+    -v "$PWD:/work" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
+    -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS -e EZSDR_D9_P5_CASE -e EZSDR_B9_SECONDS -e EZSDR_TX200_LENGTHS -e EZSDR_TX200_SECONDS \
+    ezsdr-v4-dev:uhd4.10 cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware "$1" -- --exact --ignored --nocapture --test-threads=1 \
+    >"$log" 2>&1 || status=$?
+  grep -h 'VERDICT\|test result\|panicked' "$log"
+  ((status == 0)) && [[ $(grep -c '^test result:' "$log") == 1 ]] && grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"
+}
+run_all() { for t in "$@"; do hw "$t" || return 1; done; } # 最初の失敗で止まる
+```
+`VERDICT <主張>: <PASS|FAIL|INCONCLUSIVE>: <内容>` の行を読む．`hw` は docker／cargo の終了 status と，`test result:` の行がちょうど 1 つで `ok. 1 passed; 0 failed; 0 ignored;` であることの両方を見る．失敗すると `run_all` は止まり，同じ機材の残りも次の機材も流さない．log の panic を読み，owner に報告してから再開する．
+
+### (a) ホスト確認と装置確認（送信なし，#2 → #1，約 10 分，estimate）
+
+```sh
+plan/phase8/tools/bench-host.sh --nic enp1s0f0np0 --subnet 47            # #2．read-only．不足があれば exit 1
+docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.47.37
+# 盤を替えて #1
+plan/phase8/tools/bench-host.sh --nic enp1s0f1np1 --subnet 40
+docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.40.36
+```
+確認：serial（#2 は 347D541，#1 は 347D545），FPGA 39.3，slot A の board（UBX／OBX），master clock 200 MHz，`ref_locked` が true，10 GbE link．stop：NIC の不足が残る，find されない，ref_locked が false → 止めて owner へ．
+
+### (b) raw probe で機構を再確認（#2 UBX → #1 OBX，TX あり，約 35 分，estimate）
+
+**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 && run_all hw_d9_p5_a_stale_timed_header_after_a_reopen hw_d9_p6_every_chunk_timed hw_d9_p7_the_current_transmit_shape \
+  hw_d70_one_sample_burst_then_timed_burst hw_d9_p4_ddc_entry_after_an_early_stop                # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 && run_all hw_d9_p5_a_stale_timed_header_after_a_reopen hw_d9_p6_every_chunk_timed hw_d9_p7_the_current_transmit_shape \
+  hw_d70_one_sample_burst_then_timed_burst hw_d9_p4_ddc_entry_after_an_early_stop                # 盤を替えて #1 OBX（#2 が止まったら流さない）
+```
+- これは raw probe（`raw_uhd()`，Module を通さない）．目的は今日のイメージで前の結果が再現するかの確認．
+- P5 は 3 case（A：時刻つきの前の burst が終わった後の stale header，B：時刻なし終了，C：reopen 後の 2 サンプル）．同じ process で再現しなければ `EZSDR_D9_P5_CASE=timed`・`untimed`・`reopen` で 1 case ずつ（`hw` が渡す）．
+- 期待（bench-results 2026-10-28，10-29 の記録）：P5 C と P6 は DUC の移動が e＋25 µs；P7 は e＋40 ms まで動かない（F3′．本番の送信と同じ形を対照に残す）；D70 は 1 サンプルの burst の後の時刻つき burst が約 150 ms 早く出る（#70 の再現；2 サンプルの対照は時刻どおり）；P4 は止めた後の DDC の設定が reopen の最初の sample に残る（A，C），AUTO（B）は残らない．
+- stop：`Control operation timed out waiting for space in command buffer`，`Reference Clock PLL failed to lock` → 電源を切って入れ直す（上の規則）．期待と違う（P6 が e より後，P7 が早く動く，D70 の対照が早い）→ (c) に進まず owner へ．
+
+### (c) 本番の試験 4 本（#2 UBX → #1 OBX，TX あり，約 25 分，estimate）
+
+**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 && run_all hw_p72_timed_tx_chunks_are_timed_and_flushed hw_p70_one_sample_burst_then_timed_burst \
+  hw_p4_rx_timed_tune_then_early_stop hw_l1_held_rx_tune_applies_when_its_segment_streams                # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 && run_all hw_p72_timed_tx_chunks_are_timed_and_flushed hw_p70_one_sample_burst_then_timed_burst \
+  hw_p4_rx_timed_tune_then_early_stop hw_l1_held_rx_tune_applies_when_its_segment_streams                # 盤を替えて #1 OBX（#2 が止まったら流さない）
+```
+期待される VERDICT（本番の Module を Session または Spec Run で通す）．各試験の log には T3 の証拠（`flush evidence:` または `#72 1a:` の行：送った flush と ACK の数）が出る．
+- (c)1 `hw_p72_…`：`#72 1a`（T1：全 send に時刻，T2：closing send（0 sample の EOB を含む）が 2 sample 以上，T3：flush の ACK が 1 つ以上）は **PASS**．FAIL は止めて owner へ．INCONCLUSIVE（payload が 2 send 未満，closing send がない，flush がない，ACK が flush より少ない）は閉じる根拠に数えない．1b（DUC の tune）は取り除いた（P3）．
+- (c)2 `hw_p70_…`：booking の 2 通り（最初と一緒に／最初を送った後）とも **PASS**（one-sample と 2 sample の対照の onset の差が 50 sample 以下，TIME_ERROR と TX_UNDERFLOW なし）．INCONCLUSIVE は連続性の gap か，onset がない理由が行に出る．
+- (c)3 `hw_p4_…`：case ごとに次の VERDICT が出る（early＝cut 18 000，e より前；control＝cut 26 000，e の後）．
+  - handover：timed receive change が stop の booking より前に device に返った → **PASS**（後なら INCONCLUSIVE）．
+  - stop の effective cut：early は e より前，control は e 以降 → **PASS**．逆なら INCONCLUSIVE（「case に入っていない」）．
+  - published sample が cut と一致 → **PASS**．rejected の rx_drain・rx_restore がない → **PASS**（あれば FAIL）．
+  - device の sample（e の後を含む．publication の cut とは別に分類）で 100 kHz → 50 kHz → **PASS**．early で e の後の sample が保持されず分類できないときは **INCONCLUSIVE**（理由が出る）．この場合 P4 の early は閉じない．
+  - 同じ device の次の Run（successor segment ではなく別の Run）が 100 kHz を受ける → **PASS**．
+  - VERDICT ではなく印字だけ：「successor segment in the same Run: not exercised」，「restoration after Provider::stop: not observed」．
+- (c)4 `hw_l1_…`：1 つの Spec Run に 2 segment を置く（rx を 40 ms で stop，50 ms で start_rx，150 ms で rx 周波数の変更．変更は Run の開始時に予約される）．2 行とも **PASS**：「L1 smoke: the first segment holds 100 kHz」，「L1 smoke: the second segment holds 100 kHz up to e and moves to 50 kHz at e」．held の経路（変更の e が次の segment の準備中に来る場合）は**未実行**と記録する（印字は出ない）．
+
+閉じる規則は下の「#70・#72 の閉じ方」．
+
+### (d) L2 regression：既存の Session・Spec の送信の試験（#1 OBX，TX あり，約 20 分，estimate）
+
+**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.40.36 && run_all hw_b6_txrx_and_repeat hw_b7_session_loopback hw_b8_burst_at_a_sent_burst_s_end hw_b8_burst_one_sample_after_a_burst \
+  hw_b8_preemption hw_h5_held_last_sample hw_txp_b0_send_sizes && EZSDR_B9_SECONDS=60 hw hw_b9_transmit_only_session   # 最後は送信しない smoke（60 s）
+```
+- 期待：各 test が `test result: ok. 1 passed`．`hw_b6` は `B6 bursts:`，`hw_b7` は `B7 time errors: []`．`hw_txp_b0_send_sizes` は各 rate の `B0 sizes rate …` で，payload の大きさが窓の規則に合い，closing send が 2 sample 以上（T2）．
+- 対象は Session か Spec Run のもの．raw（`raw()`，`raw_uhd()`）は含まない．
+- optional（raw，機構の観測．L2 の判定には入れない）：`hw_h1_late_multi_packet_burst`，`hw_h2_underflow_mid_burst`．`hw <名前>` で流し，結果は L2 の表とは別に記録する（約 5 分）．
+
+### (e) TX200：200 MS/s の送信（#2 UBX，1 channel，約 15 分，estimate）
+
+**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**．TX200 は PN（200 MS/s，帯域が広い）を送り，`SAFE_TX_HZ` の範囲に収まらない．**owner が att と広帯域の送信を確認してから流す**（2026-10-29 に owner の確認のもとで流した）．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37                        # #2 UBX slot A（1 channel）
+EZSDR_TX200_LENGTHS=1000,20000 EZSDR_TX200_SECONDS=300 hw hw_tx200_hot_path_probe
+```
+- 期待：`TX200 verdict: 2 of 2 trials succeeded`．各試行の行は `class=Success`，underflow 0（2026-10-29 TXS の記録と同じ：1 000 と 20 000 の両方が 300 s を通る）．1 試行でも `failed` が出たら，その試行の行（長さ・shape・class）を残して owner へ．
+- 結果は 2026-10-29 TXS の記録と比べる．どちらも通れば TXS の結論（200 MS/s の 1 channel は 300 s を通る）を今日の commit で再確認したことになる．
+
+### (f) 送信中の ssh 切断（#1 OBX，TX あり，約 8 分，estimate）
+
+**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**
+
+前提：`ssh localhost` が鍵認証（`BatchMode`）で通ること．独立の受信機を owner に聞く（スペクトラムアナライザ，または #1 の TX を別の受信に配線）．**無いなら `EZSDR_DROP_RX_CHECK` を置かずに流す**：その場合 C2 は NOT DONE と記録され，(f) は閉じない（C1 と C3 の結果は記録する）．
+
+```sh
+cd <COMMIT の tree>
+EZSDR_DROP_BOARD=obx EZSDR_BENCH_NIC=enp1s0f1np1 EZSDR_BENCH_SUBNET=40 EZSDR_UHD_ARGS=addr=192.168.40.36 \
+EZSDR_DROP_RX_CHECK='<独立の受信機に tone か quiet を最後の行に出すコマンド（owner が決める）>' \
+  plan/phase8/tools/ssh-drop-tx.sh <COMMIT> 2>&1 | tee ~/.cache/ezsdr-bench/$(date +%F)/f-ssh-drop.console.log
+```
+- Session は本番の経路：`ssh-drop-driver.py` が組む profile（UHD Module 0.4.0，profile x3xx 0.1.0，slot A の OBX，rx0 の feed，Attached の Lease（server の既定））で `ezsdr.connect()` し，`EZSDR_SERVER` の ssh wrapper（`ssh -T -o BatchMode=yes -o ControlMaster=no -o ControlPath=none localhost`）越しに `ezsdr-v4-dev:uhd4.10` の中の `ezsdr-server` を起動する．100 kHz の tone を 1 GHz・振幅 0.4 で repeat する．
+- 順序：`tx-started` の後 5 s で **local の ssh client を PID で殺す**（wrapper が書いた pidfile）．drop の前に受信機を読めなければ（失敗・timeout），drop せずに止まる．drop の後は server の終了と受信機の quiet を，drop から 15 s の**一つの期限**で待つ（受信機の 1 回の読みは 10 s まで）．C1 と C2 の VERDICT を先に出し，**その後で**まだ動いている server を止める（後始末であって判定には使わない）．C3 は受信機の最後の読みが tone でなければ走る（読めないときも走る．その時点で送信は止まっている）．
+- 確認（3 行の VERDICT）：C1 server が終了し，Manifest に `client_disconnect`（attached の Lease）．C2 期限より前に受信機が quiet を読めば PASS．期限まで tone が残れば FAIL．期限の後に初めて quiet を読んでも FAIL．読めなければ INCONCLUSIVE．受信機が無ければ NOT DONE．C3 `hw_noise_floor_receive`（同じ device を新しい Session で開き直し，coherent tone が 1 % 未満）．**exit 0 は C1・C2・C3 がすべて PASS のときだけ**．
+- 注意：tone が止まったことは，clean な end of burst と FPGA の飢えを区別しない．RF の出力が 0 であることも示さない（LO の漏れが残りうる）．
+- C1 FAIL（15 s 後も server が動いていた）は owner へ．後始末の後も `docker ps` に `ezsdr-drop-` の container が残るなら owner へ．
+
+### #70・#72 の閉じ方
+
+- **#70**：(c)2 `hw_p70_…` が **#2 UBX と #1 OBX の両方で PASS** で閉じる．
+- **#72**：(c)1 の `#72 1a` が **両 board で PASS**，かつ (b) の raw P6 が **両 board で PASS** で閉じる．INCONCLUSIVE は閉じる根拠に数えない．
+- **INCONCLUSIVE は閉じない**．
+- 記録：[bench-results.md](bench-results.md) の `## 2026-11-01：…` 節（まだない．bench の後に orchestrator が書く）に判定を書く．
+
+### 時間の合計（estimate）
+
+| ブロック | 内容 | 機材 | 時間 |
+|---|---|---|---|
+| (a) | host と装置の確認（TX なし） | #2 → #1 | 約 10 分 |
+| (b) | raw probe 5 本 | #2 UBX，#1 OBX | 約 35 分 |
+| (c) | 本番の試験 4 本 | #2 UBX，#1 OBX | 約 25 分 |
+| (d) | L2 regression 7 本＋ smoke 1 本（optional の raw 2 本は +5 分） | #1 OBX | 約 20 分 |
+| (e) | TX200（2 長さ × 300 s） | #2 UBX | 約 15 分 |
+| (f) | ssh 切断 | #1 OBX | 約 8 分 |
+| **合計** | 盤の交換と電源 cycle，初回の build を含まない | | **約 113 分（約 2 時間）** |
+
+### 流した後
+
+- orchestrator に返すもの：commit，各ブロックの VERDICT 行（log の path），(b) の P5〜P4 の値，(c)1 の `#72 1a:` 行（flush の数と ACK の数），(c)3 の successor と restoration の印字，(c)4 の held 未実行の印，(e) の行，(f) の 3 行と使った受信機（または NOT DONE），電源 cycle の有無．
+- repo へ写すのは，owner が確認したものだけ．log は `~/.cache/ezsdr-bench/<日付>/` に残す．

@@ -1,0 +1,117 @@
+{
+  "verdict": "PARTIAL",
+  "reasons": [
+    "not run: steps fmt, test, clippy, uhd-clippy, uhd-test, hw-build, py314, py39",
+    "not run: mutation lists phase3, phase4, phase5, phase6, phase7",
+    "not run: mutation rows outside --ids (P995, P998)"
+  ],
+  "started": "2026-10-31T10:30:09+00:00",
+  "finished": "2026-10-31T10:30:35+00:00",
+  "identity": {
+    "before": {
+      "head": "1277f58655c5268cf8a2e5f4133ad0b083b9c1b5",
+      "status": [
+        " M crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/tone.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M crates/ezsdr-radio-uhd/tests/hardware.rs",
+        " M handoff.md",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase8/bench.md",
+        "?? plan/phase8/tools/ssh-drop-driver.py",
+        "?? plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "untracked": [
+        "plan/phase8/tools/ssh-drop-driver.py",
+        "plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "sha256": "b25384c525dd03a3ff7f97ee08e9bd6b152200bab30ca1dce9e1d5295c15c14b"
+    },
+    "after": {
+      "head": "1277f58655c5268cf8a2e5f4133ad0b083b9c1b5",
+      "status": [
+        " M crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/tone.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M crates/ezsdr-radio-uhd/tests/hardware.rs",
+        " M handoff.md",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase8/bench.md",
+        "?? plan/phase8/tools/ssh-drop-driver.py",
+        "?? plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "untracked": [
+        "plan/phase8/tools/ssh-drop-driver.py",
+        "plan/phase8/tools/ssh-drop-tx.sh"
+      ],
+      "sha256": "b25384c525dd03a3ff7f97ee08e9bd6b152200bab30ca1dce9e1d5295c15c14b"
+    }
+  },
+  "toolchain": {
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "docker_image": "sha256:71605cc62e3069080f9bdc7f7c60175f79b58faa21958c2da0ac4c0057ab143d",
+    "cargo_target_volume": "ezsdr-v4-cargo-target-4c403447f1f8",
+    "python314": "Python 3.14.4",
+    "python39": "Python 3.9.25"
+  },
+  "steps": [
+    {
+      "name": "rules",
+      "command": "python3 plan/maintenance/tools/rules.py --base HEAD",
+      "exit": 0,
+      "seconds": 2.0,
+      "counts": {
+        "problems": 0,
+        "base": "HEAD"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate-fix/rules.log",
+      "ok": true
+    },
+    {
+      "name": "rules-self-test",
+      "command": "python3 plan/maintenance/tools/rules.py --self-test",
+      "exit": 0,
+      "seconds": 0.0,
+      "counts": {
+        "ok": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate-fix/rules-self-test.log",
+      "ok": true
+    },
+    {
+      "name": "mutation",
+      "command": "REMOTE_SSH='ssh -o BatchMode=yes' python3 plan/maintenance/tools/remote/remote_mutate.py maintenance sim02:2 P995 P998",
+      "exit": 0,
+      "seconds": 23.3,
+      "counts": {
+        "passed": 2,
+        "total": 2
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-10-31-bench/gate-fix/mutation.log",
+      "ok": true
+    }
+  ],
+  "mutation": {
+    "lists": {
+      "maintenance": {
+        "passed": 2,
+        "total": 2
+      }
+    },
+    "not_killed": [],
+    "known": [],
+    "unexpected": [],
+    "baseline_failed": [],
+    "broken": {},
+    "missing": [],
+    "missing_ids": [],
+    "notes": [],
+    "remote_exit": 0,
+    "hosts": "sim02:2",
+    "images": {
+      "sim02": "sha256:9c16b68d42f984dea02cde44bcdfd2263de8a2f56aa53e4ecec22eadeb162614"
+    }
+  }
+}

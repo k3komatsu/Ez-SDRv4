@@ -12,6 +12,7 @@ pub const PROBE_ROW_LIMIT: usize = 65_536;
 type TimedApplyHook = Box<dyn FnMut(usize) + Send>;
 type RxScript = Box<dyn FnMut(usize) -> RxRecv + Send>;
 type StopHook = Box<dyn FnMut() + Send>;
+type KeptBlocks = Option<Vec<(i64, Vec<Iq>)>>;
 
 struct ReceiveGate {
     paused: bool,
@@ -43,6 +44,8 @@ pub struct ProbeDevice {
     tx_generations: Mutex<BTreeMap<usize, u64>>,
     tx_underflow_after_send: AtomicBool,
     tx_underflow_ready: AtomicBool,
+    /// The first channel of every block `rx_recv` returned, once `keep_rx_blocks` turned keeping on.
+    rx_blocks: Mutex<KeptBlocks>,
     gate: Mutex<ReceiveGate>,
     ready: Condvar,
 }
@@ -101,6 +104,7 @@ impl ProbeDevice {
             tx_generations: Mutex::new(BTreeMap::new()),
             tx_underflow_after_send: AtomicBool::new(false),
             tx_underflow_ready: AtomicBool::new(false),
+            rx_blocks: Mutex::new(None),
             gate: Mutex::new(ReceiveGate { paused: false, active: 0 }),
             ready: Condvar::new(),
         }
@@ -112,6 +116,16 @@ impl ProbeDevice {
 
     pub fn rows(&self) -> Vec<Json> {
         self.rows.lock().unwrap().clone()
+    }
+
+    /// From now on `rx_recv` also keeps the samples it returns, before any publication truncation.
+    pub fn keep_rx_blocks(&self) {
+        *self.rx_blocks.lock().unwrap() = Some(Vec::new());
+    }
+
+    /// The kept blocks, in the order `rx_recv` returned them: (first tick, channel 0's samples).
+    pub fn rx_blocks(&self) -> Vec<(i64, Vec<Iq>)> {
+        self.rx_blocks.lock().unwrap().clone().unwrap_or_default()
     }
 
     pub fn dropped_rows(&self) -> usize {
@@ -449,6 +463,9 @@ impl Device for ProbeDevice {
         let packet_samples = self.inner.rx_packet_samples(stream);
         let result = self.inner.rx_recv(stream, n, timeout, one_packet);
         let after = self.host_ns();
+        if let (RxRecv::Samples { first_tick, samples }, Some(blocks)) = (&result, self.rx_blocks.lock().unwrap().as_mut()) {
+            blocks.push((*first_tick, samples[0].clone()));
+        }
         self.record(json!({
             "call": "rx_recv", "stream": stream, "request_samples": n, "timeout_ns": timeout.as_nanos(),
             "packet_samples": packet_samples, "host_before_ns": before, "host_after_ns": after,
