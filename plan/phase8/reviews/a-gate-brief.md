@@ -1,0 +1,48 @@
+# Brief: one gate command with a trustworthy verdict manifest (proposal A #4), and OpenCode permissions (A #8)
+
+Worktree `~/local_work/Ez-SDRv4-gate`, branch `wip/gate` (base 92e644a). Work only there. Risk: not risky (tooling); no test plan, no Sol plan review. Read AGENTS.md §7 and §9 first. Rules: never commit or push; never run `plan/maintenance/tools/mutate.py` locally or apply a mutant to any tree (mutation only through `remote_mutate.py`); run `cargo fmt --all` before reporting (the tree is rustfmt-formatted); test temp files under /tmp; kill processes by PID only. Make new files readable: `git ls-files -m -o --exclude-standard | xargs chmod go+r` (never chmod 644). Python standard library only, run with `PYTHONDONTWRITEBYTECODE=1`; follow the style of `plan/maintenance/tools/rules.py` (long lines are fine).
+
+## 1. `plan/maintenance/tools/gate.py`
+
+Today the gate is a command list in `handoff.md` §5 ("gate") that the orchestrator copies into ad-hoc scripts; a reference script is `~/.cache/ezsdr-fixes/2026-10-31-sustain/gate-fmt.sh` (read it: it is the exact set of commands, including the docker commands for the UHD feature build and Python 3.9). Replace it with one command run from any checkout (main tree or worktree; find the root with `git rev-parse --show-toplevel`; find the Cargo target directory with `cargo metadata --format-version 1 --no-deps` for `EZSDR_SERVER`):
+
+```
+python3 plan/maintenance/tools/gate.py --out <dir> [--base <commit>] [--mutation all|<list>[,<list>...]] [--ids ID,ID,...] [--hosts sim02:8,sim03:8] [--only step,step]
+```
+
+Steps, in this order, each with its own log file in `<dir>`: `fmt` (`cargo fmt --all --check`), `test` (`cargo test --workspace --no-fail-fast`; sum passed/failed over every `test result:` line, list failing test names), `clippy`, `rules` (`rules.py --base <base>`, default HEAD) and `rules-self-test`, `uhd-clippy`, `uhd-test`, `hw-build` (the three docker commands), `py314` (build `ezsdr-server` first), `py39` (docker), and `mutation` only when `--mutation` is given (`REMOTE_SSH="ssh -o BatchMode=yes" remote_mutate.py <lists> <hosts> [IDs]`, default hosts `sim02:8,sim03:8`). Run every step even after a failure (except `--only`), and record per step: command, exit code, duration, parsed counts.
+
+Verdict rules (the point of the tool — a PASS must be evidence):
+- Every step's exit code is 0 and its parsed counts are present (a step whose output cannot be parsed is FAIL, not PASS).
+- Mutation: parse each list's `name: N/M passed; not passed or missing: [...]` line and the total line; record every row id that was not killed and every `BASELINE FAILED`, `COMPILE ERROR`, `NOT FOUND`, `SURVIVED` row from the per-row lines. The step passes only if no shard reported `BASELINE FAILED` and the not-killed set is a subset of a committed known list `plan/maintenance/tools/known-survivors.txt` (new file: one `list/ID  reason` per line; today only `phase7/G09` — read handoff §5 and `plan/phase7/` for its reason). A known survivor that is now killed is reported as a note (the list should shrink), not a failure. With `--ids`, also require every requested id to appear in the results.
+- Source identity, recorded before the first step and checked again after the last: HEAD sha, `git status --porcelain=v1` lines, and a sha256 over `git diff HEAD --binary` plus every untracked non-ignored file's path and bytes. If the identity changed during the run, the verdict is FAIL ("tree changed during gate").
+- Toolchain: `rustc -V`, `cargo -V`, `rustfmt --version`, the docker image id of `ezsdr-v4-dev:uhd4.10`, the Python versions used.
+
+Output `<dir>/gate.json`: `{"verdict": "PASS"|"FAIL", "reasons": [...], "identity": {...}, "toolchain": {...}, "steps": [{"name", "command", "exit", "seconds", "counts", "log"}], "mutation": {"lists": {...}, "not_killed": [...], "known": [...], "unexpected": [...], "baseline_failed": [...]}, "started", "finished"}`, with `$HOME` written as `~` in every path. Print one line per step and the verdict; exit 0 only on PASS.
+
+`gate.py --self-test`: assert-based checks of the parsers and the verdict on embedded sample texts (a test summary with a failure, an unparsable step, a mutation summary with an unexpected survivor, with only G09, with BASELINE FAILED, with a requested id missing, and an identity change).
+
+Verification: `--self-test`; then one full real run in the worktree **including `--mutation all`** (about 10 min local + 8 min remote; nothing else is running on sim02/sim03 now) and report its gate.json verdict and per-step counts. Expected: PASS with workspace 2163, uhd 588+5, Python 57+57, mutation 2006/2007 with G09 known. Also show one FAIL: rerun `--only fmt,rules` after appending a trailing space to some `.rs` line in a /tmp copy? No — simpler: run `--only mutation --mutation phase3 --ids M39,NOPE` and show the missing-id FAIL.
+
+## 2. Project `opencode.json` (repository root)
+
+OpenCode merges a project `opencode.json` with the global `~/.config/opencode/opencode.json` (do not edit the global file). Add a project file whose `permission` section denies, for bash commands: `git commit*`, `git push*`, `git stash*`, `git reset --hard*`, `git rebase*`, `git merge*`, `git tag*`, and running the local mutation runner (`python3 plan/maintenance/tools/mutate.py*` and `*/plan/maintenance/tools/mutate.py*`), while `remote_mutate.py`, `cargo fmt`, `cargo test` and everything else stay allowed. Check the installed OpenCode's documented permission syntax first (`opencode2 --version`, its docs or schema at https://opencode.ai/config.json; cite what you used in the report). Prove it in a scratch git repository under /tmp that contains a copy of the file: launch `opencode2 run --standalone -m opencode/deepseek-v4.1-flash-free --auto "Run exactly: git commit --allow-empty -m t; then run: python3 plan/maintenance/tools/mutate.py --help; then run: python3 plan/maintenance/tools/remote/remote_mutate.py --help 2>&1 | head -1. Report each command's result."` (create stub files at those paths in the scratch repo) and show from the log that the first two were denied and the third ran. If `--auto` overrides a deny, report that instead of claiming enforcement.
+
+## 3. Report
+
+No self-review round (orchestrator and Sol review). Write `~/.cache/ezsdr-fixes/2026-10-31-sustain/report-gate.md`: files added/changed, the real run's gate.json summary, the FAIL demonstration, the permission proof with log excerpts, anything you could not verify.
+# Brief: gate fix round 1
+
+Same worktree and rules as `impl-gate-brief.md` (read it again; never commit; mutation only through `remote_mutate.py`; `cargo fmt --all` before reporting; `chmod go+r` new files). Sol's review: `sol-gate-answer.md` (same dir), FAIL with five P2. Adopted:
+
+1. **Known survivors excuse only survival.** A known id is exempt only when its observed outcome is a survival (`SURVIVED`). `COMPILE ERROR`, `NOT FOUND`, `BASELINE FAILED`, a missing result line, or any other non-kill fails the gate even for a known id. Every row selected for the run (every row of every named list from its `mutations.json`, or exactly the `--ids`) must appear in the per-row results; compare the count with each list's summary total too.
+2. **PASS means the full gate.** Verdict `PASS` only when every step ran, `--mutation all` ran without `--ids`, and everything passed. Any healthy run that omitted steps, lists or ids gets verdict `PARTIAL` (exit 0, with `reasons` naming what was not run); any failure is `FAIL` (exit 1). Remove the separate `complete` flag if `PARTIAL` replaces it.
+3. **Docker build isolation.** The docker steps must not share a Cargo target volume between checkouts: name the volume per checkout (e.g. `ezsdr-v4-cargo-target-<first 12 hex of sha256 of the checkout's absolute path>`). Record the volume name in `gate.json`. (The first run per checkout is a cold build; that is accepted.)
+5. **No stale verdict.** At start, remove any existing `<out>/gate.json` and write `<out>/gate.json` with `"verdict": "RUNNING"` atomically (write a temp file in `<out>`, then `os.replace`). Any exception (launch failure, KeyboardInterrupt, parse error) ends with a `FAIL` manifest naming the exception; the final manifest is also written atomically.
+6. (P3) Record each remote host's mutation image id after the mutation step (`ssh <host> docker image inspect --format '{{.Id}}' ezsdr-mut` — check the image name `remote_mutate.py` uses).
+7. (Maintainability) One parser for mutation results: move the per-row line regex and the outcome classification into a function in `plan/maintenance/tools/remote/remote_mutate.py` that the gate imports, so the two cannot drift; fix `remote_mutate.py`'s handling of `killed, but recorded as equivalent` to match the gate's (that line is not a pass).
+8. Re-prove the `opencode.json` permissions on the installed OpenCode **v2.2.5** (same scratch proof as before, fresh log), and include `opencode.json` in the worktree identity of the real run.
+
+Not adopted (record in your report as "rejected by orchestrator"): Sol 4 (a flaky unrelated failure counted as a kill) — pre-existing runner behaviour, tracked separately.
+
+Verification: `gate.py --self-test` extended with each adopted case (known id with COMPILE ERROR → FAIL, missing row → FAIL, no `--mutation` → PARTIAL, `--ids` → PARTIAL, stale manifest replaced by RUNNING then FAIL on an injected exception). Then one real full run `--mutation all` in the worktree (PASS expected; the docker steps rebuild cold), and the `--only mutation --mutation phase3 --ids M39,NOPE` FAIL demonstration. No self-review round. Append "Fix round 1" to `report-gate.md`.

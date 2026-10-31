@@ -28,6 +28,17 @@ SSH = os.environ.get("REMOTE_SSH", "ssh").split()  # e.g. "ssh -F tunnels.conf"
 CPUS = os.environ.get("REMOTE_CPUS", "4")  # per shard
 EXCLUDES = [".git", "target", "v3", "tmp", ".cargo", "ezsdr-runs", ".claude", "__pycache__"]
 ALL = ["maintenance", "phase3", "phase4", "phase5", "phase6", "phase7"]
+KILLED = ("killed", "killed (timeout)")
+PASSED = KILLED + ("equivalent (survived)",)  # a recorded equivalent must survive (mutate.py)
+ROW = re.compile(r"^(\S+) (.+?): (killed|equivalent \(survived\)|SURVIVED|NOT FOUND|COMPILE ERROR|BASELINE FAILED)(.*)$")
+HEADER = re.compile(r"^--- (\S+) \((\S+)\)$")
+
+
+def row_outcome(line):
+    """(id, outcome) for a mutate.py row line, where outcome is all the text after the colon; None for other lines.
+    gate.py reads the results through this too, so the two cannot disagree about what passes."""
+    m = ROW.match(line)
+    return (m[1], (m[3] + m[4]).strip()) if m else None
 
 
 def run(*args, **kw):
@@ -78,17 +89,16 @@ def main():
             if out:
                 print(f"--- {name} ({host})\n{out}", end="")
             for line in out.splitlines():
-                if m := re.match(r"(\S+) .*: (killed|equivalent \(survived\)|SURVIVED|NOT FOUND|COMPILE ERROR|BASELINE FAILED)", line):
-                    outcomes[(name, m[1])] = m[2]
+                if found := row_outcome(line):
+                    outcomes[(name, found[0])] = found[1]
         run(*SSH, host, f"rm -rf {work}")
     missing = [row for row in rows if row not in outcomes]
-    passed = ("killed", "equivalent (survived)")  # a recorded equivalent must survive (mutate.py)
-    bad = sorted(row for row, o in outcomes.items() if o not in passed) + missing
+    bad = sorted(row for row, o in outcomes.items() if o not in PASSED) + missing
     for name in names:
         n = [row for row in rows if row[0] == name]
-        ok = sum(outcomes.get(row) in passed for row in n)
+        ok = sum(outcomes.get(row) in PASSED for row in n)
         print(f"{name}: {ok}/{len(n)} passed; not passed or missing: {[rid for nm, rid in bad if nm == name]}")
-    print(f"{sum(o in passed for o in outcomes.values())}/{len(rows)} passed; not passed or missing: {[f'{n}/{r}' for n, r in bad]}")
+    print(f"{sum(o in PASSED for o in outcomes.values())}/{len(rows)} passed; not passed or missing: {[f'{n}/{r}' for n, r in bad]}")
     return 1 if bad else 0
 
 

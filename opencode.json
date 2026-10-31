@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permissions": [
+    { "action": "shell", "resource": "git commit*", "effect": "deny" },
+    { "action": "shell", "resource": "git push*", "effect": "deny" },
+    { "action": "shell", "resource": "git stash*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --hard*", "effect": "deny" },
+    { "action": "shell", "resource": "git rebase*", "effect": "deny" },
+    { "action": "shell", "resource": "git merge*", "effect": "deny" },
+    { "action": "shell", "resource": "git tag*", "effect": "deny" },
+    { "action": "shell", "resource": "python3 plan/maintenance/tools/mutate.py*", "effect": "deny" },
+    { "action": "shell", "resource": "*/plan/maintenance/tools/mutate.py*", "effect": "deny" }
+  ]
+}

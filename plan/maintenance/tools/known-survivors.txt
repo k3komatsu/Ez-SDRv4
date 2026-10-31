@@ -1,0 +1,3 @@
+# Mutation rows that may survive the gate, one per line: list/ID, then the reason. gate.py fails on any
+# other row that is not killed, and reports a listed row that is now killed as a note (remove it then).
+phase7/G09  race in coordinator/stepping.rs: two concurrent drain_and_react calls, a window of microseconds; no black-box test wins it deterministically (plan/phase7/reviews/review-l.md, review-m.md)
