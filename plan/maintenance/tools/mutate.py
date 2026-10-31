@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Maintenance spec 20's mutation checks (plan/maintenance/20-amendments.md Appendix A, GZ-6);
-Phase 7's tool (plan/phase7/tools/mutate.py) with its directory changed.
+"""Run mutation rows from any phase using one matcher and one runner.
 
 Copies the repository into a scratch directory, and there, for each mutation in the
-JSON list: runs the mutation's test command unmutated (it must pass and run at least one
-test), replaces `old` by `new` in `file` (the text must occur exactly once), runs
-`cargo +stable test -p <crate> --test <test_bin> <filter>` again, expects it to FAIL, and
-restores the file (a mutation may name a second edit in the same file as `old2` / `new2`).
-The working tree is never modified. A mutation with a `python` field
+JSON list: runs its test unmutated (it must pass and run at least one test), applies the
+`old`/`new` replacement in `file`, runs the test again, expects it to FAIL, then restores
+the file. Rust `.rs` anchors match lexer tokens while ignoring whitespace between tokens;
+strings remain exact and comments match with internal whitespace collapsed. Other files
+use exact substrings. An optional `scope` uniquely names a Rust block by text before its
+first following balanced `{ ... }`; it limits both `old` and `old2`. A row may add a second
+replacement as `old2` / `new2`. The working tree is never modified. A mutation with a
+`python` field
 instead runs that unittest id (for example `test_easy_api.EasyApi.test_ea_17_two_channels_round_trip`)
 from the scratch copy's `python/tests`, with the interpreter in `EZSDR_PYTHON` (default: this
 one) and the scratch copy's `ezsdr-server`, built first.
@@ -19,9 +21,9 @@ The scratch directory must lie outside the repository. If it exists it must be o
 script created (it holds the marker file `.ezsdr-mutation-scratch`); anything else is
 refused and nothing is deleted.
 
-Prints one line per mutation, `M01 <name>: killed`, or `SURVIVED`, `NOT FOUND`,
-`COMPILE ERROR`, `BASELINE FAILED`, and exits 1 unless every selected mutation is
-killed. A mutation recorded as equivalent carries an `equivalent` field saying why no test
+Prints one line per mutation, `M01 <name>: killed`, or `SURVIVED`, `NOT FOUND[: reason]`,
+`COMPILE ERROR`, `BASELINE FAILED`, and exits 1 unless every selected mutation is killed.
+A mutation recorded as equivalent carries an `equivalent` field saying why no test
 can kill it in this tree; it must survive, and prints `equivalent (survived)` (spec 20,
 Appendix A: F24 once VF-4 is in). Standard library only.
 """
@@ -32,6 +34,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import anchor
 
 IGNORED = {".git", "target", "v3", "tmp", ".cargo", "ezsdr-runs", ".claude"}
 MARKER = ".ezsdr-mutation-scratch"
@@ -117,6 +120,7 @@ def ran_tests(output):
 
 
 BASELINES = {}
+ORIGINALS = {}
 
 
 def run_one(scratch, env, mutation):
@@ -127,15 +131,13 @@ def run_one(scratch, env, mutation):
     if not BASELINES[key]:
         return "BASELINE FAILED"
     path = os.path.join(scratch, mutation["file"])
-    original = open(path, encoding="utf-8").read()
-    if original.count(mutation["old"]) != 1:
-        return "NOT FOUND"
-    mutated = original.replace(mutation["old"], mutation["new"])
-    # A mutation that needs a second edit in the same file names it `old2` / `new2`.
-    if "old2" in mutation:
-        if mutated.count(mutation["old2"]) != 1:
-            return "NOT FOUND"
-        mutated = mutated.replace(mutation["old2"], mutation["new2"])
+    if mutation["file"] not in ORIGINALS:
+        ORIGINALS[mutation["file"]] = open(path, encoding="utf-8").read()
+    original = ORIGINALS[mutation["file"]]
+    try:
+        mutated = anchor.apply(original, mutation)
+    except anchor.AnchorError as error:
+        return f"NOT FOUND: {error}"
     open(path, "w", encoding="utf-8").write(mutated)
     try:
         result = cargo_test(scratch, env, mutation)

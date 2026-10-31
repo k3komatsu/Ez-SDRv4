@@ -787,8 +787,8 @@
   "id": "U32",
   "name": "orderly stop cuts at the first sample not yet delivered, as abort does",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        if mode == StopMode::Abort {\n            // RM-16: an abort ends",
-  "new": "        if true {\n            // RM-16: an abort ends",
+  "old": "        if mode == StopMode::Abort {\n            // RM-16: an abort ends the stream uhd-rx has at the first sample not yet delivered,",
+  "new": "        if true {\n            // RM-16: an abort ends the stream uhd-rx has at the first sample not yet delivered,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"

@@ -4,7 +4,7 @@ Usage (from the repository root):
     python3 plan/maintenance/tools/remote/remote_mutate.py <lists> <host:shards>[,<host:shards>...] [ID ...]
 
 <lists> is `maintenance`, `phaseN`, a comma-separated set of them, or `all` (the six lists);
-each list is run by its own plan/<list>/tools/mutate.py with its own mutations.json. Every
+every list is run by plan/maintenance/tools/mutate.py with its own mutations.json. Every
 selected row (all when no ID is given; an ID selects that row in every named list that has
 it) is dealt round-robin to the shards; each shard is one container, with its own scratch
 copy and its own Cargo target directory, that runs its rows list by list, so a shard builds
@@ -61,7 +61,7 @@ def main():
         for name in names:
             ids = [rid for n, rid in chunk if n == name]
             if ids:
-                steps.append(f"python3 plan/{name}/tools/mutate.py plan/{name}/tools/mutations.json "
+                steps.append(f"python3 plan/maintenance/tools/mutate.py plan/{name}/tools/mutations.json "
                              f"/tmp/scratch {' '.join(ids)} > /out/{i}-{name}.log 2>&1")
         inner = "cd /src && export EZSDR_PYTHON=python3; " + "; ".join(steps)
         run(*SSH, host, f"docker run -d --rm --cpus={CPUS} --name {REMOTE}-{tag}-{i} -v ~/{work}/src:/src:ro "

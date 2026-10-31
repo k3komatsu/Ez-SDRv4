@@ -5,7 +5,8 @@ Checks every 15 s:
 - a local mutate.py process (remote_mutate.py is fine);
 - a cargo test / test binary orphaned (ppid 1) or running longer than 20 min;
 - a mutation row applied in place in the main tree: its `new` text present and its
-  `old` text absent (rows with an empty `new` are skipped).
+  `old` text absent, using the same anchor matcher as the runner (rows with an empty
+  `new` are skipped).
 
 Run it in the background while an implementer works (no model in it):
     python3 plan/maintenance/tools/mutation_watchdog.py
@@ -18,6 +19,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import anchor
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 LISTS = [ROOT / "plan/maintenance/tools/mutations.json"] + sorted(ROOT.glob("plan/phase*/tools/mutations.json"))
@@ -58,6 +60,7 @@ def process_violations():
 
 
 def tree_violations():
+    texts = {}
     for path in LISTS:
         try:
             rows = json.loads(path.read_text())
@@ -67,11 +70,18 @@ def tree_violations():
             new, old = row.get("new", ""), row.get("old", "")
             if not new.strip() or not old or "file" not in row:
                 continue
+            if row["file"] not in texts:
+                try:
+                    texts[row["file"]] = (ROOT / row["file"]).read_text()
+                except OSError:
+                    continue
+            text = texts[row["file"]]
             try:
-                text = (ROOT / row["file"]).read_text()
-            except OSError:
+                new_found = anchor.find(text, new, row.get("scope"), row["file"])
+                old_found = anchor.find(text, old, row.get("scope"), row["file"])
+            except anchor.AnchorError:
                 continue
-            if new in text and old not in text:
+            if new_found and not old_found:
                 yield f"mutant {row.get('id')} looks applied in the main tree: {row['file']}"
 
 

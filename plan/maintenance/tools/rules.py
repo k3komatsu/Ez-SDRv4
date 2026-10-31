@@ -11,8 +11,8 @@ Compares the accepted texts at a base revision with the working tree and fails w
   `def test_`) — only the names in KNOWN_MISSING may be cited without existing;
 - a relative link does not resolve, in the accepted texts or in any other tracked Markdown file
   (links inside code spans and fenced blocks are text, not links);
-- a mutation row's `old`, or its `old2` after `old` is replaced as `mutate.py` does it,
-  does not occur exactly once (a string check; `mutate.py` is not run);
+- a mutation row's `old`, or its `old2` after `old` is replaced, does not match exactly once
+  with the runner's anchor matcher (`mutate.py` is not run);
 - a file's history markers or lines over 1 500 characters grow outside its closing
   Changes table (the table under a `## Changes` heading; text after the table counts);
 - handoff.md is missing or exceeds 300 lines or 40 000 bytes (AGENTS.md §9: handoff holds
@@ -34,6 +34,7 @@ import os
 import re
 import subprocess
 import sys
+import anchor
 
 RID = r"[A-Z]{2,3}-\d+[a-z]?\d*"
 DEFINITION = re.compile(rf"^(?:- \*\*({RID})\*\* |#{{2,4}} ({RID})(?: |$))", re.M)
@@ -149,16 +150,15 @@ def broken_links(path, text, exists=os.path.exists):
 def rows_exact_once(rows_of, read):
     """`rows_of(list)` gives a list's rows, `read(file)` a file's text."""
     problems = []
+    texts = {}
     for name in LISTS:
         for row in rows_of(name):
-            text = read(row["file"])
-            n = text.count(row["old"])
-            if n != 1:
-                problems.append(f"mutation row {name}/{row['id']} old occurs {n} times in {row['file']}")
-            elif "old2" in row:
-                n2 = text.replace(row["old"], row["new"]).count(row["old2"])
-                if n2 != 1:
-                    problems.append(f"mutation row {name}/{row['id']} old2 occurs {n2} times in {row['file']} after old is replaced")
+            if row["file"] not in texts:
+                texts[row["file"]] = read(row["file"])
+            try:
+                anchor.apply(texts[row["file"]], row)
+            except anchor.AnchorError as error:
+                problems.append(f"mutation row {name}/{row['id']} {error} in {row['file']}")
     return problems
 
 
@@ -260,8 +260,80 @@ def self_test():
     got = sorted(rows_exact_once(lambda n: rows.get(n, []), lambda f: texts.get(f, "")))
     want = ["mutation row maintenance/Z2 old occurs 2 times in a.rs",
             "mutation row maintenance/Z3 old occurs 0 times in a.rs",
-            "mutation row maintenance/Z5 old2 occurs 0 times in a.rs after old is replaced"]
+            "mutation row maintenance/Z5 old2 occurs 0 times after old is replaced in a.rs"]
     assert got == want, got  # Z6's old2 is made by its new: accepted, as mutate.py would
+    rust = 'fn first(){ let x=1; } fn second() { let x = 1; }'
+    assert len(anchor.find(rust, "let x = 1;", path="a.rs")) == 2, "self-test: Rust whitespace-insensitive matches"
+    assert len(anchor.find(rust, "let x=1;", scope="fn second", path="a.rs")) == 1, "self-test: scope disambiguates"
+    numbers = "1 0xff 0o77 0b10 1.5 1e-6 2.5E+3 1u32 1.0f64 1_000"
+    assert [token.value for token in anchor._tokens(numbers)] == numbers.split(), \
+        "self-test: numeric literals, exponents, and suffixes are indivisible"
+    for source, partial, complete in (("1e-6", "6", "1e-6"),
+                                      ("r#name", "name", "r#name"),
+                                      ("αname", "name", "αname"),
+                                      ("1.5", "5", "1.5")):
+        assert not anchor.find(source, partial, path="a.rs"), \
+            f"self-test: partial token {partial!r} matched in {source!r}"
+        assert len(anchor.find(source, complete, path="a.rs")) == 1, \
+            f"self-test: complete token {complete!r} did not match"
+    assert [token.value for token in anchor._tokens("1..2")] == ["1", ".", ".", "2"], \
+        "self-test: a range is not a fractional literal"
+    assert [token.value for token in anchor._tokens("t.0.1")] == ["t", ".", "0", ".", "1"], \
+        "self-test: tuple indices after dots remain integer tokens"
+    assert [token.value for token in anchor._tokens("1.max")] == ["1", ".", "max"], \
+        "self-test: a method call on an integer is not a fractional literal"
+    for invalid in ("0b102", "1e-", "١"):
+        try:
+            anchor._tokens(invalid)
+        except anchor.AnchorError:
+            pass
+        else:
+            raise AssertionError(f"self-test: unsupported partial tokenization of {invalid!r}")
+    for scope, scoped, count in (("fn absent", rust, 0),
+                                 ("fn first", rust + " fn first() { let x=1; }", 2)):
+        try:
+            anchor.find(scoped, "let x=1;", scope=scope, path="a.rs")
+        except anchor.AnchorError as error:
+            assert f"scope matches {count} times" in str(error), error
+        else:
+            raise AssertionError(f"self-test: expected invalid scope {scope!r}")
+    quoted = 'fn f(){ let s = "a  b"; /* one  two */ x(); }'
+    assert len(anchor.find(quoted, 'let s="a  b";', path="a.rs")) == 1, "self-test: whitespace around tokens"
+    assert not anchor.find(quoted, 'let s = "a b";', path="a.rs"), "self-test: string whitespace is significant"
+    assert len(anchor.find(quoted, "/* one two */ x();", path="a.rs")) == 1, "self-test: comment whitespace collapses"
+    braces = ('impl TxChain { const OPEN: &str = "{"; // } { don\'t close the block\n'
+              '/* outer { /* nested } { */ still } */ fn close_device_burst() { action(); } }')
+    assert len(anchor.find(braces, "action();", scope="impl TxChain", path="a.rs")) == 1, \
+        "self-test: braces in strings and nested comments do not end scope"
+    nested = "fn outer() { match value { inner(); } action(); }"
+    assert len(anchor.find(nested, "action();", scope="fn outer() {", path="a.rs")) == 1, \
+        "self-test: a scope ending with its opening brace selects that block"
+    try:
+        anchor.find(braces + " impl TxChain {}", "action();", scope="impl TxChain", path="a.rs")
+    except anchor.AnchorError as error:
+        assert "scope matches 2 times" in str(error), error
+    else:
+        raise AssertionError("self-test: ambiguous scope")
+    assert not anchor.find("x  = 1", "x = 1", path="a.py"), "self-test: Python anchors stay exact"
+    assert anchor.find("x = 1", "x = 1", path="a.py") == [(0, 5)], "self-test: Python exact span"
+    raw = 'fn raw() { let s = r##"{ a  b }"##; let b = br#"{x}"#; }'
+    assert len(anchor.find(raw, 'r##"{ a  b }"##', path="a.rs")) == 1, \
+        "self-test: hashed raw-string contents stay one exact token"
+    assert len(anchor.find(raw, 'br#"{x}"#', scope="fn raw", path="a.rs")) == 1, \
+        "self-test: raw byte string braces do not affect scope"
+    literals = "fn f<'a>() { let c = 'a'; let q = '\\''; let b = b'x'; }"
+    assert len(anchor.find(literals, "'a", path="a.rs")) == 1, \
+        "self-test: a lifetime does not match a char literal"
+    assert len(anchor.find(literals, "'a'", path="a.rs")) == 1, \
+        "self-test: char literals are one token"
+    assert len(anchor.find(literals, "'\\''", path="a.rs")) == 1, \
+        "self-test: escaped char literals are one token"
+    assert len(anchor.find(literals, "b'x'", path="a.rs")) == 1, \
+        "self-test: byte char literals are one token"
+    assert not anchor.find("let x = 1; /* comment tail */", "let x = 1; /* comment", path="a.rs"), \
+        "self-test: a partial block-comment anchor does not match"
+    edited = anchor.apply(texts["a.rs"], rows["maintenance"][3])
+    assert "y = 1" not in edited, "self-test: old2 is applied after old"
     assert not run({**base, "design/02-y.md": two.replace("SC-1** d", "SC-1** d (KC-24)")}), "self-test: a KC citation is no marker"
     live = {**base, LIVE_PLAN[0]: "- **OV-1** a rule.\n"}
     assert any("rule id OV-1 " in p for p in check(live, {**live, LIVE_PLAN[0]: "- OV-1 a rule.\n"}, tests, {})), "self-test: a live plan id"

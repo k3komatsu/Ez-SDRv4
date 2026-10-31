@@ -96,7 +96,7 @@ CARGO_TARGET_DIR="$HOME/.cache/cargo-target/Ez-SDRv4" EZSDR_TEST_WATCHDOG_SECS=9
 The stress probe raises the watchdog's bound on purpose: under heavy
 oversubscription a single smoke test legitimately takes far longer than its
 normal ~50 s, and the probe is measuring load failures, not hangs. The default
-(120 s) is the mutation shards' bound, below `mutate.py`'s 180 s timeout.
+(120 s) is the mutation shards' bound, below the runner's 180 s timeout.
 
 This is a host timing/load probe, not a portable requirement that every developer
 machine service 128 concurrent radios within the UHD deadlines. Keep its complete
