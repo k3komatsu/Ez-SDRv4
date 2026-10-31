@@ -128,12 +128,22 @@ Each implementation step runs in this order (owner, 2026-10-18: for a risky step
    - every planned sequence has its test, the test observes what the plan says, and the mutation row breaks it;
    - scope against the plan, missing and extra;
    - a grep over every position for each "every / only / all" claim;
-   - every `design/` text the change makes false, listed in the amendments.
+   - every `design/` text the change makes false, listed in the amendments;
+   - maintainability introduced or worsened by the step, against the checks below.
 6. The orchestrator reviews the brief's fidelity, behaviour that must not change, and design intent.
-7. Sol reviews the code independently, including scenarios the test plan missed.
+7. Sol reviews the code independently, including scenarios the test plan missed and the step's maintainability (below).
 8. The orchestrator adjudicates both reviews and the implementer fixes the adopted findings. After a fix for a major, Sol re-reviews the fix and the sequences next to it. A fix round runs the tests and the mutation rows it touched or added (§7); new tests are repeated (20 runs) only when their verdict can depend on timing (a manual or wall clock, threads), not when they are pure (owner, 2026-10-26); the full lists, the image build and the Python suites run at the orchestrator's gate, and again for whatever changes after it. The step's review record counts its findings by source, severity and mechanism, matched against `plan/maintenance/failure-mechanisms.md`.
 
 Self-review is a cheap first filter. It never replaces steps 6 and 7: the same model keeps the same blind spots, and a cheaper reviewer misses more, so a self-review that ends satisfied proves nothing about the tests' power. The orchestrator steps in at the brief, the test plan and the report, not between rounds; a background watchdog shell (no model, `plan/maintenance/tools/mutation_watchdog.py`) reports a breach of the mutation rule below. Whether steps 2 and 3 pay is judged after the next two or three risky steps, from their review records (wait for reviews, fix rounds, majors found after the plan).
+
+**Maintainability** (owner, 2026-10-31; the rule reviewed by Sol the same day). Correctness gates do not stop code and tests from growing (in the UHD Module the tests are about five times the production code). Reviews in steps 5–7 therefore also check production code, tests and mutation rows. Read connected code, but require changes only for problems the step introduces or worsens:
+1. **Duplication:** search for an existing helper or decision before accepting another copy. Name the copies and what would have to change together; do not merge code merely because it looks alike.
+2. **State:** keep each lifecycle fact with its owning state and transitions, not in independently updated flags or caches. Name the competing representations and the sequence that could make them disagree.
+3. **Tests:** test pure decisions at that level; retain caller, concurrency and device-path tests for wiring and ordering. Reuse fixtures and repeated setup without hiding the sequence or assertions. Follow the brief's named cases; remove coverage only with evidence that its failure case is unreachable or covered elsewhere.
+4. **Leftovers:** remove code, parameters, tests and mutation rows the step makes obsolete, including outside edited hunks. Retarget rows when behaviour remains reachable.
+5. **Mutation rows:** mutate the intended behaviour with the smallest uniquely matching source text practical. Avoid unrelated context and production scaffolding added only as an anchor.
+
+Findings need concrete evidence, not style preferences or line-count targets. Maintainability alone is minor or a note by default; duplicated decisions or scattered lifecycle facts may be major when a concrete inconsistency risk is shown. Correctness findings keep their normal severity. Assign mechanism labels only when their definitions fit; §6 still applies. Pre-existing maintainability debt goes to the Phase 8-end review of code and test architecture (handoff §2), not a step-wide refactor. Minor-only fixes do not add a Sol re-review.
 
 Coordination:
 - Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).
