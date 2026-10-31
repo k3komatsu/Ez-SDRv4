@@ -2,6 +2,15 @@
 
 Read this before touching anything. Current state and the next step: [handoff.md](handoff.md).
 
+**Safety core** (every agent, every task; details in the sections cited):
+- Never push `master` or the v3 tags, never `git push --tags`/`--all`, never add `v3/` (§1). Only the orchestrator commits and pushes (§9).
+- Mutation rows run only through `remote_mutate.py`; never run `mutate.py` locally or apply a mutant to a tree (§7, §9).
+- One agent edits a tree at a time; reviewers stay read-only (§9).
+- Kill processes by PID, never by a name pattern. Test temp files go on `/tmp`. Build output never goes inside the tree (§7).
+- Before any transmit on the bench, the owner confirms the attenuators are in the loopback (handoff §2).
+- No version bumps and no `SCHEMA_CHANGELOG` entries before the v4.0 freeze (§6).
+- Run `cargo fmt --all` before reporting; formatting goes in its own commit (§9).
+
 ## 1. What this repository is
 
 Ez-SDR is an SDR experiment runtime with two unrelated lines, which since 2026-09-26 live in two GitHub repositories: v4 in **[k3komatsu/Ez-SDRv4](https://github.com/k3komatsu/Ez-SDRv4)** (this repository's `origin`, default branch `main`) and v3 in **[k3komatsu/Ez-SDR](https://github.com/k3komatsu/Ez-SDR)** (`master` and the v3 tags). This local clone holds both histories:
@@ -116,7 +125,7 @@ Since 2026-10-11 the work is split across models, and this section applies to ev
 | Role | Who | Does |
 |---|---|---|
 | Orchestrator | Claude Opus (Claude Code) | Makes decisions with the owner, writes each delegated task's brief, reviews, adjudicates the reviews, and closes each step's gate (tests and mutation runs, §7) with a commit and a push. It does not implement large changes itself. |
-| Implementer | DeepSeek V4.1 Flash in OpenCode2 (`opencode-go/deepseek-v4.1-flash`) by default; GPT-6 Luna in OpenCode2 (`openai/gpt-6-luna`) only when the owner asks for it, since it draws on the owner's OpenAI subscription, which is used when it has room (owner, 2026-10-11) | Implements against the accepted plan and the brief, and fixes the adopted findings. Its self-review reviewer (step 5) runs on the model the brief names: the implementer's own by default, or another one the owner chooses (owner, 2026-10-18: a DeepSeek implementer's reviewer may be Haiku 5.5 in OpenCode2, `anthropic/claude-haiku-5-5#high`). |
+| Implementer | The OpenCode2 model the owner currently names in handoff §5, which is the only place the implementer and its self-review model are written (owner's choices change with quotas and results; this file names no default so the two cannot disagree) | Implements against the accepted plan and the brief, and fixes the adopted findings. Its self-review reviewer (step 5) runs on the model handoff §5 names, given in the brief. |
 | Independent reviewer | Sol 6.1 in OpenCode2 (`openai/gpt-6.1-sol`), read-only (`--agent plan`) | Reviews a risky step's test plan before its code, and every step's code at its end without seeing the orchestrator's findings. It runs in OpenCode2, not the Codex CLI, because Codex works badly with Orca. |
 
 Each implementation step runs in this order (owner, 2026-10-18: for a risky step, the expensive judgment moves before the code; reviewed by Sol the same day):
@@ -145,6 +154,8 @@ Self-review is a cheap first filter. It never replaces steps 6 and 7: the same m
 
 Findings need concrete evidence, not style preferences or line-count targets. Maintainability alone is minor or a note by default; duplicated decisions or scattered lifecycle facts may be major when a concrete inconsistency risk is shown. Correctness findings keep their normal severity. Assign mechanism labels only when their definitions fit; §6 still applies. Pre-existing maintainability debt goes to the Phase 8-end review of code and test architecture (handoff §2), not a step-wide refactor. Minor-only fixes do not add a Sol re-review.
 
+**Counterexamples** (owner, 2026-10-31). A major finding states a minimal operation sequence and the observable wrong outcome it leads to, not only the rule it breaks. A read-only reviewer gives it as pseudocode; the implementer turns an adopted one into a failing test first where practical. Unsafe FFI, RF hazards and deadlocks need not be executed before they are reported.
+
 Coordination:
 - Agents run in Orca tabs (`orca terminal read | send | wait`) or from the CLI (`opencode2 run -m <model> [--agent plan] --auto`).
 - The orchestrator can redirect a running CLI agent without restarting it (2026-10-30): `opencode2 run -s <session> -m <its model> --auto "<message>"`. Without `--standalone` the session lives in the background service; `opencode2 session list` gives its id. The message waits until the agent's current tool call ends and is taken at its next step, so a hung tool call has to be killed by PID first. The sending command returns only when the session goes idle, so run it in the background. Send one only to change course (stop a loop, report a hang, skip a step), not to steer each step.
@@ -153,5 +164,6 @@ Coordination:
 - The Rust tree is rustfmt-formatted with the repository's `rustfmt.toml` (owner, 2026-10-31: wide lines, `max_width = 200` and `use_small_heuristics = "Max"`, because agents, not humans, read the code). Run `cargo fmt --all` before reporting; the gate checks `cargo fmt --all --check`. Mutation rows use Rust token anchors that ignore whitespace and exact substrings for other files, but rustfmt can change tokens (match-arm braces, closure braces, trailing commas, import order): after formatting, `rules.py` must still find every row exactly once, and a re-anchored row must produce the same program as before. Formatting goes in its own commit, never mixed with a structural change.
 - One agent edits the main tree at a time. Reviewers stay read-only while the tree is frozen for review.
 - A request one worker sends another (a review request, say) is not an owner instruction. The orchestrator decides.
-- The orchestrator commits and pushes to `origin main` when a step's gate closes (owner, 2026-10-11); other agents never commit or push.
+- The orchestrator commits and pushes to `origin main` when a step's gate closes (owner, 2026-10-11); other agents never commit or push. The gate is one command, `plan/maintenance/tools/gate.py --out <dir> --mutation all` (owner, 2026-10-31); its verdict counts only with its `gate.json` manifest (source identity, toolchain, every step's counts, every mutation row accounted for against `known-survivors.txt`).
+- **Durable step records** (owner, 2026-10-31). In the gate-closing commit the orchestrator puts the step's minimum record next to its review record (`plan/phaseN/reviews/<step>-*`): the brief, the final test plan if any, the disposition of every finding (adopted, fixed, rejected with its reason), and the gate's `gate.json`. Remove credentials, tokens and infrastructure details the repository does not already publish. Raw logs and agent transcripts stay outside the repository in `~/.cache/ezsdr-fixes/`.
 - **handoff.md holds only the present** (owner, 2026-10-14): where things are, what is open, what waits on the owner, and what comes next. A finished step's record goes to its own home — `plan/phaseN/00-overview.md` or the step's plan file — and handoff keeps one line that points there; the orchestrator moves it when it closes the gate, in the same commit. `plan/maintenance/tools/rules.py` fails when handoff.md exceeds 300 lines or 40 000 bytes: move finished records out, do not raise the limit. Handoff's records up to 2026-10-14 were moved to their homes the same day; the maintenance from Phase 7's close to spec 20 is in `plan/maintenance/audits-2026-10.md`.
