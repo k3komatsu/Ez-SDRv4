@@ -817,6 +817,8 @@ pub struct FakeDevice {
     state: Mutex<Fake>,
     #[cfg(test)]
     pub(crate) eob_error: Mutex<Option<DeviceError>>,
+    #[cfg(test)]
+    tx_send_gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     /// The next `time_now` first sleeps this long on the host clock, once, as
     /// `FakeFault::SlowTimeRead` does from its instant on: a test's one wide bracket (UR-7).
     #[cfg(test)]
@@ -884,8 +886,20 @@ impl FakeDevice {
             #[cfg(test)]
             eob_error: Mutex::new(None),
             #[cfg(test)]
+            tx_send_gate: Mutex::new(None),
+            #[cfg(test)]
             slow_next_read: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_next_payload_eob_send(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *self.tx_send_gate.lock().unwrap() = Some((entered, released));
+        (reached, release)
     }
 
     /// The device's front end table for `dir`: every `(slot, front end)` pair of its
@@ -1906,6 +1920,13 @@ impl Device for FakeDevice {
         eob: bool,
         timeout: Duration,
     ) -> Result<usize, DeviceError> {
+        #[cfg(test)]
+        if let Some((entered, release)) = self.tx_send_gate.lock().unwrap().take() {
+            assert!(sob && eob && samples.first().is_some_and(|samples| !samples.is_empty()),
+                "the test gate is for a payload-bearing SOB/EOB send");
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
         #[cfg(test)]
         if eob {
             if let Some(error) = self.eob_error.lock().unwrap().clone() { return Err(error); }

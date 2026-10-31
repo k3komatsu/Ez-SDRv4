@@ -9871,30 +9871,30 @@
   } ,
   {
    "id": "P640",
-  "name": "UHD leaves one sample between an EOB with the last payload and its restart (UR-23)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
-   "new": "                    self.remember_front(clock.domain, close_start.saturating_add(2));",
+   "name": "UHD leaves one sample between an EOB with the last payload and its restart (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
+    "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
  } ,
   {
-   "id": "P641",
-   "name": "an empty Stop EOB needs the gap after its two closing samples (UR-23)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
-   "new": "                    self.remember_front(clock.domain, close_start.saturating_add(2));",
+    "id": "P641",
+    "name": "an empty Stop EOB needs the gap after its two closing samples (UR-23)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
+    "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
  } ,
- {
-  "id": "P642",
-  "name": "Stop retains the UHD cursor as a front for a later burst (UR-23)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
-   "new": "                    self.remember_front(clock.domain, close_start);",
+  {
+   "id": "P642",
+   "name": "Stop retains the UHD cursor as a front for a later burst (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
+    "new": "                    self.chain.advance_front(clock.domain, close_start);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
@@ -9943,8 +9943,8 @@
   "id": "P647",
   "name": "uhd-tx does not compare a closed front across SampleClocks (UR-21)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let front = self.front.filter(|(domain, _)| *domain == clock.domain).map(|(_, sample)| sample);",
-  "new": "        let front = self.front.map(|(_, sample)| sample);",
+   "old": "        let front = self.chain.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, sample)| sample);",
+   "new": "        let front = self.chain.front().map(|(_, sample)| sample);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_cold_change_does_not_inherit_old_tx_front"
@@ -10039,12 +10039,12 @@
   "test_bin": "lib",
   "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
   },
- {
-  "id": "P657",
-  "name": "an abandoned send keeps two safe samples after its accepted cursor (UR-23)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    self.remember_front(clock.domain, cursor.saturating_add(3));",
-   "new": "                    self.remember_front(clock.domain, cursor.saturating_add(2));",
+  {
+   "id": "P657",
+   "name": "an abandoned send keeps two safe samples after its accepted cursor (UR-23)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "                    self.chain.advance_front(clock.domain, cursor.saturating_add(3));",
+    "new": "                    self.chain.advance_front(clock.domain, cursor.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -10073,8 +10073,8 @@
   "id": "P660",
   "name": "a late move past the cursor closes the prior device burst (UR-21)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        if held.k == next && (self.continues_at.is_some() || self.open.as_ref().is_some_and(|open| !open.first)) {",
-  "new": "        if held.k != next && (self.continues_at.is_some() || self.open.as_ref().is_some_and(|open| !open.first)) {",
+   "old": "        if held.k == next && (self.chain.burst_is_open() || self.open.as_ref().is_some_and(|open| !open.first)) {",
+   "new": "        if held.k != next && (self.chain.burst_is_open() || self.open.as_ref().is_some_and(|open| !open.first)) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_late_move_past_the_cursor_closes_before_a_held_burst"
@@ -14892,8 +14892,8 @@
       "id": "P1172",
       "name": "an uncertain EOB close is recovered before later timed data (D9b-1a T2/T3)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "        if self.reopen_needed {\n            return self.reopen_streamer();\n        }",
-      "new": "        if false && self.reopen_needed {\n            return self.reopen_streamer();\n        }",
+       "old": "        if self.chain.needs_reopen() {\n            return self.reopen_streamer();\n        }",
+       "new": "        if false && self.chain.needs_reopen() {\n            return self.reopen_streamer();\n        }",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_failed_eob_close_recovers_with_flush_before_the_next_timed_burst"
@@ -15030,10 +15030,10 @@
       },
       {
        "id": "P1186",
-       "name": "a held-tail EOB rejects the sample before its safe start (UR-23)",
+        "name": "a held-tail EOB rejects the sample before its safe start (UR-23)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "                    self.remember_front(clock.domain, close_start.saturating_add(3));",
-       "new": "                    self.remember_front(clock.domain, close_start.saturating_add(2));",
+       "old": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
+       "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played"
@@ -15112,8 +15112,8 @@
        "id": "P1194",
        "name": "Stop or device loss ends an uncertain streamer reopen (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "            if streams.stop.is_some() || core.is_lost() {\n                self.reopen_needed = false;\n                return false;\n            }",
-       "new": "            if streams.stop.is_some() || core.is_lost() {\n                self.reopen_needed = false;\n                return true;\n            }",
+       "old": "            if streams.stop.is_some() || core.is_lost() {\n                if core.is_lost() { self.chain.lose(); } else { self.chain.provider_stop(); }\n                return false;\n            }",
+       "new": "            if streams.stop.is_some() || core.is_lost() {\n                return false;\n            }",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_22_uncertain_reopen_waits_for_owner_claim_and_stops_on_stop_or_loss"
@@ -15152,7 +15152,7 @@
         "id": "P1198",
         "name": "payload waits while TX streamer recovery is pending (D9b-1a fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if self.reopen_needed { return false; }",
+        "old": "if self.chain.needs_reopen() { return false; }",
         "new": "if false { return false; }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
@@ -15163,7 +15163,7 @@
         "name": "ordinary TX Stop preserves pending recovery (D9b-1a fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
         "old": "        self.end_open(true);\n        let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();",
-        "new": "        self.end_open(true);\n        self.reopen_needed = false;\n        let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();",
+        "new": "        self.end_open(true);\n        self.chain.provider_stop();\n        let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_tx_stop_preserves_recovery_for_later_bursts"
@@ -16047,5 +16047,205 @@
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_loss_published_before_rx_recv_skips_the_device_call"
+      },
+      {
+        "id": "P1296",
+        "name": "closing the device burst clears its cursor and tail (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn close_device_burst(&mut self) { self.burst = DeviceBurst::Closed; }",
+        "new": "    fn close_device_burst(&mut self) {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_device_burst_open_matrix"
+      },
+      {
+        "id": "P1297",
+        "name": "same-domain safe fronts never regress (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));",
+        "new": "        let sample = sample;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_device_burst_open_matrix"
+      },
+      {
+        "id": "P1298",
+        "name": "successful non-lost reopen ends recovery even when T3 is unacknowledged (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        if result.is_ok() { self.chain.reopen_succeeded(); }",
+        "new": "        if result.is_ok() {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
+      },
+      {
+        "id": "P1299",
+        "name": "loss clears the per-streamer burst cursor and tail (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn lose(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
+        "new": "    fn lose(&mut self) {\n        self.recovery = Recovery::Clean;\n    }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_recovery_transitions"
+      },
+      {
+        "id": "P1300",
+        "name": "only an adopted segment clears Halted recovery (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "                    self.chain.next_segment_adopted();",
+        "new": "                    self.chain.reopen_failed();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_halted_tx_chain_resets_only_when_the_next_segment_is_adopted"
+      },
+      {
+        "id": "P1301",
+        "name": "a refused or interrupted switch does not clear Halted recovery (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        let Some(switch) = self.switch.take() else { return };\n        self.end_open(true);",
+        "new": "        let Some(switch) = self.switch.take() else { return };\n        self.chain.next_segment_adopted();\n        self.end_open(true);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_halted_tx_chain_resets_only_when_the_next_segment_is_adopted"
+      },
+      {
+        "id": "P1302",
+        "name": "Provider::stop clears recovery only after ending the open burst (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);\n        self.chain.provider_stop();",
+        "new": "        self.chain.provider_stop();\n        self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_26_provider_stop_ends_recovery_after_stop_and_keeps_shutdown_report_reads"
+      },
+      {
+        "id": "P1303",
+        "name": "Stop during a claimed reopen clears pending recovery without refusal (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "            } else {\n                self.chain.provider_stop();\n            }\n            streams.give_back(claim);",
+        "new": "            } else { }\n            streams.give_back(claim);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
+      },
+      {
+        "id": "P1304",
+        "name": "loss during a claimed reopen ends recovery without further device work (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "            } else if core.is_lost() {\n                self.chain.lose();\n            }",
+        "new": "            } else if core.is_lost() {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
+      },
+      {
+        "id": "P1305",
+        "name": "the TX owner returns its claim after interrupted recovery (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "            } else {\n                self.chain.provider_stop();\n            }\n            streams.give_back(claim);\n        }",
+        "new": "            } else {\n                self.chain.provider_stop();\n            }\n        }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_stop_and_loss_during_owner_recovery_release_the_claim"
+      },
+      {
+        "id": "P1306",
+        "name": "streamer replacement discards old-generation TX correlations (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "            self.unacked.clear();",
+        "new": "            let _ = self.unacked.len();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
+      },
+      {
+        "id": "P1307",
+        "name": "a failed reopen enters Halted recovery and abandons its cursor (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn reopen_failed(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Halted;\n    }",
+        "new": "    fn reopen_failed(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_recovery_transitions"
+      },
+      {
+        "id": "P1308",
+        "name": "only Halted recovery resets when a new segment is adopted (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn next_segment_adopted(&mut self) {\n        if self.recovery == Recovery::Halted { self.recovery = Recovery::Clean; }\n    }",
+        "new": "    fn next_segment_adopted(&mut self) { self.recovery = Recovery::Clean; }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_recovery_transitions"
+      },
+      {
+        "id": "P1309",
+        "name": "Provider::stop ends pending reopen work (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn provider_stop(&mut self) { self.recovery = Recovery::Clean; }",
+        "new": "    fn provider_stop(&mut self) {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_recovery_transitions"
+      },
+      {
+        "id": "P1310",
+        "name": "a nonterminal failed reopen enters Halted at the owner call site (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "                self.halt_failed_reopen(&mut streams, key);\n                self.chain.reopen_failed();\n                halted = true;",
+        "new": "                self.halt_failed_reopen(&mut streams, key);\n                self.chain.reopen_succeeded();\n                halted = true;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+      },
+      {
+        "id": "P1311",
+        "name": "a front from another clock domain is replaced (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "        let sample = self.front.filter(|(old_domain, _)| *old_domain == domain).map_or(sample, |(_, old)| old.max(sample));",
+        "new": "        let sample = self.front.map_or(sample, |(_, old)| old.max(sample));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_device_burst_open_matrix"
+      },
+      {
+        "id": "P1312",
+        "name": "only a fully acknowledged T3 advances the front (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "            if flush.acknowledged {\n                self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));\n            }",
+        "new": "            self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
+      },
+      {
+        "id": "P1313",
+        "name": "opening a device burst stores its cursor and held tail (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn open_device_burst(&mut self, next: i64, tail: Option<Tail>) {\n        assert!(matches!(self.burst, DeviceBurst::Closed));\n        self.burst = DeviceBurst::Open { next, tail };\n    }",
+        "new": "    fn open_device_burst(&mut self, next: i64, tail: Option<Tail>) {\n        assert!(matches!(self.burst, DeviceBurst::Closed));\n        self.burst = DeviceBurst::Closed;\n    }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_device_burst_open_matrix"
+      },
+      {
+        "id": "P1314",
+        "name": "continuing a device burst preserves its held tail (L2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "    fn continue_device_burst(&mut self, next: i64, tail: Option<Tail>) {\n        assert!(self.burst_is_open());\n        self.burst = DeviceBurst::Open { next, tail };\n    }",
+        "new": "    fn continue_device_burst(&mut self, next: i64, tail: Option<Tail>) {\n        assert!(self.burst_is_open());\n        self.burst = DeviceBurst::Open { next, tail: None };\n    }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "tx_chain_device_burst_open_matrix"
+      },
+      {
+        "id": "P1315",
+        "name": "a non-lost payload EOB error does not restore recovery after concurrent loss (L2 fix)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        "old": "                    self.core.reject_note(json!({ \"call\": \"tx_close\", \"stream\": self.k, \"error\": error.message }));\n                    if self.core.is_lost() { self.chain.lose(); } else { self.chain.mark_reopen_needed(); }",
+        "new": "                    self.core.reject_note(json!({ \"call\": \"tx_close\", \"stream\": self.k, \"error\": error.message }));\n                    if error.lost { self.chain.lose(); } else { self.chain.mark_reopen_needed(); }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_29_non_lost_payload_eob_error_after_concurrent_loss_does_not_reopen"
       }
   ]
