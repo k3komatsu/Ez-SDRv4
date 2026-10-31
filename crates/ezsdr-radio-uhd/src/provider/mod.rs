@@ -192,6 +192,8 @@ pub struct UhdRadio {
     /// Its hold on the device's serial (UR-5): released when this instance drops.
     _serial: SerialGuard,
     rx_stall: Option<(Wall, Wall)>,
+    #[cfg(test)]
+    fail_next_rx_spawn: bool,
     /// The first open's error when the device was opened again on it (UR-7's reopen).
     reopened: Option<String>,
     prepare_called: bool,
@@ -337,6 +339,8 @@ impl UhdRadio {
             description,
             _serial: registration,
             rx_stall: None,
+            #[cfg(test)]
+            fail_next_rx_spawn: false,
             reopened: None,
             prepare_called: false,
             prepared: None,
@@ -392,6 +396,11 @@ impl UhdRadio {
     }
 
     fn spawn(&mut self, core: &Arc<Core>, name: String, body: impl FnOnce() + Send + 'static) -> Result<(), ModuleError> {
+        #[cfg(test)]
+        if self.fail_next_rx_spawn && name.starts_with("uhd-rx-") {
+            self.fail_next_rx_spawn = false;
+            return Err(rejected(format!("UR-15: {name}: scripted thread spawn failure")));
+        }
         let core_ = core.clone();
         // §4.2, M1: the host clock registers the participant before the thread runs.
         let host = core.device.host();
@@ -690,6 +699,9 @@ impl Provider for UhdRadio {
             let rx = Rx::new(core.clone(), stream.k, from_control_rx[stream.k].take().expect("one receiver per stream"), first, (stream.k == 0).then_some(self.rx_stall).flatten());
             let name = rx_name(stream.k);
             if let Err(error) = self.spawn(&core, name, move || rx.run()) {
+                if rx_first[stream.k].is_some() {
+                    core.rx_chain[stream.k].lock().abandon_unowned();
+                }
                 failed = Some(error.message);
                 break;
             }
@@ -773,6 +785,8 @@ impl Provider for UhdRadio {
             // UR-16: a detached thread may still be inside a call on its streamer.
             core.reject_note(json!({ "leaked": "streamers", "because": self.detached.iter().collect::<Vec<_>>() }));
         } else if !core.is_lost() {
+            #[cfg(test)]
+            core.assert_rx_chains_reusable();
             self.device.close_streams();
         }
         self.write_sections(&core);
@@ -834,6 +848,42 @@ mod tests {
             tx: (0..tx).map(|k| PreparedStream { k, ..stream.clone() }).collect(),
         });
         radio
+    }
+
+    fn active_rx_chain(core: &Core, k: usize) {
+        core.rx_chain[k].lock().adopt_start(core::SegmentKey { by: Some(1), origin: 0 }, 0);
+    }
+
+    fn indebted_off_rx_chain(core: &Core, k: usize) {
+        let mut chain = core.rx_chain[k].lock();
+        chain.adopt_start(core::SegmentKey { by: Some(1), origin: 0 }, 0);
+        chain.hand(core::RxEntry { order: (1, 1), channel: 0, value: 1e9, accepted_at: Some(0) }, || Ok(()), || 0).unwrap();
+        chain.stop_result(Ok(())).unwrap();
+    }
+
+    #[test]
+    fn rx_chain_prepare_open_requires_idle_empty_debt() {
+        let mut radio = prepared_with(1, 0);
+        let (core, device, _, _) = test_support::rig_with_links(vec![Arc::new(NoLink)]);
+        let prepared = radio.prepared.as_mut().unwrap();
+        prepared.core = core.clone();
+        prepared.rx[0].channels = Channels::first(1);
+        active_rx_chain(&core, 0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| radio.arm()));
+        assert!(result.is_err(), "arm cannot open a streamer on an active chain");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_open")), "the chain guard ran before the prepare/arm open: {:?}", device.calls());
+    }
+
+    #[test]
+    fn rx_chain_cleanup_close_requires_idle_empty_debt() {
+        let mut radio = prepared_with(1, 0);
+        let core = radio.prepared.as_ref().unwrap().core.clone();
+        indebted_off_rx_chain(&core, 0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| radio.cleanup()));
+        assert!(result.is_err(), "cleanup cannot close streams while an RX debt remains");
+        assert!(radio.prepared.is_none(), "cleanup reached its guarded close_streams boundary");
     }
 
     #[test]
@@ -1022,6 +1072,54 @@ mod tests {
         radio.stop(StopMode::Orderly).unwrap();
         assert!(radio.detached.is_empty(), "{:?}", radio.detached);
         assert!(radio.running.as_ref().unwrap().threads.is_empty(), "every thread was joined");
+    }
+
+    #[test]
+    fn ur_15_a_failed_rx_owner_spawn_abandons_its_started_chain_before_cleanup() {
+        let binding: Binding = serde_json::from_value(json!({
+            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
+            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
+            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0", "0:B:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }
+        })).unwrap();
+        let inner = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let device: Arc<dyn Device> = inner.clone();
+        let mut radio = UhdRadio::from_binding(&binding, device).unwrap();
+        let (core, _, _) = test_support::rig_on_description_links(inner.clone(), vec![vec![Arc::new(NoLink)], Vec::new()], BTreeMap::new(), radio.description.clone());
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
+        core.device.rx_open(0, &[0]).unwrap();
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
+        radio.prepared = Some(Prepared {
+            core: core.clone(),
+            actions: Arc::new(NoActions),
+            config: core.description.defaults(),
+            rx: vec![
+                PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None },
+                PreparedStream { k: 1, handle: None, channels: Channels::first(0), clock: None },
+            ],
+            tx: (0..2).map(|k| PreparedStream { k, handle: None, channels: Channels::first(0), clock: None }).collect(),
+        });
+        radio.fail_next_rx_spawn = true;
+
+        let error = radio.start(None).unwrap_err();
+
+        assert!(error.message.contains("scripted thread spawn failure"), "{error:?}");
+        assert!(radio.stopped, "start failure ran Provider::stop");
+        let started = inner.calls().iter().position(|call| call == "rx_start 0 0").expect("the initial RX start succeeded");
+        let chain = core.rx_chain[0].lock();
+        assert_eq!(chain.device(), core::RxDevice::Uncertain);
+        assert_eq!(chain.segment(), None);
+        assert!(chain.debt().is_empty());
+        assert!(chain.end_now());
+        assert_eq!(chain.terminate(), Some(StopMode::Abort));
+        drop(chain);
+
+        radio.cleanup();
+        let calls = inner.calls();
+        let close = calls.iter().position(|call| call == "close_streams").expect("cleanup closed the streamers");
+        assert!(calls[started + 1..close].iter().all(|call| !call.starts_with("rx_")), "no RX call follows the orphaned start before cleanup: {calls:?}");
+        assert_eq!(calls[close + 1..].len(), 0, "close_streams is the final device call: {calls:?}");
+        assert_eq!(calls.iter().filter(|call| *call == "close_streams").count(), 1);
+        assert_eq!(core.rx_chain[0].lock().device(), core::RxDevice::Uncertain, "cleanup leaves the documented uncertain state");
     }
 
     /// A layout with two receive front ends and one transmit one (P1b).

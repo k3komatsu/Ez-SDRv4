@@ -1,6 +1,6 @@
 # 設計メモ 44：装置の chain の状態を，持ち主のある値にする
 
-Status: 第 6 版（2026-10-30，orchestrator Opus）．Sol のレビュー 6 回（5 回 REVISE，6 回目 ADOPT WITH CHANGES．変更は入れた）．owner の決め（2026-10-30）：範囲を絞らず，最終形のきれいな方を採る．時刻つきの DDC の値は，その segment を流している streamer にだけ渡し，そうでない間は uhd-control が持ち続ける（§3.1）．経過は §10．
+Status: 第 6 版（2026-10-30，orchestrator Opus）．Sol のレビュー 6 回（5 回 REVISE，6 回目 ADOPT WITH CHANGES．変更は入れた）．owner の決め（2026-10-30）：範囲を絞らず，最終形のきれいな方を採る．時刻つきの DDC の値は，その segment を流している streamer にだけ渡し，そうでない間は uhd-control が持ち続ける（§3.1）．経過は §10．**L1（§3，受信）は実装済み**（2026-10-31，[00-overview](00-overview.md) の L1 行，[reviews/l1-sol.md](reviews/l1-sol.md)）．L2（§4，送信）は未着手．
 
 | 項目 | 内容 |
 |---|---|

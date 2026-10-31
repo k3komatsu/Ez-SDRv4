@@ -865,10 +865,10 @@
  },
  {
   "id": "U40",
-  "name": "a rate mismatch at the switch accepted",
+  "name": "an RX owner accepts a rate mismatch at the switch",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-    "old": "        match core.owner_configure_with_abort(Dir::Rx, self.k, &next, || self.settle_pending(None, \"receive segment was removed before it acquired an owner\")) {",
-    "new": "        match core.owner_configure_with_abort(Dir::Rx, self.k, &next, || self.settle_pending(None, \"receive segment was removed before it acquired an owner\")).or(Ok(true)) {",
+  "old": "match core.owner_configure(Dir::Rx, self.k, &next) {",
+  "new": "match core.owner_configure(Dir::Rx, self.k, &next).or(Ok(true)) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -987,8 +987,8 @@
   "id": "R08",
   "name": "an abort delivers the orderly tail (L12); note 23 round 2: uhd-rx's own abort, its command channel gone (Provider::stop(abort)'s cut is J55's)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "stream.cut_at(stream.clock.instant(stream.expected));",
-   "new": "let _ = stream.clock.instant(stream.expected);",
+    "old": "                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected));",
+    "new": "                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected.saturating_add(1)));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_uhd_rx_aborts_when_its_provider_is_gone"
@@ -1027,8 +1027,8 @@
   "id": "R12",
   "name": "a planned receive cut handed to the device as a timed stop (P1-1; design-notes §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        let Some(stream) = self.stream.as_mut() else { return };\n        stream.follow(&lock(&self.core.streams), stream_key(Dir::Rx, self.k));",
-  "new": "        let Some(stream) = self.stream.as_mut() else { return };\n        stream.follow(&lock(&self.core.streams), stream_key(Dir::Rx, self.k));\n        if let Some(cut) = stream.cut { let _ = self.core.device.rx_stop(self.k, Some(cut)); }",
+   "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, None);",
+   "new": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, Some(cut));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -1037,8 +1037,8 @@
   "id": "R13",
   "name": "UR-25's untimed stop at the cut removed (P1-3; §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "    if core.is_lost() {\n        return Ok(None);\n    }\n    let now = core.now();",
-   "new": "    if core.is_lost() || !core.is_lost() {\n        return Ok(None);\n    }\n    let now = core.now();",
+    "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, None);",
+    "new": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = Ok(());",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -1127,11 +1127,11 @@
   "id": "B02",
   "name": "a stream silent past its cut left without its stop record (§11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "if ended {\n            self.stop_requested = true;\n            self.try_end();",
-   "new": "if ended {\n            self.stop_requested = true;\n            let _ = self.stream.as_ref();",
+  "old": "        if ended {\n            self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
+  "new": "        if ended {\n            self.core.rx_chain[self.k].lock().request_end_now();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
+  "filter": "ur_25_a_silent_stream_past_its_cut_records_its_stop"
  },
  {
   "id": "B03",
@@ -1177,8 +1177,8 @@
   "id": "B07",
   "name": "a Timeout at the cut ends the stream, however late its samples (Review N, B2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "let ended = stream.cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));",
-   "new": "let ended = stream.cut.is_some_and(|cut| i128::from(now) >= i128::from(cut));",
+    "old": "        let ended = cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));",
+    "new": "        let ended = cut.is_some_and(|cut| i128::from(now) >= i128::from(cut));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
@@ -1227,8 +1227,8 @@
   "id": "B13",
   "name": "UR-29's silence check off while a cut is pending (Review N, N7)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "let lost = stream.cut.is_none_or(|cut| now < cut)",
-   "new": "let lost = stream.cut.is_none()",
+    "old": "        let lost = cut.is_none_or(|cut| now < cut)",
+    "new": "        let lost = cut.is_none()",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device"

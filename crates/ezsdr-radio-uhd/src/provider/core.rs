@@ -86,25 +86,243 @@ pub(crate) struct Clock {
 }
 
 /// A timed receive DDC write not yet proven consumed by a sample from this stream.
-#[derive(Clone)]
-pub(crate) struct RxDspEntry {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RxEntry {
     pub order: (i64, u64),
     pub channel: usize,
     pub value: f64,
     pub accepted_at: Option<i64>,
 }
 
-/// Device-side state serialized against a receive stream's final stop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct SegmentKey {
+    pub by: Option<u64>,
+    pub origin: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum RxDevice {
+    #[default]
+    Off,
+    Armed { at: i64 },
+    Streaming,
+    Flushing,
+    Uncertain,
+    Lost,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct RxIntent {
+    cut: Option<i64>,
+    end_now: bool,
+    terminate: Option<StopMode>,
+}
+
 #[derive(Default)]
-pub(crate) struct RxDsp {
-    pub pending: Vec<RxDspEntry>,
-    /// Pending entries already reported by an owner that could not recover them.
-    pub reported: BTreeSet<((i64, u64), usize)>,
-    /// Latest accepted DDC write per channel, retained so Provider::stop can restore its S value.
-    pub latest: BTreeMap<usize, RxDspEntry>,
-    pub restore: BTreeMap<usize, f64>,
-    pub restore_ready: bool,
-    pub stopped: bool,
+pub(crate) enum Restore {
+    #[default]
+    NotAsked,
+    Planned(BTreeMap<usize, f64>),
+    Done,
+}
+
+/// One receive stream's device state and the owner intent serialized with control's handoff.
+#[derive(Default)]
+pub(crate) struct RxChain {
+    device: RxDevice,
+    intent: RxIntent,
+    segment: Option<SegmentKey>,
+    debt: Vec<RxEntry>,
+    left: Vec<RxEntry>,
+    latest: BTreeMap<usize, RxEntry>,
+    restore: Restore,
+}
+
+impl RxChain {
+    pub fn device(&self) -> RxDevice { self.device }
+    pub fn segment(&self) -> Option<SegmentKey> { self.segment }
+    pub fn cut(&self) -> Option<i64> { self.intent.cut }
+    pub fn end_now(&self) -> bool { self.intent.end_now }
+    pub fn terminate(&self) -> Option<StopMode> { self.intent.terminate }
+    pub fn debt(&self) -> &[RxEntry] { &self.debt }
+    pub fn left(&self) -> &[RxEntry] { &self.left }
+    pub fn latest(&self) -> &BTreeMap<usize, RxEntry> { &self.latest }
+    pub fn restore(&self) -> &Restore { &self.restore }
+
+    pub fn eligible(&self, segment: SegmentKey, instant: i64) -> bool {
+        self.segment == Some(segment)
+            && matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming)
+            && instant >= segment.origin
+    }
+
+    pub fn adopt_start(&mut self, segment: SegmentKey, at: i64) {
+        assert!(matches!(self.device, RxDevice::Off));
+        assert!(self.debt.is_empty());
+        self.segment = Some(segment);
+        self.device = RxDevice::Armed { at };
+    }
+
+    pub fn begin_result(&mut self, segment: SegmentKey, at: i64, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
+        assert!(matches!(self.device, RxDevice::Off | RxDevice::Uncertain));
+        assert!(self.debt.is_empty());
+        match result {
+            Ok(()) => {
+                self.segment = Some(segment);
+                self.device = RxDevice::Armed { at };
+                Ok(())
+            }
+            Err(error) => {
+                if error.lost { self.device = RxDevice::Lost; }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn restart_result(&mut self, at: i64, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
+        assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));
+        match result {
+            Ok(()) => {
+                self.device = RxDevice::Armed { at };
+                Ok(())
+            }
+            Err(error) => {
+                if error.lost { self.device = RxDevice::Lost; }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn first_sample(&mut self, segment: SegmentKey) {
+        if self.segment == Some(segment) && matches!(self.device, RxDevice::Armed { .. }) {
+            self.device = RxDevice::Streaming;
+        }
+    }
+
+    pub fn request_cut(&mut self, cut: i64) {
+        self.intent.cut = Some(self.intent.cut.map_or(cut, |old| old.min(cut)));
+    }
+
+    pub fn request_end_now(&mut self) { self.intent.end_now = true; }
+
+    pub fn request_terminate(&mut self, mode: StopMode) {
+        self.intent.terminate.get_or_insert(mode);
+    }
+
+    /// Provisional debt is visible while `apply` runs; refusal removes it, loss is terminal.
+    pub fn hand(&mut self, entry: RxEntry, apply: impl FnOnce() -> Result<(), DeviceError>, accepted_at: impl FnOnce() -> i64) -> Result<(), DeviceError> {
+        assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));
+        self.debt.push(entry.clone());
+        match apply() {
+            Ok(()) => {
+                let accepted_at = accepted_at();
+                let accepted = RxEntry { accepted_at: Some(accepted_at), ..entry };
+                if let Some(debt) = self.debt.iter_mut().find(|debt| debt.order == accepted.order && debt.channel == accepted.channel) {
+                    debt.accepted_at = Some(accepted_at);
+                }
+                self.latest.insert(accepted.channel, accepted);
+                Ok(())
+            }
+            Err(error) => {
+                self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel);
+                if error.lost { self.device = RxDevice::Lost; }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
+        assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));
+        match result {
+            Ok(()) => { self.device = RxDevice::Off; Ok(()) }
+            Err(error) => {
+                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };
+                Err(error)
+            }
+        }
+    }
+
+    pub fn flush_start_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
+        assert!(matches!(self.device, RxDevice::Off));
+        match result {
+            Ok(()) => { self.device = RxDevice::Flushing; Ok(()) }
+            Err(error) => {
+                if error.lost { self.device = RxDevice::Lost; }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn flush_stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
+        assert!(matches!(self.device, RxDevice::Flushing));
+        match result {
+            Ok(()) => { self.device = RxDevice::Off; Ok(()) }
+            Err(error) => {
+                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };
+                Err(error)
+            }
+        }
+    }
+
+    pub fn consume(&mut self, sample_ticks: i64, channels: Channels, first_tick: i64, samples: &[Vec<Iq>]) {
+        for (index, channel) in channels.iter().enumerate() {
+            let Some(samples) = samples.get(index) else { continue };
+            for sample in 0..samples.len() {
+                let tick = i128::from(first_tick) + sample as i128 * i128::from(sample_ticks);
+                let channel = channel as usize;
+                let left = self.left.iter().position(|entry| entry.channel == channel);
+                if let Some(position) = left {
+                    let entry = &self.left[position];
+                    if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {
+                        self.left.remove(position);
+                    }
+                } else if let Some(position) = self.debt.iter().position(|entry| entry.channel == channel) {
+                    let entry = &self.debt[position];
+                    if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {
+                        self.debt.remove(position);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn lose(&mut self) -> Vec<RxEntry> {
+        self.device = RxDevice::Lost;
+        self.report_debt()
+    }
+
+    /// Transfers this segment's remaining obligations to persistent, already-reported `left`.
+    pub fn finish(&mut self) -> Vec<RxEntry> {
+        assert!(matches!(self.device, RxDevice::Off | RxDevice::Uncertain | RxDevice::Lost));
+        let reported = self.report_debt();
+        self.segment = None;
+        self.intent.cut = None;
+        self.intent.end_now = false;
+        reported
+    }
+
+    pub fn abandon_unowned(&mut self) {
+        if self.device != RxDevice::Lost { self.device = RxDevice::Uncertain; }
+        self.segment = None;
+        self.intent.end_now = true;
+        self.intent.terminate.get_or_insert(StopMode::Abort);
+    }
+
+    pub fn plan_restore(&mut self, values: BTreeMap<usize, f64>) {
+        self.restore = Restore::Planned(values);
+    }
+
+    pub fn take_restore(&mut self) -> Option<BTreeMap<usize, f64>> {
+        match std::mem::replace(&mut self.restore, Restore::Done) {
+            Restore::Planned(values) => Some(values),
+            other => { self.restore = other; None }
+        }
+    }
+
+    fn report_debt(&mut self) -> Vec<RxEntry> {
+        let entries = std::mem::take(&mut self.debt);
+        self.left.extend(entries.iter().cloned());
+        entries
+    }
 }
 
 impl Clock {
@@ -816,8 +1034,8 @@ pub(crate) struct Core {
     pub device: Arc<dyn Device>,
     /// Serializes streamer open/close admission with publishing device loss (UR-29).
     device_gate: Mutex<()>,
-    /// Each receive handover and its stream's final stop share a clock lock (D9b-2).
-    pub rx_dsp: Vec<ClockMutex<RxDsp>>,
+    /// Each receive chain's owner transitions and control handovers share a clock lock (L1).
+    pub rx_chain: Vec<ClockMutex<RxChain>>,
     /// A timed TX DSP write and the open-time flush share each channel's gate (D9b-1a).
     tx_dsp_gates: Vec<ClockMutex<()>>,
     /// Every tx_async reader, including shutdown, shares one per-stream gate.
@@ -902,7 +1120,7 @@ impl Core {
             block_len: description.block_len as usize,
             device,
             device_gate: Mutex::new(()),
-            rx_dsp: (0..rx_count).map(|_| host.clock_mutex(RxDsp::default())).collect(),
+            rx_chain: (0..rx_count).map(|_| host.clock_mutex(RxChain::default())).collect(),
             tx_dsp_gates: (0..tx_channel_count).map(|_| host.clock_mutex(())).collect(),
             tx_report_gates: (0..tx_count).map(|_| host.clock_mutex(())).collect(),
             tx_report_stash: (0..tx_count).map(|_| Mutex::new(VecDeque::new())).collect(),
@@ -1341,6 +1559,7 @@ impl Core {
 
     fn open_device_locked(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         self.probe("open", None);
+        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, "open"); }
         let device_gate = self.lock_device_gate();
         if self.is_lost() {
             return Err(DeviceError { lost: true, message: "UR-29: the device is lost before opening a streamer".to_owned() });
@@ -1379,12 +1598,28 @@ impl Core {
     }
 
     pub fn close_device(&self, dir: Dir, k: usize) {
+        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, "close"); }
         let _device_gate = self.lock_device_gate();
         if self.is_lost() { return; }
         match dir {
             Dir::Rx => self.device.rx_close(k),
             Dir::Tx => self.device.tx_close(k),
         }
+    }
+
+    #[cfg(test)]
+    fn assert_rx_chain_reusable(&self, k: usize, operation: &str) {
+        let chain = self.rx_chain[k].lock();
+        assert!(matches!(chain.device, RxDevice::Off | RxDevice::Uncertain | RxDevice::Lost), "L1: RX {operation} requires an idle device chain, got {:?}", chain.device);
+        assert!(chain.debt.is_empty(), "L1: RX {operation} requires empty debt, got {:?}", chain.debt.iter().map(|entry| (entry.order, entry.channel)).collect::<Vec<_>>());
+    }
+
+    #[cfg(not(test))]
+    fn assert_rx_chain_reusable(&self, _k: usize, _operation: &str) {}
+
+    #[cfg(test)]
+    pub fn assert_rx_chains_reusable(&self) {
+        for k in 0..self.rx_chain.len() { self.assert_rx_chain_reusable(k, "close_streams"); }
     }
 
     /// Releases an idle stream's streamer only when another line still has an unprocessed
@@ -1452,30 +1687,23 @@ impl Core {
     /// is how a thread holding correlations against the replaced streamer learns of it (UR-28).
     /// On error, the caller books the refusal before giving the claim back (UR-25).
     pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<bool, (DeviceError, Claim)> {
-        self.owner_configure_with_abort(dir, k, next, || {})
-    }
-
-    /// Calls `before_abort` on every non-error exit that abandons a planned segment, before its
-    /// claim is released when one was taken.
-    pub fn owner_configure_with_abort(&self, dir: Dir, k: usize, next: &Planned, mut before_abort: impl FnMut()) -> Result<bool, (DeviceError, Claim)> {
         let stream = stream_key(dir, k);
         let (mut current, mut step, release_first, claim) = {
             let mut streams = lock(&self.streams);
-            if self.is_lost() { drop(streams); before_abort(); return Ok(false); }
-            if streams.holder(stream) != Holder::Free { drop(streams); before_abort(); return Ok(false); }
-            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { drop(streams); before_abort(); return Ok(false) };
-            if current.refused { drop(streams); before_abort(); return Ok(false); }
+            if self.is_lost() { return Ok(false); }
+            if streams.holder(stream) != Holder::Free { return Ok(false); }
+            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };
+            if current.refused { return Ok(false); }
             let step = streams.owner_step(stream, current.set(), current.segment.by);
             if step == Owner::Nothing { return Ok(true); }
             let release_first = step == Owner::Open && (streams.held_elsewhere(stream, current.set()).is_some()
                 || streams.needed_before(stream, current.set(), current.segment.origin)
                 || streams.move_source_busy(stream, current.segment.by));
-            let Some(claim) = streams.claim_owner(stream, current.segment.by) else { drop(streams); before_abort(); return Ok(false) };
+            let Some(claim) = streams.claim_owner(stream, current.segment.by) else { return Ok(false) };
             (current, step, release_first, claim)
         };
         if release_first {
             if self.is_lost() {
-                before_abort();
                 lock(&self.streams).give_back(claim);
                 return Ok(false);
             }
@@ -1485,7 +1713,6 @@ impl Core {
                 lock(&self.streams).record_open(stream, None);
             }
             let Some(latest) = self.await_release(dir, k, &current) else {
-                before_abort();
                 lock(&self.streams).give_back(claim);
                 return Ok(false);
             };
@@ -1568,6 +1795,236 @@ pub(super) fn assert_tx_open_flush_barrier(
 mod tests {
     use super::*;
     use ezsdr_kernel::time::Rational;
+
+    fn rx_segment() -> SegmentKey { SegmentKey { by: Some(7), origin: 100 } }
+
+    fn rx_entry(seq: u64) -> RxEntry {
+        RxEntry { order: (100, seq), channel: 0, value: 1.001e9, accepted_at: Some(101) }
+    }
+
+    #[test]
+    fn rx_chain_adopt_start_transitions() {
+        let mut chain = RxChain::default();
+        let segment = rx_segment();
+        chain.adopt_start(segment, 90);
+        assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
+        assert_eq!(chain.segment(), Some(segment));
+        assert!(chain.debt().is_empty());
+        assert!(chain.left().is_empty());
+        assert!(chain.latest().is_empty());
+        assert_eq!(chain.cut(), None);
+        assert!(!chain.end_now());
+        assert_eq!(chain.terminate(), None);
+        assert!(matches!(chain.restore(), Restore::NotAsked));
+    }
+
+    #[test]
+    fn rx_chain_begin_transitions() {
+        for prior in [RxDevice::Off, RxDevice::Uncertain] {
+            for outcome in [0, 1, 2] {
+                let mut chain = RxChain { device: prior, ..RxChain::default() };
+                let result = match outcome {
+                    0 => Ok(()),
+                    1 => Err(DeviceError::failed("scripted refusal")),
+                    _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
+                };
+                let actual = chain.begin_result(rx_segment(), 90, result);
+                match outcome {
+                    0 => {
+                        assert!(actual.is_ok());
+                        assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
+                        assert_eq!(chain.segment(), Some(rx_segment()));
+                    }
+                    1 => {
+                        assert!(actual.is_err());
+                        assert_eq!(chain.device(), prior);
+                        assert_eq!(chain.segment(), None);
+                    }
+                    _ => {
+                        assert!(actual.unwrap_err().lost);
+                        assert_eq!(chain.device(), RxDevice::Lost);
+                        assert_eq!(chain.segment(), None);
+                    }
+                }
+                assert!(chain.debt().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn rx_chain_restart_transitions() {
+        for prior in [RxDevice::Armed { at: 90 }, RxDevice::Streaming] {
+            for outcome in [0, 1, 2] {
+                let mut chain = RxChain { device: prior, segment: Some(rx_segment()), ..RxChain::default() };
+                let actual = chain.restart_result(120, match outcome {
+                    0 => Ok(()),
+                    1 => Err(DeviceError::failed("scripted refusal")),
+                    _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
+                });
+                match outcome {
+                    0 => { assert!(actual.is_ok()); assert_eq!(chain.device(), RxDevice::Armed { at: 120 }); }
+                    1 => { assert!(actual.is_err()); assert_eq!(chain.device(), prior); }
+                    _ => { assert!(actual.unwrap_err().lost); assert_eq!(chain.device(), RxDevice::Lost); }
+                }
+                assert_eq!(chain.segment(), Some(rx_segment()));
+            }
+        }
+    }
+
+    #[test]
+    fn rx_chain_first_sample_transition() {
+        let mut chain = RxChain::default();
+        chain.adopt_start(rx_segment(), 90);
+        chain.first_sample(SegmentKey { by: Some(8), origin: 100 });
+        assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
+        chain.first_sample(rx_segment());
+        assert_eq!(chain.device(), RxDevice::Streaming);
+        assert_eq!(chain.segment(), Some(rx_segment()));
+    }
+
+    #[test]
+    fn rx_chain_hand_transitions() {
+        for outcome in [0, 1, 2] {
+            let mut chain = RxChain::default();
+            chain.adopt_start(rx_segment(), 90);
+            let result = chain.hand(rx_entry(1), || match outcome {
+                0 => Ok(()),
+                1 => Err(DeviceError::failed("scripted refusal")),
+                _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
+            }, || 105);
+            match outcome {
+                0 => {
+                    assert!(result.is_ok());
+                    assert_eq!(chain.debt().len(), 1);
+                    assert_eq!(chain.debt()[0].accepted_at, Some(105));
+                    assert_eq!(chain.latest().get(&0).unwrap().accepted_at, Some(105));
+                    assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
+                }
+                1 => {
+                    assert!(!result.unwrap_err().lost);
+                    assert!(chain.debt().is_empty());
+                    assert!(chain.latest().is_empty());
+                    assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
+                }
+                _ => {
+                    assert!(result.unwrap_err().lost);
+                    assert!(chain.debt().is_empty());
+                    assert!(chain.latest().is_empty());
+                    assert_eq!(chain.device(), RxDevice::Lost);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rx_chain_stop_transitions() {
+        for outcome in [0, 1, 2] {
+            let mut chain = RxChain::default();
+            chain.adopt_start(rx_segment(), 90);
+            let result = chain.stop_result(match outcome {
+                0 => Ok(()),
+                1 => Err(DeviceError::failed("scripted refusal")),
+                _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
+            });
+            let expected = match outcome { 0 => RxDevice::Off, 1 => RxDevice::Uncertain, _ => RxDevice::Lost };
+            assert_eq!(chain.device(), expected);
+            assert_eq!(chain.segment(), Some(rx_segment()));
+            assert_eq!(result.is_ok(), outcome == 0);
+        }
+    }
+
+    #[test]
+    fn rx_chain_flush_transitions() {
+        let mut chain = RxChain::default();
+        assert!(chain.flush_start_result(Ok(())).is_ok());
+        assert_eq!(chain.device(), RxDevice::Flushing);
+        assert!(chain.flush_stop_result(Ok(())).is_ok());
+        assert_eq!(chain.device(), RxDevice::Off);
+
+        let mut chain = RxChain::default();
+        assert!(chain.flush_start_result(Err(DeviceError::failed("start refusal"))).is_err());
+        assert_eq!(chain.device(), RxDevice::Off);
+        let mut chain = RxChain::default();
+        assert!(chain.flush_start_result(Err(DeviceError { lost: true, message: "start loss".to_owned() })).is_err());
+        assert_eq!(chain.device(), RxDevice::Lost);
+        for (error, expected) in [
+            (DeviceError::failed("stop refusal"), RxDevice::Uncertain),
+            (DeviceError { lost: true, message: "stop loss".to_owned() }, RxDevice::Lost),
+        ] {
+            let mut chain = RxChain::default();
+            chain.flush_start_result(Ok(())).unwrap();
+            assert!(chain.flush_stop_result(Err(error)).is_err());
+            assert_eq!(chain.device(), expected);
+        }
+    }
+
+    #[test]
+    fn rx_chain_finish_transitions() {
+        for device in [RxDevice::Off, RxDevice::Uncertain, RxDevice::Lost] {
+            let entry = rx_entry(1);
+            let mut chain = RxChain {
+                device, intent: RxIntent { cut: Some(80), end_now: true, terminate: Some(StopMode::Abort) },
+                segment: Some(rx_segment()), debt: vec![entry.clone()], latest: BTreeMap::from([(0, entry.clone())]),
+                restore: Restore::Planned(BTreeMap::from([(0, 1e9)])), left: Vec::new(),
+            };
+            assert_eq!(chain.finish().as_slice(), std::slice::from_ref(&entry));
+            assert_eq!(chain.device(), device);
+            assert_eq!(chain.segment(), None);
+            assert!(chain.debt().is_empty());
+            assert_eq!(chain.left(), std::slice::from_ref(&entry));
+            assert_eq!(chain.latest().get(&0).unwrap().value, entry.value);
+            assert_eq!(chain.cut(), None);
+            assert!(!chain.end_now());
+            assert_eq!(chain.terminate(), Some(StopMode::Abort));
+            assert!(matches!(chain.restore(), Restore::Planned(values) if values.get(&0) == Some(&1e9)));
+        }
+    }
+
+    #[test]
+    fn rx_chain_lose_is_terminal() {
+        for prior in [RxDevice::Off, RxDevice::Armed { at: 90 }, RxDevice::Streaming, RxDevice::Flushing, RxDevice::Uncertain, RxDevice::Lost] {
+            let entry = rx_entry(1);
+            let mut chain = RxChain { device: prior, segment: Some(rx_segment()), debt: vec![entry.clone()], latest: BTreeMap::from([(0, entry.clone())]), ..RxChain::default() };
+            assert_eq!(chain.lose().as_slice(), std::slice::from_ref(&entry));
+            assert_eq!(chain.device(), RxDevice::Lost);
+            assert_eq!(chain.debt().len(), 0);
+            assert_eq!(chain.left(), std::slice::from_ref(&entry));
+            assert!(chain.lose().is_empty(), "loss reports each entry once");
+            assert_eq!(chain.latest().get(&0).unwrap().value, entry.value);
+            assert_eq!(chain.finish(), []);
+            assert_eq!(chain.device(), RxDevice::Lost);
+            assert_eq!(chain.segment(), None);
+        }
+    }
+
+    #[test]
+    fn rx_chain_abandon_unowned_records_cleanup_state() {
+        let mut chain = RxChain::default();
+        chain.adopt_start(rx_segment(), 90);
+        chain.request_cut(150);
+        chain.abandon_unowned();
+        assert_eq!(chain.device(), RxDevice::Uncertain);
+        assert_eq!(chain.segment(), None);
+        assert_eq!(chain.cut(), Some(150));
+        assert!(chain.end_now());
+        assert_eq!(chain.terminate(), Some(StopMode::Abort));
+        assert!(chain.debt().is_empty());
+        assert!(chain.latest().is_empty());
+    }
+
+    #[test]
+    fn rx_chain_abandon_unowned_preserves_loss() {
+        let entry = rx_entry(1);
+        let mut chain = RxChain { debt: vec![entry.clone()], ..RxChain::default() };
+        chain.lose();
+        chain.abandon_unowned();
+        assert_eq!(chain.device(), RxDevice::Lost);
+        assert_eq!(chain.segment(), None);
+        assert_eq!(chain.left(), &[entry]);
+        assert!(chain.end_now());
+        assert_eq!(chain.terminate(), Some(StopMode::Abort));
+        assert!(chain.finish().is_empty(), "loss debt is reported only once");
+    }
 
     #[test]
     fn ur_22_t3_flush_ack_is_a_timed_dsp_barrier() {
@@ -1844,6 +2301,74 @@ mod tests {
         let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).expect("the destination move segment");
         drop(streams);
         (core, device, next, from, to, seq)
+    }
+
+    fn active_rx_chain(core: &Core, k: usize) {
+        core.rx_chain[k].lock().adopt_start(SegmentKey { by: Some(1), origin: 0 }, 0);
+    }
+
+    fn indebted_off_rx_chain(core: &Core, k: usize) {
+        let mut chain = core.rx_chain[k].lock();
+        chain.adopt_start(SegmentKey { by: Some(1), origin: 0 }, 0);
+        chain.hand(RxEntry { order: (1, 1), channel: 0, value: 1e9, accepted_at: Some(0) }, || Ok(()), || 0).unwrap();
+        chain.stop_result(Ok(())).unwrap();
+    }
+
+    #[test]
+    fn rx_chain_reuse_guard_rejects_active_open_and_debt_close() {
+        let (core, device) = two_by_two_with_device();
+        active_rx_chain(&core, 0);
+        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = core.open_device(Dir::Rx, 0, Channels::first(1));
+        }));
+        assert!(opened.is_err(), "an Armed chain cannot be reopened");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_open")), "the guard runs before the device call: {:?}", device.calls());
+
+        indebted_off_rx_chain(&core, 1);
+        let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| core.close_device(Dir::Rx, 1)));
+        assert!(closed.is_err(), "an Off chain with outstanding debt cannot be closed");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_close")), "the guard runs before the device call: {:?}", device.calls());
+    }
+
+    #[test]
+    fn rx_chain_reconfigure_close_requires_idle_empty_debt() {
+        let (core, device, next, from, to, seq) = waiting_move();
+        let source = lock(&core.streams).claim_owner(from, Some(seq)).expect("the move source is busy");
+        active_rx_chain(&core, to.1 as usize);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = core.owner_configure(Dir::Rx, to.1 as usize, &next);
+        }));
+        assert!(result.is_err(), "the owner's release-before-open close is guarded");
+        assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "the reconfigure did not close an active chain: {:?}", device.calls());
+        lock(&core.streams).give_back(source);
+    }
+
+    #[test]
+    fn rx_chain_release_unneeded_close_requires_idle_empty_debt() {
+        let (core, device, _next, from, _to, _seq) = waiting_move();
+        lock(&core.streams).search(from, false);
+        indebted_off_rx_chain(&core, from.1 as usize);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| core.release_unneeded(Dir::Rx, from.1 as usize)));
+        assert!(result.is_err(), "release_unneeded cannot close a chain with debt");
+        assert!(!device.calls().iter().any(|call| call == "rx_close 1"), "the debt-bearing chain was not closed: {:?}", device.calls());
+    }
+
+    #[test]
+    fn rx_chain_open_failure_close_requires_idle_empty_debt() {
+        let (core, device) = two_by_two_with_device();
+        let rates_core = core.clone();
+        super::super::test_support::probe(&core, "rates", move |_| active_rx_chain(&rates_core, 0));
+        lock(&core.rates)[Dir::Rx as usize] = Some(Err("scripted rate-check refusal".to_owned()));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = core.open_streamer(Dir::Rx, 0, Channels::first(1));
+        }));
+        assert!(result.is_err(), "open_streamer cannot clean up by closing an active chain");
+        let calls = device.calls();
+        assert!(calls.iter().any(|call| call == "rx_open 0 [0]"), "the open preceded its rate check: {calls:?}");
+        assert!(!calls.iter().any(|call| call == "rx_close 0"), "the invalid chain prevented cleanup close: {calls:?}");
     }
 
     #[test]

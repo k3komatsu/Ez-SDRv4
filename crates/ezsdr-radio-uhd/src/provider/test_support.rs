@@ -106,6 +106,12 @@ pub(super) fn rig_with_links_on(k: usize, links: Vec<Arc<dyn ezsdr_kernel::strea
 /// is held (UR-25): the test keeps the witness and reads it.
 pub(super) fn rig_on_description_witness(device: Arc<dyn Device>, links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
     -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
+    rig_on_description_links_witness(device, vec![links], inputs, description)
+}
+
+/// `rig_on_description_links` through a sink that witnesses control-path events.
+pub(super) fn rig_on_description_links_witness(device: Arc<dyn Device>, links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>, inputs: BTreeMap<ContentHash, Arc<[u8]>>, description: ezsdr_radio::channels::Description)
+    -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
     let clocks = Arc::new(ClockRegistry::new());
     let root = clocks.allocate_id().unwrap();
     clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(),
@@ -117,7 +123,7 @@ pub(super) fn rig_on_description_witness(device: Arc<dyn Device>, links: Vec<Arc
     let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"].iter().flat_map(|s|
         kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k))).collect();
     let witness = Arc::new(SectionWitness::new(Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()))));
-    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, vec![links], description);
+    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, links, description);
     witness.watch(&core);
     (core, time, witness)
 }

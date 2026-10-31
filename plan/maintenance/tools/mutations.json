@@ -416,9 +416,9 @@
  {
   "id": "G03",
   "name": "VG-1: uhd-rx's cut replaces an earlier cut, a Stop's or a plan's",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        self.cut = Some(self.cut.map_or(cut, |set| set.min(cut)));\n",
-  "new": "        self.cut = Some(cut);\n",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        self.intent.cut = Some(self.intent.cut.map_or(cut, |old| old.min(cut)));\n",
+  "new": "        self.intent.cut = Some(cut);\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end",
@@ -427,9 +427,9 @@
  {
   "id": "G04",
   "name": "VG-1: uhd-rx's cut moves a cut already set later",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        self.cut = Some(self.cut.map_or(cut, |set| set.min(cut)));\n",
-  "new": "        self.cut = Some(self.cut.map_or(cut, |set| set.max(cut)));\n",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        self.intent.cut = Some(self.intent.cut.map_or(cut, |old| old.min(cut)));\n",
+  "new": "        self.intent.cut = Some(self.intent.cut.map_or(cut, |old| old.max(cut)));\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
@@ -437,9 +437,9 @@
  {
   "id": "G58",
   "name": "VG-1: uhd-rx keeps the first cut set, even when a later one is earlier",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        self.cut = Some(self.cut.map_or(cut, |set| set.min(cut)));\n",
-  "new": "        self.cut = Some(self.cut.unwrap_or(cut));\n",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "        self.intent.cut = Some(self.intent.cut.map_or(cut, |old| old.min(cut)));\n",
+  "new": "        self.intent.cut = Some(self.intent.cut.unwrap_or(cut));\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
@@ -448,8 +448,8 @@
   "id": "G60",
   "name": "VG-1: uhd-rx's shutdown under abort does not stop a segment it has not ended (note 23 round 2: one whose queued start's origin has not passed)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-       "old": "            if let Some(stream) = self.stream.as_mut() {\n                stream.cut_at(stream.clock.instant(stream.expected));\n            }\n            self.stop_requested = true;\n            self.try_end();",
-       "new": "            if let Some(stream) = self.stream.as_mut() {\n                stream.cut_at(stream.clock.instant(stream.expected));\n            }\n            self.stop_requested = true;\n            if false { self.try_end(); }",
+        "old": "        self.core.rx_chain[self.k].lock().request_terminate(mode);\n        if mode == StopMode::Abort {",
+        "new": "        self.core.rx_chain[self.k].lock().request_terminate(mode);\n        if false && mode == StopMode::Abort {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_an_abort_stops_a_queued_start_at_shutdown"
@@ -588,8 +588,8 @@
   "id": "J13",
   "name": "RM-16 (spec 22, review R4): uhd-rx's planned cut not floored at the first sample not yet delivered",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "self.cut_at(self.clock.instant(cut.max(self.expected)));",
-  "new": "self.cut_at(self.clock.instant(cut));",
+  "old": "chain.request_cut(stream.clock.instant(cut.max(stream.expected)));",
+  "new": "chain.request_cut(stream.clock.instant(cut));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_17_a_cut_is_never_before_what_was_delivered"
@@ -788,8 +788,8 @@
   "id": "J45",
   "name": "note 23: uhd-rx waits for samples past a cut at or before what it delivered, so an abort does not end the stream at once",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        let done = stream.cut.is_some_and(",
-  "new": "        let done = false && stream.cut.is_some_and(",
+  "old": "        let done = chain.cut().is_some_and(|cut| stream.clock.at_or_after(cut) <= stream.expected)",
+  "new": "        let done = chain.cut().is_some()",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_26_a_stopped_stream_keeps_its_end"
@@ -858,8 +858,8 @@
   "id": "J52",
   "name": "note 23: a cut booked while a receive call waits does not cut its block (R16's rule, now samples' own read of the plan)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "            let mut streams = lock(&self.core.streams);\n            stream.follow(&streams, stream_key(Dir::Rx, self.k));",
-  "new": "            let mut streams = lock(&self.core.streams);",
+  "old": "        refresh_intent(&mut chain, &streams, key, self.stream.as_ref().expect(\"a stream\"));",
+  "new": "        let _ = key;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
@@ -868,8 +868,8 @@
   "id": "J53",
   "name": "note 23 round 3: uhd-rx does not read the plan when it ends a stream, so a loss or Provider::stop's end booked by another thread after its turn read the plan (during a receive call's wait, or before it saw the device lost) ends the stream and its clock at a stale cut, or never",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        stream.follow(&streams, key);\n        if let (None, Some(cut)) = (&stream.handle, stream.cut) {",
-  "new": "        if let (None, Some(cut)) = (&stream.handle, stream.cut) {",
+  "old": "    let planned = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config));",
+  "new": "    let planned = streams.line(key).and_then(|line| line.segment(stream.clock.origin, stream.config)).filter(|_| false);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_29_a_"
@@ -886,13 +886,13 @@
  },
  {
   "id": "J55",
-  "name": "note 23 round 2: uhd-rx does not cut at once at Provider::stop(abort) a segment still being delivered up to an earlier cut",
+  "name": "RM-16: an abort shortens a segment's existing cut to the first undelivered sample",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        if matches!(streams.stop, Some((_, StopMode::Abort))) {\n",
-  "new": "        if false && matches!(streams.stop, Some((_, StopMode::Abort))) {\n",
+  "old": "            if let Some(stream) = self.stream.as_mut() {\n                self.core.rx_chain[self.k].lock().request_cut(stream.clock.instant(stream.expected));\n            }\n            self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
+  "new": "            self.core.rx_chain[self.k].lock().request_end_now();\n            self.try_end();",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_26_a_stopped_stream_keeps_its_end"
+  "filter": "ur_26_uhd_rx_aborts_when_its_provider_is_gone"
  },
  {
   "id": "J56",
@@ -1010,7 +1010,7 @@
   "name": "a timed update waiting for a channel still counts against the queue depth",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
     "old": "        if pending + 1 > depth {",
-   "new": "        if pending + usize::from(self.channel_live(dir, chan, e)) > depth {",
+   "new": "        if pending + usize::from(self.channel_live(dir, chan, e, false)) > depth {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
@@ -6271,11 +6271,11 @@
    "filter": "ur_29_a_loss_takes_effect_before_a_change_at_its_instant"
   },
   {
-    "id": "P258",
+  "id": "P258",
     "name": "the delivered floor is the block's first sample, not its end (RM-16)",
     "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-       "old": "                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, delivered);",
-       "new": "                streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, k);",
+  "old": "            streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, delivered);",
+  "new": "            streams.delivered(stream_key(Dir::Rx, self.k), clock.origin, stream.config, k);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_29_a_loss_ends_the_stream_at_its_instant"
@@ -6371,21 +6371,21 @@
    "filter": "ur_24_the_device_queue_is_one_across_the_directions"
   },
   {
-   "id": "P269",
+  "id": "P269",
    "name": "uhd-rx holds the line lock across the beginning of a segment's device calls (UR-25, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-     "old": "        let Some(next) = next else {\n            self.settle_pending(None, \"no receive segment owns the pending DDC entries\");\n            self.core.release_unneeded(Dir::Rx, self.k);\n            return false;\n        };\n        let origin = next.segment.origin;",
-     "new": "        let Some(next) = next else {\n            self.settle_pending(None, \"no receive segment owns the pending DDC entries\");\n            self.core.release_unneeded(Dir::Rx, self.k);\n            return false;\n        };\n        let _core = self.core.clone();\n        let _held = lock(&_core.streams);\n        let origin = next.segment.origin;",
+  "old": "        let result = self.core.device.rx_recv(self.k, len, timeout, one_packet);",
+  "new": "        let result = { let _streams = lock(&self.core.streams); self.core.device.rx_recv(self.k, len, timeout, one_packet) };",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_the_line_lock_is_free_inside_every_receive_device_call"
   },
   {
-   "id": "P270",
+  "id": "P270",
    "name": "uhd-rx holds the line lock across the untimed stop of a cut (UR-25, D15)",
    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "        let stopped_at = match stop_at_cut(&self.core, self.k, cut) {",
-        "new": "        let _core = self.core.clone();\n        let _held = lock(&_core.streams);\n        let stopped_at = match stop_at_cut(&self.core, self.k, cut) {",
+  "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, None);",
+  "new": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = { let _streams = lock(&self.core.streams); self.core.device.rx_stop(self.k, None) };",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_the_line_lock_is_free_inside_every_receive_device_call"
@@ -7211,14 +7211,14 @@
     "filter": "ur_25_a_transmit_poll_during_a_control_open_starts_no_streamer_call"
   },
  {
-   "id": "P409",
+  "id": "P409",
    "name": "a release is a timed command (UR-24, S1, S12, S16)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),",
-   "new": "                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),",
+  "old": "                    chain.hand(entry, || self.core.device.apply(timed.dir, *chan, &settings, Some(e)).map(|_| ()), || self.core.now()).err()",
+  "new": "                    chain.hand(entry, || self.core.device.apply(timed.dir, *chan, &settings, None).map(|_| ()), || self.core.now()).err()",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_24_a_release_without_a_live_channel_reaches_the_pending_segment"
+  "filter": "ur_24_a_frequency_inside_a_running_segment_is_given_timed"
  },
  {
    "id": "P410",
@@ -7291,11 +7291,11 @@
    "filter": "ur_25_an_owner_configures_a_segment_the_record_s_command_is_not_for"
  },
  {
-   "id": "P424",
+  "id": "P424",
    "name": "a release counts one queue slot per command, not per channel (UR-24, S12)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-       "old": "            self.released.push(e);\n            drop(rx_dsp);\n        }\n        drop(updates);",
-       "new": "            drop(rx_dsp);\n        }\n        self.released.push(e);\n        drop(updates);",
+  "old": "            self.released.push(e);\n            drop(rx_chain);\n        }\n        drop(updates);",
+  "new": "            drop(rx_chain);\n        }\n        self.released.push(e);\n        drop(updates);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_release_behind_a_released_command_keeps_the_device_queue_order",
@@ -7395,8 +7395,8 @@
   "id": "P440",
   "name": "`start` issues stream 0's timed start alone (UR-15, RM-29)",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-  "old": "            if rx_first[stream.k].is_some() {",
-  "new": "            if rx_first[stream.k].is_some() && stream.k == 0 {",
+   "old": "            if rx_first[stream.k].is_some() {\n                // UR-15: a later stream's failed start leaves the owners already begun to\n                // cleanup, which joins them before closing the device's streams.\n                if let Err(error) = self.device.rx_start(stream.k, t0) {",
+   "new": "            if rx_first[stream.k].is_some() && stream.k == 0 {\n                // UR-15: a later stream's failed start leaves the owners already begun to\n                // cleanup, which joins them before closing the device's streams.\n                if let Err(error) = self.device.rx_start(stream.k, t0) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_12_a_layout_declares_and_starts_every_stream"
@@ -7530,16 +7530,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_25_a_transmit_report_read_of_a_later_stream_does_not_hold_the_earlier_owner"
- },
- {
-  "id": "P456",
-  "name": "a receive owner starts after a configure that found the device lost (UR-29)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        if self.core.is_lost() {\n            return true;\n        }",
-  "new": "        if false {\n            return true;\n        }",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_29_a_loss_after_a_configure_starts_no_receive_segment"
  },
  {
   "id": "P457",
@@ -8034,11 +8024,11 @@
    "filter": "ur_34_a_move_destination_waits_for_source_busy_after_channel_release"
   },
   {
-   "id": "P513",
+  "id": "P513",
    "name": "an owner falls back to a stale move plan removed before its turn (UR-25, RM-34)",
    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { drop(streams); before_abort(); return Ok(false) };",
-    "new": "            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment).unwrap_or_else(|| next.clone());",
+  "old": "            let Some(current) = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment) else { return Ok(false) };",
+  "new": "            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == next.segment).unwrap_or_else(|| next.to_owned());",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_34_a_owner_does_not_open_a_move_plan_removed_before_its_turn"
@@ -8094,11 +8084,11 @@
    "filter": "ur_34_a_waited_open_aborts_when_the_planned_segment_changes"
   },
   {
-   "id": "P521",
+  "id": "P521",
    "name": "RX reports a lost owner configuration while holding the stream lock (UR-29, UR-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-     "old": "        drop(streams);\n        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        drop(dsp);\n        self.core.device_failed(None, \"update_parameter\", &error);",
-     "new": "        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        drop(dsp);\n        self.core.device_failed(None, \"update_parameter\", &error);",
+  "old": "        drop(streams);\n        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        self.core.device_failed(None, \"update_parameter\", &error);",
+  "new": "        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        self.core.device_failed(None, \"update_parameter\", &error);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_29_a_lost_receive_owner_configure_releases_stream_lock_before_reporting"
@@ -9281,8 +9271,8 @@
   "id": "P593",
   "name": "the end records every held command as cancelled (UR-24, design 38 D2 (4))",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                let due = if lost { order.0 < at } else { order.0 <= at };\n                let (chans, _) = if due",
-  "new": "                let due = false;\n                let (chans, _) = if due",
+  "old": "                let due = if lost { order.0 < at } else { order.0 <= at };\n                let rx_frequency = timed.dir == Dir::Rx && timed.settings().freq.is_some();\n                let (chans, _) = if due",
+  "new": "                let due = false;\n                let rx_frequency = timed.dir == Dir::Rx && timed.settings().freq.is_some();\n                let (chans, _) = if due",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_24_a_due_command_behind_a_channel_less_head_is_cancelled_at_the_loss"
@@ -13051,7 +13041,7 @@
    "new": "        if timeline::covering(planned.iter().filter(|planned| !planned.refused).map(|planned| &planned.segment), chan as u32, e).is_none() {\n            return Reach::Timed;\n        }",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_24_a_stopped_receive_channel_is_given_no_timed_frequency"
+    "filter": "ur_24_a_stopped_rx_segment_does_not_receive_a_late_timed_frequency"
   },
   {
    "id": "P966",
@@ -13098,17 +13088,17 @@
    "name": "a deferred frequency is given as a timed command anyway (UR-24, R1)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
    "old": "                Reach::Deferred => None,",
-   "new": "                Reach::Deferred => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),",
+   "new": "                Reach::Deferred => self.core.device.apply(timed.dir, *chan, &settings, Some(e)).err(),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_frequency_for_a_far_planned_segment_is_deferred_to_its_configure"
   },
   {
-   "id": "P971",
+  "id": "P971",
    "name": "a release untimed is a timed command (UR-24, R1)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),",
-   "new": "                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),",
+  "old": "                Reach::Untimed => self.core.device.apply(timed.dir, *chan, &settings, None).err(),",
+  "new": "                Reach::Untimed => self.core.device.apply(timed.dir, *chan, &settings, Some(e)).err(),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_gap_value_for_a_configured_segment_is_applied_untimed_at_its_release"
@@ -13324,11 +13314,11 @@
    "filter": "ur_24_a_release_waits_for_a_configure_that_carried_its_booking"
   },
   {
-   "id": "P993",
+  "id": "P993",
    "name": "a refused untimed release write is not reported (UR-24, UR-29)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),",
-   "new": "                Reach::Untimed => { let _ = self.core.device.apply(timed.dir, *chan, &settings, None); None }",
+  "old": "                Reach::Untimed => self.core.device.apply(timed.dir, *chan, &settings, None).err(),",
+  "new": "                Reach::Untimed => { let _ = self.core.device.apply(timed.dir, *chan, &settings, None); None },",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_24_a_refused_untimed_release_is_a_refusal_like_a_timed_one"
@@ -13751,7 +13741,7 @@
    "new": ".is_some() || true {\n            return Reach::Timed;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_24_a_stopped_receive_channel_is_given_no_timed_frequency"
+    "filter": "ur_24_a_gap_value_for_a_configured_segment_is_applied_untimed_at_its_release"
   },
   {
    "id": "P1036",
@@ -15319,44 +15309,44 @@
        "filter": "ur_26_provider_stop_restores_the_frequency_in_force_at_its_instant"
       },
       {
-       "id": "P1214",
-       "name": "RX samples before acceptance do not consume a timed DDC entry (D9b-2)",
-       "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-       "old": "if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {",
-       "new": "if tick >= i128::from(entry.order.0) {",
+         "id": "P1214",
+        "name": "RX samples before acceptance do not consume a timed DDC entry (D9b-2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "                } else if let Some(position) = self.debt.iter().position(|entry| entry.channel == channel) {\n                    let entry = &self.debt[position];\n                    if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {",
+        "new": "                } else if let Some(position) = self.debt.iter().position(|entry| entry.channel == channel) {\n                    let entry = &self.debt[position];\n                    if tick >= i128::from(entry.order.0) {",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_24_equal_time_rx_entries_need_distinct_samples_after_acceptance"
       },
       {
-       "id": "P1215",
-       "name": "one RX sample consumes at most one equal-time DDC entry (D9b-2)",
-       "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-       "old": "let entry = dsp.pending.remove(position);",
-       "new": "let entry = dsp.pending.remove(position); dsp.pending.clear();",
+         "id": "P1215",
+        "name": "one RX sample consumes at most one equal-time DDC entry (D9b-2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "self.debt.remove(position);",
+        "new": "self.debt.clear();",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_24_equal_time_rx_entries_need_distinct_samples_after_acceptance"
       },
       {
-       "id": "P1216",
+        "id": "P1216",
        "name": "only timed RX frequencies create DDC drain obligations (D9b-2)",
        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-       "old": "let obligation = if rx_frequency && matches!(reach, Reach::Timed) {",
-       "new": "let obligation = if rx_frequency {",
+        "old": "                Reach::Timed if rx_frequency => {",
+        "new": "                Reach::Timed if false && rx_frequency => {",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
-       "filter": "ur_24_a_stopped_receive_channel_is_given_no_timed_frequency"
+        "filter": "ur_24_a_frequency_inside_a_running_segment_is_given_timed"
       },
       {
-       "id": "P1217",
-       "name": "a refused RX frequency removes its unaccepted drain obligation (D9b-2)",
-       "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-       "old": "state.pending.retain(|pending| pending.order != obligation.order || pending.channel != obligation.channel);",
-       "new": "let _ = state.pending.len();",
+         "id": "P1217",
+        "name": "a refused RX frequency removes its unaccepted drain obligation (D9b-2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "                self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel);",
+        "new": "                self.debt.retain(|_| true);",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
-       "filter": "ur_24_refused_timed_rx_frequency_leaves_no_drain_obligation"
+        "filter": "ur_24_a_delayed_rx_apply_refusal_rolls_back_debt_and_record"
       },
       {
        "id": "P1218",
@@ -15409,11 +15399,11 @@
        "filter": "ur_26_provider_stop_restores_the_frequency_in_force_at_its_instant"
       },
       {
-       "id": "P1223",
+        "id": "P1223",
         "name": "Provider::stop restoration is enabled only after successful RX drain and stop (D9b-2)",
        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "if dsp.stopped && !self.core.is_lost() {",
-        "new": "if false && dsp.stopped && !self.core.is_lost() {",
+        "old": "            if matches!(chain.device(), RxDevice::Off) {\n                drop(chain);\n                self.restore_rx();\n                chain = core.rx_chain[self.k].lock();\n            } else {\n                self.skip_restore_rx(&mut chain, \"receive stop failed; restore was not attempted\");\n            }",
+        "new": "            if false && matches!(chain.device(), RxDevice::Off) {\n                drop(chain);\n                self.restore_rx();\n                chain = core.rx_chain[self.k].lock();\n            } else {\n                self.skip_restore_rx(&mut chain, \"receive stop failed; restore was not attempted\");\n            }",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_24_provider_stop_drains_after_s_then_restores_the_frequency_in_force_at_s"
@@ -15432,18 +15422,18 @@
         "id": "P1225",
         "name": "RX recovery uses an immediate stream-now start (D9b-2 re-review)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "if let Err(error) = self.core.device.rx_start_now(self.k) {",
-        "new": "if let Err(error) = self.core.device.rx_start(self.k, self.core.now()) {",
+        "old": "match chain.flush_start_result(self.core.device.rx_start_now(self.k)) {",
+        "new": "match chain.flush_start_result(self.core.device.rx_start(self.k, self.core.now())) {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_drain_deadline_runs_one_bounded_flush_and_consumes_or_reports"
       },
       {
-        "id": "P1226",
+         "id": "P1226",
         "name": "a failed RX stop reports its still-pending DDC entries (D9b-2 re-review)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "self.settle_pending_locked(&mut dsp, None, &format!(\"receive stop failed: {}\", error.message));",
-        "new": "let _ = &dsp;",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        let entries = std::mem::take(&mut self.debt);",
+        "new": "        let entries = Vec::new();",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_nonloss_rx_stop_failure_reports_pending_and_skips_restore"
@@ -15462,8 +15452,8 @@
         "id": "P1228",
         "name": "a stopped old RX chain does not demote a covered successor retune (D9b-2 review)",
         "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-        "old": "if state.stopped && matches!(reach, Reach::Timed) && active_covers {",
-        "new": "if state.stopped && matches!(reach, Reach::Timed) && true {",
+        "old": "                    let eligible = covering.is_some_and(|segment| chain.eligible(segment, e));",
+        "new": "                    let eligible = true;",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_successor_frequency_after_its_origin_stays_timed_during_restart"
@@ -15472,28 +15462,18 @@
         "id": "P1229",
         "name": "Provider-stop does not restore after a failed RX flush stop (D9b-2 review)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "if dsp.stopped && !self.core.is_lost() {",
-        "new": "if true && !self.core.is_lost() {",
+        "old": "            if matches!(chain.device(), RxDevice::Off) {\n                drop(chain);\n                self.restore_rx();\n                chain = core.rx_chain[self.k].lock();\n            } else {\n                self.skip_restore_rx(&mut chain, \"receive stop failed; restore was not attempted\");\n            }",
+        "new": "            if matches!(chain.device(), RxDevice::Off | RxDevice::Uncertain) {\n                drop(chain);\n                self.restore_rx();\n                chain = core.rx_chain[self.k].lock();\n            } else {\n                self.skip_restore_rx(&mut chain, \"receive stop failed; restore was not attempted\");\n            }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_provider_stop_skips_restore_when_flush_stop_fails"
       },
       {
-        "id": "P1230",
-        "name": "completed RX segments cannot accept late timed DDC entries (D9b-2 review)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-        "old": "!streams.stream(stream_key(Dir::Rx, planned.k)).completed.contains(&(planned.segment.origin, planned.segment.config, planned.segment.by))",
-        "new": "true",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_24_a_stopped_rx_segment_does_not_receive_a_late_timed_frequency"
-      },
-      {
-         "id": "P1231",
+        "id": "P1231",
          "name": "RX owner keeps the handover lock through segment completion (D9b-2 review)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "self.core.probe(\"rx_before_finish\", None);\n        self.finish();",
-        "new": "drop(dsp);\n        self.core.probe(\"rx_before_finish\", None);\n        self.finish();",
+        "old": "        self.core.probe(\"rx_before_finish\", None);\n        self.finish_locked(&mut chain);",
+        "new": "        drop(chain);\n        self.core.probe(\"rx_before_finish\", None);\n        let mut chain = core.rx_chain[self.k].lock();\n        self.finish_locked(&mut chain);",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_completed_rx_owner_serializes_a_late_frequency"
@@ -15502,8 +15482,8 @@
         "id": "P1232",
         "name": "RX owner does not abandon a pending DDC entry at stop (D9b-2 fix 1)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "let recovery = (!dsp.pending.is_empty() && !self.core.is_lost())\n                .then(|| (clock.n, channels, flush_deadline.expect(\"a pending drain has a deadline\")));",
-        "new": "let recovery = (false && !dsp.pending.is_empty() && !self.core.is_lost())\n                .then(|| (clock.n, channels, flush_deadline.expect(\"a pending drain has a deadline\")));",
+        "old": "        if stopped && !self.core.is_lost() && !chain.debt().is_empty() {",
+        "new": "        if false && stopped && !self.core.is_lost() && !chain.debt().is_empty() {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_drain_deadline_runs_one_bounded_flush_and_consumes_or_reports"
@@ -15512,8 +15492,8 @@
         "id": "P1233",
         "name": "RX handover and stop retain their per-stream serialization (D9b-2 fix 1)",
         "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-        "old": "            let applied = match reach {\n                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),\n                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),\n                Reach::Deferred => None,\n            };",
-        "new": "            drop(rx_dsp);\n            let applied = match reach {\n                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),\n                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),\n                Reach::Deferred => None,\n            };\n            let mut rx_dsp = rx_stream.map(|stream| self.core.rx_dsp[stream].lock());",
+        "old": "                Reach::Timed if rx_frequency => {\n                    let chain = rx_chain.as_mut().expect(\"an RX frequency chain\");\n                    let entry = RxEntry { order: (e, seq), channel: *chan, value: timed.value, accepted_at: None };\n                    chain.hand(entry, || self.core.device.apply(timed.dir, *chan, &settings, Some(e)).map(|_| ()), || self.core.now()).err()\n                }",
+        "new": "                Reach::Timed if rx_frequency => {\n                    drop(rx_chain.take());\n                    let applied = self.core.device.apply(timed.dir, *chan, &settings, Some(e)).err();\n                    rx_chain = rx_stream.map(|stream| self.core.rx_chain[stream].lock());\n                    applied\n                }",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_stop_decision_waits_for_a_gated_timed_rx_handover"
@@ -15522,8 +15502,8 @@
         "id": "P1234",
         "name": "Provider::stop restoration stays after recovery consumes an outstanding RX entry (D9b-2 fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "            self.settle_pending_locked(&mut dsp, recovery, \"receive drain and one flush did not show DDC consumption\");\n            if provider_stop.is_some() {\n                if dsp.stopped && !self.core.is_lost() {\n                    self.restore_rx(&dsp);\n                } else {\n                    let reason = if self.core.is_lost() { \"device lost; restore was not attempted\" } else { \"receive stop failed; restore was not attempted\" };\n                    self.skip_restore_rx(&dsp, reason);\n                }\n            }",
-        "new": "            if provider_stop.is_some() {\n                if dsp.stopped && !self.core.is_lost() {\n                    self.restore_rx(&dsp);\n                } else {\n                    let reason = if self.core.is_lost() { \"device lost; restore was not attempted\" } else { \"receive stop failed; restore was not attempted\" };\n                    self.skip_restore_rx(&dsp, reason);\n                }\n            }\n            self.settle_pending_locked(&mut dsp, recovery, \"receive drain and one flush did not show DDC consumption\");",
+        "old": "        if stopped && !self.core.is_lost() && !chain.debt().is_empty() {",
+        "new": "        if false && stopped && !self.core.is_lost() && !chain.debt().is_empty() {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_provider_stop_drains_after_s_then_restores_the_frequency_in_force_at_s"
@@ -15532,11 +15512,11 @@
         "id": "P1235",
         "name": "RX recovery stops issuing device calls after loss (D9b-2 fix 1)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "while !dsp.pending.is_empty() && i128::from(self.core.now()) < deadline && !self.core.is_lost() {",
-        "new": "while !dsp.pending.is_empty() && i128::from(self.core.now()) < deadline {",
+        "old": "                while !chain.debt().is_empty() && i128::from(self.core.now()) < deadline && !self.core.is_lost() {",
+        "new": "                while !chain.debt().is_empty() && i128::from(self.core.now()) < deadline {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
-        "filter": "ur_24_device_loss_ends_a_drain_without_more_receive_calls"
+        "filter": "ur_24_a_loss_during_rx_flush_finishes_without_recovery_calls"
       },
       {
         "id": "P1236",
@@ -15549,63 +15529,523 @@
         "filter": "ur_24_drain_deadline_runs_one_bounded_flush_and_consumes_or_reports"
       },
       {
-        "id": "P1237",
-        "name": "a refused RX successor recovers its handed DDC entries (D9b-2 fix 1)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "if !error.lost && !dsp.pending.is_empty() && !self.core.is_lost() {",
-        "new": "if false && !error.lost && !dsp.pending.is_empty() && !self.core.is_lost() {",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_24_a_refused_successor_configuration_reports_pending_ddc_through_shutdown_and_reopen"
-      },
-      {
         "id": "P1238",
         "name": "a deadline-sensitive ordinary RX receive returns after one packet (D9b-2 fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "let one_packet = self.stream.as_ref().is_some_and(|stream| stream.cut.is_some_and(|cut| self.core.now() >= cut));",
-        "new": "let one_packet = false;",
+        "old": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };",
+        "new": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (false, self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_deadline_receive_uses_one_short_packet_and_preserves_successor_lead"
       },
       {
-        "id": "P1239",
-        "name": "an abandoned RX owner settles obligations before giving back its claim (D9b-2 fix 2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "|| self.settle_pending(None, \"receive segment was removed before it acquired an owner\")",
-        "new": "|| {}",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_24_a_pending_ddc_is_reported_when_"
-      },
-      {
-        "id": "P1240",
-        "name": "shutdown without an RX stream settles pending DDC entries (D9b-2 fix 2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "self.settle_pending(None, \"receive owner exited without a stream to drain\");",
-        "new": "let _ = &self.core;",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_24_a_shutdown_without_an_rx_stream_reports_pending_ddc"
-      },
-      {
-        "id": "P1241",
+         "id": "P1241",
         "name": "an RX owner reports a pending DDC entry only once per entry (D9b-2 fix 3)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "for (key, _) in entries { dsp.reported.insert(key); }",
-        "new": "for (key, _) in entries { let _ = key; }",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        let entries = std::mem::take(&mut self.debt);",
+        "new": "        let entries = self.debt.clone();",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
-        "filter": "ur_24_a_new_successor_obligation_is_settled_after_an_earlier_empty_settlement"
+        "filter": "rx_chain_lose_is_terminal"
       },
       {
-        "id": "P1242",
+         "id": "P1242",
         "name": "a future booked RX cut does not enable one-packet receives early (D9b-2 fix 3)",
         "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-        "old": "let one_packet = self.stream.as_ref().is_some_and(|stream| stream.cut.is_some_and(|cut| self.core.now() >= cut));",
-        "new": "let one_packet = self.stream.as_ref().is_some_and(|stream| stream.cut.is_some());",
+        "old": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };",
+        "new": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some(), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_24_a_far_future_cut_keeps_pre_cut_receives_multi_packet"
+      },
+      {
+        "id": "P1243",
+        "name": "an unbegun covering RX segment blocks its timed frequency (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "if covering.is_some() && !eligible { return Handed::Blocked; }",
+        "new": "if false && covering.is_some() && !eligible { return Handed::Blocked; }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_held_frequency_is_handed_after_begin_inside_release_window"
+      },
+      {
+        "id": "P1244",
+        "name": "RX begin keeps the chain lock across device start and eligibility publication (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+         "old": "        let mut chain = self.core.rx_chain[self.k].lock();\n        if self.core.is_lost() || chain.device() == RxDevice::Lost {\n            drop(chain);\n            self.finish();\n            return true;\n        }\n        if let Err(error) = chain.begin_result(segment, origin, self.core.device.rx_start(self.k, origin)) {",
+         "new": "        let mut chain = self.core.rx_chain[self.k].lock();\n        if self.core.is_lost() || chain.device() == RxDevice::Lost {\n            drop(chain);\n            self.finish();\n            return true;\n        }\n        drop(chain);\n        let result = self.core.device.rx_start(self.k, origin);\n        let mut chain = self.core.rx_chain[self.k].lock();\n        if let Err(error) = chain.begin_result(segment, origin, result) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_release_waits_until_begin_publishes_eligibility"
+      },
+      {
+        "id": "P1245",
+        "name": "an RX segment is eligible at its exact origin (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "            && instant >= segment.origin",
+        "new": "            && instant > segment.origin",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_frequency_due_at_a_segment_origin_is_given_timed_and_the_configure_carries_it"
+      },
+      {
+        "id": "P1246",
+        "name": "first-sample transition rejects a different RX segment identity (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "if self.segment == Some(segment) && matches!(self.device, RxDevice::Armed { .. }) {",
+        "new": "if self.segment.is_some() && matches!(self.device, RxDevice::Armed { .. }) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_first_sample_transition"
+      },
+      {
+        "id": "P1247",
+        "name": "a refused timed RX apply removes its provisional debt (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "                self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel);",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_hand_transitions"
+      },
+      {
+        "id": "P1248",
+        "name": "accepted RX frequency remains available for Provider::stop restore (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "                self.latest.insert(accepted.channel, accepted);",
+        "new": "                self.latest.remove(&accepted.channel);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_left_and_latest_survive_close_open_and_chain_reuse"
+      },
+      {
+        "id": "P1249",
+        "name": "a qualifying sample consumes a reported RX leftover (L1, KL-9)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "                        self.left.remove(position);",
+        "new": "                        self.debt.remove(position);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_left_and_latest_survive_close_open_and_chain_reuse"
+      },
+      {
+        "id": "P1250",
+        "name": "a local RX leftover blocks restore (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "let local = chain.debt().iter().chain(chain.left()).find(|entry| entry.channel == channel).cloned();",
+        "new": "let local = chain.debt().iter().find(|entry| entry.channel == channel).cloned();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_local_leftover_blocks_restore"
+      },
+      {
+        "id": "P1251",
+        "name": "another RX chain's leftover blocks restore after a channel move (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "if let Some(entry) = local.or(other) {",
+        "new": "if let Some(entry) = local {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_left_stays_on_the_old_chain_after_channel_move"
+      },
+      {
+        "id": "P1252",
+        "name": "release the chain lock before Provider::stop restore (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "        self.finish_locked(&mut chain);\n        if !self.core.is_lost() && lock(&self.core.streams).stop.is_some() {\n            if matches!(chain.device(), RxDevice::Off) {\n                drop(chain);\n                self.restore_rx();",
+        "new": "        self.finish_locked(&mut chain);\n        if !self.core.is_lost() && lock(&self.core.streams).stop.is_some() {\n            if matches!(chain.device(), RxDevice::Off) {\n                self.restore_rx();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_parallel_rx_restore_checks_do_not_nest_chain_locks"
+      },
+      {
+        "id": "P1253",
+        "name": "a refused RX stop leaves device state uncertain (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "    pub fn stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {\n        assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));\n        match result {\n            Ok(()) => { self.device = RxDevice::Off; Ok(()) }\n            Err(error) => {\n                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };",
+        "new": "    pub fn stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {\n        assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));\n        match result {\n            Ok(()) => { self.device = RxDevice::Off; Ok(()) }\n            Err(error) => {\n                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Off };",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_stop_transitions"
+      },
+      {
+        "id": "P1254",
+        "name": "a refused RX flush stop leaves device state uncertain (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "    pub fn flush_stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {\n        assert!(matches!(self.device, RxDevice::Flushing));\n        match result {\n            Ok(()) => { self.device = RxDevice::Off; Ok(()) }\n            Err(error) => {\n                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };",
+        "new": "    pub fn flush_stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {\n        assert!(matches!(self.device, RxDevice::Flushing));\n        match result {\n            Ok(()) => { self.device = RxDevice::Off; Ok(()) }\n            Err(error) => {\n                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Off };",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_flush_transitions"
+      },
+      {
+        "id": "P1255",
+        "name": "RX streamer reuse requires an idle device and empty debt (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        assert!(matches!(chain.device, RxDevice::Off | RxDevice::Uncertain | RxDevice::Lost), \"L1: RX {operation} requires an idle device chain, got {:?}\", chain.device);",
+        "new": "        assert!(true, \"L1: RX {operation} requires an idle device chain, got {:?}\", chain.device);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_reuse_guard_rejects_active_open_and_debt_close"
+      },
+      {
+        "id": "P1256",
+        "name": "RX loss finishes without a recovery device call (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "        if self.core.is_lost() || matches!(chain.device(), RxDevice::Lost) {",
+        "new": "        if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_loss_during_rx_receive_finishes_without_recovery_calls"
+      },
+      {
+        "id": "P1257",
+        "name": "the new stopped-state eligibility rule applies to RX frequency, not gain (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "            let rx_frequency = timed.dir == Dir::Rx && timed.settings().freq.is_some();\n            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);",
+        "new": "            let rx_frequency = timed.dir == Dir::Rx;\n            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_stopped_receive_channel_still_takes_its_gain"
+      },
+      {
+        "id": "P1258",
+        "name": "a blocked RX head holds every later command until it resolves (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+         "old": "                Handed::Blocked => break,",
+        "new": "                Handed::Blocked => { self.held.remove(&(e, seq)); }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_blocked_rx_head_holds_later_rx_and_tx_updates"
+      },
+      {
+        "id": "P1259",
+        "name": "timed handoff waits while an RX restart is publishing eligibility (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+         "old": "                let result = {\n                    let mut chain = self.core.rx_chain[self.k].lock();\n                    if self.core.is_lost() || chain.device() == RxDevice::Lost {\n                        None\n                    } else {\n                        Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))\n                    }\n                };",
+         "new": "                let result = {\n                    let mut chain = self.core.rx_chain[self.k].lock();\n                    if self.core.is_lost() || chain.device() == RxDevice::Lost {\n                        None\n                    } else {\n                        drop(chain);\n                        let start = self.core.device.rx_start(self.k, restart);\n                        Some(self.core.rx_chain[self.k].lock().restart_result(restart, start))\n                    }\n                };",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_begin_and_timed_apply_serialize_in_both_chain_lock_orders"
+      },
+      {
+        "id": "P1260",
+        "name": "adopting the prepared RX segment records its identity (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        self.segment = Some(segment);\n        self.device = RxDevice::Armed { at };\n    }\n\n    pub fn begin_result",
+        "new": "        self.segment = None;\n        self.device = RxDevice::Armed { at };\n    }\n\n    pub fn begin_result",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_adopt_start_transitions"
+      },
+      {
+        "id": "P1261",
+        "name": "an ordinary RX begin refusal preserves the prior device state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "            Err(error) => {\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn restart_result",
+        "new": "            Err(error) => {\n                self.device = RxDevice::Lost;\n                Err(error)\n            }\n        }\n    }\n\n    pub fn restart_result",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_begin_transitions"
+      },
+      {
+        "id": "P1262",
+        "name": "an ordinary RX restart refusal preserves the segment and device state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "            Ok(()) => {\n                self.device = RxDevice::Armed { at };\n                Ok(())\n            }\n            Err(error) => {\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn first_sample",
+        "new": "            Ok(()) => {\n                self.device = RxDevice::Armed { at };\n                Ok(())\n            }\n            Err(error) => {\n                self.device = RxDevice::Lost;\n                Err(error)\n            }\n        }\n    }\n\n    pub fn first_sample",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_restart_transitions"
+      },
+      {
+        "id": "P1263",
+        "name": "finishing an RX chain transfers its outstanding debt to left (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        let reported = self.report_debt();\n        self.segment = None;",
+        "new": "        let reported = Vec::new();\n        self.segment = None;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_finish_transitions"
+      },
+      {
+        "id": "P1264",
+        "name": "abandoning an unowned RX chain records termination (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        self.intent.end_now = true;\n        self.intent.terminate.get_or_insert(StopMode::Abort);",
+        "new": "        self.intent.end_now = false;\n        self.intent.terminate.get_or_insert(StopMode::Abort);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_abandon_unowned_records_cleanup_state"
+      },
+      {
+        "id": "P1265",
+        "name": "an unbegun RX successor adds no debt to the old chain drain (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "if covering.is_some() && !eligible { return Handed::Blocked; }",
+        "new": "if false && covering.is_some() && !eligible { return Handed::Blocked; }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_unbegun_successor_does_not_extend_the_old_chain_drain"
+      },
+      {
+        "id": "P1266",
+        "name": "a held RX frequency is still handed after its instant (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "let eligible = covering.is_some_and(|segment| chain.eligible(segment, e));",
+        "new": "let eligible = covering.is_some_and(|segment| chain.eligible(segment, e) && e >= self.core.now());",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_held_frequency_is_handed_after_its_instant"
+      },
+      {
+        "id": "P1267",
+        "name": "RX restart preserves eligibility before a held frequency is released (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "            Ok(()) => {\n                self.device = RxDevice::Armed { at };\n                Ok(())\n            }\n            Err(error) => {\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn first_sample",
+        "new": "            Ok(()) => {\n                self.segment = None;\n                self.device = RxDevice::Armed { at };\n                Ok(())\n            }\n            Err(error) => {\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn first_sample",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_late_command_restart_preserves_rx_eligibility_before_release"
+      },
+      {
+        "id": "P1268",
+        "name": "RX restart preserves eligibility after a frequency has been released (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "            Ok(()) => {\n                self.device = RxDevice::Armed { at };\n                Ok(())\n            }\n            Err(error) => {\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn first_sample",
+        "new": "            Ok(()) => {\n                self.segment = None;\n                self.device = RxDevice::Armed { at };\n                Ok(())\n            }\n            Err(error) => {\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn first_sample",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_late_command_restart_preserves_rx_eligibility_after_release"
+      },
+      {
+        "id": "P1269",
+        "name": "a cut-bearing late RX command does not restart the device (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "if matches!(&result, RxRecv::LateCommand) && self.core.rx_chain[self.k].lock().cut().is_some() {",
+        "new": "if matches!(&result, RxRecv::LateCommand) && false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_cut_bearing_late_command_finishes_without_restart"
+      },
+      {
+        "id": "P1270",
+        "name": "a failed RX handoff on loss is not retained as accepted debt (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "            Err(error) => {\n                self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel);\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn stop_result",
+        "new": "            Err(error) => {\n                if !error.lost { self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel); }\n                if error.lost { self.device = RxDevice::Lost; }\n                Err(error)\n            }\n        }\n    }\n\n    pub fn stop_result",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_loss_during_timed_rx_handoff_finishes_without_recovery_calls"
+      },
+      {
+        "id": "P1273",
+        "name": "a stopped RX destination does not receive its held frequency (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);",
+        "new": "            let (chans, live) = (vec![timed.chan], true);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_stop_retargets_held_frequency"
+      },
+      {
+        "id": "P1274",
+        "name": "a cold change before e retargets a held RX frequency (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);",
+        "new": "            let (chans, live) = (vec![timed.chan], true);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_cold_change_before_e_retargets_held_frequency"
+      },
+      {
+        "id": "P1275",
+        "name": "a held RX frequency follows a move to its new destination (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);",
+        "new": "            let (chans, live) = (vec![timed.chan], true);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_move_retargets_held_frequency_to_new_destination"
+      },
+      {
+        "id": "P1276",
+        "name": "a removed RX destination records no channel instead of a stale write (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);",
+        "new": "            let (chans, live) = (vec![timed.chan], true);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_removed_destination_retargets_held_frequency_to_no_channel"
+      },
+      {
+        "id": "P1279",
+        "name": "Provider::stop settles the blocked RX head and its suffix (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "        self.settle(at, why, lost);",
+        "new": "        let _ = (at, why, lost);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_stop_settles_blocked_rx_head_and_later_commands"
+      },
+      {
+        "id": "P1280",
+        "name": "owner reconfigure close checks RX chain reuse state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, \"close\"); }",
+        "new": "        let _ = (dir, k);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_reconfigure_close_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1281",
+        "name": "release_unneeded close checks RX chain reuse state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, \"close\"); }",
+        "new": "        let _ = (dir, k);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_release_unneeded_close_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1282",
+        "name": "open failure cleanup close checks RX chain reuse state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, \"close\"); }",
+        "new": "        let _ = (dir, k);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_open_failure_close_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1283",
+        "name": "uhd-control from-none open checks RX chain reuse state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, \"open\"); }",
+        "new": "        let _ = (dir, k);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_control_open_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1284",
+        "name": "rate-check failure cleanup close checks RX chain reuse state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, \"close\"); }",
+        "new": "        let _ = (dir, k);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_rate_check_failure_close_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1285",
+        "name": "prepare/arm open checks RX chain reuse state (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "        if dir == Dir::Rx { self.assert_rx_chain_reusable(k, \"open\"); }",
+        "new": "        let _ = (dir, k);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_prepare_open_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1286",
+        "name": "Provider cleanup checks RX chain state before close_streams (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+        "old": "            #[cfg(test)]\n            core.assert_rx_chains_reusable();\n            self.device.close_streams();",
+        "new": "            #[cfg(test)]\n            let _ = &core;\n            self.device.close_streams();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_cleanup_close_requires_idle_empty_debt"
+      },
+      {
+        "id": "P1287",
+        "name": "Provider::stop does not restore while a same-chain RX leftover remains (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "            let local = chain.debt().iter().chain(chain.left()).find(|entry| entry.channel == channel).cloned();",
+        "new": "            let local = chain.debt().iter().find(|entry| entry.channel == channel).cloned();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_provider_stop_skips_restore_for_left_on_this_chain"
+      },
+      {
+        "id": "P1288",
+        "name": "an unowned RX owner exits without reopening or recovering a streamer (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "        if terminate && self.stream.is_none() {\n            self.finish();\n            return Turn::Exit;\n        }",
+        "new": "        if false && terminate && self.stream.is_none() {\n            self.finish();\n            return Turn::Exit;\n        }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "rx_chain_abandon_unowned_records_cleanup_state"
+      },
+      {
+        "id": "P1289",
+        "name": "the first RX sample preserves the segment identity needed for handoff (L1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+        "old": "    pub fn first_sample(&mut self, segment: SegmentKey) {\n        if self.segment == Some(segment) && matches!(self.device, RxDevice::Armed { .. }) {\n            self.device = RxDevice::Streaming;\n        }\n    }",
+        "new": "    pub fn first_sample(&mut self, segment: SegmentKey) {\n        if self.segment == Some(segment) && matches!(self.device, RxDevice::Armed { .. }) {\n            self.segment = None;\n            self.device = RxDevice::Streaming;\n        }\n    }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_first_rx_sample_preserves_eligibility_and_segment_identity"
+      },
+      {
+        "id": "P1290",
+        "name": "a late RX restart calls the device after loss (L1 fix 1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "                    if self.core.is_lost() || chain.device() == RxDevice::Lost {\n                        None\n                    } else {\n                        Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))\n                    }",
+        "new": "                    Some(chain.restart_result(restart, self.core.device.rx_start(self.k, restart)))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_loss_during_timed_rx_handoff_finishes_without_recovery_calls"
+      },
+      {
+        "id": "P1291",
+        "name": "RX begin starts after acquiring the chain even when loss was published (L1 fix 1)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "        if self.core.is_lost() || chain.device() == RxDevice::Lost {\n            drop(chain);\n            self.finish();\n            return true;\n        }",
+        "new": "        if false {\n            drop(chain);\n            self.finish();\n            return true;\n        }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_29_a_begin_rechecks_loss_after_acquiring_the_chain_before_rx_start"
+      },
+      {
+        "id": "P1292",
+        "name": "an RX owner spawn failure skips abandonment before cleanup (L1 fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+        "old": "                    core.rx_chain[stream.k].lock().abandon_unowned();",
+        "new": "                    core.rx_chain[stream.k].lock().request_end_now();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_15_a_failed_rx_owner_spawn_abandons_its_started_chain_before_cleanup"
+      },
+      {
+        "id": "P1293",
+        "name": "a blocked RX head skips recording due earlier handoffs (L1 fix 3)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "Handed::Blocked => break,",
+        "new": "Handed::Blocked => return,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_blocked_rx_head_still_folds_earlier_handed_updates"
+      },
+      {
+        "id": "P1294",
+        "name": "an unbegun RX segment does not block its timed update (L1 fix 4)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+        "old": "                    if covering.is_some() && !eligible { return Handed::Blocked; }",
+        "new": "                    if covering.is_some() && !eligible { return Handed::Given(self.core.now()); }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_delayed_rx_apply_refusal_rolls_back_debt_and_record"
+      },
+      {
+        "id": "P1295",
+        "name": "ordinary RX checks loss under the chain lock before receiving (L1 fix 2)",
+        "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        "old": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), self.core.is_lost() || matches!(chain.device(), RxDevice::Lost))\n        };\n        if lost {",
+        "new": "        let (one_packet, lost) = {\n            let chain = self.core.rx_chain[self.k].lock();\n            (chain.cut().is_some_and(|cut| self.core.now() >= cut), false)\n        };\n        if lost {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "ur_24_a_loss_published_before_rx_recv_skips_the_device_call"
       }
   ]

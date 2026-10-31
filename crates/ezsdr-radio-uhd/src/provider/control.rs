@@ -24,7 +24,9 @@ use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, S
 use ezsdr_radio::kinds;
 use serde_json::json;
 
-use super::core::{assert_line_free, stream_key, Clock, Core, Holder, RxDspEntry, lock};
+use super::core::{assert_line_free, stream_key, Clock, Core, Holder, RxEntry, SegmentKey, lock};
+#[cfg(test)]
+use super::core::Restore;
 #[cfg(test)]
 use super::core::booked_stream;
 use super::mode::{DescriptionExt, scalar_number};
@@ -86,6 +88,7 @@ enum Handed {
     Given(i64),
     Refused,
     Lost,
+    Blocked,
 }
 
 /// The configuration a command's segment begins with, shared with its owner: the one in
@@ -384,9 +387,8 @@ impl Control {
     pub(super) fn finish(&mut self) {
         let (at, lost) = lock(&self.core.streams).ended_at().expect("UR-26: the end was booked before uhd-control finishes");
         let why = if lost { "UR-29: device lost" } else { "Provider::stop" };
-        for k in 0..self.core.rx_dsp.len() {
-            let mut rx_dsp = self.core.rx_dsp[k].lock();
-            rx_dsp.restore.clear();
+        for k in 0..self.core.rx_chain.len() {
+            let mut chain = self.core.rx_chain[k].lock();
             if !lost {
                 let mut restore = Vec::new();
                 let frequency = |channel: usize| {
@@ -403,15 +405,16 @@ impl Control {
                         .max_by_key(|(order, _)| *order)
                         .map_or(initial, |(_, value)| value)
                 };
-                for (&channel, latest) in &rx_dsp.latest {
+                for (&channel, latest) in chain.latest() {
                     if latest.order.0 <= at && latest.accepted_at.is_some_and(|accepted| accepted <= at) {
                         continue;
                     }
                     restore.push((channel, frequency(channel)));
                 }
-                rx_dsp.restore.extend(restore);
+                chain.plan_restore(restore.into_iter().collect());
+            } else {
+                chain.plan_restore(BTreeMap::new());
             }
-            rx_dsp.restore_ready = true;
         }
         self.settle(at, why, lost);
         let plan = lock(&self.core.streams).record();
@@ -588,19 +591,32 @@ impl Control {
     /// — the stream that holds it is not halted and no refusal stops it. A timed update acts
     /// on the channel then; otherwise it is given to the later segments that run the channel,
     /// or held for one where none does (`targets`).
-    fn channel_live(&self, dir: Dir, chan: usize, t: i64) -> bool {
+    fn channel_live(&self, dir: Dir, chan: usize, t: i64, rx_frequency: bool) -> bool {
         let stream = self.core.description.stream_of(&self.config_at(t), dir == Dir::Rx, chan as u32);
         if stream < 0 {
             return false;
         }
         let key = stream_key(dir, stream as usize);
-        !lock(&self.core.streams).line(key).is_some_and(|line| line.halted(t))
+        let streams = lock(&self.core.streams);
+        if streams.line(key).is_none_or(|line| line.halted(t)) { return false; }
+        if rx_frequency {
+            let completed = &streams.stream(key).completed;
+            return timeline::covering(
+                streams.planned(key).iter().filter(|planned| {
+                    !planned.refused
+                        && !completed.contains(&(planned.segment.origin, planned.segment.config, planned.segment.by))
+                }).map(|planned| &planned.segment),
+                chan as u32,
+                t,
+            ).is_some();
+        }
+        true
     }
 
     /// UR-24: the channel a timed command is given on at `t` — in force there, or, with none
     /// in force, in a segment planned to begin at or after `t` that is not refused.
-    fn targets(&self, dir: Dir, chan: usize, t: i64) -> (Vec<usize>, bool) {
-        if self.channel_live(dir, chan, t) {
+    fn targets(&self, dir: Dir, chan: usize, t: i64, rx_frequency: bool) -> (Vec<usize>, bool) {
+        if self.channel_live(dir, chan, t, rx_frequency) {
             return (vec![chan], true);
         }
         // `planned` takes the line's lock once after `channel_live` lets it go (UR-25's order).
@@ -681,11 +697,12 @@ impl Control {
         let window = self.core.ticks(self.core.description.timing.release_window_ns);
         self.released.retain(|effective| *effective > now);
         self.booked.retain(|effective| *effective > now);
-        while let Some(((e, seq), dir, chan)) = self.held.first_key_value().map(|(&order, timed)| (order, timed.dir, timed.chan)) {
+        while let Some(((e, seq), timed)) = self.held.first_key_value().map(|(&order, timed)| (order, timed.clone())) {
             if e - now > window {
                 break;
             }
-            let (chans, live) = self.targets(dir, chan, e);
+            let rx_frequency = timed.dir == Dir::Rx && timed.settings().freq.is_some();
+            let (chans, live) = self.targets(timed.dir, timed.chan, e, rx_frequency);
             if chans.is_empty() {
                 if e > now {
                     // It waits for a channel a segment booked since may bring: it stays held,
@@ -702,7 +719,6 @@ impl Control {
             }
             // The instant is the booking's: the floor there keeps it behind every command
             // booked before it, so the device queue's order cannot move it.
-            let timed = self.held.get(&(e, seq)).expect("a held command").clone();
             match self.give(e, seq, timed.clone(), &chans) {
                 // UR-24: it is the device's now; its row comes when its instant does.
                 Handed::Given(handed_at) => {
@@ -718,6 +734,10 @@ impl Control {
                 }
                 // UR-29, design 38 D2 (4): not given, so it stays held; the end settles it.
                 Handed::Lost => return,
+                // The head is covered by a segment that has not started yet. Keep it and every
+                // later command held until the chain publishes that segment under its lock; an
+                // earlier handoff may still become due and must reach the fold below.
+                Handed::Blocked => break,
             }
         }
         // UR-26, UR-29, design 38 D2 (4): a loss or a stop another thread booked ends the Run
@@ -781,7 +801,6 @@ impl Control {
         let planned: Vec<Planned> = {
             let streams = lock(&self.core.streams);
             (0..streams.count(Dir::Rx)).flat_map(|k| streams.planned(stream_key(Dir::Rx, k)))
-                .filter(|planned| !streams.stream(stream_key(Dir::Rx, planned.k)).completed.contains(&(planned.segment.origin, planned.segment.config, planned.segment.by)))
                 .collect()
         };
         let holds = |planned: &&Planned| !planned.refused && planned.segment.config.channels.contains(chan as u32);
@@ -828,70 +847,56 @@ impl Control {
             let rx_frequency = timed.dir == Dir::Rx && settings.freq.is_some();
             let rx_stream = rx_frequency.then(|| self.core.description.stream_of(&self.config_at(e), true, timed.chan as u32))
                 .filter(|stream| *stream >= 0).map(|stream| stream as usize);
-            let mut rx_dsp = rx_stream.map(|stream| self.core.rx_dsp[stream].lock());
+            let mut rx_chain = rx_stream.map(|stream| self.core.rx_chain[stream].lock());
             let mut reach = if rx_frequency { self.reach(*chan, e) } else { Reach::Timed };
-            if rx_frequency && rx_dsp.is_none() && matches!(reach, Reach::Timed) {
+            if rx_frequency && rx_chain.is_none() && matches!(reach, Reach::Timed) {
                 reach = Reach::Deferred;
             }
-            if let Some(state) = rx_dsp.as_ref() {
+            if let Some(chain) = rx_chain.as_ref() {
                 let streams = lock(&self.core.streams);
                 if streams.stop.is_some() {
                     return Handed::Lost;
                 }
-                let active_covers = rx_stream.is_some_and(|stream| {
-                    let stream = stream_key(Dir::Rx, stream);
-                    let active = streams.active(stream);
-                    streams.planned(stream).iter().any(|planned| {
-                        active == Some((planned.segment.origin, planned.segment.config, planned.segment.by))
-                            && !planned.refused
-                            && timeline::covering(std::iter::once(&planned.segment), timed.chan as u32, e).is_some()
-                    })
-                });
-                if state.stopped && matches!(reach, Reach::Timed) && active_covers {
-                    reach = Reach::Untimed;
+                if rx_frequency && matches!(reach, Reach::Timed) {
+                    let stream = stream_key(Dir::Rx, rx_stream.expect("an RX frequency has a stream"));
+                    let covering = streams.planned(stream).into_iter().find(|planned| {
+                        timeline::covering(std::iter::once(&planned.segment), timed.chan as u32, e).is_some()
+                    }).map(|planned| SegmentKey { by: planned.segment.by, origin: planned.segment.origin });
+                    let eligible = covering.is_some_and(|segment| chain.eligible(segment, e));
+                    drop(streams);
+                    if covering.is_some() && !eligible { return Handed::Blocked; }
+                    if covering.is_none() {
+                        reach = self.reach(*chan, e);
+                        if matches!(reach, Reach::Timed) { return Handed::Blocked; }
+                    }
+                } else {
+                    drop(streams);
                 }
             }
-            let obligation = if rx_frequency && matches!(reach, Reach::Timed) {
-                let state = rx_dsp.as_mut().expect("an RX frequency gate");
-                let obligation = RxDspEntry { order: (e, seq), channel: *chan, value: timed.value, accepted_at: None };
-                state.pending.push(obligation.clone());
-                Some(obligation)
-            } else {
-                None
-            };
             handed_at = Some(self.core.now());
             let applied = match reach {
-                Reach::Timed => Some(self.core.device.apply(timed.dir, *chan, &settings, Some(e))),
-                Reach::Untimed => Some(self.core.device.apply(timed.dir, *chan, &settings, None)),
+                Reach::Timed if rx_frequency => {
+                    let chain = rx_chain.as_mut().expect("an RX frequency chain");
+                    let entry = RxEntry { order: (e, seq), channel: *chan, value: timed.value, accepted_at: None };
+                    chain.hand(entry, || self.core.device.apply(timed.dir, *chan, &settings, Some(e)).map(|_| ()), || self.core.now()).err()
+                }
+                Reach::Timed => self.core.device.apply(timed.dir, *chan, &settings, Some(e)).err(),
+                Reach::Untimed => self.core.device.apply(timed.dir, *chan, &settings, None).err(),
                 Reach::Deferred => None,
             };
-            if let Some(Err(error)) = applied {
+            if let Some(error) = applied {
                 // UR-24: a refusal, other than by a lost device, is reported and records no row;
                 // the entry stays in every configuration it was projected into, and the channels
                 // the device took keep the value it took.
                 drop(updates);
-                if let Some(obligation) = obligation {
-                    if let Some(state) = rx_dsp.as_mut() {
-                        state.pending.retain(|pending| pending.order != obligation.order || pending.channel != obligation.channel);
-                    }
-                }
-                drop(rx_dsp);
+                drop(rx_chain);
                 self.core.device_failed(None, "update_parameter", &error);
                 // UR-29, design 38 D2 (4): a lost device is not a refusal — the command was
                 // never handed over, so it stays pending for the end's settlement.
                 return if error.lost { Handed::Lost } else { Handed::Refused };
             }
-            if let Some(mut obligation) = obligation {
-                let accepted_at = self.core.now();
-                obligation.accepted_at = Some(accepted_at);
-                let state = rx_dsp.as_mut().expect("an RX frequency gate");
-                if let Some(pending) = state.pending.iter_mut().find(|pending| pending.order == obligation.order && pending.channel == obligation.channel) {
-                    pending.accepted_at = Some(accepted_at);
-                }
-                state.latest.insert(*chan, obligation);
-            }
             self.released.push(e);
-            drop(rx_dsp);
+            drop(rx_chain);
         }
         drop(updates);
         Handed::Given(handed_at.expect("UR-24: a command is given on a channel"))
@@ -916,7 +921,8 @@ impl Control {
                     updates.remove(&order);
                 }
                 let due = if lost { order.0 < at } else { order.0 <= at };
-                let (chans, _) = if due { self.targets(timed.dir, timed.chan, order.0) } else { (Vec::new(), false) };
+                let rx_frequency = timed.dir == Dir::Rx && timed.settings().freq.is_some();
+                let (chans, _) = if due { self.targets(timed.dir, timed.chan, order.0, rx_frequency) } else { (Vec::new(), false) };
                 // Keep the projections locked until the row is recorded, so an owner can never
                 // apply this held value after it.
                 let row = if due && chans.is_empty() {
@@ -1406,10 +1412,9 @@ mod tests {
     use std::sync::mpsc::{Receiver, channel};
 
     use super::*;
-    use super::super::core::key;
+    use super::super::core::{key, RxDevice};
     use crate::device::Device;
     use crate::provider::test_support::device_at;
-    use ezsdr_kernel::module_api::StopMode;
     use ezsdr_kernel::spec::Scalar;
     use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
 
@@ -2260,9 +2265,50 @@ mod tests {
 
     /// A receive owner that begins its planned segments from no stream, its commands unread.
     fn owner_rx(core: &Arc<Core>) -> super::super::rx::Rx {
+        owner_rx_for(core, 0)
+    }
+
+    fn owner_rx_for(core: &Arc<Core>, k: usize) -> super::super::rx::Rx {
         let (to_rx, cmds) = channel();
         std::mem::forget(to_rx);
-        super::super::rx::Rx::new(core.clone(), 0, cmds, None, None)
+        super::super::rx::Rx::new(core.clone(), k, cmds, None, None)
+    }
+
+    /// Publishes an Armed chain for a planned segment, the state Control's handoff must observe.
+    fn start_rx_chain(core: &Core, planned: &Planned) {
+        let stream = stream_key(Dir::Rx, planned.k);
+        let channels = planned.set();
+        if !matches!(lock(&core.streams).stream(stream).set, super::super::core::DeviceSet::Open(set) if set == channels) {
+            core.device.rx_open(planned.k, &channels.iter().map(|channel| channel as usize).collect::<Vec<_>>()).unwrap();
+            lock(&core.streams).record_open(stream, Some(channels));
+        }
+        if planned.settings.as_ref().is_some_and(|settings| !settings.is_configured()) {
+            planned.configure(core, Dir::Rx).unwrap();
+            lock(&core.streams).record_configured(stream, planned.segment.by);
+        }
+        let segment = SegmentKey { by: planned.segment.by, origin: planned.segment.origin };
+        let mut chain = core.rx_chain[planned.k].lock();
+        chain.begin_result(segment, planned.segment.origin, core.device.rx_start(planned.k, planned.segment.origin)).unwrap();
+        lock(&core.streams).started(stream, Some((planned.segment.origin, planned.segment.config, planned.segment.by)), planned.segment.origin, planned.segment.config);
+    }
+
+    fn end_rx_owner(core: &Core, rx: &mut super::super::rx::Rx, k: usize) {
+        core.rx_chain[k].lock().request_end_now();
+        rx.try_end();
+        assert!(core.rx_chain[k].lock().segment().is_none(), "the RX owner completed its active segment");
+    }
+
+    fn receive_through_rx_cut(core: &Core, rx: &mut super::super::rx::Rx, planned: &Planned) {
+        let current = plan_of_stream(core, Dir::Rx, planned.k).into_iter()
+            .find(|current| current.segment.origin == planned.segment.origin)
+            .expect("the owner segment remains planned until finish");
+        let cut = current.segment.instant(current.segment.cut.expect("the plan published its RX cut")).expect("the cut is representable");
+        let offset = cut - planned.segment.origin;
+        let n = planned.n();
+        let first_tick = planned.segment.origin + (offset.div_euclid(n) + i64::from(offset.rem_euclid(n) != 0)) * n;
+        let samples = vec![vec![[0.0, 0.0]]; planned.set().count() as usize];
+        rx.receive(crate::device::RxRecv::Samples { first_tick, samples });
+        assert!(core.rx_chain[planned.k].lock().segment().is_none(), "the owner finished at the planned cut");
     }
 
     #[test]
@@ -2283,6 +2329,7 @@ mod tests {
         let mut rx = owner_rx(&core);
         let mark = device.calls().len();
         for _ in 0..4 {
+            if core.rx_chain[0].lock().segment().is_some() { end_rx_owner(&core, &mut rx, 0); }
             rx.begin();
         }
         let owner = owner_rx_calls(&device.calls()[mark..]);
@@ -2303,6 +2350,34 @@ mod tests {
         let owner = device.calls()[mark..].to_vec();
         assert!(owner.iter().all(|c| !c.starts_with("rx_open") && !c.starts_with("apply")), "no second open or configure: {owner:?}");
         assert_eq!(owner.iter().filter(|c| c.starts_with("rx_start")).count(), 1, "{owner:?}");
+    }
+
+    #[test]
+    fn rx_chain_control_open_requires_idle_empty_debt() {
+        let (core, device, _) = rig();
+        let (mut control, _) = control(&core, &[]);
+        core.rx_chain[0].lock().adopt_start(super::super::core::SegmentKey { by: Some(1), origin: 0 }, 0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| channels_from_none(&mut control, &core, 2, 100, 1)));
+        assert!(result.is_err(), "uhd-control cannot open a streamer while its chain is Armed");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_open")), "the chain guard runs before Control's from-none open: {:?}", device.calls());
+    }
+
+    #[test]
+    fn rx_chain_rate_check_failure_close_requires_idle_empty_debt() {
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::RatesMismatch(0)], ..Default::default() };
+        let (core, device, _, _) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
+        let (mut control, _) = control(&core, &[]);
+        let rates_core = core.clone();
+        crate::provider::test_support::probe(&core, "rates", move |_| {
+            rates_core.rx_chain[0].lock().adopt_start(super::super::core::SegmentKey { by: Some(1), origin: 0 }, 0);
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| channels_from_none(&mut control, &core, 2, 100, 1)));
+        assert!(result.is_err(), "Control's failed rate check cannot close an active RX chain");
+        let calls = device.calls();
+        assert!(calls.iter().any(|call| call == "rx_open 0 [0]"), "the open precedes the rate check: {calls:?}");
+        assert!(!calls.iter().any(|call| call == "rx_close 0"), "the chain guard prevents the invalid cleanup close: {calls:?}");
     }
 
     #[test]
@@ -3014,9 +3089,9 @@ mod tests {
         // 1 ms and 40 ms instants are fixed whatever the test thread does.
         let (core, device, time, events) = manual_rig_events();
         let _frozen = hold(&core, &time, &device);
-        device.rx_open(0, &[0]).unwrap();
         device.tx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        start_rx_chain(&core, &plan_of(&core, Dir::Rx)[0]);
         let us = |n: i64| core.ticks(n * 1_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(us(n))));
         let rx_freq = key("radio.rx.c0.frequency_hz");
@@ -3058,8 +3133,8 @@ mod tests {
         // while the test thread is descheduled.
         let (core, device, time, events) = manual_rig_events();
         let _frozen = hold(&core, &time, &device);
-        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        start_rx_chain(&core, &plan_of(&core, Dir::Rx)[0]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
         let freq = key("radio.rx.c0.frequency_hz");
@@ -4009,7 +4084,6 @@ mod tests {
             let _ = configured.send(());
             let _ = wait.lock().unwrap().recv();
         });
-        core.rx_dsp[0].lock().stopped = true; // the prior segment has stopped; the planned successor has not started yet
         let mut rx = owner_rx(&core);
         let (done, finished) = channel();
         let owner = core.device.host().spawn("rx-successor-configured", move || {
@@ -4021,21 +4095,25 @@ mod tests {
         control.book_timed(ActionId(3), frequency, Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
         device_at(&core, &time, &device, release_at);
         control.release();
-        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "a covered successor retune remains timed while its old stopped flag is stale");
-        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))), "the successor retune was not handed at its instant: {:?}", device.calls());
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the configured but unbegun successor is not eligible");
+        assert_eq!(control.held.len(), 1, "the successor retune remains held");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")), "the successor retune was handed before begin: {:?}", device.calls());
 
         resume.send(()).unwrap();
         let mut rx = finished.recv_timeout(Wall::from_secs(10)).expect("the successor started");
         owner.join().unwrap();
         assert!(device.calls().iter().any(|call| call == &format!("rx_start 0 {origin}")), "the owner did not start the configured successor: {:?}", device.calls());
-        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the handover remains an owner drain obligation");
+        control.release();
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "the next release pass hands the held value to the armed chain");
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))), "the successor retune was not handed at its original instant: {:?}", device.calls());
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the handover remains an owner drain obligation");
         device_at(&core, &time, &device, e + core.ticks(2_000_000));
         drop(frozen);
         let samples = device.rx_recv(0, 2_000, Wall::from_millis(10), false);
         assert!(matches!(samples, crate::device::RxRecv::Samples { .. }));
         rx.receive(samples);
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "a successor sample consumes the timed retune");
-        assert!(core.rx_dsp[0].lock().pending.is_empty(), "the owner observes that successor sample before releasing its obligation");
+        assert!(core.rx_chain[0].lock().debt().is_empty(), "the owner observes that successor sample before releasing its obligation");
         assert!(device.dsp_log(Dir::Rx, 0).contains(&(e, value, true)), "the frequency takes effect on its successor sample: {:?}", device.dsp_log(Dir::Rx, 0));
     }
 
@@ -4062,16 +4140,22 @@ mod tests {
                     streams.started(stream, Some(identity), segment.origin, segment.config);
                 }
             }
-            core.rx_dsp[0].lock().stopped = true;
+            {
+                let mut chain = core.rx_chain[0].lock();
+                chain.adopt_start(SegmentKey { by: segment.by, origin: segment.origin }, segment.origin);
+                chain.stop_result(Ok(())).unwrap();
+                if completed { let _ = chain.finish(); }
+            }
             let value = 1.001e9;
             control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(8)))));
             device_at(&core, &time, &device, ms(11));
             control.release();
 
-            assert!(core.rx_dsp[0].lock().pending.is_empty(), "a stopped chain never gets a stale DDC obligation: completed={completed}");
+            assert!(core.rx_chain[0].lock().debt().is_empty(), "a stopped chain never gets a stale DDC obligation: completed={completed}");
             let applies: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")).collect();
-            assert_eq!(applies.iter().any(|call| call.contains(" at=-")), !completed, "only the active-but-stopped segment receives an untimed write: {applies:?}");
+            assert!(!applies.iter().any(|call| call.contains(" at=-")), "a stopped or completed chain does not receive an untimed write: {applies:?}");
             assert!(applies.iter().all(|call| !call.contains(" at=8000000")), "the stopped chain was given a timed RX entry: {applies:?}");
+            assert_eq!(control.held.len(), usize::from(!completed), "an active-but-stopped covering segment blocks the head; a completed one no longer covers it");
         }
     }
 
@@ -4372,7 +4456,8 @@ mod tests {
         let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
         let fails = Arc::new(crate::provider::test_support::ApplyFails::timed(inner.clone(), Dir::Rx, None));
         let (core, time, _) = crate::provider::test_support::rig_on_inputs(fails.clone(), vec![Arc::new(NoLink)], 2_000, BTreeMap::new());
-        let (mut control, _) = control(&core, &[Dir::Rx]);
+        let mut control = both_control(&core);
+        start_rx_chain(&core, &plan_of_stream(&core, Dir::Rx, 0)[0]);
         let instant = core.ticks(50_000_000);
         let window = core.ticks(core.description.timing.release_window_ns);
         control.book_timed(ActionId(1), key("radio.rx.c0.frequency_hz"), Value::num(1.001e9).unwrap(), Some(AbsoluteDeadline::new(core.at(instant))));
@@ -4381,7 +4466,7 @@ mod tests {
         control.release();
 
         assert_eq!(fails.attempts(), [(Dir::Rx, 0, Some(instant))]);
-        assert!(core.rx_dsp.iter().all(|dsp| dsp.lock().pending.is_empty()), "the refused apply never reached the DDC");
+        assert!(core.rx_chain.iter().all(|dsp| dsp.lock().debt().is_empty()), "the refused apply never reached the DDC");
         assert_eq!(inner.dsp_pending(Dir::Rx, 0), 0);
     }
 
@@ -4865,6 +4950,11 @@ mod tests {
             let calls = device.calls();
             let configured = calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.ends_with("at=-")).count();
             assert_eq!(configured, usize::from(timed_first), "{case}: the enable's configuration: {calls:?}");
+            assert_eq!(control.held.len(), 1, "{case}: the unbegun segment holds the timed command");
+            let planned = plan_of(&core, Dir::Rx).into_iter().find(|planned| planned.segment.config.channels.contains(0)).expect("the enable's RX segment");
+            start_rx_chain(&core, &planned);
+            control.release();
+            let calls = device.calls();
             let timed = calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(300)))).count();
             assert_eq!(timed, 1, "{case}: the timed release: {calls:?}");
             assert!(events_of(&events, kinds::LATE_COMMAND).is_empty(), "{case}");
@@ -4902,6 +4992,7 @@ mod tests {
             let _frozen = hold(&core, &time, &device);
             let channels = if only_one { Channels::first(2).without(0) } else { Channels::first(2) };
             let mut control = layout_control(&core, channels, &[("radio.rx.c0.stream", Value::from(if only_one { -1 } else { 0 })), ("radio.rx.c1.stream", Value::from(0))]);
+            start_rx_chain(&core, &plan_of(&core, Dir::Rx)[0]);
             let ms = |n: i64| core.ticks(n * 1_000_000);
             let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
             let freq = key("radio.rx.c1.frequency_hz");
@@ -5047,6 +5138,11 @@ mod tests {
                 join(&mut control);
             }
             time.advance_to(core.at(ms(118))).unwrap();
+            control.release();
+            assert_eq!(control.held.len(), 1, "the unbegun covering segment keeps the tune held");
+            assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000")), "the tune was applied before its destination began: {:?}", device.calls());
+            let target = plan_of(&core, Dir::Rx).into_iter().find(|planned| timeline::covering(std::iter::once(&planned.segment), 1, ms(120)).is_some()).expect("the join covers 120 ms");
+            start_rx_chain(&core, &target);
             control.release();
             let log = device.calls();
             let applied = log.iter().filter(|call| call.starts_with("apply rx 1 ") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(120)))).count();
@@ -5195,6 +5291,7 @@ mod tests {
         let (to_tx, _tx) = channel();
         let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], values, false,
             Start { t0: 0, rx: vec![Some((Channels::first(2), 200)), None], tx: vec![Some((core.register_in(Dir::Tx, 0, 200, 0).unwrap(), Channels::first(1))), None] });
+        start_rx_chain(&core, &plan_of_stream(&core, Dir::Rx, 0)[0]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let at = |n: i64| Some(AbsoluteDeadline::new(core.at(ms(n))));
         let freq = key("radio.rx.c1.frequency_hz");
@@ -5208,21 +5305,50 @@ mod tests {
         let calls = device.calls();
         assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=10000000") && call.contains(&format!("at={} effective={}", ms(170), ms(170)))), "{calls:?}");
         device_at(&core, &time, &device, ms(180));
-        // The channel is in stream 0's running segment at 170 ms, so the update is a timed command;
-        // no sample passes the unit rig's DDC, so it waits in the FIFO (UR-33).
-        assert_eq!(device.dsp_pending(Dir::Rx, 1), 1, "the earlier update waits for a sample");
+        // The channel is in stream 0's running segment at 170 ms, so the update is timed. The
+        // armed FakeDevice flow takes it even though the host has not called recv (UR-33).
+        assert_eq!(device.dsp_pending(Dir::Rx, 1), 0, "the flowing DDC took the earlier update");
+        assert_eq!(device.dsp_log(Dir::Rx, 1), [(ms(170), 10e6, true)]);
+        let sample = [vec![[0.0, 0.0]], vec![[0.0, 0.0]]];
+        core.rx_chain[0].lock().consume(200, Channels::first(2), ms(170), &sample);
+        assert!(core.rx_chain[0].lock().debt().is_empty(), "sample evidence reconciles the consumed DDC entry");
+        device_at(&core, &time, &device, ms(200));
+        {
+            let mut chain = core.rx_chain[0].lock();
+            chain.stop_result(device.rx_stop(0, None)).unwrap();
+            assert!(chain.finish().is_empty());
+        }
+        {
+            let mut streams = lock(&core.streams);
+            if let Some(active) = streams.finished(stream_key(Dir::Rx, 0)) {
+                streams.complete(stream_key(Dir::Rx, 0), active);
+            }
+        }
+        let source = plan_of_stream(&core, Dir::Rx, 0).into_iter()
+            .find(|planned| planned.segment.origin >= ms(200) && planned.segment.config.channels.contains(0))
+            .expect("the source's post-move segment keeps channel 0");
+        core.close_device(Dir::Rx, 0);
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), None);
+        start_rx_chain(&core, &source);
         // The move's destination configures the projected settings, and the earlier value stands.
         let destination = plan_of_stream(&core, Dir::Rx, 1).into_iter().find(|planned| planned.segment.config.channels.contains(1)).expect("the moved channel's destination segment");
         destination.configure(&core, Dir::Rx).expect("the destination configures");
+        start_rx_chain(&core, &destination);
         let calls = device.calls();
         assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=10000000") && call.ends_with("at=-")), "the destination's projected configuration: {calls:?}");
+        assert!(calls.contains(&format!("rx_start 1 {}", destination.segment.origin)), "the destination's owner starts at its planned origin: {calls:?}");
         device_at(&core, &time, &device, ms(270));
         assert_eq!(device.freq_at(Dir::Rx, 1, ms(270)), 10e6, "the earlier value remains effective before the later update");
         // The later update at its own instant, and in force after it.
         time.advance_to(core.at(ms(278))).unwrap();
         control.release();
         device_at(&core, &time, &device, ms(300));
-        assert_eq!(device.dsp_pending(Dir::Rx, 1), 2, "the later timed update waits behind the earlier one for samples");
+        assert_eq!(device.dsp_pending(Dir::Rx, 1), 0, "the flowing DDC took the later update too");
+        assert_eq!(device.dsp_log(Dir::Rx, 1), [
+            (ms(170), 10e6, true),
+            (ms(200), 10e6, false),
+            (ms(280), 20e6, true),
+        ]);
         let calls = device.calls();
         assert!(calls.iter().any(|call| call.starts_with("apply rx 1 ") && call.contains("freq=20000000") && call.contains(&format!("at={} effective={}", ms(280), ms(280)))), "{calls:?}");
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "{calls:?}");
@@ -5763,17 +5889,23 @@ mod tests {
             handed_at: Some(ms(9)),
         });
         {
-            let mut dsp = core.rx_dsp[0].lock();
-            dsp.latest.insert(0, RxDspEntry { order: (ms(12), 3), channel: 0, value: 1.003e9, accepted_at: Some(ms(7)) });
-            dsp.latest.insert(1, RxDspEntry { order: (ms(7), 4), channel: 1, value: 1.004e9, accepted_at: Some(ms(9)) });
+            let mut chain = core.rx_chain[0].lock();
+            chain.adopt_start(SegmentKey { by: None, origin: 0 }, 0);
+            for entry in [
+                RxEntry { order: (ms(12), 3), channel: 0, value: 1.003e9, accepted_at: Some(ms(7)) },
+                RxEntry { order: (ms(7), 4), channel: 1, value: 1.004e9, accepted_at: Some(ms(9)) },
+            ] {
+                let accepted_at = entry.accepted_at.unwrap();
+                chain.hand(entry, || Ok(()), || accepted_at).unwrap();
+            }
+            chain.consume(core.ticks(1_000), Channels::first(2), ms(20), &[vec![[0.0, 0.0]], vec![[0.0, 0.0]]]);
         }
         stop_end(&core, ms(8));
         control.finish();
 
-        let dsp = core.rx_dsp[0].lock();
-        assert_eq!(dsp.restore.get(&0), Some(&1.002e9), "same-instant booking order wins at S; a value recorded after S does not");
-        assert_eq!(dsp.restore.get(&1), Some(&core.description.settings(&control.initial_config, Dir::Rx, 0, 1).freq.unwrap()), "a channel without a prior update restores its initial in-force setting");
-        assert!(dsp.restore_ready);
+        let chain = core.rx_chain[0].lock();
+        assert!(matches!(chain.restore(), Restore::Planned(values) if values.get(&0) == Some(&1.002e9)), "same-instant booking order wins at S; a value recorded after S does not");
+        assert!(matches!(chain.restore(), Restore::Planned(values) if values.get(&1) == Some(&core.description.settings(&control.initial_config, Dir::Rx, 0, 1).freq.unwrap())), "a channel without a prior update restores its initial in-force setting");
     }
 
     #[test]
@@ -6391,9 +6523,19 @@ mod tests {
     fn stopped_receive() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>, Control, crate::provider::test_support::Frozen) {
         let (core, device, time, events) = manual_rig_events();
         let frozen = hold(&core, &time, &device);
-        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let planned = plan_of(&core, Dir::Rx)[0].clone();
+        start_rx_chain(&core, &planned);
         control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
+        device.rx_stop(0, None).unwrap();
+        let mut chain = core.rx_chain[0].lock();
+        chain.stop_result(Ok(())).unwrap();
+        chain.finish();
+        drop(chain);
+        let stream = stream_key(Dir::Rx, 0);
+        let mut streams = lock(&core.streams);
+        if let Some(active) = streams.finished(stream) { streams.complete(stream, active); }
+        drop(streams);
         (core, device, time, events, control, frozen)
     }
 
@@ -6409,7 +6551,7 @@ mod tests {
     #[test]
     fn ur_24_a_stopped_receive_channel_is_given_no_timed_frequency() {
         // UR-24 (R1, series 1a): no sample passes the DDC of a stopped channel, so a timed
-        // frequency is no device command; its rows are the ones a given command has.
+        // frequency is no device command and is recorded with no channel.
         let (core, device, time, events, mut control, _frozen) = stopped_receive();
         let freq = key("radio.rx.c0.frequency_hz");
         for k in 0..40 {
@@ -6420,10 +6562,10 @@ mod tests {
         control.release();
         assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=2")), "{:?}", device.calls());
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
-        assert!(core.rx_dsp.iter().all(|dsp| dsp.lock().pending.is_empty()), "a stopped-channel frequency creates no owner drain obligation");
+        assert!(core.rx_chain.iter().all(|dsp| dsp.lock().debt().is_empty()), "a stopped-channel frequency creates no owner drain obligation");
         let rows = rows_of(&core, &freq);
         assert_eq!(rows.len(), 40, "{rows:?}");
-        assert!(rows.iter().all(|(_, issued, no_channel)| *issued && !*no_channel), "a stopped channel's command is issued, with no note: {rows:?}");
+        assert!(rows.iter().all(|(_, issued, no_channel)| !*issued && *no_channel), "a stopped channel has no covering segment at each instant: {rows:?}");
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty());
     }
 
@@ -6477,13 +6619,14 @@ mod tests {
         // UR-24 (R1, series 4): a sample passes at `e`, so the DDC takes it as a timed command.
         let (core, device, time, _events) = manual_rig_events();
         let _frozen = hold(&core, &time, &device);
-        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        start_rx_chain(&core, &plan_of(&core, Dir::Rx)[0]);
         timed_at(&mut control, &core, &time, 10, "radio.rx.c0.frequency_hz", 2.1e9, 100);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let given: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={} effective=", ms(100)))).collect();
         assert_eq!(given.len(), 1, "{:?}", device.calls());
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "no sample passes the unit rig's DDC");
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the accepted timed frequency belongs to the RX chain");
     }
 
     #[test]
@@ -6531,17 +6674,22 @@ mod tests {
         // the timed entry with S3's first sample, so none is left waiting.
         let (core, device, time, _events) = manual_rig_events();
         let _frozen = hold(&core, &time, &device);
-        device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(5_000)))));
         control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(1e6).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(5_070)))));
         let planned = plan_of(&core, Dir::Rx);
         let (o3, refused) = (planned[2].segment.origin, planned[1].segment.by.expect("C1's segment"));
+        let started_sample_ticks = planned[2].segment.config.ratio.num() as i64;
+        let started_channels = planned[2].set();
         let e = o3;
         time.advance_to(core.at(e - ms(4))).unwrap();
         control.book_timed(ActionId(10), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
         time.advance_to(core.at(e - ms(3))).unwrap();
+        control.release();
+        assert_eq!(control.held.len(), 1, "S3 is not eligible before the owner begins it");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "no timed command before begin");
+        start_rx_chain(&core, &planned[2]);
         control.release();
         let timed = |calls: &[String]| calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.contains(&format!("at={e} effective={e}"))).count();
         assert_eq!(timed(&device.calls()), 1, "S3 covers its origin: {:?}", device.calls());
@@ -6549,14 +6697,14 @@ mod tests {
         assert!(lock(&core.streams).refuse(&core, booked_stream(Dir::Rx), refused));
         let planned = plan_of(&core, Dir::Rx);
         assert_eq!(planned[1].segment.origin, o3);
-        planned[1].configure(&core, Dir::Rx).expect("S3 configures");
         let calls = device.calls();
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && call.ends_with("at=-")).count(), 1, "the configure carries the value too: {calls:?}");
         assert_eq!(timed(&calls), 1, "{calls:?}");
-        // S3's first sample takes the entry.
-        device.rx_stop(0, None).unwrap();
-        device.rx_start(0, o3).unwrap();
         device_at(&core, &time, &device, o3 + ms(10));
+        let samples = device.rx_recv(0, 2_000, Wall::from_millis(10), false);
+        if let crate::device::RxRecv::Samples { first_tick, samples } = samples {
+            core.rx_chain[0].lock().consume(started_sample_ticks, started_channels, first_tick, &samples);
+        }
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "S3's first sample took the entry: {:?}", device.dsp_log(Dir::Rx, 0));
         assert_eq!(device.freq_at(Dir::Rx, 0, o3), 2.1e9);
     }
@@ -6812,10 +6960,10 @@ mod tests {
         for (case, at_cut_minus, covered) in [("e is the cut's instant", 0i64, false), ("e is one tick before the cut's instant", 1, true)] {
             let (core, device, time, _events) = manual_rig_events();
             let _frozen = hold(&core, &time, &device);
-            device.rx_open(0, &[0]).unwrap();
             let (mut control, _tx) = control(&core, &[Dir::Rx]);
             control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms(300))))));
             let plan = plan_of(&core, Dir::Rx);
+            start_rx_chain(&core, &plan[0]);
             let cut = plan[0].segment.instant(plan[0].segment.cut.expect("the first segment is cut")).unwrap();
             let e = cut - at_cut_minus * one_tick(&core);
             time.advance_to(core.at(e - core.ticks(4_000_000))).ok();
@@ -6829,15 +6977,20 @@ mod tests {
         for (case, before, covered) in [("e is the origin", 0i64, true), ("e is one tick before the origin", 1, false)] {
             let (core, device, time, _events) = manual_rig_events();
             let _frozen = hold(&core, &time, &device);
-            device.rx_open(0, &[0]).unwrap();
             let (mut control, _tx) = control(&core, &[Dir::Rx]);
             control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(ms(300))))));
             let plan = plan_of(&core, Dir::Rx);
             let e = plan[1].segment.origin - before * one_tick(&core);
+            if !covered { start_rx_chain(&core, &plan[0]); }
             time.advance_to(core.at(e - core.ticks(4_000_000))).ok();
             control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
             time.advance_to(core.at(e - core.ticks(1_000_000))).unwrap();
             control.release();
+            if covered {
+                assert_eq!(control.held.len(), 1, "the successor's origin is not eligible until begin");
+                start_rx_chain(&core, &plan[1]);
+                control.release();
+            }
             let timed = device.calls().iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2100000000") && !call.ends_with("at=-")).count();
             assert_eq!(timed, usize::from(covered), "{case}: {:?}", device.calls());
         }
@@ -6992,6 +7145,7 @@ mod tests {
         let frozen = hold(&core, &time, &device);
         device.rx_open(0, &[0]).unwrap();
         let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(Channels::first(1)));
         control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(300_000_000)))));
         let plan = plan_of(&core, Dir::Rx);
         assert_eq!(plan.len(), 2);
@@ -7149,9 +7303,13 @@ mod tests {
 
     #[test]
     fn ur_29_a_deferred_frequency_stops_at_a_loss_like_a_given_one() {
-        // UR-29 (R1, 12c): the loss is published before the channel's decision; the lost device
-        // is not called, no row is written, and the command stays held.
-        let (core, device, time, _events, mut control, _frozen) = stopped_receive();
+        // UR-29 (R1, 12c): a covering, eligible chain reaches the handoff decision; loss published
+        // there prevents the device call or row, and leaves the command for end settlement.
+        let (core, device, time, _events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let planned = plan_of(&core, Dir::Rx)[0].clone();
+        start_rx_chain(&core, &planned);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         time.advance_to(core.at(ms(95))).unwrap();
         control.book_timed(ActionId(10), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(ms(100)))));
@@ -7167,20 +7325,19 @@ mod tests {
 
     #[test]
     fn ur_24_deferred_frequency_rows_are_the_expected_ones() {
-        // UR-24 (R1, 12d): the rows a frequency the device was not called for has are the ones a
-        // given command has — explicit rows, not only a pair compared — whatever its channel's
-        // state: a stopped channel and a gap value of a channel the stream holds are issued with
-        // no note (a channel of no stream: `ur_24_a_timed_update_reaches_a_later_stream_s_…`
-        // has `no channel`); a stop at `e` settles it issued, a loss at `e` cancels it.
+        // UR-24 (R1, 12d): rows a frequency the device was not called for has — explicit rows,
+        // not only a pair compared — whatever its channel's state. A stopped channel records
+        // `no channel`; a gap value keeps the existing projection path; stop at `e` settles it
+        // through the no-channel path, while loss at `e` cancels it.
         let freq = key("radio.rx.c0.frequency_hz");
         let ms = |core: &Core, n: i64| core.ticks(n * 1_000_000);
-        // Stopped: (e, issued, no channel) = (e, true, false).
+        // Stopped: (e, issued, no channel) = (e, false, true).
         let (core, _device, time, _events, mut control, _frozen) = stopped_receive();
         timed_at(&mut control, &core, &time, 10, "radio.rx.c0.frequency_hz", 2.1e9, 100);
         time.advance_to(core.at(ms(&core, 100))).unwrap();
         control.release();
-        assert_eq!(rows_of(&core, &freq), [(ms(&core, 100), true, false)]);
-        // A gap value of a channel the stream holds, released before the next segment begins.
+        assert_eq!(rows_of(&core, &freq), [(ms(&core, 100), false, true)]);
+        // A gap value with no segment covering `e` keeps the existing projection outcome.
         let (core, _device, time, mut control, plan, _frozen) = gap_rig();
         let e = plan[1].segment.origin - ms(&core, 10);
         time.advance_to(core.at(e - core.ticks(4_000_000))).ok();
@@ -7189,17 +7346,17 @@ mod tests {
         control.release();
         time.advance_to(core.at(e)).unwrap();
         control.release();
-        assert_eq!(rows_of(&core, &freq), [(e, true, false)], "a gap value is recorded at its instant: {:?}", lock(&core.rec).applied);
-        // `Provider::stop` at `e` settles a stopped channel's value issued; a loss at `e` does not.
-        // And one due after the stop's instant is cancelled, whatever settled it.
-        for (lost, early, expected) in [(false, 0, "issued"), (true, 0, "cancelled"), (false, 1, "cancelled")] {
+        assert_eq!(rows_of(&core, &freq), [(e, true, true)], "a gap value retains the no-channel projection outcome: {:?}", lock(&core.rec).applied);
+        // Stop at `e` sees no eligible chain; loss at `e` cancels it, and one due after stop is
+        // cancelled as well.
+        for (lost, early, expected) in [(false, 0, "no channel"), (true, 0, "cancelled"), (false, 1, "cancelled")] {
             let (core, _device, time, _events, mut control, _frozen) = stopped_receive();
             timed_at(&mut control, &core, &time, 10, "radio.rx.c0.frequency_hz", 2.1e9, 100);
             let at = ms(&core, 100) - early * ms(&core, 1);
             control.settle(at, "Provider::stop", lost);
             let rows: Vec<_> = lock(&core.rec).applied.iter().filter(|row| row["key"] == freq.as_str()).cloned().collect();
             assert_eq!(rows.len(), 1, "{rows:?}");
-            let state = if rows[0].get("cancelled").is_some() { "cancelled" } else if rows[0]["issued"] == true { "issued" } else { "other" };
+            let state = if rows[0].get("cancelled").is_some() { "cancelled" } else if rows[0]["note"] == "no channel" { "no channel" } else if rows[0]["issued"] == true { "issued" } else { "other" };
             assert_eq!(state, expected, "lost: {lost}, stop {early} ms before e: {rows:?}");
         }
     }
@@ -7254,11 +7411,14 @@ mod tests {
         // release window of its configure) is covered by that segment: a timed command, given after
         // the segment's own untimed configuration, which the command's sample overwrites later.
         let (core, device, time, mut control, plan, _frozen) = gap_rig();
-        plan[1].configure(&core, Dir::Rx).expect("the segment configures");
         let e = plan[1].segment.origin + core.ticks(1_000_000);
         time.advance_to(core.at(e - core.ticks(4_000_000))).ok();
         control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
         time.advance_to(core.at(e - core.ticks(500_000))).unwrap();
+        control.release();
+        assert_eq!(control.held.len(), 1, "the covering segment has not begun");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "no debt before the owner begins");
+        start_rx_chain(&core, &plan[1]);
         control.release();
         let calls = device.calls();
         let configure = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("rate=2000000") && call.ends_with("at=-")).expect("the configure's write");
@@ -7270,25 +7430,22 @@ mod tests {
 
     #[test]
     fn ur_24_a_cut_booked_after_the_release_leaves_the_entry_for_the_next_segment() {
-        // UR-24 (R1, series 6, a current limitation — R2 waits for bench P4): a value V1 given
-        // as a timed command, and then a cut booked before its instant, stays in the DDC; a
-        // later value V2 is given to no device (the stream is stopped) and the restart's
-        // configuration writes it untimed, and the restart's first sample takes V1 over it.
+        // Raw P4 characterization only: inject V1 at the Device boundary, bypassing the RX owner
+        // and Control's eligibility rule. The fake keeps it through a raw stop/restart, where the
+        // first qualifying sample takes V1 over the intervening untimed V2.
         // INFERRED: that the owner's untimed stop precedes the entry's instant in the device.
         let (core, device, time, _events) = manual_rig_events();
         let _frozen = hold(&core, &time, &device);
         device.rx_open(0, &[0]).unwrap();
-        let (mut control, _tx) = control(&core, &[Dir::Rx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let (v1, v2) = (2.1e9, 2.2e9);
-        timed_at(&mut control, &core, &time, 10, "radio.rx.c0.frequency_hz", v1, 100);
+        device.rx_start(0, 0).unwrap();
+        device.apply(Dir::Rx, 0, &Settings { freq: Some(v1), ..Settings::default() }, Some(ms(100))).unwrap();
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
-        control.book(Dispatched::new(ActionId(11), Action::Stop { target: Some(super::super::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
-        timed_at(&mut control, &core, &time, 12, "radio.rx.c0.frequency_hz", v2, 120);
-        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "V2 was given to no DDC");
-        // The owner's stop and the restart: the configuration writes V2, the first sample takes V1.
         device.rx_stop(0, None).unwrap();
         device.apply(Dir::Rx, 0, &Settings { freq: Some(v2), ..Settings::default() }, None).unwrap();
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1, "the raw timed entry remains pending");
+        // The raw restart configures V2; its first sample still takes V1.
         let restart = ms(200);
         device.rx_start(0, restart).unwrap();
         device_at(&core, &time, &device, ms(210));
@@ -7304,7 +7461,7 @@ mod tests {
         let (core, device, time, _events) = manual_rig_events();
         let _frozen = hold(&core, &time, &device);
         let mut control = layout_control(&core, Channels::first(1), &[("radio.rx.c0.stream", Value::from(0)), ("radio.rx.c1.stream", Value::from(-1))]);
-        device.rx_open(0, &[0]).unwrap();
+        start_rx_chain(&core, &plan_of(&core, Dir::Rx)[0]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         control.book_cold(ActionId(1), key("radio.rx.c1.stream"), Value::from(0), Some(AbsoluteDeadline::new(core.at(ms(100)))));
         let plan = plan_of(&core, Dir::Rx);
@@ -7369,215 +7526,938 @@ mod tests {
         (origin, e, value)
     }
 
-    #[test]
-    fn ur_24_a_refused_successor_configuration_reports_pending_ddc_through_shutdown_and_reopen() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(1_000),
-            faults: vec![crate::device::FakeFault::RxFlowStall(std::time::Duration::ZERO)],
-            ..Default::default()
-        }));
-        let (core, time, _) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
-        spy.watch(&core);
-        let frozen = crate::provider::test_support::Frozen::on(spy.host());
-        let (mut control, _) = control(&core, &[]);
-        let (_origin, e, value) = successor_frequency(&mut control, &core, 2);
-
-        let configure_gate = spy.stop_after("rx_open");
-        let (to_rx, cmds) = channel();
-        let rx = super::super::rx::Rx::new(core.clone(), 0, cmds, None, None);
-        let start_gate = spy.stop_after("rx_start_now");
-        let recv_enter = spy.stop_before("rx_recv");
-        let recv_done = spy.stop_after("rx_recv");
-        let (done, finished) = channel();
-        let owner = std::thread::spawn(move || {
-            let mut rx = rx;
-            let began = rx.begin();
-            let _ = done.send((began, rx));
-        });
-        configure_gate.wait();
-        let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
-        let sample_ticks = plan_of(&core, Dir::Rx)[0].n();
-        let deadline = e + call * sample_ticks + core.ticks(DELIVERY_ALLOWANCE_NS);
-        control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
-        let release_at = e - core.ticks(core.description.timing.release_window_ns);
-        device_at_spy(&core, &time, &spy, release_at);
-        control.release();
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "control handed the timed successor frequency");
-        spy.refuse_rx_apply(crate::device::DeviceError::failed("test: successor configuration refusal"));
-        configure_gate.release();
-        start_gate.wait();
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the refused segment still owns its handed obligation during recovery");
-        start_gate.release();
-        recv_enter.wait();
-        recv_enter.release();
-        drop(frozen);
-        recv_done.wait();
-        device_at_spy(&core, &time, &spy, deadline);
-        recv_done.release();
-        let (began, rx) = finished.recv_timeout(Wall::from_secs(10)).expect("configuration refusal recovery finished within its bound");
-        owner.join().unwrap();
-
-        assert!(began);
-        assert!(lock(&core.streams).active(booked_stream(Dir::Rx)).is_none());
-        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1);
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the scripted old-flow stall leaves the timed DDC entry for a later Run: log={:?}, order={:?}", spy.dsp_log(Dir::Rx, 0), spy.order());
-        assert!(lock(&core.streams).line(booked_stream(Dir::Rx)).unwrap().items.iter().any(|item| item.refused), "the segment is refused only after recovery reports its leftover");
-        let rec = lock(&core.rec);
-        assert!(rec.rejected.iter().any(|row| row["call"] == "rx_drain" && row["error"].as_str().is_some_and(|error| error.contains("channel c0") && error.contains("1001000000") && error.contains(&format!("at {e}")))), "{:?}", rec.rejected);
-        drop(rec);
-        let order = spy.order();
-        let recovery_start = order.iter().position(|name| *name == "rx_start_now").unwrap();
-        let recovery_recv = order.iter().rposition(|name| *name == "rx_recv").unwrap();
-        let recovery_stop = order.iter().rposition(|name| *name == "rx_stop").unwrap();
-        assert!(recovery_start < recovery_recv && recovery_recv < recovery_stop, "recovery must be attempted before refusing the segment: {order:?}");
-
-        to_rx.send(super::super::rx::RxCmd::Shutdown(StopMode::Orderly)).unwrap();
-        rx.run();
-        spy.rx_close(0);
-        spy.rx_open(0, &[0]).unwrap();
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the failed drain is visible across shutdown and streamer reopen");
-        let restarted = core.now();
-        device_at_spy(&core, &time, &spy, restarted);
-        spy.rx_start_now(0).unwrap();
-        let sample_at = restarted + core.ticks(1_000_000);
-        device_at_spy(&core, &time, &spy, sample_at);
-        assert!(matches!(spy.rx_recv(0, 1_000, Wall::from_millis(10), false), crate::device::RxRecv::Samples { .. }));
-        spy.rx_stop(0, None).unwrap();
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 0);
-        assert!(spy.dsp_log(Dir::Rx, 0).iter().any(|(at, freq, timed)| *at >= e && *freq == value && *timed), "the residual value is consumed by the reopened chain: {:?}", spy.dsp_log(Dir::Rx, 0));
+    fn control_with_rx_enable_and_tx(core: &Arc<Core>) -> Control {
+        let mut config = core.description.defaults();
+        config.insert(key("radio.rx.c0.stream"), Value::from(-1));
+        config.insert(key("radio.tx.c0.stream"), Value::from(0));
+        let rx = vec![None; core.description.stream_count(Dir::Rx)];
+        let mut tx = vec![None; core.description.stream_count(Dir::Tx)];
+        tx[0] = Some((core.register(Dir::Tx, 200, 0).unwrap(), Channels::first(1)));
+        let (to_tx, _tx) = channel();
+        Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, Start { t0: 0, rx, tx })
     }
 
     #[test]
-    fn ur_24_a_refused_successor_rx_start_drains_handed_ddc_before_shutdown() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
-            clock: crate::ClockMode::Manual,
-            rx_packet: Some(1_000),
-            ..Default::default()
-        }));
-        let (core, time, events) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
+    fn ur_24_a_release_waits_until_begin_publishes_eligibility() {
+        let (core, spy, time) = spy_rig(true);
         spy.watch(&core);
-        let frozen = crate::provider::test_support::Frozen::on(spy.host());
         let (mut control, _) = control(&core, &[]);
         let (origin, e, value) = successor_frequency(&mut control, &core, 2);
-        spy.refuse_rx_start(crate::device::DeviceError::failed("test: successor rx_start refusal"));
-        let (configured, entered) = channel();
-        let (resume, waiting) = channel();
-        let waiting = std::sync::Mutex::new(waiting);
-        crate::provider::test_support::probe(&core, "configured", move |_| {
-            let _ = configured.send(());
-            let _ = waiting.lock().unwrap().recv();
-        });
-        let (to_rx, cmds) = channel();
-        let rx = super::super::rx::Rx::new(core.clone(), 0, cmds, None, None);
-        let (done, finished) = channel();
-        let owner = std::thread::spawn(move || {
-            let mut rx = rx;
-            let began = rx.begin();
-            let _ = done.send((began, rx));
-        });
-        assert!(entered.recv_timeout(Wall::from_secs(10)).is_ok(), "successor configuration did not reach its gate: order={:?}, calls={:?}", spy.order(), spy.log());
-        assert!(spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.ends_with("at=-")), "the owner configured the successor before its start: {:?}", spy.log());
-
         control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+
+        let gate = spy.stop_after("rx_start");
+        let mut rx = owner_rx(&core);
+        let (owner_done, owner_returned) = channel();
+        let owner = core.device.host().spawn("rx-begin-publication", move || {
+            assert!(rx.begin());
+            let _ = owner_done.send(rx);
+        }).unwrap();
+        gate.wait();
         let release_at = e - core.ticks(core.description.timing.release_window_ns);
         device_at_spy(&core, &time, &spy, release_at);
-        control.release();
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the timed retune is handed after configure and before the refused start");
-        device_at_spy(&core, &time, &spy, e);
-        let recovery_gate = spy.stop_after("rx_start_now");
-        let recv_gate = spy.stop_before("rx_recv");
-        resume.send(()).unwrap();
-        recovery_gate.wait();
-        assert!(spy.dsp_log(Dir::Rx, 0).contains(&(e, value, true)), "the stream-now recovery did not consume the due DDC value: {:?}", spy.dsp_log(Dir::Rx, 0));
-        recovery_gate.release();
-        recv_gate.wait();
-        let packet_end = e + core.ticks(1_000_000);
-        device_at_spy(&core, &time, &spy, packet_end);
-        drop(frozen);
-        recv_gate.release();
-        let (began, rx) = finished.recv_timeout(Wall::from_secs(10)).expect("start refusal recovery completed within its bound");
+        let (release_done, release_returned) = channel();
+        let release = core.device.host().spawn("control-before-begin-publication", move || {
+            control.release();
+            let _ = release_done.send(control);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert!(core.rx_chain[0].waiters() > 0, "control did not wait on begin's chain lock");
+        assert!(lock(&core.streams).active(stream_key(Dir::Rx, 0)).is_none(), "Streams::started is not published early");
+        assert!(core.rx_chain[0].is_held(), "the owner still holds eligibility unpublished");
+        assert!(!spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")), "the held frequency crossed the start gate: {:?}", spy.log());
+
+        gate.release();
+        let rx = owner_returned.recv_timeout(Wall::from_secs(10)).expect("the owner published its segment");
+        let control = release_returned.recv_timeout(Wall::from_secs(10)).expect("the release pass resumed");
         owner.join().unwrap();
+        release.join().unwrap();
+        assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Armed { at: origin });
+        assert_eq!(core.rx_chain[0].lock().segment(), Some(SegmentKey { by: plan_of(&core, Dir::Rx)[0].segment.by, origin }));
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the resumed pass hands exactly once");
+        assert!(control.held.is_empty());
+        assert!(!rows_of(&core, &key("radio.rx.c0.frequency_hz")).iter().any(|(at, _, _)| *at == e), "the applied row still waits for e");
+        let handed = spy.log().iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))).count();
+        assert_eq!(handed, 1, "the frequency was handed once: {:?}", spy.log());
+        drop(rx);
+    }
 
-        assert!(began);
-        assert!(lock(&core.streams).active(booked_stream(Dir::Rx)).is_none());
-        assert_eq!(core.rx_dsp[0].lock().pending.len(), 0);
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 0);
-        assert!(lock(&core.streams).line(booked_stream(Dir::Rx)).unwrap().items.iter().any(|item| item.refused));
-        let order = spy.order();
-        let failed_start = order.iter().position(|name| *name == "rx_start").unwrap();
-        let recovery_start = order.iter().position(|name| *name == "rx_start_now").unwrap();
-        let recovery_recv = order.iter().rposition(|name| *name == "rx_recv").unwrap();
-        let recovery_stop = order.iter().rposition(|name| *name == "rx_stop").unwrap();
-        assert!(failed_start < recovery_start && recovery_start < recovery_recv && recovery_recv < recovery_stop, "recovery must precede refusing the segment: {order:?}");
-        let rec = lock(&core.rec);
-        assert!(!rec.rejected.iter().any(|row| row["call"] == "rx_drain"), "the recovery consumed the entry: {:?}", rec.rejected);
-        drop(rec);
-        assert!(events_of(&events, kinds::COMMAND_REJECTED).iter().any(|event| event.payload["reason"].as_str().is_some_and(|reason| reason.contains("successor rx_start refusal"))));
+    #[test]
+    fn ur_24_a_first_rx_sample_preserves_eligibility_and_segment_identity() {
+        let (core, device, time) = manual_rig();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _) = control(&core, &[Dir::Rx]);
+        let planned = plan_of(&core, Dir::Rx)[0].clone();
+        start_rx_chain(&core, &planned);
+        let segment = SegmentKey { by: planned.segment.by, origin: planned.segment.origin };
+        let e = core.ticks(100_000_000);
+        control.book_timed(ActionId(7), key("radio.rx.c0.frequency_hz"), Value::num(1.002e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        time.advance_to(core.at(e - core.ticks(core.description.timing.release_window_ns))).unwrap();
 
-        to_rx.send(super::super::rx::RxCmd::Shutdown(StopMode::Orderly)).unwrap();
-        rx.run();
-        spy.rx_close(0);
-        spy.rx_open(0, &[0]).unwrap();
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 0, "shutdown and reopen retain no abandoned DDC value");
-        assert!(spy.dsp_log(Dir::Rx, 0).contains(&(e, value, true)));
+        let mut chain = core.rx_chain[0].lock();
+        chain.first_sample(segment);
+        assert_eq!(chain.device(), RxDevice::Streaming);
+        assert_eq!(chain.segment(), Some(segment), "first sample preserves the covering segment key");
+        let (done, returned) = channel();
+        let control_thread = core.device.host().spawn("control-after-first-rx-sample", move || {
+            control.release();
+            let _ = done.send(control);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert!(core.rx_chain[0].waiters() > 0, "the timed handoff did not wait for first-sample publication");
+        assert!(chain.debt().is_empty());
+        drop(chain);
+        let control = returned.recv_timeout(Wall::from_secs(10)).expect("the handoff followed the first sample");
+        control_thread.join().unwrap();
+        assert_eq!(control.held.len(), 0);
+        let chain = core.rx_chain[0].lock();
+        assert_eq!(chain.segment(), Some(segment));
+        assert_eq!(chain.debt().len(), 1, "the eligible segment receives one handoff");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
+    }
+
+    #[test]
+    fn ur_24_a_begin_and_timed_apply_serialize_in_both_chain_lock_orders() {
+        // Begin first: its completed publication is the state the subsequent release observes.
+        let (core, device, time) = manual_rig();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control_first, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut control_first, &core, 1);
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        control_first.book_timed(ActionId(1), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        time.advance_to(core.at(e - core.ticks(core.description.timing.release_window_ns))).unwrap();
+        let mark = device.calls().len();
+        control_first.release();
+        let calls = device.calls()[mark..].to_vec();
+        let start = device.calls().iter().position(|call| call == &format!("rx_start 0 {origin}")).unwrap_or_else(|| panic!("no RX start: {:?}", device.calls()));
+        let apply = device.calls().iter().position(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))).unwrap();
+        assert!(start < apply, "begin publishes eligibility before release: {:?}", device.calls());
+        assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")).count(), 1);
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1);
+
+        // Apply first: a restart cannot get between the accepted device call and debt publication.
+        let (core, spy, time) = spy_rig(true);
+        spy.watch(&core);
+        let (mut apply_control, _) = control(&core, &[]);
+        let (_origin, e, _) = successor_frequency(&mut apply_control, &core, 2);
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        apply_control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(1.003e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        device_at_spy(&core, &time, &spy, e - core.ticks(core.description.timing.release_window_ns));
+        let gate = spy.stop_after("apply");
+        let (control_done, control_returned) = channel();
+        let control_thread = core.device.host().spawn("rx-apply-before-restart", move || {
+            apply_control.release();
+            let _ = control_done.send(apply_control);
+        }).unwrap();
+        gate.wait();
+        let (owner_done, owner_returned) = channel();
+        let owner_thread = core.device.host().spawn("rx-restart-after-apply", move || {
+            rx.receive(crate::device::RxRecv::LateCommand);
+            let _ = owner_done.send(rx);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert!(core.rx_chain[0].waiters() > 0, "restart did not wait behind the timed apply");
+        assert_eq!(spy.seen("rx_start"), 1, "restart cannot reach the device before debt publication");
+        gate.release();
+        let _control = control_returned.recv_timeout(Wall::from_secs(10)).expect("the timed apply completed");
+        let _rx = owner_returned.recv_timeout(Wall::from_secs(10)).expect("the restart completed");
+        control_thread.join().unwrap();
+        owner_thread.join().unwrap();
+        let calls = spy.log();
+        let apply = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("freq=1003000000")).unwrap();
+        let restart = calls.iter().rposition(|call| call.starts_with("rx_start 0 ")).unwrap();
+        assert!(apply < restart, "the accepted debt is published before restart: {calls:?}");
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1);
+
+        // Restart first: a release cannot observe stale Armed eligibility while rx_start is
+        // in flight; the chain lock covers both the device call and publication.
+        let (core, spy, time) = spy_rig(true);
+        spy.watch(&core);
+        let (mut third_control, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut third_control, &core, 3);
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        third_control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        device_at_spy(&core, &time, &spy, e - core.ticks(core.description.timing.release_window_ns));
+        let gate = spy.stop_after("rx_start");
+        let (restart_done, restarted) = channel();
+        let restart = core.device.host().spawn("rx-restart-before-timed-apply", move || {
+            rx.receive(crate::device::RxRecv::LateCommand);
+            let _ = restart_done.send(rx);
+        }).unwrap();
+        gate.wait();
+        assert!(core.rx_chain[0].is_held(), "restart retains the chain lock while rx_start is in flight");
+        let (release_done, released) = channel();
+        let release = core.device.host().spawn("timed-apply-after-rx-restart", move || {
+            third_control.release();
+            let _ = release_done.send(third_control);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert!(core.rx_chain[0].waiters() > 0, "timed apply did not wait behind the restart lock");
+        assert!(!spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000")), "timed apply crossed the restart gate: {:?}", spy.log());
+        gate.release();
+        let _rx = restarted.recv_timeout(Wall::from_secs(10)).expect("the restart published its new eligibility");
+        let control = released.recv_timeout(Wall::from_secs(10)).expect("the timed apply followed the restart");
+        restart.join().unwrap();
+        release.join().unwrap();
+        let calls = spy.log();
+        let restart = calls.iter().rposition(|call| call.starts_with("rx_start 0 ")).unwrap();
+        let apply = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective="))).unwrap();
+        assert!(restart < apply, "restart publication precedes the timed apply: {calls:?}");
+        assert_eq!(core.rx_chain[0].lock().segment(), Some(SegmentKey { by: plan_of(&core, Dir::Rx)[0].segment.by, origin }));
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1);
+        assert!(control.held.is_empty());
+    }
+
+    #[test]
+    fn ur_24_a_held_frequency_is_handed_after_begin_inside_release_window() {
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 2);
+        control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        let release_at = e - core.ticks(core.description.timing.release_window_ns);
+        device_at(&core, &time, &device, release_at);
+        control.release();
+        assert_eq!(control.held.len(), 1);
+        assert!(core.rx_chain[0].lock().debt().is_empty());
+        assert!(events_of(&events, kinds::LATE_COMMAND).is_empty());
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        assert_eq!(core.rx_chain[0].lock().segment(), Some(SegmentKey { by: plan_of(&core, Dir::Rx)[0].segment.by, origin }));
+        control.release();
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1);
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={e}"))));
+    }
+
+    #[test]
+    fn ur_24_a_held_frequency_is_handed_after_its_instant() {
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 2);
+        control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        device_at(&core, &time, &device, e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        assert_eq!(control.held.len(), 1);
+        assert!(events_of(&events, kinds::LATE_COMMAND).is_empty(), "holding alone emits no event");
+        device_at(&core, &time, &device, e + core.ticks(1_000_000));
+        control.release();
+        assert_eq!(control.held.len(), 1, "the owner is still pending");
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        assert_eq!(core.rx_chain[0].lock().segment(), Some(SegmentKey { by: plan_of(&core, Dir::Rx)[0].segment.by, origin }));
+        control.release();
+        assert!(control.held.is_empty());
+        let rows = rows_of(&core, &key("radio.rx.c0.frequency_hz"));
+        assert_eq!(rows, vec![(e, true, false)], "the delayed handoff keeps its original instant");
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective={}", e + core.ticks(1_000_000)))));
+    }
+
+    #[test]
+    fn ur_24_a_unbegun_successor_does_not_extend_the_old_chain_drain() {
+        // With L = W, the successor's release window opens exactly at the old chain's drain
+        // deadline. Its held value must not become old-chain debt or move the planned origin.
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            rx_packet: Some(500),
+            faults: vec![crate::device::FakeFault::RxFlowStall(Wall::ZERO)],
+            ..Default::default()
+        }));
+        let mut description = crate::provider::test_support::default_description(2_000);
+        description.timing.rx_start_lead_ns = description.timing.release_window_ns;
+        let (core, time, _events) = crate::provider::test_support::rig_on_description(
+            device.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), description,
+        );
+        let frozen = hold(&core, &time, &device);
+        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let initial = plan_of(&core, Dir::Rx)[0].clone();
+        let channels = initial.set();
+        device.rx_open(0, &channels.iter().map(|channel| channel as usize).collect::<Vec<_>>()).unwrap();
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(channels));
+        device.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        lock(&core.streams).record_configured(stream_key(Dir::Rx, 0), initial.segment.by);
+        device.rx_start(0, initial.segment.origin).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, initial.segment.config.ratio).unwrap();
+        let (to_rx, cmds) = channel();
+        std::mem::forget(to_rx);
+        let mut rx = super::super::rx::Rx::new(core.clone(), 0, cmds, Some((handle, channels, initial.segment.origin)), None);
+
+        let ticks = |ms: i64| core.ticks(ms * 1_000_000);
+        let (lead, window) = (
+            core.ticks(core.description.timing.rx_start_lead_ns),
+            core.ticks(core.description.timing.release_window_ns),
+        );
+        let sync_device = |at| {
+            if core.now() < at { time.advance_to(core.at(at)).unwrap(); }
+            device.set_time(at);
+        };
+        assert_eq!(lead, window, "this sequence exercises the minimum L = W boundary");
+        let cut = ticks(10);
+        let old_e = cut + lead;
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(1), frequency.clone(), Value::num(2.1e9).unwrap(), Some(AbsoluteDeadline::new(core.at(old_e))));
+        device_at(&core, &time, &device, cut);
+        control.release();
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the old segment owns its accepted entry: held={:?}, calls={:?}, plan={:?}", control.held.keys().collect::<Vec<_>>(), device.calls(), plan_rows(&plan_of(&core, Dir::Rx)));
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
+
+        control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(cut))));
+        let planned = plan_of(&core, Dir::Rx);
+        let old = planned.iter().find(|planned| planned.segment.by.is_none()).expect("the original segment");
+        let successor = planned.iter().find(|planned| planned.segment.by.is_some()).expect("the rate-change successor");
+        assert_eq!(old.segment.instant(old.segment.cut.expect("the old cut")).unwrap(), cut);
+        let successor_origin = successor.segment.origin;
+        control.book_timed(ActionId(3), frequency.clone(), Value::num(2.2e9).unwrap(), Some(AbsoluteDeadline::new(core.at(successor_origin))));
+        let successor_order = control.held.iter().find(|(_, timed)| timed.value == 2.2e9).map(|(order, _)| *order).expect("the successor booking");
+
+        drop(frozen);
+        let stalled = core.device.rx_recv(0, core.block_len, Wall::from_millis(1), false);
+        assert!(matches!(stalled, crate::device::RxRecv::Timeout), "the normal drain read stalls");
+        rx.receive(stalled);
+        let sample_ticks = old.segment.config.ratio.num() as i64;
+        let old_samples = usize::try_from(cut / sample_ticks).unwrap();
+        rx.receive(crate::device::RxRecv::Samples { first_tick: 0, samples: vec![vec![[0.0, 0.0]; old_samples]] });
+        assert_eq!(core.rx_chain[0].lock().cut(), Some(cut), "the owner followed the booked cut");
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "pre-cut samples do not consume the future old entry");
+
+        let call = core.block_len.max(core.device.rx_packet_samples(0)) as i64;
+        let call_ticks = call * sample_ticks;
+        let allowance = core.ticks(crate::profile::DELIVERY_ALLOWANCE_NS);
+        let deadline = (old_e + call_ticks).max(cut + core.block_len as i64 * sample_ticks) + allowance;
+        assert_eq!(successor_origin - lead, deadline, "the successor's plan retains the minimum post-drain lead");
+        let release_at = successor_origin - window;
+        assert_eq!(release_at, deadline, "L = W opens the successor window at the old drain deadline");
+        let flush_at = deadline - allowance;
+        sync_device(flush_at);
+
+        let (owner_reached, wait_reached) = channel();
+        let (resume_owner, wait_owner) = channel();
+        let owner_resume = std::sync::Mutex::new(wait_owner);
+        crate::provider::test_support::probe(&core, "rx_before_finish", move |_| {
+            let _ = owner_reached.send(());
+            let _ = owner_resume.lock().unwrap().recv();
+        });
+        let (owner_done, owner_returned) = channel();
+        let owner = core.device.host().spawn("rx-minimum-lead-drain", move || {
+            rx.try_end();
+            let _ = owner_done.send(rx);
+        }).unwrap();
+        wait_reached.recv_timeout(Wall::from_secs(10)).expect("the old owner reached finish after its drain");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the old timed entry was consumed by the bounded flush");
+
+        sync_device(deadline);
+        let (control_done, control_returned) = channel();
+        let release_thread = core.device.host().spawn("rx-successor-release-window", move || {
+            control.release();
+            let _ = control_done.send(control);
+        }).unwrap();
+        let waiter_deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < waiter_deadline {
+            std::thread::yield_now();
+        }
+        let release_waited_for_finish = core.rx_chain[0].waiters() > 0;
+        let _ = resume_owner.send(());
+        let mut rx = owner_returned.recv_timeout(Wall::from_secs(10)).expect("the old owner finished");
+        owner.join().unwrap();
+        let mut control = control_returned.recv_timeout(Wall::from_secs(10)).expect("release observed the finished chain");
+        release_thread.join().unwrap();
+
+        assert!(release_waited_for_finish, "the release pass did not serialize with old-chain finish");
+        assert!(control.held.contains_key(&successor_order), "the successor value remained held through the old drain");
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 0);
+        assert!(lock(&core.rec).applied.iter().all(|row| row["key"] != frequency.as_str() || row["claimed"] != 2.2e9), "the held value was recorded before begin");
+        assert!(rx.begin(), "the successor begins after the old chain finishes");
+        assert_eq!(successor_origin - core.now(), lead, "the successor starts with exactly its minimum lead");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=2200000000") && call.contains(&format!("at={successor_origin} effective="))), "configuration did not replace the still-held timed handoff: {:?}", device.calls());
+
+        control.release();
+        assert!(!control.held.contains_key(&successor_order));
+        let timed: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("apply rx 0") && call.contains("freq=2200000000") && call.contains(&format!("at={successor_origin} effective={successor_origin}"))).collect();
+        assert_eq!(timed.len(), 1, "the successor receives one timed handoff: {:?}", device.calls());
+        sync_device(successor_origin);
+        control.release();
+        let samples = core.device.rx_recv(0, core.block_len, Wall::from_millis(10), false);
+        assert!(matches!(&samples, crate::device::RxRecv::Samples { .. }), "the successor produces qualifying samples: {samples:?}");
+        rx.receive(samples);
+        assert!(device.dsp_log(Dir::Rx, 0).iter().any(|(at, value, timed)| *at >= successor_origin && *value == 2.2e9 && *timed), "the fake applies the successor value on a qualifying sample: {:?}", device.dsp_log(Dir::Rx, 0));
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 0, "the successor sample consumes its own debt");
+        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
+    }
+
+    #[test]
+    fn ur_24_a_blocked_rx_head_holds_later_rx_and_tx_updates() {
+        let (core, device, time, _) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = both_control(&core);
+        control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(core.ticks(100_000_000)))));
+        let blocked = plan_of_stream(&core, Dir::Rx, 0).into_iter().find(|planned| planned.segment.by.is_some()).expect("the unbegun successor");
+        let running = plan_of_stream(&core, Dir::Rx, 1)[0].clone();
+        start_rx_chain(&core, &running);
+        let e = blocked.segment.origin + core.ticks(1_000_000);
+        let later_rx = e + core.ticks(1_000_000);
+        let later_tx = e + core.ticks(2_000_000);
+        let rx0 = key("radio.rx.c0.frequency_hz");
+        let rx1 = key("radio.rx.c1.frequency_hz");
+        let tx0 = key("radio.tx.c0.gain_db");
+        for (id, target, value, at) in [
+            (2, rx0.clone(), 1.001e9, e),
+            (3, rx1.clone(), 1.002e9, later_rx),
+            (4, tx0.clone(), 3.0, later_tx),
+        ] {
+            control.book_timed(ActionId(id), target, Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(at))));
+        }
+        device_at(&core, &time, &device, later_tx + core.ticks(1_000_000));
+
+        let chain = core.rx_chain[0].lock();
+        let (done, returned) = channel();
+        let release = core.device.host().spawn("blocked-rx-head-release", move || {
+            control.release();
+            let _ = done.send(control);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert!(core.rx_chain[0].waiters() > 0, "the release pass reached the blocked owner's chain lock");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply ")), "a later RX/TX command passed the blocked head: {:?}", device.calls());
+        assert!(lock(&core.rec).applied.is_empty(), "no command was recorded before the head resolved");
+        assert_eq!(core.rx_chain[1].lock().device(), RxDevice::Armed { at: running.segment.origin }, "the second owner began on time");
+        drop(chain);
+        control = returned.recv_timeout(Wall::from_secs(10)).expect("the blocked release returned");
+        release.join().unwrap();
+        assert_eq!(control.held.len(), 3, "the first pass leaves the whole ordered suffix held");
+
+        start_rx_chain(&core, &blocked);
+        control.release();
+        assert!(control.held.is_empty());
+        let calls = device.calls();
+        let first = calls.iter().position(|call| call.starts_with("apply rx 0") && call.contains("freq=1001000000") && call.contains(&format!("at={e} effective="))).expect("the blocked head is handed first");
+        let second = calls.iter().position(|call| call.starts_with("apply rx 1") && call.contains("freq=1002000000") && call.contains(&format!("at={later_rx} effective="))).expect("the later RX update is handed");
+        let third = calls.iter().position(|call| call.starts_with("apply tx 0") && call.contains("gain=3") && call.contains(&format!("at={later_tx} effective="))).expect("the TX update is handed");
+        assert!(first < second && second < third, "release preserves the (e, sequence) device order: {calls:?}");
+        assert!(calls[second].contains(&format!("effective={}", device.time_now().unwrap())), "the already-running second owner was physically late: {calls:?}");
+        assert_eq!(rows_of(&core, &rx0), vec![(e, true, false)]);
+        assert_eq!(rows_of(&core, &rx1), vec![(later_rx, true, false)]);
+        assert_eq!(rows_of(&core, &tx0), vec![(later_tx, true, false)]);
+    }
+
+    #[test]
+    fn ur_24_a_blocked_rx_head_still_folds_earlier_handed_updates() {
+        let (core, device, time, _) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = both_control(&core);
+        let change = core.ticks(100_000_000);
+        control.book_cold(ActionId(1), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(change))));
+        let blocked = plan_of_stream(&core, Dir::Rx, 0).into_iter().find(|planned| planned.segment.by.is_some()).expect("the unbegun successor");
+        let running = plan_of_stream(&core, Dir::Rx, 1)[0].clone();
+        start_rx_chain(&core, &running);
+
+        let window = core.ticks(core.description.timing.release_window_ns);
+        let e = blocked.segment.origin + core.ticks(1_000_000);
+        let earlier = e - window - core.ticks(1_000_000);
+        let earlier_key = key("radio.rx.c1.frequency_hz");
+        let blocked_key = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(2), earlier_key.clone(), Value::num(1.001e9).unwrap(), Some(AbsoluteDeadline::new(core.at(earlier))));
+        control.book_timed(ActionId(3), blocked_key.clone(), Value::num(1.002e9).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+
+        device_at(&core, &time, &device, earlier - window);
+        control.release();
+        assert_eq!(rows_of(&core, &earlier_key), [], "the earlier command is issued but its instant has not arrived");
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 1") && call.contains("freq=1001000000") && call.contains(&format!("at={earlier} effective="))), "the earlier command was handed before the blocked head");
+
+        device_at(&core, &time, &device, earlier + core.ticks(1_000_000));
+        control.release();
+
+        assert_eq!(rows_of(&core, &earlier_key), [(earlier, true, false)], "the due prefix is recorded despite the blocked head");
+        assert_eq!(control.config.get(&earlier_key), Some(&Value::num(1.001e9).unwrap()), "the prefix becomes configuration of record");
+        assert_eq!(control.held.len(), 1, "the blocked head remains held");
+        assert!(control.held.values().any(|timed| timed.key == blocked_key));
+        assert!(rows_of(&core, &blocked_key).is_empty());
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1002000000")), "the blocked head never reached the device");
+    }
+
+    #[test]
+    fn ur_24_a_refused_blocked_head_reconsiders_later_commands() {
+        let (core, device, time, _) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = control_with_rx_enable_and_tx(&core);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let later = e + core.ticks(1_000_000);
+        let head = key("radio.rx.c0.frequency_hz");
+        let tail = key("radio.tx.c0.gain_db");
+        control.book_timed(ActionId(2), head.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(ActionId(3), tail.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(later))));
+        device_at(&core, &time, &device, e - core.ticks(1_000_000));
+        control.release();
+        assert_eq!(control.held.len(), 2, "the unbegun covering segment blocks the later command");
+        let refused = plan_of(&core, Dir::Rx).into_iter().find(|planned| planned.segment.origin == origin).expect("the covering segment");
+        assert!(lock(&core.streams).refuse(&core, stream_key(Dir::Rx, 0), refused.segment.by.expect("booked enable")));
+
+        device_at(&core, &time, &device, later);
+        control.release();
+        assert!(control.held.is_empty());
+        assert_eq!(rows_of(&core, &head), vec![(e, false, true)], "the refused segment leaves the head on the existing no-channel path");
+        assert_eq!(rows_of(&core, &tail), vec![(later, true, false)], "the next pass reconsiders the following TX update");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))));
+    }
+
+    #[test]
+    fn ur_24_a_refused_covering_segment_retargets_held_frequency() {
+        let (core, spy, time) = spy_rig(true);
+        spy.watch(&core);
+        let _frozen = crate::provider::test_support::Frozen::on(spy.host());
+        let (mut control, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        device_at_spy(&core, &time, &spy, e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        assert_eq!(control.held.len(), 1, "the unbegun covering segment holds the value");
+
+        let mut rx = owner_rx(&core);
+        spy.refuse_rx_start(crate::DeviceError::failed("scripted covering-segment start refusal"));
+        assert!(rx.begin(), "the owner handles the refused planned segment");
+        assert!(core.rx_chain[0].lock().segment().is_none());
+        assert_eq!(core.rx_chain[0].lock().debt().len(), 0);
+        device_at_spy(&core, &time, &spy, e);
+        control.release();
+
+        assert!(control.held.is_empty());
+        assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the removed covering segment takes the existing no-channel path");
+        assert!(!spy.log().iter().any(|call| call.contains(&format!("freq={value}"))), "the refused segment never received the frequency: {:?}", spy.log());
         assert!(origin < e);
     }
 
     #[test]
-    fn ur_24_a_new_successor_obligation_is_settled_after_an_earlier_empty_settlement() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
-        let (core, time, _) = crate::provider::test_support::rig_on(spy.clone(), vec![Arc::new(NoLink)], 2_000);
-        spy.watch(&core);
-        let frozen = crate::provider::test_support::Frozen::on(spy.host());
-        spy.set_time(core.now());
-        let (mut control, _) = control(&core, &[]);
-        let (to_rx, cmds) = channel();
-        std::mem::forget(to_rx);
-        let mut rx = super::super::rx::Rx::new(core.clone(), 0, cmds, None, None);
-        assert!(!rx.begin(), "the first empty plan settles nothing");
-
-        let (origin, e, value) = successor_frequency(&mut control, &core, 2);
-        let (entered, ready) = channel();
-        let (resume, waiting) = channel();
-        let (done, finished) = channel();
-        let owner = std::thread::spawn(move || {
-            let _ = entered.send(());
-            let _ = waiting.recv();
-            let began = rx.begin();
-            let _ = done.send((began, rx));
-        });
-        ready.recv_timeout(Wall::from_secs(10)).expect("the RX owner is held before begin");
-
-        control.book_timed(ActionId(3), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
-        let release_at = e - core.ticks(core.description.timing.release_window_ns);
-        device_at_spy(&core, &time, &spy, release_at);
+    fn ur_24_a_stop_retargets_held_frequency() {
+        let (core, device, time, _) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = control_with_rx_enable_and_tx(&core);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let later = e + core.ticks(1_000_000);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        let gain = key("radio.tx.c0.gain_db");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(later))));
+        device_at(&core, &time, &device, e - core.ticks(core.description.timing.release_window_ns));
         control.release();
-        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "control handed the timed value to the planned successor");
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1);
+        assert_eq!(control.held.len(), 2);
 
-        let stop_at = core.now();
-        {
-            let mut streams = lock(&core.streams);
-            streams.stop = Some((stop_at, StopMode::Orderly));
-            streams.end(&core, stop_at, false, false);
-        }
-        control.finish();
-        assert!(!lock(&core.streams).planned(booked_stream(Dir::Rx)).iter().any(|planned| planned.segment.origin == origin), "Provider::stop removed the successor before begin");
-        resume.send(()).unwrap();
-        owner.join().unwrap();
-        let (began, mut rx) = finished.recv_timeout(Wall::from_secs(10)).expect("the owner settled the abandoned successor");
+        let planned = plan_of(&core, Dir::Rx).into_iter().find(|planned| planned.segment.origin == origin).expect("the covering segment");
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the segment after the first held release");
+        device_at(&core, &time, &device, origin + core.ticks(500_000));
+        let node = core.description.stream_node(&core.id, Dir::Rx, 0);
+        control.book(Dispatched::new(ActionId(4), Action::Stop { target: Some(super::super::test_support::target_of(&node)) }, Some(node)));
+        receive_through_rx_cut(&core, &mut rx, &planned);
+        device_at(&core, &time, &device, later);
+        control.release();
 
-        assert!(!began, "the removed successor was never begun");
-        assert_eq!(core.rx_dsp[0].lock().pending.len(), 1, "the unconsumed device obligation remains visible");
-        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 1, "the abandoned DDC value remains in the device");
-        let rejected = lock(&core.rec).rejected.clone();
-        assert_eq!(rejected.iter().filter(|row| row["call"] == "rx_drain").count(), 1, "the new obligation was reported once");
-        assert!(rejected.iter().any(|row| row["call"] == "rx_drain" && row["error"].as_str().is_some_and(|error| error.contains("channel c0") && error.contains("1001000000") && error.contains(&format!("at {e}")))), "the report identifies the handed entry: {rejected:?}");
-        assert!(!spy.log().iter().any(|call| call.starts_with("rx_open") || call.starts_with("rx_start_now") || call.starts_with("rx_recv")), "the absent successor has no streamer to recover: {:?}", spy.log());
-
-        assert!(!rx.begin(), "a second empty-plan settlement is harmless");
-        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "rx_drain").count(), 1, "a second settlement does not duplicate the report");
-        drop(frozen);
+        assert!(control.held.is_empty());
+        assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the completed RX plan no longer covers the held value");
+        assert_eq!(rows_of(&core, &gain), [(later, true, false)], "the following command is reconsidered after the stop retarget");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))));
     }
+
+    #[test]
+    fn ur_24_a_cold_change_before_e_retargets_held_frequency() {
+        let (core, device, time, _) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = control_with_rx_enable_and_tx(&core);
+        let (_, e, value) = successor_frequency(&mut control, &core, 1);
+        let later = e + core.ticks(1_000_000);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        let gain = key("radio.tx.c0.gain_db");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(later))));
+        let first_release = e - core.ticks(core.description.timing.release_window_ns);
+        device_at(&core, &time, &device, first_release);
+        control.release();
+        assert_eq!(control.held.len(), 2);
+
+        let planned = plan_of(&core, Dir::Rx).into_iter().find(|planned| planned.segment.origin < e).expect("the covering segment");
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner begins the segment after the first held release");
+        let cut = e - core.ticks(500_000);
+        control.book_cold(ActionId(4), key("radio.rx.c0.stream"), Value::from(-1), Some(AbsoluteDeadline::new(core.at(cut))));
+        device_at(&core, &time, &device, cut);
+        receive_through_rx_cut(&core, &mut rx, &planned);
+        control.release();
+        assert_eq!(control.held.len(), 2, "the future no-channel head still blocks its suffix");
+        device_at(&core, &time, &device, e);
+        control.release();
+        device_at(&core, &time, &device, later);
+        control.release();
+
+        assert!(control.held.is_empty());
+        assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the cold plan change removes the covering destination");
+        assert_eq!(rows_of(&core, &gain), [(later, true, false)], "the suffix is released only after the head settles");
+    }
+
+    #[test]
+    fn ur_24_a_move_retargets_held_frequency_to_new_destination() {
+        let (core, device, time, _) = both_rig();
+        let _frozen = hold(&core, &time, &device);
+        let mut config = core.description.defaults();
+        for name in ["radio.rx.c0.stream", "radio.rx.c1.stream"] { config.insert(key(name), Value::from(-1)); }
+        for name in ["radio.tx.c0.stream", "radio.tx.c1.stream"] { config.insert(key(name), Value::from(-1)); }
+        let (to_tx, _tx) = channel();
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false,
+            Start { t0: 0, rx: vec![None, None], tx: vec![None, None] });
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        let first_release = e - core.ticks(core.description.timing.release_window_ns);
+        device_at(&core, &time, &device, first_release);
+        control.release();
+        assert_eq!(control.held.len(), 1, "the unbegun source segment blocks the frequency");
+
+        let move_at = origin + core.ticks(500_000);
+        lock(&core.streams).search(stream_key(Dir::Rx, 1), true);
+        control.book_cold(ActionId(3), key("radio.rx.c0.stream"), Value::from(1), Some(AbsoluteDeadline::new(core.at(move_at))));
+        let destination = plan_of_stream(&core, Dir::Rx, 1).into_iter()
+            .find(|planned| planned.segment.origin > e && planned.segment.config.channels.contains(0))
+            .expect("the move creates a later destination segment");
+        assert!(destination.settings.as_ref().is_some_and(|settings| !settings.is_configured()));
+        device_at(&core, &time, &device, e);
+        control.release();
+
+        assert!(control.held.is_empty(), "the new destination's configure now carries the value");
+        assert_eq!(rows_of(&core, &frequency), [(e, true, true)], "no destination is active at e, so the row keeps the existing no-channel note");
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))),
+            "the held value was not written to the old destination: {:?}", device.calls());
+        destination.configure(&core, Dir::Rx).expect("the destination configures from the updated projection");
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}") ) && call.ends_with("at=-")),
+            "the new destination configure carries the held frequency: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_24_a_removed_destination_retargets_held_frequency_to_no_channel() {
+        let (core, device, time, _) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = control_with_rx_enable_and_tx(&core);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        device_at(&core, &time, &device, e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        assert_eq!(control.held.len(), 1);
+
+        let remove_at = origin + core.ticks(500_000);
+        control.book_cold(ActionId(3), key("radio.rx.c0.stream"), Value::from(-1), Some(AbsoluteDeadline::new(core.at(remove_at))));
+        device_at(&core, &time, &device, e);
+        control.release();
+
+        assert!(control.held.is_empty());
+        assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the removed destination records no channel at the original instant");
+        assert!(lock(&core.rec).applied.iter().any(|row| row["key"] == frequency.as_str() && row["note"] == "no channel" && row["at"]["ticks"] == core.at(e).ticks_in(core.root).unwrap()));
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}"))),
+            "the removed destination receives no stale timed or untimed write: {:?}", device.calls());
+    }
+
+    fn configured_successor_refusal_case(refuse_start: bool) {
+        let (core, spy, time) = spy_rig(true);
+        spy.watch(&core);
+        let _frozen = crate::provider::test_support::Frozen::on(spy.host());
+        let (mut control, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        device_at_spy(&core, &time, &spy, e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        assert_eq!(control.held.len(), 1, "the configured-but-unbegun successor keeps the command held");
+        assert!(core.rx_chain[0].lock().debt().is_empty(), "no successor debt is created before begin");
+
+        if refuse_start {
+            spy.refuse_rx_start(crate::DeviceError::failed("scripted successor start refusal"));
+        } else {
+            spy.refuse_rx_apply(crate::DeviceError::failed("scripted successor configure refusal"));
+        }
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin(), "the owner handles the configured successor refusal");
+        assert!(core.rx_chain[0].lock().segment().is_none());
+        assert!(core.rx_chain[0].lock().debt().is_empty());
+        assert_eq!(control.held.len(), 1, "the refusal leaves the frequency for the next release pass");
+        assert!(!spy.log().iter().any(|call| call.contains(&format!("freq={value}") ) && call.contains("at=")),
+            "the refused successor never receives a timed frequency: {:?}", spy.log());
+
+        device_at_spy(&core, &time, &spy, e);
+        control.release();
+        assert!(control.held.is_empty());
+        assert_eq!(rows_of(&core, &frequency), [(e, false, true)], "the refusal removes the only destination, so the row records no channel");
+        assert_eq!(control.config.get(&frequency), Some(&Value::num(value).unwrap()),
+            "the no-channel outcome remains the configuration of record");
+
+        core.close_device(Dir::Rx, 0);
+        core.open_streamer(Dir::Rx, 0, Channels::first(1)).expect("the later run reopens the clean chain");
+        let settings = core.description.settings(&control.config, Dir::Rx, 0, 0);
+        core.configure(Dir::Rx, &[(0, settings)], 1e6, 0).expect("the later configure uses the recorded frequency");
+        assert_eq!(core.rx_chain[0].lock().latest().get(&0).map(|entry| entry.value), None, "a failed segment did not create a timed device entry");
+        assert_eq!(spy.dsp_pending(Dir::Rx, 0), 0, "no stale timed write survives the close/open");
+        assert!(spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}")) && call.ends_with("at=-")),
+            "the later open/configure applies the projected value untimed: {:?}", spy.log());
+        assert!(origin < e);
+    }
+
+    #[test]
+    fn ur_24_a_configured_successor_configure_refusal_keeps_frequency_held() {
+        configured_successor_refusal_case(false);
+    }
+
+    #[test]
+    fn ur_24_a_configured_successor_start_refusal_keeps_frequency_held() {
+        configured_successor_refusal_case(true);
+    }
+
+    #[test]
+    fn ur_24_a_stop_settles_blocked_rx_head_and_later_commands() {
+        let (core, device, time, _) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let mut control = control_with_rx_enable_and_tx(&core);
+        let (_, e, value) = successor_frequency(&mut control, &core, 1);
+        let later = e + core.ticks(1_000_000);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        let gain = key("radio.tx.c0.gain_db");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        control.book_timed(ActionId(3), gain.clone(), Value::num(3.0).unwrap(), Some(AbsoluteDeadline::new(core.at(later))));
+        device_at(&core, &time, &device, e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        assert_eq!(control.held.len(), 2, "the blocked head prevents the later TX update");
+
+        let stop = e - core.ticks(100_000);
+        stop_end(&core, stop);
+        control.finish();
+
+        assert!(control.held.is_empty());
+        assert_eq!(cancelled_at(&core), [stop, stop], "stop settles the held head and suffix together");
+        assert_eq!((rows_of(&core, &frequency), rows_of(&core, &gain)), (vec![(e, false, false)], vec![(later, false, false)]));
+        assert!(!device.calls().iter().any(|call| call.starts_with("apply ")), "nothing behind the blocked head reaches the device after the Run ends: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_24_a_loss_during_timed_rx_handoff_finishes_without_recovery_calls() {
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig {
+            clock: crate::ClockMode::Manual,
+            command_queue: 64,
+            ..Default::default()
+        }));
+        let (core, time, events) = crate::provider::test_support::rig_on_description(
+            spy.clone(), vec![Arc::new(NoLink)], BTreeMap::new(), crate::provider::test_support::default_description(2_000));
+        spy.watch(&core);
+        let _frozen = crate::provider::test_support::Frozen::on(spy.host());
+        let (mut control, _) = control(&core, &[]);
+        let (origin, first_e, first_value) = successor_frequency(&mut control, &core, 1);
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        assert_eq!(core.rx_chain[0].lock().segment(), Some(SegmentKey { by: plan_of(&core, Dir::Rx)[0].segment.by, origin }));
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(2), frequency.clone(), Value::num(first_value).unwrap(), Some(AbsoluteDeadline::new(core.at(first_e))));
+        device_at_spy(&core, &time, &spy, first_e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        let chain = core.rx_chain[0].lock();
+        assert_eq!(chain.debt().len(), 1, "the earlier handoff is accepted debt");
+        drop(chain);
+
+        let lost_e = first_e + core.ticks(core.description.timing.release_window_ns) + ms(1);
+        control.book_timed(ActionId(3), frequency, Value::num(1.002e9).unwrap(), Some(AbsoluteDeadline::new(core.at(lost_e))));
+        device_at_spy(&core, &time, &spy, lost_e - core.ticks(core.description.timing.release_window_ns));
+        spy.refuse_rx_apply(crate::DeviceError { lost: true, message: "scripted loss during timed handoff".to_owned() });
+        let gate = spy.stop_before("apply");
+        let (release_done, released) = channel();
+        let release = spy.host().spawn("rx-loss-timed-handoff", move || {
+            control.release();
+            let _ = release_done.send(control);
+        }).unwrap();
+        gate.wait();
+        let (owner_done, returned) = channel();
+        let owner = spy.host().spawn("rx-late-command-during-loss", move || {
+            rx.receive(crate::device::RxRecv::LateCommand);
+            let _ = owner_done.send(rx);
+        }).unwrap();
+        let deadline = std::time::Instant::now() + Wall::from_secs(10);
+        while core.rx_chain[0].waiters() == 0 && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert!(core.rx_chain[0].waiters() > 0, "LateCommand reached the chain lock while the timed handoff held it");
+        gate.release();
+        let _control = released.recv_timeout(Wall::from_secs(10)).expect("the timed handoff reported loss");
+        release.join().unwrap();
+        assert!(core.is_lost());
+        let calls_at_loss = spy.log().len();
+        let starts_at_loss = spy.seen("rx_start");
+        let _rx = returned.recv_timeout(Wall::from_secs(10)).expect("LateCommand finalized the lost segment");
+        owner.join().unwrap();
+
+        assert_eq!(spy.log().len(), calls_at_loss, "LateCommand made no restart or recovery call after loss: {:?}", spy.log());
+        assert_eq!(spy.seen("rx_start"), starts_at_loss, "LateCommand made no rx_start call after loss");
+        let calls = spy.log();
+        let marked = calls.iter().position(|call| call == "mark_lost").expect("the loss was published");
+        assert!(!calls[marked + 1..].iter().any(|call| call.starts_with("rx_start")), "no restart followed loss: {calls:?}");
+        let chain = core.rx_chain[0].lock();
+        assert_eq!(chain.device(), RxDevice::Lost);
+        assert!(chain.debt().is_empty());
+        assert_eq!(chain.left().len(), 1, "only the earlier accepted value remains to report");
+        assert_eq!(chain.segment(), None, "the owner finished the segment");
+        drop(chain);
+        let drain: Vec<_> = lock(&core.rec).rejected.iter().filter(|row| row["call"] == "rx_drain").cloned().collect();
+        assert_eq!(drain.len(), 1, "each outstanding entry is reported once: {drain:?}");
+        assert_eq!(drain[0]["at"], first_e);
+        assert_eq!(lock(&core.streams).active(stream_key(Dir::Rx, 0)), None, "the active stream was released");
+        assert_eq!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST).count(), 1);
+    }
+
+    fn late_rx_restart_case(release_first: bool) {
+        let (core, device, time, events) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let (mut control, _) = control(&core, &[]);
+        let (origin, e, value) = successor_frequency(&mut control, &core, 1);
+        let mut rx = owner_rx(&core);
+        assert!(rx.begin());
+        let segment = SegmentKey { by: plan_of(&core, Dir::Rx)[0].segment.by, origin };
+        control.book_timed(ActionId(2), key("radio.rx.c0.frequency_hz"), Value::num(value).unwrap(), Some(AbsoluteDeadline::new(core.at(e))));
+        let release_at = e - core.ticks(core.description.timing.release_window_ns);
+        device_at(&core, &time, &device, release_at);
+        if release_first {
+            control.release();
+            assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the first pass hands the update");
+            device_at(&core, &time, &device, e + core.ticks(1_000_000));
+        }
+        let before = device.calls().iter().filter(|call| call.starts_with("rx_start 0 ")).count();
+        rx.receive(crate::device::RxRecv::LateCommand);
+        let chain = core.rx_chain[0].lock();
+        assert_eq!(chain.segment(), Some(segment), "a cut-free restart preserves the chain identity");
+        assert!(matches!(chain.device(), RxDevice::Armed { .. }));
+        assert!(chain.eligible(segment, e), "restart preserves handoff eligibility");
+        drop(chain);
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("rx_start 0 ")).count(), before + 1);
+        if !release_first {
+            control.release();
+            assert!(control.held.is_empty());
+            assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the post-restart pass hands the held update once");
+        }
+        assert!(device.calls().iter().any(|call| call.starts_with("apply rx 0") && call.contains(&format!("freq={value}")) && call.contains(&format!("at={e} effective="))));
+        assert_eq!(events_of(&events, kinds::LATE_COMMAND).len(), 1, "only the actual restart emits LateCommand");
+    }
+
+    #[test]
+    fn ur_24_a_late_command_restart_preserves_rx_eligibility_before_release() {
+        late_rx_restart_case(false);
+    }
+
+    #[test]
+    fn ur_24_a_late_command_restart_preserves_rx_eligibility_after_release() {
+        late_rx_restart_case(true);
+    }
+
+    #[test]
+    fn ur_24_a_cut_bearing_late_command_finishes_without_restart() {
+        let (core, device, time, _) = manual_rig_events();
+        let _frozen = hold(&core, &time, &device);
+        let (_control, _) = control(&core, &[Dir::Rx]);
+        let planned = plan_of(&core, Dir::Rx).remove(0);
+        let channels = planned.set();
+        core.device.rx_open(0, &channels.iter().map(|channel| channel as usize).collect::<Vec<_>>()).unwrap();
+        lock(&core.streams).record_open(stream_key(Dir::Rx, 0), Some(channels));
+        core.device.rx_start(0, planned.segment.origin).unwrap();
+        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Rx, 0), core.root, planned.segment.config.ratio).unwrap();
+        let mut rx = super::super::rx::Rx::new(core.clone(), 0, channel().1, Some((handle, channels, planned.segment.origin)), None);
+        assert!(matches!(core.rx_chain[0].lock().device(), RxDevice::Armed { .. } | RxDevice::Streaming));
+        assert!(lock(&core.streams).active(stream_key(Dir::Rx, 0)).is_some(), "the late command must reach a live RX owner");
+        core.rx_chain[0].lock().request_cut(planned.segment.origin);
+        assert!(core.rx_chain[0].lock().cut().is_some(), "the current segment has a cut intent");
+        let starts = device.calls().iter().filter(|call| call.starts_with("rx_start 0 ")).count();
+
+        rx.receive(crate::device::RxRecv::LateCommand);
+
+        assert_eq!(device.calls().iter().filter(|call| call.starts_with("rx_start 0 ")).count(), starts, "a cut-bearing late command does not restart");
+        assert!(core.rx_chain[0].lock().segment().is_none());
+        assert!(lock(&core.streams).active(stream_key(Dir::Rx, 0)).is_none());
+    }
+
+    #[test]
+    fn ur_24_a_delayed_rx_apply_refusal_rolls_back_debt_and_record() {
+        let spy = Arc::new(crate::provider::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
+        let (core, time, witness) = crate::provider::test_support::rig_on_description_links_witness(
+            spy.clone(), vec![vec![Arc::new(NoLink)], vec![Arc::new(NoLink)]], BTreeMap::new(), both_description());
+        witness.watch(&core);
+        spy.watch(&core);
+        let _frozen = crate::provider::test_support::Frozen::on(spy.host());
+        let mut control = both_control(&core);
+        start_rx_chain(&core, &plan_of_stream(&core, Dir::Rx, 1)[0]);
+        let mut rx = owner_rx_for(&core, 0);
+        assert!(rx.begin(), "stream 0 starts before its later unbegun segment");
+        let old_e = core.ticks(10_000_000);
+        let old_key = key("radio.rx.c1.frequency_hz");
+        let frequency = key("radio.rx.c0.frequency_hz");
+        control.book_timed(ActionId(1), old_key.clone(), Value::num(1.001e9).unwrap(), Some(AbsoluteDeadline::new(core.at(old_e))));
+        device_at_spy(&core, &time, &spy, old_e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        device_at_spy(&core, &time, &spy, old_e);
+        control.release();
+        let old_latest = core.rx_chain[1].lock().latest().get(&1).cloned().expect("the first value was accepted");
+        let before_rows = rows_of(&core, &old_key);
+        assert_eq!(before_rows.len(), 1);
+
+        let change = core.ticks(100_000_000);
+        control.book_cold(ActionId(2), key("radio.rx.s0.sample_rate_hz"), Value::num(2e6).unwrap(), Some(AbsoluteDeadline::new(core.at(change))));
+        let successor = plan_of_stream(&core, Dir::Rx, 0).into_iter().find(|planned| planned.segment.by.is_some()).expect("the unbegun successor");
+        let cut = plan_of_stream(&core, Dir::Rx, 0).into_iter().find(|planned| planned.segment.cut.is_some()).expect("the current segment's cut").segment;
+        let cut_at = cut.instant(cut.cut.unwrap()).unwrap();
+        device_at_spy(&core, &time, &spy, cut_at);
+        rx.receive(crate::device::RxRecv::Samples { first_tick: cut_at, samples: vec![vec![[0.0, 0.0]]] });
+        assert_eq!(core.rx_chain[0].lock().segment(), None, "the current segment ended before the successor");
+
+        let window = core.ticks(core.description.timing.release_window_ns);
+        let refused_e = successor.segment.origin + core.ticks(1_000_000);
+        let later_e = refused_e + window + core.ticks(1_000_000);
+        control.book_timed(ActionId(3), frequency.clone(), Value::num(1.002e9).unwrap(), Some(AbsoluteDeadline::new(core.at(refused_e))));
+        control.book_timed(ActionId(4), frequency.clone(), Value::num(1.003e9).unwrap(), Some(AbsoluteDeadline::new(core.at(later_e))));
+        device_at_spy(&core, &time, &spy, refused_e - window);
+        control.release();
+        assert_eq!(control.held.len(), 2, "the unbegun covering segment keeps the command and suffix held");
+        assert!(core.rx_chain[0].lock().segment().is_none(), "the covering segment has not begun");
+        assert!(spy.rx_apply_pending().iter().all(|(_, at, value, _)| *at != Some(refused_e) || *value != 1.002e9),
+            "the blocked command was not attempted: {:?}", spy.rx_apply_pending());
+
+        device_at_spy(&core, &time, &spy, refused_e + 1);
+        assert!(core.now() > refused_e);
+        assert!(rx.begin(), "the owner begins the segment after the command instant");
+        assert_eq!(core.rx_chain[0].lock().segment(), Some(SegmentKey { by: successor.segment.by, origin: successor.segment.origin }));
+        let applies_before_refusal = spy.rx_apply_pending().len();
+        let rows_before_refusal = rows_of(&core, &frequency).len();
+        let rejected_before = lock(&core.rec).rejected.iter().filter(|row| row["kind"] == "update_parameter").count();
+        let _ = witness.events();
+        spy.refuse_rx_apply(crate::device::DeviceError::failed("scripted delayed refusal"));
+        control.release();
+        assert!(spy.time_now().unwrap() > refused_e, "the refusal call occurs after its instant");
+        assert!(spy.rx_apply_pending()[applies_before_refusal..].iter()
+            .any(|(channel, at, value, _)| (*channel, *at, *value) == (0, Some(refused_e), 1.002e9)),
+            "the delayed timed apply was refused: {:?}", spy.rx_apply_pending());
+        assert!(core.rx_chain[0].lock().debt().is_empty(), "the provisional refused entry was removed");
+        assert_eq!(core.rx_chain[1].lock().debt().iter().map(|entry| entry.order.0).collect::<Vec<_>>(), [old_e], "the other stream's earlier debt remains");
+        assert_eq!(core.rx_chain[1].lock().latest().get(&1), Some(&old_latest), "a refused value is not the configuration of record");
+        assert_eq!(control.held.len(), 1, "the later value remains behind the refused head for this pass");
+        assert_eq!(rows_of(&core, &frequency).len(), rows_before_refusal, "a refused frequency has no applied row");
+        assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["kind"] == "update_parameter").count(), rejected_before + 1);
+        assert_eq!(witness.events().iter().filter(|(kind, _)| kind == kinds::COMMAND_REJECTED).count(), 1);
+        assert_ne!(control.config.get(&key("radio.rx.c0.frequency_hz")), Some(&Value::num(1.002e9).unwrap()));
+
+        device_at_spy(&core, &time, &spy, later_e - core.ticks(core.description.timing.release_window_ns));
+        control.release();
+        assert!(control.held.is_empty());
+        assert_eq!(core.rx_chain[0].lock().debt().iter().map(|entry| entry.order.0).collect::<Vec<_>>(), [later_e]);
+        assert!(spy.log().iter().any(|call| call.starts_with("apply rx 0") && call.contains("freq=1003000000") && call.contains(&format!("at={later_e} effective={later_e}"))));
+        device_at_spy(&core, &time, &spy, later_e);
+        control.release();
+        assert_eq!(rows_of(&core, &frequency).last(), Some(&(later_e, true, false)), "the later command is recorded when its instant arrives");
+    }
+
+
+
+
+
+
 }

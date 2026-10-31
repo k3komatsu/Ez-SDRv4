@@ -302,6 +302,17 @@ impl HostClock {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn advance_for_test(&self, by: Duration) {
+        let manual = self.inner.manual.as_ref().expect("test clock is manual");
+        let real = Instant::now();
+        let mut st = lock_state(manual);
+        assert!(st.busy.is_empty() && st.earliest.is_none(), "test clock has active participants");
+        commit(&mut st, real);
+        st.vnow = st.vnow.saturating_add(by);
+        st.last = real;
+    }
+
     /// Sleeps `d` of clock time (M7). A participant is idle while it waits (M2); a
     /// non-participant waits on the same clock without stopping it (M6).
     pub fn sleep(&self, d: Duration) {
