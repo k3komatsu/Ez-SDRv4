@@ -4,7 +4,7 @@ and a verdict in <dir>/gate.json.
 
 Usage (from the checkout's root or any directory inside it):
     python3 plan/maintenance/tools/gate.py --out <dir> [--base <commit>] [--mutation all|<list>[,<list>...]]
-        [--ids ID,ID,...] [--hosts sim02:8,sim03:8] [--only step,step]
+        [--ids ID,ID,...] [--hosts sim02:8,sim03:8] [--only step,step] [--remote sim02|local]
     python3 plan/maintenance/tools/gate.py --self-test
 
 Steps, in this order: fmt, test, clippy, rules, rules-self-test, uhd-clippy, uhd-test, hw-build,
@@ -22,7 +22,9 @@ something out (a step, a mutation list, or --ids; exit 0, reasons name it); PASS
 gate (exit 0). An exception ends the run as FAIL. <dir>/gate.json is removed when the run starts,
 and is written atomically: RUNNING first, then the verdict. It also records the Cargo target volume
 (one per checkout) and the mutation image id on each remote host. Writes every path with $HOME as ~.
-Standard library only.
+--remote (default sim02) runs every build and test step on that host through remote/rdev.py, so the
+local PC carries no build load (owner, 2026-11-01); rules and rules-self-test stay local (they need
+git and are light); --remote local runs everything here as before. Standard library only.
 """
 import argparse
 import ast
@@ -240,6 +242,16 @@ def cargo_target_volume(root):
     return "ezsdr-v4-cargo-target-" + hashlib.sha256(root.encode()).hexdigest()[:12]
 
 
+def remote_toolchain(host):
+    try:
+        lines = subprocess.run([*shlex.split(REMOTE_SSH), host, f"docker image inspect --format '{{{{.Id}}}}' {IMAGE} && docker run --rm {IMAGE} sh -c "
+                                "'rustc -V; cargo -V; rustfmt --version; python3 -V' && docker run --rm python:3.9-slim python -V"],
+                               capture_output=True, text=True, check=True, timeout=600).stdout.split("\n")
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"remote": host, "unavailable": str(error)}
+    return dict(zip(["docker_image", "rustc", "cargo", "rustfmt", "python314", "python39"], lines), remote=host)
+
+
 def toolchain(volume):
     def first(command):
         try:
@@ -267,7 +279,29 @@ def show(argv, env=None):
     return " ".join([f"{k}={shlex.quote(v)}" for k, v in (env or {}).items()] + [shlex.join(argv)])
 
 
+def remote_commands_for(name, ctx):
+    rdev = ["python3", "plan/maintenance/tools/remote/rdev.py", "--host", ctx.remote, "--"]
+    feature = ["-p", "ezsdr-radio-uhd", "--features", "uhd"]
+    py = "python -m unittest discover -s python/tests"
+    table = {
+        "fmt": [(rdev + ["cargo", "fmt", "--all", "--check"], {})],
+        "test": [(rdev + ["cargo", "test", "--workspace", "--no-fail-fast"], {})],
+        "clippy": [(rdev + ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], {})],
+        "uhd-clippy": [(rdev + ["cargo", "clippy", *feature, "--all-targets", "--", "-D", "warnings"], {})],
+        "uhd-test": [(rdev + ["cargo", "test", *feature, "--lib", "--test", "uhd_api"], {})],
+        "hw-build": [(rdev + ["cargo", "test", *feature, "--test", "hardware", "--no-run"], {})],
+        "py314": [(rdev + ["sh", "-c", "cargo build -p ezsdr-server && python3 -m unittest discover -s python/tests"], {})],
+        "py39": [(rdev[:-1] + ["--image", "python:3.9-slim", "--", "sh", "-c",
+                               f"pip -q install --user numpy && EZSDR_SERVER=/cargo-target/debug/ezsdr-server PYTHONDONTWRITEBYTECODE=1 {py}"], {})],
+    }
+    return table[name] if name in table else local_commands_for(name, ctx)
+
+
 def commands_for(name, ctx):
+    return remote_commands_for(name, ctx) if ctx.remote != "local" else local_commands_for(name, ctx)
+
+
+def local_commands_for(name, ctx):
     uid = f"{os.getuid()}:{os.getgid()}"
     uhd = ["docker", "run", "--rm", "--user", uid, "-v", f"{ROOT}:/work", "-v", f"{ctx.volume}:/cargo-target", "-w", "/work", IMAGE]
     feature = ["-p", "ezsdr-radio-uhd", "--features", "uhd"]
@@ -382,16 +416,16 @@ def run_guarded(out, record, gaps, body):
 def execute(out, record, failures, plan):
     metadata = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], capture_output=True, text=True, check=True).stdout)
     server = os.path.join(metadata["target_directory"], "debug", "ezsdr-server")
-    if "py39" in plan.selected and "py314" not in plan.selected and not os.path.exists(server):
+    if plan.remote == "local" and "py39" in plan.selected and "py314" not in plan.selected and not os.path.exists(server):
         failures.append(f"py39: {server} is missing; run the py314 step first (it builds ezsdr-server)")
         return
     known = parse_known(open(os.path.join(ROOT, KNOWN_FILE), encoding="utf-8").read())
     rows = [(name, r["id"]) for name in plan.lists for r in json.load(open(f"plan/{name}/tools/mutations.json", encoding="utf-8"))
             if not plan.ids or r["id"] in plan.ids]
-    ctx = SimpleNamespace(base=plan.base, server=server, lists=plan.mutation, hosts=plan.hosts, ids=plan.ids, volume=cargo_target_volume(ROOT))
+    ctx = SimpleNamespace(base=plan.base, server=server, lists=plan.mutation, hosts=plan.hosts, ids=plan.ids, volume=cargo_target_volume(ROOT), remote=plan.remote)
     before = identity()
     record["identity"] = {"before": before}
-    record["toolchain"] = toolchain(ctx.volume)
+    record["toolchain"] = toolchain(ctx.volume) if plan.remote == "local" else remote_toolchain(plan.remote)
     for name in plan.selected:
         code, seconds, text, log = run_step(name, commands_for(name, ctx), out)
         if name == "mutation":
@@ -426,6 +460,7 @@ def main(argv):
     parser.add_argument("--ids")
     parser.add_argument("--hosts", default="sim02:8,sim03:8")
     parser.add_argument("--only")
+    parser.add_argument("--remote", default="sim02")
     args = parser.parse_args(argv)
     try:
         ROOT = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
@@ -453,7 +488,7 @@ def main(argv):
         return die(f"unknown mutation list; lists are all,{','.join(available)}")
     ids = args.ids.split(",") if args.ids else []
     selected = [s for s in STEPS if (only is None or s in only) and (s != "mutation" or args.mutation)]
-    plan = SimpleNamespace(base=args.base, mutation=args.mutation, lists=lists, hosts=args.hosts, ids=ids, selected=selected)
+    plan = SimpleNamespace(base=args.base, mutation=args.mutation, lists=lists, hosts=args.hosts, ids=ids, selected=selected, remote=args.remote)
     record = {"verdict": "RUNNING", "reasons": [], "started": now(), "finished": None, "identity": None, "toolchain": None, "steps": [], "mutation": None}
     return run_guarded(out, record, coverage_gaps(only, args.mutation, ids, available), lambda failures: execute(out, record, failures, plan))
 
@@ -482,6 +517,11 @@ def self_test():
     assert parse_unittest("Ran 57 tests in 2.1s\n\nOK\n") == {"ran": 57, "result": "OK"}, "self-test: unittest OK"
     assert check_unittest(parse_unittest("Ran 3 tests in 0.1s\n\nFAILED (failures=1)\n")) == ["python tests FAILED"], "self-test: unittest FAILED"
     assert parse_unittest("garbage") is None, "self-test: unittest output without a result is unparsable"
+    remote = SimpleNamespace(remote="sim03", base="HEAD", server="/s", lists="all", hosts="h", ids=[], volume="v")
+    assert remote_commands_for("test", remote)[0][0][:5] == ["python3", "plan/maintenance/tools/remote/rdev.py", "--host", "sim03", "--"], "self-test: --remote runs tests through rdev"
+    assert commands_for("rules", remote)[0][0][0] == "python3" and "rdev.py" not in " ".join(commands_for("rules", remote)[0][0]), "self-test: rules stay local"
+    assert all("rdev.py" in " ".join(commands_for(n, remote)[0][0]) for n in ("fmt", "clippy", "uhd-clippy", "uhd-test", "hw-build", "py314", "py39")), "self-test: every build step is remote"
+    assert commands_for("test", SimpleNamespace(**{**vars(remote), "remote": "local"}))[0][0][0] == "cargo", "self-test: --remote local runs here"
 
     counts, mutation, reasons = parse_mutation(MUT_KNOWN, 1, MUT_ROWS, [], {"phase7/G09": "race"})
     assert reasons == [] and mutation["known"] == ["phase7/G09"] and mutation["unexpected"] == [], "self-test: a known survivor passes"

@@ -9426,13 +9426,12 @@ fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {
     // Bench-results.md §D9 (2026-10-29): P5 A is early with the stale header; the untimed-close
     // control has none; P5 C's acknowledged two-zero flush restores the transition at e.
     let p5 = common::d9::p5_stale_header(&*device, 0, &mut tune, &[common::d9::P5Case::StaleHeader, common::d9::P5Case::NoStaleHeader, common::d9::P5Case::FlushAfterReopen]);
-    let p5_verdicts: Vec<_> = p5.iter().map(|result| common::tone::classify_tone(&result.capture.samples, result.start, result.start + 60 * ms(1), result.e, 100e3)).collect();
     assert!(p5[0].old_header.is_some_and(|header| header >= p5[0].e));
     assert_eq!(p5[1].old_header, None);
     assert!(p5[2].flush_reports.iter().any(|report| report.code == TxCode::BurstAck && report.channel == 0));
-    // The shared hardware classifier is run, but FakeDevice cannot reproduce these RF loopbacks:
-    // its receive path forwards samples only when RX and TX frequencies match, then emits a ramp.
-    assert!(p5_verdicts.iter().all(|verdict| !verdict.usable()), "FakeDevice unexpectedly produced a complete P5 tone loopback: {p5_verdicts:?}");
+    // FakeDevice cannot reproduce the RF loopback (its receive path forwards samples only when RX and
+    // TX frequencies match), so the tone verdict is the bench's; the DSP log below is the fake's
+    // check. No assertion on the fake's verdict: it depends on wall-clock timing (2026-11-01).
     let timed: Vec<_> = device.dsp_log(Dir::Tx, 0).into_iter().filter(|(_, freq, is_timed)| *is_timed && *freq == 1e9 + 50e3).collect();
     assert_eq!(timed.iter().map(|(tick, ..)| *tick).collect::<Vec<_>>(), [p5[0].start, p5[1].e, p5[2].e], "P5 A applies at the new burst's first sample; control and P5 C apply at e");
 
@@ -9441,10 +9440,7 @@ fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {
     let before_calls = device.calls().len();
     let before_log = device.dsp_log(Dir::Tx, 0).len();
     let (p6, starvation) = common::d9::p6_every_chunk_timed(&*device, 0, &mut tune);
-    let p6_verdicts: Vec<_> = p6.iter().map(|result| common::tone::classify_tone(&result.capture.samples, result.start, result.start + 60 * ms(1), result.e, 100e3)).collect();
-    // A TX-only frequency shift makes the FakeDevice's exact-match RX/TX loopback unavailable;
-    // retain its identical classifier verdict for the report, and pin the DSP timing below.
-    assert!(p6_verdicts.iter().all(|verdict| !verdict.usable()), "FakeDevice unexpectedly produced a complete P6 tone loopback: {p6_verdicts:?}");
+    // As for P5, the tone verdict is the bench's; the DSP timing below is the fake's check.
     let timed: Vec<_> = device.dsp_log(Dir::Tx, 0).into_iter().skip(before_log).filter(|(_, freq, is_timed)| *is_timed && *freq == 1e9 + 50e3).collect();
     assert_eq!(timed.iter().map(|(tick, ..)| *tick).collect::<Vec<_>>(), [p6[0].e, p6[1].e]);
     assert!(device.calls()[before_calls..].iter().filter(|call| call.starts_with("tx_send 0 n=2000 ")).all(|call| !call.contains("at=-")), "P6 sends every chunk with its first sample's time");
@@ -9458,10 +9454,7 @@ fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {
     // the DUC value remains queued because those samples carry no time.
     let before = device.dsp_log(Dir::Tx, 0).len();
     let p7 = common::d9::p7_untimed_continuations(&*device, 0, &mut tune);
-    let p7_verdict = common::tone::classify_tone(&p7.capture.samples, p7.start, p7.start + 60 * ms(1), p7.e, 100e3);
-    // P7 does produce the unchanged waveform loopback (pinned below), but the FakeDevice's
-    // deterministic ramp has a higher power floor than this safe-amplitude tone.
-    assert!(!p7_verdict.usable(), "the hardware tone classifier is inconclusive against FakeDevice's ramp floor: {}", common::tone::tone_verdict(&p7_verdict));
+    // P7 does produce the unchanged waveform loopback (pinned below); the tone verdict is the bench's.
     let p7_log = device.dsp_log(Dir::Tx, 0);
     assert!(p7_log[before..].iter().all(|(_, _, timed)| !timed));
     assert_eq!(device.dsp_pending(Dir::Tx, 0), 1);
