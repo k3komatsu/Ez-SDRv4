@@ -125,7 +125,7 @@ docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(i
 ## 7. リポジトリと記録の索引
 
 - branch と remote は AGENTS.md §1．`origin` = `k3komatsu/Ez-SDRv4`（`main` に push）．v3 は `k3komatsu/Ez-SDR`．**`git push --tags`/`--all` をしない**．
-- ローカル：`~/work/Ez-SDRv4`（`main`），`v3/`（`master` の git worktree，消さない．設計文書が `v3/...` を22件引用），`/Users/komatsu/orca/workspaces/Ez-SDRv4/gh-pages`（`gh-pages` の worktree）．`v3/` を消したら `git worktree prune && git worktree add v3 master`，リンクが切れたら `git worktree repair v3`．引用の確認：
+- ローカル（usrp-lnx03）：`~/local_work/Ez-SDRv4`（`main`），`v3/`（`master` の git worktree，消さない．設計文書が `v3/...` を引用）．`gh-pages` の worktree はこの PC にない（要るときに `git worktree add`）．`v3/` を消したら `git worktree prune && git worktree add v3 master`，リンクが切れたら `git worktree repair v3`．引用の確認：
 
   ```bash
   grep -rhoE 'v3/[A-Za-z0-9_./-]+' design plan Ez-SDR_v4_ARCHITECTURE_VISION.md | sort -u | while read p; do test -e "$p" || echo "MISSING $p"; done
