@@ -6075,7 +6075,9 @@ mod tests {
         for fault in [FakeFault::ShortSend(1), FakeFault::StalledSend(1), FakeFault::FailSend(1)] {
             let faults = vec![fault.clone(), FakeFault::TxReport(Wall::ZERO, TxCode::BurstAck)];
             let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
-            let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
+            let (core, device, time, _events) = super::super::test_support::rig_with(config, Vec::new());
+            let frozen = crate::provider::test_support::Frozen::of(&device);
+            device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
             let clock = core.register(Dir::Tx, 1, 0).unwrap();
@@ -6096,17 +6098,26 @@ mod tests {
             assert_eq!(tx.unacked.len(), 1, "{fault:?}: the old experiment burst stays correlated");
 
             txp_give(&mut tx, &core, txp_burst(&clock, 1_000_000, 1, false, LatePolicy::DropAndFlag));
-            assert!(tx.pass(), "{fault:?}: the owner did not reopen the uncertain streamer");
+            // The recovery flush waits for its ack on the device's clock: it runs as a participant, and the clock is held again before it ends.
+            let ((mut tx, passed), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
+                let passed = tx.pass();
+                (tx, passed)
+            });
+            assert!(passed, "{fault:?}: the owner did not reopen the uncertain streamer");
             let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
             assert!(sends[2].contains("n=2 at=- sob=true eob=true"), "{fault:?}: recovery flush was not the first send after the failed close: {sends:?}");
             assert_eq!(sends.len(), 3, "{fault:?}: timed experiment data crossed streamer replacement: {sends:?}");
             assert!(!tx.chain.needs_reopen());
             assert!(tx.unacked.is_empty(), "{fault:?}: replacing the streamer retained old-generation correlations");
 
+            // Both clocks, the Core's and the device's, are put at one instant, with the device's clock held, before the burst is dispatched.
+            assert!(device.time_now().unwrap() <= TX_RECOVERY_RESUME, "the held clock stands before the resume instant");
+            device_at(&core, &time, &device, TX_RECOVERY_RESUME);
             assert!(tx.pass(), "{fault:?}: the following timed burst was not dispatched");
             let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
             assert_eq!(sends.len(), 4, "{fault:?}: {sends:?}");
             assert!(sends[3].contains("at=1000000 sob=true"), "{fault:?}: the timed burst did not follow the recovery flush: {sends:?}");
+            drop(frozen);
         }
     }
 
@@ -6134,6 +6145,9 @@ mod tests {
         assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck").count(), 2, "the late ack is still visible in the raw async record");
     }
 
+    /// An instant after the device's time at a recovery flush's ack (a few device ticks past the failed send) and before the next burst's start.
+    const TX_RECOVERY_RESUME: i64 = 600_000;
+
     #[test]
     fn ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery() {
         let (core, device, time, _events, clock, mut tx, frozen) = txp_high_rate_rig(1, vec![FakeFault::ShortSend(0)], BTreeMap::new());
@@ -6149,8 +6163,12 @@ mod tests {
         assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "tx_close"), "the failed EOB is identified as an uncertain close");
 
         device_at(&core, &time, &device, start + 3);
-        drop(frozen);
-        assert!(tx.pass(), "streamer replacement and recovery flush were not attempted");
+        // The recovery flush waits for its ack on the device's clock: it runs as a participant, and the clock is held again before it ends.
+        let ((mut tx, recovered), frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
+            let recovered = tx.pass();
+            (tx, recovered)
+        });
+        assert!(recovered, "streamer replacement and recovery flush were not attempted");
         assert!(!tx.chain.needs_reopen());
         let flush_tick =
             lock(&core.rec).device_async.iter().find(|row| row["tx_flush"] == true && row["code"] == "BurstAck").and_then(|row| row["tick"].as_i64()).expect("the recovery flush ack was recorded");
@@ -6158,11 +6176,15 @@ mod tests {
         let after_flush: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
         assert!(after_flush[1].contains("n=2 at=- sob=true eob=true"), "the replacement flush precedes any next timed burst: {after_flush:?}");
 
+        // Both clocks, the Core's and the device's, are put at one instant before the next burst is booked and dispatched, with the device's clock held.
+        assert!(device.time_now().unwrap() <= TX_RECOVERY_RESUME, "the held clock stands before the resume instant");
+        device_at(&core, &time, &device, TX_RECOVERY_RESUME);
         txp_give(&mut tx, &core, txp_burst(&clock, 1_000_000, 1, false, LatePolicy::DropAndFlag));
         assert!(tx.pass(), "the burst after a recovered EOB was not sent");
         let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
         assert_eq!(sends.len(), 3, "the next burst follows the flush: {sends:?}");
         assert!(sends[2].contains("at=1000000 sob=true"), "the first later data packet remains timed: {sends:?}");
+        drop(frozen);
     }
 
     #[test]
@@ -6974,8 +6996,12 @@ mod tests {
         assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "a two-zero end-of-burst only");
         assert_eq!(device.transmitted(clock.instant(10_500), 2), vec![Some([0.0, 0.0]), Some([0.0, 0.0])], "nothing of the burst at or past the cut");
         device_at(&core, &time, &device, cut);
-        drop(frozen);
-        assert!(tx.step(), "the switch");
+        // The switch configures the device on its clock: it runs as a participant, and the clock is held again before it ends.
+        let ((mut tx, switched), _frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
+            let switched = tx.step();
+            (tx, switched)
+        });
+        assert!(switched, "the switch");
         assert_eq!(tx.clock, Some(new), "the new clock is adopted after the wait and the cut");
         assert_eq!(tx.channels, Channels::first(2));
         assert_eq!(tx.at, 1);

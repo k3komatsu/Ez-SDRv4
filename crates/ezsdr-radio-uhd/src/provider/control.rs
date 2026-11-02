@@ -4163,8 +4163,9 @@ mod tests {
         );
         assert_eq!(core.rx_chain[0].lock().debt().len(), 1, "the handover remains an owner drain obligation");
         device_at(&core, &time, &device, e + core.ticks(2_000_000));
-        drop(frozen);
-        let samples = device.rx_recv(0, 2_000, Wall::from_millis(10), false);
+        // The receive waits for its packet on the device's clock: it runs as a participant, registered before the clock is released.
+        let receiver = device.clone();
+        let (samples, _frozen) = crate::provider::test_support::released(frozen, &device.host(), move || receiver.rx_recv(0, 2_000, Wall::from_millis(10), false));
         assert!(matches!(samples, crate::device::RxRecv::Samples { .. }));
         rx.receive(samples);
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "a successor sample consumes the timed retune");
@@ -8034,8 +8035,7 @@ mod tests {
         control.book_timed(ActionId(3), frequency.clone(), Value::num(2.2e9).unwrap(), Some(AbsoluteDeadline::new(core.at(successor_origin))));
         let successor_order = control.held.iter().find(|(_, timed)| timed.value == 2.2e9).map(|(order, _)| *order).expect("the successor booking");
 
-        drop(frozen);
-        let stalled = core.device.rx_recv(0, core.block_len, Wall::from_millis(1), false);
+        let stalled = core.device.rx_recv(0, core.block_len, Wall::ZERO, false);
         assert!(matches!(stalled, crate::device::RxRecv::Timeout), "the normal drain read stalls");
         rx.receive(stalled);
         let sample_ticks = old.segment.config.ratio.num() as i64;
@@ -8070,8 +8070,12 @@ mod tests {
                 let _ = owner_done.send(rx);
             })
             .unwrap();
+        // The owner's bounded flush waits on the device's clock: the owner is a participant before the clock is released, so it runs from `flush_at` until it reaches `finish`.
+        drop(frozen);
         wait_reached.recv_timeout(Wall::from_secs(10)).expect("the old owner reached finish after its drain");
         assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "the old timed entry was consumed by the bounded flush");
+        // Held again: the owner waits in the probe, and the instants below are the test's, so no real time moves them.
+        let frozen = crate::provider::test_support::Frozen::of(&device);
 
         sync_device(deadline);
         let (control_done, control_returned) = channel();
@@ -8116,7 +8120,9 @@ mod tests {
         assert_eq!(timed.len(), 1, "the successor receives one timed handoff: {:?}", device.calls());
         sync_device(successor_origin);
         control.release();
-        let samples = core.device.rx_recv(0, core.block_len, Wall::from_millis(10), false);
+        // The receive waits for the packet on the device's clock: it runs as a participant, registered before the clock is released.
+        let (receiver, block_len) = (core.device.clone(), core.block_len);
+        let (samples, _frozen) = crate::provider::test_support::released(frozen, &device.host(), move || receiver.rx_recv(0, block_len, Wall::from_millis(10), false));
         assert!(matches!(&samples, crate::device::RxRecv::Samples { .. }), "the successor produces qualifying samples: {samples:?}");
         rx.receive(samples);
         assert!(

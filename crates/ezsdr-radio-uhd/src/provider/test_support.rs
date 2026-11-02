@@ -202,6 +202,24 @@ impl Drop for Frozen {
     }
 }
 
+/// `work` run as a participant of `clock` with `frozen` released, and the clock held again before it ends: the work's waits on the device's
+/// time run at clock speed, a test thread that is descheduled cannot let that time pass the work's instants, and no time passes between
+/// the work and the next hold. The work owns what it uses and gives it back as its result.
+pub(super) fn released<T: Send + 'static>(frozen: Frozen, clock: &HostClock, work: impl FnOnce() -> T + Send + 'static) -> (T, Frozen) {
+    let (done, result) = channel();
+    let again = clock.clone();
+    let worker = clock
+        .spawn("released", move || {
+            let out = work();
+            let _ = done.send((out, Frozen::on(again)));
+        })
+        .expect("a participant thread");
+    drop(frozen);
+    let held = result.recv().expect("the released work ended without a result");
+    let _ = worker.join();
+    held
+}
+
 /// The device's clock moved to `ticks`, with its queue's commands due by then applied, and
 /// asserted to be there: the two clocks a test reads are the Core's, which it advances, and
 /// the device's, which it fixes.

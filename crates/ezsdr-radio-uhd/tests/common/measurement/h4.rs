@@ -347,6 +347,89 @@ fn await_timed_apply(probe: &ProbeDevice, e: i64, manual: bool) -> Option<Json> 
     }
 }
 
+/// Where a timed update's apply falls against the TX interval, in device ticks: before it starts, inside it, or at or after its end.
+fn tx_overlap(tx_interval_ambiguous: bool, has_delay: bool, apply_tick: Option<i64>, tx_start_tick: Option<i64>, tx_end_tick: Option<i64>) -> &'static str {
+    match (tx_interval_ambiguous, has_delay, apply_tick, tx_start_tick, tx_end_tick) {
+        (false, true, Some(apply), Some(start), Some(_)) if apply < start => "before_tx",
+        (false, true, Some(apply), Some(_), Some(end)) if apply < end => "concurrent",
+        (false, true, Some(_), Some(_), Some(_)) => "after_tx_end",
+        _ => "ambiguous",
+    }
+}
+
+/// Puts a timed update's clock mapping and dispatch delay into its row from the apply the probe saw and the anchors that bracket it.
+fn map_dispatch_row(row: &mut Json, anchor_before: Option<ClockAnchor>, after: Option<ClockAnchor>, apply: Option<&Json>, e: i64, window_ticks: i64, master: u64) {
+    if let (Some(anchor_before), Some(anchor_after), Some(apply_row)) = (anchor_before, after, apply) {
+        let anchors = [anchor_before, anchor_after];
+        match dispatch_delay(apply_row["host_entry_ns"].as_u64().unwrap_or_default(), e, window_ticks, anchors, master) {
+            Ok((lower, upper, mapped)) => {
+                row["dispatch_delay_ns"] = json!({ "lower": lower, "upper": upper });
+                row["clock_mapping"] = json!({ "status": "mapped", "release_host_interval_ns": [mapped.lower_ns, mapped.upper_ns],
+                        "anchor_span_ticks": mapped.anchor_span_ticks, "anchor_span_host_ns": mapped.anchor_span_host_ns,
+                        "anchor_before_age_ns": mapped.before_age_ns, "anchor_after_age_ns": mapped.after_age_ns,
+                        "bracket_width_ns": mapped.bracket_width_ns, "rate_assumption": "host and device clocks are treated as affine between these anchors (INFERRED)" });
+            }
+            Err(reason) => row["clock_mapping"] = json!({ "status": "unavailable", "reason": reason }),
+        }
+    } else {
+        row["clock_mapping"] = json!({ "status": "unavailable", "reason": "timed apply or bracketed time_now anchor was missing" });
+    }
+}
+
+/// What the applied updates were against the TX interval, from `classify_dispatch_rows`.
+#[derive(Debug, Default)]
+struct Classified {
+    successful_delays: Vec<(i64, i64)>,
+    concurrent_dispatch_count: usize,
+    after_tx_end_count: usize,
+    overlap_ambiguous_count: usize,
+    before_tx_count: usize,
+    successful_apply_count: usize,
+}
+
+/// Classifies each applied update against the TX interval and keeps the dispatch delays of the concurrent ones only.
+fn classify_dispatch_rows(
+    dispatch_rows: &mut [Json],
+    tx_anchors: Option<(ClockAnchor, ClockAnchor)>,
+    tx_interval_ambiguous: bool,
+    tx_start_tick: Option<i64>,
+    tx_end_tick: Option<i64>,
+    master: u64,
+) -> Classified {
+    let mut counts = Classified::default();
+    let Classified { successful_delays, concurrent_dispatch_count, after_tx_end_count, overlap_ambiguous_count, before_tx_count, successful_apply_count } = &mut counts;
+    for row in dispatch_rows.iter_mut() {
+        if row["apply_called"] != true || row["apply"]["result"]["error"].is_string() {
+            continue;
+        }
+        *successful_apply_count += 1;
+        let Some(entry_ns) = row["apply"]["host_entry_ns"].as_u64() else {
+            row["tx_overlap"] = json!("ambiguous");
+            *overlap_ambiguous_count += 1;
+            continue;
+        };
+        let apply_tick = tx_anchors.and_then(|(start, end)| host_to_device_tick([start, end], entry_ns, master));
+        let overlap = tx_overlap(tx_interval_ambiguous, row["dispatch_delay_ns"].is_object(), apply_tick, tx_start_tick, tx_end_tick);
+        row["tx_overlap"] = json!(overlap);
+        match overlap {
+            "concurrent" if row["dispatch_delay_ns"].is_object() => {
+                *concurrent_dispatch_count += 1;
+                successful_delays.push((row["dispatch_delay_ns"]["lower"].as_i64().unwrap_or_default(), row["dispatch_delay_ns"]["upper"].as_i64().unwrap_or_default()));
+            }
+            "after_tx_end" => *after_tx_end_count += 1,
+            "ambiguous" | "concurrent" => *overlap_ambiguous_count += 1,
+            "before_tx" => *before_tx_count += 1,
+            _ => (),
+        }
+    }
+    counts
+}
+
+/// The TX interval ends at the earliest of the ends the observations name.
+fn earliest_tx_end(tx_end_ticks: Vec<i64>) -> Option<i64> {
+    tx_end_ticks.into_iter().min()
+}
+
 /// Runs the Session-to-Provider H4 probe. `updates` is 200 on hardware and small in the fake rehearsal.
 pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<MeasurementGroup, String> {
     if updates == 0 || updates > H4_DISPATCH_UPDATES {
@@ -430,21 +513,7 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         if thread_snapshot.is_none() && apply.is_some() {
             thread_snapshot = Some(proc_thread_snapshot());
         }
-        if let (Some(anchor_before), Some(anchor_after), Some(apply_row)) = (anchor_before, after, apply.as_ref()) {
-            let anchors = [anchor_before, anchor_after];
-            match dispatch_delay(apply_row["host_entry_ns"].as_u64().unwrap_or_default(), e, window_ticks, anchors, master) {
-                Ok((lower, upper, mapped)) => {
-                    row["dispatch_delay_ns"] = json!({ "lower": lower, "upper": upper });
-                    row["clock_mapping"] = json!({ "status": "mapped", "release_host_interval_ns": [mapped.lower_ns, mapped.upper_ns],
-                        "anchor_span_ticks": mapped.anchor_span_ticks, "anchor_span_host_ns": mapped.anchor_span_host_ns,
-                        "anchor_before_age_ns": mapped.before_age_ns, "anchor_after_age_ns": mapped.after_age_ns,
-                        "bracket_width_ns": mapped.bracket_width_ns, "rate_assumption": "host and device clocks are treated as affine between these anchors (INFERRED)" });
-                }
-                Err(reason) => row["clock_mapping"] = json!({ "status": "unavailable", "reason": reason }),
-            }
-        } else {
-            row["clock_mapping"] = json!({ "status": "unavailable", "reason": "timed apply or bracketed time_now anchor was missing" });
-        }
+        map_dispatch_row(&mut row, anchor_before, after, apply.as_ref(), e, window_ticks, master);
         if apply.is_none() {
             stop_after = Some("timed apply was not observed; later updates were not submitted".to_owned());
         } else if apply.as_ref().is_some_and(|row| row["result"]["error"].is_string()) {
@@ -531,7 +600,7 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         tx_interval_ambiguous = true;
         tx_mapping_errors.push("the enclosing host/device clock anchors were unavailable".to_owned());
     }
-    let tx_end_tick = tx_end_ticks.into_iter().min();
+    let tx_end_tick = earliest_tx_end(tx_end_ticks);
     if tx_start_tick.is_none() || tx_end_tick.is_none() {
         tx_interval_ambiguous = true;
     }
@@ -542,39 +611,8 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
         (Some(start), Some(end)) if underflow_unconvertible.is_empty() => tx_headroom(&tx_rows, [start, end], master, H4_RATE_HZ, &underflow_ticks),
         _ => Vec::new(),
     };
-    let mut successful_delays = Vec::new();
-    let (mut concurrent_dispatch_count, mut after_tx_end_count, mut overlap_ambiguous_count) = (0, 0, 0);
-    let mut before_tx_count = 0;
-    let mut successful_apply_count = 0;
-    for row in &mut dispatch_rows {
-        if row["apply_called"] != true || row["apply"]["result"]["error"].is_string() {
-            continue;
-        }
-        successful_apply_count += 1;
-        let Some(entry_ns) = row["apply"]["host_entry_ns"].as_u64() else {
-            row["tx_overlap"] = json!("ambiguous");
-            overlap_ambiguous_count += 1;
-            continue;
-        };
-        let apply_tick = tx_anchors.and_then(|(start, end)| host_to_device_tick([start, end], entry_ns, master));
-        let overlap = match (tx_interval_ambiguous, row["dispatch_delay_ns"].is_object(), apply_tick, tx_start_tick, tx_end_tick) {
-            (false, true, Some(apply), Some(start), Some(_)) if apply < start => "before_tx",
-            (false, true, Some(apply), Some(_), Some(end)) if apply < end => "concurrent",
-            (false, true, Some(_), Some(_), Some(_)) => "after_tx_end",
-            _ => "ambiguous",
-        };
-        row["tx_overlap"] = json!(overlap);
-        match overlap {
-            "concurrent" if row["dispatch_delay_ns"].is_object() => {
-                concurrent_dispatch_count += 1;
-                successful_delays.push((row["dispatch_delay_ns"]["lower"].as_i64().unwrap_or_default(), row["dispatch_delay_ns"]["upper"].as_i64().unwrap_or_default()));
-            }
-            "after_tx_end" => after_tx_end_count += 1,
-            "ambiguous" | "concurrent" => overlap_ambiguous_count += 1,
-            "before_tx" => before_tx_count += 1,
-            _ => (),
-        }
-    }
+    let Classified { successful_delays, concurrent_dispatch_count, after_tx_end_count, overlap_ambiguous_count, before_tx_count, successful_apply_count } =
+        classify_dispatch_rows(&mut dispatch_rows, tx_anchors, tx_interval_ambiguous, tx_start_tick, tx_end_tick, master);
     let delay_lower: Vec<i64> = successful_delays.iter().map(|(lower, _)| *lower).collect();
     let delay_upper: Vec<i64> = successful_delays.iter().map(|(_, upper)| *upper).collect();
     let headroom_lower: Vec<i64> = headroom_rows.iter().filter_map(|row| row["headroom_ns"]["lower"].as_i64()).collect();
@@ -650,6 +688,78 @@ mod tests {
 
     fn anchors() -> [ClockAnchor; 2] {
         [ClockAnchor { device_tick: 0, host_before_ns: 90, host_after_ns: 110 }, ClockAnchor { device_tick: 200, host_before_ns: 1_090, host_after_ns: 1_110 }]
+    }
+
+    #[test]
+    fn h4_tx_overlap_classifies_an_apply_against_the_tx_interval() {
+        let at = |apply| tx_overlap(false, true, Some(apply), Some(100), Some(200));
+        assert_eq!(at(99), "before_tx");
+        assert_eq!(at(100), "concurrent", "the start is inside");
+        assert_eq!(at(199), "concurrent");
+        assert_eq!(at(200), "after_tx_end", "the end is outside");
+        assert_eq!(at(201), "after_tx_end");
+        assert_eq!(tx_overlap(true, true, Some(150), Some(100), Some(200)), "ambiguous");
+        assert_eq!(tx_overlap(false, false, Some(150), Some(100), Some(200)), "ambiguous");
+        assert_eq!(tx_overlap(false, true, None, Some(100), Some(200)), "ambiguous");
+    }
+
+    #[test]
+    fn h4_the_measurement_finds_the_apply_recorded_at_its_instant() {
+        // A timed apply recorded by a direct call at a far-future instant: the lookup the measurement waits on has no scheduling in it.
+        use ezsdr_radio_uhd::Device;
+        let probe = ProbeDevice::new(common::fake(common::one_obx()));
+        let e = 1_000_000_000_000;
+        let _ = probe.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { gain: Some(1.0), ..ezsdr_radio_uhd::Settings::default() }, Some(e));
+        for manual in [true, false] {
+            let row = await_timed_apply(&probe, e, manual).expect("the apply recorded at e is found");
+            assert_eq!(row["e"], e);
+            assert_eq!(row["gain_only"], true);
+        }
+        assert!(await_timed_apply(&probe, e + 1, true).is_none(), "an apply at another instant is not the update's");
+    }
+
+    #[test]
+    fn h4_the_gain_update_is_booked_at_its_instant() {
+        let point = TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 5);
+        let ezsdr_kernel::session::SessionAction::Vocabulary { at, .. } = h4_gain_action(point, 1.0) else { panic!("a vocabulary action") };
+        assert_eq!(at, Some(point));
+    }
+
+    #[test]
+    fn h4_a_successful_dispatch_maps_into_its_row_and_a_missing_anchor_does_not() {
+        let [before, after] = anchors();
+        let apply = json!({ "host_entry_ns": 700 });
+        let mut row = json!({});
+        map_dispatch_row(&mut row, Some(before), Some(after), Some(&apply), 100, 0, 200_000_000);
+        assert_eq!(row["clock_mapping"]["status"], "mapped", "{row}");
+        let (lower, upper, _) = dispatch_delay(700, 100, 0, [before, after], 200_000_000).unwrap();
+        assert_eq!(row["dispatch_delay_ns"], json!({ "lower": lower, "upper": upper }));
+        for (b, a, apply) in [(None, Some(after), Some(&apply)), (Some(before), None, Some(&apply)), (Some(before), Some(after), None)] {
+            let mut row = json!({});
+            map_dispatch_row(&mut row, b, a, apply, 100, 0, 200_000_000);
+            assert_eq!(row["clock_mapping"]["status"], "unavailable", "{row}");
+            assert!(!row["dispatch_delay_ns"].is_object());
+        }
+    }
+
+    #[test]
+    fn h4_an_underflow_ends_tx_and_later_applied_gain_updates_are_excluded_from_the_distribution() {
+        // Anchors map host ns to device ticks as tick = (ns - 100) / 5. The TX underflow is at tick 40 and the Run ends at 400: the interval ends at the earlier.
+        let [before, after] = anchors();
+        let end = earliest_tx_end(vec![40, 400]).unwrap();
+        assert_eq!(end, 40);
+        let applied = |host_ns: u64| json!({ "apply_called": true, "apply": { "host_entry_ns": host_ns, "result": { "applied": true } }, "dispatch_delay_ns": { "lower": 1, "upper": 2 } });
+        // Applies at ticks 20 (during TX), 60 and 80 (after the underflow, gain still applied), and one that failed.
+        let mut rows = vec![applied(200), applied(400), applied(500), json!({ "apply_called": true, "apply": { "host_entry_ns": 300, "result": { "error": "failed" } } })];
+        let counts = classify_dispatch_rows(&mut rows, Some((before, after)), false, Some(10), Some(end), 200_000_000);
+        assert_eq!((counts.concurrent_dispatch_count, counts.after_tx_end_count, counts.before_tx_count, counts.overlap_ambiguous_count), (1, 2, 0, 0), "{rows:?}");
+        assert_eq!(counts.successful_apply_count, 3, "a failed apply is not a successful one");
+        assert_eq!(counts.successful_delays, [(1, 2)], "only the update during TX enters the distribution");
+        assert_eq!(rows.iter().map(|row| row["tx_overlap"].as_str()).collect::<Vec<_>>(), [Some("concurrent"), Some("after_tx_end"), Some("after_tx_end"), None]);
+        // Without the bracketing anchors nothing is placed.
+        let mut rows = vec![applied(200)];
+        let counts = classify_dispatch_rows(&mut rows, None, false, Some(10), Some(end), 200_000_000);
+        assert_eq!((counts.concurrent_dispatch_count, counts.overlap_ambiguous_count), (0, 1));
     }
 
     #[test]

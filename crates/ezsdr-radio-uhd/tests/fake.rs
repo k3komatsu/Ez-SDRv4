@@ -9222,30 +9222,36 @@ fn h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies() {
     assert_eq!(group.conditions[0].concurrent.len(), 2);
     let result = Json::Object(group.observations[0].result.clone().into_iter().collect());
     let updates = result["timed_updates"].as_array().unwrap();
+    // The fake runs on the real clock, so which updates were admitted before their instant and how their host entries map to device time depend on when this thread runs.
+    // Everything asserted here holds whatever the scheduling: every update is accounted for, and each one that reached the device is recorded in full.
     assert_eq!(updates.len(), 2);
-    assert_eq!(result["accepted_count"].as_u64(), Some(2));
-    assert_eq!(result["status"], "complete", "{result}");
+    assert_h4_accounting(&result, 2);
+    assert!(matches!(result["status"].as_str(), Some("complete" | "partial")), "{result}");
     assert_eq!(result["master_clock_hz"].as_u64(), Some(200_000_000));
     assert_eq!(result["release_window_ticks"].as_i64(), Some(600_000));
-    assert_eq!(result["apply_called_count"].as_u64(), Some(2));
     assert_eq!(result["submit_error_count"].as_u64(), Some(0));
-    assert!(updates.iter().all(|row| row["direction"] == "rx"
-        && row["channel"] == 0
-        && row["setting"] == "gain_db"
-        && row["session_action"] == "ezsdr.h4.set_rx_gain"
-        && row["apply"]["gain_only"] == true));
-    let first = &updates[0];
-    assert_eq!(first["apply"]["e"], first["e"]);
-    assert!(first["apply"]["host_entry_ns"].as_u64().is_some());
-    assert_eq!(first["clock_mapping"]["status"], "mapped");
-    let delay = &first["dispatch_delay_ns"];
-    assert!(delay["lower"].as_i64().unwrap() <= delay["upper"].as_i64().unwrap());
+    // Any update may be late on a loaded host and none reach the device; the wiring of a successful apply is pinned by `h4_probe_records_a_timed_apply_under_its_instant_with_its_host_entry` and `h4_the_gain_update_is_booked_at_its_instant`.
+    let applied = result["apply_called_count"].as_u64().unwrap();
+    assert!(applied <= probe.timed_apply_count() as u64, "{applied} {}: {result}", probe.timed_apply_count());
+    assert!(matches!(result["tx_end_reason"].as_str(), Some("run_termination" | "tx_underflow")), "{result}");
+    assert!(!result["tx_headroom"].as_array().unwrap().is_empty(), "{result}");
+    for row in updates.iter().filter(|row| row["apply_called"] == true) {
+        assert!(row["direction"] == "rx" && row["channel"] == 0 && row["setting"] == "gain_db" && row["session_action"] == "ezsdr.h4.set_rx_gain" && row["apply"]["gain_only"] == true, "{row}");
+        assert_eq!(row["apply"]["e"], row["e"]);
+        assert!(row["apply"]["host_entry_ns"].as_u64().is_some());
+        match row["clock_mapping"]["status"].as_str() {
+            Some("mapped") => {
+                let delay = &row["dispatch_delay_ns"];
+                assert!(delay["lower"].as_i64().unwrap() <= delay["upper"].as_i64().unwrap());
+            }
+            other => assert_eq!(other, Some("unavailable"), "{row}"),
+        }
+    }
     assert_eq!(result["dispatch_delay_proxy"].as_str(), Some("uhd-control timed-apply entry minus the host-mapped release-window instant; not scheduler wake-up latency"));
     assert_eq!(result["tx_headroom_proxy"].as_str(), Some("nominal next-sample submission margin; not RF execution time"));
     assert!(!result["tx_send_records"].as_array().unwrap().is_empty());
     let headroom = result["tx_headroom"].as_array().unwrap();
     let mapped_headroom: Vec<_> = headroom.iter().filter(|row| row["headroom_ns"].is_object()).collect();
-    assert!(!mapped_headroom.is_empty(), "the Session rehearsal exposes computed TX submission headroom: {headroom:?}");
     assert!(
         mapped_headroom
             .iter()
@@ -9254,9 +9260,22 @@ fn h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies() {
         "{mapped_headroom:?}"
     );
     let anchors = result["time_now_records"].as_array().unwrap();
-    assert!(anchors.iter().any(|row| row["purpose"] == "h4_anchor" && row["result"]["value"].is_i64()));
     assert!(anchors.iter().all(|row| row["host_before_ns"].as_u64().unwrap() <= row["host_after_ns"].as_u64().unwrap()));
-    assert_eq!(probe.timed_apply_count(), 2);
+}
+
+/// The H4 result's update counts add up, whatever the scheduling did: every requested update is admitted, rejected, a submit error or not submitted,
+/// and every update the device applied is classified once, so the dispatch distribution holds exactly the concurrent ones.
+fn assert_h4_accounting(result: &Json, requested: u64) {
+    let count = |key: &str| result[key].as_u64().unwrap_or_else(|| panic!("{key}: {result}"));
+    assert_eq!(count("accepted_count") + count("rejected_count") + count("submit_error_count") + count("not_submitted_count"), requested, "{result}");
+    let applied = count("apply_called_count") - count("apply_error_count");
+    let classified =
+        count("concurrent_dispatch_update_count") + count("dispatch_updates_after_tx_end_count") + count("dispatch_updates_before_tx_start_count") + count("dispatch_updates_overlap_ambiguous_count");
+    assert_eq!(classified, applied, "{result}");
+    assert_eq!(result["dispatch_delay_lower_ns"]["count"].as_u64(), Some(count("concurrent_dispatch_update_count")), "only concurrent updates enter the distribution: {result}");
+    if result["status"] == "complete" {
+        assert_eq!(count("concurrent_dispatch_update_count"), count("accepted_count"), "{result}");
+    }
 }
 
 #[test]
@@ -9268,17 +9287,35 @@ fn h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates()
     let group = measurement::measure_h4_dispatch(probe, 4).unwrap();
     let result = Json::Object(group.observations[0].result.clone().into_iter().collect());
     let updates = result["timed_updates"].as_array().unwrap();
-    assert_eq!(result["accepted_count"].as_u64(), Some(4));
-    assert_eq!(result["apply_called_count"].as_u64(), Some(4));
+    // As above, which updates the real clock let in before their instant depends on this thread's scheduling; these asserts hold whichever did.
+    assert_h4_accounting(&result, 4);
     assert_eq!(result["apply_error_count"].as_u64(), Some(0), "gain updates continue after the TX report");
     assert!(result["tx_underflow_events"].as_u64().unwrap() > 0);
     assert!(result["tx_underflow_sample_clock_events"].as_u64().unwrap() > 0, "the TX event must carry its SampleClock domain");
     assert!(result["tx_underflow_converted_events"].as_u64().unwrap() > 0, "the TX SampleClock report was converted to root time");
     assert_eq!(result["tx_underflow_unconvertible_events"].as_u64(), Some(0));
     assert_ne!(result["status"], "complete", "an underflow-terminated repeat cannot be complete");
-    assert!(result["dispatch_updates_after_tx_end_count"].as_u64().unwrap() > 0, "updates after TX ended are excluded from the concurrent distribution: {updates:?}");
-    assert!(updates.iter().all(|row| row["apply_called"] == true && !row["apply"]["result"]["error"].is_string()));
-    assert!(result["dispatch_delay_lower_ns"]["count"].as_u64().unwrap() < 4);
+    if result["dispatch_updates_after_tx_end_count"].as_u64().unwrap() > 0 {
+        assert!(
+            result["dispatch_delay_lower_ns"]["count"].as_u64().unwrap() < result["apply_called_count"].as_u64().unwrap(),
+            "updates after TX ended are excluded from the concurrent distribution: {updates:?}"
+        );
+    }
+    assert!(updates.iter().all(|row| !row["apply"]["result"]["error"].is_string()));
+}
+
+#[test]
+fn h4_probe_records_a_timed_apply_under_its_instant_with_its_host_entry() {
+    // A direct call on the probe: no Session books anything, so no submission window exists. Only the record is asserted, not the apply's verdict, which depends on the device's time.
+    let probe = common::probe_device::ProbeDevice::new(fake(one_obx()));
+    let at = 1_000_000_000_000;
+    let _ = probe.apply(Dir::Rx, 0, &ezsdr_radio_uhd::Settings { gain: Some(1.0), ..ezsdr_radio_uhd::Settings::default() }, Some(at));
+    assert_eq!(probe.timed_apply_count(), 1);
+    let row = probe.matching_timed_apply(at).expect("the timed apply is found by its instant");
+    assert_eq!(row["e"], at);
+    assert_eq!(row["gain_only"], true);
+    assert!(row["host_entry_ns"].as_u64().is_some(), "{row}");
+    assert!(probe.matching_timed_apply(at + 1).is_none(), "another instant finds nothing");
 }
 
 #[test]

@@ -14642,7 +14642,7 @@
    "new": "        at: None,",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+   "filter": "h4_the_gain_update_is_booked_at_its_instant"
   },
   {
    "id": "P1140",
@@ -14672,7 +14672,7 @@
    "new": "            \"e\": at, \"host_entry\": host_entry_ns, \"host_return_ns\": self.host_ns(),",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
-   "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+   "filter": "h4_probe_records_a_timed_apply_under_its_instant_with_its_host_entry"
   },
   {
    "id": "P1143",
@@ -14762,7 +14762,7 @@
     "new": "            (false, true, Some(apply), Some(_), Some(end)) if apply <= end || apply > end => \"concurrent\",",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
-    "filter": "h4_counts_a_timed_tx_sample_clock_underflow_and_excludes_later_gain_updates"
+    "filter": "h4_tx_overlap_classifies_an_apply_against_the_tx_interval"
    },
    {
     "id": "P1152",
@@ -14792,7 +14792,7 @@
     "new": "row[\"call\"] == \"tx_send\" && row[\"e\"].as_i64() == Some(e)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
-    "filter": "h4_fake_session_records_timed_rx_gain_and_tx_submission_proxies"
+    "filter": "h4_probe_records_a_timed_apply_under_its_instant_with_its_host_entry"
    },
    {
     "id": "P1155",
@@ -18670,5 +18670,35 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s6d_time_cannot_pass_a_runnable_brain"
+    },
+    {
+      "id": "P1316",
+      "name": "H4's TX interval ends at the earliest named end, not the latest",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+      "old": "tx_end_ticks.into_iter().min()",
+      "new": "tx_end_ticks.into_iter().max()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "h4_an_underflow_ends_tx_and_later_applied_gain_updates_are_excluded_from_the_distribution"
+    },
+    {
+      "id": "P1317",
+      "name": "a successful H4 dispatch maps into its row",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+      "old": "match dispatch_delay(apply_row[\"host_entry_ns\"].as_u64().unwrap_or_default(), e, window_ticks, anchors, master) {",
+      "new": "match dispatch_delay(apply_row[\"host_entry_ns\"].as_u64().unwrap_or_default(), e, window_ticks, anchors, master).and_then(|_| Err::<(i64, i64, HostInterval), String>(\"mutant\".to_owned())) {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "h4_a_successful_dispatch_maps_into_its_row_and_a_missing_anchor_does_not"
+    },
+    {
+      "id": "P1318",
+      "name": "H4 looks up the apply recorded at the update's own instant",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+      "old": "probe.matching_timed_apply(e)",
+      "new": "probe.matching_timed_apply(e + 1)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "h4_the_measurement_finds_the_apply_recorded_at_its_instant"
     }
   ]

@@ -1179,8 +1179,9 @@ mod tests {
         assert_eq!(successor, t0 + ticks(37), "cut + 3 ms release + 20 ms receive call + 3 ms allowance + 3 ms lead");
 
         super::super::test_support::device_at(&core, &time, &device, e);
-        drop(frozen);
-        let block = device.rx_recv(0, 20_000, Wall::from_millis(100), false);
+        // The receive waits for its packet on the device's clock: it runs as a participant, registered before the clock is released.
+        let receiver = device.clone();
+        let (block, _frozen) = super::super::test_support::released(frozen, &device.host(), move || receiver.rx_recv(0, 20_000, Wall::from_millis(100), false));
         assert!(matches!(&block, RxRecv::Samples { first_tick: 0, .. }), "the real fake receive call spans the cut: {block:?}");
         rx.receive(block);
 
@@ -1524,12 +1525,11 @@ mod tests {
             device.set_time(0);
             device.rx_open(0, &[0]).unwrap();
             device.rx_start(0, 0).unwrap();
-            drop(_frozen);
-            assert!(matches!(device.rx_recv(0, 2_000, Wall::from_millis(1), false), RxRecv::Timeout));
+            assert!(matches!(device.rx_recv(0, 2_000, Wall::ZERO, false), RxRecv::Timeout));
             let at = 200_000;
             device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(at)).unwrap();
             device.set_time(400_000);
-            assert!(matches!(device.rx_recv(0, 2_000, Wall::from_millis(1), false), RxRecv::Timeout), "no host block is delivered");
+            assert!(matches!(device.rx_recv(0, 2_000, Wall::ZERO, false), RxRecv::Timeout), "no host block is delivered");
             assert_eq!(device.dsp_pending(Dir::Rx, 0), pending, "host silence and stopped chain flow are distinct");
             assert_eq!(device.dsp_log(Dir::Rx, 0).len(), usize::from(pending == 0), "only flowing DDC samples take the timed entry");
         }
@@ -2016,7 +2016,6 @@ mod tests {
         plan(&core, &[(0, Some(cut_index), None), (successor, None, Some(1))]);
         let deadline = rx_drain_deadline(&core, 0, clock.n, cut, core.rx_chain[0].lock().debt()).unwrap();
         assert_eq!(deadline - i128::from(now), i128::from(core.ticks(20_000_000)), "the ordinary receive starts with one 20 ms packet-maximum window remaining");
-        drop(frozen);
 
         let gate = spy.stop_after("rx_recv");
         let (done, finished) = std::sync::mpsc::channel();
@@ -2028,6 +2027,8 @@ mod tests {
                 let _ = done.send(rx);
             })
             .unwrap();
+        // The worker is a participant before the clock is released, so the exact return time below does not depend on this thread.
+        drop(frozen);
         gate.wait();
         let returned_at = spy.time_now().unwrap();
         assert_eq!(returned_at, now + core.ticks(7_000_000), "the one-packet receive returned after 500 samples and delivery latency");
