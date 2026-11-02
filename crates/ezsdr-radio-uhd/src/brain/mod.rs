@@ -5,11 +5,19 @@
 
 mod cases;
 mod cell;
+mod conformance;
 mod core;
+mod device_tests;
 mod dst;
+mod force;
 mod model;
+mod model_device;
+mod observed;
 mod oracle;
 mod rules;
+mod shared;
+mod thread_tests;
+mod threads;
 mod toy;
 mod world;
 
@@ -69,6 +77,26 @@ pub(crate) mod fixtures {
     pub(crate) fn feed(brain: &mut Brain, cells: &mut [Cell], input: Input) {
         brain.step(input);
         brain.run(cells);
+    }
+
+    /// Stream 0's stop leaves an accepted value no sample has read (value 1, instant 8, accepted at 8, call finished Ok): the device is
+    /// at T = 12 with stream 0 open and not started, R0's FIFO holds a Stop, and the brain's Restore of channel 0 is deferred (enqueued
+    /// explicitly: a Stop invents none). The shared start of the world's `harness_stop_debt_is_flushed_before_restore` and S6b.
+    pub(crate) fn stop_debt_world(params: super::world::Params) -> super::world::World {
+        use super::cell::{Outcome, Terminal};
+        use super::core::{Request, RxOp};
+        let mut entry = value(0, 8, 1);
+        entry.accepted_at = Some(8);
+        let mut c = cell(Phase::Streaming(seg(0)), 0, None, 0);
+        push(&mut c, entry, ValueState::Done(Terminal::Call(Outcome::Ok)));
+        let mut w = super::world::World::new(vec![c], Vec::new(), params);
+        w.rx[0].handle = Some(1);
+        w.device.open(0, vec![0]);
+        w.device.t = 12;
+        w.monitor.reserved.insert(1, (0, seg(0), 1));
+        w.rx[0].fifo.push_back(RxOp::Stop { at: None, epoch: 1 });
+        w.brain.deferred.push(Request::Restore { channel: 0 });
+        w
     }
 
     /// A recv begun under `epoch` whose buffered sample ticks are `samples`.

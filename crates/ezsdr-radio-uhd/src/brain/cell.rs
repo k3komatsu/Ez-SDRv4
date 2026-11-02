@@ -167,6 +167,27 @@ pub(crate) struct Cell {
 }
 
 impl Cell {
+    /// An empty placeholder: the cell that stands in a mutex while its content is moved out (thread runtime).
+    pub(crate) fn vacant() -> Cell {
+        Cell {
+            phase: Phase::Off,
+            drain: Drain::Idle,
+            outstanding: None,
+            channels: Channels::first(0),
+            generation: 0,
+            epoch: 0,
+            origin: i64::MIN,
+            cut: None,
+            retiring: None,
+            progress: 0,
+            in_flight: Vec::new(),
+            flushed: false,
+            revision: 0,
+            recomputes: 0,
+            discarded: 0,
+        }
+    }
+
     /// Reservation of a held value in the segment the phase names (I2; note 45 §4.5 procedure 1).
     pub(crate) fn reserve(&mut self, entry: RxEntry, generation: u64) -> Result<(), Refusal> {
         let segment = match self.phase {
@@ -281,14 +302,30 @@ impl Cell {
     /// Publishes what a recv buffered (note 45 §4.6). Refused when the epoch, the cut or the
     /// revision changed since `seen`: the caller takes a fresh snapshot and publishes again.
     pub(crate) fn publish(&mut self, seen: Snapshot, recv: &Recv) -> Publish {
-        if seen.epoch != self.epoch || seen.cut != self.cut || seen.revision != self.revision {
-            self.recomputes += 1;
+        if self.stale(seen) {
             return Publish::Stale;
         }
         let plan = rules::plan_publish(self.origin_of(recv.epoch), self.bound(recv.epoch), &recv.samples, self.progress);
+        self.publish_planned(seen, recv.epoch, &plan)
+    }
+
+    fn stale(&mut self, seen: Snapshot) -> bool {
+        let stale = seen.epoch != self.epoch || seen.cut != self.cut || seen.revision != self.revision;
+        if stale {
+            self.recomputes += 1;
+        }
+        stale
+    }
+
+    /// The write half of a publish: the recheck (epoch, cut, revision) and the plan's effect, nothing computed from the
+    /// samples. The caller computed `plan` from a view of this cell that it has found unchanged (note 45 §4.5).
+    pub(crate) fn publish_planned(&mut self, seen: Snapshot, epoch: u64, plan: &rules::Plan) -> Publish {
+        if self.stale(seen) {
+            return Publish::Stale;
+        }
         self.progress = plan.progress;
         self.discarded += plan.discard;
-        if let Some(retiring) = self.retiring.as_mut().filter(|r| r.epoch == recv.epoch) {
+        if let Some(retiring) = self.retiring.as_mut().filter(|r| r.epoch == epoch) {
             retiring.published = true;
         }
         let cut_reached = self.cut.is_some_and(|cut| self.progress >= cut);
@@ -296,6 +333,17 @@ impl Cell {
             self.stop_accepting();
         }
         Publish::Published { cut_reached }
+    }
+
+    /// Whether everything a publish computation reads is as in `view` (a clone taken earlier): the snapshot, the values in
+    /// flight, the retiring epoch, the phase, the origin and the progress.
+    pub(crate) fn unchanged_since(&self, view: &Cell) -> bool {
+        self.snapshot() == view.snapshot()
+            && self.in_flight == view.in_flight
+            && self.retiring == view.retiring
+            && self.phase == view.phase
+            && self.origin == view.origin
+            && self.progress == view.progress
     }
 
     /// The cut that bounds the samples of `epoch`: the cut in force, or the retiring cut for the

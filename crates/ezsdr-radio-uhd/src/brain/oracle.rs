@@ -8,7 +8,8 @@
 use super::cell::{Drain, Outcome, Phase, Terminal, ValueState};
 use super::core::{Change, Command, Disposition, IN_FLIGHT_BOUND, Op, RxOp, Section, SetCmd};
 use super::dst::Model;
-use super::world::{Event, Ident, RStep, RxCall, SStep, Who, World};
+use super::rules::RxCall;
+use super::world::{Event, Ident, RStep, SStep, Who, World};
 
 /// The safety checks of every state: I5 (the cut in force is not below the published progress)
 /// and I8 (a chain applies at most one write per sample, in order).
@@ -514,7 +515,7 @@ mod tests {
     use super::*;
 
     fn params() -> Params {
-        Params { horizon: 8, epilogue: 8, recv_timeout: 8, queue_cap: 4, fifo_cap: 4, drain_window: DRAIN_WINDOW, call_faults: false, panic_step: None }
+        Params { horizon: 8, epilogue: 8, recv_timeout: 8, queue_cap: 4, fifo_cap: 4, drain_window: DRAIN_WINDOW, packet: crate::brain::world::PACKET, call_faults: false, panic_step: None }
     }
 
     fn world(cells: Vec<Cell>) -> World {
@@ -954,7 +955,7 @@ mod tests {
         .to_vec();
         // A recv timeout and a drain window of one tick: after the epilogue's end time goes on silently until the drain deadline
         // (the Stop's cut plus the window) and the recv's timeout, and every silent tick multiplies the states.
-        let params = Params { horizon, epilogue, recv_timeout: 1, drain_window: 1, ..params() };
+        let params = Params { horizon, epilogue, recv_timeout: 1, drain_window: 1, packet: 1, ..params() };
         World::new(vec![cell(Phase::Off, 0, None, 0)], env, params)
     }
 

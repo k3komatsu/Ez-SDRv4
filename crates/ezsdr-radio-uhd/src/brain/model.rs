@@ -241,9 +241,14 @@ impl Device {
         }
     }
 
-    /// `rx_recv` (device.rs:1604), for the length only: the next `n` buffered sample ticks, in
-    /// order. Generated samples are never returned (G8).
-    pub(crate) fn recv(&mut self, stream: usize, n: usize) -> Vec<i64> {
+    /// `rx_recv` (device.rs:1604), for the length only: the next `n` buffered sample ticks, in order, if a whole packet was ready by
+    /// the recv's `deadline` (UHD: a packet not complete by then is a timeout, device.rs:1763-1767, whenever the call is completed
+    /// afterwards; a packet that was ready in time is returned even if the completion is late). Generated samples are never
+    /// returned (G8). The one place that decides what a recv returns is [`Device::ready_at`].
+    pub(crate) fn recv(&mut self, stream: usize, n: usize, deadline: i64) -> Vec<i64> {
+        if !self.ready_at(stream, n).is_some_and(|ready| ready <= deadline) {
+            return Vec::new();
+        }
         let Some(streamer) = self.streamers.get_mut(&stream) else { return Vec::new() };
         let mut out = Vec::new();
         while out.len() < n {
@@ -253,6 +258,22 @@ impl Device {
             }
         }
         out
+    }
+
+    /// The tick at which a recv of `n` samples can return: the sample that completes the packet is produced at its own tick and is
+    /// there one tick later; a stopped stream's tail is there at the stop. `None` when no packet is buffered.
+    pub(crate) fn ready_at(&self, stream: usize, n: usize) -> Option<i64> {
+        let streamer = self.streamers.get(&stream)?;
+        match streamer.buffered.get(n.saturating_sub(1)) {
+            Some(&tick) => Some(tick + 1),
+            None if !streamer.buffered.is_empty() => streamer.end,
+            None => None,
+        }
+    }
+
+    /// A recv of `n` samples may end: a missed start is due, `n` samples are buffered, or a stopped stream's tail is.
+    pub(crate) fn packet_ready(&self, stream: usize, n: usize) -> bool {
+        self.late_due(stream) || self.ready_at(stream, n).is_some_and(|ready| ready <= self.t)
     }
 
     /// A missed start is due: `rx_recv` returns `LateCommand` at once (device.rs:1642–1647).
@@ -360,9 +381,9 @@ mod tests {
         for _ in 4..14 {
             dev.tick();
             dev.enter_recv(0);
-            received.extend(dev.recv(0, 4));
+            received.extend(dev.recv(0, 4, i64::MAX));
         }
-        assert_eq!(received, vec![0, 1, 2, 3, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(received, vec![0, 1, 2, 3, 8, 9, 10, 11], "whole packets only: 12 and 13 are an incomplete packet");
         let streamer = &dev.streamers[&0];
         assert_eq!((streamer.end, streamer.then, streamer.next, streamer.late), (None, None, Some(8), None));
     }
@@ -403,7 +424,7 @@ mod tests {
             dev.tick();
         }
         dev.enter_recv(0);
-        assert_eq!(dev.recv(0, 4), vec![0, 1, 2, 3]);
+        assert_eq!(dev.recv(0, 4, i64::MAX), vec![0, 1, 2, 3]);
         let streamer = &dev.streamers[&0];
         assert_eq!((streamer.end, streamer.then, streamer.late), (Some(4), Some(8), None), "the tail's recv does not promote");
         for _ in 6..10 {
@@ -478,7 +499,7 @@ mod tests {
         let mut buffered = streamer(vec![0], None, None);
         buffered.buffered = VecDeque::from([8, 9, 10, 11]);
         dev.streamers.insert(0, buffered);
-        assert_eq!(dev.recv(0, 2), vec![8, 9]);
-        assert_eq!(dev.recv(0, 2), vec![10, 11]);
+        assert_eq!(dev.recv(0, 2, i64::MAX), vec![8, 9]);
+        assert_eq!(dev.recv(0, 2, i64::MAX), vec![10, 11]);
     }
 }

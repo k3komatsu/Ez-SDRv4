@@ -30,7 +30,7 @@ const SEEDED_EPILOGUE: i64 = 96;
 const RECV_TIMEOUT: i64 = 8;
 const FIFO_CAP: usize = 32;
 /// The walk's event limit: far above any terminal state of the seeded horizon.
-const WALK_LIMIT: usize = 1_000_000;
+pub(super) const WALK_LIMIT: usize = 1_000_000;
 /// The micro variants' time scale (45-experiment §10, draft 5): a recv timeout, a drain window and an
 /// epilogue of a few ticks, so the exhaustive search of each micro case completes within the budget.
 const MICRO_RECV_TIMEOUT: i64 = 1;
@@ -87,7 +87,17 @@ pub(crate) struct Case {
 }
 
 fn params(timing: Timing, horizon: i64, queue_cap: usize, call_faults: bool, panic_step: Option<usize>) -> Params {
-    Params { horizon, epilogue: timing.epilogue, recv_timeout: timing.recv_timeout, queue_cap, fifo_cap: FIFO_CAP, drain_window: timing.drain_window, call_faults, panic_step }
+    Params {
+        horizon,
+        epilogue: timing.epilogue,
+        recv_timeout: timing.recv_timeout,
+        queue_cap,
+        fifo_cap: FIFO_CAP,
+        drain_window: timing.drain_window,
+        packet: crate::brain::world::PACKET,
+        call_faults,
+        panic_step,
+    }
 }
 
 /// An input delivered once in `[earliest, latest]`, after the slot at index `after` if given.
@@ -111,14 +121,14 @@ fn shutdown(horizon: i64, timing: Timing) -> EnvSlot {
 }
 
 /// Stream `k` open on `channels` and started at tick 0, with its handle open.
-fn running(world: &mut World, k: usize, channels: Vec<usize>) {
+pub(super) fn running(world: &mut World, k: usize, channels: Vec<usize>) {
     world.device.open(k, channels);
     world.device.start(k, 0);
     world.rx[k].handle = Some(1);
 }
 
 /// One stream 0 on channel 0, streaming under segment 0 with `cut` in force, and running.
-fn single(cut: Option<i64>, env: Vec<EnvSlot>, params: Params) -> World {
+pub(super) fn single(cut: Option<i64>, env: Vec<EnvSlot>, params: Params) -> World {
     let mut world = World::new(vec![cell(Phase::Streaming(seg(0)), 0, cut, 0)], env, params);
     running(&mut world, 0, vec![0]);
     world
@@ -435,7 +445,7 @@ fn canonical_step(world: &World, wanted: impl Fn(&Input) -> bool) -> usize {
 }
 
 /// The number of brain steps on the canonical path of `world` (the walk sweep of case 6 picks k among them).
-fn canonical_brain_steps(world: &World) -> usize {
+pub(super) fn canonical_brain_steps(world: &World) -> usize {
     let mut w = world.clone();
     let mut steps = 0;
     for _ in 0..100_000 {
@@ -452,7 +462,7 @@ fn canonical_brain_steps(world: &World) -> usize {
 }
 
 /// The step that processes Stop in case 6's script in `variant` (run k = that step).
-fn case6_stop_step(variant: Variant) -> usize {
+pub(super) fn case6_stop_step(variant: Variant) -> usize {
     canonical_step(&case1(variant).world, |input| matches!(input, Input::Stop { .. }))
 }
 
@@ -512,7 +522,7 @@ fn witnesses_along(init: &World, trace: &[Event]) -> BTreeSet<&'static str> {
 }
 
 /// Each witness the walk reaches, with the length of the shortest prefix of `trace` that reaches it.
-fn witness_prefixes(init: &World, trace: &[Event]) -> BTreeMap<&'static str, usize> {
+pub(super) fn witness_prefixes(init: &World, trace: &[Event]) -> BTreeMap<&'static str, usize> {
     let mut model = init.clone();
     let mut reached: BTreeMap<&'static str, usize> = model.witnesses().into_iter().map(|witness| (witness, 0)).collect();
     for (at, event) in trace.iter().enumerate() {
@@ -844,6 +854,35 @@ fn case9_pending_move_partial_refused_walks() {
 #[ignore = "walk sweep (stage E1b part 3b): EZSDR_SEEDS=a-b, run on sim02/sim03"]
 fn seeded_config_walks() {
     sweep("seeded configuration", |seed| seeded(seed, true, 96));
+}
+
+/// The builders of the full-horizon cases, by name, for the thread runtime's replay (stage E2a, S1). Case 6 takes its `k` from the
+/// seed over the brain steps of the canonical path, as its walk sweep does.
+/// A case builder: the case for a seed.
+pub(super) type Builder = Box<dyn Fn(u64) -> Case>;
+
+pub(super) fn full_builders() -> Vec<(&'static str, Builder)> {
+    vec![
+        ("case 1", Box::new(|_| case1(Variant::Full))),
+        ("case 2", Box::new(|_| case2(Variant::Full))),
+        ("case 3", Box::new(|_| case3(Variant::Full))),
+        ("case 4", Box::new(|_| case4(Variant::Full))),
+        ("case 5", Box::new(|_| case5(Variant::Full))),
+        (
+            "case 6",
+            Box::new(|seed| {
+                let steps = canonical_brain_steps(&case1(Variant::Full).world).max(1);
+                case6(Variant::Full, (seed.saturating_sub(1) as usize) % steps)
+            }),
+        ),
+        ("case 7a", Box::new(|_| case7a(Variant::Full))),
+        ("case 7b", Box::new(|_| case7b(Variant::Full))),
+        ("case 7b late restore", Box::new(|_| case7b_late_restore(Variant::Full))),
+        ("case 7c", Box::new(|_| case7c(Variant::Full))),
+        ("case 8", Box::new(|_| case8(Variant::Full))),
+        ("case 9", Box::new(|_| case9(Variant::Full))),
+        ("seeded configuration", Box::new(|seed| seeded(seed, true, 96))),
+    ]
 }
 
 /// A probe: a `World` with per-state and per-step checks of one case, and an extra witness. The
@@ -1386,7 +1425,7 @@ mod tests {
 
 /// Counterexamples the walks found (E1 fix rounds 2 and 3): one that the plan answers is a default test, one it does not is ignored.
 #[cfg(test)]
-mod counterexamples {
+pub(super) mod counterexamples {
     use super::*;
     use crate::brain::cell::Outcome;
     use Event::*;
@@ -1405,9 +1444,11 @@ mod counterexamples {
     /// Case 5 (micro), found by the full micro search after E1-179 (fixed: E1-184, a chain that comes up during shutdown is stopped): StartNext is
     /// decided while value 1's debt keeps the Restore waiting; Shutdown arrives with that start in flight, so `Armed` finds no
     /// stop sent, the chain stays Armed, the Restore waits for it to be Off, and B and R0 wait at the end of the epilogue.
-    #[test]
-    fn ce_shutdown_during_start_leaves_restore_waiting() {
-        let trace = [
+    /// The scripted trace of `ce_shutdown_during_start_leaves_restore_waiting` (case 5, micro), also replayed on threads (stage E2a, S1).
+    pub(crate) fn shutdown_during_start_trace() -> Vec<Event> {
+        // Re-recorded when the device model became packet-granular (a recv that finds no whole packet returns nothing and sends
+        // nothing): the original's three receives that sent boundaries are the events the world no longer enables, so they are gone.
+        vec![
             Env(0),
             Tick,
             Tick,
@@ -1452,9 +1493,6 @@ mod counterexamples {
             BStep,
             BOp,
             SResult,
-            RSend(0),
-            BStep,
-            BOp,
             RCheck(0),
             RCmd(0),
             RLock(0),
@@ -1477,11 +1515,12 @@ mod counterexamples {
             RCall(0),
             RUnlock(0),
             RResult(0),
-            RSend(0),
-            BStep,
-            BOp,
-            BOp,
-        ];
+        ]
+    }
+
+    #[test]
+    fn ce_shutdown_during_start_leaves_restore_waiting() {
+        let trace = shutdown_during_start_trace();
         let world = case5(Variant::Micro).world;
         let replayed = dst::replay(&world, &trace).expect("the trace is a run of the world");
         assert_eq!(replayed.failure, None);

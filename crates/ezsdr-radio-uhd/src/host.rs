@@ -93,6 +93,9 @@ struct State {
     /// Bumped by every [`HostClock::notify_all`]: a plain wait ends on it, a sleep does not
     /// (M7).
     notified: u64,
+    /// The registered participants' names (the probe's key).
+    #[cfg(test)]
+    names: BTreeMap<u64, String>,
 }
 
 /// A blocked clock wait.
@@ -272,6 +275,8 @@ impl HostClock {
             locks: BTreeMap::new(),
             next_token: 0,
             notified: 0,
+            #[cfg(test)]
+            names: BTreeMap::new(),
         })))
     }
 
@@ -386,6 +391,8 @@ impl HostClock {
     /// with a NUL) alike.
     pub(crate) fn spawn(&self, name: &str, f: impl FnOnce() + Send + 'static) -> std::io::Result<JoinHandle<()>> {
         let mut prestart = PreStart { clock: self.clone(), id: self.register() };
+        #[cfg(test)]
+        self.name_participant(prestart.id, name);
         let (clock, id) = (self.clone(), prestart.id);
         let handle = std::thread::Builder::new().name(name.to_owned()).spawn(move || {
             let _guard = id.map(|id| ParticipantGuard::new(clock, id));
@@ -409,6 +416,8 @@ impl HostClock {
     fn unregister(&self, id: u64) {
         let Some(m) = &self.inner.manual else { return };
         let (mut st, now) = state(m);
+        #[cfg(test)]
+        st.names.remove(&id);
         clear_deadline(&mut st, id);
         go_idle(&mut st, now, id);
     }
@@ -473,6 +482,24 @@ impl HostClock {
         }
     }
 
+    #[cfg(test)]
+    fn name_participant(&self, id: Option<u64>, name: &str) {
+        if let (Some(id), Some(m)) = (id, self.inner.manual.as_ref()) {
+            lock(m).names.insert(id, name.to_owned());
+        }
+    }
+
+    /// The probe (tests only): every registered participant of a manual clock, by name, with whether it is busy and the manual deadline
+    /// it waits for, and the clock's reading, all taken under the clock's lock at one instant. A real clock has no participants.
+    #[cfg(test)]
+    pub(crate) fn participants(&self) -> (Duration, Vec<Participant>) {
+        let Some(m) = &self.inner.manual else { return (self.now(), Vec::new()) };
+        let (st, now) = state(m);
+        let at = now_locked(&st, now);
+        let list = st.names.iter().map(|(id, name)| Participant { name: name.clone(), busy: st.busy.contains(id), deadline: st.deadlines.get(id).copied() }).collect();
+        (at, list)
+    }
+
     /// How many waits block on this clock, its lock waiters included: a test's handshake that
     /// a thread has entered its wait.
     #[cfg(test)]
@@ -482,6 +509,16 @@ impl HostClock {
             st.waits.len() + st.locks.values().map(|lock| lock.waiters.len()).sum::<usize>()
         })
     }
+}
+
+/// One registered participant, as the probe reports it.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct Participant {
+    pub(crate) name: String,
+    pub(crate) busy: bool,
+    /// The manual deadline it waits for, if it waits for one.
+    pub(crate) deadline: Option<Duration>,
 }
 
 /// A [`HostClock::spawn`]'s registration until its thread owns it: rolled back on drop (M1).

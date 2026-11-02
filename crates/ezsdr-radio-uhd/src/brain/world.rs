@@ -9,12 +9,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ezsdr_radio::timeline::Channels;
 
-use super::cell::{Call, Cell, Drain, Outcome, Phase, Publish, Recv, Snapshot, Take, Terminal, ValueState};
+use super::cell::{Cell, Drain, Outcome, Phase, Recv, Snapshot, Take, Terminal, ValueState};
 use super::core::{Boundary, Brain, Change, Command, Disposition, Guard, Input, Op, Request, RxOp, Section, SetCmd};
 use super::dst::Model;
 use super::model::{Apply, Device, Dsp};
-use super::rules::{self, Check};
-use crate::device::{DeviceError, Iq};
+use super::rules::{self, CallPlan, CallResult, Check, DevCall, DeviceOp, FlushEnd, Handle, Next, Received, Round, RxCall, has_debt};
 use crate::provider::core::{RxEntry, SegmentKey};
 
 /// The witness names a later check reads (W7b3 reads W7b2; `witness_issued` reads the three waited markers): they decide a
@@ -22,7 +21,7 @@ use crate::provider::core::{RxEntry, SegmentKey};
 const READ_LATER: [&str; 4] = ["W7b2", "restore waited", "start waited", "move waited"];
 
 /// The samples a recv asks for: one packet.
-const PACKET: usize = 4;
+pub(crate) const PACKET: usize = 4;
 
 /// The id of a write that is already in the device's DSP FIFO when a case starts (initial device
 /// state, never reserved by the brain), so the monitor does not track it.
@@ -37,6 +36,8 @@ pub(crate) struct Params {
     pub(crate) queue_cap: usize,
     pub(crate) fifo_cap: usize,
     pub(crate) drain_window: i64,
+    /// The samples of one receive packet: a recv returns whole packets only (the one place that reads it; `PACKET` is the default).
+    pub(crate) packet: usize,
     /// Whether a device call may return failed (`RFault`): the case's branch of §3.2's outcome.
     pub(crate) call_faults: bool,
     /// The brain step (counted from 0) whose input is replaced by a panic (case 6); `None` for no panic.
@@ -61,53 +62,14 @@ pub(crate) enum PubStep {
     Mark,
 }
 
-const PUB_STEPS: [PubStep; 4] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Mark];
+pub(crate) const PUB_STEPS: [PubStep; 4] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Mark];
 
-fn guard_step(guard: Guard) -> PubStep {
+pub(crate) fn guard_step(guard: Guard) -> PubStep {
     match guard {
         Guard::Gate => PubStep::Gate,
         Guard::FlagSet => PubStep::Set,
         Guard::Ungate => PubStep::Ungate,
         Guard::MarkLost => PubStep::Mark,
-    }
-}
-
-/// A device call the receive executor makes (the cell's calls, and the lifecycle calls that have no cell state).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RxCall {
-    Begin {
-        at: i64,
-    },
-    /// `epoch` is the segment the stop ends: its Finished boundary carries it.
-    Stop {
-        epoch: u64,
-    },
-    /// The stop a plan change makes of the old epoch's stream (under `L` only). `retiring` is that
-    /// epoch: its Finished boundary carries it, as a stop's does.
-    PlanStop {
-        retiring: u64,
-    },
-    FlushStart,
-    FlushStop,
-    Open,
-    Close,
-}
-
-/// What a device call returned: a failure that leaves the device, a failure of the device, or ok.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CallResult {
-    Ok,
-    Failed,
-    Lost,
-}
-
-impl CallResult {
-    fn result(self) -> Result<(), DeviceError> {
-        match self {
-            CallResult::Ok => Ok(()),
-            CallResult::Failed => Err(DeviceError::failed("the call failed")),
-            CallResult::Lost => Err(DeviceError { lost: true, message: "the device is lost".to_string() }),
-        }
     }
 }
 
@@ -270,6 +232,26 @@ pub(crate) struct Monitor {
     pub(crate) shortened: BTreeMap<u64, i64>,
 }
 
+/// What one publish gave the user: the stream and epoch, the ticks, and how many samples it discarded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Published {
+    pub(crate) stream: usize,
+    pub(crate) epoch: u64,
+    pub(crate) ticks: Vec<i64>,
+    pub(crate) discarded: u64,
+}
+
+/// A consumption fact: the sample that consumed `value` on `stream`, over `channel`; `leftover` for a value left at its
+/// segment's end (its own list, not a second disposition).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Fact {
+    pub(crate) leftover: bool,
+    pub(crate) value: u64,
+    pub(crate) stream: usize,
+    pub(crate) channel: usize,
+    pub(crate) sample: i64,
+}
+
 /// A step the world can take. Each variant is one event of 45-experiment §3.2.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Event {
@@ -329,55 +311,25 @@ pub(crate) struct World {
     pub(crate) timers: Vec<(usize, i64)>,
     /// The events taken so far (diagnostic; not in the key).
     pub(crate) trace: Vec<Event>,
+    /// What each publish gave the user, `(stream, epoch, ticks)` (diagnostic, outside the key: the observation of S1).
+    pub(crate) published: Vec<Published>,
+    /// Every settings terminal in the order it was written (diagnostic, outside the key).
+    pub(crate) terminal_log: Vec<(u64, Terminal)>,
+    /// Every consumption fact in the order it was written (diagnostic, outside the key).
+    pub(crate) fact_log: Vec<Fact>,
+    /// Every call made on the device, in order (diagnostic, outside the key).
+    pub(crate) calls: Vec<DevCall>,
     pub(crate) monitor: Monitor,
     /// The brain steps taken, capped at the panic step plus one (the panic's position is part of the state only there).
     pub(crate) steps: usize,
 }
 
 /// One abandoned settings command: each cell's section, the terminal, and the `Done` to the brain.
-fn abandon_command(cells: &mut [Cell], monitor: &mut Monitor, inbox: &mut VecDeque<Input>, id: u64) {
-    for cell in cells.iter_mut() {
-        cell.abandon(id);
-    }
+fn abandon_command(cells: &mut [Cell], monitor: &mut Monitor, log: &mut Vec<(u64, Terminal)>, inbox: &mut VecDeque<Input>, id: u64) {
+    rules::abandon_all(cells, id);
     monitor.terminals.insert(id, Terminal::Abandoned);
+    log.push((id, Terminal::Abandoned));
     inbox.push_back(Input::Done { id, terminal: Terminal::Abandoned });
-}
-
-/// Whether the cell has debt: a finished call's value that no sample has consumed yet (a left value
-/// included).
-fn has_debt(cell: &Cell) -> bool {
-    cell.in_flight.iter().any(|f| matches!(f.state, ValueState::Done(Terminal::Call(Outcome::Ok | Outcome::Partial))))
-}
-
-/// The consumption of `samples` by a stream's chain: `(value, sample)` for each value a sample
-/// consumes, computed by the production rule (`rules::consume_packet`) one sample at a time. `channels`
-/// are the receiving streamer's (the device's, not the cell's). Left values are the cell's left values;
-/// debt is an accepted value of a finished call that no sample has consumed yet. Values the executor
-/// already consumed (`seen`) are not offered again.
-fn consume(cell: &Cell, channels: Channels, seen: &BTreeSet<u64>, samples: &[i64]) -> Vec<(u64, i64)> {
-    let mut left: Vec<RxEntry> = Vec::new();
-    let mut debt: Vec<RxEntry> = Vec::new();
-    for flight in &cell.in_flight {
-        let id = flight.entry.order.1;
-        if seen.contains(&id) {
-            continue;
-        }
-        if flight.left {
-            left.push(flight.entry.clone());
-        } else if flight.entry.accepted_at.is_some() {
-            debt.push(flight.entry.clone());
-        }
-    }
-    let one_sample: Vec<Vec<Iq>> = channels.iter().map(|_| vec![[0.0, 0.0]]).collect();
-    let mut consumed = Vec::new();
-    for &tick in samples {
-        for (id, at) in rules::consume_packet(&left, &debt, 1, channels, tick, &one_sample) {
-            left.retain(|entry| entry.order.1 != id);
-            debt.retain(|entry| entry.order.1 != id);
-            consumed.push((id, at));
-        }
-    }
-    consumed
 }
 
 impl World {
@@ -403,6 +355,10 @@ impl World {
             env,
             timers: Vec::new(),
             trace: Vec::new(),
+            published: Vec::new(),
+            terminal_log: Vec::new(),
+            fact_log: Vec::new(),
+            calls: Vec::new(),
             monitor: Monitor::default(),
             steps: 0,
         }
@@ -456,20 +412,12 @@ impl World {
         }
     }
 
-    /// A stream is receiving: its handle is open and its phase has a stream running, stopping or flushing.
     fn receiving(&self, k: usize) -> bool {
-        self.rx[k].handle.is_some() && matches!(self.cells[k].phase, Phase::Armed(_) | Phase::Streaming(_) | Phase::Stopping(_) | Phase::Flushing)
+        rules::receiving(&self.cells[k], self.rx[k].handle.is_some())
     }
 
-    /// A flush still has left values to read: one not yet consumed by a sample.
-    fn flush_pending(&self, k: usize) -> bool {
-        self.cells[k].in_flight.iter().any(|f| f.left && !self.rx[k].consumed.contains(&f.entry.order.1))
-    }
-
-    /// A flush is over (its recv cycles end, and FlushStop is next): no left value remains, the drain
-    /// window has passed, or the epilogue has ended.
     fn flush_over(&self, k: usize) -> bool {
-        self.cells[k].phase == Phase::Flushing && (self.at_end() || self.rx[k].flush_end.is_some_and(|end| self.device.t >= end) || !self.flush_pending(k))
+        rules::flush_over(&self.cells[k], &self.rx[k].consumed, self.rx[k].flush_end, self.device.t, self.at_end())
     }
 
     /// A recv may end: the device is lost, a packet is buffered, a stopped stream's tail is
@@ -490,9 +438,8 @@ impl World {
         self.timers.iter().any(|(_, at)| *at > t) || self.rx.iter().any(|r| r.recv.as_ref().is_some_and(|call| call.deadline > t))
     }
 
-    /// A packet's worth is buffered, or a stopped stream's tail is, or a missed start is due.
     fn packet_ready(&self, k: usize) -> bool {
-        self.device.late_due(k) || self.device.streamers.get(&k).is_some_and(|streamer| streamer.buffered.len() >= PACKET || (streamer.end.is_some() && !streamer.buffered.is_empty()))
+        self.device.packet_ready(k, self.params.packet)
     }
 
     /// The effect of a settings outcome is possible now: a lost device returns lost; a timed
@@ -560,7 +507,7 @@ impl World {
             Event::SSend => self.s_front() == Some(&SStep::Send),
             Event::RCheck(k) => {
                 let r = &self.rx[k];
-                !r.exited && r.program.is_empty() && (self.failure || !r.fifo.is_empty() || (self.receiving(k) && !self.at_end()) || self.flush_over(k))
+                !r.exited && r.program.is_empty() && rules::next_action(self.failure, !r.fifo.is_empty(), self.flush_over(k), self.receiving(k), self.at_end()) != Next::Idle
             }
             Event::RCmd(k) => self.r_front(k) == Some(&RStep::Cmd),
             Event::RSnap(k) => self.r_front(k) == Some(&RStep::Snap),
@@ -656,7 +603,7 @@ impl World {
                 let input = self.inbox.pop_front().expect("an input is queued");
                 let at = self.steps;
                 self.steps = (self.steps + 1).min(self.params.panic_step.map_or(0, |k| k + 1));
-                let input = if self.params.panic_step == Some(at) { self.panic_at(input) } else { input };
+                let input = if rules::panics_at(at, self.params.panic_step) { self.panic_at(input) } else { input };
                 match &input {
                     Input::Release(held) => {
                         self.monitor.released.insert(held.entry.order.1);
@@ -697,9 +644,7 @@ impl World {
                 self.settings.program.pop_front();
                 self.native = Some(Holder::Settings);
                 if let Some(id) = self.settings.hand.as_ref().map(|cmd| cmd.id) {
-                    for cell in self.cells.iter_mut() {
-                        cell.start_call(id);
-                    }
+                    rules::start_calls(&mut self.cells, id);
                 }
             }
             Event::SEffect(outcome) => self.s_effect(outcome),
@@ -783,11 +728,8 @@ impl World {
         if let Op::Guard(guard) = op {
             self.publish(Holder::Brain, guard_step(guard));
         }
-        let reserve = match op {
-            Op::Section(Section::Reserve { id }) => Some(id),
-            _ => None,
-        };
-        let held = reserve.and_then(|id| self.brain.held.iter().find(|held| held.entry.order.1 == id).map(|held| (held.stream, held.entry.channel)));
+        let reserve = rules::reserving(&self.brain, &op);
+        let held = reserve.map(|(_, stream, channel)| (stream, channel));
         self.witness_before(&op, held);
         let stop = match op {
             Op::Section(Section::Stop { stream, .. }) => Some((stream, self.cells[stream].cut)),
@@ -802,9 +744,8 @@ impl World {
             // The guard has run: the brain is gone. Its bookings fire on nothing, and its senders close with it, so each executor
             // ends after what it already holds. What reaches its inbox is never served.
             self.timers.clear();
-            self.route(Command::SettingsTerminate);
-            for stream in 0..self.rx.len() {
-                self.route(Command::Rx { stream, op: RxOp::Terminate });
+            for command in rules::dead_commands(self.rx.len()) {
+                self.route(command);
             }
         }
         let commands = std::mem::take(&mut self.brain.outbox);
@@ -824,14 +765,8 @@ impl World {
                 self.monitor.witnesses.insert("W5c");
             }
         }
-        if let (Some(id), Some((stream, channel))) = (reserve, held) {
-            if !self.brain.held.iter().any(|held| held.entry.order.1 == id) {
-                let segment = match self.cells[stream].phase {
-                    Phase::Armed(segment) | Phase::Streaming(segment) => segment,
-                    _ => unreachable!("a reservation needs a running phase"),
-                };
-                self.monitor.reserved.insert(id, (channel, segment, self.cells[stream].epoch));
-            }
+        if let Some((id, channel, segment, epoch)) = reserve.and_then(|r| rules::reserved(&self.brain, &self.cells, r)) {
+            self.monitor.reserved.insert(id, (channel, segment, epoch));
         }
     }
 
@@ -911,15 +846,6 @@ impl World {
         }
     }
 
-    /// Moves a channel to stream `to` (an Ok move result, in S.result): the cell that owns it loses
-    /// it. The values reserved on it stay with the chain they were applied to.
-    fn move_channel(&mut self, channel: usize, to: usize) {
-        for cell in self.cells.iter_mut().filter(|cell| cell.channels.contains(channel as u32)) {
-            cell.channels = cell.channels.without(channel as u32);
-        }
-        self.cells[to].channels = self.cells[to].channels.with(channel as u32);
-    }
-
     /// `S.take`: the head command is taken. A cancelled value is dropped here, and its completion
     /// is sent here (E1-42).
     fn s_take(&mut self) {
@@ -929,10 +855,7 @@ impl World {
             return;
         }
         let cmd = self.settings.fifo.pop_front().expect("a command is queued");
-        let take = match cmd.change {
-            Change::Timed { .. } => self.cells.iter_mut().map(|cell| cell.take(cmd.id)).find(|take| *take != Take::Absent).unwrap_or(Take::Absent),
-            _ => Take::Call,
-        };
+        let take = rules::take_command(&mut self.cells, &cmd);
         match take {
             Take::Call => {
                 self.settings.program = VecDeque::from([SStep::Check, SStep::Lock, SStep::Effect]);
@@ -945,6 +868,7 @@ impl World {
                     self.monitor.witnesses.insert("W1b");
                 }
                 self.monitor.terminals.insert(cmd.id, Terminal::Dropped);
+                self.terminal_log.push((cmd.id, Terminal::Dropped));
                 self.inbox.push_back(Input::Done { id: cmd.id, terminal: Terminal::Dropped });
             }
         }
@@ -959,7 +883,8 @@ impl World {
         let cells = &mut self.cells;
         let monitor = &mut self.monitor;
         let inbox = &mut self.inbox;
-        let check = rules::settings_check(self.failure, hand, &mut queued, |id| abandon_command(cells, monitor, inbox, id));
+        let log = &mut self.terminal_log;
+        let check = rules::settings_check(self.failure, hand, &mut queued, |id| abandon_command(cells, monitor, log, inbox, id));
         if check == Check::Exit {
             self.settings.exited = true;
             self.settings.fifo.clear();
@@ -978,7 +903,8 @@ impl World {
         let cells = &mut self.cells;
         let monitor = &mut self.monitor;
         let inbox = &mut self.inbox;
-        rules::settings_check(true, None, &mut queued, |id| abandon_command(cells, monitor, inbox, id));
+        let log = &mut self.terminal_log;
+        rules::settings_check(true, None, &mut queued, |id| abandon_command(cells, monitor, log, inbox, id));
     }
 
     /// `S.effect(outcome)`: the device call of a timed command, or of a restore or move (no device
@@ -997,11 +923,12 @@ impl World {
         };
         self.settings.program.pop_front();
         let cmd = self.settings.hand.clone().expect("a command in hand");
+        if let Some((channel, freq, at)) = rules::settings_call(&cmd.change) {
+            self.calls.push(DevCall::Apply { channel, freq, at });
+        }
         if let (Change::Timed { channel, at, .. }, Outcome::Ok | Outcome::Partial) = (&cmd.change, outcome) {
             if let Apply::Accepted { effective } = self.device.apply_timed(*channel, cmd.id, *at) {
-                for cell in self.cells.iter_mut() {
-                    cell.accept(cmd.id, effective);
-                }
+                rules::accept_all(&mut self.cells, cmd.id, effective);
             }
         }
         self.settings.terminal = Some(Terminal::Call(outcome));
@@ -1018,15 +945,9 @@ impl World {
         self.settings.program.pop_front();
         let hand = self.settings.hand.clone().expect("a command in hand");
         let terminal = self.settings.terminal.expect("a decided terminal");
-        if let Terminal::Call(outcome) = terminal {
-            for cell in self.cells.iter_mut() {
-                cell.finish_call(hand.id, outcome);
-            }
-        }
-        if let (Terminal::Call(Outcome::Ok), Change::Move { channel, to }) = (terminal, &hand.change) {
-            self.move_channel(*channel, *to);
-        }
+        rules::settle_call(&mut self.cells, &hand, terminal);
         self.monitor.terminals.insert(hand.id, terminal);
+        self.terminal_log.push((hand.id, terminal));
     }
 
     /// `R.check` at a loop top: the flag discards the FIFO and exits. The exit first sends the loss
@@ -1037,17 +958,19 @@ impl World {
         self.monitor.checked.insert(Who::Rx(k), failure);
         let receiving = self.receiving(k);
         let flush_over = self.flush_over(k);
+        let at_end = self.at_end();
         let r = &mut self.rx[k];
-        if rules::loop_check(failure, &mut r.fifo) == Check::Exit {
-            // The send is queued as the last step: `RCheck` is off once exited, `RSend` still runs.
-            r.program.push_back(RStep::Send(Input::Boundary(Boundary::Lost { stream: k })));
-            r.exited = true;
-        } else if !r.fifo.is_empty() {
-            r.program.push_back(RStep::Cmd);
-        } else if flush_over {
-            r.program = call_steps(RxCall::FlushStop, false).into();
-        } else if receiving {
-            r.program = VecDeque::from([RStep::Snap, RStep::Begin, RStep::End, RStep::Publish]);
+        match rules::next_action(failure, !r.fifo.is_empty(), flush_over, receiving, at_end) {
+            Next::Exit => {
+                assert_eq!(rules::loop_check(failure, &mut r.fifo), Check::Exit);
+                // The send is queued as the last step: `RCheck` is off once exited, `RSend` still runs.
+                r.program.push_back(RStep::Send(Input::Boundary(Boundary::Lost { stream: k })));
+                r.exited = true;
+            }
+            Next::Cmd => r.program.push_back(RStep::Cmd),
+            Next::FlushStop => r.program = call_steps(RxCall::FlushStop, false).into(),
+            Next::Recv => r.program = VecDeque::from([RStep::Snap, RStep::Begin, RStep::End, RStep::Publish]),
+            Next::Idle => {}
         }
     }
 
@@ -1061,19 +984,11 @@ impl World {
             self.rx[k].program.clear();
             return;
         }
-        let steps = match op {
-            RxOp::Start { at, .. } => call_steps(RxCall::Begin { at }, false),
-            RxOp::Stop { epoch, .. } => call_steps(RxCall::Stop { epoch }, false),
-            RxOp::Flush => call_steps(RxCall::FlushStart, false),
-            RxOp::Open => call_steps(RxCall::Open, true),
-            RxOp::Close => call_steps(RxCall::Close, true),
-            RxOp::Plan { retiring, .. } => {
-                let mut steps = call_steps(RxCall::PlanStop { retiring }, false);
-                steps.push(RStep::Send(Input::Boundary(Boundary::Quiesced { stream: k })));
-                steps
-            }
-            RxOp::Terminate => unreachable!("handled before the steps"),
-        };
+        let (call, lifecycle, quiesce) = rules::call_of(op).expect("a terminate is handled above");
+        let mut steps = call_steps(call, lifecycle);
+        if quiesce {
+            steps.push(RStep::Send(Input::Boundary(Boundary::Quiesced { stream: k })));
+        }
         self.rx[k].program = steps.into();
     }
 
@@ -1089,6 +1004,7 @@ impl World {
         let snap = self.rx[k].snap.expect("a snapshot");
         let handle = self.rx[k].handle.expect("an open handle");
         let deadline = self.device.t + self.params.recv_timeout;
+        self.calls.push(DevCall::Recv { stream: k });
         self.device.enter_recv(k);
         self.rx[k].recv = Some(RecvCall { recv: Recv { epoch: snap.epoch, handle, samples: Vec::new() }, deadline });
     }
@@ -1100,27 +1016,33 @@ impl World {
         if self.rx[k].recv.as_ref().is_some_and(|call| call.recv.epoch != self.cells[k].epoch) {
             self.monitor.witnesses.insert("W3a");
         }
-        if self.device.lost {
+        if !self.device.lost {
+            if let Some(deadline) = self.rx[k].recv.as_ref().map(|call| call.deadline) {
+                if !self.packet_ready(k) && self.device.t >= deadline {
+                    self.monitor.observed.insert((k, deadline, self.device.t));
+                }
+            }
+        }
+        let received = if self.device.lost {
+            Received::Lost
+        } else if self.device.take_late(k) {
+            Received::Late
+        } else {
+            Received::Samples(self.device.recv(k, self.params.packet, self.rx[k].recv.as_ref().map_or(i64::MAX, |call| call.deadline)))
+        };
+        let ended = rules::end_of_recv(received, k, self.device.t);
+        if ended.lost {
             let r = &mut self.rx[k];
             r.recv = None;
             r.snap = None;
             r.program = PUB_STEPS.iter().map(|step| RStep::Pub(*step)).collect();
             return;
         }
-        if let Some(deadline) = self.rx[k].recv.as_ref().map(|call| call.deadline) {
-            if !self.packet_ready(k) && self.device.t >= deadline {
-                self.monitor.observed.insert((k, deadline, self.device.t));
-            }
-        }
-        // A missed start returns `LateCommand` with no samples; R reads the time and reports it to the brain (provider/rx.rs `receive`).
-        let late = self.device.take_late(k);
-        let samples = if late { Vec::new() } else { self.device.recv(k, PACKET) };
         if let Some(call) = self.rx[k].recv.as_mut() {
-            call.recv.samples = samples;
+            call.recv.samples = ended.samples;
         }
-        if late {
-            let now = self.device.t;
-            self.rx[k].program.push_back(RStep::Send(Input::LateCommand { stream: k, now }));
+        if let Some(input) = ended.late_send {
+            self.rx[k].program.push_back(RStep::Send(input));
         }
     }
 
@@ -1130,15 +1052,11 @@ impl World {
         self.rx[k].program.pop_front();
         let snap = self.rx[k].snap.take().expect("a snapshot");
         let call = self.rx[k].recv.take().expect("a recv");
-        let phase = self.cells[k].phase;
-        let before = self.cells[k].progress;
+        let flushing = self.cells[k].phase == Phase::Flushing;
         let region = (self.cells[k].origin_of(call.recv.epoch), self.cells[k].bound(call.recv.epoch));
-        let consumed = consume(&self.cells[k], self.carried(k), &self.rx[k].consumed, &call.recv.samples);
-        // A flush's samples are not published: only the left values they consume are reported (note 45 §4.5).
-        let flushing = phase == Phase::Flushing;
-        let publish = if flushing { Publish::Published { cut_reached: false } } else { self.cells[k].publish(snap, &call.recv) };
-        match publish {
-            Publish::Stale => {
+        let carried = self.carried(k);
+        match rules::publish_round(&mut self.cells[k], k, snap, &call.recv, carried, &self.rx[k].consumed) {
+            Round::Stale => {
                 if snap.epoch == self.cells[k].epoch && snap.cut != self.cells[k].cut {
                     self.monitor.witnesses.insert("W3b");
                 }
@@ -1147,15 +1065,12 @@ impl World {
                 r.program.push_front(RStep::Publish);
                 r.program.push_front(RStep::Snap);
             }
-            Publish::Published { cut_reached } => {
+            Round::Published { sends, consumed, published, discarded } => {
                 let epoch = call.recv.epoch;
                 if !flushing {
                     self.monitor.published.insert(epoch, self.cells[k].progress);
                 }
-                let mut sends = Vec::new();
-                if matches!(phase, Phase::Armed(_)) && self.cells[k].progress > before {
-                    sends.push(Input::Boundary(Boundary::FirstSample { stream: k }));
-                }
+                self.published.push(Published { stream: k, epoch, ticks: published, discarded });
                 for (id, sample) in consumed {
                     if !flushing && region.0 <= sample && region.1.is_none_or(|bound| sample < bound) {
                         self.monitor.witnesses.insert("W1a");
@@ -1171,13 +1086,10 @@ impl World {
                     if left && self.brain.deferred.contains(&Request::Restore { channel }) {
                         self.monitor.witnesses.insert("W5d");
                     }
+                    self.fact_log.push(Fact { leftover: left, value: id, stream: k, channel, sample });
                     let fact = if left { &mut self.monitor.leftovers } else { &mut self.monitor.evidence };
                     fact.entry(id).or_insert(ident);
                     self.rx[k].consumed.insert(id);
-                    sends.push(Input::Boundary(Boundary::Consumed { id }));
-                }
-                if cut_reached {
-                    sends.push(Input::Boundary(Boundary::CutReached { stream: k }));
                 }
                 self.rx[k].program.extend(sends.into_iter().map(RStep::Send));
             }
@@ -1212,35 +1124,34 @@ impl World {
     /// The device effect of a call on stream `k`, with the device not lost. A call on a closed
     /// handle fails without touching the device.
     fn device_call(&mut self, k: usize, call: RxCall) -> CallResult {
-        let open = self.rx[k].handle.is_some();
-        match call {
-            RxCall::Begin { at } if open => {
-                self.device.start(k, at);
+        match rules::plan_call(call, self.rx[k].handle.is_some()) {
+            CallPlan::Skip(result) => result,
+            CallPlan::Do(op) => {
+                match op {
+                    DeviceOp::Start { at } => {
+                        self.calls.push(DevCall::Start { stream: k, at });
+                        self.device.start(k, at)
+                    }
+                    DeviceOp::StartNow => {
+                        self.calls.push(DevCall::StartNow { stream: k });
+                        self.device.start_now(k)
+                    }
+                    DeviceOp::Stop => {
+                        self.calls.push(DevCall::Stop { stream: k });
+                        self.device.stop(k)
+                    }
+                    DeviceOp::Open => {
+                        let channels: Vec<usize> = self.cells[k].channels.iter().map(|channel| channel as usize).collect();
+                        self.calls.push(DevCall::Open { stream: k, channels: channels.clone() });
+                        self.device.open(k, channels);
+                    }
+                    DeviceOp::Close => {
+                        self.calls.push(DevCall::Close { stream: k });
+                        self.device.close(k)
+                    }
+                }
                 CallResult::Ok
             }
-            RxCall::Stop { .. } | RxCall::PlanStop { .. } if open => {
-                self.device.stop(k);
-                CallResult::Ok
-            }
-            RxCall::FlushStart if open => {
-                self.device.start_now(k);
-                CallResult::Ok
-            }
-            RxCall::FlushStop if open => {
-                self.device.stop(k);
-                CallResult::Ok
-            }
-            RxCall::FlushStart | RxCall::FlushStop => CallResult::Ok,
-            RxCall::Open if !open => {
-                let channels = self.cells[k].channels.iter().map(|channel| channel as usize).collect();
-                self.device.open(k, channels);
-                CallResult::Ok
-            }
-            RxCall::Close if open => {
-                self.device.close(k);
-                CallResult::Ok
-            }
-            _ => CallResult::Failed,
         }
     }
 
@@ -1264,60 +1175,24 @@ impl World {
             }
             _ => {}
         }
-        match call {
-            RxCall::Begin { at } => {
-                let segment = SegmentKey { by: Some(self.cells[k].epoch), origin: at };
-                self.cells[k].device_result(Call::Begin(segment), &result.result());
-                if result == CallResult::Ok {
-                    self.cells[k].start_confirmed(at);
-                    self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Armed { stream: k })));
-                } else if result == CallResult::Failed {
-                    self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::BeginFailed { stream: k })));
-                }
+        let now = self.device.t;
+        let after = rules::after_call(&mut self.cells[k], k, call, result, now, self.params.drain_window);
+        let r = &mut self.rx[k];
+        match after.handle {
+            Handle::Opened => {
+                r.handles += 1;
+                r.handle = Some(r.handles);
             }
-            RxCall::Stop { epoch } => {
-                self.cells[k].device_result(Call::Stop, &result.result());
-                // A failed stop ends the segment too (its phase is Uncertain); a loss publishes instead.
-                if result != CallResult::Lost {
-                    self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Finished { stream: k, next_origin: None, epoch })));
-                }
-            }
-            RxCall::PlanStop { retiring } => {
-                self.cells[k].device_result(Call::Stop, &result.result());
-                self.cells[k].read_new_epoch();
-                // As a stop's: a loss publishes instead; a failed stop still ends the old segment.
-                if result != CallResult::Lost {
-                    self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Finished { stream: k, next_origin: None, epoch: retiring })));
-                }
-            }
-            RxCall::FlushStart => {
-                self.cells[k].device_result(Call::FlushStart, &result.result());
-                // A failed start skips the stop; the left values stay on the chain (production, provider/rx.rs).
-                if result == CallResult::Ok {
-                    self.rx[k].flush_end = Some(self.device.t + self.params.drain_window);
-                } else if result != CallResult::Lost {
-                    self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Flushed { stream: k })));
-                }
-            }
-            RxCall::FlushStop => {
-                self.cells[k].device_result(Call::FlushStop, &result.result());
-                self.rx[k].flush_end = None;
-                if result != CallResult::Lost {
-                    self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Flushed { stream: k })));
-                }
-            }
-            RxCall::Open if result == CallResult::Ok => {
-                self.rx[k].handles += 1;
-                self.rx[k].handle = Some(self.rx[k].handles);
-            }
-            RxCall::Close if result == CallResult::Ok => self.rx[k].handle = None,
-            RxCall::Open | RxCall::Close => {}
+            Handle::Closed => r.handle = None,
+            Handle::Keep => {}
         }
-        // Every lifecycle call completes with a boundary, whatever its result (the brain's outstanding command settles).
-        match call {
-            RxCall::Open => self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Opened { stream: k }))),
-            RxCall::Close => self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Closed { stream: k }))),
-            _ => {}
+        match after.flush_end {
+            FlushEnd::Set(end) => r.flush_end = Some(end),
+            FlushEnd::Clear => r.flush_end = None,
+            FlushEnd::Keep => {}
+        }
+        if let Some(input) = after.send {
+            r.program.push_front(RStep::Send(input));
         }
     }
 
@@ -1390,7 +1265,8 @@ impl Model for World {
     /// destructurings have no `..`, so a new field fails to compile until the key decides it; a field
     /// the key drops is named `: _` with its reason.
     fn key(&self) -> String {
-        let World { params, brain, inbox, cells, settings, rx, clock, native, gate, failure, device, env, timers, trace: _, monitor, steps } = self;
+        let World { params, brain, inbox, cells, settings, rx, clock, native, gate, failure, device, env, timers, trace: _, published: _, terminal_log: _, fact_log: _, calls: _, monitor, steps } =
+            self;
         let cells: Vec<_> = cells
             .iter()
             .map(|cell| {
@@ -1591,7 +1467,7 @@ mod tests {
     use super::*;
 
     fn params() -> Params {
-        Params { horizon: 8, epilogue: 8, recv_timeout: 8, queue_cap: 4, fifo_cap: 4, drain_window: DRAIN_WINDOW, call_faults: false, panic_step: None }
+        Params { horizon: 8, epilogue: 8, recv_timeout: 8, queue_cap: 4, fifo_cap: 4, drain_window: DRAIN_WINDOW, packet: PACKET, call_faults: false, panic_step: None }
     }
 
     fn world(cells: Vec<Cell>) -> World {
@@ -2159,18 +2035,8 @@ mod tests {
     /// reads the value (or retires it at its stop), and the deferred restore then goes.
     #[test]
     fn harness_stop_debt_is_flushed_before_restore() {
-        let mut entry = value(0, 8, 1);
-        entry.accepted_at = Some(8);
-        let mut c = cell(Phase::Streaming(seg(0)), 0, None, 0);
-        push(&mut c, entry, ValueState::Done(Terminal::Call(Outcome::Ok)));
-        let mut w = World::new(vec![c], Vec::new(), params());
-        w.rx[0].handle = Some(1);
-        w.device.open(0, vec![0]);
         // The flush reads at device time 12, after the value's instant 8 (samples before it consume nothing).
-        w.device.t = 12;
-        w.monitor.reserved.insert(1, (0, seg(0), 1));
-        w.rx[0].fifo.push_back(RxOp::Stop { at: None, epoch: 1 });
-        w.brain.deferred.push(Request::Restore { channel: 0 });
+        let mut w = crate::brain::fixtures::stop_debt_world(params());
         let flushing = std::cell::Cell::new(false);
         settle_with(&mut w, |w| flushing.set(flushing.get() || w.cells[0].phase == Phase::Flushing));
         assert!(flushing.get(), "the stop's debt is flushed: {:?}", w.trace);
@@ -2347,7 +2213,7 @@ mod tests {
         let mut c = cell(Phase::Off, 0, None, 0);
         push(&mut c, value(0, 8, 1), ValueState::Taken);
         c.mark_left(1);
-        assert_eq!(consume(&c, Channels::first(1), &BTreeSet::new(), &[8]), vec![(1, 8)]);
+        assert_eq!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &[8]), vec![(1, 8)]);
     }
 
     /// A value the device applied at sample 15 (accepted at 15) is debt for the packet that carries
@@ -2357,8 +2223,8 @@ mod tests {
     fn u20_debt_counts_an_applied_value_before_its_call_finishes() {
         let mut c = cell(Phase::Streaming(seg(0)), 0, None, 0);
         push(&mut c, RxEntry { accepted_at: Some(15), ..value(0, 2, 5) }, ValueState::Taken);
-        assert!(consume(&c, Channels::first(1), &BTreeSet::new(), &[12, 13, 14]).is_empty());
-        assert_eq!(consume(&c, Channels::first(1), &BTreeSet::new(), &[12, 13, 14, 15]), vec![(5, 15)]);
+        assert!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &[12, 13, 14]).is_empty());
+        assert_eq!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &[12, 13, 14, 15]), vec![(5, 15)]);
     }
 
     /// `settle`, with the oracles' transition and safety checks at every step.
