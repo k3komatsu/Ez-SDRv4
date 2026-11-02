@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use ezsdr_radio::timeline::Channels;
 
-use super::cell::{Call, Cell, Outcome, Phase, Publish, Recv, Snapshot, Take, Terminal, ValueState};
+use super::cell::{Call, Cell, Outcome, Phase, Publish, Recv, Snapshot, Take, Terminal, Ticks, ValueState};
 use super::core::{Boundary, Brain, Change, Command, Input, Op, RxOp, Section, SetCmd};
 use crate::device::{DeviceError, Iq, RxRecv};
 use crate::provider::core::{RxChain, RxEntry, SegmentKey};
@@ -19,16 +19,17 @@ pub(crate) struct Plan {
 }
 
 /// The samples from `origin` up to `bound` are published, and the progress passes them; the rest are discarded.
-pub(crate) fn plan_publish(origin: i64, bound: Option<i64>, samples: &[i64], progress: i64) -> Plan {
-    let mut plan = Plan { progress, discard: 0 };
-    for &tick in samples {
-        if publishes(origin, bound, tick) {
-            plan.progress = plan.progress.max(tick + 1);
-        } else {
-            plan.discard += 1;
-        }
-    }
-    plan
+/// The progress passes the published samples to the tick after the last one (the next sample's, one `step` on).
+pub(crate) fn plan_publish(origin: i64, bound: Option<i64>, samples: &Ticks, progress: i64) -> Plan {
+    let published = published_range(origin, bound, samples);
+    let progress = if published.is_empty() { progress } else { progress.max(samples.at(published.end - 1) + samples.step) };
+    Plan { progress, discard: (samples.count - published.len()) as u64 }
+}
+
+/// The indices of the samples a publish gives the user: those at or after `origin` and before `bound`.
+pub(crate) fn published_range(origin: i64, bound: Option<i64>, samples: &Ticks) -> std::ops::Range<usize> {
+    let from = samples.index_from(origin);
+    from..bound.map_or(samples.count, |bound| samples.index_from(bound)).max(from)
 }
 
 /// The consumption evidence of one packet: `(value id, sample tick)` for each entry the production
@@ -245,17 +246,17 @@ pub(crate) fn flush_over(cell: &Cell, seen: &BTreeSet<u64>, flush_end: Option<i6
 pub(crate) enum Received {
     Lost,
     Late,
-    Samples(Vec<i64>),
+    Samples(Ticks),
 }
 
 /// The sample ticks `rx_recv` returned, as the executor's decision input: a lost device, a missed start, or samples
-/// (a timeout or a non-lost failure carries none). Ticks are one per sample.
-pub(crate) fn received_of(result: &RxRecv) -> Received {
+/// (a timeout or a non-lost failure carries none). Ticks are one per sample, `sample_ticks` device ticks apart (the decimation).
+pub(crate) fn received_of(result: &RxRecv, sample_ticks: i64) -> Received {
     match result {
         RxRecv::Failed(error) if error.lost => Received::Lost,
         RxRecv::LateCommand => Received::Late,
-        RxRecv::Samples { first_tick, samples } => Received::Samples((0..samples.first().map_or(0, Vec::len) as i64).map(|i| first_tick + i).collect()),
-        _ => Received::Samples(Vec::new()),
+        RxRecv::Samples { first_tick, samples } => Received::Samples(Ticks::new(*first_tick, sample_ticks, samples.first().map_or(0, Vec::len))),
+        _ => Received::Samples(Ticks::default()),
     }
 }
 
@@ -263,14 +264,14 @@ pub(crate) fn received_of(result: &RxRecv) -> Received {
 /// brain (provider/rx.rs `receive`) and carries no samples.
 pub(crate) struct Ended {
     pub(crate) lost: bool,
-    pub(crate) samples: Vec<i64>,
+    pub(crate) samples: Ticks,
     pub(crate) late_send: Option<Input>,
 }
 
 pub(crate) fn end_of_recv(received: Received, stream: usize, now: i64) -> Ended {
     match received {
-        Received::Lost => Ended { lost: true, samples: Vec::new(), late_send: None },
-        Received::Late => Ended { lost: false, samples: Vec::new(), late_send: Some(Input::LateCommand { stream, now }) },
+        Received::Lost => Ended { lost: true, samples: Ticks::default(), late_send: None },
+        Received::Late => Ended { lost: false, samples: Ticks::default(), late_send: Some(Input::LateCommand { stream, now }) },
         Received::Samples(samples) => Ended { lost: false, samples, late_send: None },
     }
 }
@@ -360,15 +361,17 @@ pub(crate) fn after_call(cell: &mut Cell, stream: usize, call: RxCall, result: C
 }
 
 /// The consumption of `samples` by a stream's chain: `(value, sample)` for each value a sample consumes, computed by the
-/// production rule ([`consume_packet`]) one sample at a time. `channels` are the receiving streamer's (the device's, not the
+/// production rule ([`consume_packet`]) at the samples that can consume. `channels` are the receiving streamer's (the device's, not the
 /// cell's). Left values are the cell's left values; debt is an accepted value of a finished call that no sample has consumed
-/// yet. Values the executor already consumed (`seen`) are not offered again.
-pub(crate) fn consume_samples(cell: &Cell, channels: Channels, seen: &BTreeSet<u64>, samples: &[i64]) -> Vec<(u64, i64)> {
+/// yet. Values the executor already consumed (`seen`) are not offered again. A sample consumes the head of each channel's queue (left
+/// values first) once its tick reaches the head's instant and acceptance, so the walk jumps to the earliest such tick, and ends
+/// when nothing is pending: a block with nothing to consume costs no per-sample work.
+pub(crate) fn consume_samples(cell: &Cell, channels: Channels, seen: &BTreeSet<u64>, samples: &Ticks) -> Vec<(u64, i64)> {
     let mut left: Vec<RxEntry> = Vec::new();
     let mut debt: Vec<RxEntry> = Vec::new();
     for flight in &cell.in_flight {
         let id = flight.entry.order.1;
-        if seen.contains(&id) {
+        if seen.contains(&id) || !channels.contains(flight.entry.channel as u32) {
             continue;
         }
         if flight.left {
@@ -377,14 +380,29 @@ pub(crate) fn consume_samples(cell: &Cell, channels: Channels, seen: &BTreeSet<u
             debt.push(flight.entry.clone());
         }
     }
+    // Nothing pending: a block costs no allocation.
+    if left.is_empty() && debt.is_empty() {
+        return Vec::new();
+    }
     let one_sample: Vec<Vec<Iq>> = channels.iter().map(|_| vec![[0.0, 0.0]]).collect();
     let mut consumed = Vec::new();
-    for &tick in samples {
+    let mut index = 0;
+    while !(left.is_empty() && debt.is_empty()) {
+        let reach = |entry: &RxEntry| entry.order.0.max(entry.accepted_at.unwrap_or(i64::MIN));
+        let head = |entries: &[RxEntry], channel: usize| entries.iter().find(|entry| entry.channel == channel).map(reach);
+        let earliest = channels.iter().filter_map(|channel| head(&left, channel as usize).or_else(|| head(&debt, channel as usize))).min();
+        let Some(earliest) = earliest else { break };
+        index = index.max(samples.index_from(earliest));
+        if index >= samples.count {
+            break;
+        }
+        let tick = samples.at(index);
         for (id, at) in consume_packet(&left, &debt, 1, channels, tick, &one_sample) {
             left.retain(|entry| entry.order.1 != id);
             debt.retain(|entry| entry.order.1 != id);
             consumed.push((id, at));
         }
+        index += 1;
     }
     consumed
 }
@@ -418,13 +436,15 @@ pub(crate) struct Computed {
 
 /// `R.publish`, the computing half (note 45 §4.5, §4.6): reads `view`, writes nothing. A flush's samples are not published:
 /// only the left values they consume are reported.
-pub(crate) fn publish_compute(view: &Cell, recv: &Recv, carried: Channels, seen: &BTreeSet<u64>) -> Computed {
+pub(crate) fn publish_compute(view: &Cell, recv: &Recv, carried: Channels, seen: &BTreeSet<u64>, want_ticks: bool) -> Computed {
     let flushing = view.phase == Phase::Flushing;
     let consumed = consume_samples(view, carried, seen, &recv.samples);
     let (published, plan) = if flushing {
         (Vec::new(), None)
     } else {
-        (published_ticks(view.origin_of(recv.epoch), view.bound(recv.epoch), &recv.samples), Some(plan_publish(view.origin_of(recv.epoch), view.bound(recv.epoch), &recv.samples, view.progress)))
+        let (origin, bound) = (view.origin_of(recv.epoch), view.bound(recv.epoch));
+        // The user's ticks are built only for an observer that reads them (a measurement run counts and does not).
+        (if want_ticks { published_ticks(origin, bound, &recv.samples) } else { Vec::new() }, Some(plan_publish(origin, bound, &recv.samples, view.progress)))
     };
     Computed { consumed, published, plan, phase: view.phase }
 }
@@ -433,7 +453,6 @@ pub(crate) fn publish_compute(view: &Cell, recv: &Recv, carried: Channels, seen:
 pub(crate) fn publish_write(cell: &mut Cell, stream: usize, snap: Snapshot, recv: &Recv, computed: Computed) -> Round {
     let Computed { consumed, published, plan, phase } = computed;
     let before = cell.progress;
-    let flushing = plan.is_none();
     let cut_reached = match &plan {
         None => false,
         Some(plan) => match cell.publish_planned(snap, recv.epoch, plan) {
@@ -449,23 +468,19 @@ pub(crate) fn publish_write(cell: &mut Cell, stream: usize, snap: Snapshot, recv
     if cut_reached {
         sends.push(Input::Boundary(Boundary::CutReached { stream }));
     }
-    let discarded = if flushing { 0 } else { (recv.samples.len() - published.len()) as u64 };
+    let discarded = plan.as_ref().map_or(0, |plan| plan.discard);
     Round::Published { sends, consumed, published, discarded }
 }
 
 /// `R.publish` on the live cell (the world's one event): compute and write in one step.
 pub(crate) fn publish_round(cell: &mut Cell, stream: usize, snap: Snapshot, recv: &Recv, carried: Channels, seen: &BTreeSet<u64>) -> Round {
-    let computed = publish_compute(cell, recv, carried, seen);
+    let computed = publish_compute(cell, recv, carried, seen, true);
     publish_write(cell, stream, snap, recv, computed)
 }
 
 /// The samples a publish gives the user.
-pub(crate) fn published_ticks(origin: i64, bound: Option<i64>, samples: &[i64]) -> Vec<i64> {
-    samples.iter().copied().filter(|&tick| publishes(origin, bound, tick)).collect()
-}
-
-fn publishes(origin: i64, bound: Option<i64>, tick: i64) -> bool {
-    tick >= origin && bound.is_none_or(|bound| tick < bound)
+pub(crate) fn published_ticks(origin: i64, bound: Option<i64>, samples: &Ticks) -> Vec<i64> {
+    published_range(origin, bound, samples).map(|i| samples.at(i)).collect()
 }
 
 /// `S.take` over every cell: a timed value's take is the first cell that knows it; any other change is called.
@@ -697,17 +712,36 @@ mod tests {
         }
         let channels = Channels::first(1);
         let mut seen = BTreeSet::new();
-        assert_eq!(consume_samples(&c, channels, &seen, &[6, 7, 8, 9, 10]), vec![(1, 8), (2, 9)], "first offer");
+        assert_eq!(consume_samples(&c, channels, &seen, &Ticks::from_slice(&[6, 7, 8, 9, 10])), vec![(1, 8), (2, 9)], "first offer");
         seen.extend([1, 2]);
-        assert_eq!(consume_samples(&c, channels, &seen, &[10, 11]), vec![], "second offer, `seen` persisted");
+        assert_eq!(consume_samples(&c, channels, &seen, &Ticks::from_slice(&[10, 11])), vec![], "second offer, `seen` persisted");
         let only_first = BTreeSet::from([1]);
-        assert_eq!(consume_samples(&c, channels, &only_first, &[10]), vec![(2, 10)]);
+        assert_eq!(consume_samples(&c, channels, &only_first, &Ticks::from_slice(&[10])), vec![(2, 10)]);
         let mut left_entry = value(0, 100, 9);
         left_entry.accepted_at = Some(100);
         c.in_flight.push(InFlight { entry: left_entry, state: ValueState::Done(Terminal::Call(Outcome::Ok)), left: true });
-        assert!(consume_samples(&c, channels, &seen, &[99, 100]).contains(&(9, 100)), "a left value is consumed at its instant");
+        assert!(consume_samples(&c, channels, &seen, &Ticks::from_slice(&[99, 100])).contains(&(9, 100)), "a left value is consumed at its instant");
         let with_left = BTreeSet::from([1, 2, 9]);
-        assert!(consume_samples(&c, channels, &with_left, &[99, 100]).is_empty(), "and not again once seen");
+        assert!(consume_samples(&c, channels, &with_left, &Ticks::from_slice(&[99, 100])).is_empty(), "and not again once seen");
+    }
+
+    /// A sample is `step` device ticks (the decimation): a value is consumed by the first sample at or after its instant, a value
+    /// beyond the block's last sample is not consumed by it, and the progress passes the last published sample by one step.
+    #[test]
+    fn decimated_ticks_consume_at_the_first_sample_at_or_after_the_instant() {
+        use super::super::cell::{InFlight, ValueState};
+        use super::super::fixtures::cell;
+        let mut c = cell(Phase::Streaming(SegmentKey { by: Some(1), origin: 0 }), 0, None, 0);
+        for (id, e) in [(1, 9), (2, 10), (3, 31)] {
+            let mut entry = value(0, e, id);
+            entry.accepted_at = Some(0);
+            c.in_flight.push(InFlight { entry, state: ValueState::Done(Terminal::Call(Outcome::Ok)), left: false });
+        }
+        let block = Ticks::new(4, 2, 10);
+        assert_eq!(consume_samples(&c, Channels::first(1), &BTreeSet::new(), &block), vec![(1, 10), (2, 12)], "one value per sample; 3's instant is past the block's last tick, 22");
+        assert_eq!(consume_samples(&c, Channels::first(1), &BTreeSet::new(), &Ticks::new(4, 2, 0)), vec![], "an empty block");
+        let plan = plan_publish(6, Some(20), &block, 0);
+        assert_eq!((plan.progress, plan.discard), (20, 3), "published ticks 6..=18, the progress is the next sample's tick");
     }
 
     /// Sol E2a-1 P6: the computation reads a view and writes nothing; the write half rechecks and refuses a cell that moved on.
@@ -719,13 +753,13 @@ mod tests {
         let view = c.clone();
         let snap = c.snapshot();
         let samples = recv(1, &[0, 1, 2, 3]);
-        let computed = publish_compute(&view, &samples, Channels::first(1), &BTreeSet::new());
+        let computed = publish_compute(&view, &samples, Channels::first(1), &BTreeSet::new(), true);
         assert_eq!((view.progress, view.in_flight.len()), (0, 0), "the computation wrote nothing");
         assert!(c.unchanged_since(&view));
         // The cell moves on between the view and the write: the recheck notices, and a stale snapshot is refused.
         c.book_stop(2);
         assert!(!c.unchanged_since(&view), "a booked cut is a change");
-        let stale = publish_write(&mut c, 0, snap, &samples, publish_compute(&view, &samples, Channels::first(1), &BTreeSet::new()));
+        let stale = publish_write(&mut c, 0, snap, &samples, publish_compute(&view, &samples, Channels::first(1), &BTreeSet::new(), true));
         assert!(matches!(stale, Round::Stale));
         assert_eq!(c.progress, 0, "nothing was written");
         // Unchanged: the write publishes what the view computed.

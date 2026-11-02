@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use super::cell::{Cell, Drain, Outcome, Outstanding, Phase, Terminal, ValueState};
+use super::cell::{Cell, Drain, Outcome, Outstanding, Phase, Refusal, Terminal, ValueState};
 use crate::provider::core::RxEntry;
 
 /// The drain window: the drain deadline is the cut plus this (note 45 §4.4).
@@ -283,6 +283,8 @@ pub(crate) struct Brain {
     pub(crate) exit: Exit,
     /// The Restore and Move commands sent and not yet done, by command id: the channel each changes (written in `decide`, cleared at `Done`).
     pub(crate) pending: std::collections::BTreeMap<u64, usize>,
+    /// The in-flight bound this brain applies: [`IN_FLIGHT_BOUND`], except in the E2b bound diagnostic's runs of the measured runtime.
+    pub(crate) in_flight_bound: usize,
 }
 
 impl Brain {
@@ -300,6 +302,7 @@ impl Brain {
             guard: Vec::new(),
             exit: Exit::Running,
             pending: std::collections::BTreeMap::new(),
+            in_flight_bound: IN_FLIGHT_BOUND,
         }
     }
 
@@ -513,13 +516,24 @@ impl Brain {
         }
     }
 
+    /// Why held value `id` is not reserved now (`None`: it would be, or it is not held): the in-flight bound, or the cell's refusal. Read-only: the
+    /// measurement's attribution of a rejected attempt (it asks `reserve`'s own two checks, never a copy of them).
+    pub(crate) fn reservation_refusal(&self, id: u64, cells: &[Cell]) -> Option<NotReserved> {
+        let held = self.held.iter().find(|held| held.entry.order.1 == id)?;
+        let cell = &cells[held.stream];
+        if at_bound(cell, self.in_flight_bound) {
+            return Some(NotReserved::Bound);
+        }
+        cell.clone().reserve(held.entry.clone(), held.generation).err().map(NotReserved::Refused)
+    }
+
     /// Reserves one held value (the reservation of U1; the bound of I11; the refusal leaves it
     /// held, with no send).
     fn reserve(&mut self, id: u64, cells: &mut [Cell]) {
         let Some(position) = self.held.iter().position(|held| held.entry.order.1 == id) else { return };
         let held = self.held[position].clone();
         let cell = &mut cells[held.stream];
-        if cell.in_flight.len() >= IN_FLIGHT_BOUND {
+        if at_bound(cell, self.in_flight_bound) {
             return;
         }
         if cell.reserve(held.entry.clone(), held.generation).is_err() {
@@ -615,21 +629,21 @@ impl Brain {
                     cell.finish_call(id, outcome);
                 }
                 if self.consumed(id) {
-                    retire(id, cells);
+                    self.retired(id, cells);
                 }
             }
             Terminal::Call(outcome) => {
                 let disposition = if outcome == Outcome::Refused { Disposition::Refused } else { Disposition::Reported(Reason::Loss) };
                 self.dispose(id, disposition);
-                retire(id, cells);
+                self.retired(id, cells);
             }
             Terminal::Dropped => {
                 self.dispose(id, Disposition::Cancelled);
-                retire(id, cells);
+                self.retired(id, cells);
             }
             Terminal::Abandoned => {
                 self.dispose(id, Disposition::Reported(Reason::Loss));
-                retire(id, cells);
+                self.retired(id, cells);
             }
         }
         for stream in 0..cells.len() {
@@ -637,6 +651,15 @@ impl Brain {
         }
         self.drain_after_result(cells);
         self.recheck(cells);
+    }
+
+    /// Retires a value; a chain that was at the in-flight bound has a free slot, so its held values are reserved in order (note 45 §4.5).
+    fn retired(&mut self, id: u64, cells: &mut [Cell]) {
+        let full = cells.iter().position(|cell| at_bound(cell, self.in_flight_bound) && cell.state_of(id).is_some());
+        retire(id, cells);
+        if let Some(stream) = full.filter(|stream| self.held.iter().any(|held| held.stream == *stream)) {
+            self.front(vec![Op::Section(Section::ReserveHeld { stream })]);
+        }
     }
 
     /// A sample consumed a value: the first consumption is its disposition; a consumption of a
@@ -648,7 +671,7 @@ impl Brain {
             Some(_) => {}
         }
         if self.consumed(id) && done_ok(cells, id) {
-            retire(id, cells);
+            self.retired(id, cells);
         }
         self.recheck(cells);
     }
@@ -713,7 +736,7 @@ impl Brain {
         for id in ids {
             if self.disposition(id).is_none() {
                 self.dispose(id, Disposition::Reported(Reason::Loss));
-                retire(id, cells);
+                self.retired(id, cells);
             }
         }
         self.recheck(cells);
@@ -877,6 +900,18 @@ impl Brain {
             }
         }
     }
+}
+
+/// Why a held value is not reserved: its chain is at the in-flight bound, or the cell refuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotReserved {
+    Bound,
+    Refused(Refusal),
+}
+
+/// The chain holds as many values in flight as the bound (I11) allows.
+fn at_bound(cell: &Cell, bound: usize) -> bool {
+    cell.in_flight.len() >= bound
 }
 
 /// Removes the value from whichever cell holds it.
@@ -1696,6 +1731,84 @@ mod tests {
         }
         assert_eq!(brain.held.len(), 1);
         assert_eq!(brain.outbox.len(), 4);
+    }
+
+    /// The bound is the brain's own field (the measurement's bound diagnostic sets it): with 6 the fifth and sixth values are reserved and the
+    /// seventh waits; a slot that frees reserves it.
+    #[test]
+    fn u14a_the_bound_is_the_brains_own_parameter() {
+        let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(16), 0)];
+        let mut brain = Brain::new();
+        brain.in_flight_bound = 6;
+        for id in 1..=7 {
+            feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8 + id as i64, id), 1)));
+        }
+        assert_eq!((brain.held.len(), brain.outbox.len(), cells[0].in_flight.len()), (1, 6, 6), "the seventh waits at the bound of six");
+        assert_eq!(cells[0].take(1), Take::Call);
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
+        assert!(brain.held.is_empty(), "the freed slot reserves the held value");
+        assert_eq!(Brain::new().in_flight_bound, IN_FLIGHT_BOUND, "the default is the design's bound");
+    }
+
+    /// A held value at the in-flight bound is reserved when a slot frees (note 45 §4.5: it waits for capacity).
+    #[test]
+    fn u14b_held_value_reserved_when_a_slot_frees() {
+        let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(16), 0)];
+        let mut brain = Brain::new();
+        for id in 1..=5 {
+            feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8 + id as i64, id), 1)));
+        }
+        assert_eq!(brain.held.len(), 1);
+        assert_eq!(cells[0].take(1), Take::Call);
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
+        assert!(brain.held.is_empty());
+        assert_eq!(brain.outbox.len(), 5);
+        assert_eq!(brain.outbox.last(), Some(&timed(5, 0, 5.0, 13, 1)));
+    }
+
+    /// Sol E2b-A P1 (adjudicated): the retry uses the reservation rule as it is, so a held value whose instant has passed by the time a
+    /// slot frees is reserved and sent, as a late release is today (it will not be applied at its instant).
+    #[test]
+    fn u14c_held_value_retried_after_its_instant_is_reserved_and_sent() {
+        let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(32), 0)];
+        let mut brain = Brain::new();
+        for id in 1..=5 {
+            feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8 + id as i64, id), 1)));
+        }
+        assert_eq!(brain.held.len(), 1, "v5 (e = 13) waits at the bound");
+        cells[0].progress = 16;
+        assert_eq!(cells[0].take(1), Take::Call);
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
+        assert!(brain.held.is_empty());
+        assert_eq!(brain.outbox.last(), Some(&timed(5, 0, 5.0, 13, 1)), "sent after its instant (progress 16 > 13)");
+        assert!(cells[0].state_of(5).is_some(), "reserved in the cell");
+    }
+
+    /// The measurement's attribution of a rejected reservation: the bound, a refusal of the cell (a cell that is not running, a cut), or none (the
+    /// value is reservable, or not held at all).
+    #[test]
+    fn u14d_reservation_refusal_names_the_bound_and_the_cells_refusals() {
+        let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(16), 0)];
+        let mut brain = Brain::new();
+        for id in 1..=5 {
+            feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8 + id as i64, id), 1)));
+        }
+        assert_eq!(brain.held.len(), 1, "v5 waits at the bound");
+        assert_eq!(brain.reservation_refusal(5, &cells), Some(NotReserved::Bound));
+        assert_eq!(brain.reservation_refusal(1, &cells), None, "a value that is not held has no refusal");
+        // A lost (not running) cell refuses for its phase: not a bound hit.
+        cells[0].in_flight.truncate(2);
+        cells[0].phase = Phase::Off;
+        assert_eq!(brain.reservation_refusal(5, &cells), Some(NotReserved::Refused(Refusal::Phase)));
+        // A running cell with room, and a cut at or before the value's instant.
+        cells[0].phase = Phase::Streaming(seg(0));
+        assert_eq!(brain.reservation_refusal(5, &cells), None, "reservable");
+        cells[0].cut = Some(13);
+        assert_eq!(brain.reservation_refusal(5, &cells), Some(NotReserved::Refused(Refusal::Cut)));
+        assert_eq!(cells[0].in_flight.len(), 2, "asking changes nothing");
     }
 
     #[test]

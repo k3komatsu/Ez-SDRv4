@@ -336,19 +336,26 @@ impl Device for ModelDevice {
 pub(crate) struct CheckingDevice {
     pub(crate) inner: Arc<dyn Device>,
     pub(crate) failure: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) log: Mutex<Vec<(&'static str, bool)>>,
+    /// The call history; none in a measurement run (it would grow with every block).
+    pub(crate) log: Option<Mutex<Vec<(&'static str, bool)>>>,
 }
 
 impl CheckingDevice {
     pub(crate) fn new(inner: Arc<dyn Device>, failure: Arc<std::sync::atomic::AtomicBool>) -> CheckingDevice {
-        CheckingDevice { inner, failure, log: Mutex::new(Vec::new()) }
+        CheckingDevice { inner, failure, log: Some(Mutex::new(Vec::new())) }
+    }
+    /// The same assertion with no history.
+    pub(crate) fn unlogged(inner: Arc<dyn Device>, failure: Arc<std::sync::atomic::AtomicBool>) -> CheckingDevice {
+        CheckingDevice { inner, failure, log: None }
     }
     fn check(&self, name: &'static str) {
         assert_eq!(held_cells(), 0, "I10: device call `{name}` made while a cell guard is held");
-        self.log.lock().unwrap_or_else(|e| e.into_inner()).push((name, self.failure.load(std::sync::atomic::Ordering::SeqCst)));
+        if let Some(log) = &self.log {
+            log.lock().unwrap_or_else(|e| e.into_inner()).push((name, self.failure.load(std::sync::atomic::Ordering::SeqCst)));
+        }
     }
     pub(crate) fn calls(&self) -> Vec<(&'static str, bool)> {
-        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.log.as_ref().map_or_else(Vec::new, |log| log.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 }
 

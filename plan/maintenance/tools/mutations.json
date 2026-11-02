@@ -16509,7 +16509,7 @@
         "id": "E1-19",
         "name": "the in-flight bound is not enforced",
         "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-        "old": "cell.in_flight.len() >= IN_FLIGHT_BOUND",
+        "old": "cell.in_flight.len() >= bound",
         "new": "cell.in_flight.len() >= usize::MAX",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
@@ -16903,8 +16903,8 @@
         "id": "E1-76",
         "name": "a publish takes samples below the segment's origin",
         "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
-        "old": "tick >= origin && bound.is_none_or(|bound| tick < bound)",
-        "new": "bound.is_none_or(|bound| tick < bound)",
+        "old": "let from = samples.index_from(origin);",
+        "new": "let from = 0;",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "u08d_new_epoch_publishes_from_its_origin_only"
@@ -18195,8 +18195,8 @@
       "id": "E2-13",
       "name": "the publish decision gives the user samples at or past the cut",
       "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
-      "old": "tick >= origin && bound.is_none_or(|bound| tick < bound)",
-      "new": "tick >= origin",
+      "old": "bound.map_or(samples.count, |bound| samples.index_from(bound))",
+      "new": "samples.count",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s10_plan_change_in_recv_publishes_to_the_retiring_cut_then_quiesces"
@@ -18215,7 +18215,7 @@
       "id": "E2-15",
       "name": "a publish round does not count the samples it discards",
       "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
-      "old": "let discarded = if flushing { 0 } else { (recv.samples.len() - published.len()) as u64 };",
+      "old": "let discarded = plan.as_ref().map_or(0, |plan| plan.discard);",
       "new": "let discarded = 0;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -18335,8 +18335,8 @@
       "id": "E2-28",
       "name": "consume_samples offers a value that was already consumed",
       "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
-      "old": "if seen.contains(&id) { continue; }",
-      "new": "if false { continue; }",
+      "old": "seen.contains(&id) || !channels",
+      "new": "false || !channels",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "consume_samples_offers_each_value_once"
@@ -18700,5 +18700,517 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "h4_the_measurement_finds_the_apply_recorded_at_its_instant"
+    },
+    {
+      "id": "E2-62",
+      "name": "E2b's nearest-rank index is off by one (p99.9 of 10,000 reads index 9,990)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "(n * per_mille).div_ceil(1000).max(1) - 1",
+      "new": "(n * per_mille).div_ceil(1000).max(1)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "rank_index_is_nearest_rank_zero_based"
+    },
+    {
+      "id": "E2-63",
+      "name": "E2b does not count an update with no timed apply as a failure",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": ".filter(|(_, why)| why.is_some())",
+      "new": ".filter(|(_, why)| why.as_ref().is_some_and(|why| *why != Why::NoApply))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "account_counts_every_unapplied_update_as_a_failure"
+    },
+    {
+      "id": "E2-64",
+      "name": "E2b's loss check demands strictly less loss from the new owner than from today's",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "ln.iter().zip(&lt).all(|(n, t)| n <= t)",
+      "new": "ln.iter().zip(&lt).all(|(n, t)| n < t)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_verdict_compares_p99_and_each_loss_number_and_accounting"
+    },
+    {
+      "id": "E2-65",
+      "name": "E2b looks for the DSP log's entry at the tick after the update's instant",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "taken.get_mut(&(u.e, u.freq.to_bits()))",
+      "new": "taken.get_mut(&(u.e + 1, u.freq.to_bits()))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "account_matches_by_instant_and_frequency_not_by_order"
+    },
+    {
+      "id": "E2-66",
+      "name": "The brain does not retry a held value when a slot of its full chain frees",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "full.filter(|stream| self.held.iter().any(|held| held.stream == *stream))",
+      "new": "full.filter(|_| false)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u14b_held_value_reserved_when_a_slot_frees"
+    },
+    {
+      "id": "E2-67",
+      "name": "The receive executor turns a block into ticks one device tick apart whatever the decimation",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "rules::received_of(&result, sh.sample_ticks)",
+      "new": "rules::received_of(&result, 1)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s7b_decimation_two_value_consumed_by_the_sample_at_or_after_its_instant"
+    },
+    {
+      "id": "E2-68",
+      "name": "A publish passes the progress one tick beyond the last sample, not one sample",
+      "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+      "old": "samples.at(published.end - 1) + samples.step",
+      "new": "samples.at(published.end - 1) + 1",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "decimated_ticks_consume_at_the_first_sample_at_or_after_the_instant"
+    },
+    {
+      "id": "E2-69",
+      "name": "E2b's verdict needs only one repetition to pass, not every one",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "per_rep.iter().all(|r| r[\"pass\"] == json!(true))",
+      "new": "per_rep.iter().any(|r| r[\"pass\"] == json!(true))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_verdict_holds_every_repetition_not_only_the_pool"
+    },
+    {
+      "id": "E2-70",
+      "name": "E2b's verdict ignores a run's reasons for not being clean",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "out.failures == 0 && out.unclean.is_empty()",
+      "new": "out.updates > 0 && out.failures == 0",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_verdict_compares_p99_and_each_loss_number_and_accounting"
+    },
+    {
+      "id": "E2-71",
+      "name": "E2b does not count a timed DSP entry that no update matched as an extra entry",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "extra_dsp: timed_dsp - matched_dsp",
+      "new": "extra_dsp: 0",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_stray_dsp_entry_labels_no_update"
+    },
+    {
+      "id": "E2-72",
+      "name": "E2b's reconciliation does not count the reader's trailing gap",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "let trailing = trailing_gap(tap.end, read.end);",
+      "new": "let trailing = 0;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_endpoint_reconciles_the_published_stream_the_counters_and_the_reader"
+    },
+    {
+      "id": "E2-73",
+      "name": "E2b's published-span identity leaves out the samples missing from the timestamps",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "tap.samples as i64 + tap.missing as i64 == tap.end",
+      "new": "tap.samples as i64 == tap.end",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_endpoint_reconciles_the_published_stream_the_counters_and_the_reader"
+    },
+    {
+      "id": "E2-74",
+      "name": "E2b's tap does not count a leading gap (the first block's index against the stream's start)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "if k > expected {",
+      "new": "if k > expected && expected > 0 {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_reader_counts_the_leading_gap"
+    },
+    {
+      "id": "E2-75",
+      "name": "E2b's sink reader starts from the end of the stream, so it counts no leading gap",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "let mut expected = 0i64;",
+      "new": "let mut expected = i64::MAX;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_reader_counts_the_leading_gap"
+    },
+    {
+      "id": "E2-76",
+      "name": "E2b checks a recorded return against twice the update's own deadline",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "r.ret_ns > u.e_ns + EXPIRY_NS",
+      "new": "r.ret_ns > u.e_ns + 2 * EXPIRY_NS",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_return_after_its_own_deadline_is_expired"
+    },
+    {
+      "id": "E2-77",
+      "name": "E2b files a rejection at the in-flight bound under the phase reason",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "NotReserved::Bound => 0,",
+      "new": "NotReserved::Bound => 1,",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
+    },
+    {
+      "id": "E2-78",
+      "name": "The brain's refusal reader reports no refusal for a chain at the in-flight bound",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "return Some(NotReserved::Bound);",
+      "new": "return None;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u14d_reservation_refusal_names_the_bound_and_the_cells_refusals"
+    },
+    {
+      "id": "E2-79",
+      "name": "E2b counts any rejection of a value as a bound hit",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "by_reason.first().is_some_and(|n| *n > 0)",
+      "new": "by_reason.iter().any(|n| *n > 0)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "only_a_rejection_at_the_bound_is_a_bound_hit"
+    },
+    {
+      "id": "E2-80",
+      "name": "E2b's run stays clean when an owner's thread panicked",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "if finish[\"panics\"].as_array().is_some_and(|p| !p.is_empty()) {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_failed_stop_or_a_panic_makes_the_run_unclean"
+    },
+    {
+      "id": "E2-81",
+      "name": "E2b's run stays clean when the executors did not exit orderly",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "finish[\"orderly_exit\"] == json!(false)",
+      "new": "finish[\"orderly_exit\"] == json!(true)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_failed_stop_or_a_panic_makes_the_run_unclean"
+    },
+    {
+      "id": "E2-82",
+      "name": "E2b's run stays clean when the owner did not stop and join",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "if finish[\"joined\"] != json!(true) {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_failed_stop_or_a_panic_makes_the_run_unclean"
+    },
+    {
+      "id": "E2-83",
+      "name": "E2b's repetition passes without its runs being clean",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "\"pass\": clean_today && clean_new && checks.iter().all(|c| c.1)",
+      "new": "\"pass\": checks.iter().all(|c| c.1)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "an_unclean_repetition_fails_its_own_pass"
+    },
+    {
+      "id": "E2-84",
+      "name": "A targeted wake reaches no actor",
+      "file": "crates/ezsdr-radio-uhd/src/brain/force.rs",
+      "old": "let reg = self.lock(); if let Some(cv) = reg.cvs.get(&actor) { cv.notify_all(); }",
+      "new": "let reg = self.lock(); if let Some(cv) = reg.cvs.get(&actor) { let _ = cv; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15a_a_wake_reaches_the_named_actor_alone"
+    },
+    {
+      "id": "E2-85",
+      "name": "A targeted wake reaches the wrong actor",
+      "file": "crates/ezsdr-radio-uhd/src/brain/force.rs",
+      "old": "if let Some(cv) = reg.cvs.get(&actor) {",
+      "new": "if let Some(cv) = reg.cvs.get(&Actor::Main) {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15a_a_wake_reaches_the_named_actor_alone"
+    },
+    {
+      "id": "E2-86",
+      "name": "A change only a controller reads wakes every actor in a targeted run",
+      "file": "crates/ezsdr-radio-uhd/src/brain/force.rs",
+      "old": "pub(crate) fn changed(&self) { if !self.targeted() { self.notify(); } }",
+      "new": "pub(crate) fn changed(&self) { self.notify(); }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15b_changed_wakes_no_one_and_notify_wakes_everyone"
+    },
+    {
+      "id": "E2-87",
+      "name": "A push wakes the timer instead of the queue's actor",
+      "file": "crates/ezsdr-radio-uhd/src/brain/shared.rs",
+      "old": "self.sched.wake(queue.owner);",
+      "new": "self.sched.wake(Actor::Timer);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15a_a_real_clock_run_wakes_each_idle_actor_by_its_own_queue"
+    },
+    {
+      "id": "E2-88",
+      "name": "The brain's routing of a timer wakes the brain instead of the timer thread",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "sh.sched.wake(Actor::Timer);",
+      "new": "sh.sched.wake(Actor::Brain);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline"
+    },
+    {
+      "id": "E2-89",
+      "name": "The timer thread sleeps until woken whatever deadline is booked",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "None => Err(timers.iter().map(|&(_, at)| at).min().map(|at| sh.tick * (at - now).clamp(1, 1 << 20) as u32)),",
+      "new": "None => Err(None),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline"
+    },
+    {
+      "id": "E2-90",
+      "name": "An acquisition that never waits does not see an abort",
+      "file": "crates/ezsdr-radio-uhd/src/brain/force.rs",
+      "old": "if self.aborted.load(Ordering::SeqCst) { Self::abort_now(self.lock()); }",
+      "new": "if false { Self::abort_now(self.lock()); }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15f_abort_ends_an_acquisition_that_never_waits"
+    },
+    {
+      "id": "E2-91",
+      "name": "The measurement's checking decorator keeps a call history",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model_device.rs",
+      "old": "CheckingDevice { inner, failure, log: None }",
+      "new": "CheckingDevice { inner, failure, log: Some(Mutex::new(Vec::new())) }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15c_an_unlogged_checking_device_records_nothing_and_still_asserts"
+    },
+    {
+      "id": "E2-92",
+      "name": "The decorator does not clear the request tag after the apply that takes it",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "let id = self.tag.swap(0, Relaxed);",
+      "new": "let id = self.tag.load(Relaxed);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_decorator_records_timed_applies_and_receive_counts_and_forwards_the_rest"
+    },
+    {
+      "id": "E2-93",
+      "name": "S's apply is not tagged with its request's id",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "bench.clock.tag(cmd.id);",
+      "new": "let _ = cmd.id;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_value_applied_by_the_measured_runtime_carries_its_id_and_is_seen_retiring"
+    },
+    {
+      "id": "E2-94",
+      "name": "A rejection at the bound is not counted as a bound rejection",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "if reason == NotReserved::Bound { self.bound_rejections.fetch_add(1, Relaxed); }",
+      "new": "if reason != NotReserved::Bound { self.bound_rejections.fetch_add(1, Relaxed); }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
+    },
+    {
+      "id": "E2-95",
+      "name": "A value that left the chain is not stamped as retired",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "self.stage(Stage::Retired, *id);",
+      "new": "let _ = id;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_in_flight_observation_stamps_each_value_once_when_it_leaves"
+    },
+    {
+      "id": "E2-96",
+      "name": "A retirement is counted twice",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "self.retired.fetch_add(1, Relaxed);",
+      "new": "self.retired.fetch_add(2, Relaxed);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_in_flight_observation_stamps_each_value_once_when_it_leaves"
+    },
+    {
+      "id": "E2-97",
+      "name": "The occupancy is not stored",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "self.occupancy.store(ids.len(), Relaxed);",
+      "new": "self.occupancy.store(0, Relaxed);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_in_flight_observation_stamps_each_value_once_when_it_leaves"
+    },
+    {
+      "id": "E2-98",
+      "name": "The brain's operation does not report the chain's in-flight values",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "bench.observe_in_flight(ids);",
+      "new": "let _ = ids;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_value_applied_by_the_measured_runtime_carries_its_id_and_is_seen_retiring"
+    },
+    {
+      "id": "E2-99",
+      "name": "A held value is reserved against the design's bound, not the brain's",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "let cell = &mut cells[held.stream]; if at_bound(cell, self.in_flight_bound) { return; }",
+      "new": "let cell = &mut cells[held.stream]; if at_bound(cell, IN_FLIGHT_BOUND) { return; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u14a_the_bound_is_the_brains_own_parameter"
+    },
+    {
+      "id": "E2-100",
+      "name": "The measured runtime ignores the bound a diagnostic run names",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/newrt.rs",
+      "old": "world.brain.in_flight_bound = opts.bound;",
+      "new": "let _ = opts.bound;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_bound_is_the_designs_unless_a_diagnostic_run_names_another"
+    },
+    {
+      "id": "E2-101",
+      "name": "The loss's missing samples are the published stream's gaps, not the reader's",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "reader_missing_total(&read, tap_stats.end)",
+      "new": "tap_stats.missing",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_loss_counts_the_samples_the_reader_missed_at_the_tail"
+    },
+    {
+      "id": "E2-102",
+      "name": "The reader's trailing gap is not counted in its missing samples",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "read.missing + trailing_gap(tap_end, read.end)",
+      "new": "read.missing",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_readers_missing_samples_are_its_gaps_and_its_trailing_gap_once_each"
+    },
+    {
+      "id": "E2-103",
+      "name": "The logs are read before the owner stops",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "let finish = rig.finish(); let reader_ok = reader.end();",
+      "new": "let early_rows = timing.rows(); let finish = rig.finish(); let reader_ok = reader.end();",
+      "old2": "let rows = timing.rows();",
+      "new2": "let rows = early_rows;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_call_made_while_the_owner_stops_is_accounted"
+    },
+    {
+      "id": "E2-104",
+      "name": "A measured run keeps a per-call history",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "CheckingDevice::unlogged(inner, failure.clone())",
+      "new": "CheckingDevice::new(inner, failure.clone())",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_measured_run_keeps_no_per_call_log_while_it_receives"
+    },
+    {
+      "id": "E2-105",
+      "name": "A booking wakes the timer thread only when it is the first",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((stream, at)); sh.sched.wake(Actor::Timer);",
+      "new": "let first = { let mut timers = sh.timers.lock().unwrap_or_else(|e| e.into_inner()); timers.push((stream, at)); timers.len() == 1 }; if first { sh.sched.wake(Actor::Timer); }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline"
+    },
+    {
+      "id": "E2-106",
+      "name": "A free run's write does not recheck the cell against the view it computed from",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "cell.unchanged_since(&view).then(|| rules::publish_write(cell, k, snap, &recv, computed))",
+      "new": "Some(rules::publish_write(cell, k, snap, &recv, computed))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15e_a_free_run_recomputes_when_the_first_view_went_stale_before_the_write"
+    },
+    {
+      "id": "E2-107",
+      "name": "A backlog excursion that coincides with a bound hit is counted as an excursion alone",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "(true, true) => both += 1,",
+      "new": "(true, true) => backlog_only += 1,",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_coincidence_counts_excursions_against_bound_hits_per_second"
+    },
+    {
+      "id": "E2-108",
+      "name": "A DSP entry of another frequency is paired as an update's application",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "if row.freq.to_bits() == freq.to_bits() {",
+      "new": "if true {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_bound_diagnostic_pairs_an_update_with_its_apply_its_application_and_its_retirement"
+    },
+    {
+      "id": "E2-109",
+      "name": "The scheduler's waiting probe never reports a sleeping actor",
+      "file": "crates/ezsdr-radio-uhd/src/brain/force.rs",
+      "old": "reg.sleeping.insert(actor);",
+      "new": "reg.sleeping.remove(&actor);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15a_a_real_clock_run_wakes_each_idle_actor_by_its_own_queue"
+    },
+    {
+      "id": "E2-110",
+      "name": "The scheduler does not count an actor's entries into its wait",
+      "file": "crates/ezsdr-radio-uhd/src/brain/force.rs",
+      "old": "*reg.waits.entry(actor).or_default() += 1;",
+      "new": "*reg.waits.entry(actor).or_default() += 0;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline"
+    },
+    {
+      "id": "E2-111",
+      "name": "An untagged apply of the new runtime does not make the run unclean",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "if owner == Owner::New && untagged_rows > 0 {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_moved_booking_is_attributed_by_the_owners_own_identity_and_an_untagging_owner_is_labelled_inferred"
+    },
+    {
+      "id": "E2-112",
+      "name": "A booking the owner moved is not reported from the owner's identity",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "owner_booked(u).filter(|e| *e != u.e)",
+      "new": "owner_booked(u).filter(|e| *e == u.e)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_moved_booking_is_attributed_by_the_owners_own_identity_and_an_untagging_owner_is_labelled_inferred"
     }
   ]

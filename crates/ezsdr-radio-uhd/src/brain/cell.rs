@@ -88,12 +88,51 @@ pub(crate) enum Publish {
     Published { cut_reached: bool },
 }
 
+/// The device ticks of one block's samples: one sample every `step` ticks (the decimation) from `first`. The protocol reads ticks only
+/// through this, so a block is never expanded into a vector of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ticks {
+    pub(crate) first: i64,
+    pub(crate) step: i64,
+    pub(crate) count: usize,
+}
+
+impl Default for Ticks {
+    fn default() -> Self {
+        Ticks { first: 0, step: 1, count: 0 }
+    }
+}
+
+impl Ticks {
+    pub(crate) fn new(first: i64, step: i64, count: usize) -> Ticks {
+        assert!(step > 0, "a sample is at least one device tick long");
+        Ticks { first, step, count }
+    }
+
+    /// The ticks of `ticks`, which must be an arithmetic progression (a block's samples are).
+    pub(crate) fn from_slice(ticks: &[i64]) -> Ticks {
+        let step = if ticks.len() >= 2 { ticks[1] - ticks[0] } else { 1 };
+        assert!(ticks.windows(2).all(|pair| pair[1] - pair[0] == step), "a block's ticks are evenly spaced: {ticks:?}");
+        Ticks::new(ticks.first().copied().unwrap_or(0), step, ticks.len())
+    }
+
+    pub(crate) fn at(&self, index: usize) -> i64 {
+        self.first + index as i64 * self.step
+    }
+
+    /// The index of the first sample at or after `tick` (`count` when none is).
+    pub(crate) fn index_from(&self, tick: i64) -> usize {
+        let behind = i128::from(tick) - i128::from(self.first);
+        if behind <= 0 { 0 } else { (((behind + i128::from(self.step) - 1) / i128::from(self.step)).min(self.count as i128)) as usize }
+    }
+}
+
 /// A recv begun under `epoch`, with its identity and the sample ticks it buffered, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Recv {
     pub(crate) epoch: u64,
     pub(crate) handle: u64,
-    pub(crate) samples: Vec<i64>,
+    pub(crate) samples: Ticks,
 }
 
 /// The epoch a plan change replaced, while its recv may still publish (note 45 §4.6).
@@ -741,7 +780,7 @@ mod tests {
         let mut c = old_epoch();
         c.start_confirmed(20);
         assert_eq!(c.progress, 20);
-        let fresh = recv(2, &[4, 20, 21]);
+        let fresh = recv(2, &[19, 20, 21]);
         assert!(matches!(c.publish(c.snapshot(), &fresh), Publish::Published { .. }));
         assert_eq!(c.progress, 22);
         assert_eq!(c.discarded, 1);

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use super::cell::{Outcome, Recv, Take, Terminal};
+use super::cell::{Cell, Outcome, Phase, Recv, Take, Terminal};
 use super::core::{Change, Command, Exit, Input, Op, SetCmd};
 use super::force::{Actor, Forced, Point, Sched, join_all, spawn_on};
 use super::model_device::{CheckingDevice, LEvent, ModelDevice, PARTIAL};
@@ -39,6 +39,10 @@ struct Sources {
     now: Box<dyn Fn() -> i64 + Send + Sync>,
     effective: Box<dyn Fn() -> i64 + Send + Sync>,
     fake: Option<Arc<FakeDevice>>,
+    /// E2b's measurement hooks (counters and the receive work), absent in every other run.
+    bench: Option<Arc<super::speed::Bench>>,
+    /// Device ticks per receive sample (the decimation at the device).
+    sample_ticks: i64,
 }
 
 /// A running system: the shared state, the model behind it, and the threads.
@@ -62,14 +66,21 @@ impl Runtime {
         let sched = Sched::new(forcing);
         let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
         let (now_model, effective_model) = (model.clone(), model.clone());
-        let sources =
-            Sources { tick: Duration::from_millis(1), inner: model.clone(), now: Box::new(move || now_model.now()), effective: Box::new(move || effective_model.state().dev.last_command), fake: None };
+        let sources = Sources {
+            tick: Duration::from_millis(1),
+            inner: model.clone(),
+            now: Box::new(move || now_model.now()),
+            effective: Box::new(move || effective_model.state().dev.last_command),
+            fake: None,
+            bench: None,
+            sample_ticks: 1,
+        };
         Runtime::build(world, sched, model, real_panic, quirk, sources)
     }
 
     /// A free run over a `FakeDevice` on its own clock (S6, S7): the cells, queues and handles come from `world`, the device
     /// from `fake`, which the caller has opened and started to match them. The `now` source is the fake's own clock.
-    pub(crate) fn start_fake(world: &World, fake: Arc<FakeDevice>) -> Runtime {
+    pub(crate) fn start_fake(world: &World, fake: Arc<FakeDevice>, sample_ticks: i64) -> Runtime {
         let sched = Sched::new(false);
         let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
         let now_fake = fake.clone();
@@ -79,21 +90,45 @@ impl Runtime {
             now: Box::new(move || now_fake.time_now().expect("the fake's clock")),
             effective: Box::new(|| i64::MIN),
             fake: Some(fake),
+            bench: None,
+            sample_ticks,
         };
+        Runtime::build(world, sched, model, None, Quirk::None, sources)
+    }
+
+    /// E2b's free run over a `FakeDevice` seen through `device` (a timing decorator over `fake`), with its own `now` source and the
+    /// measurement hooks `bench`.
+    pub(crate) fn start_measured(
+        world: &World,
+        fake: Arc<FakeDevice>,
+        device: Arc<dyn Device>,
+        now: Box<dyn Fn() -> i64 + Send + Sync>,
+        bench: Arc<super::speed::Bench>,
+        sample_ticks: i64,
+    ) -> Runtime {
+        let sched = Sched::new(false);
+        let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
+        let sources =
+            Sources { tick: Duration::from_nanos(1_000_000_000 / fake.master_clock_rate()), inner: device, now, effective: Box::new(|| i64::MIN), fake: Some(fake), bench: Some(bench), sample_ticks };
         Runtime::build(world, sched, model, None, Quirk::None, sources)
     }
 
     fn build(world: &World, sched: Arc<Sched>, model: Arc<ModelDevice>, real_panic: Option<usize>, quirk: Quirk, sources: Sources) -> Runtime {
         let forcing = sched.forcing();
-        let Sources { tick, inner, now, effective, fake } = sources;
+        let Sources { tick, inner, now, effective, fake, bench, sample_ticks } = sources;
         // Every thread of a fake run on a manual clock is a participant of it (the receive executors as production's are, and the brain, S, K and
         // the timer, so none can fall behind simulated time).
         let host = fake.as_ref().map(|fake| fake.host()).filter(|host| host.is_manual());
         if let Some(host) = &host {
             sched.set_host(host.clone());
         }
+        // A free run on a fake's real clock waits and wakes per actor (a manual clock's participants wait on that clock).
+        if !forcing && fake.is_some() && host.is_none() {
+            sched.set_targeted();
+        }
         let failure = Arc::new(AtomicBool::new(false));
-        let checking = Arc::new(CheckingDevice::new(inner, failure.clone()));
+        // A measurement run keeps no per-call history (the no-cell-held assertion stays).
+        let checking = Arc::new(if bench.is_some() { CheckingDevice::unlogged(inner, failure.clone()) } else { CheckingDevice::new(inner, failure.clone()) });
         let streams = world.cells.len();
         let sh = Arc::new(Shared {
             sched: sched.clone(),
@@ -102,10 +137,10 @@ impl Runtime {
             failure,
             gate: Mutex::new(None),
             device: checking.clone(),
-            inbox: Queue::new(),
-            s_fifo: Queue::new(),
+            inbox: Queue::new(Actor::Brain),
+            s_fifo: Queue::new(Actor::Settings),
             s_terminate: AtomicBool::new(world.settings.terminate),
-            r_fifo: (0..streams).map(|_| Queue::new()).collect(),
+            r_fifo: (0..streams).map(|k| Queue::new(Actor::Rx(k))).collect(),
             rx: (0..streams)
                 .map(|k| {
                     let carried = world
@@ -116,7 +151,7 @@ impl Runtime {
                     Mutex::new(RxState { handle: world.rx[k].handle, handles: world.rx[k].handles, carried, consumed: world.rx[k].consumed.clone(), flush_end: world.rx[k].flush_end })
                 })
                 .collect(),
-            k_fifo: Queue::new(),
+            k_fifo: Queue::new(Actor::Clock),
             timers: Mutex::new(world.timers.clone()),
             sink: Mutex::new(Sink { reservations: world.monitor.reserved.iter().map(|(&id, &(channel, segment, epoch))| (id, channel, segment, epoch)).collect(), ..Sink::default() }),
             params: world.params,
@@ -131,6 +166,8 @@ impl Runtime {
             ops_run: std::sync::atomic::AtomicUsize::new(0),
             before_write: Mutex::new(None),
             after_batch: Mutex::new(None),
+            bench,
+            sample_ticks,
         });
         if quirk == Quirk::AcceptInEffect {
             let weak = Arc::downgrade(&sh);
@@ -325,18 +362,23 @@ impl Drop for Runtime {
 
 // ------------------------------------------------------------------------------------------------ the brain
 
-fn route(sh: &Arc<Shared>, command: Command) {
+pub(super) fn route(sh: &Arc<Shared>, command: Command) {
     sh.sink().routed.push(command.clone());
     match command {
-        Command::Settings(cmd) => sh.push(&sh.s_fifo, cmd),
+        Command::Settings(cmd) => {
+            if let Some(bench) = &sh.bench {
+                bench.stage(super::speed::Stage::Pushed, cmd.id);
+            }
+            sh.push(&sh.s_fifo, cmd)
+        }
         Command::Rx { stream, op } => sh.push(&sh.r_fifo[stream], op),
         Command::Timer { stream, at } => {
             sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((stream, at));
-            sh.sched.notify();
+            sh.sched.wake(Actor::Timer);
         }
         Command::SettingsTerminate => {
             sh.s_terminate.store(true, Ordering::SeqCst);
-            sh.sched.notify();
+            sh.sched.wake(Actor::Settings);
         }
     }
 }
@@ -352,15 +394,29 @@ fn brain_op(sh: &Arc<Shared>, op: Op) {
     }
     let reserving = rules::reserving(&sh.brain(), &op);
     let number = sh.ops_run.fetch_add(1, Ordering::SeqCst);
+    let mut attempt = None;
+    let mut in_flight = None;
     sh.with_cells(|cells| {
         assert!(!sh.panic_in_op.lock().unwrap_or_else(|e| e.into_inner()).contains(&number), "injected panic in a brain operation");
         let mut brain = sh.brain();
         brain.op(cells);
-        if let Some(reserved) = reserving.and_then(|r| rules::reserved(&brain, cells, r)) {
+        let reserved = reserving.and_then(|r| rules::reserved(&brain, cells, r));
+        // A rejected attempt's reason is read for the measurement only (a refusal leaves the cells as they were).
+        let reason = if sh.bench.is_some() && reserved.is_none() { reserving.and_then(|(id, _, _)| brain.reservation_refusal(id, cells)) } else { None };
+        attempt = reserving.map(|(id, _, _)| (id, reserved.is_some(), reason));
+        // The diagnostic's occupancy and retirement observation (stream 0 only), read where the operation ran.
+        in_flight = sh.bench.as_ref().filter(|bench| bench.stamps.is_some()).map(|_| cells[0].in_flight.iter().map(|flight| flight.entry.order.1).collect::<Vec<u64>>());
+        if let Some(reserved) = reserved {
             let (id, channel, segment, epoch) = reserved;
             sh.sink().reservations.push((id, channel, segment, epoch));
         }
     });
+    if let (Some(bench), Some((id, reserved, reason))) = (&sh.bench, attempt) {
+        bench.reserve_attempt(id, reserved, reason);
+    }
+    if let (Some(bench), Some(ids)) = (&sh.bench, &in_flight) {
+        bench.observe_in_flight(ids);
+    }
     let (dead, commands) = {
         let mut brain = sh.brain();
         (brain.dead(), std::mem::take(&mut brain.outbox))
@@ -374,7 +430,7 @@ fn brain_op(sh: &Arc<Shared>, op: Op) {
     for command in commands {
         route(sh, command);
     }
-    sh.sched.notify();
+    sh.sched.changed();
 }
 
 /// Every queued operation of the brain; true when the brain is dead after one of them.
@@ -432,6 +488,9 @@ fn run_brain(sh: &Arc<Shared>) {
     loop {
         let pred = sh.pred(|s| s.inbox.nonempty() || s.stopping.load(Ordering::SeqCst));
         let (_, input) = sh.sched.acquire(a, Point::BStep, pred, || sh.inbox.pop());
+        if let (Some(bench), Some(Input::Release(held))) = (&sh.bench, &input) {
+            bench.stage(super::speed::Stage::BrainTake, held.entry.order.1);
+        }
         let Some(mut input) = input else {
             sh.brain_gone.store(true, Ordering::SeqCst);
             sh.sched.notify();
@@ -475,6 +534,9 @@ fn run_settings(sh: &Arc<Shared>) {
             sh.mark_exited(a);
             break;
         };
+        if let Some(bench) = &sh.bench {
+            bench.stage(super::speed::Stage::STake, cmd.id);
+        }
         if !settle_one(sh, &cmd) {
             break;
         }
@@ -494,6 +556,9 @@ fn settle_one(sh: &Arc<Shared>, cmd: &SetCmd) -> bool {
     let early = (sh.quirk == Quirk::CallBeforeTake).then(|| call_settings(sh, cmd));
     let take = sh.with_cells(|cells| rules::take_command(cells, cmd));
     if take != Take::Call {
+        if let Some(bench) = &sh.bench {
+            bench.count(&bench.take_dropped);
+        }
         sh.sink().terminals.push((cmd.id, Terminal::Dropped));
         sh.send(Input::Done { id: cmd.id, terminal: Terminal::Dropped });
         return true;
@@ -528,7 +593,7 @@ fn settle_one(sh: &Arc<Shared>, cmd: &SetCmd) -> bool {
         sh.sched.hook(a, Point::SResult);
         sh.with_cells(|cells| rules::settle_call(cells, cmd, terminal));
         sh.sink().terminals.push((cmd.id, terminal));
-        sh.sched.notify();
+        sh.sched.changed();
     };
     if sh.quirk == Quirk::SendBeforeResult {
         sh.sched.hook(a, Point::SSend);
@@ -547,6 +612,10 @@ fn call_settings(sh: &Arc<Shared>, cmd: &SetCmd) -> Outcome {
     match rules::settings_call(&cmd.change) {
         Some((channel, freq, at)) => {
             let settings = Settings { freq: freq.map(|f| f as f64), ..Settings::default() };
+            // The measurement's decorator records which request this call carries (the owner's own identity of the booking).
+            if let Some(bench) = &sh.bench {
+                bench.clock.tag(cmd.id);
+            }
             outcome_of(&sh.device.apply(Dir::Rx, channel, &settings, at))
         }
         // A move has no settings call: it takes the native lock through a null call, whose own result is the outcome (a lost device
@@ -563,10 +632,18 @@ fn call_settings(sh: &Arc<Shared>, cmd: &SetCmd) -> Outcome {
 
 fn run_rx(sh: &Arc<Shared>, k: usize) {
     let a = Actor::Rx(k);
+    // The loop's one decision per iteration, with a view of the cell when the iteration receives (a free run: the first of the block's two cell
+    // sections; forcing takes its snapshot and view at their own events).
+    let decide: Arc<dyn Fn() -> Result<Looked, Option<Duration>> + Send + Sync> = {
+        let s = sh.clone();
+        Arc::new(move || {
+            let looked = loop_next(&s, k, !s.sched.forcing());
+            if s.stopping.load(Ordering::SeqCst) || looked.next != Next::Idle { Ok(looked) } else { Err(looked.timed.then_some(Duration::from_millis(2))) }
+        })
+    };
     loop {
-        let pred = sh.pred(move |s| s.stopping.load(Ordering::SeqCst) || loop_next(s, k) != Next::Idle);
-        sh.sched.acquire(a, Point::RCheck, pred, || ());
-        let next = loop_next(sh, k);
+        let looked = sh.sched.acquire_with(a, Point::RCheck, decide.clone());
+        let (next, view) = looked.map_or((Next::Idle, None), |l| (l.next, l.view));
         if sh.stopping.load(Ordering::SeqCst) {
             return;
         }
@@ -591,24 +668,41 @@ fn run_rx(sh: &Arc<Shared>, k: usize) {
                 }
             }
             Next::FlushStop => run_call(sh, k, rules::RxCall::FlushStop, false, false),
-            Next::Recv => recv_cycle(sh, k),
+            Next::Recv => recv_cycle(sh, k, view),
             Next::Idle => {}
         }
     }
 }
 
+/// The receive executor's loop-top decision, with what it read.
+struct Looked {
+    next: Next,
+    /// A copy of the cell, taken in the same section when the decision is to receive and a view was asked for.
+    view: Option<Cell>,
+    /// An idle executor whose decision depends on the time (a flush that ends at its drain window): it wakes by itself.
+    timed: bool,
+}
+
 /// What the receive executor does at its loop top (the shared decision, read from the shared state). `carried` (the channels the
 /// streamer was opened on) is the definition `World::carried` reads from the device model: it changes only at open and close.
-fn loop_next(sh: &Shared, k: usize) -> Next {
+fn loop_next(sh: &Shared, k: usize, want_view: bool) -> Looked {
     let failure = sh.failed();
     let fifo = sh.r_fifo[k].nonempty();
-    let st = sh.rx_state(k).clone();
-    let now = (sh.now)();
+    // The executor's own state, copied out so no lock is held across the cell's (`consumed` holds only values still in the cell: see `recv_cycle`).
+    let (handle_open, flush_end, consumed) = {
+        let st = sh.rx_state(k);
+        (st.handle.is_some(), st.flush_end, st.consumed.clone())
+    };
+    // The time is read only where the decision uses it: a flush has an end only while it runs.
+    let now = if flush_end.is_some() { (sh.now)() } else { 0 };
     let at_end = sh.at_end();
-    let cell = sh.lock_cell(k);
-    let over = rules::flush_over(&cell, &st.consumed, st.flush_end, now, at_end);
-    let receiving = rules::receiving(&cell, st.handle.is_some());
-    rules::next_action(failure, fifo, over, receiving, at_end)
+    let (next, view) = view_of(sh, k, |cell| {
+        let over = rules::flush_over(cell, &consumed, flush_end, now, at_end);
+        let receiving = rules::receiving(cell, handle_open);
+        let next = rules::next_action(failure, fifo, over, receiving, at_end);
+        (next, (want_view && next == Next::Recv).then(|| cell.clone()))
+    });
+    Looked { next, view, timed: flush_end.is_some() }
 }
 
 /// One device call of the executor with its steps: the gate around a lifecycle call (rechecking the flag inside it), the
@@ -704,10 +798,31 @@ fn do_op(sh: &Arc<Shared>, k: usize, op: DeviceOp) -> CallResult {
 }
 
 /// One recv cycle: snapshot, the recv, the publish (recomputing from a fresh snapshot while it is stale), the boundaries.
-fn recv_cycle(sh: &Arc<Shared>, k: usize) {
+/// `R`'s one acquisition of its cell (the loop top's decision and view, a later view, or the write of a block). In a diagnostic run its wait and hold are recorded here, after the
+/// lock is released, so the recording is not inside the time it measures.
+fn view_of<T>(sh: &Shared, k: usize, f: impl FnOnce(&mut Cell) -> T) -> T {
+    if !super::speed::instrument_on() {
+        return sh.with_cell(k, f);
+    }
+    let asked = std::time::Instant::now();
+    let (value, got, released) = sh.with_cell(k, |cell| {
+        let got = std::time::Instant::now();
+        let value = f(cell);
+        (value, got, std::time::Instant::now())
+    });
+    super::speed::R_CELL_WAIT.record(got - asked);
+    super::speed::R_CELL_HOLD.record(released - got);
+    value
+}
+
+fn recv_cycle(sh: &Arc<Shared>, k: usize, mut first_view: Option<Cell>) {
     let a = Actor::Rx(k);
     sh.sched.hook(a, Point::RSnap);
-    let mut snap = sh.with_cell(k, |cell| cell.snapshot());
+    // A free run's snapshot is the loop top's view: the recv began under it, and the first write rechecks against that same copy.
+    let mut snap = match &first_view {
+        Some(view) => view.snapshot(),
+        None => sh.with_cell(k, |cell| cell.snapshot()),
+    };
     sh.sched.hook(a, Point::RBegin);
     if sh.at_end() {
         return;
@@ -715,7 +830,7 @@ fn recv_cycle(sh: &Arc<Shared>, k: usize) {
     let handle = sh.rx_state(k).handle.expect("an open handle");
     let result = sh.device.rx_recv(k, sh.params.packet, Duration::from_millis(sh.params.recv_timeout as u64), true);
     let now = (sh.now)();
-    let ended = rules::end_of_recv(rules::received_of(&result), k, now);
+    let ended = rules::end_of_recv(rules::received_of(&result, sh.sample_ticks), k, now);
     if ended.lost {
         for step in PUB_STEPS {
             sh.publish_step(a, step, Point::Pub(step));
@@ -728,13 +843,15 @@ fn recv_cycle(sh: &Arc<Shared>, k: usize) {
         if sh.quirk == Quirk::PublishWithoutRecheck {
             snap = sh.with_cell(k, |cell| cell.snapshot());
         }
-        let carried = sh.rx_state(k).carried;
-        let seen = sh.rx_state(k).consumed.clone();
+        let (carried, seen) = {
+            let st = sh.rx_state(k);
+            (st.carried, st.consumed.clone())
+        };
         // Compute outside the cell from a view of it; inside, recheck that nothing the computation read has changed, and write
         // (note 45 §4.5). A cell that moved on in between sends the round back to the view.
-        let (round, facts) = loop {
-            let view = sh.with_cell(k, |cell| cell.clone());
-            let computed = rules::publish_compute(&view, &recv, carried, &seen);
+        let (round, facts, view) = loop {
+            let view = first_view.take().unwrap_or_else(|| view_of(sh, k, |cell| cell.clone()));
+            let computed = rules::publish_compute(&view, &recv, carried, &seen, sh.bench.is_none());
             let facts: Vec<super::world::Fact> = computed
                 .consumed
                 .iter()
@@ -747,13 +864,19 @@ fn recv_cycle(sh: &Arc<Shared>, k: usize) {
             if let Some(hook) = hook {
                 hook(sh);
             }
-            let written = sh.with_cell(k, |cell| cell.unchanged_since(&view).then(|| rules::publish_write(cell, k, snap, &recv, computed)));
+            let written = view_of(sh, k, |cell| cell.unchanged_since(&view).then(|| rules::publish_write(cell, k, snap, &recv, computed)));
             if let Some(round) = written {
-                break (round, facts);
+                break (round, facts, view);
+            }
+            if let Some(bench) = &sh.bench {
+                bench.count(&bench.publish_retries);
             }
         };
         match (round, facts) {
             (Round::Stale, _) => {
+                if let Some(bench) = &sh.bench {
+                    bench.count(&bench.stale_rounds);
+                }
                 sh.sched.hook(a, Point::RSnap);
                 snap = sh.with_cell(k, |cell| cell.snapshot());
             }
@@ -761,14 +884,30 @@ fn recv_cycle(sh: &Arc<Shared>, k: usize) {
                 {
                     let mut st = sh.rx_state(k);
                     st.consumed.extend(consumed.iter().map(|&(id, _)| id));
+                    // Only values still in the cell are ever read again (a value's id is never reserved twice): the history stays as small as the cell.
+                    st.consumed.retain(|id| view.in_flight.iter().any(|f| f.entry.order.1 == *id));
                 }
-                {
+                if let Some(bench) = &sh.bench {
+                    // A measurement run keeps counters only: the per-sample tick lists of every block would grow without bound. The sink gets
+                    // what the cell accepted and nothing else, after the acceptance.
+                    bench.count(&bench.publishes);
+                    if view.phase != Phase::Flushing {
+                        let (origin, bound) = (view.origin_of(recv.epoch), view.bound(recv.epoch));
+                        let range = rules::published_range(origin, bound, &recv.samples);
+                        let before = recv.samples.index_from(origin) as u64;
+                        bench.add(&bench.discarded_before_origin, before);
+                        bench.add(&bench.discarded_after_cut, discarded.saturating_sub(before));
+                        if !range.is_empty() {
+                            (bench.sink)(&result, range);
+                        }
+                    }
+                } else {
                     let mut sink = sh.sink();
                     sink.events.push("publish");
                     sink.published.push(super::world::Published { stream: k, epoch: recv.epoch, ticks: published, discarded });
                     sink.facts.extend(facts);
                 }
-                sh.sched.notify();
+                sh.sched.changed();
                 for input in sends {
                     sh.sched.hook(a, Point::RSend);
                     sh.send(input);
@@ -828,17 +967,20 @@ fn run_timer(sh: &Arc<Shared>) {
         }
     }
     loop {
-        let pred = sh.pred(|s| s.stopping.load(Ordering::SeqCst) || s.timers.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(_, at)| (s.now)() >= at));
-        sh.sched.wait_until(a, pred);
-        let now = (sh.now)();
-        let due = {
+        // One evaluation under the scheduler's lock: a due deadline is delivered; otherwise the timer sleeps until the earliest one, or until a booking
+        // or the stop wakes it.
+        let due = sh.sched.wait_for(a, || {
+            let now = (sh.now)();
             let mut timers = sh.timers.lock().unwrap_or_else(|e| e.into_inner());
-            timers.iter().position(|&(_, at)| now >= at).map(|i| timers.remove(i))
-        };
+            match timers.iter().position(|&(_, at)| now >= at) {
+                Some(i) => Ok(Some(timers.remove(i))),
+                None if sh.stopping.load(Ordering::SeqCst) => Ok(None),
+                None => Err(timers.iter().map(|&(_, at)| at).min().map(|at| sh.tick * (at - now).clamp(1, 1 << 20) as u32)),
+            }
+        });
         match due {
             Some((stream, _)) => sh.send(Input::Timer { stream }),
-            None if sh.stopping.load(Ordering::SeqCst) => return,
-            None => {}
+            None => return,
         }
     }
 }

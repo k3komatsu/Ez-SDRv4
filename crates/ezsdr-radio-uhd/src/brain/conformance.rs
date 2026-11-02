@@ -177,7 +177,16 @@ fn consumption_on(values: &[(u64, usize, i64, Option<i64>)], channels: u32, samp
         entry.accepted_at = accepted;
         c.in_flight.push(InFlight { entry, state: ValueState::Done(Terminal::Call(Outcome::Ok)), left: false });
     }
-    rules::consume_samples(&c, (1..channels).fold(ezsdr_radio::timeline::Channels::first(1), |all, channel| all.with(channel)), &Default::default(), samples)
+    let channels = (1..channels).fold(ezsdr_radio::timeline::Channels::first(1), |all, channel| all.with(channel));
+    // The samples a script received are runs of consecutive ticks (a timeout leaves a gap between two); each run is one block.
+    let (mut seen, mut consumed) = (std::collections::BTreeSet::new(), Vec::new());
+    for run in samples.chunk_by(|a, b| b - a == 1) {
+        for (id, at) in rules::consume_samples(&c, channels, &seen, &super::cell::Ticks::from_slice(run)) {
+            seen.insert(id);
+            consumed.push((id, at));
+        }
+    }
+    consumed
 }
 
 // ------------------------------------------------------------------------------------------------------- the scripts

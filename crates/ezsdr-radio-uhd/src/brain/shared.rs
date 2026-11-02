@@ -25,12 +25,12 @@ pub(crate) fn held_cells() -> usize {
 }
 
 /// A cell's guard; the thread-local count follows its lifetime.
-pub(crate) struct CellGuard<'a>(MutexGuard<'a, Cell>);
+pub(crate) struct CellGuard<'a>(MutexGuard<'a, Cell>, Option<std::time::Instant>);
 
 impl<'a> CellGuard<'a> {
-    fn new(guard: MutexGuard<'a, Cell>) -> Self {
+    fn new(guard: MutexGuard<'a, Cell>, timed: bool) -> Self {
         HELD.with(|held| held.set(held.get() + 1));
-        CellGuard(guard)
+        CellGuard(guard, timed.then(std::time::Instant::now))
     }
 }
 
@@ -50,6 +50,9 @@ impl std::ops::DerefMut for CellGuard<'_> {
 impl Drop for CellGuard<'_> {
     fn drop(&mut self) {
         HELD.with(|held| held.set(held.get() - 1));
+        if let Some(since) = self.1 {
+            super::speed::CELL_HOLD.record(since.elapsed());
+        }
     }
 }
 
@@ -67,15 +70,18 @@ impl Drop for Swap<'_, '_> {
     }
 }
 
-/// A FIFO between threads. A push wakes the waiters through the scheduler.
-pub(crate) struct Queue<T>(Mutex<VecDeque<T>>);
+/// A FIFO between threads, read by one actor: a push wakes that actor (everyone, outside a targeted run) through the scheduler.
+pub(crate) struct Queue<T> {
+    items: Mutex<VecDeque<T>>,
+    owner: Actor,
+}
 
 impl<T: Clone> Queue<T> {
-    pub(crate) fn new() -> Queue<T> {
-        Queue(Mutex::new(VecDeque::new()))
+    pub(crate) fn new(owner: Actor) -> Queue<T> {
+        Queue { items: Mutex::new(VecDeque::new()), owner }
     }
     fn q(&self) -> MutexGuard<'_, VecDeque<T>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.items.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub(crate) fn nonempty(&self) -> bool {
         !self.q().is_empty()
@@ -163,6 +169,10 @@ pub(crate) struct Shared {
     /// A test hook run by `R` between a publish's computation and its write.
     pub(crate) before_write: Mutex<Option<BatchHook>>,
     pub(crate) after_batch: Mutex<Option<BatchHook>>,
+    /// E2b's measurement hooks: the receive work and the counters (absent outside a measurement run).
+    pub(crate) bench: Option<Arc<super::speed::Bench>>,
+    /// Device ticks between two samples of a receive stream (the decimation): the receive executor turns a block into ticks with it.
+    pub(crate) sample_ticks: i64,
 }
 
 /// A deliberate protocol violation for the negative tests: a wrapper that reorders the protocol must fail S1.
@@ -190,7 +200,13 @@ pub(crate) type Pred = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl Shared {
     pub(crate) fn lock_cell(&self, k: usize) -> CellGuard<'_> {
-        CellGuard::new(self.cells[k].lock().unwrap_or_else(|e| e.into_inner()))
+        let timed = super::speed::instrument_on();
+        let asked = timed.then(std::time::Instant::now);
+        let guard = self.cells[k].lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(asked) = asked {
+            super::speed::CELL_WAIT.record(asked.elapsed());
+        }
+        CellGuard::new(guard, timed)
     }
 
     /// Runs `f` on every cell at once, locked in index order. The cells are moved into a scratch vector and back, so the
@@ -229,7 +245,7 @@ impl Shared {
 
     pub(crate) fn push<T: Clone>(&self, queue: &Queue<T>, item: T) {
         queue.q().push_back(item);
-        self.sched.notify();
+        self.sched.wake(queue.owner);
     }
 
     pub(crate) fn send(&self, input: Input) {

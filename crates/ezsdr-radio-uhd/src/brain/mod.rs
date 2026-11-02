@@ -16,6 +16,7 @@ mod observed;
 mod oracle;
 mod rules;
 mod shared;
+mod speed;
 mod thread_tests;
 mod threads;
 mod toy;
@@ -101,6 +102,6 @@ pub(crate) mod fixtures {
 
     /// A recv begun under `epoch` whose buffered sample ticks are `samples`.
     pub(crate) fn recv(epoch: u64, samples: &[i64]) -> Recv {
-        Recv { epoch, handle: 7, samples: samples.to_vec() }
+        Recv { epoch, handle: 7, samples: super::cell::Ticks::from_slice(samples) }
     }
 }

@@ -17,11 +17,11 @@ use crate::host::ClockMode;
 
 // ------------------------------------------------------------------------------------ free runs on FakeDevice
 
-/// A fake at ratio one (1 tick = 1 sample = 1 ms), packets of four samples, two channels, on a manual clock: the clock stands while
+/// A fake at ratio `ratio` (a sample is `ratio` ticks, 1 ms; one at ratio one), packets of four samples, two channels, on a manual clock: the clock stands while
 /// the test's participant thread works and runs only while it sleeps, so every instant below is a tick the test chose (#76: no
 /// verdict depends on how fast the runtime's threads are scheduled).
-fn fake() -> Arc<FakeDevice> {
-    Arc::new(FakeDevice::new(FakeConfig { master_clock_rate: 1000, rx_packet: Some(4), command_queue: 16, clock: ClockMode::Manual, ..FakeConfig::default() }))
+fn fake(ratio: i64) -> Arc<FakeDevice> {
+    Arc::new(FakeDevice::new(FakeConfig { master_clock_rate: 1000 * ratio as u64, rx_packet: Some(4), command_queue: 16, clock: ClockMode::Manual, ..FakeConfig::default() }))
 }
 
 /// The cells of `streams` streams, each streaming under a segment that begins at `origin`, as the open fake is.
@@ -40,7 +40,13 @@ fn streaming_cells(streams: usize, origin: i64) -> World {
 /// participants that wait on each other would hang in a clock sleep that no poll bound can interrupt, and the diagnosis names their
 /// states. Terminating the process belongs to the external runner.
 fn run_fake(streams: usize, body: impl FnOnce(&Lock) + Send + 'static) {
-    let fake = fake();
+    run_fake_at(1, 0, streams, body)
+}
+
+/// As [`run_fake`], with a DDC decimation of `ratio` (device ticks per sample; the master clock is `ratio` kHz and the rate 1 kS/s) and the
+/// segment's origin `skew` ticks after the usual one (an origin off the global lattice of multiples of the decimation).
+fn run_fake_at(ratio: i64, skew: i64, streams: usize, body: impl FnOnce(&Lock) + Send + 'static) {
+    let fake = fake(ratio);
     let device = fake.clone();
     let slot: Arc<std::sync::Mutex<Option<Arc<super::shared::Shared>>>> = Arc::new(std::sync::Mutex::new(None));
     let published = slot.clone();
@@ -50,15 +56,15 @@ fn run_fake(streams: usize, body: impl FnOnce(&Lock) + Send + 'static) {
         .spawn("test", move || {
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 device.set_time_zero(false).unwrap();
-                let origin = device.time_now().unwrap() + 20;
+                let origin = device.time_now().unwrap() + 20 * ratio + skew;
                 for k in 0..streams {
                     device.apply(Dir::Rx, k, &Settings { rate: Some(1e3), ..Settings::default() }, None).unwrap();
                     device.rx_open(k, &[k]).unwrap();
                     device.rx_start(k, origin).unwrap();
                 }
-                let rt = Runtime::start_fake(&streaming_cells(streams, origin), device.clone());
+                let rt = Runtime::start_fake(&streaming_cells(streams, origin), device.clone(), ratio);
                 *published.lock().unwrap() = Some(rt.sh.clone());
-                body(&Lock { fake: device, rt, streams, origin });
+                body(&Lock { fake: device, rt, streams, origin, ratio });
             }));
             let _ = done.send(run);
         })
@@ -81,6 +87,7 @@ struct Lock {
     rt: Runtime,
     streams: usize,
     origin: i64,
+    ratio: i64,
 }
 
 impl Lock {
@@ -96,7 +103,8 @@ impl Lock {
         while self.now() < t {
             self.fake.host().sleep(Duration::from_millis(1));
             let now = self.now();
-            let covered = if now >= self.origin + 5 { self.origin + (now - 1 - self.origin) / 4 * 4 } else { 0 };
+            let packet = 4 * self.ratio;
+            let covered = if now >= self.origin + packet + self.ratio { self.origin + (now - 1 - self.origin) / packet * packet } else { 0 };
             poll("the executors have taken every packet complete by the previous tick", || (0..self.streams).all(|k| self.rt.sh.with_cell(k, |cell| cell.progress >= covered)));
         }
     }
@@ -220,6 +228,31 @@ fn s7_fakedevice_value_applied_before_instant_consumed_at_it() {
         assert_eq!(observed.applications.get(&0), Some(&vec![(1, e)]));
         assert_eq!(observed.evidence, vec![Fact { leftover: false, value: 1, stream: 0, channel: 0, sample: e }], "consumed by the sample the DDC applied it at");
         assert!(observed.leftovers.is_empty());
+    });
+}
+
+/// S7 at a decimation of 2 (a sample is two device ticks): an instant between two samples is consumed by the first sample at or after it,
+/// whose tick is the segment's origin plus a whole number of decimations. The ticks are the device's, as the cut, the origin and the
+/// instants of timed values are.
+#[test]
+fn s7b_decimation_two_value_consumed_by_the_sample_at_or_after_its_instant() {
+    run_fake_at(2, 1, 1, |run| {
+        let (fake, rt) = (&run.fake, &run.rt);
+        run.advance_to(run.origin + 16);
+        assert!(run.published());
+        assert_eq!(run.origin % 2, 1, "an odd origin: the samples are on the odd ticks");
+        let e = run.origin + 49 * 2 + 1;
+        run.release(1, e);
+        run.advance_until("the value is consumed", || run.consumed(1));
+        run.shut_down();
+        let observed = rt.observed().unwrap();
+        assert_eq!(fake.dsp_log(Dir::Rx, 0).into_iter().filter(|(_, _, timed)| *timed).collect::<Vec<_>>(), vec![(e, 1.0, true)], "the DDC applied it at its instant");
+        assert_eq!(
+            observed.evidence,
+            vec![Fact { leftover: false, value: 1, stream: 0, channel: 0, sample: e + 1 }],
+            "consumed by the first sample at or after e, one decimation on, on the lattice of the origin (not of the even ticks)"
+        );
+        assert_eq!((e + 1 - run.origin) % 2, 0);
     });
 }
 
@@ -571,4 +604,153 @@ fn s9j_the_deadline_decides_the_recv_not_its_completion() {
             assert_eq!(observed.published[1].ticks, vec![0, 1, 2, 3], "the next recv returns the packet whole");
         }
     }
+}
+
+/// A free run on a real-clock fake is targeted: each actor waits on its own input, and a push wakes that actor alone (S15: the measured runtime's
+/// wake-ups). One stream that is not receiving, so the receive executor is idle: its FIFO, the brain's inbox and the clock reader's FIFO each wake
+/// their own actor. Each actor is proven to be inside its wait before the push to its queue (`Sched::waiting`), so a push that wakes the wrong actor
+/// leaves the queue unread and fails the bounded wait: the actor cannot have found the queue already filled when it looked.
+#[test]
+fn s15a_a_real_clock_run_wakes_each_idle_actor_by_its_own_queue() {
+    use super::core::RxOp;
+    use super::shared::ClockCmd;
+    let fake = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let w = World::new(vec![cell(Phase::Off, 0, None, 0)], Vec::new(), super::thread_tests::params());
+    let rt = Runtime::start_fake(&w, fake.clone(), 200);
+    assert!(rt.sh.sched.targeted(), "a free run on a real clock is targeted");
+    let sh = &rt.sh;
+    use super::force::Actor;
+    let asleep = |actor: Actor| poll(&format!("{actor:?} is inside its wait"), || sh.sched.waiting(actor).is_some());
+    [Actor::Rx(0), Actor::Clock, Actor::Brain].into_iter().for_each(asleep);
+    // The receive executor sleeps; its FIFO's push ends it (a terminate op exits the executor).
+    sh.push(&sh.r_fifo[0], RxOp::Terminate);
+    poll("R exits on the op pushed to its FIFO", || sh.sink().exited.contains(&super::force::Actor::Rx(0)));
+    // The clock reader serves the command pushed to its FIFO.
+    sh.push(&sh.k_fifo, ClockCmd::Serve { stream: 0 });
+    poll("K takes the command pushed to its FIFO", || !sh.k_fifo.nonempty());
+    // The brain takes the input pushed to its inbox.
+    sh.send(Input::Timer { stream: 0 });
+    poll("the brain takes the input pushed to its inbox", || !sh.inbox.nonempty());
+    sh.send(Input::Shutdown);
+    poll("the brain ends", || sh.brain().exit == super::core::Exit::Terminated);
+    let panics = rt.stop(JOIN).expect("every thread joins");
+    assert!(panics.is_empty(), "{panics:?}");
+}
+
+/// A booking earlier than the deadline the timer thread sleeps on wakes it: the timer is proven to be inside its wait for the later deadline (a
+/// wait of a later count than the idle one, after the first booking woke it to evaluate), then the earlier one is booked through the brain's routing
+/// and delivered; the later stays booked. The fake's clock ticks in milliseconds, so the later deadline's sleep (10 minutes) cannot end by itself.
+#[test]
+fn s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline() {
+    use super::core::{Command, Exit};
+    use super::force::Actor;
+    let fake = Arc::new(FakeDevice::new(FakeConfig { master_clock_rate: 1000, ..FakeConfig::default() }));
+    fake.set_time_zero(false).unwrap();
+    let w = World::new(vec![cell(Phase::Off, 0, None, 0)], Vec::new(), super::thread_tests::params());
+    let rt = Runtime::start_fake(&w, fake.clone(), 1);
+    let sh = &rt.sh;
+    let idle_count = {
+        poll("the timer is inside its wait", || sh.sched.waiting(Actor::Timer).is_some());
+        sh.sched.waiting(Actor::Timer).unwrap_or(0)
+    };
+    let (later, earlier) = (fake.time_now().unwrap() + 600_000, fake.time_now().unwrap() + 80);
+    super::threads::route(sh, Command::Timer { stream: 0, at: later });
+    poll("the timer evaluated the later booking and sleeps on its deadline", || sh.sched.waiting(Actor::Timer).is_some_and(|n| n > idle_count));
+    super::threads::route(sh, Command::Timer { stream: 0, at: earlier });
+    poll("the earlier booking is delivered", || sh.timers.lock().unwrap().iter().all(|&(_, at)| at == later));
+    assert_eq!(sh.timers.lock().unwrap().clone(), vec![(0, later)], "only the earlier booking was delivered");
+    sh.send(Input::Shutdown);
+    poll("the brain ends", || sh.brain().exit == Exit::Terminated);
+    let panics = rt.stop(JOIN).expect("every thread joins");
+    assert!(panics.is_empty(), "{panics:?}");
+}
+
+/// The whole path of a timed value on a real-clock run, each hand-off a targeted wake: the release reaches the brain, the reservation reaches `S`,
+/// the result reaches the brain again; the DDC applies it at its instant and a sample consumes it. Then a Stop booked ahead makes the brain route a
+/// drain timer, which the timer thread (asleep with nothing booked) must wake for and deliver.
+#[test]
+fn s15b_a_real_clock_run_applies_a_value_and_delivers_a_booked_timer() {
+    use super::core::{Command, Exit};
+    use super::world::Params;
+    let fake = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let ms = |n: i64| n * fake.master_clock_rate() as i64 / 1000;
+    fake.set_time_zero(false).unwrap();
+    fake.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+    fake.rx_open(0, &[0]).unwrap();
+    let origin = fake.time_now().unwrap() + ms(20);
+    fake.rx_start(0, origin).unwrap();
+    let params = Params { packet: 1000, recv_timeout: 100, drain_window: ms(5), ..super::thread_tests::params() };
+    let mut w = World::new(vec![cell(Phase::Streaming(seg(origin)), 0, None, 0)], Vec::new(), params);
+    cases::running(&mut w, 0, vec![0]);
+    let rt = Runtime::start_fake(&w, fake.clone(), 200);
+    assert!(rt.sh.sched.targeted());
+    let sh = &rt.sh;
+    let e = fake.time_now().unwrap() + ms(80);
+    sh.send(Input::Release(held(0, value(0, e, 1), 1)));
+    poll("the value is consumed", || sh.brain().dispositions.iter().any(|d| d.0 == 1 && d.1 == Disposition::Consumed));
+    assert_eq!(fake.dsp_log(Dir::Rx, 0).into_iter().filter(|(_, _, timed)| *timed).collect::<Vec<_>>(), vec![(e, 1.0, true)], "the DDC applied it at its instant");
+    sh.send(Input::Stop { stream: 0, requested: fake.time_now().unwrap() + ms(40) });
+    poll("the brain routes a drain timer", || sh.sink().routed.iter().any(|c| matches!(c, Command::Timer { .. })));
+    poll("the timer thread delivers it", || sh.timers.lock().unwrap().is_empty());
+    sh.send(Input::Shutdown);
+    poll("the brain ends", || sh.brain().exit == Exit::Terminated);
+    let panics = rt.stop(JOIN).expect("every thread joins");
+    assert!(panics.is_empty(), "{panics:?}");
+}
+
+/// A free run's first compute reuses the view the loop top took (no second view per block), and the write rechecks the cell against that same
+/// copy. Here the loop top's view holds a finished value with no acceptance; `S`'s acceptance lands between the compute and the write (the hook, once;
+/// it does not bump the cell's revision), so the first compute consumed nothing. The write must notice, recompute from a fresh view and publish the
+/// consumption at the value's own sample (tick `origin`); a write that trusted the first view would publish the block without it and the value would
+/// be consumed a block later.
+#[test]
+fn s15e_a_free_run_recomputes_when_the_first_view_went_stale_before_the_write() {
+    use super::cell::Outcome;
+    use super::cell::ValueState;
+    use super::fixtures::push;
+    let fake = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let ms = |n: i64| n * fake.master_clock_rate() as i64 / 1000;
+    fake.set_time_zero(false).unwrap();
+    fake.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+    fake.rx_open(0, &[0]).unwrap();
+    let origin = fake.time_now().unwrap() + ms(20);
+    fake.rx_start(0, origin).unwrap();
+    let params = super::world::Params { packet: 1000, recv_timeout: 100, drain_window: ms(5), ..super::thread_tests::params() };
+    let mut w = World::new(vec![cell(Phase::Streaming(seg(origin)), 0, None, 0)], Vec::new(), params);
+    cases::running(&mut w, 0, vec![0]);
+    push(&mut w.cells[0], value(0, origin, 1), ValueState::Done(Terminal::Call(Outcome::Ok)));
+    w.monitor.reserved.insert(1, (0, seg(origin), 1));
+    let rt = Runtime::start_fake(&w, fake.clone(), 200);
+    assert!(rt.sh.sched.targeted());
+    let sh = &rt.sh;
+    // Armed before the first block can be received (the stream starts 20 ms ahead): the hook is the acceptance landing.
+    *sh.before_write.lock().unwrap() = Some(Arc::new(move |sh: &super::shared::Shared| {
+        if sh.before_write.lock().unwrap().take().is_some() {
+            sh.with_cells(|cells| super::rules::accept_all(cells, 1, origin));
+        }
+    }));
+    poll("the value is consumed", || sh.brain().dispositions.iter().any(|d| d.0 == 1 && d.1 == Disposition::Consumed));
+    let facts: Vec<(u64, i64)> = sh.sink().facts.iter().map(|f| (f.value, f.sample)).collect();
+    assert_eq!(facts, vec![(1, origin)], "the recomputed first block consumed the value at its own sample");
+    sh.send(Input::Shutdown);
+    poll("the brain ends", || sh.brain().exit == super::core::Exit::Terminated);
+    let panics = rt.stop(JOIN).expect("every thread joins");
+    assert!(panics.is_empty(), "{panics:?}");
+}
+
+/// A measurement run's checking decorator keeps the no-cell-held assertion (I10) and records no call history (a history would grow with every block).
+#[test]
+fn s15c_an_unlogged_checking_device_records_nothing_and_still_asserts() {
+    use super::model_device::CheckingDevice;
+    let fake = Arc::new(FakeDevice::new(FakeConfig::default()));
+    let failure = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (logged, unlogged) = (CheckingDevice::new(fake.clone(), failure.clone()), CheckingDevice::unlogged(fake.clone(), failure));
+    let _ = (logged.time_now(), unlogged.time_now());
+    assert_eq!((logged.calls().len(), unlogged.calls().len()), (1, 0));
+    let w = World::new(vec![cell(Phase::Off, 0, None, 0)], Vec::new(), super::thread_tests::params());
+    let rt = Runtime::start_fake(&w, fake, 200);
+    let guard = rt.sh.lock_cell(0);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unlogged.time_now())).is_err();
+    drop(guard);
+    assert!(panicked, "I10: a device call with a cell held panics, logged or not");
 }

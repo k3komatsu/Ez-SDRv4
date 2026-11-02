@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ezsdr_radio::timeline::Channels;
 
-use super::cell::{Cell, Drain, Outcome, Phase, Recv, Snapshot, Take, Terminal, ValueState};
+use super::cell::{Cell, Drain, Outcome, Phase, Recv, Snapshot, Take, Terminal, Ticks, ValueState};
 use super::core::{Boundary, Brain, Change, Command, Disposition, Guard, Input, Op, Request, RxOp, Section, SetCmd};
 use super::dst::Model;
 use super::model::{Apply, Device, Dsp};
@@ -1006,7 +1006,7 @@ impl World {
         let deadline = self.device.t + self.params.recv_timeout;
         self.calls.push(DevCall::Recv { stream: k });
         self.device.enter_recv(k);
-        self.rx[k].recv = Some(RecvCall { recv: Recv { epoch: snap.epoch, handle, samples: Vec::new() }, deadline });
+        self.rx[k].recv = Some(RecvCall { recv: Recv { epoch: snap.epoch, handle, samples: Default::default() }, deadline });
     }
 
     /// `R.recv_end`: the buffered samples up to a packet. A lost device ends the recv with the loss
@@ -1028,7 +1028,7 @@ impl World {
         } else if self.device.take_late(k) {
             Received::Late
         } else {
-            Received::Samples(self.device.recv(k, self.params.packet, self.rx[k].recv.as_ref().map_or(i64::MAX, |call| call.deadline)))
+            Received::Samples(Ticks::from_slice(&self.device.recv(k, self.params.packet, self.rx[k].recv.as_ref().map_or(i64::MAX, |call| call.deadline))))
         };
         let ended = rules::end_of_recv(received, k, self.device.t);
         if ended.lost {
@@ -1300,7 +1300,8 @@ impl Model for World {
         let device = (t, queue, queue_cap, fifo_cap, last_command, dsp, streamers, lost, silent_from);
         // A value's disposition, result and leftover fact are read by id only, and the first write per id stands,
         // so the order of writes across ids is history. `guard` records the guard steps taken (a test reads it).
-        let Brain { held, dispositions, results, leftovers, outbox, deferred, ops, next_id, drain_window, guard: _, exit, pending } = brain;
+        // `in_flight_bound` is a constant of the world (the design's, but in the measurement's bound diagnostic).
+        let Brain { held, dispositions, results, leftovers, outbox, deferred, ops, next_id, drain_window, guard: _, exit, pending, in_flight_bound: _ } = brain;
         let mut dispositions = dispositions.clone();
         dispositions.sort_by_key(|(id, _)| *id);
         let mut results = results.clone();
@@ -1626,7 +1627,7 @@ mod tests {
             ("rx.program", |w| w.rx[0].program.push_back(RStep::Cmd)),
             ("rx.handle", |w| w.rx[0].handle = None),
             ("rx.handles", |w| w.rx[0].handles += 1),
-            ("rx.recv", |w| w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Vec::new() }, deadline: 4 })),
+            ("rx.recv", |w| w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Default::default() }, deadline: 4 })),
             ("rx.snap", |w| w.rx[0].snap = Some(Snapshot { epoch: 1, cut: None, revision: 0 })),
             ("rx.call", |w| w.rx[0].call = Some(CallResult::Failed)),
             ("rx.consumed", |w| {
@@ -1930,7 +1931,7 @@ mod tests {
         let mut w = world(vec![cell(Phase::Streaming(seg(0)), 0, None, 0)]);
         w.device.open(0, vec![0]);
         w.rx[0].handle = Some(1);
-        w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Vec::new() }, deadline: 18 });
+        w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Default::default() }, deadline: 18 });
         w.rx[0].program = VecDeque::from([RStep::End]);
         w.device.t = 16;
         assert!(!w.enabled().contains(&Event::REnd(0)), "a recv does not end early at the epilogue's end");
@@ -2213,7 +2214,7 @@ mod tests {
         let mut c = cell(Phase::Off, 0, None, 0);
         push(&mut c, value(0, 8, 1), ValueState::Taken);
         c.mark_left(1);
-        assert_eq!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &[8]), vec![(1, 8)]);
+        assert_eq!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &Ticks::from_slice(&[8])), vec![(1, 8)]);
     }
 
     /// A value the device applied at sample 15 (accepted at 15) is debt for the packet that carries
@@ -2223,8 +2224,8 @@ mod tests {
     fn u20_debt_counts_an_applied_value_before_its_call_finishes() {
         let mut c = cell(Phase::Streaming(seg(0)), 0, None, 0);
         push(&mut c, RxEntry { accepted_at: Some(15), ..value(0, 2, 5) }, ValueState::Taken);
-        assert!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &[12, 13, 14]).is_empty());
-        assert_eq!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &[12, 13, 14, 15]), vec![(5, 15)]);
+        assert!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &Ticks::from_slice(&[12, 13, 14])).is_empty());
+        assert_eq!(rules::consume_samples(&c, Channels::first(1), &BTreeSet::new(), &Ticks::from_slice(&[12, 13, 14, 15])), vec![(5, 15)]);
     }
 
     /// `settle`, with the oracles' transition and safety checks at every step.
@@ -2324,7 +2325,7 @@ mod tests {
             w.device.open(0, carried.clone());
             w.rx[0].handle = Some(1);
             w.monitor.reserved.insert(5, (0, seg(0), 1));
-            w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: vec![8] }, deadline: 100 });
+            w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Ticks::from_slice(&[8]) }, deadline: 100 });
             w.rx[0].snap = Some(w.cells[0].snapshot());
             w.rx[0].program = VecDeque::from([RStep::Publish]);
             w.apply(&Event::RPublish(0));
