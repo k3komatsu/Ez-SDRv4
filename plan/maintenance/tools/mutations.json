@@ -16324,5 +16324,1751 @@
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_29_non_lost_payload_eob_error_after_concurrent_loss_does_not_reopen"
-      }
+      },
+      {
+        "id": "E1-01",
+        "name": "reserve accepts a value while the segment is Stopping",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "Phase::Armed(s) | Phase::Streaming(s) => s,",
+        "new": "Phase::Armed(s) | Phase::Streaming(s) | Phase::Stopping(s) => s,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u02b_stopping_refuses"
+      },
+      {
+        "id": "E1-02",
+        "name": "reserve admits a value whose instant equals the cut",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "entry.order.0 >= cut",
+        "new": "entry.order.0 > cut",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u02f_instant_at_cut_refuses"
+      },
+      {
+        "id": "E1-03",
+        "name": "reserve ignores the progress-at-cut check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "if self.progress >= cut",
+        "new": "if false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u02g_progress_at_cut_refuses"
+      },
+      {
+        "id": "E1-04",
+        "name": "reserve refuses a value whose instant equals the origin",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "entry.order.0 < segment.origin",
+        "new": "entry.order.0 <= segment.origin",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u01c_instant_equal_origin_reserves"
+      },
+      {
+        "id": "E1-05",
+        "name": "reserve ignores the channel check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "!self.channels.contains(",
+        "new": "false && !self.channels.contains(",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u02c_other_channel_refuses"
+      },
+      {
+        "id": "E1-06",
+        "name": "reserve inverts the generation check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "generation != self.generation",
+        "new": "generation == self.generation",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u02d_stale_generation_refuses"
+      },
+      {
+        "id": "E1-07",
+        "name": "reserve refuses a value in the Armed phase",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "Phase::Armed(s) | Phase::Streaming(s) => s,",
+        "new": "Phase::Streaming(s) => s,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u01b_armed_value_reserves"
+      },
+      {
+        "id": "E1-08",
+        "name": "book_stop takes the requested instant without the progress floor",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "requested.max(self.progress)",
+        "new": "requested",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u06a_stop_below_progress_clamps_to_progress"
+      },
+      {
+        "id": "E1-09",
+        "name": "book_stop ignores the cut in force",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "bound.min(requested.max(self.progress))",
+        "new": "requested.max(self.progress)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u06b_stop_beyond_plan_cut_keeps_plan_cut"
+      },
+      {
+        "id": "E1-10",
+        "name": "book_stop leaves queued values at or after the cut uncancelled",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "self.cancel_queued(|e| e >= cut)",
+        "new": "self.cancel_queued(|_| false)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u03_cancel_before_take_drops_without_call"
+      },
+      {
+        "id": "E1-11",
+        "name": "stop_accepting leaves queued values uncancelled",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "self.cancel_queued(|_| true)",
+        "new": "self.cancel_queued(|_| false)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u05a_stopping_cancels_queued_and_lists_obligations"
+      },
+      {
+        "id": "E1-12",
+        "name": "take calls a cancelled value instead of dropping it",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "flight.state = ValueState::Done(Terminal::Dropped); Take::Dropped",
+        "new": "flight.state = ValueState::Taken; Take::Call",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u03_cancel_before_take_drops_without_call"
+      },
+      {
+        "id": "E1-13",
+        "name": "publish skips the stale-snapshot check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "if seen.epoch != self.epoch || seen.cut != self.cut || seen.revision != self.revision",
+        "new": "if false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u07a_stale_snapshot_refused_and_counted"
+      },
+      {
+        "id": "E1-14",
+        "name": "advance_epoch gives the replaced epoch the new plan cut",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "Retiring { epoch: self.epoch, cut: self.cut, origin: self.origin, published: false }",
+        "new": "Retiring { epoch: self.epoch, cut: plan_cut, origin: self.origin, published: false }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u08a_old_buffer_published_to_retiring_cut"
+      },
+      {
+        "id": "E1-15",
+        "name": "ack_quiesce accepts the ack before the publish",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "retiring.epoch == epoch && retiring.published",
+        "new": "retiring.epoch == epoch",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u08c_quiesce_ack_after_publish"
+      },
+      {
+        "id": "E1-16",
+        "name": "a restore is not deferred while a value of its channel is pinned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.committed(Some(channel)) || cell.owed_on(channel)",
+        "new": "cell.owed_on(channel)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09a_restore_deferred_while_pinned"
+      },
+      {
+        "id": "E1-17",
+        "name": "a partial result is treated as a failure, not MaybeApplied",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "outcome @ (Outcome::Ok | Outcome::Partial)",
+        "new": "outcome @ (Outcome::Ok)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u10_partial_result_is_maybe_applied_not_failure"
+      },
+      {
+        "id": "E1-18",
+        "name": "the panic guard marks lost before it sets the flag",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "for guard in [Guard::Gate, Guard::FlagSet, Guard::Ungate, Guard::MarkLost]",
+        "new": "for guard in [Guard::Gate, Guard::MarkLost, Guard::Ungate, Guard::FlagSet]",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u13b_panic_guard_sets_flag_before_mark_lost"
+      },
+      {
+        "id": "E1-19",
+        "name": "the in-flight bound is not enforced",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.in_flight.len() >= IN_FLIGHT_BOUND",
+        "new": "cell.in_flight.len() >= usize::MAX",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u14_in_flight_bound_holds_value"
+      },
+      {
+        "id": "E1-20",
+        "name": "consume_packet records no consumption (RxChain::consume not called)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "old": "chain.consume(sample_ticks, channels, tick, &one);",
+        "new": "let _ = (sample_ticks, channels, tick, &one);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u12a_equal_time_values_take_distinct_samples"
+      },
+      {
+        "id": "E1-21",
+        "name": "the scratch chain of consume_packet drops the left list",
+        "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "old": "for entry in left { hand(&mut chain, entry); } chain.stop_result(Ok(())).expect(\"the scratch chain stops\");",
+        "new": "for entry in left.iter().take(0) { hand(&mut chain, entry); } chain.stop_result(Ok(())).expect(\"the scratch chain stops\");",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u12d_scratch_adapter_matches_rxchain_consume"
+      },
+      {
+        "id": "E1-24",
+        "name": "apply_timed accepts a command into a full queue",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "probe.queue.len() >= probe.queue_cap",
+        "new": "probe.queue.len() > probe.queue_cap",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u15a_full_queue_blocks_then_accepts"
+      },
+      {
+        "id": "E1-25",
+        "name": "apply_timed refuses one slot late on a full RX DSP FIFO",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "chain.fifo.len() >= probe.fifo_cap",
+        "new": "chain.fifo.len() > probe.fifo_cap",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u15b_dsp_fifo_full_refuses_rx_write"
+      },
+      {
+        "id": "E1-26",
+        "name": "stop does not keep the stopped stream's tail end",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "streamer.end = Some(streamer.end.map_or(now, |end| end.min(now)))",
+        "new": "streamer.end = None",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u15c_stop_with_tail_keeps_end"
+      },
+      {
+        "id": "E1-27",
+        "name": "a start behind a stopped tail is not deferred (then unset)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "streamer.then = Some(at);",
+        "new": "let _ = at;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u15d_start_behind_stopped_tail_sets_then"
+      },
+      {
+        "id": "E1-28",
+        "name": "drain takes the FIFO's tail, not its head (head-of-line removed)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "chain.fifo.front()",
+        "new": "chain.fifo.back()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u15e_drain_is_head_of_line"
+      },
+      {
+        "id": "E1-33",
+        "name": "decide: a LateCommand after Lost issues a start",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if !matches!(cell.phase, Phase::Armed(_) | Phase::Streaming(_))",
+        "new": "if !matches!(cell.phase, Phase::Armed(_) | Phase::Streaming(_) | Phase::Lost)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u16c_lost_no_call"
+      },
+      {
+        "id": "E1-34",
+        "name": "a LateCommand with a cut restarts instead of ending",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if cell.cut.is_some() {",
+        "new": "if cell.cut.is_none() {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u16b_late_command_with_cut_ends_no_start"
+      },
+      {
+        "id": "E1-36",
+        "name": "a restore is issued from Uncertain",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "Phase::Uncertain | Phase::Lost",
+        "new": "Phase::Lost",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u17d_flush_final_stop_failure_uncertain_no_restore"
+      },
+      {
+        "id": "E1-38",
+        "name": "a held value is carried without the later-segment coverage check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!next_origin.is_some_and(|origin| held.entry.order.0 >= origin)",
+        "new": "false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u18b_reported_once_when_no_segment_covers"
+      },
+      {
+        "id": "E1-39",
+        "name": "shutdown settles held values as Cancelled, not by the settle rule",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "{ Disposition::Cancelled } else { Disposition::Reported(Reason::NoChannel) }",
+        "new": "{ Disposition::Cancelled } else { Disposition::Cancelled }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u18c_shutdown_settles_held_by_settle_rule"
+      },
+      {
+        "id": "E1-40",
+        "name": "the stop send does not close acceptance before its call",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.stop_accepting(); cell.outstanding = Some(Outstanding::Stop);",
+        "new": "cell.outstanding = Some(Outstanding::Stop);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u05c_stop_send_closes_acceptance_before_call"
+      },
+      {
+        "id": "E1-43",
+        "name": "recv delivers buffered packets in reverse order",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "streamer.buffered.pop_front()",
+        "new": "streamer.buffered.pop_back()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u15f_recv_delivers_buffered_samples_in_order"
+      },
+      {
+        "id": "E1-45",
+        "name": "a start is issued while a value of the chain is pinned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.pinned() || cell.flush_owed() || cell.busy() || matches!(cell.phase",
+        "new": "cell.flush_owed() || cell.busy() || matches!(cell.phase",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09d_start_next_deferred_while_pinned"
+      },
+      {
+        "id": "E1-46",
+        "name": "publish skips the obligation revision check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "|| seen.revision != self.revision",
+        "new": "|| false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u07b_result_between_snapshot_and_publish_refused"
+      },
+      {
+        "id": "E1-50",
+        "name": "outstanding debt is treated as a pin (the flush is blocked)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.phase == Phase::Off && !cell.committed(None)",
+        "new": "cell.phase == Phase::Off && !cell.committed(None) && cell.in_flight.is_empty()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u17f_flush_not_blocked_by_debt"
+      },
+      {
+        "id": "E1-51",
+        "name": "a partial result retires the value (drops it from the leftovers)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if self.consumed(id) {",
+        "new": "if outcome == Outcome::Partial || self.consumed(id) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u10_partial_result_is_maybe_applied_not_failure"
+      },
+      {
+        "id": "E1-58",
+        "name": "restore eligibility checks pins only, not debt or left on the channel",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.committed(Some(channel)) || cell.owed_on(channel)",
+        "new": "cell.committed(Some(channel))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09e_restore_waits_for_debt_or_left_on_channel"
+      },
+      {
+        "id": "E1-59",
+        "name": "the drain-ended transition waits for the pin to clear",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cells[stream].drain == Drain::Draining { self.stop_send(stream, cells);",
+        "new": "cells[stream].drain == Drain::Draining && !cells[stream].pinned() { self.stop_send(stream, cells);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u04d_drain_deadline_sends_stop_while_pinned"
+      },
+      {
+        "id": "E1-60",
+        "name": "publish bounds a recv by the current epoch, not its own",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "self.bound(recv.epoch)",
+        "new": "self.bound(self.epoch)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u07d_recompute_keeps_recv_identity"
+      },
+      {
+        "id": "E1-67",
+        "name": "the next segment waits for empty debt or left (over-restriction)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.pinned() || cell.flush_owed() || cell.busy() || matches!(cell.phase",
+        "new": "cell.pinned() || !cell.in_flight.is_empty() || cell.flush_owed() || cell.busy() || matches!(cell.phase",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09g_start_next_not_blocked_by_debt"
+      },
+      {
+        "id": "E1-68",
+        "name": "start, close and open proceed while an old epoch's quiesce is unacknowledged (I12)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if cell.retiring.is_some() {",
+        "new": "if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09h_start_waits_for_quiesce_ack"
+      },
+      {
+        "id": "E1-69",
+        "name": "a second stop in a new segment keeps the previous stop's drain state",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.drain = Drain::Idle;",
+        "new": "let _ = 0;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u04e_second_stop_in_new_segment_books_drain"
+      },
+      {
+        "id": "E1-70",
+        "name": "a refused settings command writes a value disposition",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if !cells.iter().any(|cell| cell.state_of(id).is_some()) {",
+        "new": "if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u17e_refused_settings_command_writes_no_value_disposition"
+      },
+      {
+        "id": "E1-71",
+        "name": "a LateCommand end-now stop does not take the Stopping transition",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.drain = Drain::Ended; cell.stop_accepting(); cell.outstanding = Some(Outstanding::Stop);",
+        "new": "cell.stop_accepting(); cell.outstanding = Some(Outstanding::Stop);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u16d_late_stop_takes_stopping_transition_and_no_second_stop"
+      },
+      {
+        "id": "E1-72",
+        "name": "the Stop booking closes acceptance before the cut is reached",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.book_stop(requested); self.front(vec![Op::Section(Section::Drain { stream })]);",
+        "new": "cell.book_stop(requested); cell.stop_accepting(); self.front(vec![Op::Section(Section::Drain { stream })]);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u04f_stop_booking_keeps_values_before_cut_acceptable"
+      },
+      {
+        "id": "E1-73",
+        "name": "a reached cut sends the stop while a value of the chain is pinned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "_ if reached && !cells[stream].pinned()",
+        "new": "_ if reached",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u04g_cut_reached_while_pinned_waits_for_the_pin_to_clear"
+      },
+      {
+        "id": "E1-30",
+        "name": "a state is forgotten when its frame is popped, so reconvergence re-expands it",
+        "file": "crates/ezsdr-radio-uhd/src/brain/dst.rs",
+        "old": "self.visited.insert(frame.key, false);",
+        "new": "self.visited.remove(&frame.key);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_dfs_expands_each_edge_once"
+      },
+      {
+        "id": "E1-31",
+        "name": "a revisit of a state on the DFS stack is accepted instead of reported as a cycle",
+        "file": "crates/ezsdr-radio-uhd/src/brain/dst.rs",
+        "old": "Some(true) => return Outcome::Cycle { trace: self.trace(Some(&event)) },",
+        "new": "Some(true) => {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_cycle_is_reported"
+      },
+      {
+        "id": "E1-32",
+        "name": "a budget overrun returns Pass",
+        "file": "crates/ezsdr-radio-uhd/src/brain/dst.rs",
+        "old": "return Outcome::BudgetExceeded { frontier: self.trace(Some(&event)), pending: self.pending() };",
+        "new": "return Outcome::Pass;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_budget_overrun_is_failure"
+      },
+      {
+        "id": "E1-61",
+        "name": "the transition and safety checks run only on newly inserted states, not on a step into a visited state",
+        "file": "crates/ezsdr-radio-uhd/src/brain/dst.rs",
+        "old": "if let Err(failure) = checked.and_then(|()| self.observe(&next)) {",
+        "new": "drop(checked); if let Err(failure) = Ok::<(), Failure>(()) {",
+        "old2": "if let Err(outcome) = self.enter(Some(event), next, key) {",
+        "new2": "let (_, checked) = step(&self.stack.last().expect(\"the state before\").model, &event); if let Err(failure) = checked.and_then(|()| self.observe(&next)) { return Outcome::Violation { failure, trace: self.trace(Some(&event)) }; } if let Err(outcome) = self.enter(Some(event), next, key) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_violation_into_visited_state_is_caught"
+      },
+      {
+        "id": "E1-29",
+        "name": "the key of a World leaves out its settings executor",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "format!(\"{settings:?}\"),",
+        "new": "{ let _ = settings; String::new() },",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_key_separates_each_behaviour_field"
+      },
+      {
+        "id": "E1-42",
+        "name": "S.take of a cancelled value does not send Done{Dropped}",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.inbox.push_back(Input::Done { id: cmd.id, terminal: Terminal::Dropped });",
+        "new": "let _ = Terminal::Dropped;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_take_cancelled_sends_done_dropped"
+      },
+      {
+        "id": "E1-62",
+        "name": "the first Tick produces sample 1 and not sample 0",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "old": "let now = self.t; if now >= self.silent_from {",
+        "new": "self.t += 1; let now = self.t; if now >= self.silent_from {",
+        "old2": "self.settle(); self.t += 1;",
+        "new2": "self.settle();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_first_tick_produces_sample_0"
+      },
+      {
+        "id": "E1-63",
+        "name": "a Release sends its settings command before the reservation is decided",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.ops.push_back(Op::Section(Section::Reserve { id }));",
+        "new": "self.ops.push_back(Op::Send(Command::Settings(SetCmd { id, change: Change::Restore { channel: 0 } }))); self.ops.push_back(Op::Section(Section::Reserve { id }));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_failed_reservation_leaves_no_send"
+      },
+      {
+        "id": "E1-65",
+        "name": "the epilogue end never reports an actor still waiting",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "fn incomplete(&self) -> Option<String> {",
+        "new": "fn incomplete(&self) -> Option<String> { return None;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_recv_timeout_loop_at_end_is_incomplete"
+      },
+      {
+        "id": "E1-75",
+        "name": "a stale finish of an older epoch resets the new epoch's cut and progress",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if cells[stream].epoch == epoch {",
+        "new": "if true {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09h_stale_finished_keeps_new_epoch"
+      },
+      {
+        "id": "E1-76",
+        "name": "a publish takes samples below the segment's origin",
+        "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "old": "if tick >= origin && bound.is_none_or(|bound| tick < bound) {",
+        "new": "if bound.is_none_or(|bound| tick < bound) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u08d_new_epoch_publishes_from_its_origin_only"
+      },
+      {
+        "id": "E1-77",
+        "name": "a failed stop does not end the segment (no Finished after an Uncertain stop)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if result != CallResult::Lost { self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Finished { stream: k, next_origin: None, epoch })));",
+        "new": "if result == CallResult::Ok { self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Finished { stream: k, next_origin: None, epoch })));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_failed_stop_ends_segment"
+      },
+      {
+        "id": "E1-78",
+        "name": "the Finished section does not mark its left values on the cell",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "flight.left = true;",
+        "new": "flight.left = false;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u18d_finished_marks_the_left_values_on_the_cell"
+      },
+      {
+        "id": "E1-79",
+        "name": "the loss publication does not dispose the stream's values as lost",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if self.disposition(id).is_none() { self.dispose(id, Disposition::Reported(Reason::Loss));",
+        "new": "if false { self.dispose(id, Disposition::Reported(Reason::Loss));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u18e_lost_disposes_each_value_once"
+      },
+      {
+        "id": "E1-80",
+        "name": "a receive executor exits on the loss flag without sending the loss boundary",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "r.program.push_back(RStep::Send(Input::Boundary(Boundary::Lost { stream: k }))); r.exited = true;",
+        "new": "r.exited = true;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_loss_reaches_idle_receive_executor"
+      },
+      {
+        "id": "E1-81",
+        "name": "a receive ends at the epilogue's end before its own deadline (it fabricates an early timeout)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.packet_ready(k) || self.device.t >= deadline",
+        "new": "self.packet_ready(k) || self.device.t >= deadline || self.at_end()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_recv_at_epilogue_end_waits_for_its_deadline"
+      },
+      {
+        "id": "E1-82",
+        "name": "a receive cycle begins at the epilogue's end",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if self.at_end() { self.rx[k].program.clear(); self.rx[k].snap = None; return; }",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_recv_cycle_dropped_at_epilogue_end"
+      },
+      {
+        "id": "E1-83",
+        "name": "a drain deadline is delivered at the epilogue's end before its instant (an early synthetic timer counts as a deadline observation)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.timers.get(i).is_some_and(|(_, at)| self.device.t >= *at)",
+        "new": "self.timers.get(i).is_some_and(|(_, at)| self.device.t >= *at || self.at_end())",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_timer_beyond_end_fires_at_its_instant"
+      },
+      {
+        "id": "E1-84",
+        "name": "a start is stamped with the wrong epoch",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "Decision::Go(Command::Rx { stream, op: RxOp::Start { at, epoch: cell.epoch } })",
+        "new": "Decision::Go(Command::Rx { stream, op: RxOp::Start { at, epoch: cell.epoch + 1 } })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09h_start_waits_for_quiesce_ack"
+      },
+      {
+        "id": "E1-85",
+        "name": "I12 accepts no start of the new epoch before the quiesce ack",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "RxOp::Start { epoch, .. } => epoch == cell.epoch && epoch != retiring.epoch,",
+        "new": "RxOp::Start { .. } => true,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i12_old_epoch_start_during_quiesce_is_legal"
+      },
+      {
+        "id": "E1-86",
+        "name": "a command routed after the settings executor exits is not discarded",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "Event::SDiscard => self.settings.exited && !self.settings.fifo.is_empty(),",
+        "new": "Event::SDiscard => false,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_exited_settings_discards_routed_command"
+      },
+      {
+        "id": "E1-87",
+        "name": "a discarded settings command sends no Done to the brain",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "inbox.push_back(Input::Done { id, terminal: Terminal::Abandoned });",
+        "new": "let _ = inbox;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_exited_settings_discards_routed_command"
+      },
+      {
+        "id": "E1-88",
+        "name": "the settings terminate is not routed to S",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "Command::SettingsTerminate => self.settings.terminate = true,",
+        "new": "Command::SettingsTerminate => {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_terminate_follows_queued_commands"
+      },
+      {
+        "id": "E1-89",
+        "name": "S exits on an empty FIFO with no terminate check",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.settings.exited = true; return;",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_terminate_follows_queued_commands"
+      },
+      {
+        "id": "E1-90",
+        "name": "shutdown does not terminate the settings executor",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "commands.push(Op::Send(Command::SettingsTerminate));",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_shutdown_terminates_every_receive_executor"
+      },
+      {
+        "id": "E1-91",
+        "name": "an exited-or-idle receive still receiving at the end is not named Incomplete",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if r.recv.is_some() || !r.program.is_empty() || (!r.exited && (self.receiving(k) || self.flush_over(k))) {",
+        "new": "if r.recv.is_some() || !r.program.is_empty() {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_recv_timeout_loop_at_end_is_incomplete"
+      },
+      {
+        "id": "E1-92",
+        "name": "the loop top starts a receive cycle at the epilogue's end",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "(self.receiving(k) && !self.at_end())",
+        "new": "self.receiving(k)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_recv_cycle_dropped_at_epilogue_end"
+      },
+      {
+        "id": "E1-93",
+        "name": "Section::Stop books no cut while no stream runs (returns early in Off)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "Phase::Stopping(_) | Phase::Lost => {}",
+        "new": "Phase::Stopping(_) | Phase::Lost | Phase::Off => {}",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u17_stop_booked_while_off_starts_drain_when_armed"
+      },
+      {
+        "id": "E1-94",
+        "name": "a stop booked before its start does not start its drain at Armed",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.drain_booked(stream, cells);",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u17_stop_booked_while_off_starts_drain_when_armed"
+      },
+      {
+        "id": "E1-95",
+        "name": "shutdown does not stop a running chain before its terminate",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if matches!(cells[stream].phase, Phase::Armed(_) | Phase::Streaming(_) | Phase::Stopping(_)) && cells[stream].drain != Drain::Ended { self.stop_send(stream, cells); }",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u19a_shutdown_stops_running_chain_before_terminate"
+      },
+      {
+        "id": "E1-96",
+        "name": "consumption waits for the call result (debt needs a finished call)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "} else if flight.entry.accepted_at.is_some() {",
+        "new": "} else if matches!(flight.state, ValueState::Done(Terminal::Call(Outcome::Ok | Outcome::Partial))) && flight.entry.accepted_at.is_some() {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u20_debt_counts_an_applied_value_before_its_call_finishes"
+      },
+      {
+        "id": "E1-97",
+        "name": "a move result does not change the channel sets",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.move_channel(*channel, *to);",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_move_result_moves_channel_sets"
+      },
+      {
+        "id": "E1-98",
+        "name": "a plan change's PlanStop sends no Finished for the retiring epoch",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.rx[k].program.push_front(RStep::Send(Input::Boundary(Boundary::Finished { stream: k, next_origin: None, epoch: retiring })));",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_plan_change_finishes_retiring_epoch"
+      },
+      {
+        "id": "E1-99",
+        "name": "decide: a Move ignores a value queued in S's FIFO on its channel (pinned only)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if cells.iter().any(|cell| cell.committed(Some(channel)) || (cell.channels.contains(channel as u32) && cell.busy())) {",
+        "new": "if cells.iter().any(|cell| cell.pinned_on(channel) || (cell.channels.contains(channel as u32) && cell.busy())) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09i_move_waits_for_value_queued_in_s_fifo"
+      },
+      {
+        "id": "E1-100",
+        "name": "decide: a Restore ignores a value queued in S's FIFO on its channel (pinned only)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.committed(Some(channel)) || cell.owed_on(channel)",
+        "new": "cell.pinned_on(channel) || cell.owed_on(channel)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09j_restore_waits_for_queued_value_through_its_done"
+      },
+      {
+        "id": "E1-101",
+        "name": "decide: a Close or an Open ignores a value queued in S's FIFO on its chain (pinned only; one arm decides both)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if !matches!(cell.phase, Phase::Off | Phase::Uncertain) || cell.committed(None)",
+        "new": "if !matches!(cell.phase, Phase::Off | Phase::Uncertain) || cell.pinned()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09l"
+      },
+      {
+        "id": "E1-104",
+        "name": "a start confirmed below a booked cut keeps the cut below its origin",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "self.cut = self.cut.map(|cut| cut.max(origin));",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u06c_booked_cut_below_origin_becomes_origin"
+      },
+      {
+        "id": "E1-105",
+        "name": "finished does not request the flush of a stop that left values with results",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.owe_flush(stream, cells);\n        self.recheck(cells);",
+        "new": "self.recheck(cells);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09m_stop_debt_requests_flush_and_start_waits_for_it"
+      },
+      {
+        "id": "E1-106",
+        "name": "StartNext does not wait for a flush owed on its stream (Off phase)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.pinned() || cell.flush_owed() || cell.busy() || matches!(cell.phase",
+        "new": "cell.pinned() || cell.busy() || matches!(cell.phase",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09m_stop_debt_requests_flush_and_start_waits_for_it"
+      },
+      {
+        "id": "E1-108",
+        "name": "the flushing phase is not a receiving phase, so the flush reads no left value",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "Phase::Stopping(_) | Phase::Flushing)",
+        "new": "Phase::Stopping(_))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_stop_debt_is_flushed_before_restore"
+      },
+      {
+        "id": "E1-110",
+        "name": "a shutdown still starts a deferred segment (StartNext is not dropped at shutdown)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "matches!(request, Request::StartNext { .. } | Request::Open { .. } | Request::Close { .. })",
+        "new": "matches!(request, Request::Open { .. } | Request::Close { .. })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u19d_shutdown_drops_deferred_start_and_lifecycle"
+      },
+      {
+        "id": "E1-111",
+        "name": "a flush ends at the drain window even when the device stop has not finished",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.rx[k].flush_end.is_some_and(|end| self.device.t >= end)",
+        "new": "false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_flush_ends_at_drain_window_with_unread_left"
+      },
+      {
+        "id": "E1-112",
+        "name": "busy ignores an outstanding lifecycle command (a Close, Open or StartNext then goes)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "self.outstanding.is_some() || self.drain == Drain::Draining",
+        "new": "self.drain == Drain::Draining",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09o_lifecycle_waits_for_flush_in_progress"
+      },
+      {
+        "id": "E1-113",
+        "name": "a result that arrives after the stop Finished does not request the flush it owes (done handler)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "for stream in 0..cells.len() { self.owe_flush(stream, cells); }",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09q_result_after_finished_requests_flush"
+      },
+      {
+        "id": "E1-114",
+        "name": "decide: a StartNext ignores an outstanding lifecycle command (case 5, first shape)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.pinned() || cell.flush_owed() || cell.busy() || matches!(cell.phase",
+        "new": "cell.pinned() || cell.flush_owed() || matches!(cell.phase",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09r_start_waits_for_outstanding_stop"
+      },
+      {
+        "id": "E1-115",
+        "name": "a Finished does not clear the outstanding stop",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cells[stream].settle(Outstanding::Stop);",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u19c_shutdown_flushes_stop_debt_before_terminate"
+      },
+      {
+        "id": "E1-116",
+        "name": "decide: a flush request is not dropped once its debt is gone (deferred flush waits in an Armed cell)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if !cell.flush_owed() { return Decision::Never; }",
+        "new": "",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u09u_deferred_flush_dropped_without_debt"
+      },
+      {
+        "id": "E1-22",
+        "name": "R's loop check is skipped before its call (case 2 micro: a loss in the R loop)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "rules::loop_check(failure, &mut r.fifo)",
+        "new": "rules::loop_check(false, &mut r.fifo)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "case2_loss_everywhere_micro"
+      },
+      {
+        "id": "E1-23",
+        "name": "S's settings check ignores the failure flag (case 2 micro: a loss in the settings path)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "rules::settings_check(self.failure, hand",
+        "new": "rules::settings_check(false, hand",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_settings_check_abandons_hand_under_failure"
+      },
+      {
+        "id": "E1-41",
+        "name": "a clock read is allowed while the native lock is held (section C: clock read holds the native lock)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.clock.is_none() && self.native.is_none()",
+        "new": "self.clock.is_none()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_clock_read_holds_native_lock"
+      },
+      {
+        "id": "E1-47",
+        "name": "the failed lifecycle gate does not record W8b and does not release the gate (case 8 micro)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if self.failure { self.monitor.witnesses.insert(\"W8b\");",
+        "new": "if false { self.monitor.witnesses.insert(\"W8b\");",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_failed_lifecycle_gate_releases_and_drops_call"
+      },
+      {
+        "id": "E1-49",
+        "name": "the last sample of each packet is not recorded as consumption evidence (case 1 micro: drain samples)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "old": "for index in 0..count {",
+        "new": "for index in 0..count.saturating_sub(1) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "u12e_last_sample_of_packet_is_evidence"
+      },
+      {
+        "id": "E1-53",
+        "name": "a Tick is allowed while a mandatory input is still due (section C: tick cannot pass mandatory input)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "(!self.at_end() || self.awaits_time()) && self.env.iter().all(|slot| slot.delivered || slot.latest > self.device.t)",
+        "new": "(!self.at_end() || self.awaits_time())",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_tick_cannot_pass_mandatory_input"
+      },
+      {
+        "id": "E1-54",
+        "name": "the result is sent before the settings result is written (section C: result precedes send)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "program.extend([SStep::Result, SStep::Send]);",
+        "new": "program.extend([SStep::Send, SStep::Result]);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_result_precedes_send"
+      },
+      {
+        "id": "E1-55",
+        "name": "a delivered timer is not recorded as an observed drain deadline (case 5 micro: P1 depends on it)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.monitor.drain_observed.insert((stream, at));",
+        "new": "let _ = (stream, at);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_timer_beyond_end_fires_at_its_instant"
+      },
+      {
+        "id": "E1-56",
+        "name": "a lost publication runs after the native lock is released (section C: loss publish releases L first)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "let mut program = vec![SStep::Unlock];",
+        "new": "let mut program = vec![];",
+        "old2": "program.extend([SStep::Result, SStep::Send]);",
+        "new2": "program.extend([SStep::Result, SStep::Send, SStep::Unlock]);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_loss_publish_releases_l_first"
+      },
+      {
+        "id": "E1-57",
+        "name": "a lifecycle call's loss publication takes the gate again (section C: no recursion)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "filter(|step| !(lifecycle && **step == PubStep::Gate))",
+        "new": "filter(|_step| true)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_lifecycle_inline_loss_publish_no_recursion"
+      },
+      {
+        "id": "E1-64",
+        "name": "a timer fires one tick early (section C: timer never early, case 5)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.timers.get(i).is_some_and(|(_, at)| self.device.t >= *at)",
+        "new": "self.timers.get(i).is_some_and(|(_, at)| self.device.t + 1 >= *at)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_timer_never_early"
+      },
+    {
+      "id": "E1-119",
+      "name": "a take that finds no value (a loss retired it) writes no Dropped terminal (section C: the command still ends)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.monitor.terminals.insert(cmd.id, Terminal::Dropped);",
+      "new": "self.monitor.terminals.insert(cmd.id, Terminal::Abandoned);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_take_after_loss_retirement_drops_command"
+    },
+    {
+      "id": "E1-120",
+      "name": "a successor window may end before its predecessor's (seeded builder: no deadlock by a window that ends too early)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "(e, pick(pl.max(e), hi))",
+      "new": "(e, pick(e, hi))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_seeded_windows_fit_and_chain"
+    },
+    {
+      "id": "E1-121",
+      "name": "case 6 declares W6a for every panic step, including the first (plan gap: W6a only at the Stop step)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "if k == stop_step {",
+      "new": "if true {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "case6_brain_panic_first_micro"
+    },
+    {
+      "id": "E1-122",
+      "name": "the canonical key keeps the disposition write order (E1b part 3c: dispositions are sorted by id)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "dispositions.sort_by_key(|(id, _)| *id);",
+      "new": "let _ = ();",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_key_merges_equivalent_histories"
+    },
+    {
+      "id": "E1-123",
+      "name": "the Close and Open decision does not wait while its stream is busy (an outstanding lifecycle command on an Off stream)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "|| cell.retiring.is_some() || cell.busy()",
+      "new": "|| cell.retiring.is_some()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09t_close_waits_for_outstanding_open"
+    },
+    {
+      "id": "E1-124",
+      "name": "the Restore decision does not wait while a stream of its channel is busy (I13: a Restore during a stop)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "cell.busy() || cell.phase != Phase::Off",
+      "new": "cell.phase != Phase::Off",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13_restore_waits_while_a_chain_of_the_channel_is_not_off"
+    },
+    {
+      "id": "E1-125",
+      "name": "busy ignores the drain (a stop decided, its timer pending)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+      "old": "self.outstanding.is_some() || self.drain == Drain::Draining ||",
+      "new": "self.outstanding.is_some() ||",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09y_busy_reads_drain_and_lost"
+    },
+    {
+      "id": "E1-126",
+      "name": "case 8's StartNext may arrive before the reopen (a start on a closed handle, a script error)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "input(Input::Request(Request::StartNext { stream: 0, at: next }), lifecycle, Some(3)),",
+      "new": "input(Input::Request(Request::StartNext { stream: 0, at: next }), lifecycle, None),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_case8_start_follows_open"
+    },
+    {
+      "id": "E1-127",
+      "name": "a move issued after its wait is not witnessed (W9b: the command goes out in a later operation)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "Command::Settings(SetCmd { change: Change::Move { .. }, .. }) => (\"move waited\", \"W9b\"),",
+      "new": "Command::Settings(SetCmd { change: Change::Move { .. }, .. }) => (\"move waited\", \"W9x\"),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_witness_issued_after_wait_in_a_later_operation"
+    },
+    {
+      "id": "E1-128",
+      "name": "busy counts a lost stream (a stop sent to it is never finished, so a Move or Close waits for ever)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+      "old": "self.phase != Phase::Lost && (self.outstanding.is_some()",
+      "new": "(self.outstanding.is_some()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09y_busy_reads_drain_and_lost"
+    },
+    {
+      "id": "E1-129",
+      "name": "a Plan for a lost stream is not dropped (it waits for an outstanding stop that never finishes)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if cells[stream].phase == Phase::Lost { return Decision::Never; }",
+      "new": "if false { return Decision::Never; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09aa_plan_on_lost_stream_does_not_wait_for_ever"
+    },
+    {
+      "id": "E1-130",
+      "name": "a new request overtakes an earlier deferred request for the same stream or channel",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if self.deferred_ahead(request) { return Decision::Wait; }",
+      "new": "if false { return Decision::Wait; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09z_open_does_not_overtake_deferred_close"
+    },
+    {
+      "id": "E1-131",
+      "name": "a flush attempt is not recorded on the cell (a second flush is owed for the same left value)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+      "old": "if matches!(call, Call::FlushStart | Call::FlushStop) { self.flushed = true; }",
+      "new": "if matches!(call, Call::FlushStart | Call::FlushStop) { self.flushed = false; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09m2_flush_attempted_is_not_owed_again"
+    },
+    {
+      "id": "E1-132",
+      "name": "a value left again does not reset the cell's flush-attempted fact (its own flush is never owed)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+      "old": "flight.left = true; self.flushed = false;",
+      "new": "flight.left = true;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09m2_flush_attempted_is_not_owed_again"
+    },
+    {
+      "id": "E1-133",
+      "name": "a restore is not dropped when a left value stays on its channel after the flush (it waits for ever)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if cells.iter().any(|cell| cell.left_after_flush(channel)) { return Decision::Never; }",
+      "new": "if false { return Decision::Never; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09e2_restore_dropped_when_left_stays_after_the_flush"
+    },
+    {
+      "id": "E1-134",
+      "name": "a restore is dropped for a left value before its flush was attempted (it must wait for the flush)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+      "old": "self.flushed && self.in_flight.iter().any(|f| f.left && f.entry.channel == channel)",
+      "new": "self.in_flight.iter().any(|f| f.left && f.entry.channel == channel)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09e2_restore_dropped_when_left_stays_after_the_flush"
+    },
+    {
+      "id": "E1-135",
+      "name": "a Close or an Open is decided while its chain is accepting (a reservation can pin the chain before R runs it)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if !matches!(cell.phase, Phase::Off | Phase::Uncertain) || cell.committed(None)",
+      "new": "if cell.committed(None)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09ab_close_and_open_wait_for_a_chain_that_is_not_accepting"
+    },
+    {
+      "id": "E1-136",
+      "name": "a Close or an Open for a lost stream is not dropped (it waits for a phase the lost stream never reaches)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if cell.phase == Phase::Lost { return Decision::Never; } if !matches!(cell.phase, Phase::Off | Phase::Uncertain)",
+      "new": "if !matches!(cell.phase, Phase::Off | Phase::Uncertain)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u09ac_close_dropped_when_lost_and_goes_when_uncertain"
+    },
+    {
+      "id": "E1-137",
+      "name": "I3 does not check a Close or Open at its execution (a reservation between the routing and the call pins the chain)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+      "old": "if handle_blocked(before, k) {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "inv_i3_close_executing_with_a_committed_value_is_violation"
+    },
+    {
+      "id": "E1-138",
+      "name": "I3 checks a Close or Open at its routing for a pin only, not for an accepting chain",
+      "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+      "old": "Command::Rx { stream, op: RxOp::Close | RxOp::Open } => handle_blocked(before, stream),",
+      "new": "Command::Rx { stream, op: RxOp::Close | RxOp::Open } => before.cells[stream].pinned(),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "inv_i3_close_to_an_accepting_chain_is_violation"
+    },
+    {
+      "id": "E1-139",
+      "name": "the panic guard does not kill the brain",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if guard == Guard::MarkLost { self.exit = Exit::Dead; }",
+      "new": "if guard == Guard::MarkLost {}",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13c_brain_is_dead_after_its_guard"
+    },
+    {
+      "id": "E1-140",
+      "name": "a dead brain accepts an input",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "assert!(!self.dead(), \"a dead brain takes no input\");",
+      "new": "assert!(true, \"a dead brain takes no input\");",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13c_brain_is_dead_after_its_guard"
+    },
+    {
+      "id": "E1-141",
+      "name": "the world serves the inbox of a dead brain",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "Event::BStep => !self.brain.dead() && self.brain.ops.is_empty()",
+      "new": "Event::BStep => self.brain.ops.is_empty()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_dead_brain_serves_nothing_and_executors_end"
+    },
+    {
+      "id": "E1-142",
+      "name": "a dead brain's timers still fire",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.timers.clear(); self.route(Command::SettingsTerminate);",
+      "new": "self.route(Command::SettingsTerminate);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_dead_brain_serves_nothing_and_executors_end"
+    },
+    {
+      "id": "E1-143",
+      "name": "a dead brain's death does not end the settings executor",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.route(Command::SettingsTerminate); for stream in 0..self.rx.len() {",
+      "new": "for stream in 0..self.rx.len() {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_dead_brain_serves_nothing_and_executors_end"
+    },
+    {
+      "id": "E1-144",
+      "name": "a dead brain with an unserved inbox is named as waiting at the end",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "if !self.brain.dead() && (!self.inbox.is_empty()",
+      "new": "if (!self.inbox.is_empty()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_dead_brain_serves_nothing_and_executors_end"
+    },
+    {
+      "id": "E1-145",
+      "name": "the shutdown input is not recorded when it is delivered (a dead brain never records it)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.monitor.shutdown |= input == Input::Shutdown;",
+      "new": "let _ = &input;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_dead_brain_serves_nothing_and_executors_end"
+    },
+    {
+      "id": "E1-146",
+      "name": "the stopped tail promotes no waiting start (the start never begins)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "self.next = Some(at);",
+      "new": "let _ = at;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15g_start_behind_stopped_tail_delivers_the_next_segment"
+    },
+    {
+      "id": "E1-147",
+      "name": "the waiting start is promoted before the tail is delivered",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "let delivered = self.buffered.is_empty() &&",
+      "new": "let delivered =",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15h_start_waits_while_the_tail_is_undelivered"
+    },
+    {
+      "id": "E1-148",
+      "name": "a promoted start whose instant has passed is not a missed start",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "self.late = Some(at);",
+      "new": "self.next = Some(at);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15i_start_promoted_at_the_next_recv_entry_after_its_instant_is_late"
+    },
+    {
+      "id": "E1-149",
+      "name": "a missed start is reported again (never consumed)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "self.streamers.get_mut(&stream).expect(\"the stream is open\").late = None;",
+      "new": "let _ = stream;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15i_start_promoted_at_the_next_recv_entry_after_its_instant_is_late"
+    },
+    {
+      "id": "E1-150",
+      "name": "a due missed start does not end the recv",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.device.late_due(k) ||",
+      "new": "",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_missed_start_after_the_tail_reaches_the_brain"
+    },
+    {
+      "id": "E1-151",
+      "name": "R does not report a missed start to the brain",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.rx[k].program.push_back(RStep::Send(Input::LateCommand { stream: k, now }));",
+      "new": "let _ = now;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_missed_start_after_the_tail_reaches_the_brain"
+    },
+    {
+      "id": "E1-152",
+      "name": "a tick after the epilogue's end produces samples",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "if now >= self.silent_from { self.t += 1; return; }",
+      "new": "if false { self.t += 1; return; }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_silent_tick_produces_and_applies_nothing"
+    },
+    {
+      "id": "E1-153",
+      "name": "the device stops settling the queue at the epilogue's end (a write accepted in the silent time blocks S for good)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "*at <= self.t",
+      "new": "*at <= self.t.min(self.silent_from)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_silent_tick_produces_and_applies_nothing"
+    },
+    {
+      "id": "E1-154",
+      "name": "the DSP chains apply writes past the epilogue's end",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "let now = self.last_tick();",
+      "new": "let now = self.t;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_silent_tick_produces_and_applies_nothing"
+    },
+    {
+      "id": "E1-155",
+      "name": "time stops at the epilogue's end though a timer lies ahead",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "(!self.at_end() || self.awaits_time()) && self.env",
+      "new": "!self.at_end() && self.env",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_timer_beyond_end_fires_at_its_instant"
+    },
+    {
+      "id": "E1-156",
+      "name": "time stops at the epilogue's end though a recv deadline lies ahead",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "|| self.rx.iter().any(|r| r.recv.as_ref().is_some_and(|call| call.deadline > t))",
+      "new": "",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_recv_at_epilogue_end_waits_for_its_deadline"
+    },
+    {
+      "id": "E1-157",
+      "name": "a write's application takes the channel of its reservation, not the DSP chain that applied it",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "!self.monitor.applied.contains_key(&id) { let ident = self.ident(id, channel, sample);",
+      "new": "!self.monitor.applied.contains_key(&id) { let ident = self.ident(id, self.monitor.reserved[&id].0, sample);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "inv_i4_write_applied_on_another_channel_is_violation"
+    },
+    {
+      "id": "E1-158",
+      "name": "I4 compares receive evidence with the application but not with the reservation",
+      "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+      "old": "intended && same_reservation(applied, fact)",
+      "new": "same_reservation(applied, fact)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "inv_i4_write_applied_on_another_channel_is_violation"
+    },
+    {
+      "id": "E1-159",
+      "name": "consumption uses the cell's channels, not the receiving streamer's",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.carried(k), &self.rx[k].consumed",
+      "new": "self.cells[k].channels, &self.rx[k].consumed",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_consumption_follows_the_streamers_channels"
+    },
+    {
+      "id": "E1-160",
+      "name": "the state key leaves out the shortened cuts (W1c reads them later)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "(shortened, read_later)",
+      "new": "(0, read_later)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_key_separates_each_behaviour_field"
+    },
+    {
+      "id": "E1-161",
+      "name": "the state key leaves out the witness names a later check reads",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "(shortened, read_later)",
+      "new": "(shortened, 0)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_key_separates_each_behaviour_field"
+    },
+    {
+      "id": "E1-162",
+      "name": "the state key leaves out a cell's flush-attempted fact",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "in_flight, flushed, revision))",
+      "new": "in_flight, revision))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_key_separates_each_behaviour_field"
+    },
+    {
+      "id": "E1-163",
+      "name": "the state key leaves out the device's silent tick",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "lost, silent_from);",
+      "new": "lost);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_key_separates_each_behaviour_field"
+    },
+    {
+      "id": "E1-164",
+      "name": "a walk sweep passes with a declared witness no walk reached",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "assert!(unreached.is_empty(),",
+      "new": "assert!(true,",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_sweep_fails_on_an_unreached_declared_witness"
+    },
+    {
+      "id": "E1-165",
+      "name": "case 7b's full variant has no call faults (the failed final flush stop is unreachable)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "let world = single(Some(cut), env, params(variant.timing(), horizon, 1, true, None)); Case { world, config: config(variant, [\"case 7b full\"",
+      "new": "let world = single(Some(cut), env, params(variant.timing(), horizon, 1, false, None)); Case { world, config: config(variant, [\"case 7b full\"",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_case7b_enables_call_faults_in_every_variant"
+    },
+    {
+      "id": "E1-166",
+      "name": "P1 claims a drain ended for a dead brain (a panic after the deadline's delivery is a false violation)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+      "old": "fn p1(w: &World) -> Result<(), String> { if w.brain.dead() { return Ok(()); }",
+      "new": "fn p1(w: &World) -> Result<(), String> {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "prog_p1_dead_brain_makes_no_claim"
+    },
+    {
+      "id": "E1-167",
+      "name": "a tick promotes the start waiting behind a stopped tail (promotion belongs to a recv entry)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "for streamer in self.streamers.values_mut() {",
+      "new": "for streamer in self.streamers.values_mut() { streamer.promote(now);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15i_start_promoted_at_the_next_recv_entry_after_its_instant_is_late"
+    },
+    {
+      "id": "E1-168",
+      "name": "the recv that returns the tail promotes the waiting start at its end",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "None => break, } } out",
+      "new": "None => break, } } streamer.promote(self.t); out",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15i_start_promoted_at_the_next_recv_entry_after_its_instant_is_late"
+    },
+    {
+      "id": "E1-169",
+      "name": "a timed start below now is not a missed start",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "if at < self.t {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15j_timed_start_below_now_is_late_start_now_is_not"
+    },
+    {
+      "id": "E1-170",
+      "name": "a start-now is a timed start in the past",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "self.start(stream, self.t);",
+      "new": "self.start(stream, self.t - 1);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15j_timed_start_below_now_is_late_start_now_is_not"
+    },
+    {
+      "id": "E1-171",
+      "name": "the flush starts with a timed start in the past instead of a start-now",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.device.start_now(k);",
+      "new": "self.device.start(k, self.device.t - 1);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_flush_start_is_never_late"
+    },
+    {
+      "id": "E1-172",
+      "name": "a recv's entry does not promote the waiting start (R's begin never reaches the device)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.device.enter_recv(k);",
+      "new": "let _ = k;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_missed_start_after_the_tail_reaches_the_brain"
+    },
+    {
+      "id": "E1-173",
+      "name": "the chains apply a write at silent_from, the first sample never produced",
+      "file": "crates/ezsdr-radio-uhd/src/brain/model.rs",
+      "old": "self.t.min(self.silent_from.saturating_sub(1))",
+      "new": "self.t.min(self.silent_from)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u15k_no_write_is_applied_at_silent_from"
+    },
+    {
+      "id": "E1-174",
+      "name": "the walk's weights are not used in the pick (every enabled event weighs one)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/dst.rs",
+      "old": "let weight = weights.0[model.class(event)];",
+      "new": "let weight = 1;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_walk_weights_are_the_seeds_and_steer_the_pick"
+    },
+    {
+      "id": "E1-175",
+      "name": "a seed's weights can be zero",
+      "file": "crates/ezsdr-radio-uhd/src/brain/dst.rs",
+      "old": "1 << rng.below(6)",
+      "new": "0 * rng.below(6)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_walk_weights_are_the_seeds_and_steer_the_pick"
+    },
+    {
+      "id": "E1-176",
+      "name": "the tick joins the environment's scheduling class",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "Event::Tick => 0,",
+      "new": "Event::Tick => 1,",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_event_classes_are_time_environment_actor"
+    },
+    {
+      "id": "E1-177",
+      "name": "an environment delivery joins the actors' scheduling class",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "Event::Env(_) | Event::Timer(_) => 1,",
+      "new": "Event::Env(_) | Event::Timer(_) => 2,",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_event_classes_are_time_environment_actor"
+    },
+    {
+      "id": "E1-178",
+      "name": "case 8's Open may come before its Close",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "input(Input::Request(Request::Open { stream: 0 }), lifecycle, Some(2)),",
+      "new": "input(Input::Request(Request::Open { stream: 0 }), lifecycle, Some(1)),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_case8_start_follows_open"
+    },
+    {
+      "id": "E1-179",
+      "name": "a restore is decided while a chain of its channel is still running",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "(cell.busy() || cell.phase != Phase::Off)",
+      "new": "cell.busy()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13_restore_waits_while_a_chain_of_the_channel_is_not_off"
+    },
+    {
+      "id": "E1-180",
+      "name": "a pending settings command no longer holds a Close, Open or StartNext on its channel",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "cells[stream].channels.iter().any(|channel| on_channel(channel as usize))",
+      "new": "false",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13_pending_restore_blocks_lifecycle_until_done"
+    },
+    {
+      "id": "E1-181",
+      "name": "a pending settings command no longer holds a Restore or Move of its channel",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "=> on_channel(channel),",
+      "new": "=> false,",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13_pending_restore_blocks_lifecycle_until_done"
+    },
+    {
+      "id": "E1-182",
+      "name": "a settings command's Done does not clear its pending entry",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "self.pending.remove(&id);",
+      "new": "",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u13_pending_restore_blocks_lifecycle_until_done"
+    },
+    {
+      "id": "E1-183",
+      "name": "case 8's second stream is not running on the device",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "running(&mut world, 1, vec![1]); Case { world, config: config(variant, [\"case 8 full\", \"case 8 reduced\"",
+      "new": "Case { world, config: config(variant, [\"case 8 full\", \"case 8 reduced\"",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_case8_has_a_streaming_second_stream"
+    },
+    {
+      "id": "E1-184",
+      "name": "a chain that comes up during shutdown is not stopped",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "if self.exit == Exit::ShuttingDown && matches!(cells[stream].phase, Phase::Armed(_) | Phase::Streaming(_) | Phase::Stopping(_)) && cells[stream].drain != Drain::Ended {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ce_shutdown_during_start_leaves_restore_waiting"
+    },
+    {
+      "id": "E1-185",
+      "name": "case 7b late restore has no second Restore",
+      "file": "crates/ezsdr-radio-uhd/src/brain/cases.rs",
+      "old": "case.world.env.insert(3, input(Input::Request(Request::Restore { channel: 0 }), again, Some(2)));",
+      "new": "",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_case7b_has_a_late_second_restore"
+    },
+    {
+      "id": "E1-186",
+      "name": "shutdown's terminates do not wait for a chain that is not stopped",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "matches!(cell.phase, Phase::Off | Phase::Uncertain) || cell.drain == Drain::Ended",
+      "new": "true",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "u21_terminates_wait_for_a_chain_that_is_not_stopped"
+    },
+    {
+      "id": "E1-187",
+      "name": "a plan change's restart leaves the drain Ended, so shutdown cannot stop the new chain",
+      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+      "old": "cell.drain = if cell.drain == Drain::Ended { Drain::Idle } else { cell.drain };",
+      "new": "let _ = 0;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "harness_plan_change_finishes_retiring_epoch"
+    }
   ]

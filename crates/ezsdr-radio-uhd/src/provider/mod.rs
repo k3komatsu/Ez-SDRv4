@@ -2,11 +2,11 @@
 //! UR-26, UR-30). It is not stepped; three threads of its own do the work.
 
 mod control;
-mod core;
+pub(crate) mod core;
 /// VH-8's seeded sequences (spec 22), shared with the other crates' tests by path.
 #[cfg(test)]
 #[path = "../../../ezsdr-radio/tests/generator/mod.rs"]
-mod generator;
+pub(crate) mod generator;
 mod mode;
 mod rx;
 #[cfg(test)]
