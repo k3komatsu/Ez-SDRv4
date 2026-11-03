@@ -1,0 +1,418 @@
+[
+ {
+  "id": "HO01",
+  "holdout": "H01 reservation conditions validated on a snapshot, inserted later without revalidation",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if cell.reserve(held.entry.clone(), held.generation).is_err() { return; } self.held.remove(position);",
+  "new": "if cell.clone().reserve(held.entry.clone(), held.generation).is_err() { return; }",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "if cell.reserve(held.entry.clone(), held.generation).is_err() { return; } self.held.remove(position);",
+    "new": "if cell.clone().reserve(held.entry.clone(), held.generation).is_err() { return; }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "Op::Send(command) => self.outbox.push(command),",
+    "new": "Op::Send(command) => {\n                if let Command::Settings(SetCmd { id, change: Change::Timed { .. } }) = &command {\n                    if let Some(position) = self.held.iter().position(|held| held.entry.order.1 == *id) {\n                        let held = self.held.remove(position);\n                        let cell = &mut cells[held.stream];\n                        cell.in_flight.push(super::cell::InFlight { entry: held.entry, state: ValueState::Queued, left: false });\n                        cell.revision += 1;\n                    }\n                }\n                self.outbox.push(command)\n            }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+    "old": "let Op::Section(Section::Reserve { id }) = op else { return None };",
+    "new": "let id = match op { Op::Section(Section::Reserve { id }) | Op::Send(Command::Settings(SetCmd { id, change: Change::Timed { .. } })) => id, _ => return None };"
+   }
+  ]
+ },
+ {
+  "id": "HO02",
+  "holdout": "H02 inclusive upper cut: accept e <= C",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "if entry.order.0 >= cut { return Err(Refusal::Cut); }",
+  "new": "if entry.order.0 > cut { return Err(Refusal::Cut); }"
+ },
+ {
+  "id": "HO03",
+  "holdout": "H03 exhausted executor still qualifies: accept P <= C",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "if self.progress >= cut { return Err(Refusal::Progress); }",
+  "new": "if self.progress > cut { return Err(Refusal::Progress); }"
+ },
+ {
+  "id": "HO04",
+  "holdout": "H04 take marks Taken later (at the lock) without re-checking that the value is still queued",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "ValueState::Queued => { flight.state = ValueState::Taken; Take::Call }",
+  "new": "ValueState::Queued => Take::Call,",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+    "old": "ValueState::Queued => { flight.state = ValueState::Taken; Take::Call }",
+    "new": "ValueState::Queued => Take::Call,"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+    "old": "if flight.state == ValueState::Taken { flight.state = ValueState::MaybeApplied; }",
+    "new": "if matches!(flight.state, ValueState::Queued | ValueState::Taken | ValueState::Cancelled) { flight.state = ValueState::MaybeApplied; }"
+   }
+  ]
+ },
+ {
+  "id": "HO05",
+  "holdout": "H05 an old first-sample event reopens a Stopping segment",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if let Phase::Armed(segment) = cells[stream].phase { cells[stream].phase = Phase::Streaming(segment); }",
+  "new": "if let Phase::Armed(segment) | Phase::Stopping(segment) = cells[stream].phase { cells[stream].phase = Phase::Streaming(segment); }"
+ },
+ {
+  "id": "HO06",
+  "holdout": "H06 Stop reads progress in one brain operation and writes the cut in a later one",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "ReserveHeld { stream: usize },",
+  "new": "ReserveHeld { stream: usize }, StopCut { stream: usize, cut: i64 },",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "ReserveHeld { stream: usize },",
+    "new": "ReserveHeld { stream: usize }, StopCut { stream: usize, cut: i64 },"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "cell.drain = Drain::Idle; cell.book_stop(requested); self.front(vec![Op::Section(Section::Drain { stream })]);",
+    "new": "cell.drain = Drain::Idle; let cut = cell.stop_cut(requested); self.front(vec![Op::Section(Section::StopCut { stream, cut }), Op::Section(Section::Drain { stream })]);"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "Section::Drain { stream } => self.drain_check(stream, cells),",
+    "new": "Section::Drain { stream } => self.drain_check(stream, cells), Section::StopCut { stream, cut } => cells[stream].book_cut(cut),"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+    "old": "fn cancel_queued(&mut self, pred: impl Fn(i64) -> bool) {",
+    "new": "pub(crate) fn stop_cut(&self, requested: i64) -> i64 {\n        self.cut.unwrap_or(i64::MAX).min(requested.max(self.progress))\n    }\n\n    pub(crate) fn book_cut(&mut self, cut: i64) {\n        self.cut = Some(cut);\n        self.cancel_queued(|e| e >= cut);\n        self.revision += 1;\n    }\n\n    fn cancel_queued(&mut self, pred: impl Fn(i64) -> bool) {"
+   }
+  ]
+ },
+ {
+  "id": "HO07",
+  "holdout": "H07 (Sol R07) executor acknowledges quiescence on observing the cancellation, old recv still outstanding",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "self.brain.op(&mut self.cells);",
+  "new": "self.brain.op(&mut self.cells); if let Op::Section(Section::PlanCancel { stream, .. }) = op { self.rx[stream].program.push_front(RStep::Send(Input::Boundary(Boundary::Quiesced { stream }))); }",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "self.brain.op(&mut self.cells);",
+    "new": "self.brain.op(&mut self.cells); if let Op::Section(Section::PlanCancel { stream, .. }) = op { self.rx[stream].program.push_front(RStep::Send(Input::Boundary(Boundary::Quiesced { stream }))); }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+    "old": "Some(retiring) if retiring.epoch == epoch && retiring.published =>",
+    "new": "Some(retiring) if retiring.epoch == epoch =>"
+   }
+  ]
+ },
+ {
+  "id": "HO08",
+  "holdout": "H08 (Sol R08) old-epoch buffer clipped to the cut captured at recv start, kept across stale retries",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "pub(crate) snap: Option<Snapshot>,",
+  "new": "pub(crate) snap: Option<Snapshot>, pub(crate) recv_cut: Option<i64>,",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "pub(crate) snap: Option<Snapshot>,",
+    "new": "pub(crate) snap: Option<Snapshot>, pub(crate) recv_cut: Option<i64>,"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "let snap = self.rx[k].snap.expect(\"a snapshot\");",
+    "new": "let snap = self.rx[k].snap.expect(\"a snapshot\"); self.rx[k].recv_cut = snap.cut;"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "let RxExec { fifo, program, handle, handles, recv, snap, call, consumed, flush_end, exited } = r;",
+    "new": "let RxExec { fifo, program, handle, handles, recv, snap, recv_cut, call, consumed, flush_end, exited } = r;"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "(fifo, program, handle, handles, recv, snap, call, consumed, flush_end, exited)",
+    "new": "(fifo, program, handle, handles, recv, snap, recv_cut, call, consumed, flush_end, exited)"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "match rules::publish_round(&mut self.cells[k], k, snap, &call.recv, carried, &self.rx[k].consumed) {",
+    "new": "match { let mut view = self.cells[k].clone(); if let Some(retiring) = view.retiring.as_mut().filter(|r| r.epoch == call.recv.epoch) { retiring.cut = self.rx[k].recv_cut; } let computed = rules::publish_compute(&view, &call.recv, carried, &self.rx[k].consumed, true); rules::publish_write(&mut self.cells[k], k, snap, &call.recv, computed) } {"
+   }
+  ]
+ },
+ {
+  "id": "HO09",
+  "holdout": "H09 publication and the progress advance are two cell sections, publication first",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "Send(Input), Pub(PubStep), }",
+  "new": "Send(Input), Advance(i64), Pub(PubStep), }",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "Send(Input), Pub(PubStep), }",
+    "new": "Send(Input), Advance(i64), Pub(PubStep), }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "Event::RSend(k) => matches!(self.r_front(k), Some(RStep::Send(_))),",
+    "new": "Event::RSend(k) => matches!(self.r_front(k), Some(RStep::Send(_) | RStep::Advance(_))),"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "let Some(RStep::Send(input)) = self.rx[k].program.pop_front() else { unreachable!(\"allowed only at a send\") };",
+    "new": "let step = self.rx[k].program.pop_front();\n                if let Some(RStep::Advance(progress)) = step {\n                    self.cells[k].progress = self.cells[k].progress.max(progress);\n                    return;\n                }\n                let Some(RStep::Send(input)) = step else { unreachable!(\"allowed only at a send\") };"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "match rules::publish_round(&mut self.cells[k], k, snap, &call.recv, carried, &self.rx[k].consumed) {",
+    "new": "let before = self.cells[k].progress;\n        match rules::publish_round(&mut self.cells[k], k, snap, &call.recv, carried, &self.rx[k].consumed) {"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "self.rx[k].program.extend(sends.into_iter().map(RStep::Send));",
+    "new": "if !flushing {\n                    let advanced = self.cells[k].progress;\n                    self.cells[k].progress = before;\n                    self.rx[k].program.push_back(RStep::Advance(advanced));\n                }\n                self.rx[k].program.extend(sends.into_iter().map(RStep::Send));"
+   }
+  ]
+ },
+ {
+  "id": "HO10",
+  "holdout": "H10 loss is recorded (Mark) before the failure flag is raised",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "pub(crate) const PUB_STEPS: [PubStep; 4] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Mark];",
+  "new": "pub(crate) const PUB_STEPS: [PubStep; 4] = [PubStep::Gate, PubStep::Mark, PubStep::Set, PubStep::Ungate];"
+ },
+ {
+  "id": "HO11",
+  "holdout": "H11 the receive loop checks the failure flag on entry only, not per iteration",
+  "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+  "old": "if failure { Next::Exit } else if fifo_nonempty {",
+  "new": "if failure && !receiving { Next::Exit } else if fifo_nonempty {"
+ },
+ {
+  "id": "HO12",
+  "holdout": "H12 the brain's panic guard sets the flag but omits the native mark_lost",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "PubStep::Mark => self.monitor.marked = true,",
+  "new": "PubStep::Mark => self.monitor.marked |= holder != Holder::Brain,"
+ },
+ {
+  "id": "HO13",
+  "holdout": "H13 (Sol R13) only maybe-applied values pin: decision predicates in core.rs, cell helpers untouched",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "reached && !cells[stream].pinned()",
+  "new": "reached && !cells[stream].in_flight.iter().any(|f| f.state == ValueState::MaybeApplied)",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "reached && !cells[stream].pinned()",
+    "new": "reached && !cells[stream].in_flight.iter().any(|f| f.state == ValueState::MaybeApplied)"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "if cell.pinned() || cell.flush_owed()",
+    "new": "if cell.in_flight.iter().any(|f| f.state == ValueState::MaybeApplied) || cell.flush_owed()"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "cell.committed(Some(channel)) || cell.owed_on(channel)",
+    "new": "cell.in_flight.iter().any(|f| f.entry.channel == channel && matches!(f.state, ValueState::Queued | ValueState::MaybeApplied)) || cell.owed_on(channel)"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "cell.committed(Some(channel)) || (cell.channels.contains(channel as u32) && cell.busy())",
+    "new": "cell.in_flight.iter().any(|f| f.entry.channel == channel && matches!(f.state, ValueState::Queued | ValueState::MaybeApplied)) || (cell.channels.contains(channel as u32) && cell.busy())"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "cell.committed(None) || cell.retiring.is_some()",
+    "new": "cell.in_flight.iter().any(|f| matches!(f.state, ValueState::Queued | ValueState::MaybeApplied)) || cell.retiring.is_some()"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "!cell.committed(None) && !cell.busy()",
+    "new": "!cell.in_flight.iter().any(|f| matches!(f.state, ValueState::Queued | ValueState::MaybeApplied)) && !cell.busy()"
+   }
+  ]
+ },
+ {
+  "id": "HO13a",
+  "holdout": "H13 branch a: pinned()/pinned_on() only (start-next and drain decisions)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "pub(crate) fn pinned(&self) -> bool { self.in_flight.iter().any(|f| matches!(f.state, ValueState::Taken | ValueState::MaybeApplied)) }",
+  "new": "pub(crate) fn pinned(&self) -> bool { self.in_flight.iter().any(|f| matches!(f.state, ValueState::MaybeApplied)) }",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+    "old": "pub(crate) fn pinned(&self) -> bool { self.in_flight.iter().any(|f| matches!(f.state, ValueState::Taken | ValueState::MaybeApplied)) }",
+    "new": "pub(crate) fn pinned(&self) -> bool { self.in_flight.iter().any(|f| matches!(f.state, ValueState::MaybeApplied)) }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+    "old": "f.entry.channel == channel && matches!(f.state, ValueState::Taken | ValueState::MaybeApplied)",
+    "new": "f.entry.channel == channel && matches!(f.state, ValueState::MaybeApplied)"
+   }
+  ],
+  "alt_of": "HO13"
+ },
+ {
+  "id": "HO13b",
+  "holdout": "H13 branch b: committed() only (restore, move, close, open, flush decisions)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "matches!(f.state, ValueState::Queued | ValueState::Taken | ValueState::MaybeApplied))",
+  "new": "matches!(f.state, ValueState::Queued | ValueState::MaybeApplied))",
+  "alt_of": "HO13"
+ },
+ {
+  "id": "HO14",
+  "holdout": "H14 the executor's result write retires the value (settled) instead of finishing it",
+  "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+  "old": "for cell in cells.iter_mut() { cell.finish_call(cmd.id, outcome); }",
+  "new": "for cell in cells.iter_mut() { cell.finish_call(cmd.id, outcome); cell.retire(cmd.id); }"
+ },
+ {
+  "id": "HO17",
+  "holdout": "H17 shutdown timeout cleanup closes handles while an executor still holds or waits for the native lock",
+  "no_translation": "the model has no join timeout, no cleanup that closes or drops handles, and no handle-retention decision; the code under test cannot express the error"
+ },
+ {
+  "id": "HO15",
+  "holdout": "H15 a partial failure is reported as a clean rejection",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "self.settings.terminal = Some(Terminal::Call(outcome));",
+  "new": "self.settings.terminal = Some(Terminal::Call(if outcome == Outcome::Partial { Outcome::Refused } else { outcome }));"
+ },
+ {
+  "id": "HO16",
+  "holdout": "H16 drain-deadline expiry discards taken and maybe-applied values",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if cells[stream].drain == Drain::Draining { self.stop_send(stream, cells); }",
+  "new": "if cells[stream].drain == Drain::Draining { cells[stream].in_flight.retain(|f| !matches!(f.state, ValueState::Taken | ValueState::MaybeApplied)); self.stop_send(stream, cells); }"
+ },
+ {
+  "id": "HO18",
+  "holdout": "H18 a full cell consumes the held head (removed without a reservation)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "let cell = &mut cells[held.stream]; if at_bound(cell, self.in_flight_bound) { return; }",
+  "new": "let cell = &mut cells[held.stream]; if at_bound(cell, self.in_flight_bound) { self.held.remove(position); return; }"
+ },
+ {
+  "id": "HO19",
+  "holdout": "H19 a value's consumption threshold is the start of its settings call, not the device's acceptance",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "pub(crate) terminate: bool,",
+  "new": "pub(crate) terminate: bool,\n    pub(crate) call_at: i64,",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "pub(crate) terminate: bool,",
+    "new": "pub(crate) terminate: bool,\n    pub(crate) call_at: i64,"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "self.native = Some(Holder::Settings);",
+    "new": "self.native = Some(Holder::Settings);\n                self.settings.call_at = self.device.t;"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "rules::accept_all(&mut self.cells, cmd.id, effective);",
+    "new": "rules::accept_all(&mut self.cells, cmd.id, effective.min(self.settings.call_at));"
+   }
+  ]
+ },
+ {
+  "id": "HO20",
+  "holdout": "H20 (Sol R20) one sample consumes repeatedly, keeping FIFO head blocking",
+  "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+  "old": "for (id, at) in consume_packet(&left, &debt, 1, channels, tick, &one_sample) { left.retain(|entry| entry.order.1 != id); debt.retain(|entry| entry.order.1 != id); consumed.push((id, at)); }",
+  "new": "loop { let batch = consume_packet(&left, &debt, 1, channels, tick, &one_sample); if batch.is_empty() { break; } for (id, at) in batch { left.retain(|entry| entry.order.1 != id); debt.retain(|entry| entry.order.1 != id); consumed.push((id, at)); } }",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+    "old": "for (id, at) in consume_packet(&left, &debt, 1, channels, tick, &one_sample) { left.retain(|entry| entry.order.1 != id); debt.retain(|entry| entry.order.1 != id); consumed.push((id, at)); }",
+    "new": "loop { let batch = consume_packet(&left, &debt, 1, channels, tick, &one_sample); if batch.is_empty() { break; } for (id, at) in batch { left.retain(|entry| entry.order.1 != id); debt.retain(|entry| entry.order.1 != id); consumed.push((id, at)); } }"
+   }
+  ]
+ },
+ {
+  "id": "HO01b",
+  "holdout": "H01 diagnostic: as HO01, with the observer reserved() returning None instead of unreachable! (bookkeeping only), so the oracles can speak",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if cell.reserve(held.entry.clone(), held.generation).is_err() { return; } self.held.remove(position);",
+  "new": "if cell.clone().reserve(held.entry.clone(), held.generation).is_err() { return; }",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "if cell.reserve(held.entry.clone(), held.generation).is_err() { return; } self.held.remove(position);",
+    "new": "if cell.clone().reserve(held.entry.clone(), held.generation).is_err() { return; }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "Op::Send(command) => self.outbox.push(command),",
+    "new": "Op::Send(command) => {\n                if let Command::Settings(SetCmd { id, change: Change::Timed { .. } }) = &command {\n                    if let Some(position) = self.held.iter().position(|held| held.entry.order.1 == *id) {\n                        let held = self.held.remove(position);\n                        let cell = &mut cells[held.stream];\n                        cell.in_flight.push(super::cell::InFlight { entry: held.entry, state: ValueState::Queued, left: false });\n                        cell.revision += 1;\n                    }\n                }\n                self.outbox.push(command)\n            }"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+    "old": "let Op::Section(Section::Reserve { id }) = op else { return None };",
+    "new": "let id = match op { Op::Section(Section::Reserve { id }) | Op::Send(Command::Settings(SetCmd { id, change: Change::Timed { .. } })) => id, _ => return None };"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+    "old": "_ => unreachable!(\"a reservation needs a running phase\"),",
+    "new": "_ => return None,"
+   }
+  ],
+  "alt_of": "HO01"
+ },
+ {
+  "id": "PB2",
+  "holdout": "D9b-2 #2 a restore after a failed flush stop (Uncertain) (reuses mutation row E1-36)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "Phase::Uncertain | Phase::Lost",
+  "new": "Phase::Lost"
+ },
+ {
+  "id": "PB3",
+  "holdout": "D9b-2 #3 completion races a late hand-over: stop send does not close acceptance before its call (reuses mutation row E1-40)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "cell.stop_accepting(); cell.outstanding = Some(Outstanding::Stop);",
+  "new": "cell.outstanding = Some(Outstanding::Stop);"
+ },
+ {
+  "id": "PB6",
+  "holdout": "D9b-2 #6 settlement does not dispose each obligation (loss leaves values without a disposition) (reuses mutation row E1-79)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if self.disposition(id).is_none() { self.dispose(id, Disposition::Reported(Reason::Loss));",
+  "new": "if false { self.dispose(id, Disposition::Reported(Reason::Loss));"
+ },
+ {
+  "id": "PB7",
+  "holdout": "L1 M1 a cut-free LateCommand after Lost issues a start (reuses mutation row E1-33)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if !matches!(cell.phase, Phase::Armed(_) | Phase::Streaming(_))",
+  "new": "if !matches!(cell.phase, Phase::Armed(_) | Phase::Streaming(_) | Phase::Lost)"
+ },
+ {
+  "id": "PB2b",
+  "holdout": "D9b-2 #2 a restore after a failed flush stop: the restore decision accepts an Uncertain chain (both guards)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "Phase::Uncertain | Phase::Lost",
+  "new": "Phase::Lost",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "Phase::Uncertain | Phase::Lost",
+    "new": "Phase::Lost"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "cell.busy() || cell.phase != Phase::Off",
+    "new": "cell.busy() || !matches!(cell.phase, Phase::Off | Phase::Uncertain)"
+   }
+  ]
+ }
+]
