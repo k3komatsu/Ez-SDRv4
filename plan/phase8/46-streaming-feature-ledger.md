@@ -203,7 +203,9 @@ spec 18 の規則の大きさ：UR-24（時刻つきの値，F1・F2・F9）19.4
 
 ## 6. owner に決めてもらうこと（一つずつ）
 
-F1〜F9（F4 は F4a と F4b）のそれぞれを §3 の段階のどれにするか．順は F4a → F4b → F5 → F6 → F1 → F3 → F2 → F9 → F7 → F8 を提案する（F4a・F4b・F5・F6 は計画と ownership を決め，F1・F3 はその上で受け渡しを決める．送信の三つは独立に近い）．
+F1〜F9（F4 は F4a と F4b）のそれぞれを §3 の段階のどれにするか．順は F4a → F4b → F5 → F1 → F3 → F6 → F2 → F9 → F7 → F8（owner 2026-11-04 に F6 を F1・F3 の後へ移した：F6 を残す代価の大半は，cut をまたぐ受信の時刻つきの周波数，つまり F1 にあるため）．
+
+v3 との比べ（orchestrator が `v3/` を読んだ，master の worktree）：v3 は controller ごとに受信・送信のループを何度でも開始・終了できた（`v3/source/controller/cyclicrx.d:282-301`，`cyclictx.d:219-228`，停止は時刻なしの `STREAM_MODE_STOP_CONTINUOUS`，`v3/cpp/uhd_usrp/multiusrp.cpp:653-681`）．単位は controller で，stream ごとではない．cut を sample で決めて記録すること，再開を新しい clock にすること，cut をまたぐ時刻つきの値を扱うことはしない．周波数と gain は設定ファイルで開始の前に与え（`multiusrp.cpp:127-133,236-255`），流れている間に変える `setParam` の周波数・gain の分は comment にされている（`multiusrp.cpp:525-560`）．
 
 ## 7. Sol の事実確認
 
