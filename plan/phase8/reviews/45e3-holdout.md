@@ -3,7 +3,7 @@
 
 These are **behavioural mutations**, not disabled assertions. This response freezes the selection before implementation; no files were changed.
 
-**Basis:** all of [note 45](plan/phase8/45-uhd-decision-core.md), [note 44 §3](plan/phase8/44-device-chain-state.md), [note 39 §6.6–§6.8](plan/phase8/39-dsp-timed-commands.md), and [spec 18 UR-24](design/18-uhd-radio.md). Where note 45 explicitly changes existing semantics—especially late completion and partial failure—the experiment’s proposed semantics govern.
+**Basis:** all of [note 45](../45-uhd-decision-core.md), [note 44 §3](../44-device-chain-state.md), [note 39 §6.6–§6.8](../39-dsp-timed-commands.md), and [spec 18 UR-24](../../../design/18-uhd-radio.md). Where note 45 explicitly changes existing semantics—especially late completion and partial failure—the experiment’s proposed semantics govern.
 
 **Notation:** `O` = segment origin; `C` = logical cut; `P` = first-undelivered sample; `e` = command instant; `D` = drain deadline. “Case N” means note 45 §7’s exhaustive case N. Exposure mappings identify required schedules and inputs, not a claim that the cases already specify them.
 
