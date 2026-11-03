@@ -1,6 +1,6 @@
 # 設計メモ 46：受信中・送信中にできることの帳簿
 
-Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．**owner の決定は §8**（F4a と F4b は (d)，よって F5 もなくなる．F1 は (e)．F4b は受信だけ (e) に改めた．F3 は F1 の結果なくなる．F6 は (a)）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
+Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．**owner の決定は §8**（F4a と F4b は (d)，よって F5 もなくなる．F1 は (e)．F4b は受信だけ (e) に改めた．F3 は F1 の結果なくなる．F6 は (a)．F2 と F9 は再開の parameter だけ）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
 
 | 項目 | 内容 |
 |---|---|
@@ -221,6 +221,8 @@ v3 との比べ（orchestrator が `v3/` を読んだ，master の worktree）�
 | 2026-11-04 | F4b（改め） | 受信の sample rate と antenna も F1 と同じく `start_rx` の parameter としてだけ変えられる（(d) を改めた）．送信の rate と antenna は F2 と一緒に決める | 技術的に問題がなければ変えられるとよい（owner）．channel の組が変わらないので streamer は開き直さず（`owner_step` の `Configure`），`start_rx` はもともと新しい SampleClock を始める．流れている stream を切る判断と instance 全体の floor は戻らない | 足すもの：再開の時の profile と throughput（RM-32）の確かめ，duplex の board の antenna の規則（RM-31）の確かめ．**条件**：開いたままの streamer で，止めている間に rate を変えて開始し直すことを実機で一度確かめる（FakeDevice でしか通っていない．棚卸し §4 も UHD の保証は見つからないとする） |
 | 2026-11-04 | F3 | 決めることがない（F1 の結果） | — | restore が働くのは，流れている受信に渡した時刻つきの周波数が S の後に効く場合だけ（UR-26）．F1 (e) でその値がなくなる．`start_rx` の設定を入れた後，開始の前に `Provider::stop` が来た場合は，今の restore も戻さない（時刻つきで渡した値ではない）．装置の設定は device record（UR-36）に残る |
 | 2026-11-04 | F6 | (a) 受信の Stop と `start_rx`，送信の Stop をすべて残す | (b)(c) では機能的に厳しい（owner）．`start_rx` は F1・F4b の変更の唯一の入口で，送信の Stop は repeat を途中で止める唯一の方法 | F1 (e) で，流れている受信に渡した時刻つきの値と Stop の競合（D9b-2 の大部分）がなくなる見込み（INFERRED：Stop の時に未消費の時刻つきの値がほかの道から残らないかは未確認）．残る：cut，新しい segment と SampleClock，開始の前の設定と refusal，start lead，#67 |
+| 2026-11-04 | F2（送信の rate と antenna を含む） | ①：送信の周波数・gain・rate・antenna は，送信の stream に流れている burst も予約済みの burst もない時に予約された burst にだけ parameter として付けられる（受信の `start_rx` と同じ形）．開始は前の burst の終わりから送信の start lead 以上後．その burst の booking で新しい送信の clock を登録し，origin はその開始．antenna は将来のための予約で，`coerce` が board ごとに確かめる（X310 では今は同じ値だけ） | 周波数ホッピングや gain の変更はそれほどしない．sample の単位で要るならデジタル信号処理ですべき（owner） | burst と結びつかない時刻つきの値，device burst の途中の値（#71・#72 の場合）がなくなる見込み（INFERRED）．退けた案②（周波数と gain は新しい device burst を始める burst なら付けられる）：前もって並べた予約ができる代わりに規則が二つ．**条件**：開いたままの送信の streamer で rate を変えることを実機で一度確かめる |
+| 2026-11-04 | F9 | 時刻つきの gain も，受信は `start_rx`，送信は F2 ① の burst の parameter としてだけ変える | F2 の理由と同じ（owner：gain の変更もそれほどしない） | 流れている間の時刻つきの値が受信・送信ともなくなる．uhd-control の流れている間の release はなくなる（再開の parameter の時刻つきの値の渡し方は設計で決める） |
 
 ## Changes
 
