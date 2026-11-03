@@ -1,6 +1,6 @@
 # 設計メモ 46：受信中・送信中にできることの帳簿
 
-Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．**owner の決定は §8**（F4a と F4b は (d)，よって F5 もなくなる）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
+Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．**owner の決定は §8**（F4a と F4b は (d)，よって F5 もなくなる．F1 は (e)）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
 
 | 項目 | 内容 |
 |---|---|
@@ -217,6 +217,7 @@ v3 との比べ（orchestrator が `v3/` を読んだ，master の worktree）�
 |---|---|---|---|---|
 | 2026-11-04 | F4a | (d) Run の間は channel の組を変えない（`radio.<d>.c<n>.stream` の class を外す） | v3 も同じ．用途があまり思いつかない | F5 もなくなる（move と from none は組の変更）．F5 は決めることがない |
 | 2026-11-04 | F4b | (d) Run の間は sample rate と antenna を変えない（`radio.<d>.s<k>.sample_rate_hz` と `radio.<d>.c<n>.antenna` の class を外す） | rate はユーザーのプログラムで resampling すればよい．antenna の変更も要らない | F4a と合わせて radio の key に `cold` がなくなる．F4 共通（`cold` change が stream を切って新しい segment を始めること，instance 全体の floor，refusal の往復と halt）は，F6 の `start_rx` の分を除いてなくなる |
+| 2026-11-04 | F1 | (e)（帳簿の外の段階．owner の案）：受信の周波数は，止めた受信を開き直す `start_rx` に parameter として付けてだけ変えられる（Easy API なら `rx.start(at, frequency=…)`）．流れている間の `UpdateParameter` では変えない | 止めた stream を開き直すときだけ許せばよい．値と再開を一つの命令にすれば，別々に届いた値と再開の時刻の前後の規則も要らない | 受け渡し，debt，drain，flush，`left`，eligibility，F3 の戻す値がなくなる．設計で決めること：key の class（Vision §27・§65 の 40 により要る．`cold` が合う），`start_rx` の parameter への RF envelope の確かめ（§58 の 16 の試験の書き直し），止めている間の tune の位相（時刻なしなら保たない），MockRadio と RM-12・MR-29 の変更 |
 
 ## Changes
 
