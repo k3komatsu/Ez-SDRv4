@@ -9,7 +9,7 @@ use super::cell::{Drain, Outcome, Phase, Terminal, ValueState};
 use super::core::{Change, Command, Disposition, Op, RxOp, Section, SetCmd};
 use super::dst::Model;
 use super::rules::RxCall;
-use super::world::{Event, Ident, RStep, SStep, Who, World};
+use super::world::{Cleanup, Event, Ident, PubStep, RStep, SStep, Who, World};
 
 /// The safety checks of every state: I5 (the cut in force is not below the published progress)
 /// and I8 (a chain applies at most one write per sample, in order).
@@ -23,7 +23,7 @@ pub(super) fn safety(w: &World) -> Result<(), String> {
 /// state it produced.
 pub(super) fn transition(before: &World, event: &Event, after: &World) -> Result<(), String> {
     type StepCheck = fn(&World, &Event, &World) -> Result<(), String>;
-    let checks: [StepCheck; 18] = [i1, i7, i2, i3, i4, i5, i6, i9, i11, i12, i13, i14, i15, i16, i17, capacity_timer_inert, p6a, p6b];
+    let checks: [StepCheck; 22] = [i1, i7, i2, i3, i4, i5, i6, i9, i11, i12, i13, i14, i15, i16, i17, capacity_timer_inert, p6a, p6b, i18, i19, i20, i21];
     for check in checks {
         check(before, event, after)?;
     }
@@ -35,7 +35,8 @@ pub(super) fn progress(w: &World) -> Result<(), String> {
     p1(w)?;
     p2(w)?;
     p3(w)?;
-    p4(w)
+    p4(w)?;
+    i19_progress(w)
 }
 
 /// Two facts name the same reservation: the value, its channel, segment and epoch.
@@ -456,6 +457,115 @@ fn p6b(_before: &World, event: &Event, after: &World) -> Result<(), String> {
     Ok(())
 }
 
+/// I18: the loss record and the native `mark_lost` come after the failure flag is set and after the publisher released the gate (the order of one
+/// publication is gate, `F`, ungate, record, mark).
+fn i18(before: &World, event: &Event, _after: &World) -> Result<(), String> {
+    match event {
+        Event::Pub(holder, step @ (PubStep::Record | PubStep::Mark)) if !before.failure => Err(format!("I18: {holder:?} publishes {step:?} before F is set")),
+        Event::Pub(holder, step @ (PubStep::Record | PubStep::Mark)) if before.gate == Some(*holder) => Err(format!("I18: {holder:?} publishes {step:?} while it still holds the gate")),
+        _ => Ok(()),
+    }
+}
+
+/// I19 (handles): cleanup decides to close only when `F` is clear and nothing is detached; it closes nothing when something is detached; no
+/// handle is destroyed while `F` is set or something is detached (the destructor reads the native mark, so a missing mark shows here).
+fn i19(before: &World, event: &Event, after: &World) -> Result<(), String> {
+    let (Some(was), Some(now)) = (&before.teardown, &after.teardown) else { return Ok(()) };
+    match event {
+        Event::CleanupDecide if now.decision == Some(Cleanup::Close) && (before.failure || !was.detached.is_empty()) => {
+            Err("I19: cleanup decided to close the streamers although F is set or an executor is detached".to_string())
+        }
+        Event::CleanupClose(k) if !was.detached.is_empty() => Err(format!("I19: cleanup closes stream {k}'s handle although an executor is detached")),
+        Event::OwnerRelease if now.destroyed.len() > was.destroyed.len() && before.failure => {
+            Err(format!("I19: the native device's final release freed a handle while F is set (native mark {})", before.monitor.marked))
+        }
+        Event::OwnerRelease if was.detached.iter().any(|j| !ended(before, *j)) => Err("I19: the native device was released while a detached thread still holds it".to_string()),
+        Event::Destroy(k) if now.destroyed.len() > was.destroyed.len() && (before.failure || !was.detached.is_empty()) => {
+            Err(format!("I19: stream {k}'s handle is destroyed while F is set or an executor is detached (native mark {})", before.monitor.marked))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// I19, the progress half: at a terminal state where cleanup decided to close, every handle was closed, and each closed handle's destructor ran
+/// (it freed the handle, or retained it because the native mark was set).
+fn i19_progress(w: &World) -> Result<(), String> {
+    let Some(td) = w.teardown.as_ref().filter(|td| td.decision == Some(Cleanup::Close)) else { return Ok(()) };
+    if let Some(k) = w.rx.iter().position(|r| r.handle.is_some()) {
+        return Err(format!("I19: cleanup decided to close but stream {k}'s handle is still open at the end"));
+    }
+    if !td.pending.is_empty() || td.closed.iter().any(|k| !td.destroyed.iter().chain(&td.retained).any(|(stream, _)| stream == k)) {
+        return Err("I19: a closed handle's destructor did not run at the end".to_string());
+    }
+    Ok(())
+}
+
+/// Whether joinee `i` of the stopper has ended, as the oracle reads it (a second implementation of the world's `joinee_done`, checked at the
+/// moment of a join; a joined thread stays ended): `S`, then each receive executor (an unspawned one has nothing to end), then the brain:
+/// finished or dead, nothing left to take or do, no booking pending.
+fn ended(w: &World, i: usize) -> bool {
+    match i {
+        0 => w.settings.unspawned || (w.settings.exited && w.settings.terminate && w.settings.fifo.is_empty() && w.settings.program.is_empty() && w.settings.hand.is_none()),
+        i if i <= w.rx.len() => (w.rx[i - 1].exited && w.rx[i - 1].program.is_empty()) || w.rx[i - 1].unspawned,
+        _ => w.brain_exited,
+    }
+}
+
+/// I20: a detach only after the join limit has passed in virtual time; a join only of a joinee that has ended; cleanup's decision only when every
+/// joinee has ended or been detached; nothing closed or destroyed with an executor detached (also I19).
+fn i20(before: &World, event: &Event, after: &World) -> Result<(), String> {
+    let (Some(was), Some(now)) = (&before.teardown, &after.teardown) else { return Ok(()) };
+    // A brain thread that returned after terminating takes nothing more: what is in its inbox then (queued before it returned, or sent after) is
+    // lost. A dead brain (its guard ran) drops its inbox by design.
+    if after.brain_exited && !after.brain.dead() && !after.inbox.is_empty() {
+        return Err("I20: an input is queued for a brain whose thread has returned".to_string());
+    }
+    match event {
+        Event::Detach if before.device.t < was.since + was.join_limit => {
+            Err(format!("I20: joinee {} detached at {} before the join limit ({} from {})", was.next, before.device.t, was.join_limit, was.since))
+        }
+        Event::Join if !ended(before, was.next) => Err(format!("I20: joinee {} joined before it ended", was.next)),
+        Event::CleanupDecide => {
+            let pending = (0..2 + before.rx.len()).find(|i| !was.detached.contains(i) && !was.joined.contains(i));
+            match pending {
+                Some(i) => Err(format!("I20: cleanup began while joinee {i} had neither ended nor been detached")),
+                None => Ok(()),
+            }
+        }
+        Event::CleanupClose(_) | Event::Destroy(_) if !now.detached.is_empty() && (now.closed.len() > was.closed.len() || now.destroyed.len() > was.destroyed.len()) => {
+            Err("I20: cleanup closed or destroyed a handle with an executor detached".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// I21: no command is routed to a stream whose executor was never spawned; the brain's spawn-failure step abandons only the failing stream and
+/// only when its start had succeeded (`Uncertain`, a loss already known kept), and no other stream's phase changes.
+fn i21(before: &World, event: &Event, after: &World) -> Result<(), String> {
+    for command in routed(before, after) {
+        match command {
+            Command::Rx { stream, op } if after.rx[stream].unspawned => {
+                return Err(format!("I21: {op:?} routed to stream {stream}, whose executor was never spawned"));
+            }
+            Command::Settings(cmd) if after.settings.unspawned => return Err(format!("I21: settings command {} routed to the control thread, which was never spawned", cmd.id)),
+            _ => {}
+        }
+    }
+    if after.settings.unspawned && after.settings.terminate {
+        return Err("I21: the brain terminated the control thread, which was never spawned".to_string());
+    }
+    if let (Event::BOp, Some(Op::Section(Section::SpawnFailed { stream, started }))) = (event, before.brain.ops.front()) {
+        for k in 0..before.cells.len() {
+            let (was, now) = (before.cells[k].phase, after.cells[k].phase);
+            let want = if k == *stream && *started && was != Phase::Lost { Phase::Uncertain } else { was };
+            if now != want {
+                return Err(format!("I21: spawn failure of stream {stream} (started {started}) moved stream {k} from {was:?} to {now:?}, expected {want:?}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// I17: a cell that is `Stopping` becomes `Armed` or `Streaming` only at the executor's completed start, the one the brain issued for the
 /// epoch the cell is in (the call carries the epoch of its `Start`).
 fn i17(before: &World, event: &Event, after: &World) -> Result<(), String> {
@@ -613,11 +723,11 @@ fn panic_settled(w: &World, id: u64) -> bool {
 /// P3: after shutdown, `S` and every receive executor have exited (a complete run).
 fn p3(w: &World) -> Result<(), String> {
     if w.monitor.shutdown && w.incomplete().is_none() {
-        if !w.settings.exited {
+        if !w.settings.exited && !w.settings.unspawned {
             return Err("P3: S did not exit after shutdown".to_string());
         }
         for (k, rx) in w.rx.iter().enumerate() {
-            if !rx.exited {
+            if !rx.exited && !rx.unspawned {
                 return Err(format!("P3: receive executor R{k} did not exit after shutdown"));
             }
         }
@@ -1067,6 +1177,249 @@ mod tests {
         assert_eq!(p6a(&stale, &Event::BOp, &stale.clone()), Ok(()));
         stale.brain.now = 10;
         violates(p6a(&stale, &Event::BOp, &stale.clone()), "P6a:");
+    }
+
+    /// A world at the start of cleanup: one open handle (stream 0, handle 1) and a stopper that has joined its one executor.
+    fn teardown_world() -> World {
+        use super::super::world::Teardown;
+        let mut w = world(vec![streaming()]);
+        w.rx[0].handle = Some(1);
+        w.rx[0].exited = true;
+        w.settings.exited = true;
+        w.brain.exit = super::super::core::Exit::Terminated;
+        w.teardown = Some(Teardown { join_limit: 4, began: true, next: 3, since: 0, joined: [0, 1, 2].into(), ..Teardown::default() });
+        w
+    }
+
+    #[test]
+    fn inv_i18_record_or_mark_before_f_is_violation() {
+        for step in [PubStep::Record, PubStep::Mark] {
+            let before = world(vec![streaming()]);
+            let event = Event::Pub(super::super::world::Holder::Settings, step);
+            violates(before.transition(&event, &before.clone()), "I18:");
+            let mut set = before.clone();
+            set.failure = true;
+            assert_eq!(set.transition(&event, &set.clone()), Ok(()), "{step:?} after F");
+        }
+    }
+
+    /// The record and the mark come after the publisher released the gate.
+    #[test]
+    fn inv_i18_record_or_mark_while_the_gate_is_held_is_violation() {
+        use super::super::world::Holder;
+        for step in [PubStep::Record, PubStep::Mark] {
+            let mut before = world(vec![streaming()]);
+            before.failure = true;
+            before.gate = Some(Holder::Settings);
+            let event = Event::Pub(Holder::Settings, step);
+            violates(before.transition(&event, &before.clone()), "I18:");
+            before.gate = None;
+            assert_eq!(before.transition(&event, &before.clone()), Ok(()), "{step:?} with the gate free");
+        }
+    }
+
+    /// A loss publication taken event by event is in the order gate, F, ungate, record, mark, and passes every oracle.
+    #[test]
+    fn inv_i18_the_publication_order_is_f_then_record_then_mark() {
+        use super::super::world::Holder;
+        let mut w = world(vec![streaming()]);
+        w.settings.program = super::super::world::PUB_STEPS.iter().map(|step| SStep::Pub(*step)).collect();
+        for step in super::super::world::PUB_STEPS {
+            let event = Event::Pub(Holder::Settings, step);
+            assert!(w.enabled().contains(&event), "{step:?} is enabled in order");
+            let before = w.clone();
+            w.apply(&event);
+            before.transition(&event, &w).unwrap_or_else(|why| panic!("{step:?}: {why}"));
+        }
+        assert!(w.failure && w.monitor.marked);
+    }
+
+    #[test]
+    fn inv_i19_cleanup_decides_to_close_only_without_f_and_detach() {
+        use super::super::world::Cleanup;
+        for (failure, detached) in [(true, false), (false, true), (true, true)] {
+            let mut before = teardown_world();
+            before.failure = failure;
+            if detached {
+                before.teardown.as_mut().unwrap().detached.insert(0);
+            }
+            let mut after = before.clone();
+            after.teardown.as_mut().unwrap().decision = Some(Cleanup::Close);
+            violates(before.transition(&Event::CleanupDecide, &after), "I19:");
+            after.teardown.as_mut().unwrap().decision = Some(Cleanup::Retain);
+            assert_eq!(before.transition(&Event::CleanupDecide, &after), Ok(()), "retain is right with F {failure}, detached {detached}");
+        }
+        let before = teardown_world();
+        let mut after = before.clone();
+        after.teardown.as_mut().unwrap().decision = Some(Cleanup::Close);
+        assert_eq!(before.transition(&Event::CleanupDecide, &after), Ok(()));
+    }
+
+    /// The destructor reads the native mark: with F set and the mark set the handle is retained (legal); with F set and no mark (the guard that
+    /// forgot `mark_lost`) it is freed, which is the violation; a close after a loss that came after the check is legal.
+    #[test]
+    fn inv_i19_a_destroy_while_f_is_set_is_a_violation_and_the_mark_retains() {
+        use super::super::world::Cleanup;
+        let mut before = teardown_world();
+        before.teardown.as_mut().unwrap().decision = Some(Cleanup::Close);
+        before.teardown.as_mut().unwrap().pending.insert((0, 1));
+        before.failure = true;
+        let mut marked = before.clone();
+        marked.monitor.marked = true;
+        let mut retained = marked.clone();
+        retained.apply(&Event::Destroy(0));
+        assert_eq!((retained.teardown.as_ref().unwrap().destroyed.len(), retained.teardown.as_ref().unwrap().retained.len()), (0, 1), "the mark retains it");
+        assert_eq!(marked.transition(&Event::Destroy(0), &retained), Ok(()));
+        let mut freed = before.clone();
+        freed.apply(&Event::Destroy(0));
+        assert_eq!(freed.teardown.as_ref().unwrap().destroyed.len(), 1, "without the mark the destructor frees it");
+        violates(before.transition(&Event::Destroy(0), &freed), "I19:");
+        // A close that comes after the loss (the check came before it) drops the reference only.
+        let mut closing = teardown_world();
+        closing.teardown.as_mut().unwrap().decision = Some(Cleanup::Close);
+        closing.failure = true;
+        closing.monitor.marked = true;
+        let mut after = closing.clone();
+        after.apply(&Event::CleanupClose(0));
+        assert_eq!(closing.transition(&Event::CleanupClose(0), &after), Ok(()));
+    }
+
+    /// The native device's final release reads the native mark: with `F` set and the mark set the open handle is kept (legal); with `F` set and no
+    /// mark it is freed, which is the violation; a handle a detached executor holds is not freed by the release.
+    #[test]
+    fn inv_i19_the_owner_release_frees_a_handle_only_without_the_mark() {
+        use super::super::world::Cleanup;
+        let mut before = teardown_world();
+        before.teardown.as_mut().unwrap().decision = Some(Cleanup::Retain);
+        before.failure = true;
+        let mut marked = before.clone();
+        marked.monitor.marked = true;
+        let mut kept = marked.clone();
+        kept.apply(&Event::OwnerRelease);
+        assert_eq!((kept.teardown.as_ref().unwrap().destroyed.len(), kept.teardown.as_ref().unwrap().retained.len()), (0, 1));
+        assert_eq!(marked.transition(&Event::OwnerRelease, &kept), Ok(()));
+        let mut freed = before.clone();
+        freed.apply(&Event::OwnerRelease);
+        assert_eq!(freed.teardown.as_ref().unwrap().destroyed.len(), 1, "without the mark the release frees it");
+        violates(before.transition(&Event::OwnerRelease, &freed), "I19:");
+        let mut held = before.clone();
+        held.teardown.as_mut().unwrap().detached.insert(1);
+        held.rx[0].exited = false;
+        assert!(!held.enabled().contains(&Event::OwnerRelease), "a detached thread still holds the device");
+        held.rx[0].exited = true;
+        held.rx[0].program.clear();
+        assert!(held.enabled().contains(&Event::OwnerRelease), "released once it has ended");
+    }
+
+    /// The owner release waits for a detached thread (it holds the device), and nothing is sent to a control thread that was never spawned.
+    #[test]
+    fn inv_i19_i21_the_owner_release_spares_a_detached_holder_and_the_unspawned_control_gets_nothing() {
+        use super::super::world::Cleanup;
+        let mut before = teardown_world();
+        before.teardown.as_mut().unwrap().decision = Some(Cleanup::Retain);
+        before.teardown.as_mut().unwrap().detached.insert(1);
+        before.rx[0].exited = false;
+        let after = before.clone();
+        violates(i19(&before, &Event::OwnerRelease, &after), "I19:");
+        before.rx[0].exited = true;
+        before.settings.unspawned = true;
+        let mut told = before.clone();
+        told.settings.terminate = true;
+        violates(i21(&before, &Event::BOp, &told), "I21:");
+        let mut sent = before.clone();
+        sent.settings.fifo.push_back(super::super::core::SetCmd { id: 1, change: Change::Restore { channel: 0 } });
+        violates(i21(&before, &Event::BOp, &sent), "I21:");
+    }
+
+    #[test]
+    fn inv_i19_progress_every_closed_handle_is_destroyed_at_the_end() {
+        use super::super::world::Cleanup;
+        let mut w = teardown_world();
+        w.monitor.shutdown = true;
+        w.teardown.as_mut().unwrap().decision = Some(Cleanup::Close);
+        violates(i19_progress(&w), "I19:");
+        w.rx[0].handle = None;
+        w.teardown.as_mut().unwrap().closed.insert(0);
+        violates(i19_progress(&w), "I19:");
+        w.teardown.as_mut().unwrap().destroyed.insert((0, 1));
+        assert_eq!(i19_progress(&w), Ok(()));
+        // A destructor that retained the handle (the mark was set) has run too.
+        w.teardown.as_mut().unwrap().destroyed.clear();
+        w.teardown.as_mut().unwrap().retained.insert((0, 1));
+        assert_eq!(i19_progress(&w), Ok(()));
+    }
+
+    #[test]
+    fn inv_i20_detach_join_and_cleanup_follow_their_conditions() {
+        use super::super::world::{Cleanup, Teardown};
+        // A detach before the join limit.
+        let mut before = teardown_world();
+        before.rx[0].exited = false;
+        before.teardown = Some(Teardown { join_limit: 4, began: true, next: 1, since: 10, ..Teardown::default() });
+        before.device.t = 13;
+        let mut after = before.clone();
+        after.teardown.as_mut().unwrap().detached.insert(1);
+        after.teardown.as_mut().unwrap().next = 2;
+        violates(before.transition(&Event::Detach, &after), "I20:");
+        before.device.t = 14;
+        assert_eq!(before.transition(&Event::Detach, &after), Ok(()), "at the limit");
+        // A join of a joinee that has not ended.
+        violates(before.transition(&Event::Join, &after), "I20:");
+        // Cleanup's decision while a joinee has neither ended nor been detached.
+        let mut open = before.clone();
+        open.teardown.as_mut().unwrap().next = 3;
+        let mut decided = open.clone();
+        decided.teardown.as_mut().unwrap().decision = Some(Cleanup::Retain);
+        violates(open.transition(&Event::CleanupDecide, &decided), "I20:");
+        open.teardown.as_mut().unwrap().joined.extend([0, 2]);
+        open.teardown.as_mut().unwrap().detached.insert(1);
+        assert_eq!(open.transition(&Event::CleanupDecide, &decided), Ok(()));
+        // A close or a destroy with an executor detached.
+        let mut closing = teardown_world();
+        closing.teardown.as_mut().unwrap().detached.insert(1);
+        closing.teardown.as_mut().unwrap().decision = Some(Cleanup::Close);
+        let mut closed = closing.clone();
+        closed.teardown.as_mut().unwrap().closed.insert(0);
+        violates(i20(&closing, &Event::CleanupClose(0), &closed), "I20:");
+        // The brain thread returning with an input queued, and an input sent after it returned.
+        let mut returning = teardown_world();
+        returning.inbox.push_back(Input::Shutdown);
+        let mut returned = returning.clone();
+        returned.brain_exited = true;
+        violates(i20(&returning, &Event::BExit, &returned), "I20:");
+        let mut late = teardown_world();
+        late.brain_exited = true;
+        let mut sent = late.clone();
+        sent.inbox.push_back(Input::Shutdown);
+        violates(i20(&late, &Event::RSend(0), &sent), "I20:");
+    }
+
+    #[test]
+    fn inv_i21_a_command_to_an_unspawned_stream_and_a_wrong_abandonment_are_violations() {
+        use super::super::core::Section;
+        let mut before = world(vec![streaming(), cell(Phase::Streaming(seg(0)), 1, None, 0)]);
+        before.rx[1].unspawned = true;
+        let mut after = before.clone();
+        after.rx[1].fifo.push_back(RxOp::Terminate);
+        violates(before.transition(&Event::BOp, &after), "I21:");
+        // The spawn-failure step: stream 1 started and failing becomes Uncertain; nothing else moves.
+        before.brain.ops = VecDeque::from([Op::Section(Section::SpawnFailed { stream: 1, started: true })]);
+        let mut right = before.clone();
+        right.cells[1].phase = Phase::Uncertain;
+        assert_eq!(before.transition(&Event::BOp, &right), Ok(()));
+        let mut other = right.clone();
+        other.cells[0].phase = Phase::Uncertain;
+        violates(before.transition(&Event::BOp, &other), "I21:");
+        let mut unstarted = before.clone();
+        unstarted.brain.ops = VecDeque::from([Op::Section(Section::SpawnFailed { stream: 1, started: false })]);
+        violates(unstarted.transition(&Event::BOp, &right), "I21:");
+        // A loss already known stays.
+        let mut lost = before.clone();
+        lost.cells[1].phase = Phase::Lost;
+        let mut overwritten = lost.clone();
+        overwritten.cells[1].phase = Phase::Uncertain;
+        violates(lost.transition(&Event::BOp, &overwritten), "I21:");
+        assert_eq!(lost.transition(&Event::BOp, &lost.clone()), Ok(()));
     }
 
     #[test]

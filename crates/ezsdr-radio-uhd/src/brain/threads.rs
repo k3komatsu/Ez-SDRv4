@@ -65,7 +65,18 @@ impl Runtime {
         let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
         let now_model = model.clone();
         let sources = Sources { tick: Duration::from_millis(1), inner: model.clone(), now: Box::new(move || now_model.now()), fake: None, bench: None, sample_ticks: 1 };
-        Runtime::build(world, sched, model, real_panic, quirk, sources)
+        Runtime::build(world, sched, model, real_panic, quirk, sources, None)
+    }
+
+    /// A targeted free run (each actor waits on its own condition, as on a real-clock fake) whose threads pass `hook` at each [`Gate`](super::shared::Gate)
+    /// (a test holds them there).
+    pub(crate) fn start_held(world: &World, hook: super::shared::GateHook) -> Runtime {
+        let sched = Sched::new(false);
+        sched.set_targeted();
+        let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
+        let now_model = model.clone();
+        let sources = Sources { tick: Duration::from_millis(1), inner: model.clone(), now: Box::new(move || now_model.now()), fake: None, bench: None, sample_ticks: 1 };
+        Runtime::build(world, sched, model, None, Quirk::None, sources, Some(hook))
     }
 
     /// A free run over a `FakeDevice` on its own clock (S6, S7): the cells, queues and handles come from `world`, the device
@@ -82,7 +93,7 @@ impl Runtime {
             bench: None,
             sample_ticks,
         };
-        Runtime::build(world, sched, model, None, Quirk::None, sources)
+        Runtime::build(world, sched, model, None, Quirk::None, sources, None)
     }
 
     /// E2b's free run over a `FakeDevice` seen through `device` (a timing decorator over `fake`), with its own `now` source and the
@@ -98,10 +109,10 @@ impl Runtime {
         let sched = Sched::new(false);
         let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
         let sources = Sources { tick: Duration::from_nanos(1_000_000_000 / fake.master_clock_rate()), inner: device, now, fake: Some(fake), bench: Some(bench), sample_ticks };
-        Runtime::build(world, sched, model, None, Quirk::None, sources)
+        Runtime::build(world, sched, model, None, Quirk::None, sources, None)
     }
 
-    fn build(world: &World, sched: Arc<Sched>, model: Arc<ModelDevice>, real_panic: Option<usize>, quirk: Quirk, sources: Sources) -> Runtime {
+    fn build(world: &World, sched: Arc<Sched>, model: Arc<ModelDevice>, real_panic: Option<usize>, quirk: Quirk, sources: Sources, gate_hook: Option<super::shared::GateHook>) -> Runtime {
         let forcing = sched.forcing();
         let Sources { tick, inner, now, fake, bench, sample_ticks } = sources;
         // Every thread of a fake run on a manual clock is a participant of it (the receive executors as production's are, and the brain, S, K and
@@ -114,7 +125,7 @@ impl Runtime {
         if !forcing && fake.is_some() && host.is_none() {
             sched.set_targeted();
         }
-        let failure = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(AtomicBool::new(world.failure));
         // A measurement run keeps no per-call history (the no-cell-held assertion stays).
         let checking = Arc::new(if bench.is_some() { CheckingDevice::unlogged(inner, failure.clone()) } else { CheckingDevice::new(inner, failure.clone()) });
         let streams = world.cells.len();
@@ -146,13 +157,16 @@ impl Runtime {
             now,
             tick,
             stopping: AtomicBool::new(false),
-            brain_gone: AtomicBool::new(false),
+            halt_senders: AtomicBool::new(false),
+            exit_model: world.teardown.is_some(),
+            brain_exit: AtomicBool::new(false),
             real_panic,
             quirk,
             panic_in_op: Mutex::new(Vec::new()),
             ops_run: std::sync::atomic::AtomicUsize::new(0),
             before_write: Mutex::new(None),
             after_batch: Mutex::new(None),
+            gate_hook: Mutex::new(gate_hook),
             bench,
             sample_ticks,
         });
@@ -167,20 +181,32 @@ impl Runtime {
                 sh.push(&sh.r_fifo[k], *op);
             }
         }
+        // Every thread that can send to the brain registers with its inbox, all of them before any thread starts (a zero count must never mean "not
+        // registered yet"), and deregisters when it returns.
+        let s_guard = (!world.settings.unspawned).then(|| sh.sender(Actor::Settings));
+        let r_guards: Vec<_> = (0..streams).filter(|k| !world.rx[*k].unspawned).map(|k| (k, sh.sender(Actor::Rx(k)))).collect();
+        let clock_guard = sh.sender(Actor::Clock);
+        let timer_guard = (!forcing).then(|| sh.sender(Actor::Timer));
         let mut handles = Vec::new();
         let s = sh.clone();
         handles.push(spawn_on(&sched, host.as_ref(), Actor::Brain, move || run_brain(&s)));
         let s = sh.clone();
-        handles.push(spawn_on(&sched, host.as_ref(), Actor::Settings, move || run_settings(&s)));
-        for k in 0..streams {
+        handles.push(spawn_on(&sched, host.as_ref(), Actor::Settings, move || {
+            run_settings(&s, s_guard);
+            s.mark_exited(Actor::Settings);
+        }));
+        for (k, guard) in r_guards {
             let s = sh.clone();
-            handles.push(spawn_on(&sched, host.as_ref(), Actor::Rx(k), move || run_rx(&s, k)));
+            handles.push(spawn_on(&sched, host.as_ref(), Actor::Rx(k), move || {
+                run_rx(&s, k, guard);
+                s.mark_exited(Actor::Rx(k));
+            }));
         }
         let s = sh.clone();
-        handles.push(spawn_on(&sched, host.as_ref(), Actor::Clock, move || run_clock(&s)));
-        if !forcing {
+        handles.push(spawn_on(&sched, host.as_ref(), Actor::Clock, move || run_clock(&s, clock_guard)));
+        if let Some(guard) = timer_guard {
             let s = sh.clone();
-            handles.push(spawn_on(&sched, host.as_ref(), Actor::Timer, move || run_timer(&s)));
+            handles.push(spawn_on(&sched, host.as_ref(), Actor::Timer, move || run_timer(&s, guard)));
         }
         Runtime { sh, model, checking, env: world.env.clone(), fake, handles: Mutex::new(handles) }
     }
@@ -256,6 +282,19 @@ impl Runtime {
             Event::RUngate(k) => (rx(k), Point::RUngate, Forced::None),
             Event::RResult(k) => (rx(k), Point::RResult, Forced::None),
             Event::RSend(k) => (rx(k), Point::RSend, Forced::None),
+            // The provider's stop, cleanup and start prefix are not threads of this runtime: dedicated tests drive them (the cases that model them are
+            // not replayed).
+            Event::BExit => {
+                // The brain thread returns: after its guard it already has; otherwise it is parked waiting for an input, and is told there is none.
+                if self.sh.sink().exited.contains(&Actor::Brain) {
+                    return sched.settle();
+                }
+                self.sh.brain_exit.store(true, Ordering::SeqCst);
+                (Actor::Brain, Point::BStep, Forced::None)
+            }
+            Event::Spawn(_) | Event::Join | Event::Detach | Event::CleanupDecide | Event::CleanupClose(_) | Event::Destroy(_) | Event::OwnerRelease => {
+                return Err(format!("{event:?} is a provider event; the thread runtime does not replay it"));
+            }
             Event::Pub(holder, step) => {
                 let actor = match holder {
                     super::world::Holder::Settings => Actor::Settings,
@@ -266,6 +305,43 @@ impl Runtime {
             }
         };
         sched.step(actor, point, forced)
+    }
+
+    /// The provider's cleanup (note 45 §4.9): with a detached thread or the failure flag set it leaves the streamers alone; otherwise it closes
+    /// every streamer, and each destructor reads the native mark. Returns the decision, as the world's `CleanupDecide` does.
+    pub(crate) fn cleanup(&self, detached: bool) -> super::world::Cleanup {
+        if detached || self.sh.failed() {
+            return super::world::Cleanup::Retain;
+        }
+        self.sh.device.close_streams();
+        super::world::Cleanup::Close
+    }
+
+    /// The stopper's join of `actor` with a limit in device ticks: time passes (a forced run's `Tick`) until the actor has ended or the limit has
+    /// passed; returns whether it ended (false: the stopper detaches it, and the thread keeps running).
+    pub(crate) fn join_within(&self, actor: Actor, limit: i64) -> Result<bool, String> {
+        let start = self.model.now();
+        loop {
+            if self.sh.sink().exited.contains(&actor) {
+                return Ok(true);
+            }
+            if self.model.now() >= start + limit {
+                return Ok(false);
+            }
+            self.replay(&[Event::Tick])?;
+        }
+    }
+
+    /// The final release of the native device's last owner (`UhdDevice::drop`, once no thread holds the device): the streamers still open are
+    /// freed by the native destructors, which read the native mark and not `F`.
+    pub(crate) fn release_owner(&self) {
+        self.model.release_streamers();
+    }
+
+    /// The model device's destructor log: the streamers freed and those retained.
+    pub(crate) fn destructors(&self) -> (Vec<usize>, Vec<usize>) {
+        let st = self.model.state();
+        (st.destroyed.clone(), st.retained.clone())
     }
 
     /// The observation of the run so far: the system must be quiet.
@@ -401,13 +477,13 @@ fn brain_op(sh: &Arc<Shared>, op: Op) {
     if let (Some(bench), Some(ids)) = (&sh.bench, &in_flight) {
         bench.observe_in_flight(ids);
     }
-    let (dead, commands) = {
+    let (dead, commands, unspawned, control_unspawned) = {
         let mut brain = sh.brain();
-        (brain.dead(), std::mem::take(&mut brain.outbox))
+        (brain.dead(), std::mem::take(&mut brain.outbox), brain.unspawned.clone(), brain.control_unspawned)
     };
     if dead {
         sh.timers.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        for command in rules::dead_commands(sh.cells.len()) {
+        for command in rules::dead_commands(sh.cells.len(), &unspawned, control_unspawned) {
             route(sh, command);
         }
     }
@@ -455,7 +531,11 @@ fn guard_routine(sh: &Arc<Shared>) {
         brain.exit = Exit::Dead;
     }
     sh.timers.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    for command in rules::dead_commands(sh.cells.len()) {
+    let (unspawned, control_unspawned) = {
+        let brain = sh.brain();
+        (brain.unspawned.clone(), brain.control_unspawned)
+    };
+    for command in rules::dead_commands(sh.cells.len(), &unspawned, control_unspawned) {
         route(sh, command);
     }
     sh.sched.notify();
@@ -470,13 +550,18 @@ fn run_brain(sh: &Arc<Shared>) {
     let a = Actor::Brain;
     let mut at = 0usize;
     loop {
-        let pred = sh.pred(|s| s.inbox.nonempty() || s.stopping.load(Ordering::SeqCst));
+        sh.gate(super::shared::Gate::BrainTop);
+        if sh.exit_model && !sh.sched.forcing() && sh.brain().exit == Exit::Terminated && !sh.halt_senders.swap(true, Ordering::SeqCst) {
+            // The clock reader and the timer are told to stop; each finishes the send it has begun and deregisters.
+            sh.sched.notify();
+        }
+        let pred = sh.pred(|s| s.inbox.nonempty() || s.stopping.load(Ordering::SeqCst) || s.brain_exit.load(Ordering::SeqCst) || s.brain_may_exit());
         let (_, input) = sh.sched.acquire(a, Point::BStep, pred, || sh.inbox.pop());
         if let (Some(bench), Some(Input::Release(held))) = (&sh.bench, &input) {
             bench.stage(super::speed::Stage::BrainTake, held.entry.order.1);
         }
         let Some(mut input) = input else {
-            sh.brain_gone.store(true, Ordering::SeqCst);
+            sh.mark_exited(a);
             sh.sched.notify();
             return;
         };
@@ -499,8 +584,12 @@ fn run_brain(sh: &Arc<Shared>) {
                 true
             }
         };
-        if dead {
-            sh.brain_gone.store(true, Ordering::SeqCst);
+        // The thread returns after its guard, and (with the stop model, free running) once the brain has terminated and nothing is queued for it;
+        // under forcing the trace's `BExit` event ends it (`Runtime::event`), because an input may still arrive between the two.
+        sh.gate(super::shared::Gate::ExitTest);
+        let finished = dead || sh.brain_may_exit();
+        if finished {
+            sh.mark_exited(a);
             sh.sched.notify();
             return;
         }
@@ -509,15 +598,12 @@ fn run_brain(sh: &Arc<Shared>) {
 
 // ------------------------------------------------------------------------------------------ the settings executor
 
-fn run_settings(sh: &Arc<Shared>) {
+fn run_settings(sh: &Arc<Shared>, _sender: Option<super::shared::SenderGuard>) {
     let a = Actor::Settings;
     loop {
         let pred = sh.pred(|s| s.s_fifo.nonempty() || s.s_terminate.load(Ordering::SeqCst) || s.stopping.load(Ordering::SeqCst));
         let (_, cmd) = sh.sched.acquire(a, Point::STake, pred, || sh.s_fifo.pop());
-        let Some(cmd) = cmd else {
-            sh.mark_exited(a);
-            break;
-        };
+        let Some(cmd) = cmd else { break };
         if let Some(bench) = &sh.bench {
             bench.stage(super::speed::Stage::STake, cmd.id);
         }
@@ -525,9 +611,15 @@ fn run_settings(sh: &Arc<Shared>) {
             break;
         }
     }
-    // An exited `S` discards what is routed to it afterwards (I1).
+    // An exited `S` discards what is routed to it afterwards (I1) until the brain's terminate, the last thing it routes to `S`, has arrived and
+    // the queue is empty: `S` then returns and deregisters.
     loop {
-        let pred = sh.pred(|s| s.s_fifo.nonempty() || s.stopping.load(Ordering::SeqCst) || s.brain_gone.load(Ordering::SeqCst));
+        let pred = sh.pred(|s| s.s_fifo.nonempty() || s.stopping.load(Ordering::SeqCst) || s.s_terminate.load(Ordering::SeqCst));
+        // A wait that is not an event (under forcing the thread returns on its own); only a queued command is an event, the discard.
+        sh.sched.wait_until(a, pred.clone());
+        if !sh.s_fifo.nonempty() {
+            return;
+        }
         let (_, cmd) = sh.sched.acquire(a, Point::SDiscard, pred, || sh.s_fifo.pop());
         let Some(cmd) = cmd else { return };
         sh.abandon(cmd.id);
@@ -557,7 +649,6 @@ fn settle_one(sh: &Arc<Shared>, cmd: &SetCmd) -> bool {
         hook(sh);
     }
     if rules::settings_check(failure, Some(cmd.id), &mut queued, |id| sh.abandon(id)) == rules::Check::Exit {
-        sh.mark_exited(a);
         return false;
     }
     sh.with_cells(|cells| rules::start_calls(cells, cmd.id));
@@ -616,7 +707,7 @@ fn call_settings(sh: &Arc<Shared>, cmd: &SetCmd) -> Outcome {
 
 // -------------------------------------------------------------------------------------------- a receive executor
 
-fn run_rx(sh: &Arc<Shared>, k: usize) {
+fn run_rx(sh: &Arc<Shared>, k: usize, _sender: super::shared::SenderGuard) {
     let a = Actor::Rx(k);
     // The loop's one decision per iteration, with a view of the cell when the iteration receives (a free run: the first of the block's two cell
     // sections; forcing takes its snapshot and view at their own events).
@@ -636,8 +727,8 @@ fn run_rx(sh: &Arc<Shared>, k: usize) {
         match next {
             Next::Exit => {
                 sh.r_fifo[k].clear();
-                sh.mark_exited(a);
                 sh.sched.hook(a, Point::RSend);
+                sh.gate(super::shared::Gate::FinalSend(a));
                 sh.send(Input::Boundary(super::core::Boundary::Lost { stream: k }));
                 return;
             }
@@ -647,7 +738,6 @@ fn run_rx(sh: &Arc<Shared>, k: usize) {
                 match rules::call_of(op) {
                     None => {
                         sh.r_fifo[k].clear();
-                        sh.mark_exited(a);
                         return;
                     }
                     Some((call, lifecycle, quiesce)) => run_call(sh, k, call, lifecycle, quiesce),
@@ -906,11 +996,14 @@ fn recv_cycle(sh: &Arc<Shared>, k: usize, mut first_view: Option<Cell>) {
 
 // ----------------------------------------------------------------------------------------- the clock and timers
 
-fn run_clock(sh: &Arc<Shared>) {
+fn run_clock(sh: &Arc<Shared>, _sender: super::shared::SenderGuard) {
     let a = Actor::Clock;
     loop {
-        let pred = sh.pred(|s| s.k_fifo.nonempty() || s.stopping.load(Ordering::SeqCst));
+        let pred = sh.pred(|s| s.k_fifo.nonempty() || s.stopping.load(Ordering::SeqCst) || s.halt_senders.load(Ordering::SeqCst));
         sh.sched.wait_until(a, pred);
+        if sh.halt_senders.load(Ordering::SeqCst) {
+            return;
+        }
         let Some(ClockCmd::Serve { stream }) = sh.k_fifo.pop() else {
             if sh.stopping.load(Ordering::SeqCst) {
                 return;
@@ -919,6 +1012,7 @@ fn run_clock(sh: &Arc<Shared>) {
         };
         let now = sh.device.time_now().unwrap_or_else(|_| (sh.now)());
         sh.sched.hook(a, Point::ClockSend);
+        sh.gate(super::shared::Gate::FinalSend(a));
         sh.send(Input::LateCommand { stream, now });
     }
 }
@@ -934,12 +1028,12 @@ fn timer_input(timer: Timer, now: i64) -> Input {
 /// Outside forcing: delivers a brain-booked deadline once the time source has passed it (never early). On a fake's manual clock the
 /// timer is a participant and waits for the earliest deadline on that clock (a wait that ends at the deadline, or at a notify), so the
 /// clock stops there until the delivery is made; otherwise it polls the time source.
-fn run_timer(sh: &Arc<Shared>) {
+fn run_timer(sh: &Arc<Shared>, _sender: super::shared::SenderGuard) {
     let a = Actor::Timer;
     if let Some(host) = sh.sched.host() {
         loop {
             let seen = host.generation();
-            if sh.stopping.load(Ordering::SeqCst) {
+            if sh.stopping.load(Ordering::SeqCst) || sh.halt_senders.load(Ordering::SeqCst) {
                 return;
             }
             let now = (sh.now)();
@@ -948,6 +1042,7 @@ fn run_timer(sh: &Arc<Shared>) {
                 timers.iter().position(|&(_, at)| now >= at).map(|i| timers.remove(i))
             };
             if let Some((timer, _)) = due {
+                sh.gate(super::shared::Gate::FinalSend(a));
                 sh.send(timer_input(timer, now));
                 continue;
             }
@@ -961,6 +1056,9 @@ fn run_timer(sh: &Arc<Shared>) {
         // or the stop wakes it.
         let due = sh.sched.wait_for(a, || {
             let now = (sh.now)();
+            if sh.halt_senders.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
             let mut timers = sh.timers.lock().unwrap_or_else(|e| e.into_inner());
             match timers.iter().position(|&(_, at)| now >= at) {
                 Some(i) => Ok(Some(timers.remove(i))),
@@ -969,7 +1067,10 @@ fn run_timer(sh: &Arc<Shared>) {
             }
         });
         match due {
-            Some((timer, _)) => sh.send(timer_input(timer, (sh.now)())),
+            Some((timer, _)) => {
+                sh.gate(super::shared::Gate::FinalSend(a));
+                sh.send(timer_input(timer, (sh.now)()))
+            }
             None => return,
         }
     }

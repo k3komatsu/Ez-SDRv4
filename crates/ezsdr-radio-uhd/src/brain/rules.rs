@@ -538,8 +538,12 @@ pub(crate) fn abandon_all(cells: &mut [Cell], id: u64) {
 }
 
 /// The commands a dead brain's senders issue as they close: `S` and every receive executor end after what they hold.
-pub(crate) fn dead_commands(streams: usize) -> Vec<Command> {
-    std::iter::once(Command::SettingsTerminate).chain((0..streams).map(|stream| Command::Rx { stream, op: RxOp::Terminate })).collect()
+pub(crate) fn dead_commands(streams: usize, unspawned: &std::collections::BTreeSet<usize>, control_unspawned: bool) -> Vec<Command> {
+    (!control_unspawned)
+        .then_some(Command::SettingsTerminate)
+        .into_iter()
+        .chain((0..streams).filter(|stream| !unspawned.contains(stream)).map(|stream| Command::Rx { stream, op: RxOp::Terminate }))
+        .collect()
 }
 
 /// Whether the brain's `at`-th step is the one a case replaces with a panic.

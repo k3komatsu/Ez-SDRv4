@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use ezsdr_radio::timeline::Channels;
 
 use super::cell::{Cell, Drain, Outcome, Phase, Recv, Refusal, Snapshot, Take, Terminal, Ticks, ValueState};
-use super::core::{Boundary, Brain, CHAIN_BOUND, Change, Command, DEVICE_BOUND, Disposition, Guard, Input, NotReserved, Op, Request, RxOp, Section, SetCmd, Timer};
+use super::core::{Boundary, Brain, CHAIN_BOUND, Change, Command, DEVICE_BOUND, Disposition, Exit, Guard, Input, NotReserved, Op, Request, RxOp, Section, SetCmd, Timer};
 use super::dst::Model;
 use super::model::{Apply, Device, Dsp};
 use super::rules::{self, CallPlan, CallResult, Check, DevCall, DeviceOp, FlushEnd, Handle, Next, Received, Round, RxCall, has_debt};
@@ -56,16 +56,18 @@ pub(crate) enum Holder {
     Clock,
 }
 
-/// The four events of publishing a loss (R5; note 45 §4.5 procedure 4).
+/// The events of publishing a loss (R5; note 45 §4.5 procedure 4): `G`, `F`, release `G`, the loss record, the native `mark_lost`. The
+/// brain's panic guard publishes `F` and the mark only (it has no record to write, I18 holds for the others).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PubStep {
     Gate,
     Set,
     Ungate,
+    Record,
     Mark,
 }
 
-pub(crate) const PUB_STEPS: [PubStep; 4] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Mark];
+pub(crate) const PUB_STEPS: [PubStep; 5] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Record, PubStep::Mark];
 
 pub(crate) fn guard_step(guard: Guard) -> PubStep {
     match guard {
@@ -117,6 +119,8 @@ pub(crate) struct SettingsExec {
     pub(crate) exited: bool,
     /// Shutdown's terminate: `S` exits once the commands queued before it are taken.
     pub(crate) terminate: bool,
+    /// `S` (the control thread) was never spawned: a failed start stops before it (E4a2).
+    pub(crate) unspawned: bool,
 }
 
 /// A recv in progress, with the time it times out at.
@@ -126,6 +130,52 @@ pub(crate) struct RecvCall {
     pub(crate) deadline: i64,
     /// The missed start's `LateCommand`, sent with the publication's boundaries (see `rules::recv_inputs`).
     pub(crate) late: Option<Input>,
+}
+
+/// The provider's stop and cleanup (E4a2; note 45 §4.7, §4.9): the stopper joins `S` and then each receive executor in turn, each with a
+/// limit in virtual time, and detaches one that has not ended by then; once every joinee has ended or been detached, cleanup decides from `F`
+/// and the detached set whether to close the streamers (it reads the failure flag, not the native mark), closes each open handle (dropping the
+/// device's reference), and the destructor of each runs as an event of its own and decides from the native mark, not from `F`. A detached
+/// executor keeps running: nothing disables its events. `None` in the world: the cases that do not model the stop.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Teardown {
+    /// The join limit, in device ticks.
+    pub(crate) join_limit: i64,
+    /// The stopper has begun (the shutdown input was delivered).
+    pub(crate) began: bool,
+    /// The joinee being joined: `0` is `S`, `1 + k` is `R_k`.
+    pub(crate) next: usize,
+    /// The device time the current join began.
+    pub(crate) since: i64,
+    pub(crate) detached: BTreeSet<usize>,
+    /// The joinees whose join returned (each had ended at that moment, and a joined thread stays ended).
+    pub(crate) joined: BTreeSet<usize>,
+    /// Cleanup's decision once made: close the streamers or retain them.
+    pub(crate) decision: Option<Cleanup>,
+    pub(crate) closed: BTreeSet<usize>,
+    /// Destructors that have not run yet, `(stream, handle)`.
+    pub(crate) pending: BTreeSet<(usize, u64)>,
+    pub(crate) destroyed: BTreeSet<(usize, u64)>,
+    pub(crate) retained: BTreeSet<(usize, u64)>,
+    /// The final owner of the native device has been released (`UhdDevice::drop`, once no thread holds the device: a detached thread keeps it alive):
+    /// each handle still open is freed unless the native mark is set, by the native device's own decision (it reads the mark, not `F`).
+    pub(crate) released: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cleanup {
+    Close,
+    Retain,
+}
+
+/// Provider::start's spawn prefix (E4a2; note 45 §4.9): the executors are spawned in stream order; `fail` names the stream whose spawn fails
+/// (the later spawns are suppressed). `started[k]` is whether stream `k`'s `rx_start` had succeeded when its spawn is attempted.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Startup {
+    pub(crate) fail: Option<usize>,
+    pub(crate) started: Vec<bool>,
+    pub(crate) next: usize,
+    pub(crate) failed: bool,
 }
 
 /// A receive executor `R_k`: its FIFO, its steps, its streamer handle (the id of the open handle),
@@ -143,6 +193,8 @@ pub(crate) struct RxExec {
     /// The time the flush's recv cycles stop reading left values, set when its start succeeds.
     pub(crate) flush_end: Option<i64>,
     pub(crate) exited: bool,
+    /// The executor was never spawned (a spawn failure, E4a2): none of its events is enabled and nothing waits for it.
+    pub(crate) unspawned: bool,
 }
 
 /// The clock reader's hold: the late input it serves, and the time it read.
@@ -310,6 +362,22 @@ pub(crate) enum Event {
     RResult(usize),
     RSend(usize),
     Pub(Holder, PubStep),
+    /// The spawn of stream `k`'s executor (the start prefix).
+    Spawn(usize),
+    /// The stopper joins the joinee it waits for (it has ended).
+    Join,
+    /// The stopper detaches the joinee it waits for (the join limit passed).
+    Detach,
+    /// Cleanup's eligibility check.
+    CleanupDecide,
+    /// Cleanup closes stream `k`'s handle (drops the device's reference).
+    CleanupClose(usize),
+    /// The destructor of stream `k`'s handle: it frees the handle unless the native loss mark is set.
+    Destroy(usize),
+    /// The brain thread returns.
+    BExit,
+    /// The final owner of the native device is released: it decides from the native mark whether to free the streamers still open.
+    OwnerRelease,
 }
 
 /// The whole simulated system. Stream `k` is cell `k`, executor `rx[k]` and streamer `k`.
@@ -343,6 +411,13 @@ pub(crate) struct World {
     /// Every call made on the device, in order (diagnostic, outside the key).
     pub(crate) calls: Vec<DevCall>,
     pub(crate) monitor: Monitor,
+    pub(crate) teardown: Option<Teardown>,
+    pub(crate) startup: Option<Startup>,
+    /// The brain thread has returned (E4a2, with the stop model): it exits once terminated with nothing left to take, or at once after its guard;
+    /// what reaches its inbox afterwards is never served.
+    pub(crate) brain_exited: bool,
+    /// Test fault injection: a loss publication's `mark_lost` does nothing (the regression of the missing mark).
+    pub(crate) omit_mark: bool,
     /// The brain steps taken, capped at the panic step plus one (the panic's position is part of the state only there).
     pub(crate) steps: usize,
 }
@@ -385,6 +460,10 @@ impl World {
             fact_log: Vec::new(),
             calls: Vec::new(),
             monitor: Monitor::default(),
+            teardown: None,
+            startup: None,
+            brain_exited: false,
+            omit_mark: false,
             steps: 0,
         }
     }
@@ -460,7 +539,50 @@ impl World {
     /// A timer, or the timeout of a recv in progress, lies beyond the present time.
     fn awaits_time(&self) -> bool {
         let t = self.device.t;
-        self.timers.iter().any(|(_, at)| *at > t) || self.rx.iter().any(|r| r.recv.as_ref().is_some_and(|call| call.deadline > t))
+        self.timers.iter().any(|(_, at)| *at > t)
+            || self.rx.iter().any(|r| r.recv.as_ref().is_some_and(|call| call.deadline > t))
+            || self.teardown.as_ref().is_some_and(|td| td.began && td.next < self.joinees() && !self.joinee_done(td.next) && td.since + td.join_limit > t)
+    }
+
+    /// The provider's start has finished (every executor spawned, or the failure reported): no Action reaches the brain before (`Provider::start`
+    /// returns first).
+    fn startup_over(&self) -> bool {
+        self.startup.as_ref().is_none_or(|st| st.failed || st.next == self.rx.len())
+    }
+
+    /// Every thread registered with the brain's inbox has deregistered (`S`, each spawned receive executor, the clock reader mid-serve): the brain's
+    /// receiver then reports a closed channel once the queue is empty, which is when its thread returns. A detached executor still running keeps it
+    /// alive. A timer's delivery is one event (its due booking is removed and sent together), so it holds nothing open.
+    fn senders_gone(&self) -> bool {
+        self.s_ended() && (0..self.rx.len()).all(|k| self.rx_ended(k)) && self.clock.is_none()
+    }
+
+    /// The control thread has ended: it was never spawned, or the terminate has arrived and nothing is left for it (no queued command to take or
+    /// discard, no call in progress): a thread whose loop exited on a failure still discards what is routed to it until the terminate.
+    pub(crate) fn s_ended(&self) -> bool {
+        let s = &self.settings;
+        s.unspawned || (s.exited && s.terminate && s.fifo.is_empty() && s.program.is_empty() && s.hand.is_none())
+    }
+
+    /// A receive executor's thread has ended: its loop exited and its final send (the queued program) is done, or it was never spawned.
+    pub(crate) fn rx_ended(&self, k: usize) -> bool {
+        let r = &self.rx[k];
+        (r.exited && r.program.is_empty()) || r.unspawned
+    }
+
+    /// The joinees the stopper waits for in turn: `S`, each receive executor, and the brain last.
+    pub(crate) fn joinees(&self) -> usize {
+        2 + self.rx.len()
+    }
+
+    /// The joinee has ended: `S` and an executor that was never spawned have nothing to wait for; the brain has ended once its thread returned
+    /// (the `BExit` event).
+    pub(crate) fn joinee_done(&self, i: usize) -> bool {
+        match i {
+            0 => self.s_ended(),
+            i if i <= self.rx.len() => self.rx_ended(i - 1),
+            _ => self.brain_exited,
+        }
     }
 
     fn packet_ready(&self, k: usize) -> bool {
@@ -490,7 +612,7 @@ impl World {
         match step {
             PubStep::Gate => self.gate.is_none(),
             PubStep::Set | PubStep::Ungate => self.gate == Some(holder),
-            PubStep::Mark => true,
+            PubStep::Record | PubStep::Mark => true,
         }
     }
 
@@ -499,7 +621,9 @@ impl World {
             PubStep::Gate => self.gate = Some(holder),
             PubStep::Set => self.failure = true,
             PubStep::Ungate => self.gate = None,
-            PubStep::Mark => self.monitor.marked = true,
+            PubStep::Record => {}
+            // A fault the tests inject: the publisher that forgot `mark_lost` (the native mark stays clear).
+            PubStep::Mark => self.monitor.marked |= !self.omit_mark,
         }
     }
 
@@ -507,22 +631,25 @@ impl World {
     fn allowed(&self, event: &Event) -> bool {
         match *event {
             Event::Tick => (!self.at_end() || self.awaits_time()) && self.env.iter().all(|slot| slot.delivered || slot.latest > self.device.t),
-            Event::Env(i) => self.env.get(i).is_some_and(|slot| !slot.delivered && !matches!(slot.input, EnvInput::Late { .. }) && self.in_window(slot) && self.ordered(i)),
+            Event::Env(i) => self.startup_over() && self.env.get(i).is_some_and(|slot| !slot.delivered && !matches!(slot.input, EnvInput::Late { .. }) && self.in_window(slot) && self.ordered(i)),
             Event::Timer(i) => self.timers.get(i).is_some_and(|(_, at)| self.device.t >= *at),
-            Event::BStep => !self.brain.dead() && self.brain.ops.is_empty() && !self.inbox.is_empty(),
+            Event::BStep => !self.brain_exited && !self.brain.dead() && self.brain.ops.is_empty() && !self.inbox.is_empty(),
             Event::BOp => self.brain.ops.front().is_some_and(|op| match op {
                 Op::Guard(guard) => self.publish_allowed(Holder::Brain, guard_step(*guard)),
                 _ => true,
             }),
             Event::ClockLock(i) => {
                 self.clock.is_none()
+                    && !self.brain_exited
                     && self.native.is_none()
                     && self.env.get(i).is_some_and(|slot| !slot.delivered && matches!(slot.input, EnvInput::Late { .. }) && self.in_window(slot) && self.ordered(i))
             }
             Event::ClockRead => self.clock.is_some_and(|hold| hold.now.is_none() && self.native == Some(Holder::Clock)),
             Event::ClockUnlock => self.clock.is_some_and(|hold| hold.now.is_some() && self.native == Some(Holder::Clock)),
             Event::ClockSend => self.clock.is_some_and(|hold| hold.now.is_some() && self.native.is_none()),
-            Event::STake => !self.settings.exited && self.settings.program.is_empty() && self.settings.hand.is_none() && (!self.settings.fifo.is_empty() || self.settings.terminate),
+            Event::STake => {
+                !self.settings.exited && !self.settings.unspawned && self.settings.program.is_empty() && self.settings.hand.is_none() && (!self.settings.fifo.is_empty() || self.settings.terminate)
+            }
             Event::SDiscard => self.settings.exited && !self.settings.fifo.is_empty(),
             Event::SCheck => self.s_front() == Some(&SStep::Check),
             Event::SLock => self.s_front() == Some(&SStep::Lock) && self.native.is_none(),
@@ -532,7 +659,7 @@ impl World {
             Event::SSend => self.s_front() == Some(&SStep::Send),
             Event::RCheck(k) => {
                 let r = &self.rx[k];
-                !r.exited && r.program.is_empty() && rules::next_action(self.failure, !r.fifo.is_empty(), self.flush_over(k), self.receiving(k), self.at_end()) != Next::Idle
+                !r.exited && !r.unspawned && r.program.is_empty() && rules::next_action(self.failure, !r.fifo.is_empty(), self.flush_over(k), self.receiving(k), self.at_end()) != Next::Idle
             }
             Event::RCmd(k) => self.r_front(k) == Some(&RStep::Cmd),
             Event::RSnap(k) => self.r_front(k) == Some(&RStep::Snap),
@@ -548,6 +675,25 @@ impl World {
             Event::RResult(k) => matches!(self.r_front(k), Some(RStep::Result(_))),
             Event::RSend(k) => matches!(self.r_front(k), Some(RStep::Send(_))),
             Event::Pub(holder, step) => self.pub_front(holder) == Some(step) && self.publish_allowed(holder, step),
+            Event::Spawn(k) => self.startup.as_ref().is_some_and(|st| !st.failed && st.next == k && k < self.rx.len()),
+            Event::Join => self.teardown.as_ref().is_some_and(|td| td.began && td.next < self.joinees() && self.joinee_done(td.next)),
+            Event::Detach => self.teardown.as_ref().is_some_and(|td| td.began && td.next < self.joinees() && !self.joinee_done(td.next) && self.device.t >= td.since + td.join_limit),
+            Event::CleanupDecide => self.teardown.as_ref().is_some_and(|td| td.began && td.next == self.joinees() && td.decision.is_none()),
+            Event::CleanupClose(k) => self.teardown.as_ref().is_some_and(|td| td.decision == Some(Cleanup::Close) && self.rx[k].handle.is_some() && !td.closed.contains(&k)),
+            Event::Destroy(k) => self.teardown.as_ref().is_some_and(|td| td.pending.iter().any(|(stream, _)| *stream == k)),
+            Event::BExit => {
+                self.teardown.is_some()
+                    && !self.brain_exited
+                    && self.brain.ops.is_empty()
+                    && (self.brain.dead() || (self.brain.exit == Exit::Terminated && self.inbox.is_empty() && self.senders_gone()))
+            }
+            // The last owner of the native device is released once no thread holds the device: a detached thread keeps it alive until it ends.
+            Event::OwnerRelease => self.teardown.as_ref().is_some_and(|td| {
+                !td.released
+                    && td.pending.is_empty()
+                    && td.detached.iter().all(|i| self.joinee_done(*i))
+                    && td.decision.is_some_and(|d| d == Cleanup::Retain || self.rx.iter().all(|r| r.handle.is_none()))
+            }),
         }
     }
 
@@ -575,6 +721,8 @@ impl World {
             events.push(Event::Pub(Holder::Settings, step));
             events.extend((0..self.rx.len()).map(|k| Event::Pub(Holder::Rx(k), step)));
         }
+        events.extend([Event::Join, Event::Detach, Event::CleanupDecide, Event::BExit, Event::OwnerRelease]);
+        events.extend((0..self.rx.len()).flat_map(|k| [Event::Spawn(k), Event::CleanupClose(k), Event::Destroy(k)]));
         for k in 0..self.rx.len() {
             events.extend([
                 Event::RCheck(k),
@@ -606,6 +754,14 @@ impl World {
                 match input {
                     EnvInput::Input(input) => {
                         self.monitor.shutdown |= input == Input::Shutdown;
+                        if input == Input::Shutdown {
+                            let t = self.device.t;
+                            if let Some(td) = self.teardown.as_mut() {
+                                td.began = true;
+                                td.next = 0;
+                                td.since = t;
+                            }
+                        }
                         self.inbox.push_back(input);
                     }
                     EnvInput::Loss => {
@@ -741,6 +897,70 @@ impl World {
                 let Some(RStep::Send(input)) = self.rx[k].program.pop_front() else { unreachable!("allowed only at a send") };
                 self.inbox.push_back(input);
             }
+            Event::Spawn(k) => self.spawn(k),
+            Event::Join => {
+                let t = self.device.t;
+                let td = self.teardown.as_mut().expect("a stopper");
+                td.joined.insert(td.next);
+                td.next += 1;
+                td.since = t;
+            }
+            Event::Detach => {
+                let t = self.device.t;
+                let td = self.teardown.as_mut().expect("a stopper");
+                td.detached.insert(td.next);
+                td.next += 1;
+                td.since = t;
+                self.monitor.witnesses.insert("W14a");
+            }
+            Event::CleanupDecide => {
+                let failed = self.failure;
+                let td = self.teardown.as_mut().expect("a stopper");
+                td.decision = Some(if failed || !td.detached.is_empty() { Cleanup::Retain } else { Cleanup::Close });
+            }
+            Event::CleanupClose(k) => {
+                let handle = self.rx[k].handle.take().expect("an open handle");
+                self.device.close(k);
+                let td = self.teardown.as_mut().expect("a stopper");
+                td.closed.insert(k);
+                td.pending.insert((k, handle));
+            }
+            Event::BExit => {
+                self.brain_exited = true;
+                // Its bookings die with it.
+                self.timers.clear();
+            }
+            Event::OwnerRelease => {
+                let marked = self.monitor.marked;
+                let freed: Vec<(usize, u64)> = (0..self.rx.len()).filter_map(|k| self.rx[k].handle.map(|handle| (k, handle))).collect();
+                for (k, handle) in freed {
+                    let td = self.teardown.as_mut().expect("a stopper");
+                    // The native device's destructor reads the native mark (not `F`): a lost device's streamers are kept.
+                    if marked {
+                        td.retained.insert((k, handle));
+                    } else {
+                        td.destroyed.insert((k, handle));
+                        self.rx[k].handle = None;
+                        self.device.close(k);
+                    }
+                }
+                self.teardown.as_mut().expect("a stopper").released = true;
+            }
+            Event::Destroy(k) => {
+                let marked = self.monitor.marked;
+                let td = self.teardown.as_mut().expect("a stopper");
+                let entries: Vec<(usize, u64)> = td.pending.iter().filter(|(stream, _)| *stream == k).copied().collect();
+                for entry in entries {
+                    td.pending.remove(&entry);
+                    // The destructor reads the native mark, not the failure flag.
+                    if marked {
+                        td.retained.insert(entry);
+                        self.monitor.witnesses.insert("W13c");
+                    } else {
+                        td.destroyed.insert(entry);
+                    }
+                }
+            }
             Event::Pub(holder, step) => {
                 match holder {
                     Holder::Settings => {
@@ -804,7 +1024,7 @@ impl World {
             // The guard has run: the brain is gone. Its bookings fire on nothing, and its senders close with it, so each executor
             // ends after what it already holds. What reaches its inbox is never served.
             self.timers.clear();
-            for command in rules::dead_commands(self.rx.len()) {
+            for command in rules::dead_commands(self.rx.len(), &self.brain.unspawned, self.brain.control_unspawned) {
                 self.route(command);
             }
         }
@@ -932,6 +1152,41 @@ impl World {
             Command::Timer { stream, at } => self.timers.push((Timer::Drain(stream), at)),
             Command::CapacityTimer { at } => self.timers.push((Timer::Capacity, at)),
             Command::SettingsTerminate => self.settings.terminate = true,
+        }
+    }
+
+    /// The spawn of stream `k`'s executor (the start prefix). A failing spawn ends the prefix: later spawns are suppressed, and the runtime tells the
+    /// brain of every executor that was not spawned (`started` is whether the stream's `rx_start` had succeeded); the provider's abort follows as the
+    /// case's shutdown.
+    fn spawn(&mut self, k: usize) {
+        let st = self.startup.as_mut().expect("a start prefix");
+        if st.fail == Some(k) {
+            st.failed = true;
+            self.monitor.witnesses.insert(if st.started[k] { "W15a" } else { "W15b" });
+            let unspawned: Vec<(usize, bool)> = (k..self.rx.len()).map(|j| (j, st.started[j] && j == k)).collect();
+            for (stream, started) in unspawned {
+                self.inbox.push_back(Input::SpawnFailed { stream, started });
+            }
+            // The failure itself is the failed start's shutdown (`stop(Abort)`) and rejection: the control thread is never spawned, no Action is
+            // admitted (the case's scripted Actions are dropped), and the stopper begins.
+            self.inbox.push_back(Input::ControlUnspawned);
+            self.inbox.push_back(Input::Shutdown);
+            self.monitor.shutdown = true;
+            for slot in &mut self.env {
+                slot.delivered = true;
+            }
+            let t = self.device.t;
+            if let Some(td) = self.teardown.as_mut() {
+                td.began = true;
+                td.next = 0;
+                td.since = t;
+            }
+        } else {
+            st.next += 1;
+            self.rx[k].unspawned = false;
+            if st.next == self.rx.len() {
+                self.settings.unspawned = false;
+            }
         }
     }
 
@@ -1367,8 +1622,32 @@ impl Model for World {
     /// destructurings have no `..`, so a new field fails to compile until the key decides it; a field
     /// the key drops is named `: _` with its reason.
     fn key(&self) -> String {
-        let World { params, brain, inbox, cells, settings, rx, clock, native, gate, failure, device, env, timers, trace: _, published: _, terminal_log: _, fact_log: _, calls: _, monitor, steps } =
-            self;
+        let World {
+            params,
+            brain,
+            inbox,
+            cells,
+            settings,
+            rx,
+            clock,
+            native,
+            gate,
+            failure,
+            device,
+            env,
+            timers,
+            trace: _,
+            published: _,
+            terminal_log: _,
+            fact_log: _,
+            calls: _,
+            monitor,
+            teardown,
+            startup,
+            brain_exited,
+            omit_mark,
+            steps,
+        } = self;
         let cells: Vec<_> = cells
             .iter()
             .map(|cell| {
@@ -1382,9 +1661,9 @@ impl Model for World {
             .iter()
             .enumerate()
             .map(|(k, r)| {
-                let RxExec { fifo, program, handle, handles, recv, snap, call, consumed, flush_end, exited } = r;
+                let RxExec { fifo, program, handle, handles, recv, snap, call, consumed, flush_end, exited, unspawned } = r;
                 let consumed: BTreeSet<u64> = consumed.iter().copied().filter(|id| self.cells[k].state_of(*id).is_some()).collect();
-                (fifo, program, handle, handles, recv, snap, call, consumed, flush_end, exited)
+                (fifo, program, handle, handles, recv, snap, call, consumed, flush_end, exited, unspawned)
             })
             .collect();
         let Device { t, queue, queue_cap, fifo_cap, last_command, dsp, streamers, lost, silent_from } = device;
@@ -1403,7 +1682,26 @@ impl Model for World {
         // A value's disposition, result and leftover fact are read by id only, and the first write per id stands,
         // so the order of writes across ids is history. `guard` records the guard steps taken (a test reads it).
         // `device_bound` and `chain_bound` are constants of the world, copied from `params` (which the key holds).
-        let Brain { held, dispositions, results, leftovers, outbox, deferred, ops, next_id, drain_window, guard: _, exit, pending, device_bound: _, chain_bound: _, now, capacity_timer } = brain;
+        let Brain {
+            held,
+            dispositions,
+            results,
+            leftovers,
+            outbox,
+            deferred,
+            ops,
+            next_id,
+            drain_window,
+            guard: _,
+            exit,
+            pending,
+            device_bound: _,
+            chain_bound: _,
+            now,
+            capacity_timer,
+            unspawned,
+            control_unspawned,
+        } = brain;
         let mut dispositions = dispositions.clone();
         dispositions.sort_by_key(|(id, _)| *id);
         let mut results = results.clone();
@@ -1411,8 +1709,8 @@ impl Model for World {
         let mut leftovers = leftovers.clone();
         leftovers.sort_unstable();
         leftovers.dedup();
-        let brain = ((held, dispositions, results, leftovers, outbox, deferred), (ops, next_id, drain_window, exit, pending, now, capacity_timer));
-        // Each field the key drops is read by no behaviour, oracle or later witness: `published`, `drain_ended` and `marked`
+        let brain = ((held, dispositions, results, leftovers, outbox, deferred), (ops, next_id, drain_window, exit, pending, now, capacity_timer, unspawned, control_unspawned));
+        // Each field the key drops is read by no behaviour, oracle or later witness: `published` and `drain_ended`
         // are monotone bits whose witness names are reported at the state that has them; `dispositions` copies the brain's.
         // A witness a later check reads stays: `shortened` (W1c) and the names in `READ_LATER`. The other witness names are
         // records only. The tick of a delivery is read by no oracle (P1 reads `drain_observed`), so `observed` keeps `(stream, at)`.
@@ -1427,7 +1725,7 @@ impl Model for World {
             observed,
             drain_ended: _,
             drain_observed,
-            marked: _,
+            marked,
             released,
             commanded,
             shutdown,
@@ -1457,6 +1755,7 @@ impl Model for World {
             (shortened, read_later),
             (instants, streams, cancelled, done_processed, starts),
             (k_refused, last_input, step_record),
+            marked,
         );
         [
             format!("{params:?}"),
@@ -1474,6 +1773,10 @@ impl Model for World {
             format!("{timers:?}"),
             format!("{monitor:?}"),
             format!("{steps:?}"),
+            format!("{teardown:?}"),
+            format!("{startup:?}"),
+            format!("{brain_exited:?}"),
+            format!("{omit_mark:?}"),
         ]
         .join("|")
     }
@@ -1522,6 +1825,9 @@ impl Model for World {
             (!m.observed.is_empty(), "deadline observed"),
             (!m.drain_ended.is_empty(), "drain ended"),
             (m.marked, "loss marked"),
+            (self.teardown.as_ref().is_some_and(|td| !td.destroyed.is_empty()), "handle destroyed"),
+            (self.teardown.as_ref().is_some_and(|td| td.decision == Some(Cleanup::Retain)), "cleanup retained"),
+            (self.teardown.as_ref().is_some_and(|td| !td.detached.is_empty()), "executor detached"),
         ];
         let mut names: Vec<&'static str> = bits.into_iter().filter(|(on, _)| *on).map(|(_, name)| name).collect();
         names.extend(m.witnesses.iter().copied());
@@ -1542,13 +1848,16 @@ impl Model for World {
     /// finished, which is `Incomplete` and not a violation (45-experiment §3.2).
     fn incomplete(&self) -> Option<String> {
         let mut waiting = Vec::new();
-        if !self.brain.dead() && (!self.inbox.is_empty() || !self.brain.ops.is_empty() || !self.brain.deferred.is_empty()) {
+        if !self.brain_exited && !self.brain.dead() && (!self.inbox.is_empty() || !self.brain.ops.is_empty() || !self.brain.deferred.is_empty()) {
             waiting.push("B".to_string());
         }
         if self.settings.hand.is_some() || !self.settings.program.is_empty() {
             waiting.push("S".to_string());
         }
         for (k, r) in self.rx.iter().enumerate() {
+            if r.unspawned {
+                continue;
+            }
             let running = !self.device.lost
                 && !self.failure
                 && self.cells[k].phase != Phase::Uncertain
@@ -1562,6 +1871,14 @@ impl Model for World {
             } else if r.exited && outstanding {
                 waiting.push(format!("R{k} (exited with a command outstanding on its cell)"));
             }
+        }
+        if let Some(td) = &self.teardown {
+            if td.began && !(td.next == self.joinees() && td.decision.is_some() && td.pending.is_empty() && td.released) {
+                waiting.push("teardown".to_string());
+            }
+        }
+        if self.startup.as_ref().is_some_and(|st| !st.failed && st.next < self.rx.len()) {
+            waiting.push("startup".to_string());
         }
         if self.clock.is_some() {
             waiting.push("clock".to_string());
@@ -1785,6 +2102,8 @@ mod tests {
             ("streamer.late", |w| w.device.streamers.get_mut(&0).unwrap().late = Some(5)),
             ("streamer.channels", |w| w.device.streamers.get_mut(&0).unwrap().channels.push(2)),
             ("timers", |w| w.timers.push((Timer::Drain(0), 24))),
+            // The destructor of a handle reads the native mark (E4a2): the key keeps it.
+            ("monitor.marked", |w| w.monitor.marked = true),
             ("env.delivered", |w| w.env[0].delivered = true),
             ("env.earliest", |w| w.env[0].earliest += 1),
             ("env.input", |w| w.env[0].input = EnvInput::Late { stream: 0 }),
@@ -1870,7 +2189,6 @@ mod tests {
             ("monitor.drain_ended", |w| {
                 w.monitor.drain_ended.insert(0);
             }),
-            ("monitor.marked", |w| w.monitor.marked = true),
             ("monitor.dispositions", |w| {
                 w.monitor.dispositions.insert(5, Disposition::Consumed);
             }),

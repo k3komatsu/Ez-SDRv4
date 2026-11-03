@@ -30,3 +30,20 @@ All adopted.
 - Re-check 5 (`45e4a1-code-sol5.md`): PASS.
 - The orchestrator reran the walk sweeps at seeds 1–10,000 on sim02 after round 3 (no log had been kept): 17 passed, no failing seed.
 - Gate (no mutation step; rows E4-01..E4-55 run at E4a2's full gate): `45e4a1-gate.json`.
+# Dispositions: Sol's E4a2 code review (REVISE; `plan/phase8/reviews/45e4a2-code-sol.md`)
+
+All adopted.
+1. P2 brain exit: model the brain thread's actual exit (a `Terminated` brain with empty queues is not an exited thread unless the runtime makes it exit); make `run_brain` exit and record `sink.exited` on normal termination and after a panic, so `join_within(Actor::Brain, …)` observes it; drive the same shutdown → join executors → join brain → cleanup sequence on threads; fix I20's copied `ended`. Thread cleanup tests must call cleanup only after the joins.
+2. P2 native retention: represent the final native-owner release (the native device destructor's own decision, `uhd.rs:667-692`, and `RxStream::drop` reading only the native mark, `:345-356`) separately from cleanup eligibility. Add a reachable DST regression for the missing-mark path (panic guard omits `mark_lost` → retain → owner release frees the handle → I19). Report the existing injected-F/mark test as destructor-unit coverage, not as reachable lifecycle coverage.
+3. P2 spawn failure: the failure itself triggers the failed-start shutdown (stop(Abort)) and the start's rejection; no later Actions are admitted; the control thread / later executors are not spawned; assert the already-spawned executor's stop sequence. Model `Abort` to the extent this ordering needs.
+Mechanical rules (owner 2026-11-03, self-review waived): out-of-tree probes count a compile failure as not killed; the report names, per new or touched row, the test that killed it; every suite, sweep, s1c and probe run is saved to `/tmp/e4a2b-*.log` and named.
+
+# E4a2 later rounds (orchestrator)
+- Join order (implementer's DST finding, I19 in `case13_panic_micro`): ruling — cleanup runs after the brain thread is joined too; note 45 §4.9 「片付けの前に判断役を join する」.
+- Owner 2026-11-03: the DeepSeek self-review is dropped for Sonnet-implemented steps; probes count a compile failure as not killed, the report names the killing test per row, every run is logged.
+- Re-review 2 (`45e4a2-code-sol2.md`, REVISE, P2 ×2): free-running brain exit wait; executor completion before its final send → fixed.
+- Check 3 (`45e4a2-code-sol3.md`, REVISE, P2 ×3 + P3): ruling — the brain's inbox counts registered senders (S, each R, clock, timer); exit when Terminated, inbox empty and count 0 are read together; clock and timer finish a begun send and deregister.
+- Check 4 (`45e4a2-code-sol4.md`, REVISE, P2 ×2): register every sender before any thread starts; the world's S completion includes pending discards.
+- Check 5 (`45e4a2-code-sol5.md`, REVISE, P2): threaded joins use the thread's actual return.
+- Check 6 (`45e4a2-code-sol6.md`): PASS.
+- Full gate with every mutation row (E4-01..E4-117 included): `45e4a-gate.json`, PASS.

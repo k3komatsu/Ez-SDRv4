@@ -511,7 +511,18 @@ fn b8e_a_capacity_timer_after_f_reserves_and_s_abandons_with_no_device_call() {
     run(&mut script, &std::iter::repeat_n(Tick, 14).collect::<Vec<_>>());
     run(&mut script, &[Env(0), REnd(0), Pub(super::world::Holder::Rx(0), super::world::PubStep::Gate), Pub(super::world::Holder::Rx(0), super::world::PubStep::Set)]);
     assert!(script.w.failure && script.w.cells[0].phase != Phase::Lost, "F is set and the loss boundary has not reached the brain");
-    run(&mut script, &[Pub(super::world::Holder::Rx(0), super::world::PubStep::Ungate), Pub(super::world::Holder::Rx(0), super::world::PubStep::Mark), Tick, Tick, Timer(0), BStep]);
+    run(
+        &mut script,
+        &[
+            Pub(super::world::Holder::Rx(0), super::world::PubStep::Ungate),
+            Pub(super::world::Holder::Rx(0), super::world::PubStep::Record),
+            Pub(super::world::Holder::Rx(0), super::world::PubStep::Mark),
+            Tick,
+            Tick,
+            Timer(0),
+            BStep,
+        ],
+    );
     while !script.w.brain.ops.is_empty() {
         run(&mut script, &[BOp]);
     }

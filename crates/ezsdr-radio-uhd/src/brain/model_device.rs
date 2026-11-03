@@ -32,6 +32,11 @@ pub(crate) struct MState {
     pub(crate) l: Option<Actor>,
     pub(crate) calls: Vec<DevCall>,
     pub(crate) llog: Vec<LEvent>,
+    /// The native loss mark (`mark_lost`), which the destructor of a streamer reads.
+    pub(crate) marked: bool,
+    /// The streamers `close_streams` freed (the destructor ran with the mark clear) and those it retained (the mark was set), by stream.
+    pub(crate) destroyed: Vec<usize>,
+    pub(crate) retained: Vec<usize>,
 }
 
 pub(crate) struct ModelDevice {
@@ -47,7 +52,7 @@ fn lost() -> DeviceError {
 
 impl ModelDevice {
     pub(crate) fn new(sched: Arc<Sched>, dev: Model, p: usize) -> Arc<ModelDevice> {
-        Arc::new(ModelDevice { sched, st: Arc::new(Mutex::new(MState { dev, l: None, calls: Vec::new(), llog: Vec::new() })), p })
+        Arc::new(ModelDevice { sched, st: Arc::new(Mutex::new(MState { dev, l: None, calls: Vec::new(), llog: Vec::new(), marked: false, destroyed: Vec::new(), retained: Vec::new() })), p })
     }
 
     pub(crate) fn sched(&self) -> &Arc<Sched> {
@@ -77,6 +82,21 @@ impl ModelDevice {
     pub(crate) fn set_lost(&self) {
         self.state().dev.lost = true;
         self.sched.notify();
+    }
+
+    /// The streamers' destructors: each open streamer is freed unless the native mark is set (`uhd.rs` `Drop for
+    /// RxStream` reads only the mark); a retained one stays open.
+    pub(crate) fn release_streamers(&self) {
+        let mut st = self.state();
+        let open: Vec<usize> = st.dev.streamers.keys().copied().collect();
+        for stream in open {
+            if st.marked {
+                st.retained.push(stream);
+            } else {
+                st.destroyed.push(stream);
+                st.dev.close(stream);
+            }
+        }
     }
 
     pub(crate) fn snapshot(&self) -> (Model, Vec<DevCall>, Vec<LEvent>) {
@@ -312,10 +332,14 @@ impl Device for ModelDevice {
         });
     }
     fn tx_close(&self, _stream: usize) {}
+    /// The provider's cleanup closes every streamer: the device drops its references, and each streamer's destructor decides from the native
+    /// mark (not from the failure flag) whether to free the handle or to retain it (`uhd.rs` `Drop for RxStream`).
     fn close_streams(&self) {
-        panic!("the executors never close every stream");
+        self.release_streamers();
     }
-    fn mark_lost(&self) {}
+    fn mark_lost(&self) {
+        self.state().marked = true;
+    }
     fn raise_thread_priority(&self) -> Result<(), DeviceError> {
         Ok(())
     }

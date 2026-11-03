@@ -17293,8 +17293,8 @@
         "id": "E1-41",
         "name": "a clock read is allowed while the native lock is held (section C: clock read holds the native lock)",
         "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
-        "old": "self.clock.is_none() && self.native.is_none()",
-        "new": "self.clock.is_none()",
+        "old": "&& !self.brain_exited\n                    && self.native.is_none()",
+        "new": "&& !self.brain_exited",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "harness_clock_read_holds_native_lock"
@@ -17605,8 +17605,8 @@
       "id": "E1-141",
       "name": "the world serves the inbox of a dead brain",
       "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
-      "old": "Event::BStep => !self.brain.dead() && self.brain.ops.is_empty()",
-      "new": "Event::BStep => self.brain.ops.is_empty()",
+      "old": "Event::BStep => !self.brain_exited && !self.brain.dead() && self.brain.ops.is_empty()",
+      "new": "Event::BStep => !self.brain_exited && self.brain.ops.is_empty()",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "harness_dead_brain_serves_nothing_and_executors_end"
@@ -17615,8 +17615,8 @@
       "id": "E1-142",
       "name": "a dead brain's timers still fire",
       "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
-      "old": "self.timers.clear();",
-      "new": "",
+      "old": "self.timers.clear(); for command in rules::dead_commands(self.rx.len(), &self.brain.unspawned, self.brain.control_unspawned) {",
+      "new": "for command in rules::dead_commands(self.rx.len(), &self.brain.unspawned, self.brain.control_unspawned) {",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "harness_dead_brain_serves_nothing_and_executors_end"
@@ -17625,7 +17625,7 @@
       "id": "E1-143",
       "name": "a dead brain's death does not end the settings executor",
       "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
-      "old": "std::iter::once(Command::SettingsTerminate).chain(",
+      "old": "(!control_unspawned).then_some(Command::SettingsTerminate).into_iter().chain(",
       "new": "std::iter::empty::<Command>().chain(",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -17635,8 +17635,8 @@
       "id": "E1-144",
       "name": "a dead brain with an unserved inbox is named as waiting at the end",
       "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
-      "old": "if !self.brain.dead() && (!self.inbox.is_empty()",
-      "new": "if (!self.inbox.is_empty()",
+      "old": "if !self.brain_exited && !self.brain.dead() && (!self.inbox.is_empty()",
+      "new": "if !self.brain_exited && (!self.inbox.is_empty()",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "harness_dead_brain_serves_nothing_and_executors_end"
@@ -18435,8 +18435,8 @@
       "id": "E2-38",
       "name": "the settings executor clears its FIFO when it exits on the failure flag",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
-      "old": "== rules::Check::Exit { sh.mark_exited(a);",
-      "new": "== rules::Check::Exit { sh.s_fifo.clear(); sh.mark_exited(a);",
+      "old": "== rules::Check::Exit {\n        return false;",
+      "new": "== rules::Check::Exit {\n        sh.s_fifo.clear();\n        return false;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s3c_command_routed_during_failure_cleanup_is_abandoned_not_lost"
@@ -18453,10 +18453,10 @@
     },
     {
       "id": "E2-40",
-      "name": "the settings discarder does not end when the brain is gone",
+      "name": "the settings discarder does not end at the brain's terminate (a dead brain's guard routes it)",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
-      "old": "|| s.stopping.load(Ordering::SeqCst) || s.brain_gone.load(Ordering::SeqCst));",
-      "new": "|| s.stopping.load(Ordering::SeqCst));",
+      "old": "s.s_fifo.nonempty() || s.stopping.load(Ordering::SeqCst) || s.s_terminate.load(Ordering::SeqCst)",
+      "new": "s.s_fifo.nonempty() || s.stopping.load(Ordering::SeqCst)",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s5_brain_panic_at_the_stop"
@@ -19732,5 +19732,607 @@
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it"
-      }
+      },
+      {
+        "id": "E4-56",
+        "name": "The loss record is published before F",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "[PubStep; 5] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Record, PubStep::Mark]",
+        "new": "[PubStep; 5] = [PubStep::Gate, PubStep::Record, PubStep::Set, PubStep::Ungate, PubStep::Mark]",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i18_the_publication_order_is_f_then_record_then_mark"
+      },
+      {
+        "id": "E4-57",
+        "name": "I18 does not check the failure flag before the record or the mark (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Event::Pub(holder, step @ (PubStep::Record | PubStep::Mark)) if !before.failure =>",
+        "new": "Event::Pub(holder, step @ (PubStep::Record | PubStep::Mark)) if false =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i18_record_or_mark_before_f_is_violation"
+      },
+      {
+        "id": "E4-58",
+        "name": "Cleanup does not read the failure flag",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "td.decision = Some(if failed || !td.detached.is_empty() { Cleanup::Retain } else { Cleanup::Close });",
+        "new": "td.decision = Some(if !td.detached.is_empty() { Cleanup::Retain } else { Cleanup::Close });",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12_after_a_loss_cleanup_retains_the_handles"
+      },
+      {
+        "id": "E4-59",
+        "name": "Cleanup does not read the detached set",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "td.decision = Some(if failed || !td.detached.is_empty() { Cleanup::Retain } else { Cleanup::Close });",
+        "new": "td.decision = Some(if failed { Cleanup::Retain } else { Cleanup::Close });",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b13_a_detached_executor_makes_cleanup_retain_and_the_executor_ends_later"
+      },
+      {
+        "id": "E4-60",
+        "name": "The destructor ignores the native mark",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if marked { td.retained.insert(entry); self.monitor.witnesses.insert(\"W13c\"); } else { td.destroyed.insert(entry); }",
+        "new": "if false { td.retained.insert(entry); self.monitor.witnesses.insert(\"W13c\"); } else { td.destroyed.insert(entry); }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12_a_loss_after_the_check_and_before_the_destructor_retains_the_handle_by_the_mark"
+      },
+      {
+        "id": "E4-61",
+        "name": "Cleanup closes no handle",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "td.decision == Some(Cleanup::Close) && self.rx[k].handle.is_some() && !td.closed.contains(&k)",
+        "new": "false && self.rx[k].handle.is_some() && !td.closed.contains(&k)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12_a_clean_run_closes_and_destroys_every_handle_once"
+      },
+      {
+        "id": "E4-62",
+        "name": "The stopper detaches one tick before the join limit",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "!self.joinee_done(td.next) && self.device.t >= td.since + td.join_limit)",
+        "new": "!self.joinee_done(td.next) && self.device.t + 1 >= td.since + td.join_limit)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b13_detach_waits_for_the_limit_join_for_the_end_and_cleanup_for_every_joinee"
+      },
+      {
+        "id": "E4-63",
+        "name": "The stopper never detaches",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "!self.joinee_done(td.next) && self.device.t >= td.since + td.join_limit)",
+        "new": "!self.joinee_done(td.next) && false)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b13_detach_waits_for_the_limit_join_for_the_end_and_cleanup_for_every_joinee"
+      },
+      {
+        "id": "E4-64",
+        "name": "Cleanup begins before the last joinee is joined",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "td.began && td.next == self.joinees() && td.decision.is_none()",
+        "new": "td.began && td.next + 1 >= self.joinees() && td.decision.is_none()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b13_detach_waits_for_the_limit_join_for_the_end_and_cleanup_for_every_joinee"
+      },
+      {
+        "id": "E4-65",
+        "name": "The stopper does not join the brain",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "        2 + self.rx.len()",
+        "new": "        1 + self.rx.len()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "case13_panic_micro"
+      },
+      {
+        "id": "E4-66",
+        "name": "The brain does not record an unspawned stream",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.unspawned.insert(stream);",
+        "new": "let _ = stream;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_only_a_started_failing_chain_is_abandoned_and_the_rest_ends_normally"
+      },
+      {
+        "id": "E4-67",
+        "name": "A failing stream is abandoned although its start had not run",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if started {\n                    if cells[stream].phase != Phase::Lost {",
+        "new": "if true {\n                    if cells[stream].phase != Phase::Lost {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_stream_whose_start_had_not_run_is_not_abandoned"
+      },
+      {
+        "id": "E4-68",
+        "name": "An abandoned chain overwrites a known loss",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if cells[stream].phase != Phase::Lost {\n                        cells[stream].phase = Phase::Uncertain;",
+        "new": "if true {\n                        cells[stream].phase = Phase::Uncertain;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_loss_the_start_published_stays_a_loss"
+      },
+      {
+        "id": "E4-69",
+        "name": "The brain sends the terminate to an unspawned stream",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": ".filter(|stream| !self.unspawned.contains(stream)).map(|stream| Op::Send(Command::Rx { stream, op: RxOp::Terminate })));",
+        "new": ".map(|stream| Op::Send(Command::Rx { stream, op: RxOp::Terminate })));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_only_a_started_failing_chain_is_abandoned_and_the_rest_ends_normally"
+      },
+      {
+        "id": "E4-70",
+        "name": "A failed spawn does not suppress the later spawns",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.startup.as_ref().is_some_and(|st| !st.failed && st.next == k && k < self.rx.len())",
+        "new": "self.startup.as_ref().is_some_and(|st| st.next == k && k < self.rx.len())",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_failed_spawn_suppresses_the_later_spawns_and_actions_wait_for_the_start"
+      },
+      {
+        "id": "E4-71",
+        "name": "An Action reaches the brain before the start has finished",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "Event::Env(i) => self.startup_over() && self.env.get(i)",
+        "new": "Event::Env(i) => self.env.get(i)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_failed_spawn_suppresses_the_later_spawns_and_actions_wait_for_the_start"
+      },
+      {
+        "id": "E4-72",
+        "name": "The executor of an unspawned stream runs",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "!r.exited && !r.unspawned && r.program.is_empty()",
+        "new": "!r.exited && r.program.is_empty()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_loss_the_start_published_stays_a_loss"
+      },
+      {
+        "id": "E4-73",
+        "name": "I19 does not read F at the destructor (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "now.destroyed.len() > was.destroyed.len() && (before.failure || !was.detached.is_empty())",
+        "new": "now.destroyed.len() > was.destroyed.len() && !was.detached.is_empty()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i19_a_destroy_while_f_is_set_is_a_violation_and_the_mark_retains"
+      },
+      {
+        "id": "E4-74",
+        "name": "I20 detaches at the limit only after it (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Event::Detach if before.device.t < was.since + was.join_limit =>",
+        "new": "Event::Detach if before.device.t <= was.since + was.join_limit =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i20_detach_join_and_cleanup_follow_their_conditions"
+      },
+      {
+        "id": "E4-75",
+        "name": "I21 does not look at commands to unspawned streams (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Command::Rx { stream, op } if after.rx[stream].unspawned =>",
+        "new": "Command::Rx { stream, op } if false =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i21_a_command_to_an_unspawned_stream_and_a_wrong_abandonment_are_violations"
+      },
+      {
+        "id": "E4-76",
+        "name": "I21 lets an abandonment overwrite a loss (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if k == *stream && *started && was != Phase::Lost {",
+        "new": "if k == *stream && *started {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i21_a_command_to_an_unspawned_stream_and_a_wrong_abandonment_are_violations"
+      },
+      {
+        "id": "E4-77",
+        "name": "Thread cleanup ignores a detached thread",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "if detached || self.sh.failed() {",
+        "new": "if self.sh.failed() {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b13t_a_blocked_settings_executor_is_detached_after_the_limit_and_finishes_later"
+      },
+      {
+        "id": "E4-78",
+        "name": "Thread cleanup ignores F",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "if detached || self.sh.failed() {",
+        "new": "if detached {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12t_the_stop_joins_every_thread_then_cleans_up_and_the_owner_release_reads_the_mark"
+      },
+      {
+        "id": "E4-79",
+        "name": "The model destructor ignores the native mark",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model_device.rs",
+        "old": "if st.marked {\n                st.retained.push(stream);",
+        "new": "if false {\n                st.retained.push(stream);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12t_the_native_destructor_alone_reads_the_mark_and_not_f"
+      },
+      {
+        "id": "E4-80",
+        "name": "The model's mark_lost marks nothing",
+        "file": "crates/ezsdr-radio-uhd/src/brain/model_device.rs",
+        "old": "self.state().marked = true;",
+        "new": "drop(self.state());",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12t_the_native_destructor_alone_reads_the_mark_and_not_f"
+      },
+      {
+        "id": "E4-81",
+        "name": "The thread runtime spawns an executor for an unspawned stream",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "(0..streams).filter(|k| !world.rx[*k].unspawned).map(|k| (k, sh.sender(Actor::Rx(k))))",
+        "new": "(0..streams).map(|k| (k, sh.sender(Actor::Rx(k))))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14t_the_threads_spawn_no_executor_for_an_unspawned_stream_and_agree_with_the_world"
+      },
+      {
+        "id": "E4-82",
+        "name": "The threads publish no loss record",
+        "file": "crates/ezsdr-radio-uhd/src/brain/shared.rs",
+        "old": "self.sink().order.push(\"record\");",
+        "new": "drop(self.sink());",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b11t_the_threads_publish_f_then_the_record_then_the_mark"
+      },
+      {
+        "id": "E4-83",
+        "name": "I18 lets the record and the mark through while the publisher holds the gate (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Event::Pub(holder, step @ (PubStep::Record | PubStep::Mark)) if before.gate == Some(*holder) =>",
+        "new": "Event::Pub(holder, step @ (PubStep::Record | PubStep::Mark)) if false =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i18_record_or_mark_while_the_gate_is_held_is_violation"
+      },
+      {
+        "id": "E4-84",
+        "name": "The loss record and the mark are published before the ungate",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "[PubStep; 5] = [PubStep::Gate, PubStep::Set, PubStep::Ungate, PubStep::Record, PubStep::Mark]",
+        "new": "[PubStep; 5] = [PubStep::Gate, PubStep::Set, PubStep::Record, PubStep::Mark, PubStep::Ungate]",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i18_the_publication_order_is_f_then_record_then_mark"
+      },
+      {
+        "id": "E4-85",
+        "name": "The brain thread returns before it has terminated",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "(self.brain.dead() || (self.brain.exit == Exit::Terminated && self.inbox.is_empty() && self.senders_gone()))",
+        "new": "true",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "teardown_cases_walk_clean"
+      },
+      {
+        "id": "E4-86",
+        "name": "The brain thread returns with an input still queued for it",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "(self.brain.dead() || (self.brain.exit == Exit::Terminated && self.inbox.is_empty() && self.senders_gone()))",
+        "new": "(self.brain.dead() || (self.brain.exit == Exit::Terminated && self.senders_gone()))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "teardown_cases_walk_clean"
+      },
+      {
+        "id": "E4-87",
+        "name": "The stopper joins the brain before its thread has returned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "_ => self.brain_exited,\n        }\n    }\n\n    fn packet_ready",
+        "new": "_ => true,\n        }\n    }\n\n    fn packet_ready",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "teardown_cases_walk_clean"
+      },
+      {
+        "id": "E4-88",
+        "name": "The thread runtime does not return the brain thread at the BExit event",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "self.sh.brain_exit.store(true, Ordering::SeqCst);",
+        "new": "let _ = &self.sh.brain_exit;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12t_the_stop_joins_every_thread_then_cleans_up_and_the_owner_release_reads_the_mark"
+      },
+      {
+        "id": "E4-89",
+        "name": "The native owner's release ignores the native mark",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if marked {\n                        td.retained.insert((k, handle));",
+        "new": "if false {\n                        td.retained.insert((k, handle));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12_a_brain_panic_publishes_f_and_the_mark_and_cleanup_retains_the_handle"
+      },
+      {
+        "id": "E4-90",
+        "name": "The native owner is released while a detached thread still holds the device",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "td.detached.iter().all(|i| self.joinee_done(*i))",
+        "new": "true",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b13_a_detached_executor_makes_cleanup_retain_and_the_executor_ends_later"
+      },
+      {
+        "id": "E4-91",
+        "name": "The injected missing mark is ignored (the mark is always set)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "PubStep::Mark => self.monitor.marked |= !self.omit_mark,",
+        "new": "PubStep::Mark => self.monitor.marked = true,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b12_a_missing_native_mark_is_found_when_the_native_owner_is_released"
+      },
+      {
+        "id": "E4-92",
+        "name": "A failed spawn does not send the failed start's shutdown",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.inbox.push_back(Input::ControlUnspawned);\n            self.inbox.push_back(Input::Shutdown);",
+        "new": "self.inbox.push_back(Input::ControlUnspawned);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_failed_spawn_suppresses_the_later_spawns_and_actions_wait_for_the_start"
+      },
+      {
+        "id": "E4-93",
+        "name": "A failed spawn still admits the case's Actions",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "for slot in &mut self.env {\n                slot.delivered = true;\n            }",
+        "new": "for slot in &mut self.env {\n                let _ = slot;\n            }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_failed_spawn_suppresses_the_later_spawns_and_actions_wait_for_the_start"
+      },
+      {
+        "id": "E4-94",
+        "name": "A failed spawn does not begin the stopper",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "if let Some(td) = self.teardown.as_mut() {\n                td.began = true;\n                td.next = 0;\n                td.since = t;\n            }\n        } else {",
+        "new": "if let Some(td) = self.teardown.as_mut() {\n                let _ = td;\n            }\n        } else {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_a_failed_spawn_suppresses_the_later_spawns_and_actions_wait_for_the_start"
+      },
+      {
+        "id": "E4-95",
+        "name": "The runtime does not tell the brain the control thread was never spawned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.inbox.push_back(Input::ControlUnspawned);\n            self.inbox.push_back(Input::Shutdown);",
+        "new": "self.inbox.push_back(Input::Shutdown);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_only_a_started_failing_chain_is_abandoned_and_the_rest_ends_normally"
+      },
+      {
+        "id": "E4-96",
+        "name": "The brain terminates a control thread that was never spawned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if !self.control_unspawned {\n                commands.push(Op::Send(Command::SettingsTerminate));",
+        "new": "if true {\n                commands.push(Op::Send(Command::SettingsTerminate));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b14_only_a_started_failing_chain_is_abandoned_and_the_rest_ends_normally"
+      },
+      {
+        "id": "E4-97",
+        "name": "I21 lets the brain terminate a control thread that was never spawned (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if after.settings.unspawned && after.settings.terminate {",
+        "new": "if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i19_i21_the_owner_release_spares_a_detached_holder_and_the_unspawned_control_gets_nothing"
+      },
+      {
+        "id": "E4-98",
+        "name": "I19 lets the owner release free a handle while F is set (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Event::OwnerRelease if now.destroyed.len() > was.destroyed.len() && before.failure =>",
+        "new": "Event::OwnerRelease if false =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i19_the_owner_release_frees_a_handle_only_without_the_mark"
+      },
+      {
+        "id": "E4-99",
+        "name": "I19 lets the owner release run while a detached thread still holds the device (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Event::OwnerRelease if was.detached.iter().any(|j| !ended(before, *j)) =>",
+        "new": "Event::OwnerRelease if false =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i19_i21_the_owner_release_spares_a_detached_holder_and_the_unspawned_control_gets_nothing"
+      },
+      {
+        "id": "E4-100",
+        "name": "The brain thread returns while a thread that sends to it is still running or has a send left",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "(self.brain.dead() || (self.brain.exit == Exit::Terminated && self.inbox.is_empty() && self.senders_gone()))",
+        "new": "(self.brain.dead() || (self.brain.exit == Exit::Terminated && self.inbox.is_empty()))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "teardown_cases_walk_clean"
+      },
+    {
+      "id": "E4-101",
+      "name": "A receive executor is marked ended before its final Lost send (the stopper's join passes early)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "sh.r_fifo[k].clear();\n                sh.sched.hook(a, Point::RSend);",
+      "new": "sh.r_fifo[k].clear();\n                sh.mark_exited(a);\n                sh.sched.hook(a, Point::RSend);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_the_join_of_an_executor_waits_for_its_final_send"
+    },
+    {
+      "id": "E4-102",
+      "name": "The brain's wait ignores that the inbox has drained and every sender deregistered",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": " || s.brain_exit.load(Ordering::SeqCst) || s.brain_may_exit());",
+      "new": " || s.brain_exit.load(Ordering::SeqCst));",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_a_targeted_brain_waiting_for_the_last_sender_wakes_when_it_deregisters"
+    },
+    {
+      "id": "E4-104",
+      "name": "The world counts a receive executor with a final send pending as ended",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "let r = &self.rx[k];\n        (r.exited && r.program.is_empty()) || r.unspawned",
+      "new": "let r = &self.rx[k];\n        r.exited || r.unspawned",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12_the_brain_thread_returns_only_when_nothing_can_still_send_to_it"
+    },
+    {
+      "id": "E4-105",
+      "name": "I20 lets the brain thread return (or be sent to afterwards) with an input in its inbox (oracle self-test)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+      "old": "if after.brain_exited && !after.brain.dead() && !after.inbox.is_empty() {",
+      "new": "if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "inv_i20_detach_join_and_cleanup_follow_their_conditions"
+    },
+    {
+      "id": "E4-106",
+      "name": "A sender's deregistration does not wake the brain's own wait (targeted)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/shared.rs",
+      "old": "self.0.sched.wake(self.0.inbox.owner);",
+      "new": "let _ = ();",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_a_targeted_brain_waiting_for_the_last_sender_wakes_when_it_deregisters"
+    },
+    {
+      "id": "E4-107",
+      "name": "The inbox counts itself drained with an item still queued",
+      "file": "crates/ezsdr-radio-uhd/src/brain/shared.rs",
+      "old": "g.0.is_empty() && g.1 == 0",
+      "new": "g.1 == 0",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_an_executor_that_sends_lost_and_deregisters_during_the_brains_step_is_served_first"
+    },
+    {
+      "id": "E4-108",
+      "name": "The clock reader ignores the brain's stop and never deregisters",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "        if sh.halt_senders.load(Ordering::SeqCst) {\n            return;\n        }\n        let Some(ClockCmd::Serve",
+      "new": "        let Some(ClockCmd::Serve",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_a_clock_read_and_a_due_booking_pending_at_termination_are_delivered_and_served"
+    },
+    {
+      "id": "E4-109",
+      "name": "The timer ignores the brain's stop and never deregisters",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "if sh.halt_senders.load(Ordering::SeqCst) {\n                return Ok(None);\n            }",
+      "new": "",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_a_clock_read_and_a_due_booking_pending_at_termination_are_delivered_and_served"
+    },
+    {
+      "id": "E4-111",
+      "name": "The brain never tells the clock and the timer to stop",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "!sh.halt_senders.swap(true, Ordering::SeqCst)",
+      "new": "false",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_a_clock_read_and_a_due_booking_pending_at_termination_are_delivered_and_served"
+    },
+    {
+      "id": "E4-112",
+      "name": "The brain returns once terminated, without waiting for the inbox to drain",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "let finished = dead || sh.brain_may_exit();",
+      "new": "let finished = dead || sh.brain().exit == Exit::Terminated;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_an_executor_that_sends_lost_and_deregisters_during_the_brains_step_is_served_first"
+    },
+    {
+      "id": "E4-113",
+      "name": "The world lets the brain thread return while the clock reader holds a serve (world unit)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "&& (0..self.rx.len()).all(|k| self.rx_ended(k)) && self.clock.is_none()",
+      "new": "&& (0..self.rx.len()).all(|k| self.rx_ended(k))",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12_the_brain_thread_returns_only_when_nothing_can_still_send_to_it"
+    },
+    {
+      "id": "E4-114",
+      "name": "The world lets the clock reader start a serve after the brain thread returned (world unit)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "self.clock.is_none()\n                    && !self.brain_exited\n                    && self.native.is_none()",
+      "new": "self.clock.is_none()\n                    && self.native.is_none()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12_the_brain_thread_returns_only_when_nothing_can_still_send_to_it"
+    },
+    {
+      "id": "E4-115",
+      "name": "The world counts S as ended when its loop exited, with a routed command still awaiting its discard (world unit)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+      "old": "s.unspawned || (s.exited && s.terminate && s.fifo.is_empty() && s.program.is_empty() && s.hand.is_none())",
+      "new": "s.unspawned || s.exited",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b13_a_failed_s_has_not_ended_while_a_routed_command_awaits_its_discard"
+    },
+    {
+      "id": "E4-116",
+      "name": "The brain thread starts before any sender has registered with its inbox",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "let s_guard = (!world.settings.unspawned).then(|| sh.sender(Actor::Settings));",
+      "new": "let s = sh.clone();\n        let brain_handle = spawn_on(&sched, host.as_ref(), Actor::Brain, move || run_brain(&s));\n        let s_guard = (!world.settings.unspawned).then(|| sh.sender(Actor::Settings));",
+      "old2": "let mut handles = Vec::new();\n        let s = sh.clone();\n        handles.push(spawn_on(&sched, host.as_ref(), Actor::Brain, move || run_brain(&s)));",
+      "new2": "let mut handles = vec![brain_handle];",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b12t_every_sender_is_registered_before_the_brain_thread_starts"
+    },
+    {
+      "id": "E4-117",
+      "name": "S is marked ended when its loop exits on a failure, before its discarder has finished (the join passes early)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+      "old": "|id| sh.abandon(id)) == rules::Check::Exit {\n        return false;",
+      "new": "|id| sh.abandon(id)) == rules::Check::Exit {\n        sh.mark_exited(a);\n        return false;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "b13t_the_join_of_a_failed_s_waits_for_its_discarder"
+    }
   ]

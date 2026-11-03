@@ -72,32 +72,39 @@ impl Drop for Swap<'_, '_> {
 
 /// A FIFO between threads, read by one actor: a push wakes that actor (everyone, outside a targeted run) through the scheduler.
 pub(crate) struct Queue<T> {
-    items: Mutex<VecDeque<T>>,
+    /// The items and the number of registered senders, behind one lock: "empty and no sender left" is one read.
+    items: Mutex<(VecDeque<T>, usize)>,
     owner: Actor,
 }
 
 impl<T: Clone> Queue<T> {
     pub(crate) fn new(owner: Actor) -> Queue<T> {
-        Queue { items: Mutex::new(VecDeque::new()), owner }
-    }
-    fn q(&self) -> MutexGuard<'_, VecDeque<T>> {
-        self.items.lock().unwrap_or_else(|e| e.into_inner())
+        Queue { items: Mutex::new((VecDeque::new(), 0)), owner }
     }
     pub(crate) fn nonempty(&self) -> bool {
-        !self.q().is_empty()
+        !self.items.lock().unwrap_or_else(|e| e.into_inner()).0.is_empty()
     }
     pub(crate) fn pop(&self) -> Option<T> {
-        self.q().pop_front()
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).0.pop_front()
     }
     pub(crate) fn clear(&self) {
-        self.q().clear();
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).0.clear();
     }
     /// Removes every queued item in one step.
     pub(crate) fn take_all(&self) -> Vec<T> {
-        self.q().drain(..).collect()
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).0.drain(..).collect()
     }
     pub(crate) fn items(&self) -> Vec<T> {
-        self.q().iter().cloned().collect()
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).0.iter().cloned().collect()
+    }
+    /// A thread that can send to this queue registers before it starts.
+    pub(crate) fn register(&self) {
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
+    }
+    /// Nothing is queued and no registered sender is left, read together: nothing can arrive any more.
+    pub(crate) fn drained(&self) -> bool {
+        let g = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        g.0.is_empty() && g.1 == 0
     }
 }
 
@@ -155,8 +162,13 @@ pub(crate) struct Shared {
     pub(crate) tick: std::time::Duration,
     pub(crate) now: Box<dyn Fn() -> i64 + Send + Sync>,
     pub(crate) stopping: AtomicBool,
-    /// The brain thread has ended: nothing routes to `S` any more (the closed sender).
-    pub(crate) brain_gone: AtomicBool,
+    /// The brain has terminated (stop model, free running): the clock reader and the timer start no more work and return after the send they have begun.
+    pub(crate) halt_senders: AtomicBool,
+    /// The brain thread returns once it has terminated with nothing left to take (and at once after its guard), at a `BExit` event under
+    /// forcing: the run models the provider's join of the decision thread (set when the world has the stop model).
+    pub(crate) exit_model: bool,
+    /// The brain thread is told to return (the `BExit` event under forcing).
+    pub(crate) brain_exit: AtomicBool,
     /// The injected real panic of the brain thread (S5): the step at which it panics.
     pub(crate) real_panic: Option<usize>,
     pub(crate) quirk: Quirk,
@@ -167,6 +179,8 @@ pub(crate) struct Shared {
     /// A test hook run by `R` between a publish's computation and its write.
     pub(crate) before_write: Mutex<Option<BatchHook>>,
     pub(crate) after_batch: Mutex<Option<BatchHook>>,
+    /// A test's hold on a free run: called at each [`Gate`] a thread passes (a closure that blocks holds that thread there).
+    pub(crate) gate_hook: Mutex<Option<GateHook>>,
     /// E2b's measurement hooks: the receive work and the counters (absent outside a measurement run).
     pub(crate) bench: Option<Arc<super::speed::Bench>>,
     /// Device ticks between two samples of a receive stream (the decimation): the receive executor turns a block into ticks with it.
@@ -187,6 +201,22 @@ pub(crate) enum Quirk {
 
 /// A test hook run with the shared state.
 pub(crate) type BatchHook = Arc<dyn Fn(&Shared) + Send + Sync>;
+
+/// The places of the stop's last hand-offs a free run can be held at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gate {
+    /// A sender's last send is about to be made (a receive executor's final `Lost`, the clock's read time, the timer's removed booking).
+    FinalSend(Actor),
+    /// A sender has made its last send and is about to deregister from the brain's inbox.
+    Deregister(Actor),
+    /// The builder is about to register this sender with the brain's inbox.
+    Registering(Actor),
+    /// The brain's loop top, before it tells the clock and the timer to stop.
+    BrainTop,
+    /// The brain's step is over and it is about to test whether it may return.
+    ExitTest,
+}
+pub(crate) type GateHook = Arc<dyn Fn(&Shared, Gate) + Send + Sync>;
 
 pub(crate) type Pred = Arc<dyn Fn() -> bool + Send + Sync>;
 
@@ -236,7 +266,7 @@ impl Shared {
     }
 
     pub(crate) fn push<T: Clone>(&self, queue: &Queue<T>, item: T) {
-        queue.q().push_back(item);
+        queue.items.lock().unwrap_or_else(|e| e.into_inner()).0.push_back(item);
         self.sched.wake(queue.owner);
     }
 
@@ -244,6 +274,30 @@ impl Shared {
         self.push(&self.inbox, input);
     }
 
+    /// Free running with the stop model: the brain has terminated and the inbox is empty with no registered sender left, read together under the
+    /// inbox's lock, so its receiver reports a closed channel and its thread returns (under forcing the trace's `BExit` says so instead).
+    pub(crate) fn brain_may_exit(&self) -> bool {
+        self.exit_model && !self.sched.forcing() && self.brain().exit == super::core::Exit::Terminated && self.inbox.drained()
+    }
+
+    /// A sending thread's registration with the brain's inbox; it ends the registration when dropped, that is when the thread returns after its
+    /// final send (also by an unwind).
+    pub(crate) fn sender(self: &Arc<Self>, actor: Actor) -> SenderGuard {
+        self.gate(Gate::Registering(actor));
+        self.inbox.register();
+        SenderGuard(self.clone(), actor)
+    }
+
+    /// Passes `gate`: a test's hook may hold the calling thread here.
+    pub(crate) fn gate(&self, gate: Gate) {
+        let hook = self.gate_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = hook {
+            hook(self, gate);
+        }
+    }
+
+    /// The thread has completed: it returned, after its last send and its deregistration (S, a receive executor), or the brain's returns. This is
+    /// what a join waits for; a loop that exited on a failure is not completion (a discarder may still run).
     pub(crate) fn mark_exited(&self, actor: Actor) {
         self.sink().exited.insert(actor);
     }
@@ -298,11 +352,27 @@ impl Shared {
                 self.sched.notify();
             }
             PubStep::Ungate => self.gate_release(actor, point),
+            PubStep::Record => {
+                self.sched.hook(actor, point);
+                self.sink().order.push("record");
+            }
             PubStep::Mark => {
                 self.sched.hook(actor, point);
                 self.sink().order.push("mark");
                 self.device.mark_lost();
             }
         }
+    }
+}
+
+/// A registered sender of the brain's inbox. Dropping it deregisters (the decrement is under the inbox's lock) and wakes the brain's own wait: the
+/// waiter evaluates its predicate under the scheduler's lock and this wake takes that lock after the decrement, so no wake-up is lost.
+pub(crate) struct SenderGuard(Arc<Shared>, Actor);
+
+impl Drop for SenderGuard {
+    fn drop(&mut self) {
+        self.0.gate(Gate::Deregister(self.1));
+        self.0.inbox.items.lock().unwrap_or_else(|e| e.into_inner()).1 -= 1;
+        self.0.sched.wake(self.0.inbox.owner);
     }
 }

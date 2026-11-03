@@ -107,11 +107,11 @@ impl Observed {
     /// The observation of a world's state.
     pub(crate) fn of_world(w: &World) -> Result<Observed, String> {
         let mut exited = BTreeSet::new();
-        if w.settings.exited {
+        if !w.settings.unspawned && w.s_ended() {
             exited.insert(Actor::Settings);
         }
-        for (k, r) in w.rx.iter().enumerate() {
-            if r.exited {
+        for k in 0..w.rx.len() {
+            if !w.rx[k].unspawned && w.rx_ended(k) {
                 exited.insert(Actor::Rx(k));
             }
         }

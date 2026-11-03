@@ -11,7 +11,7 @@ use super::cell::{Phase, ValueState};
 use super::core::{CHAIN_BOUND, Change, DEVICE_BOUND, DRAIN_WINDOW, Input, Request, SetCmd, Timer};
 use super::dst::{self, Config, Model, Verdict};
 use super::fixtures::{cell, held, push, seg, value};
-use super::world::{EnvInput, EnvSlot, Event, Holder, INITIAL_OCCUPANT, Params, PubStep, RStep, World};
+use super::world::{EnvInput, EnvSlot, Event, Holder, INITIAL_OCCUPANT, Params, PubStep, RStep, Startup, Teardown, World};
 use crate::provider::generator::Rng;
 
 /// The state budget of an exhaustive run (45-experiment §3.3).
@@ -460,6 +460,138 @@ pub(crate) fn case12b(variant: Variant) -> Case {
     world.monitor.commanded.insert(1);
     world.monitor.released.insert(1);
     Case { world, config: config(variant, ["case 12b full", "case 12b reduced", "case 12b micro"], &["W12b"]) }
+}
+
+/// The stop model of a case: the provider's stopper (join limit in device ticks) and cleanup begin when the shutdown is delivered.
+fn with_teardown(mut world: World, join_limit: i64) -> World {
+    world.teardown = Some(Teardown { join_limit, ..Teardown::default() });
+    world
+}
+
+/// What case 13 does to the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Case13 {
+    /// No loss: every opened handle is closed and destroyed once.
+    Clean,
+    /// A device loss in the run: cleanup retains the handles (it reads `F`).
+    Loss,
+    /// The brain panics at step `k`: its guard publishes `F` and the native mark, so a destructor that runs after the guard retains the handle.
+    Panic(usize),
+}
+
+/// Case 13 (E4a2; B11, B12): one stream, a value, a Stop and the shutdown, then the provider's stopper and cleanup (join limit 4). `Loss` adds a
+/// device loss in the run (each loss publication also writes the loss record, I18); `Panic(k)` panics the brain at step `k`. I19 holds at every
+/// step and at the end. Witnesses: the handle destroyed (Clean), cleanup retained (Loss, Panic).
+/// Micro: value instant 1, cut 2, release [0, 1], Stop asks for 1 in [0, 2], loss in [0, 2], horizon 2.
+pub(crate) fn case13(variant: Variant, mode: Case13) -> Case {
+    let mut case = case1(variant);
+    case.world = with_teardown(case.world, 4);
+    if let Case13::Panic(k) = mode {
+        case.world.params.panic_step = Some(k);
+    }
+    if mode == Case13::Loss {
+        let window = match variant {
+            Variant::Micro => (0, 2),
+            _ => (0, 24),
+        };
+        let shutdown_at = case.world.env.len() - 1;
+        case.world.env.insert(shutdown_at, loss(window));
+    }
+    let names = match mode {
+        Case13::Clean => ["case 13 clean full", "case 13 clean reduced", "case 13 clean micro"],
+        Case13::Loss => ["case 13 loss full", "case 13 loss reduced", "case 13 loss micro"],
+        Case13::Panic(_) => ["case 13 panic full", "case 13 panic reduced", "case 13 panic micro"],
+    };
+    let witnesses: &'static [&'static str] = match mode {
+        Case13::Clean => &["handle destroyed"],
+        Case13::Loss => &["cleanup retained", "loss marked"],
+        Case13::Panic(_) => &["loss marked"],
+    };
+    case.config = config(variant, names, witnesses);
+    case
+}
+
+/// Case 14 (E4a2; B13): `S` blocked in its settings call holding `L` (queue capacity 1, held by an earlier command due late), a value reserved,
+/// then the shutdown: the stopper's join of `S` (and of `R0`, which waits for `L`) passes the join limit and detaches them; cleanup retains the
+/// handles and closes nothing (I20, I19); the detached executors go on and end when the queue drains (late execution after the detach).
+/// Micro: value instant 1, occupant due 6, release [0, 0], shutdown from 3, join limit 2, horizon 4.
+pub(crate) fn case14(variant: Variant) -> Case {
+    let (at, release, occupant, limit) = match variant {
+        Variant::Full | Variant::Reduced(_) => (8, (0, 3), 40, 8),
+        Variant::Micro => (1, (0, 0), 6, 2),
+    };
+    let horizon = variant.horizon(56, 4);
+    let env = vec![input(Input::Release(held(0, value(0, at, 1), 1)), release, None), shutdown(horizon, variant.timing())];
+    let mut world = with_teardown(single(None, env, params(variant.timing(), horizon, 1, false, None)), limit);
+    world.device.queue.push_back(occupant);
+    Case { world, config: config(variant, ["case 14 full", "case 14 reduced", "case 14 micro"], &["executor detached", "cleanup retained"]) }
+}
+
+/// Which executor's spawn fails in case 15 and whether that stream's `rx_start` had succeeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Case15 {
+    /// Stream 1's spawn fails after its `rx_start` succeeded: only its chain is abandoned.
+    AfterStart,
+    /// Stream 1's spawn fails and its `rx_start` had not run: nothing is abandoned.
+    BeforeStart,
+    /// The first stream's spawn fails: the later spawn is suppressed and its stream was never started.
+    First,
+    /// As `AfterStart`, after a loss the start itself published (`rx_start` of stream 1 returned lost: `F`, the mark, the cell `Lost`): the
+    /// failing chain stays `Lost` and the spawn failure is not a second loss.
+    PriorLoss,
+}
+
+/// Case 15 (E4a2; B14): two receive streams started by the provider's prefix; a spawn fails (`Case15`), the later spawns are suppressed, and the
+/// runtime tells the brain of every executor it did not spawn; the provider's abort follows (the shutdown). The brain sends the unspawned
+/// streams nothing and waits for nothing from them, abandons only a started failing chain (`Uncertain`), and the spawned stream stops in the normal
+/// order; every value is disposed once (I21, P2, P3). A release for a stream that has no executor is disposed at once.
+/// Micro: values at instants 1 and 2, releases [0, 1], horizon 3.
+pub(crate) fn case15(variant: Variant, kind: Case15) -> Case {
+    let (at, release) = match variant {
+        Variant::Full | Variant::Reduced(_) => ((6, 8), (0, 4)),
+        Variant::Micro => ((1, 2), (0, 1)),
+    };
+    let horizon = variant.horizon(40, 3);
+    let env = vec![input(Input::Release(held(0, value(0, at.0, 1), 1)), release, None), input(Input::Release(held(1, value(1, at.1, 2), 1)), release, Some(0)), shutdown(horizon, variant.timing())];
+    let (fail, started) = match kind {
+        Case15::AfterStart | Case15::PriorLoss => (1, [true, true]),
+        Case15::BeforeStart => (1, [true, false]),
+        Case15::First => (0, [true, false]),
+    };
+    let cells = vec![cell(Phase::Streaming(seg(0)), 0, None, 0), cell(if started[1] { Phase::Streaming(seg(0)) } else { Phase::Off }, 1, None, 0)];
+    let mut world = World::new(cells, env, params(variant.timing(), horizon, 4, false, None));
+    running(&mut world, 0, vec![0]);
+    if started[1] {
+        running(&mut world, 1, vec![1]);
+    } else {
+        world.device.open(1, vec![1]);
+        world.rx[1].handle = Some(1);
+    }
+    for r in &mut world.rx {
+        r.unspawned = true;
+    }
+    // The control thread is spawned after the receive executors.
+    world.settings.unspawned = true;
+    if kind == Case15::PriorLoss {
+        world.cells[1].phase = Phase::Lost;
+        world.device.lost = true;
+        world.failure = true;
+        world.monitor.marked = true;
+    }
+    world.startup = Some(Startup { fail: Some(fail), started: started.to_vec(), next: 0, failed: false });
+    let world = with_teardown(world, 4);
+    let names = match kind {
+        Case15::AfterStart => ["case 15a full", "case 15a reduced", "case 15a micro"],
+        Case15::BeforeStart => ["case 15b full", "case 15b reduced", "case 15b micro"],
+        Case15::First => ["case 15c full", "case 15c reduced", "case 15c micro"],
+        Case15::PriorLoss => ["case 15d full", "case 15d reduced", "case 15d micro"],
+    };
+    let witnesses: &'static [&'static str] = match kind {
+        Case15::BeforeStart => &["W15b", "handle destroyed"],
+        Case15::PriorLoss => &["W15a", "cleanup retained"],
+        _ => &["W15a", "handle destroyed"],
+    };
+    Case { world, config: config(variant, names, witnesses) }
 }
 
 /// A window `(e, l)` with `e <= l` within `[0, hi]`: two independent draws could invert it, and an
@@ -924,6 +1056,45 @@ fn bounds_cases_walk_clean() {
     }
 }
 
+/// The panic step of case 13's panic mode: the last brain step of the canonical path, so the guard can run after the executors ended and
+/// cleanup decided (the destructor then reads the native mark).
+pub(super) fn case13_last_step(variant: Variant) -> usize {
+    canonical_brain_steps(&case13(variant, Case13::Clean).world).saturating_sub(1)
+}
+
+reaching_pair!(case13_clean_micro, case13_clean_micro_full, case13(Variant::Micro, Case13::Clean));
+reaching_pair!(case13_loss_micro, case13_loss_micro_full, case13(Variant::Micro, Case13::Loss));
+reaching_pair!(case13_panic_micro, case13_panic_micro_full, case13(Variant::Micro, Case13::Panic(case13_last_step(Variant::Micro))));
+reaching_pair!(case14_join_limit_detach_micro, case14_join_limit_detach_micro_full, case14(Variant::Micro));
+reaching_pair!(case15a_spawn_fails_after_start_micro, case15a_spawn_fails_after_start_micro_full, case15(Variant::Micro, Case15::AfterStart));
+reaching_pair!(case15b_spawn_fails_before_start_micro, case15b_spawn_fails_before_start_micro_full, case15(Variant::Micro, Case15::BeforeStart));
+reaching_pair!(case15c_first_spawn_fails_micro, case15c_first_spawn_fails_micro_full, case15(Variant::Micro, Case15::First));
+reaching_pair!(case15d_spawn_fails_after_a_loss_micro, case15d_spawn_fails_after_a_loss_micro_full, case15(Variant::Micro, Case15::PriorLoss));
+
+/// The stop and start cases at their full horizon, 500 seeds each (a default test, so a mutation row can be killed by the walks): no walk fails
+/// an oracle (I18-I21, P2, P3 among them).
+#[test]
+fn teardown_cases_walk_clean() {
+    let builders: Vec<(&str, Builder)> = vec![
+        ("case 13 clean", Box::new(|_| case13(Variant::Full, Case13::Clean))),
+        ("case 13 loss", Box::new(|_| case13(Variant::Full, Case13::Loss))),
+        ("case 13 panic", Box::new(|_| case13(Variant::Full, Case13::Panic(case13_last_step(Variant::Full))))),
+        ("case 14", Box::new(|_| case14(Variant::Full))),
+        ("case 15a", Box::new(|_| case15(Variant::Full, Case15::AfterStart))),
+        ("case 15b", Box::new(|_| case15(Variant::Full, Case15::BeforeStart))),
+        ("case 15c", Box::new(|_| case15(Variant::Full, Case15::First))),
+        ("case 15d", Box::new(|_| case15(Variant::Full, Case15::PriorLoss))),
+    ];
+    for (name, build) in builders {
+        for seed in 1..=500 {
+            let case = build(seed);
+            if let Some((failure, shrunk)) = walk_failure(&case, seed) {
+                panic!("{name} seed {seed} weights {:?}: {failure}; shrunk trace {shrunk:?}", dst::weights_for(seed));
+            }
+        }
+    }
+}
+
 /// The walk sweeps (ignored): one per case at its full horizon, and one for the seeded configuration
 /// at horizon 96 with its device loss. Seeds come from `EZSDR_SEEDS`.
 #[test]
@@ -1024,6 +1195,54 @@ fn case12a_capacity_timer_stopping_walks() {
 #[ignore = "walk sweep (E4a1): EZSDR_SEEDS=a-b, run on sim02/sim03"]
 fn case12b_pinned_drain_progress_guard_walks() {
     sweep("case 12b", |_| case12b(Variant::Full));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case13_clean_walks() {
+    sweep("case13_clean_walks", |_| case13(Variant::Full, Case13::Clean));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case13_loss_walks() {
+    sweep("case13_loss_walks", |_| case13(Variant::Full, Case13::Loss));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case13_panic_walks() {
+    sweep("case13_panic_walks", |_| case13(Variant::Full, Case13::Panic(case13_last_step(Variant::Full))));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case14_join_limit_detach_walks() {
+    sweep("case14_join_limit_detach_walks", |_| case14(Variant::Full));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case15a_spawn_fails_after_start_walks() {
+    sweep("case15a_spawn_fails_after_start_walks", |_| case15(Variant::Full, Case15::AfterStart));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case15b_spawn_fails_before_start_walks() {
+    sweep("case15b_spawn_fails_before_start_walks", |_| case15(Variant::Full, Case15::BeforeStart));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case15c_first_spawn_fails_walks() {
+    sweep("case15c_first_spawn_fails_walks", |_| case15(Variant::Full, Case15::First));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a2): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case15d_spawn_fails_after_a_loss_walks() {
+    sweep("case15d_spawn_fails_after_a_loss_walks", |_| case15(Variant::Full, Case15::PriorLoss));
 }
 
 #[test]

@@ -229,6 +229,14 @@ pub(crate) enum Input {
     },
     Shutdown,
     Panic,
+    /// The runtime failed to spawn the executor of `stream` (or, after a failure, did not spawn it at all): `started` is whether its `rx_start`
+    /// had succeeded (note 45 §4.9). The brain sends that stream no command and waits for nothing from it.
+    SpawnFailed {
+        stream: usize,
+        started: bool,
+    },
+    /// The start failed before the control thread (`S`) was spawned: it does not exist, and nothing is sent to it.
+    ControlUnspawned,
 }
 
 /// The guard's events of a panic, in order: the failure flag before the loss is published (I1).
@@ -306,6 +314,11 @@ pub(crate) enum Section {
         now: i64,
     },
     Shutdown,
+    SpawnFailed {
+        stream: usize,
+        started: bool,
+    },
+    ControlUnspawned,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -356,6 +369,10 @@ pub(crate) struct Brain {
     pub(crate) now: i64,
     /// The instant of the capacity timer last booked and not yet delivered (timer bookkeeping, not part of K or D).
     pub(crate) capacity_timer: Option<i64>,
+    /// The streams whose executor was never spawned (an input-delivered fact like `exit`): nothing is sent to them.
+    pub(crate) unspawned: std::collections::BTreeSet<usize>,
+    /// The control thread `S` was never spawned.
+    pub(crate) control_unspawned: bool,
 }
 
 impl Brain {
@@ -377,6 +394,8 @@ impl Brain {
             chain_bound: CHAIN_BOUND,
             now: i64::MIN,
             capacity_timer: None,
+            unspawned: std::collections::BTreeSet::new(),
+            control_unspawned: false,
         }
     }
 
@@ -384,6 +403,10 @@ impl Brain {
     pub(crate) fn step(&mut self, input: Input) {
         assert!(!self.dead(), "a dead brain takes no input");
         match input {
+            Input::Release(held) if self.unspawned.contains(&held.stream) => {
+                // No executor will ever run this stream: the value is disposed at once, once.
+                self.dispose(held.entry.order.1, Disposition::Reported(Reason::NoReservation));
+            }
             Input::Release(held) => {
                 self.held.push(held);
                 // A pass over the held list starts at its head: a release never jumps ahead of a value that waits.
@@ -424,6 +447,8 @@ impl Brain {
                 self.ops.push_back(Op::Section(Section::Late { stream, now }));
             }
             Input::Shutdown => self.ops.push_back(Op::Section(Section::Shutdown)),
+            Input::SpawnFailed { stream, started } => self.ops.push_back(Op::Section(Section::SpawnFailed { stream, started })),
+            Input::ControlUnspawned => self.ops.push_back(Op::Section(Section::ControlUnspawned)),
             Input::Panic => {
                 for guard in [Guard::Gate, Guard::FlagSet, Guard::Ungate, Guard::MarkLost] {
                     self.ops.push_back(Op::Guard(guard));
@@ -523,6 +548,30 @@ impl Brain {
                 }
             }
             Section::CapacityTimer => {}
+            Section::ControlUnspawned => {
+                self.control_unspawned = true;
+                self.recheck(cells);
+            }
+            Section::SpawnFailed { stream, started } => {
+                self.unspawned.insert(stream);
+                // Its held values will never be reserved; the chain is abandoned only when its start succeeded (`abandon_unowned`: the device
+                // state is uncertain, a loss already known is kept, no segment, the stop is an abort).
+                for held in std::mem::take(&mut self.held) {
+                    if held.stream == stream {
+                        self.dispose(held.entry.order.1, Disposition::Reported(Reason::NoReservation));
+                    } else {
+                        self.held.push(held);
+                    }
+                }
+                if started {
+                    if cells[stream].phase != Phase::Lost {
+                        cells[stream].phase = Phase::Uncertain;
+                    }
+                    cells[stream].outstanding = None;
+                    cells[stream].drain = Drain::Ended;
+                }
+                self.recheck(cells);
+            }
             Section::Stop { stream, requested } => {
                 let cell = &mut cells[stream];
                 match cell.phase {
@@ -901,8 +950,10 @@ impl Brain {
         }
         if self.terminates_ready(cells) {
             self.exit = Exit::Terminated;
-            commands.push(Op::Send(Command::SettingsTerminate));
-            commands.extend((0..cells.len()).map(|stream| Op::Send(Command::Rx { stream, op: RxOp::Terminate })));
+            if !self.control_unspawned {
+                commands.push(Op::Send(Command::SettingsTerminate));
+            }
+            commands.extend((0..cells.len()).filter(|stream| !self.unspawned.contains(stream)).map(|stream| Op::Send(Command::Rx { stream, op: RxOp::Terminate })));
         }
         self.front(commands);
     }
@@ -941,6 +992,16 @@ impl Brain {
     fn decide(&mut self, request: Request, cells: &[Cell]) -> Decision {
         // Shutdown starts no segment and no lifecycle call; a restore or move still goes before the terminates.
         if self.exit == Exit::Terminated || (self.exit == Exit::ShuttingDown && matches!(request, Request::StartNext { .. } | Request::Open { .. } | Request::Close { .. })) {
+            return Decision::Never;
+        }
+        // An executor that was never spawned runs no command: a request for its stream ends here.
+        let stream_of = match request {
+            Request::Close { stream } | Request::Open { stream } | Request::StartNext { stream, .. } | Request::Flush { stream } | Request::Plan { stream, .. } | Request::Late { stream, .. } => {
+                Some(stream)
+            }
+            Request::Restore { .. } | Request::Move { .. } => None,
+        };
+        if stream_of.is_some_and(|stream| self.unspawned.contains(&stream)) {
             return Decision::Never;
         }
         if self.deferred_ahead(request) {

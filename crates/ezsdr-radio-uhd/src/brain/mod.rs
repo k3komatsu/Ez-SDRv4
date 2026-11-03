@@ -18,6 +18,7 @@ mod oracle;
 mod rules;
 mod shared;
 mod speed;
+mod stop_tests;
 mod thread_tests;
 mod threads;
 mod toy;
