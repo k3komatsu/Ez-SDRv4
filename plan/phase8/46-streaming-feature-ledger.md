@@ -1,6 +1,6 @@
 # 設計メモ 46：受信中・送信中にできることの帳簿
 
-Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
+Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
 
 | 項目 | 内容 |
 |---|---|
@@ -53,10 +53,12 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の事実確認（19
 
 | | 機能 | 根拠 | 生んだ不具合 |
 |---|---|---|---|
-| F1 | 受信中の時刻つき周波数（DDC の受け渡し，debt，drain，`left`） | Vocabulary：RM-27 の `frequency_hz` は `hardware_timed`．Vision §58 の 16（Run の中の周波数の変更を admission で拒む試験）はこの変更を前提にする | D9b-2 の 6 件（受け渡しと停止・完了など．F6 と共有），L1 の M1 と受信の窓，38a の 4 件（終わりの清算．F2・F9 と共有），流れる channel のない値を後の segment へ渡す設計（failure-mechanisms:38，計画 4 件とコード 5 件．F2・F4 と共有） |
+| F1 | 受信中の時刻つき周波数（DDC の受け渡し，debt，drain，`left`） | Vocabulary：RM-27 の `frequency_hz` は `hardware_timed`．Vision §58 の 16（Run の中の周波数の変更を admission で拒む試験）はこの変更を前提にする | D9b-2 の 6 件（受け渡しと停止・完了など．F6 と共有），L1 の M1 と受信の窓，38a の 4 件（終わりの清算．F2・F9 と共有），流れる channel のない値を後の segment へ渡す設計（failure-mechanisms:38，計画 4 件とコード 5 件．F2・F4 共通と共有） |
 | F2 | 送信中の時刻つき周波数（DUC） | Vocabulary：RM-27 | #72（untimed の続きの send が TX の周波数を取らない），#71（burst のない間の時刻つきの TX の値がたまる．burst の間に受け付ける場合），38a（共有），D9b-1a の T3 の待ち（時刻つきの TX DSP の値の前に ACK を読む） |
 | F3 | 停止の時に受信の周波数を戻す（restore） | Module だけ（UR-26 の末尾） | D9b-2 の「flush の stop が失敗した後も restore する」 |
-| F4 | 走っている間の `cold` change（rate，antenna，stream の channel の組） | Vocabulary：RM-27 は `cold`．Vision §27 は「sample rate の変更は常に `cold`」と書き，§58 の 16 は Run の中の rate の admission を試す．Easy API が Session の中で設定させる（EA-16） | spec 22 の refusal の往復 5 件，1b-4c の O1 と再レビューの major 3，1b-4d-1a の 3 件（streamer の取り替え．F8 と共有），MockRadio の #35・#45（`cold` change と受信の fault），#46・#47（Stop と `cold` change．F6 と共有），#50（`cold` change と `Provider::stop` の parity） |
+| F4a | 走っている間に stream が持つ channel の組を変える（`stream` key：channel を足す，外す，入れ替える） | Vocabulary：RM-27 は `cold`，RM-21．Easy API の `stream` の設定（EA-16） | 1b-4d-1a の 3 件（streamer の取り替え．F8 と共有），1b-4c の「owner が持つ装置の写しが古くなる」（device record，F4b と共有）．ほかは F4 共通（下の行） |
+| F4b | 走っている間に sample rate と antenna を変える | Vocabulary：RM-27 は `cold`．Vision §27 は「sample rate の変更は常に `cold`」と書き，§58 の 16 は Run の中の rate の admission を試す．Easy API の `sample_rate`・`antenna` の設定（EA-16） | #35（rate の `cold` change の clock のない間の受信の fault）．ほかは F4 共通（下の行） |
+| F4 共通 | `cold` change が流れている stream を切り，新しい segment を始めること（F4a と F4b のどちらでも起こる） | RM-25 | spec 22 の refusal の往復 5 件，1b-4c の O1（`cold` の booking と記帳の間で lock を離す）と再レビューの major 3，MockRadio の #45（`cold` change の stream の tail の fault），#46・#47（Stop と `cold` change．F6 と共有），#50（`Provider::stop` の時に残る `cold` change の parity） |
 | F5 | stream の間の channel の move，空の stream を開く（from none） | Vocabulary：RM-34（`stream` は `cold`） | 1b-4e-2 の major 2（from none の追い越し），move の destination の開始の条件 5 件（failure-mechanisms:28），続けた move の prune（`reviews/1b4e2-sol.md:24-31`），#58（from none の開始と abort） |
 | F6 | 一つの stream だけを途中で止める（`Stop`），止めた受信を開き直す（`start_rx`） | Vocabulary：RM-12，RM-16，MR-29．Easy API の `stop()` と `start()` | D9b-2（受け渡しと Stop．F1 と共有），#46・#47（共有），#67 の一部（遠い未来の開始と停止．#67 は §2 の最初の時刻つきの開始と `Provider::stop` でも起こる） |
 | F7 | 送信中に，流れている burst と重なる・続く burst を予約する（preemption，続きの device burst，最後の sample の取り置き） | Vocabulary：RM-14，RM-15．Module の UR-21・UR-23 | Phase 7 K の N-P1-2（preemption の前線が send に追い越される），note 40 の Mock の framing 4 件と UHD の二重の `TIME_ERROR`（failure-mechanisms:48．基本の送信と共有） |
@@ -91,17 +93,38 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の事実確認（19
 - **制限すると失うもの**：Run の後の装置の周波数が，記録の S の値と違うことがある．次の Run への影響は graph の扱いで分かれる（VERIFIED，Sol 8）：同じ graph を使い続ければ，FIFO に残った時刻つきの値は後の sample で新しい untimed の設定を上書きしうる（[ddc.v:114-142](https://github.com/EttusResearch/uhd/blob/v4.10.0.0/fpga/usrp3/lib/rfnoc/ddc.v#L114-L142)）．新しく graph を作れば block は flush される（[rfnoc_graph.cpp:714-722, 985-998](https://github.com/EttusResearch/uhd/blob/v4.10.0.0/host/lib/rfnoc/rfnoc_graph.cpp#L714-L722)）が，生きている graph は再利用される（同 `:1100-1121`）．ただし FIFO に残る値は restore の有無と関係しない（restore は未消費の channel を戻さない）．
 - **制限の段階**：(a) 今のまま，(b) restore をやめ，記録に「装置は S の後の値のままかもしれない」と書く，(c) F1 を (b) か (d) にすれば，戻す値がなくなる．「S の後に効く値を S の前に渡さない」は代わりにならない：S は前もって分からないこと（Session の終わり，abort）があり，すでに渡した値は取り消せない（Sol 9）．
 
-### F4 走っている間の `cold` change
+### F4 走っている間の `cold` change（F4a と F4b に分けて決める）
 
-- **できること**：Run を止めずに，stream の sample rate，channel の antenna，stream が持つ channel の組を変える．Easy API では Session の中で `sample_rate`，`antenna`，`stream` を設定できる（EA-16）．
-- **抱える仕組み**：stream ごとの timeline の segment，cut，origin，instance 全体の `cold` の floor（RM-25），refusal が stream を止める（halt）と refusal の往復，segment ごとに streamer を開き直す，device record（UR-36），open generation による report の照合．
-- **制限すると消えるもの**：`cold` に固有の部分：instance 全体の floor，refusal の往復と halt，rate と antenna の切り替え．**残るもの**（Sol 12）：F6 が残れば，`start_rx` が新しい segment を作り，configure と refusal の道が残る．F8 が残れば，streamer の取り替え，generation，report の照合が残る．
-- **制限すると失うもの**：Run の中で rate や antenna や channel の組を変えること．代わり：Run を分ける（Session では接続し直す）．代価：`arm` と start up の時間，記録が二つに分かれること．§58 の 16 の rate の部分は書き直しが要る．
+owner 2026-11-04：streamer を開き直すのは channel の組が変わる時だけなので，二つに分けて決める．
+
+**F4 共通（どちらを残しても残るもの）**
+
+- 一つでも残せば，`cold` change は流れている stream を切って新しい segment を始める（RM-25）．stream ごとの timeline の segment，cut，origin，instance 全体の `cold` の floor，refusal が stream を止める（halt）と refusal の往復は残る．
+- 両方を (d) にすれば，これらが消える．ただし F6 が残れば，`start_rx` が新しい segment を作り，configure と refusal の道が残る（Sol 12）．
+- 「F4 共通」の行の不具合は，片方だけを制限しても消えない．
+
+#### F4a 流れている間に channel の組を変える
+
+- **できること**：Run を止めずに，stream が持つ channel を足す，外す，同じ数のまま入れ替える．Easy API の `rx_channels[n].stream = k` など（EA-16）．
+- **抱える仕組み**：組が変われば streamer を閉じて開き直す（UHD の streamer は作る時に channel の並びが決まる）．device record の開いた組（UR-36），open generation による report の照合，開き直しの間の受信の止まり．F5 が残れば，開け閉めの順の待ち合わせ（`held_elsewhere`，`needed_before`，`core.rs:1751-1775`）も．
+- **制限すると消えるもの**：流れている間の streamer の開け閉め（F5 と F8 も制限すれば，開くのは `arm`，閉じるのは片付けの時だけになる）．device record の開いた組の比べ直し．**残るもの**：F8 が残れば streamer の取り替えと generation．F4b が残れば F4 共通．
+- **制限すると失うもの**：Run の中で channel の組を変えること．代わり：Run を分ける（Session では接続し直す）．代価：`arm` と start up の時間，記録が二つに分かれること．
+- **制限の段階**：
+  - (a) 今のまま．
+  - (b) 止めた stream にだけ受け付ける（受信は `Stop` → 変更 → `start_rx`．送信の「止めた」は F4b (b) と同じく定義が要る）．開け閉めは残るが，流れている stream を切る判断はなくなる．
+  - (d) Run の間は変えない（`stream` の class を外す）．F5 もなくなる（move と from none は組の変更だから）．
+
+#### F4b 流れている間に sample rate と antenna を変える
+
+- **できること**：Run を止めずに，stream の sample rate と channel の antenna を変える．Easy API の `rx.sample_rate = …`，`rx_channels[n].antenna = …`（EA-16）．
+- **抱える仕組み**：channel の組が同じなら streamer は開き直さない．設定し直して，時刻つきで開始する（`owner_step` が `Configure`，`core.rs:899-911`）．rate の変更は新しい SampleClock を始める（Vision §15）．antenna の read-back が拒めば stream を止める（`ur_25_a_refused_antenna_read_back_halts_the_stream`）．
+- **制限すると消えるもの**：F4 共通の一部（F4a も制限した場合に全部）．rate の切り替えに伴う clock の終わりと始まり．**残るもの**：F4a が残れば F4 共通．
+- **制限すると失うもの**：Run の中で rate や antenna を変えること．代わりと代価は F4a と同じ．§58 の 16 の rate の部分は書き直しが要る．
 - **制限の段階**：
   - (a) 今のまま．
   - (b) 止めた stream にだけ受け付ける．受信は `Stop` → 変更 → `start_rx`．送信は「止めた」の意味を決める必要がある：送信の `Stop` は burst を終えて clock を残し，後の burst は送れる．「Stop した」「host が送っていない」「装置が無音」「後の予約がない」は同じでない（Sol 14）．
   - (c) v3 の形：instance のすべての stream を止め，変えて，揃えて開き直す（Vision §27 の箇条）．ただし F6 が残れば stream ごとの計画は残る．全体の止め方の予約の順，止まったことの確かめ方，開き直し方を決めるまでは，line と floor が要らなくなるとは言えない（Sol 14）．
-  - (d) Run の間は変えない（class を外す）．F5 もなくなる．
+  - (d) Run の間は変えない（class を外す）．
 
 ### F5 stream の間の channel の move，空の stream を開く
 
@@ -109,7 +132,7 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の事実確認（19
 - **抱える仕組み**：二本の line に一つの move を book し，source の release を待って destination を開く．holder の `Release` と `FromNone`，uhd-control が自分で streamer を開く道，move の release の計算．
 - **制限すると消えるもの**：holder の `Release` と `FromNone` とその競合の扱い，from none の待ち，move の release，UR-25 の Ownership の段落の多く．**残るもの**（Sol 13）：`Free` と `Owner` と report の読みの排他（`reading`）．F8 の開き直しも owner の claim を使う．
 - **制限すると失うもの**：Run の中で channel を別の stream へ動かすこと，空の stream を後から開くこと．代わり：Run を分ける．
-- **制限の段階**：(a) 今のまま，(b) 止めた stream の間だけ（F4 (b) と同じ「止めた」の定義が要る），(c) Run の間は channel の組を固定（F4 (d) の一部）．
+- **制限の段階**：(a) 今のまま，(b) 止めた stream の間だけ（F4b (b) と同じ「止めた」の定義が要る），(c) Run の間は channel の組を固定（F4a (d) と同じ）．
 
 ### F6 一つの stream だけを途中で止める，止めた受信を開き直す
 
@@ -117,7 +140,7 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の事実確認（19
 - **抱える仕組み**：受信の cut と，cut をまたぐ時刻つきの値の drain（F1 と共有），止めた後の segment，開き直しの start lead．
 - **制限すると消えるもの**：一つの stream の再開，F1 と組み合わせた受け渡しと Stop の競合（D9b-2）．#67 は一部しか消えない（`Provider::stop` でも起こる）．
 - **制限すると失うもの**：一つの stream だけの停止と再開．代わり：Run 全体を止める．
-- **制限の段階**：(a) 今のまま，(b) Stop は残し，`start_rx` での再開をなくす（なくなるのは明示の Stop の後の再開．F4 が残れば `cold` change による停止と再開と複数の SampleClock は残る，Sol 15），(c) Stop は Run 全体だけ．
+- **制限の段階**：(a) 今のまま，(b) Stop は残し，`start_rx` での再開をなくす（なくなるのは明示の Stop の後の再開．F4a か F4b が残れば `cold` change による停止と再開と複数の SampleClock は残る，Sol 15），(c) Stop は Run 全体だけ．
 
 ### F7 送信中に，流れている burst と重なる・続く burst を予約する
 
@@ -157,28 +180,30 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の事実確認（19
 | F1 | 904 / 73 | 324 / 25 | 9 / 0 |
 | F2 | 489 / 13 | 315 / 10 | 6 / 0 |
 | F3 | 107 / 11 | 0 / 0 | 0 / 0 |
-| F4 | 944 / 57 | 532 / 38 | 376 / 17 |
+| F4a と F4b の合計（分けて数えていない） | 944 / 57 | 532 / 38 | 376 / 17 |
 | F5 | 498 / 125 | 137 / 19 | 349 / 48 |
 | F6 | 233 / 136 | 244 / 36 | 137 / 4 |
 | F7 | 526 / 32 | 307 / 3 | 19 / 2 |
 | F8 | 314 / 47 | 0 / 0 | 0 / 0 |
 | F9 | （F1・F2 に含まれる） | | |
 
-spec 18 の規則の大きさ：UR-24（時刻つきの値，F1・F2・F9）19.4 KB で名のあるテスト 141，UR-25（計画と ownership，F4・F5・F6）16.3 KB で 132，UR-23（送信の計画と device burst，F7 ほか）9.6 KB で 67，UR-36（device record，F4・F8）4.1 KB で 24．
+spec 18 の規則の大きさ：UR-24（時刻つきの値，F1・F2・F9）19.4 KB で名のあるテスト 141，UR-25（計画と ownership，F4a・F4b・F5・F6）16.3 KB で 132，UR-23（送信の計画と device burst，F7 ほか）9.6 KB で 67，UR-36（device record，F4a・F4b・F8）4.1 KB で 24．
 
 ## 5. 組み合わせ
 
-- F4 を (d) にすると F5 もなくなる．F4 (b) と F5 (b) は F6 を要り，送信の「止めた」の定義を要る．
-- F4 をなくしても，F6 が残れば新しい segment と configure の道が，F8 が残れば streamer の取り替えと generation が残る．
+- F4a を (d) にすると F5 もなくなる．F4a (b)，F4b (b)，F5 (b) は F6 を要り，送信の「止めた」の定義を要る．
+- F4 共通（segment，cut，floor，refusal の往復）は，F4a と F4b の両方を (d) にしたときだけ消える．
+- F4a と F4b をなくしても，F6 が残れば新しい segment と configure の道が，F8 が残れば streamer の取り替えと generation が残る．
+- F4a，F5，F8 をすべて制限すると，streamer を開くのは `arm`，閉じるのは片付けの時だけになる．F4b は残しても開け閉めを生まない．
 - F1 を (b) か (d) にすると，F3 の戻す値がなくなり，D9b-2 の受け渡しと Stop の競合もなくなる．
 - F1・F2・F9 をすべて (d) にすると，uhd-control の時刻つきの release がなくなる．一つでも残れば release の道は残る．
-- F1・F4・F5 を制限しても，loss，終わり，届けた sample の床，clock の登録と終わり，phase，記録の共有は残る（F6 と §2，`provider/core.rs:725-870`）（Sol 18）．
-- RM の振る舞いを変える制限（F1・F2・F4・F5・F6・F7・F9）は MockRadio と spec 07 も変える．parity の比べる範囲も縮む．F3 と F8 は UHD Module だけ．
+- F1・F4a・F4b・F5 を制限しても，loss，終わり，届けた sample の床，clock の登録と終わり，phase，記録の共有は残る（F6 と §2，`provider/core.rs:725-870`）（Sol 18）．
+- RM の振る舞いを変える制限（F1・F2・F4a・F4b・F5・F6・F7・F9）は MockRadio と spec 07 も変える．parity の比べる範囲も縮む．F3 と F8 は UHD Module だけ．
 - 設計メモ 45 の判断役の形と今の形のどちらが向くかは，この帳簿の結論で変わりうる（報告 E4 §6 の 2・3 をこの後に置いた理由）．
 
 ## 6. owner に決めてもらうこと（一つずつ）
 
-F1〜F9 のそれぞれを §3 の段階のどれにするか．順は F4 → F5 → F6 → F1 → F3 → F2 → F9 → F7 → F8 を提案する（F4・F5・F6 は計画と ownership を決め，F1・F3 はその上で受け渡しを決める．送信の三つは独立に近い）．
+F1〜F9（F4 は F4a と F4b）のそれぞれを §3 の段階のどれにするか．順は F4a → F4b → F5 → F6 → F1 → F3 → F2 → F9 → F7 → F8 を提案する（F4a・F4b・F5・F6 は計画と ownership を決め，F1・F3 はその上で受け渡しを決める．送信の三つは独立に近い）．
 
 ## 7. Sol の事実確認
 
@@ -189,4 +214,5 @@ F1〜F9 のそれぞれを §3 の段階のどれにするか．順は F4 → F5
 | 日付 | 変更 |
 |---|---|
 | 2026-11-04 | 初版（orchestrator Opus） |
+| 2026-11-04 | 第 3 版：owner の指示で F4 を F4a（channel の組，streamer を開き直す）と F4b（rate と antenna，開き直さない）に分けた．両方に共通の仕組みと不具合は「F4 共通」に置いた |
 | 2026-11-04 | 第 2 版：Sol の事実確認 19 件を入れた．F9（時刻つきの gain）を分けた．§2 を三つに分けた．§4 に量を入れた |
