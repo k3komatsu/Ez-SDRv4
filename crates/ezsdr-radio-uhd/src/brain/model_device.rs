@@ -34,11 +34,7 @@ pub(crate) struct MState {
     pub(crate) llog: Vec<LEvent>,
 }
 
-/// A diagnostic hook run inside the device's effect when a timed write is accepted: `(value id, effective instant)`.
-pub(crate) type AcceptHook = Arc<dyn Fn(u64, i64) + Send + Sync>;
-
 pub(crate) struct ModelDevice {
-    pub(crate) accept_hook: Mutex<Option<AcceptHook>>,
     sched: Arc<Sched>,
     st: Arc<Mutex<MState>>,
     /// The samples one recv returns.
@@ -51,7 +47,7 @@ fn lost() -> DeviceError {
 
 impl ModelDevice {
     pub(crate) fn new(sched: Arc<Sched>, dev: Model, p: usize) -> Arc<ModelDevice> {
-        Arc::new(ModelDevice { accept_hook: Mutex::new(None), sched, st: Arc::new(Mutex::new(MState { dev, l: None, calls: Vec::new(), llog: Vec::new() })), p })
+        Arc::new(ModelDevice { sched, st: Arc::new(Mutex::new(MState { dev, l: None, calls: Vec::new(), llog: Vec::new() })), p })
     }
 
     pub(crate) fn sched(&self) -> &Arc<Sched> {
@@ -183,7 +179,6 @@ impl Device for ModelDevice {
             }) as Arc<dyn Fn() -> bool + Send + Sync>
         });
         let freq = s.freq;
-        let hook = self.accept_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.locked(ready, |g, forced| {
             g.calls.push(DevCall::Apply { channel: chan, freq: freq.map(|f| f as i64), at });
             if g.dev.lost {
@@ -196,16 +191,11 @@ impl Device for ModelDevice {
             };
             let id = freq.expect("a timed apply carries the value id") as u64;
             match g.dev.apply_timed(chan, id, at) {
-                Apply::Accepted { effective } => {
-                    if let Some(hook) = &hook {
-                        hook(id, effective);
-                    }
-                    match forced {
-                        Forced::Outcome(Outcome::Partial) => Err(DeviceError::failed(PARTIAL)),
-                        Forced::None | Forced::Outcome(Outcome::Ok) => Ok(Self::applied()),
-                        other => panic!("forced {other:?} on an accepted write: the trace does not describe this run"),
-                    }
-                }
+                Apply::Accepted { .. } => match forced {
+                    Forced::Outcome(Outcome::Partial) => Err(DeviceError::failed(PARTIAL)),
+                    Forced::None | Forced::Outcome(Outcome::Ok) => Ok(Self::applied()),
+                    other => panic!("forced {other:?} on an accepted write: the trace does not describe this run"),
+                },
                 Apply::Refused => {
                     assert!(matches!(forced, Forced::None | Forced::Outcome(Outcome::Refused)), "forced {forced:?} on a refused write");
                     Err(DeviceError::failed(REFUSED))

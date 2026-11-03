@@ -148,14 +148,12 @@ pub(crate) struct Shared {
     pub(crate) r_fifo: Vec<Queue<RxOp>>,
     pub(crate) rx: Vec<Mutex<RxState>>,
     pub(crate) k_fifo: Queue<ClockCmd>,
-    pub(crate) timers: Mutex<Vec<(usize, i64)>>,
+    pub(crate) timers: Mutex<Vec<(super::core::Timer, i64)>>,
     pub(crate) sink: Mutex<Sink>,
     pub(crate) params: Params,
     /// The wall time of one device tick on a fake's manual clock.
     pub(crate) tick: std::time::Duration,
     pub(crate) now: Box<dyn Fn() -> i64 + Send + Sync>,
-    /// The effective instant of the device's latest accepted timed command (read only by `Quirk::AcceptAtEffective`).
-    pub(crate) effective: Box<dyn Fn() -> i64 + Send + Sync>,
     pub(crate) stopping: AtomicBool,
     /// The brain thread has ended: nothing routes to `S` any more (the closed sender).
     pub(crate) brain_gone: AtomicBool,
@@ -185,12 +183,6 @@ pub(crate) enum Quirk {
     CallBeforeTake,
     /// `R` publishes from a snapshot taken at the publish itself (no recheck against the one its recv began with).
     PublishWithoutRecheck,
-    /// `S` records a value's acceptance at the instant the device queued its command (the world's `effective`) instead of the time
-    /// source read after the call returns: the diagnostic that classifies the Q1 difference.
-    AcceptAtEffective,
-    /// The acceptance is recorded inside the device's effect, at the effective instant (the world's timing and value): the
-    /// diagnostic that classifies the whole Q1 difference.
-    AcceptInEffect,
 }
 
 /// A test hook run with the shared state.
@@ -260,7 +252,7 @@ impl Shared {
     pub(crate) fn abandon(&self, id: u64) {
         self.with_cells(|cells| rules::abandon_all(cells, id));
         self.sink().terminals.push((id, Terminal::Abandoned));
-        self.send(Input::Done { id, terminal: Terminal::Abandoned });
+        self.send(Input::Done { id, terminal: Terminal::Abandoned, now: (self.now)() });
     }
 
     pub(crate) fn pred(self: &Arc<Self>, f: impl Fn(&Shared) -> bool + Send + Sync + 'static) -> Pred {

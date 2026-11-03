@@ -79,7 +79,7 @@ Each line is one atomic event. The harness picks the next event among the enable
 
 ### 3.4 Time and sizes in the cases
 
-`P = 4` samples per packet, one tick per sample, segment origin 0, horizon 48 unless a case says otherwise. The release window, start lead and drain allowance are parameters of the core; the cases set them so that the interleavings of interest are reachable (not today's profile values). Defaults (G14): in-flight bound 4, recv timeout 8 ticks, drain deadline cut + 8, Shutdown after every other environment input once `T ≥ horizon − 8`.
+`P = 4` samples per packet, one tick per sample, segment origin 0, horizon 48 unless a case says otherwise. The release window, start lead and drain allowance are parameters of the core; the cases set them so that the interleavings of interest are reachable (not today's profile values). Defaults (G14): in-flight bound 4 (E1–E3; E4 replaces it with K = 4 for the device and D = 64 per chain, §11), recv timeout 8 ticks, drain deadline cut + 8, Shutdown after every other environment input once `T ≥ horizon − 8`.
 
 ## 4. Cases
 
@@ -113,7 +113,7 @@ Safety (checked at every state):
 - **I8** Equal-time values are taken by distinct samples, in booking order; one value per eligible sample.
 - **I9** No call on a closed streamer handle; no handle is closed after `F` (loss retains handles).
 - **I10** No actor performs a device event while holding a cell. By construction in E1 (cell sections are single events; cell procedures take only `&mut Cell`); an oracle from E2 (G13).
-- **I11** In-flight values per chain never exceed the bound; beyond it the brain keeps the value held.
+- **I11** In-flight values per chain never exceed the bound; beyond it the brain keeps the value held. (E4: replaced by I11′, K over the device and D per chain, with the progress check P6, §11.)
 - **I12** No command for a new epoch's streamer or chain (start, close, open) before the old epoch's quiesce ack.
 - **I13** No restore of a chain whose device state is `Uncertain` or `Lost`.
 - **I14** No lifecycle admission (open, close, rate read) after `F` is published: the recheck inside `G` closes the window that I1 keeps for ordinary calls.
@@ -147,7 +147,7 @@ Each row is a unit test on `Brain::step`, the cell procedures or an executor rul
 | U11 | late completion after the segment finished | the command result recorded once; the value's disposition stays the earlier report (`left`); a later sample's consumption is recorded as leftover consumption, not a second disposition; pins come from the in-flight list, so `finish` does not clear them and the next `begin` waits (G5) |
 | U12 | consumption: two equal-time values; a value arriving after its instant; a sample before acceptance | distinct samples; first sample after arrival; not consumed |
 | U13 | `F` set: executor rule before a call; brain panic guard | no call; guard sets `F` then `mark_lost` |
-| U14 | in-flight bound reached | value stays held, no new Ceiling event |
+| U14 | in-flight bound reached (E4: K or D reached, §11) | value stays held, no new Ceiling event |
 | U16 | cut-free LateCommand restart; LateCommand with a cut | restart from Armed/Streaming (Lost: no call); with a cut: end-now |
 | U17 | failed start (`Uncertain`), failed stop, flush start failure, flush final stop failure | the device states of note 44 §3.3; no restore from `Uncertain` |
 | U18 | held value whose segment ends unreserved; held at shutdown | carried or reported once; settled by the `settle` rule |
@@ -192,3 +192,43 @@ Test-plan draft 4 notes (2026-11-01): 6 budget — the measurement decides (§3.
 | 2026-11-02 | E2 split into E2a and E2b (owner 2026-11-02: 「了解です，進めてください」 on the orchestrator's recommendation). **FakeDevice does not delegate to the device model in the experiment** (a deviation from note 45 §7 item 2): FakeDevice is public and used by the server, acceptance and about 1,000 tests; delegating now would put a receive-only test model into production builds, make the experiment undeletable, and be redone when the transmit side (which shares the command queue, the DSP and device time) joins the model in the migration. Instead the executors call only the `Device` trait; `ModelDevice` wraps the same model for trace forcing, so the two wrappers (DST and threads) share one model as §7 requires; FakeDevice fidelity is checked by a differential suite; the speed comparison runs both owners on FakeDevice. Delegation moves to the migration's first stage, with the transmit side. Owner 2026-11-02: local builds allowed again. |
 | 2026-11-03 | E2a closed (e144da8, gate with #76). E2b closed: 1 MS/s spaced and bursty PASS (new p99 about 80 µs, today about 1,050 µs, no loss); 50 MS/s × 500 (100,000 blocks/s) FAIL for the new runtime (1,100–4,100 updates per repetition not applied at e; today's settings clean). Cause VERIFIED in code: the in-flight slot is retired only on sample evidence (`brain/core.rs:629-674`) while today's command slot expires at device time, so a host receive backlog (here from FakeDevice's per-block DSP-history scan, `device.rs:548-553`, which both owners suffer) becomes settings lateness. Three measurement rounds first removed test-adapter cost (per-sample reconstruction and cloned history; a shared scheduler condvar broadcast per block; an unbounded call log). The measurement found and fixed a core liveness defect (a value held at the bound was never reserved again, `u14b`); a late retry is pinned (`u14c`). **Open for the owner (E3):** keep device capacity (freed at device time) apart from disposition (awaiting evidence) in note 45 §4.5. Records `reviews/45e2b-*`. |
 | 2026-11-03 | E3 closed. Holdout 14 of 20 found (criterion 16 not met): not found H03 (double guard), H05 (no oracle: Stopping reopens), H18 (no case above the in-flight bound), H10/H12/H17 (not modelled). Past bugs: 3 found, 4 cannot happen, 3 not solved (outside the model). Replay: 7 unclassified whole-walk divergences at seeds 2,001-10,000 since E2a; one cause VERIFIED (receive send order differs between world and threads). Report [45-report](45-report.md); recommendation a bounded E4; awaiting the owner. |
+| 2026-11-03 | §11 added: the second round E4 (owner decisions on report §6), its stages, fixed K and D, criteria and sequences B1–B15 |
+| 2026-11-03 | Sol's E4a test-plan review (REVISE, P2 1–6, P3 7–8, all adopted; `reviews/45e4a-plan-sol.md`): B8 reworded; the held order stops at its head (§11) |
+| 2026-11-03 | Sol's E4a1 code review (REVISE, P2 ×3, all adopted; `reviews/45e4a1-code-sol.md`): B8's window after F (abandoned by S, not refused by the brain); P6 checked when the freeing step's ops end; both wrappers record acceptance at the call's return, and the Q1 tolerance goes |
+
+## 11. The second round (E4)
+
+The owner decided report §6 on 2026-11-03 ([45-report.md](45-report.md) §5, §6): one bounded second round, with the design change of note 45 sixth draft (§4.5 「上限は二つ」, §4.9 「実行役の生成の失敗」). If E4 fails a criterion, the experiment ends and note 45 §9's first alternative follows; no third round.
+
+| Stage | Content | Gate |
+|---|---|---|
+| E4a1 | Core: the two bounds (device-wide capacity K, per-chain resident bound D), device time carried by input, a capacity timer distinct from the drain timer, held re-evaluation on every freeing event. DST: oracles I11′, I17 (Stopping reopens only by a confirmed start the brain issued), cases 10–12. H03's double guard resolved. Replay: one send order for both wrappers, the shrink display, the 7 divergences of s1c at seeds 2,001–10,000 classified. Threads follow the core. | orchestrator gate; rows run with E4a2 |
+| E4a2 | Model: loss recording, native handle destruction, the shutdown join timeout and detach, an executor spawn failure, each with its oracle (I18–I21) and case (13–15) | full gate |
+| E4b | Speed re-measurement with E2b's tools, table and verdict, at K and D fixed below | full gate if tooling changes |
+| E4c | Evaluation: the new holdout (chosen by Sol from the sixth draft before any E4 code, kept outside the repository, never shown to implementers), the past-bug table rechecked, a report addendum, the owner's decision | — |
+
+E4a1 and E4a2 are risky and share one test plan, reviewed by Sol before code. **Held order** (orchestrator, Sol plan review 4): the held values are tried in one release order for the whole device, and the pass stops at the first value a bound or a reservation condition refuses, as today's held list stops at its head (`provider/control.rs` `release`): reserving a later value of another chain first could put it ahead of an earlier one in the device's in-order command queue.
+
+**Fixed before measurement.** K = 4 for the whole device (all chains), the value of E1–E3's per-chain bound; it fits the bursty table (four values per 10 ms, released within the 3 ms window) and is below FakeDevice's queue of 16 (`device.rs:413`). D = 64 per chain: at E2b's worst steady receive backlog (about 100 ms, `reviews/45e2b-results.md`), the bursty table keeps about 40 values resident. The measurement reports K hits and D hits separately, maximum occupancy of each, held time, R backlog, cell hold time and every update's lateness. If D hits precede the late updates, the coupling has moved, not gone: the speed criterion counts as failed.
+
+**Criteria** (unchanged, note 45 §7): speed p99(new) − p99(today) < 100 µs, p99(new) ≤ 300 µs, loss(new) ≤ loss(today), every update accounted, at 1 MS/s and at 100,000 blocks/s, spaced and bursty; at least 16 of the new 20 holdout errors found by the DST (default suite, walks at seeds 1–10,000, micro searches within budget) without changing an observable assertion; replay: no unclassified divergence at seeds 1–10,000.
+
+**Sequences** (expected result; the test plan gives each its test):
+
+| # | Sequence | Expected |
+|---|---|---|
+| B1 | One chain, R stalled (no samples); device time advances; K + 2 values at spaced instants | the first K are reserved; each later value is reserved, in order, once a reserved value has finished ok and device time reaches its instant; no consumption is invented; all K + 2 stay resident (D) until R resumes and consumes them |
+| B2 | K = 1; A taken; its call runs past e_A; B held; time passes e_A | B stays held while A's call runs; at A's `Done(ok)` (now ≥ e_A) B is reserved in that step |
+| B3 | As B2 with `Done(partial)` and with `Done(refused)` | partial: K frees (now ≥ e_A), A stays resident as possibly applied; refused: K and D free at `Done` |
+| B4 | A queued; Stop shortens the cut below e_A | A cancelled: K frees at the cancel; D frees at A's `Dropped` |
+| B5 | Two chains; chain 0 holds K values whose instants are in the future; chain 1 gets a value | chain 1's value is held until a chain-0 value frees K (K is shared) |
+| B6 | A chain with D resident values (R stalled), K free | the next value is held; no timer frees D; when R consumes one, the held value is reserved |
+| B7 | A applied; Stop cut < e_A; drain deadline | A is reported `left` and stays resident (counted in D); a later sample consumes it as leftover; only then it leaves the cell |
+| B8 | A capacity timer due during a drain; a stale capacity timer after an epoch change; a capacity timer after `F` | none of them ends the drain, stops or restarts; a reservation one triggers is only one that K, D and the reservation conditions allow, and none after the loss boundary; one made after F is set but before the brain learns the loss (the pure brain does not read F) is abandoned by S without a device call (I1) and retired at its terminal |
+| B9 | A's consumption arrives before its `Done` | A leaves the cell at `Done`; K counts it until `Done(ok)` and now ≥ e_A |
+| B10 | Stopping, then any input other than the executor's confirmation of a start the brain issued for that epoch | the cell does not reopen (I17) |
+| B11 | Loss: the failure flag, the loss record, `mark_lost` | F before the record and before `mark_lost` (I18) |
+| B12 | Handles: close with no loss or detach; loss or detach; panic | without loss or detach every opened handle is closed and destroyed once; after F or detach none is closed or destroyed (retained); the panic guard publishes the loss so the destructor retains the handle (I19) |
+| B13 | Shutdown with S blocked in `apply` holding L past the join limit | shutdown detaches after the limit, retains the handles, closes nothing; cleanup proceeds only when every executor stopped or the handles are retained (I20) |
+| B14 | Two receive streams; R1's spawn fails after its `rx_start` succeeded; and before it | start fails; only R1's chain is abandoned (uncertain, `Lost` kept, Abort) and only when its `rx_start` had succeeded; the brain sends R1 nothing and waits for no quiesce from it; R0 stops in the normal order; every value is disposed once (I21, P2, P3) |
+| B15 | s1c whole walks at seeds 1–10,000, after one send order | equal, or each divergence classified with its cause |

@@ -4,14 +4,17 @@
 
 use std::collections::VecDeque;
 
-use super::cell::{Cell, Drain, Outcome, Outstanding, Phase, Refusal, Terminal, ValueState};
+use super::cell::{Cell, Drain, InFlight, Outcome, Outstanding, Phase, Refusal, Terminal, ValueState};
 use crate::provider::core::RxEntry;
 
 /// The drain window: the drain deadline is the cut plus this (note 45 §4.4).
 pub(crate) const DRAIN_WINDOW: i64 = 8;
 
-/// The in-flight bound of a cell (I11; G14).
-pub(crate) const IN_FLIGHT_BOUND: usize = 4;
+/// The device's capacity K (I11′; note 45 §4.5 「上限は二つ」): values counted against the device's command queue, over all chains.
+pub(crate) const DEVICE_BOUND: usize = 4;
+
+/// The resident bound D of a chain: every value in its cell, from reservation until its terminal input and its obligations are over.
+pub(crate) const CHAIN_BOUND: usize = 64;
 
 /// The first id the brain numbers its own commands with; a value's id is its entry's order id.
 const FIRST_ID: u64 = 1 << 32;
@@ -91,8 +94,19 @@ pub(crate) enum Command {
         stream: usize,
         at: i64,
     },
+    /// The capacity timer: a device-time instant at which a counted value frees K (a kind of its own, never a drain deadline).
+    CapacityTimer {
+        at: i64,
+    },
     /// Shutdown's terminate for `S`: `S` takes the commands queued before it, then exits.
     SettingsTerminate,
+}
+
+/// A booked timer: a stream's drain deadline, or the device's capacity timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Timer {
+    Drain(usize),
+    Capacity,
 }
 
 /// A lifecycle or settings request the brain may defer until the chain is clear.
@@ -193,13 +207,21 @@ pub(crate) enum Input {
         plan_cut: Option<i64>,
     },
     Request(Request),
+    /// A settings command's terminal; `now` is the device time its sender read (the brain's only source of time besides the timers).
     Done {
         id: u64,
         terminal: Terminal,
+        now: i64,
     },
     Boundary(Boundary),
+    /// A drain deadline; `now` is the device time read at delivery (never before the deadline).
     Timer {
         stream: usize,
+        now: i64,
+    },
+    /// A capacity timer: only re-evaluates the held values.
+    CapacityTimer {
+        now: i64,
     },
     LateCommand {
         stream: usize,
@@ -220,25 +242,69 @@ pub(crate) enum Guard {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Section {
-    Reserve { id: u64 },
-    ReserveHeld { stream: usize },
-    Stop { stream: usize, requested: i64 },
-    PlanCancel { stream: usize, origin: i64, epoch: u64, plan_cut: Option<i64> },
-    Drain { stream: usize },
-    TimerFired { stream: usize },
-    Done { id: u64, terminal: Terminal },
-    Consumed { id: u64 },
-    Finished { stream: usize, next_origin: Option<i64>, epoch: u64 },
-    Armed { stream: usize },
-    FirstSample { stream: usize },
-    Quiesced { stream: usize },
-    Lost { stream: usize },
-    Flushed { stream: usize },
-    BeginFailed { stream: usize },
-    Opened { stream: usize },
-    Closed { stream: usize },
+    Reserve {
+        id: u64,
+    },
+    /// Tries the head of the held list; each success queues the next pass (head-of-line, experiment §11 "Held order").
+    ReserveAll,
+    Stop {
+        stream: usize,
+        requested: i64,
+    },
+    PlanCancel {
+        stream: usize,
+        origin: i64,
+        epoch: u64,
+        plan_cut: Option<i64>,
+    },
+    Drain {
+        stream: usize,
+    },
+    TimerFired {
+        stream: usize,
+    },
+    CapacityTimer,
+    Done {
+        id: u64,
+        terminal: Terminal,
+    },
+    Consumed {
+        id: u64,
+    },
+    Finished {
+        stream: usize,
+        next_origin: Option<i64>,
+        epoch: u64,
+    },
+    Armed {
+        stream: usize,
+    },
+    FirstSample {
+        stream: usize,
+    },
+    Quiesced {
+        stream: usize,
+    },
+    Lost {
+        stream: usize,
+    },
+    Flushed {
+        stream: usize,
+    },
+    BeginFailed {
+        stream: usize,
+    },
+    Opened {
+        stream: usize,
+    },
+    Closed {
+        stream: usize,
+    },
     Decide(Request),
-    Late { stream: usize, now: i64 },
+    Late {
+        stream: usize,
+        now: i64,
+    },
     Shutdown,
 }
 
@@ -283,8 +349,13 @@ pub(crate) struct Brain {
     pub(crate) exit: Exit,
     /// The Restore and Move commands sent and not yet done, by command id: the channel each changes (written in `decide`, cleared at `Done`).
     pub(crate) pending: std::collections::BTreeMap<u64, usize>,
-    /// The in-flight bound this brain applies: [`IN_FLIGHT_BOUND`], except in the E2b bound diagnostic's runs of the measured runtime.
-    pub(crate) in_flight_bound: usize,
+    /// K and D this brain applies: [`DEVICE_BOUND`] and [`CHAIN_BOUND`] unless a case or the E2b diagnostic sets them (from `Params` in the world).
+    pub(crate) device_bound: usize,
+    pub(crate) chain_bound: usize,
+    /// The latest device time an input carried (`i64::MIN` before any): never lowered by a stale input. Nothing else is read as time.
+    pub(crate) now: i64,
+    /// The instant of the capacity timer last booked and not yet delivered (timer bookkeeping, not part of K or D).
+    pub(crate) capacity_timer: Option<i64>,
 }
 
 impl Brain {
@@ -302,7 +373,10 @@ impl Brain {
             guard: Vec::new(),
             exit: Exit::Running,
             pending: std::collections::BTreeMap::new(),
-            in_flight_bound: IN_FLIGHT_BOUND,
+            device_bound: DEVICE_BOUND,
+            chain_bound: CHAIN_BOUND,
+            now: i64::MIN,
+            capacity_timer: None,
         }
     }
 
@@ -311,14 +385,18 @@ impl Brain {
         assert!(!self.dead(), "a dead brain takes no input");
         match input {
             Input::Release(held) => {
-                let id = held.entry.order.1;
                 self.held.push(held);
-                self.ops.push_back(Op::Section(Section::Reserve { id }));
+                // A pass over the held list starts at its head: a release never jumps ahead of a value that waits.
+                let head = self.held[0].entry.order.1;
+                self.ops.push_back(Op::Section(Section::Reserve { id: head }));
             }
             Input::Stop { stream, requested } => self.ops.push_back(Op::Section(Section::Stop { stream, requested })),
             Input::PlanCancel { stream, origin, epoch, plan_cut } => self.ops.push_back(Op::Section(Section::PlanCancel { stream, origin, epoch, plan_cut })),
             Input::Request(request) => self.ops.push_back(Op::Section(Section::Decide(request))),
-            Input::Done { id, terminal } => self.ops.push_back(Op::Section(Section::Done { id, terminal })),
+            Input::Done { id, terminal, now } => {
+                self.see(now);
+                self.ops.push_back(Op::Section(Section::Done { id, terminal }));
+            }
             Input::Boundary(boundary) => self.ops.push_back(Op::Section(match boundary {
                 Boundary::Consumed { id } => Section::Consumed { id },
                 Boundary::CutReached { stream } => Section::Drain { stream },
@@ -332,8 +410,19 @@ impl Brain {
                 Boundary::Opened { stream } => Section::Opened { stream },
                 Boundary::Closed { stream } => Section::Closed { stream },
             })),
-            Input::Timer { stream } => self.ops.push_back(Op::Section(Section::TimerFired { stream })),
-            Input::LateCommand { stream, now } => self.ops.push_back(Op::Section(Section::Late { stream, now })),
+            Input::Timer { stream, now } => {
+                self.see(now);
+                self.ops.push_back(Op::Section(Section::TimerFired { stream }));
+            }
+            Input::CapacityTimer { now } => {
+                self.see(now);
+                self.capacity_timer = None;
+                self.ops.push_back(Op::Section(Section::CapacityTimer));
+            }
+            Input::LateCommand { stream, now } => {
+                self.see(now);
+                self.ops.push_back(Op::Section(Section::Late { stream, now }));
+            }
             Input::Shutdown => self.ops.push_back(Op::Section(Section::Shutdown)),
             Input::Panic => {
                 for guard in [Guard::Gate, Guard::FlagSet, Guard::Ungate, Guard::MarkLost] {
@@ -341,6 +430,11 @@ impl Brain {
                 }
             }
         }
+    }
+
+    /// A time an input carried: the brain's device time only moves forward.
+    fn see(&mut self, now: i64) {
+        self.now = self.now.max(now);
     }
 
     /// The brain panicked and its guard has run.
@@ -391,18 +485,44 @@ impl Brain {
         }
     }
 
+    /// Whether the brain has taken the value's terminal input.
+    fn has_result(&self, id: u64) -> bool {
+        self.results.iter().any(|(done, _)| *done == id)
+    }
+
     /// Whether the value's consumption has been seen (as debt's, or as left's).
     fn consumed(&self, id: u64) -> bool {
         self.disposition(id) == Some(Disposition::Consumed) || self.leftovers.contains(&id)
     }
 
+    /// Runs a section; any section that can free a bound or open a reservation condition is followed by a re-evaluation of the held values
+    /// (note 45 §4.5): every section but a reservation itself and the shutdown's disposal. A request's decision is included: the stop it
+    /// sends cancels queued values, which frees K.
     fn section(&mut self, section: Section, cells: &mut [Cell]) {
+        let reevaluates = !matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown);
+        self.section_body(section, cells);
+        if reevaluates {
+            self.reevaluate();
+        }
+    }
+
+    /// Queues one pass over the held values after the step's other operations (once).
+    fn reevaluate(&mut self) {
+        if !self.held.is_empty() && !self.ops.contains(&Op::Section(Section::ReserveAll)) {
+            self.ops.push_back(Op::Section(Section::ReserveAll));
+        }
+    }
+
+    fn section_body(&mut self, section: Section, cells: &mut [Cell]) {
         match section {
             Section::Reserve { id } => self.reserve(id, cells),
-            Section::ReserveHeld { stream } => {
-                let ids: Vec<Op> = self.held.iter().filter(|held| held.stream == stream).map(|held| Op::Section(Section::Reserve { id: held.entry.order.1 })).collect();
-                self.front(ids);
+            Section::ReserveAll => {
+                if let Some(head) = self.held.first() {
+                    let id = head.entry.order.1;
+                    self.front(vec![Op::Section(Section::Reserve { id })]);
+                }
             }
+            Section::CapacityTimer => {}
             Section::Stop { stream, requested } => {
                 let cell = &mut cells[stream];
                 match cell.phase {
@@ -444,7 +564,6 @@ impl Brain {
             Section::Armed { stream } => {
                 cells[stream].settle(Outstanding::Start);
                 self.drain_booked(stream, cells);
-                self.front(vec![Op::Section(Section::ReserveHeld { stream })]);
                 self.stop_if_shutting_down(stream, cells);
                 self.recheck(cells);
             }
@@ -452,7 +571,6 @@ impl Brain {
                 if let Phase::Armed(segment) = cells[stream].phase {
                     cells[stream].phase = Phase::Streaming(segment);
                 }
-                self.front(vec![Op::Section(Section::ReserveHeld { stream })]);
                 self.stop_if_shutting_down(stream, cells);
             }
             Section::Lost { stream } => self.lost(stream, cells),
@@ -521,27 +639,57 @@ impl Brain {
     pub(crate) fn reservation_refusal(&self, id: u64, cells: &[Cell]) -> Option<NotReserved> {
         let held = self.held.iter().find(|held| held.entry.order.1 == id)?;
         let cell = &cells[held.stream];
-        if at_bound(cell, self.in_flight_bound) {
-            return Some(NotReserved::Bound);
+        if let Some(bound) = self.bound_refusal(held.stream, cells) {
+            return Some(bound);
         }
         cell.clone().reserve(held.entry.clone(), held.generation).err().map(NotReserved::Refused)
     }
 
-    /// Reserves one held value (the reservation of U1; the bound of I11; the refusal leaves it
-    /// held, with no send).
+    /// The bound that refuses a reservation on `stream` now: K over every chain, then D of the chain (both computed from the cells).
+    fn bound_refusal(&self, stream: usize, cells: &[Cell]) -> Option<NotReserved> {
+        if device_load(cells, self.now) >= self.device_bound {
+            Some(NotReserved::DeviceBound)
+        } else if cells[stream].in_flight.len() >= self.chain_bound {
+            Some(NotReserved::ChainBound)
+        } else {
+            None
+        }
+    }
+
+    /// Reserves one held value (the reservation of U1; the bounds of I11′; a refusal leaves it held, with no send, and
+    /// ends the pass). A reservation queues the next pass, so the held list drains from its head.
     fn reserve(&mut self, id: u64, cells: &mut [Cell]) {
         let Some(position) = self.held.iter().position(|held| held.entry.order.1 == id) else { return };
         let held = self.held[position].clone();
-        let cell = &mut cells[held.stream];
-        if at_bound(cell, self.in_flight_bound) {
-            return;
+        match self.bound_refusal(held.stream, cells) {
+            Some(NotReserved::DeviceBound) => return self.book_capacity(cells),
+            Some(_) => return,
+            None => {}
         }
-        if cell.reserve(held.entry.clone(), held.generation).is_err() {
+        if cells[held.stream].reserve(held.entry.clone(), held.generation).is_err() {
             return;
         }
         self.held.remove(position);
         let change = Change::Timed { channel: held.entry.channel, freq: held.entry.value, at: held.entry.order.0, generation: held.generation };
-        self.front(vec![Op::Send(Command::Settings(SetCmd { id, change }))]);
+        let mut ops = vec![Op::Send(Command::Settings(SetCmd { id, change }))];
+        if !self.held.is_empty() {
+            ops.push(Op::Section(Section::ReserveAll));
+        }
+        self.front(ops);
+    }
+
+    /// K is full: when a completed value will free it by time, one timer at the earliest such instant after the device time known.
+    fn book_capacity(&mut self, cells: &[Cell]) {
+        let next = cells
+            .iter()
+            .flat_map(|cell| cell.in_flight.iter().map(move |f| (cell, f)))
+            .filter(|(cell, f)| counts_for_k(cell, f, self.now) && matches!(f.state, ValueState::Done(_)))
+            .map(|(_, f)| f.entry.order.0)
+            .min();
+        if let Some(at) = next.filter(|at| self.capacity_timer.is_none_or(|booked| *at < booked)) {
+            self.capacity_timer = Some(at);
+            self.front(vec![Op::Send(Command::CapacityTimer { at })]);
+        }
     }
 
     /// The drain of a stop (note 45 §4.4): the stop is sent once the cut is reached; until then the
@@ -628,22 +776,23 @@ impl Brain {
                 for cell in cells.iter_mut() {
                     cell.finish_call(id, outcome);
                 }
-                if self.consumed(id) {
-                    self.retired(id, cells);
+                // A value the loss report covered has no consumption to wait for: it leaves with its terminal.
+                if self.consumed(id) || self.disposition(id) == Some(Disposition::Reported(Reason::Loss)) {
+                    retire(id, cells);
                 }
             }
             Terminal::Call(outcome) => {
                 let disposition = if outcome == Outcome::Refused { Disposition::Refused } else { Disposition::Reported(Reason::Loss) };
                 self.dispose(id, disposition);
-                self.retired(id, cells);
+                retire(id, cells);
             }
             Terminal::Dropped => {
                 self.dispose(id, Disposition::Cancelled);
-                self.retired(id, cells);
+                retire(id, cells);
             }
             Terminal::Abandoned => {
                 self.dispose(id, Disposition::Reported(Reason::Loss));
-                self.retired(id, cells);
+                retire(id, cells);
             }
         }
         for stream in 0..cells.len() {
@@ -651,15 +800,6 @@ impl Brain {
         }
         self.drain_after_result(cells);
         self.recheck(cells);
-    }
-
-    /// Retires a value; a chain that was at the in-flight bound has a free slot, so its held values are reserved in order (note 45 §4.5).
-    fn retired(&mut self, id: u64, cells: &mut [Cell]) {
-        let full = cells.iter().position(|cell| at_bound(cell, self.in_flight_bound) && cell.state_of(id).is_some());
-        retire(id, cells);
-        if let Some(stream) = full.filter(|stream| self.held.iter().any(|held| held.stream == *stream)) {
-            self.front(vec![Op::Section(Section::ReserveHeld { stream })]);
-        }
     }
 
     /// A sample consumed a value: the first consumption is its disposition; a consumption of a
@@ -670,8 +810,9 @@ impl Brain {
             Some(Disposition::Reported(Reason::Left)) => self.leftovers.push(id),
             Some(_) => {}
         }
-        if self.consumed(id) && done_ok(cells, id) {
-            self.retired(id, cells);
+        // A consumption that comes before the value's `Done` input leaves the value resident: `done` removes it (note 45 §4.5, D).
+        if self.consumed(id) && self.has_result(id) {
+            retire(id, cells);
         }
         self.recheck(cells);
     }
@@ -732,11 +873,15 @@ impl Brain {
     fn lost(&mut self, stream: usize, cells: &mut [Cell]) {
         cells[stream].phase = Phase::Lost;
         cells[stream].outstanding = None;
+        // The values are reported at once but stay resident until their terminal input arrives (note 45 §4.5, D): a call
+        // still running, or a cancelled value S has not dropped yet, leaves the cell at its `Done`.
         let ids: Vec<u64> = cells[stream].in_flight.iter().map(|flight| flight.entry.order.1).collect();
         for id in ids {
             if self.disposition(id).is_none() {
                 self.dispose(id, Disposition::Reported(Reason::Loss));
-                self.retired(id, cells);
+            }
+            if self.has_result(id) {
+                retire(id, cells);
             }
         }
         self.recheck(cells);
@@ -902,16 +1047,28 @@ impl Brain {
     }
 }
 
-/// Why a held value is not reserved: its chain is at the in-flight bound, or the cell refuses it.
+/// Why a held value is not reserved: the device is at K, its chain is at D, or the cell refuses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NotReserved {
-    Bound,
+    DeviceBound,
+    ChainBound,
     Refused(Refusal),
 }
 
-/// The chain holds as many values in flight as the bound (I11) allows.
-fn at_bound(cell: &Cell, bound: usize) -> bool {
-    cell.in_flight.len() >= bound
+/// Whether a value counts against the device's capacity K at device time `now` (note 45 §4.5): a value whose call is queued, taken or
+/// may be running counts whatever its instant; one that finished ok or partly counts until the device time reaches its instant;
+/// a cancelled, refused, dropped or abandoned one does not. Once its cell is lost a finished call no longer counts.
+pub(crate) fn counts_for_k(cell: &Cell, flight: &InFlight, now: i64) -> bool {
+    match flight.state {
+        ValueState::Queued | ValueState::Taken | ValueState::MaybeApplied => true,
+        ValueState::Done(Terminal::Call(Outcome::Ok | Outcome::Partial)) => cell.phase != Phase::Lost && now < flight.entry.order.0,
+        ValueState::Cancelled | ValueState::Done(_) => false,
+    }
+}
+
+/// K's load: the values counted over every chain (the only place K is computed; nothing stores it).
+pub(crate) fn device_load(cells: &[Cell], now: i64) -> usize {
+    cells.iter().map(|cell| cell.in_flight.iter().filter(|flight| counts_for_k(cell, flight, now)).count()).sum()
 }
 
 /// Removes the value from whichever cell holds it.
@@ -919,10 +1076,6 @@ fn retire(id: u64, cells: &mut [Cell]) {
     for cell in cells.iter_mut() {
         cell.retire(id);
     }
-}
-
-fn done_ok(cells: &[Cell], id: u64) -> bool {
-    cells.iter().any(|cell| matches!(cell.state_of(id), Some(ValueState::Done(Terminal::Call(Outcome::Ok | Outcome::Partial)))))
 }
 
 #[cfg(test)]
@@ -939,6 +1092,11 @@ mod tests {
     }
 
     /// One Streaming stream, with value 1 (instant 8) taken, so the chain is pinned.
+    /// The settings commands the brain sent (the outbox also holds timers).
+    fn settings_sent(brain: &Brain) -> Vec<&Command> {
+        brain.outbox.iter().filter(|command| matches!(command, Command::Settings(_))).collect()
+    }
+
     fn pinned() -> (Vec<Cell>, Brain) {
         let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, None, 4)];
         push(&mut cells[0], value(0, 8, 1), ValueState::Taken);
@@ -952,8 +1110,8 @@ mod tests {
         cells[0].book_stop(8);
         assert_eq!(cells[0].take(1), Take::Dropped);
         let mut brain = Brain::new();
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Dropped });
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Dropped });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Dropped, now: 0 });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Dropped, now: 0 });
         assert_eq!(brain.dispositions, vec![(1, Disposition::Cancelled)]);
     }
 
@@ -970,7 +1128,7 @@ mod tests {
     fn u04d_drain_deadline_sends_stop_while_pinned() {
         let (mut cells, mut brain) = pinned();
         feed(&mut brain, &mut cells, Input::Stop { stream: 0, requested: 8 });
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         assert_eq!(brain.outbox.last(), Some(&Command::Rx { stream: 0, op: RxOp::Stop { at: None, epoch: 1 } }));
         assert_eq!(cells[0].state_of(1), Some(&ValueState::Taken));
     }
@@ -990,7 +1148,7 @@ mod tests {
         let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, None, 4)];
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Stop { stream: 0, requested: 8 });
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         assert_eq!(brain.outbox.last(), Some(&Command::Rx { stream: 0, op: RxOp::Stop { at: None, epoch: 1 } }));
         assert!(matches!(cells[0].phase, Phase::Stopping(_)));
         brain.outbox.clear();
@@ -1005,7 +1163,7 @@ mod tests {
         cells[0].phase = Phase::Off;
         feed(&mut brain, &mut cells, Input::Request(Request::Restore { channel: 0 }));
         assert!(brain.outbox.is_empty());
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert!(brain.outbox.is_empty());
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
         assert_eq!(brain.outbox.len(), 1);
@@ -1017,7 +1175,7 @@ mod tests {
         let (mut cells, mut brain) = pinned();
         feed(&mut brain, &mut cells, Input::Request(Request::Move { channel: 0, to: 1 }));
         assert!(brain.outbox.is_empty());
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox.len(), 1);
         assert!(matches!(brain.outbox[0], Command::Settings(SetCmd { change: Change::Move { channel: 0, to: 1 }, .. })));
     }
@@ -1030,7 +1188,7 @@ mod tests {
         feed(&mut brain, &mut cells, Input::Request(Request::Close { stream: 0 }));
         feed(&mut brain, &mut cells, Input::Request(Request::Open { stream: 0 }));
         assert!(brain.outbox.is_empty());
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Close }]);
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Closed { stream: 0 }));
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Close }, Command::Rx { stream: 0, op: RxOp::Open }]);
@@ -1045,7 +1203,7 @@ mod tests {
         feed(&mut brain, &mut cells, Input::Stop { stream: 0, requested: 8 });
         feed(&mut brain, &mut cells, Input::Request(Request::Close { stream: 0 }));
         assert!(!brain.outbox.contains(&Command::Rx { stream: 0, op: RxOp::Close }), "the Close waits for the drain: {:?}", brain.outbox);
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         let stop = Command::Rx { stream: 0, op: RxOp::Stop { at: None, epoch: 1 } };
         assert_eq!(brain.outbox.last(), Some(&stop));
         cells[0].phase = Phase::Off;
@@ -1063,7 +1221,7 @@ mod tests {
         feed(&mut brain, &mut cells, Input::Stop { stream: 0, requested: 8 });
         feed(&mut brain, &mut cells, Input::Request(Request::Restore { channel: 0 }));
         feed(&mut brain, &mut cells, Input::Request(Request::Move { channel: 0, to: 1 }));
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         assert!(matches!(cells[0].phase, Phase::Stopping(_)));
         assert!(!brain.outbox.iter().any(|c| matches!(c, Command::Settings(_))), "nothing goes to S during the stop: {:?}", brain.outbox);
         cells[0].phase = Phase::Off;
@@ -1118,7 +1276,7 @@ mod tests {
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Request(Request::StartNext { stream: 0, at: 20 }));
         assert!(brain.outbox.is_empty());
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Start { at: 20, epoch: 1 } }]);
     }
 
@@ -1133,7 +1291,7 @@ mod tests {
         assert!(brain.outbox.is_empty(), "queued value 1 is ahead of the Move in S's FIFO");
         assert_eq!(cells[0].take(1), Take::Call);
         assert!(brain.outbox.is_empty(), "taken value 1 pins the chain");
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert!(matches!(brain.outbox.as_slice(), [Command::Settings(SetCmd { change: Change::Move { channel: 0, to: 1 }, .. })]), "a Move has no debt wait: the pin is gone");
     }
 
@@ -1148,7 +1306,7 @@ mod tests {
         assert!(brain.outbox.is_empty(), "queued value 1 is ahead of the Restore in S's FIFO");
         assert_eq!(cells[0].take(1), Take::Call);
         assert_eq!(cells[0].state_of(1), Some(&ValueState::Taken));
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Partial) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Partial), now: 0 });
         assert!(brain.outbox.is_empty(), "partially applied value 1 owes debt");
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
         assert!(matches!(brain.outbox.as_slice(), [Command::Settings(SetCmd { change: Change::Restore { channel: 0 }, .. })]));
@@ -1165,7 +1323,7 @@ mod tests {
         feed(&mut brain, &mut cells, Input::Request(Request::Move { channel: 0, to: 1 }));
         assert!(matches!(brain.outbox.as_slice(), [Command::Settings(SetCmd { change: Change::Move { channel: 0, to: 1 }, .. })]));
         let Some(Command::Settings(SetCmd { id, .. })) = brain.outbox.first().cloned() else { panic!("{:?}", brain.outbox) };
-        feed(&mut brain, &mut cells, Input::Done { id, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         feed(&mut brain, &mut cells, Input::Request(Request::Restore { channel: 0 }));
         assert!(matches!(brain.outbox.as_slice(), [_, Command::Settings(SetCmd { change: Change::Restore { channel: 0 }, .. })]));
     }
@@ -1180,7 +1338,7 @@ mod tests {
         assert!(brain.outbox.is_empty(), "queued value 1 is ahead of the Close");
         assert_eq!(cells[0].take(1), Take::Call);
         assert!(brain.outbox.is_empty(), "taken value 1 pins the chain");
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Close }]);
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Closed { stream: 0 }));
     }
@@ -1195,7 +1353,7 @@ mod tests {
         feed(&mut brain, &mut cells, Input::Request(Request::Open { stream: 0 }));
         assert!(brain.outbox.is_empty(), "queued value 1 is ahead of the Open");
         assert_eq!(cells[0].take(1), Take::Call);
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Open }]);
     }
 
@@ -1261,7 +1419,7 @@ mod tests {
             assert!(brain.outbox.is_empty(), "{request:?} waits while the chain accepts: {:?}", brain.outbox);
             feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8, 1), 1)));
             assert_eq!(cells[0].take(1), Take::Call);
-            feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+            feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
             assert!(!brain.outbox.iter().any(|c| matches!(c, Command::Rx { .. })), "{request:?} is not issued while the chain is accepting: {:?}", brain.outbox);
             cells[0].phase = Phase::Off;
             cells[0].retire(1);
@@ -1335,6 +1493,8 @@ mod tests {
         cells[0].channels = Channels::first(0).with(1);
         push(&mut cells[0], value(0, 8, 1), ValueState::Done(Terminal::Call(Outcome::Ok)));
         let mut brain = Brain::new();
+        // The value's `Done` was taken before (a consumption removes a value only after its terminal input).
+        brain.results.push((1, Terminal::Call(Outcome::Ok)));
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Finished { stream: 0, next_origin: None, epoch: 1 }));
         feed(&mut brain, &mut cells, Input::Request(Request::Restore { channel: 0 }));
         assert!(brain.outbox.is_empty());
@@ -1392,7 +1552,7 @@ mod tests {
         }
         assert_eq!(brain.outbox.len(), 1, "everything waits for the Restore's Done: {:?}", brain.outbox);
         assert_eq!(brain.deferred.len(), 5);
-        feed(&mut brain, &mut cells, Input::Done { id, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert!(brain.pending.values().all(|c| *c != 0) || brain.outbox.len() > 1);
         assert!(brain.outbox.iter().any(|c| matches!(c, Command::Rx { stream: 0, op: RxOp::Start { .. } })), "the start goes after the Done: {:?}", brain.outbox);
     }
@@ -1403,7 +1563,7 @@ mod tests {
         push(&mut cells[0], value(0, 8, 1), ValueState::Taken);
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Request(Request::StartNext { stream: 0, at: 20 }));
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Start { at: 20, epoch: 1 } }]);
     }
 
@@ -1416,7 +1576,7 @@ mod tests {
         push(&mut cells[0], value(0, 8, 1), ValueState::Taken);
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Request(Request::StartNext { stream: 0, at: 20 }));
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         // The stop's result leaves the cell Off; its Finished then marks the value left.
         cells[0].phase = Phase::Off;
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Finished { stream: 0, next_origin: None, epoch: 1 }));
@@ -1543,7 +1703,7 @@ mod tests {
         cells[0].phase = Phase::Off;
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Finished { stream: 0, next_origin: None, epoch: 1 }));
         assert!(brain.outbox.is_empty(), "no flush before the result: {:?}", brain.outbox);
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Flush }]);
     }
 
@@ -1557,7 +1717,7 @@ mod tests {
         push(&mut cells[0], value(0, 8, 1), ValueState::Taken);
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Request(Request::StartNext { stream: 0, at: 20 }));
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert!(brain.outbox.is_empty(), "the start waits for the stop's Finished: {:?}", brain.outbox);
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Finished { stream: 0, next_origin: None, epoch: 1 }));
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Flush }], "the left value is flushed first: {:?}", brain.outbox);
@@ -1652,7 +1812,7 @@ mod tests {
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Lost { stream: 0 }));
         assert_eq!(cells[0].phase, Phase::Lost);
         assert_eq!(brain.dispositions, vec![(1, Disposition::Reported(Reason::Loss)), (2, Disposition::Reported(Reason::Loss))]);
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.dispositions.len(), 2, "a late result writes no second disposition");
     }
 
@@ -1661,7 +1821,7 @@ mod tests {
         let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(16), 4)];
         push(&mut cells[0], value(0, 8, 1), ValueState::MaybeApplied);
         let mut brain = Brain::new();
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Partial) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Partial), now: 0 });
         assert_eq!(cells[0].state_of(1), Some(&ValueState::Done(Terminal::Call(Outcome::Partial))));
         assert!(!cells[0].pinned());
         assert_eq!(brain.results, vec![(1, Terminal::Call(Outcome::Partial))]);
@@ -1674,8 +1834,8 @@ mod tests {
         push(&mut cells[0], value(0, 8, 1), ValueState::MaybeApplied);
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Finished { stream: 0, next_origin: None, epoch: 1 }));
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.results, vec![(1, Terminal::Call(Outcome::Ok))]);
         assert_eq!(brain.dispositions, vec![(1, Disposition::Reported(Reason::Left))]);
     }
@@ -1686,7 +1846,7 @@ mod tests {
         push(&mut cells[0], value(0, 8, 1), ValueState::MaybeApplied);
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Finished { stream: 0, next_origin: None, epoch: 1 }));
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
         assert_eq!(brain.leftovers, vec![1]);
         assert_eq!(brain.dispositions, vec![(1, Disposition::Reported(Reason::Left))]);
@@ -1739,16 +1899,17 @@ mod tests {
     fn u14a_the_bound_is_the_brains_own_parameter() {
         let mut cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(16), 0)];
         let mut brain = Brain::new();
-        brain.in_flight_bound = 6;
+        brain.device_bound = 6;
+        brain.chain_bound = 6;
         for id in 1..=7 {
             feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8 + id as i64, id), 1)));
         }
         assert_eq!((brain.held.len(), brain.outbox.len(), cells[0].in_flight.len()), (1, 6, 6), "the seventh waits at the bound of six");
         assert_eq!(cells[0].take(1), Take::Call);
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
         assert!(brain.held.is_empty(), "the freed slot reserves the held value");
-        assert_eq!(Brain::new().in_flight_bound, IN_FLIGHT_BOUND, "the default is the design's bound");
+        assert_eq!((Brain::new().device_bound, Brain::new().chain_bound), (DEVICE_BOUND, CHAIN_BOUND), "the defaults are the design's bounds");
     }
 
     /// A held value at the in-flight bound is reserved when a slot frees (note 45 §4.5: it waits for capacity).
@@ -1761,11 +1922,12 @@ mod tests {
         }
         assert_eq!(brain.held.len(), 1);
         assert_eq!(cells[0].take(1), Take::Call);
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
         assert!(brain.held.is_empty());
-        assert_eq!(brain.outbox.len(), 5);
-        assert_eq!(brain.outbox.last(), Some(&timed(5, 0, 5.0, 13, 1)));
+        let settings = settings_sent(&brain);
+        assert_eq!(settings.len(), 5);
+        assert_eq!(settings.last(), Some(&&timed(5, 0, 5.0, 13, 1)));
     }
 
     /// Sol E2b-A P1 (adjudicated): the retry uses the reservation rule as it is, so a held value whose instant has passed by the time a
@@ -1780,7 +1942,7 @@ mod tests {
         assert_eq!(brain.held.len(), 1, "v5 (e = 13) waits at the bound");
         cells[0].progress = 16;
         assert_eq!(cells[0].take(1), Take::Call);
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::Consumed { id: 1 }));
         assert!(brain.held.is_empty());
         assert_eq!(brain.outbox.last(), Some(&timed(5, 0, 5.0, 13, 1)), "sent after its instant (progress 16 > 13)");
@@ -1797,7 +1959,7 @@ mod tests {
             feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8 + id as i64, id), 1)));
         }
         assert_eq!(brain.held.len(), 1, "v5 waits at the bound");
-        assert_eq!(brain.reservation_refusal(5, &cells), Some(NotReserved::Bound));
+        assert_eq!(brain.reservation_refusal(5, &cells), Some(NotReserved::DeviceBound));
         assert_eq!(brain.reservation_refusal(1, &cells), None, "a value that is not held has no refusal");
         // A lost (not running) cell refuses for its phase: not a bound hit.
         cells[0].in_flight.truncate(2);
@@ -1920,7 +2082,7 @@ mod tests {
     fn u04e_second_stop_in_new_segment_books_drain() {
         let (mut cells, mut brain) = pinned();
         feed(&mut brain, &mut cells, Input::Stop { stream: 0, requested: 8 });
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         assert_eq!(brain.outbox.last(), Some(&Command::Rx { stream: 0, op: RxOp::Stop { at: None, epoch: 1 } }));
         cells[0].phase = Phase::Streaming(seg(20));
         cells[0].cut = None;
@@ -1950,7 +2112,7 @@ mod tests {
         let mut brain = Brain::new();
         feed(&mut brain, &mut cells, Input::Request(Request::Restore { channel: 0 }));
         let Command::Settings(SetCmd { id, .. }) = brain.outbox[0].clone() else { panic!("a restore is sent") };
-        feed(&mut brain, &mut cells, Input::Done { id, terminal: Terminal::Call(Outcome::Refused) });
+        feed(&mut brain, &mut cells, Input::Done { id, terminal: Terminal::Call(Outcome::Refused), now: 0 });
         assert!(brain.dispositions.is_empty());
     }
 
@@ -1973,9 +2135,9 @@ mod tests {
         assert!(matches!(cells[0].phase, Phase::Stopping(_)));
         feed(&mut brain, &mut cells, Input::Release(held(0, value(0, 8, 2), 1)));
         assert_eq!(brain.held.len(), 1);
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         feed(&mut brain, &mut cells, Input::Stop { stream: 0, requested: 20 });
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         // The cut is reached after the late stop: its drain is over (Drain::Ended), so no second stop follows (E1-71).
         cells[0].progress = 12;
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::CutReached { stream: 0 }));
@@ -2003,10 +2165,10 @@ mod tests {
         brain.outbox.clear();
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::CutReached { stream: 0 }));
         assert!(brain.outbox.is_empty());
-        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) });
+        feed(&mut brain, &mut cells, Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 });
         assert_eq!(brain.outbox, vec![Command::Rx { stream: 0, op: RxOp::Stop { at: None, epoch: 1 } }]);
         feed(&mut brain, &mut cells, Input::Boundary(Boundary::CutReached { stream: 0 }));
-        feed(&mut brain, &mut cells, Input::Timer { stream: 0 });
+        feed(&mut brain, &mut cells, Input::Timer { stream: 0, now: 0 });
         assert_eq!(brain.outbox.len(), 1, "one stop");
     }
 }

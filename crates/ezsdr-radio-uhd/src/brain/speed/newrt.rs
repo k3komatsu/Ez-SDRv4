@@ -163,11 +163,26 @@ fn start_new(cond: &Cond, opts: &Opts) -> New {
         clock: timing.clone(),
     });
 
-    let params = Params { horizon: 0, epilogue: 0, recv_timeout: 100, queue_cap: 1, fifo_cap: 32, drain_window: mcr as i64 / 200, packet: cond.block_len, call_faults: false, panic_step: None };
+    let params = Params {
+        horizon: 0,
+        epilogue: 0,
+        recv_timeout: 100,
+        queue_cap: 1,
+        fifo_cap: 32,
+        drain_window: mcr as i64 / 200,
+        packet: cond.block_len,
+        call_faults: false,
+        panic_step: None,
+        k: crate::brain::core::DEVICE_BOUND,
+        d: crate::brain::core::CHAIN_BOUND,
+    };
     let mut world = World::new(vec![cell(Phase::Streaming(seg(origin)), 0, None, 0)], Vec::new(), params);
     crate::brain::cases::running(&mut world, 0, vec![0]);
-    if opts.bound != 0 {
-        world.brain.in_flight_bound = opts.bound;
+    if opts.k != 0 {
+        world.brain.device_bound = opts.k;
+    }
+    if opts.d != 0 {
+        world.brain.chain_bound = opts.d;
     }
     // The time source is the extrapolation of the host clock that the map already is (a pure read, no device lock), as today's `core.now()`
     // extrapolates the Authority's re-reads; `FakeDevice::time_now` would take the fake's one state mutex four times per block.
@@ -342,12 +357,15 @@ mod tests {
         assert!(Box::new(rig).finish()["joined"] == json!(true));
     }
 
-    /// The in-flight bound is a parameter of the measured runtime alone: the design's 4 unless the diagnostic names another.
+    /// K and D are parameters of the measured runtime alone: the design's 4 and 64 unless the diagnostic names others.
     #[test]
-    fn the_bound_is_the_designs_unless_a_diagnostic_run_names_another() {
-        for (asked, want) in [(0, crate::brain::core::IN_FLIGHT_BOUND), (16, 16)] {
-            let rig = start_new(&cond(), &Opts { counters: true, bound: asked, ..Opts::default() });
-            assert_eq!(rig.rt.sh.brain().in_flight_bound, want, "asked {asked}");
+    fn the_bounds_are_the_designs_unless_a_diagnostic_run_names_others() {
+        use crate::brain::core::{CHAIN_BOUND, DEVICE_BOUND};
+        for (asked, want) in [((0, 0), (DEVICE_BOUND, CHAIN_BOUND)), ((16, 7), (16, 7))] {
+            let rig = start_new(&cond(), &Opts { counters: true, k: asked.0, d: asked.1, ..Opts::default() });
+            let brain = rig.rt.sh.brain();
+            assert_eq!((brain.device_bound, brain.chain_bound), want, "asked {asked:?}");
+            drop(brain);
             assert!(Box::new(rig).finish()["joined"] == json!(true));
         }
     }

@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::cell::{Cell, Outcome, Phase, Recv, Take, Terminal};
-use super::core::{Change, Command, Exit, Input, Op, SetCmd};
+use super::core::{Change, Command, Exit, Input, Op, SetCmd, Timer};
 use super::force::{Actor, Forced, Point, Sched, join_all, spawn_on};
 use super::model_device::{CheckingDevice, LEvent, ModelDevice, PARTIAL};
 use super::observed::{Observed, Raw};
@@ -30,14 +30,12 @@ pub(crate) fn outcome_of(result: &Result<crate::device::Applied, crate::device::
     }
 }
 
-/// What a run reads from its device: the device itself, the `now` source, the effective-instant diagnostic and, for a
-/// `FakeDevice`, the fake.
+/// What a run reads from its device: the device itself, the `now` source and, for a `FakeDevice`, the fake.
 struct Sources {
     /// The wall time of one device tick on the fake's clock (a timer waits for its deadline on that clock).
     tick: Duration,
     inner: Arc<dyn crate::device::Device>,
     now: Box<dyn Fn() -> i64 + Send + Sync>,
-    effective: Box<dyn Fn() -> i64 + Send + Sync>,
     fake: Option<Arc<FakeDevice>>,
     /// E2b's measurement hooks (counters and the receive work), absent in every other run.
     bench: Option<Arc<super::speed::Bench>>,
@@ -65,16 +63,8 @@ impl Runtime {
     pub(crate) fn start_with(world: &World, forcing: bool, real_panic: Option<usize>, quirk: Quirk) -> Runtime {
         let sched = Sched::new(forcing);
         let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
-        let (now_model, effective_model) = (model.clone(), model.clone());
-        let sources = Sources {
-            tick: Duration::from_millis(1),
-            inner: model.clone(),
-            now: Box::new(move || now_model.now()),
-            effective: Box::new(move || effective_model.state().dev.last_command),
-            fake: None,
-            bench: None,
-            sample_ticks: 1,
-        };
+        let now_model = model.clone();
+        let sources = Sources { tick: Duration::from_millis(1), inner: model.clone(), now: Box::new(move || now_model.now()), fake: None, bench: None, sample_ticks: 1 };
         Runtime::build(world, sched, model, real_panic, quirk, sources)
     }
 
@@ -88,7 +78,6 @@ impl Runtime {
             tick: Duration::from_nanos(1_000_000_000 / fake.master_clock_rate()),
             inner: fake.clone(),
             now: Box::new(move || now_fake.time_now().expect("the fake's clock")),
-            effective: Box::new(|| i64::MIN),
             fake: Some(fake),
             bench: None,
             sample_ticks,
@@ -108,14 +97,13 @@ impl Runtime {
     ) -> Runtime {
         let sched = Sched::new(false);
         let model = ModelDevice::new(sched.clone(), world.device.clone(), world.params.packet);
-        let sources =
-            Sources { tick: Duration::from_nanos(1_000_000_000 / fake.master_clock_rate()), inner: device, now, effective: Box::new(|| i64::MIN), fake: Some(fake), bench: Some(bench), sample_ticks };
+        let sources = Sources { tick: Duration::from_nanos(1_000_000_000 / fake.master_clock_rate()), inner: device, now, fake: Some(fake), bench: Some(bench), sample_ticks };
         Runtime::build(world, sched, model, None, Quirk::None, sources)
     }
 
     fn build(world: &World, sched: Arc<Sched>, model: Arc<ModelDevice>, real_panic: Option<usize>, quirk: Quirk, sources: Sources) -> Runtime {
         let forcing = sched.forcing();
-        let Sources { tick, inner, now, effective, fake, bench, sample_ticks } = sources;
+        let Sources { tick, inner, now, fake, bench, sample_ticks } = sources;
         // Every thread of a fake run on a manual clock is a participant of it (the receive executors as production's are, and the brain, S, K and
         // the timer, so none can fall behind simulated time).
         let host = fake.as_ref().map(|fake| fake.host()).filter(|host| host.is_manual());
@@ -156,7 +144,6 @@ impl Runtime {
             sink: Mutex::new(Sink { reservations: world.monitor.reserved.iter().map(|(&id, &(channel, segment, epoch))| (id, channel, segment, epoch)).collect(), ..Sink::default() }),
             params: world.params,
             now,
-            effective,
             tick,
             stopping: AtomicBool::new(false),
             brain_gone: AtomicBool::new(false),
@@ -169,14 +156,6 @@ impl Runtime {
             bench,
             sample_ticks,
         });
-        if quirk == Quirk::AcceptInEffect {
-            let weak = Arc::downgrade(&sh);
-            *model.accept_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(move |id, at| {
-                if let Some(sh) = weak.upgrade() {
-                    sh.with_cells(|cells| rules::accept_all(cells, id, at));
-                }
-            }));
-        }
         for input in &world.inbox {
             sh.push(&sh.inbox, input.clone());
         }
@@ -236,12 +215,13 @@ impl Runtime {
                 if i >= timers.len() {
                     return Err("no such timer".to_string());
                 }
-                let (stream, at) = timers.remove(i);
+                let (timer, at) = timers.remove(i);
                 drop(timers);
-                if self.model.now() < at {
-                    return Err(format!("a timer due at {at} is delivered at {}", self.model.now()));
+                let now = self.model.now();
+                if now < at {
+                    return Err(format!("a timer due at {at} is delivered at {now}"));
                 }
-                self.sh.send(Input::Timer { stream });
+                self.sh.send(timer_input(timer, now));
                 return sched.settle();
             }
             Event::BStep => (Actor::Brain, Point::BStep, Forced::None),
@@ -373,7 +353,11 @@ pub(super) fn route(sh: &Arc<Shared>, command: Command) {
         }
         Command::Rx { stream, op } => sh.push(&sh.r_fifo[stream], op),
         Command::Timer { stream, at } => {
-            sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((stream, at));
+            sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((Timer::Drain(stream), at));
+            sh.sched.wake(Actor::Timer);
+        }
+        Command::CapacityTimer { at } => {
+            sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((Timer::Capacity, at));
             sh.sched.wake(Actor::Timer);
         }
         Command::SettingsTerminate => {
@@ -560,7 +544,7 @@ fn settle_one(sh: &Arc<Shared>, cmd: &SetCmd) -> bool {
             bench.count(&bench.take_dropped);
         }
         sh.sink().terminals.push((cmd.id, Terminal::Dropped));
-        sh.send(Input::Done { id: cmd.id, terminal: Terminal::Dropped });
+        sh.send(Input::Done { id: cmd.id, terminal: Terminal::Dropped, now: (sh.now)() });
         return true;
     }
     sh.sched.hook(a, Point::SCheck);
@@ -578,8 +562,10 @@ fn settle_one(sh: &Arc<Shared>, cmd: &SetCmd) -> bool {
     }
     sh.with_cells(|cells| rules::start_calls(cells, cmd.id));
     let outcome = early.unwrap_or_else(|| call_settings(sh, cmd));
-    if sh.quirk != Quirk::AcceptInEffect && matches!(cmd.change, Change::Timed { .. }) && matches!(outcome, Outcome::Ok | Outcome::Partial) {
-        let at = if sh.quirk == Quirk::AcceptAtEffective { (sh.effective)() } else { (sh.now)() };
+    // The acceptance is recorded where the call returns, at the time source read there (the world does the same at `S.unlock`); the device's
+    // own application instant is the device's fact and stays apart.
+    if matches!(cmd.change, Change::Timed { .. }) && matches!(outcome, Outcome::Ok | Outcome::Partial) {
+        let at = (sh.now)();
         sh.with_cells(|cells| rules::accept_all(cells, cmd.id, at));
         sh.sink().acceptances.push((cmd.id, at));
     }
@@ -597,13 +583,13 @@ fn settle_one(sh: &Arc<Shared>, cmd: &SetCmd) -> bool {
     };
     if sh.quirk == Quirk::SendBeforeResult {
         sh.sched.hook(a, Point::SSend);
-        sh.send(Input::Done { id: cmd.id, terminal });
+        sh.send(Input::Done { id: cmd.id, terminal, now: (sh.now)() });
         write(sh);
         return true;
     }
     write(sh);
     sh.sched.hook(a, Point::SSend);
-    sh.send(Input::Done { id: cmd.id, terminal });
+    sh.send(Input::Done { id: cmd.id, terminal, now: (sh.now)() });
     true
 }
 
@@ -908,17 +894,13 @@ fn recv_cycle(sh: &Arc<Shared>, k: usize, mut first_view: Option<Cell>) {
                     sink.facts.extend(facts);
                 }
                 sh.sched.changed();
-                for input in sends {
+                for input in rules::recv_inputs(sends, ended.late_send.clone()) {
                     sh.sched.hook(a, Point::RSend);
                     sh.send(input);
                 }
                 break;
             }
         }
-    }
-    if let Some(input) = ended.late_send {
-        sh.sched.hook(a, Point::RSend);
-        sh.send(input);
     }
 }
 
@@ -941,6 +923,14 @@ fn run_clock(sh: &Arc<Shared>) {
     }
 }
 
+/// The input a delivered timer is: the drain deadline of a stream or the capacity timer, with the device time read at delivery.
+fn timer_input(timer: Timer, now: i64) -> Input {
+    match timer {
+        Timer::Drain(stream) => Input::Timer { stream, now },
+        Timer::Capacity => Input::CapacityTimer { now },
+    }
+}
+
 /// Outside forcing: delivers a brain-booked deadline once the time source has passed it (never early). On a fake's manual clock the
 /// timer is a participant and waits for the earliest deadline on that clock (a wait that ends at the deadline, or at a notify), so the
 /// clock stops there until the delivery is made; otherwise it polls the time source.
@@ -957,8 +947,8 @@ fn run_timer(sh: &Arc<Shared>) {
                 let mut timers = sh.timers.lock().unwrap_or_else(|e| e.into_inner());
                 timers.iter().position(|&(_, at)| now >= at).map(|i| timers.remove(i))
             };
-            if let Some((stream, _)) = due {
-                sh.send(Input::Timer { stream });
+            if let Some((timer, _)) = due {
+                sh.send(timer_input(timer, now));
                 continue;
             }
             let next = sh.timers.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|&(_, at)| at).min();
@@ -979,7 +969,7 @@ fn run_timer(sh: &Arc<Shared>) {
             }
         });
         match due {
-            Some((stream, _)) => sh.send(Input::Timer { stream }),
+            Some((timer, _)) => sh.send(timer_input(timer, (sh.now)())),
             None => return,
         }
     }

@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ezsdr_radio::timeline::Channels;
 
-use super::cell::{Cell, Drain, Outcome, Phase, Recv, Snapshot, Take, Terminal, Ticks, ValueState};
-use super::core::{Boundary, Brain, Change, Command, Disposition, Guard, Input, Op, Request, RxOp, Section, SetCmd};
+use super::cell::{Cell, Drain, Outcome, Phase, Recv, Refusal, Snapshot, Take, Terminal, Ticks, ValueState};
+use super::core::{Boundary, Brain, CHAIN_BOUND, Change, Command, DEVICE_BOUND, Disposition, Guard, Input, NotReserved, Op, Request, RxOp, Section, SetCmd, Timer};
 use super::dst::Model;
 use super::model::{Apply, Device, Dsp};
 use super::rules::{self, CallPlan, CallResult, Check, DevCall, DeviceOp, FlushEnd, Handle, Next, Received, Round, RxCall, has_debt};
@@ -42,6 +42,9 @@ pub(crate) struct Params {
     pub(crate) call_faults: bool,
     /// The brain step (counted from 0) whose input is replaced by a panic (case 6); `None` for no panic.
     pub(crate) panic_step: Option<usize>,
+    /// The device's capacity K and a chain's resident bound D (note 45 §4.5): the brain's bounds, and the oracle's (I11′).
+    pub(crate) k: usize,
+    pub(crate) d: usize,
 }
 
 /// Who holds the native lock `L` or the lifecycle gate `G`.
@@ -121,6 +124,8 @@ pub(crate) struct SettingsExec {
 pub(crate) struct RecvCall {
     pub(crate) recv: Recv,
     pub(crate) deadline: i64,
+    /// The missed start's `LateCommand`, sent with the publication's boundaries (see `rules::recv_inputs`).
+    pub(crate) late: Option<Input>,
 }
 
 /// A receive executor `R_k`: its FIFO, its steps, its streamer handle (the id of the open handle),
@@ -230,6 +235,24 @@ pub(crate) struct Monitor {
     pub(crate) witnesses: BTreeSet<&'static str>,
     /// A taken value whose cut a stop shortened: the cut it was shortened to (W1c).
     pub(crate) shortened: BTreeMap<u64, i64>,
+    /// Each released value's instant (I11′ reads it, never the brain's cells).
+    pub(crate) instants: BTreeMap<u64, i64>,
+    /// The stream each reserved value was reserved on.
+    pub(crate) streams: BTreeMap<u64, usize>,
+    /// The values the cell showed cancelled before S took them (recorded where `sync` first sees the state).
+    pub(crate) cancelled: BTreeSet<u64>,
+    /// The values whose `Done` input the brain has taken (it has recorded the result and, unless an obligation remains, retired the value).
+    pub(crate) done_processed: BTreeSet<u64>,
+    /// The starts the brain has sent, `(stream, epoch)` (I17 matches the completed start with one of them).
+    pub(crate) starts: BTreeSet<(usize, u64)>,
+    /// The values a reservation attempt found the device at K for (witnesses W10b, W10d, W11b read it).
+    pub(crate) k_refused: BTreeSet<u64>,
+    /// The kind of the latest input the brain took (the witnesses of the bounds name the input that freed a bound).
+    pub(crate) last_input: &'static str,
+    /// The brain's current step took an input of the freeing set (every input but a release, the shutdown and a panic: each can free a bound
+    /// or open a reservation condition) and has run a `Reserve` of the held head since (a `ReserveAll` that queues no `Reserve` does not count): P6b's record of the step.
+    pub(crate) step_freeing: bool,
+    pub(crate) step_retried: bool,
 }
 
 /// What one publish gave the user: the stream and epoch, the ticks, and how many samples it discarded.
@@ -308,7 +331,7 @@ pub(crate) struct World {
     pub(crate) device: Device,
     pub(crate) env: Vec<EnvSlot>,
     /// Brain-booked deadlines `(stream, at)`, not yet delivered.
-    pub(crate) timers: Vec<(usize, i64)>,
+    pub(crate) timers: Vec<(Timer, i64)>,
     /// The events taken so far (diagnostic; not in the key).
     pub(crate) trace: Vec<Event>,
     /// What each publish gave the user, `(stream, epoch, ticks)` (diagnostic, outside the key: the observation of S1).
@@ -325,11 +348,11 @@ pub(crate) struct World {
 }
 
 /// One abandoned settings command: each cell's section, the terminal, and the `Done` to the brain.
-fn abandon_command(cells: &mut [Cell], monitor: &mut Monitor, log: &mut Vec<(u64, Terminal)>, inbox: &mut VecDeque<Input>, id: u64) {
+fn abandon_command(cells: &mut [Cell], monitor: &mut Monitor, log: &mut Vec<(u64, Terminal)>, inbox: &mut VecDeque<Input>, id: u64, now: i64) {
     rules::abandon_all(cells, id);
     monitor.terminals.insert(id, Terminal::Abandoned);
     log.push((id, Terminal::Abandoned));
-    inbox.push_back(Input::Done { id, terminal: Terminal::Abandoned });
+    inbox.push_back(Input::Done { id, terminal: Terminal::Abandoned, now });
 }
 
 impl World {
@@ -338,6 +361,8 @@ impl World {
         let streams = cells.len();
         let mut brain = Brain::new();
         brain.drain_window = params.drain_window;
+        brain.device_bound = params.k;
+        brain.chain_bound = params.d;
         let mut device = Device::new(params.queue_cap, params.fifo_cap);
         device.silent_from = params.horizon + params.epilogue;
         World {
@@ -594,10 +619,25 @@ impl World {
                 if self.native == Some(Holder::Settings) {
                     self.monitor.witnesses.insert("W5a");
                 }
-                let (stream, at) = self.timers.remove(i);
-                self.inbox.push_back(Input::Timer { stream });
-                self.monitor.observed.insert((stream, at, self.device.t));
-                self.monitor.drain_observed.insert((stream, at));
+                let (timer, at) = self.timers.remove(i);
+                let now = self.device.t;
+                match timer {
+                    Timer::Drain(stream) => {
+                        self.inbox.push_back(Input::Timer { stream, now });
+                        self.monitor.observed.insert((stream, at, now));
+                        self.monitor.drain_observed.insert((stream, at));
+                    }
+                    Timer::Capacity => {
+                        for (name, on) in
+                            [("W12a", self.cells.iter().any(|cell| cell.drain == Drain::Draining)), ("W12p", self.cells.iter().any(|cell| cell.retiring.is_some())), ("W12c", self.failure)]
+                        {
+                            if on {
+                                self.monitor.witnesses.insert(name);
+                            }
+                        }
+                        self.inbox.push_back(Input::CapacityTimer { now });
+                    }
+                }
             }
             Event::BStep => {
                 let input = self.inbox.pop_front().expect("an input is queued");
@@ -607,6 +647,10 @@ impl World {
                 match &input {
                     Input::Release(held) => {
                         self.monitor.released.insert(held.entry.order.1);
+                        self.monitor.instants.insert(held.entry.order.1, held.entry.order.0);
+                    }
+                    Input::Done { id, .. } => {
+                        self.monitor.done_processed.insert(*id);
                     }
                     Input::Panic => self.monitor.panicked = true,
                     Input::Request(Request::Restore { .. }) if self.monitor.witnesses.contains("W7b2") => {
@@ -614,6 +658,14 @@ impl World {
                     }
                     _ => {}
                 }
+                self.monitor.last_input = match &input {
+                    Input::Done { .. } => "done",
+                    Input::CapacityTimer { .. } => "capacity timer",
+                    Input::Stop { .. } => "stop",
+                    _ => "other",
+                };
+                self.monitor.step_freeing = !matches!(input, Input::Release(_) | Input::Shutdown | Input::Panic);
+                self.monitor.step_retried = false;
                 self.brain.step(input);
             }
             Event::BOp => self.brain_op(),
@@ -651,13 +703,14 @@ impl World {
             Event::SUnlock => {
                 self.settings.program.pop_front();
                 self.native = None;
+                self.s_accept();
             }
             Event::SResult => self.s_result(),
             Event::SSend => {
                 self.settings.program.pop_front();
                 let hand = self.settings.hand.take().expect("a command in hand");
                 let terminal = self.settings.terminal.take().expect("a decided terminal");
-                self.inbox.push_back(Input::Done { id: hand.id, terminal });
+                self.inbox.push_back(Input::Done { id: hand.id, terminal, now: self.device.t });
             }
             Event::RCheck(k) => self.r_check(k),
             Event::RCmd(k) => self.r_cmd(k),
@@ -715,6 +768,7 @@ impl World {
         if let Input::Release(held) = &input {
             let id = held.entry.order.1;
             self.monitor.released.insert(id);
+            self.monitor.instants.insert(id, held.entry.order.0);
             self.monitor.panic_reported.insert(id);
         }
         Input::Panic
@@ -725,6 +779,12 @@ impl World {
     /// state before the operation, or the cut it shortens, are recorded around it.
     fn brain_op(&mut self) {
         let op = self.brain.ops.front().cloned().expect("an operation is queued");
+        // Only a `Reserve` of the held head credits the step (P6b): a `ReserveAll` that queues nothing has retried nothing.
+        if let Op::Section(Section::Reserve { id }) = &op {
+            if self.brain.held.first().is_some_and(|head| head.entry.order.1 == *id) {
+                self.monitor.step_retried = true;
+            }
+        }
         if let Op::Guard(guard) = op {
             self.publish(Holder::Brain, guard_step(guard));
         }
@@ -767,15 +827,40 @@ impl World {
         }
         if let Some((id, channel, segment, epoch)) = reserve.and_then(|r| rules::reserved(&self.brain, &self.cells, r)) {
             self.monitor.reserved.insert(id, (channel, segment, epoch));
+            if let Some((_, stream, _)) = reserve {
+                self.monitor.streams.insert(id, stream);
+            }
+            if self.monitor.k_refused.contains(&id) {
+                self.monitor.witnesses.insert("W10b");
+                match self.monitor.last_input {
+                    "capacity timer" => self.monitor.witnesses.insert("W10d"),
+                    "stop" => self.monitor.witnesses.insert("W11b"),
+                    _ => false,
+                };
+            }
         }
     }
 
     /// The witnesses an operation decides from the state it finds (before it runs).
     fn witness_before(&mut self, op: &Op, held: Option<(usize, usize)>) {
         match op {
-            Op::Section(Section::Reserve { .. }) => {
+            Op::Section(Section::Reserve { id }) => {
                 if held.is_some_and(|(stream, _)| matches!(self.cells[stream].phase, Phase::Stopping(_))) {
                     self.monitor.witnesses.insert("W4a");
+                }
+                match self.brain.reservation_refusal(*id, &self.cells) {
+                    Some(NotReserved::DeviceBound) => {
+                        self.monitor.witnesses.insert("W10a");
+                        self.monitor.k_refused.insert(*id);
+                    }
+                    Some(NotReserved::ChainBound) => {
+                        self.monitor.witnesses.insert("W10c");
+                    }
+                    // Refused for progress at the cut while the phase still accepts: the pinned drain (H03's second guard).
+                    Some(NotReserved::Refused(Refusal::Progress)) => {
+                        self.monitor.witnesses.insert("W12b");
+                    }
+                    _ => {}
                 }
             }
             Op::Section(Section::PlanCancel { stream, .. }) if self.cells[*stream].pinned() => {
@@ -829,6 +914,9 @@ impl World {
                 self.settings.fifo.push_back(cmd);
             }
             Command::Rx { stream, op } => {
+                if let RxOp::Start { epoch, .. } = op {
+                    self.monitor.starts.insert((stream, epoch));
+                }
                 let debt = has_debt(&self.cells[stream]);
                 match op {
                     RxOp::Start { .. } if debt => {
@@ -841,7 +929,8 @@ impl World {
                 }
                 self.rx[stream].fifo.push_back(op);
             }
-            Command::Timer { stream, at } => self.timers.push((stream, at)),
+            Command::Timer { stream, at } => self.timers.push((Timer::Drain(stream), at)),
+            Command::CapacityTimer { at } => self.timers.push((Timer::Capacity, at)),
             Command::SettingsTerminate => self.settings.terminate = true,
         }
     }
@@ -869,7 +958,7 @@ impl World {
                 }
                 self.monitor.terminals.insert(cmd.id, Terminal::Dropped);
                 self.terminal_log.push((cmd.id, Terminal::Dropped));
-                self.inbox.push_back(Input::Done { id: cmd.id, terminal: Terminal::Dropped });
+                self.inbox.push_back(Input::Done { id: cmd.id, terminal: Terminal::Dropped, now: self.device.t });
             }
         }
     }
@@ -884,7 +973,8 @@ impl World {
         let monitor = &mut self.monitor;
         let inbox = &mut self.inbox;
         let log = &mut self.terminal_log;
-        let check = rules::settings_check(self.failure, hand, &mut queued, |id| abandon_command(cells, monitor, log, inbox, id));
+        let now = self.device.t;
+        let check = rules::settings_check(self.failure, hand, &mut queued, |id| abandon_command(cells, monitor, log, inbox, id, now));
         if check == Check::Exit {
             self.settings.exited = true;
             self.settings.fifo.clear();
@@ -900,11 +990,12 @@ impl World {
     fn s_discard(&mut self) {
         let cmd = self.settings.fifo.pop_front().expect("a command is queued");
         let mut queued = VecDeque::from([cmd.id]);
+        let now = self.device.t;
         let cells = &mut self.cells;
         let monitor = &mut self.monitor;
         let inbox = &mut self.inbox;
         let log = &mut self.terminal_log;
-        rules::settings_check(true, None, &mut queued, |id| abandon_command(cells, monitor, log, inbox, id));
+        rules::settings_check(true, None, &mut queued, |id| abandon_command(cells, monitor, log, inbox, id, now));
     }
 
     /// `S.effect(outcome)`: the device call of a timed command, or of a restore or move (no device
@@ -927,9 +1018,9 @@ impl World {
             self.calls.push(DevCall::Apply { channel, freq, at });
         }
         if let (Change::Timed { channel, at, .. }, Outcome::Ok | Outcome::Partial) = (&cmd.change, outcome) {
-            if let Apply::Accepted { effective } = self.device.apply_timed(*channel, cmd.id, *at) {
-                rules::accept_all(&mut self.cells, cmd.id, effective);
-            }
+            // The device queues the command here (its application instant is the device's fact); the value's acceptance is written where
+            // the call returns, at `S.unlock`.
+            self.device.apply_timed(*channel, cmd.id, *at);
         }
         self.settings.terminal = Some(Terminal::Call(outcome));
         let mut program = vec![SStep::Unlock];
@@ -938,6 +1029,16 @@ impl World {
         }
         program.extend([SStep::Result, SStep::Send]);
         self.settings.program = program.into();
+    }
+
+    /// The acceptance of a timed value whose call returned ok or partly: the time source read where the call returns (the threads read
+    /// `now` right after the call, with nothing between).
+    fn s_accept(&mut self) {
+        if let (Some(cmd), Some(Terminal::Call(Outcome::Ok | Outcome::Partial))) = (&self.settings.hand, self.settings.terminal) {
+            if matches!(cmd.change, Change::Timed { .. }) {
+                rules::accept_all(&mut self.cells, cmd.id, self.device.t);
+            }
+        }
     }
 
     /// `S.result`: the cell section that writes the command's terminal, before its send.
@@ -1006,7 +1107,7 @@ impl World {
         let deadline = self.device.t + self.params.recv_timeout;
         self.calls.push(DevCall::Recv { stream: k });
         self.device.enter_recv(k);
-        self.rx[k].recv = Some(RecvCall { recv: Recv { epoch: snap.epoch, handle, samples: Default::default() }, deadline });
+        self.rx[k].recv = Some(RecvCall { recv: Recv { epoch: snap.epoch, handle, samples: Default::default() }, deadline, late: None });
     }
 
     /// `R.recv_end`: the buffered samples up to a packet. A lost device ends the recv with the loss
@@ -1040,9 +1141,7 @@ impl World {
         }
         if let Some(call) = self.rx[k].recv.as_mut() {
             call.recv.samples = ended.samples;
-        }
-        if let Some(input) = ended.late_send {
-            self.rx[k].program.push_back(RStep::Send(input));
+            call.late = ended.late_send;
         }
     }
 
@@ -1091,7 +1190,7 @@ impl World {
                     fact.entry(id).or_insert(ident);
                     self.rx[k].consumed.insert(id);
                 }
-                self.rx[k].program.extend(sends.into_iter().map(RStep::Send));
+                self.rx[k].program.extend(rules::recv_inputs(sends, call.late).into_iter().map(RStep::Send));
             }
         }
     }
@@ -1238,6 +1337,9 @@ impl World {
             if cell.drain == Drain::Ended {
                 self.monitor.drain_ended.insert(k);
             }
+            for flight in cell.in_flight.iter().filter(|f| f.state == ValueState::Cancelled) {
+                self.monitor.cancelled.insert(flight.entry.order.1);
+            }
         }
     }
 }
@@ -1300,8 +1402,8 @@ impl Model for World {
         let device = (t, queue, queue_cap, fifo_cap, last_command, dsp, streamers, lost, silent_from);
         // A value's disposition, result and leftover fact are read by id only, and the first write per id stands,
         // so the order of writes across ids is history. `guard` records the guard steps taken (a test reads it).
-        // `in_flight_bound` is a constant of the world (the design's, but in the measurement's bound diagnostic).
-        let Brain { held, dispositions, results, leftovers, outbox, deferred, ops, next_id, drain_window, guard: _, exit, pending, in_flight_bound: _ } = brain;
+        // `device_bound` and `chain_bound` are constants of the world, copied from `params` (which the key holds).
+        let Brain { held, dispositions, results, leftovers, outbox, deferred, ops, next_id, drain_window, guard: _, exit, pending, device_bound: _, chain_bound: _, now, capacity_timer } = brain;
         let mut dispositions = dispositions.clone();
         dispositions.sort_by_key(|(id, _)| *id);
         let mut results = results.clone();
@@ -1309,7 +1411,7 @@ impl Model for World {
         let mut leftovers = leftovers.clone();
         leftovers.sort_unstable();
         leftovers.dedup();
-        let brain = (held, dispositions, results, leftovers, outbox, deferred, ops, next_id, drain_window, exit, pending);
+        let brain = ((held, dispositions, results, leftovers, outbox, deferred), (ops, next_id, drain_window, exit, pending, now, capacity_timer));
         // Each field the key drops is read by no behaviour, oracle or later witness: `published`, `drain_ended` and `marked`
         // are monotone bits whose witness names are reported at the state that has them; `dispositions` copies the brain's.
         // A witness a later check reads stays: `shortened` (W1c) and the names in `READ_LATER`. The other witness names are
@@ -1334,10 +1436,28 @@ impl Model for World {
             panic_reported,
             witnesses,
             shortened,
+            instants,
+            streams,
+            cancelled,
+            done_processed,
+            starts,
+            k_refused,
+            last_input,
+            step_freeing,
+            step_retried,
         } = monitor;
+        // The flag matters only while a step's operations are queued (the next step resets it).
+        let step_record = (*step_freeing, *step_retried) != (false, false) && !self.brain.ops.is_empty();
+        let step_record = if step_record { (*step_freeing, *step_retried) } else { (false, false) };
         let read_later: BTreeSet<&str> = witnesses.iter().copied().filter(|name| READ_LATER.contains(name)).collect();
         let observed: BTreeSet<(usize, i64)> = observed.iter().map(|&(stream, at, _)| (stream, at)).collect();
-        let monitor = ((applied, evidence, leftover_facts, reserved, terminals, observed, drain_observed), (released, commanded, shutdown, checked, panicked, panic_reported), (shortened, read_later));
+        let monitor = (
+            (applied, evidence, leftover_facts, reserved, terminals, observed, drain_observed),
+            (released, commanded, shutdown, checked, panicked, panic_reported),
+            (shortened, read_later),
+            (instants, streams, cancelled, done_processed, starts),
+            (k_refused, last_input, step_record),
+        );
         [
             format!("{params:?}"),
             format!("{brain:?}"),
@@ -1468,7 +1588,19 @@ mod tests {
     use super::*;
 
     fn params() -> Params {
-        Params { horizon: 8, epilogue: 8, recv_timeout: 8, queue_cap: 4, fifo_cap: 4, drain_window: DRAIN_WINDOW, packet: PACKET, call_faults: false, panic_step: None }
+        Params {
+            horizon: 8,
+            epilogue: 8,
+            recv_timeout: 8,
+            queue_cap: 4,
+            fifo_cap: 4,
+            drain_window: DRAIN_WINDOW,
+            packet: PACKET,
+            call_faults: false,
+            panic_step: None,
+            k: DEVICE_BOUND,
+            d: CHAIN_BOUND,
+        }
     }
 
     fn world(cells: Vec<Cell>) -> World {
@@ -1547,7 +1679,7 @@ mod tests {
         let mut c = cell(Phase::Streaming(seg(0)), 0, Some(16), 0);
         push(&mut c, RxEntry { accepted_at: Some(8), ..value(0, 8, 1) }, ValueState::Taken);
         let plan = Input::PlanCancel { stream: 0, origin: 20, epoch: 2, plan_cut: Some(48) };
-        let done = Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok) };
+        let done = Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 0 };
         let env = vec![
             EnvSlot { input: EnvInput::Input(plan), earliest: 1, latest: 1, delivered: false, after: None },
             EnvSlot { input: EnvInput::Input(done), earliest: 0, latest: 6, delivered: false, after: None },
@@ -1627,7 +1759,7 @@ mod tests {
             ("rx.program", |w| w.rx[0].program.push_back(RStep::Cmd)),
             ("rx.handle", |w| w.rx[0].handle = None),
             ("rx.handles", |w| w.rx[0].handles += 1),
-            ("rx.recv", |w| w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Default::default() }, deadline: 4 })),
+            ("rx.recv", |w| w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Default::default() }, deadline: 4, late: None })),
             ("rx.snap", |w| w.rx[0].snap = Some(Snapshot { epoch: 1, cut: None, revision: 0 })),
             ("rx.call", |w| w.rx[0].call = Some(CallResult::Failed)),
             ("rx.consumed", |w| {
@@ -1652,7 +1784,7 @@ mod tests {
             ("streamer.then", |w| w.device.streamers.get_mut(&0).unwrap().then = Some(5)),
             ("streamer.late", |w| w.device.streamers.get_mut(&0).unwrap().late = Some(5)),
             ("streamer.channels", |w| w.device.streamers.get_mut(&0).unwrap().channels.push(2)),
-            ("timers", |w| w.timers.push((0, 24))),
+            ("timers", |w| w.timers.push((Timer::Drain(0), 24))),
             ("env.delivered", |w| w.env[0].delivered = true),
             ("env.earliest", |w| w.env[0].earliest += 1),
             ("env.input", |w| w.env[0].input = EnvInput::Late { stream: 0 }),
@@ -1715,7 +1847,7 @@ mod tests {
             push(&mut c, value(0, 10, 1), ValueState::Cancelled);
             push(&mut c, value(0, 11, 2), ValueState::Cancelled);
             let mut w = world(vec![c]);
-            w.inbox.extend(order.map(|id| Input::Done { id, terminal: Terminal::Dropped }));
+            w.inbox.extend(order.map(|id| Input::Done { id, terminal: Terminal::Dropped, now: 0 }));
             settle(&mut w);
             w
         };
@@ -1827,7 +1959,7 @@ mod tests {
         assert!(w.enabled().contains(&Event::STake));
         w.apply(&Event::STake);
         assert_eq!(w.monitor.terminals.get(&5), Some(&Terminal::Dropped));
-        assert_eq!(w.inbox, VecDeque::from([Input::Done { id: 5, terminal: Terminal::Dropped }]));
+        assert_eq!(w.inbox, VecDeque::from([Input::Done { id: 5, terminal: Terminal::Dropped, now: 0 }]));
         for _ in 0..100 {
             let events = w.enabled();
             let Some(event) = events.iter().find(|e| matches!(e, Event::BStep | Event::BOp)).cloned() else { break };
@@ -1845,7 +1977,7 @@ mod tests {
         w.settings.fifo.push_back(SetCmd { id: 5, change: Change::Timed { channel: 0, freq: 1.0, at: 10, generation: 1 } });
         assert!(w.enabled().contains(&Event::STake));
         w.apply(&Event::STake);
-        assert_eq!(w.inbox, VecDeque::from([Input::Done { id: 5, terminal: Terminal::Dropped }]));
+        assert_eq!(w.inbox, VecDeque::from([Input::Done { id: 5, terminal: Terminal::Dropped, now: 0 }]));
     }
 
     #[test]
@@ -1875,10 +2007,18 @@ mod tests {
         assert!(w.monitor.witnesses.contains("W9b"));
     }
 
+    /// A settings command's `Done` carries the device time of the event that sends it: the brain's only clock besides the timers.
+    #[test]
+    fn harness_done_carries_the_device_time_of_its_send() {
+        let mut script = super::super::thread_tests::Script::new(super::super::thread_tests::with_command(&[]));
+        script.ev(&[Event::Tick, Event::Tick, Event::STake, Event::SCheck, Event::SLock, Event::SEffect(Outcome::Ok), Event::SUnlock, Event::SResult, Event::SSend]);
+        assert!(matches!(script.w.inbox.back(), Some(Input::Done { id: 1, now: 2, .. })), "{:?}", script.w.inbox);
+    }
+
     #[test]
     fn harness_timer_never_early() {
         let mut w = world(vec![cell(Phase::Off, 0, None, 0)]);
-        w.timers.push((0, 5));
+        w.timers.push((Timer::Drain(0), 5));
         w.device.t = 4;
         assert!(!w.enabled().contains(&Event::Timer(0)), "a deadline is not delivered before its instant");
         w.device.t = 5;
@@ -1890,7 +2030,7 @@ mod tests {
     #[test]
     fn harness_timer_beyond_end_fires_at_its_instant() {
         let mut w = world(vec![cell(Phase::Off, 0, None, 0)]);
-        w.timers.push((0, 20));
+        w.timers.push((Timer::Drain(0), 20));
         w.device.t = 16;
         assert!(w.at_end() && !w.enabled().contains(&Event::Timer(0)), "a deadline beyond the end is not delivered at the end");
         assert!(w.enabled().contains(&Event::Tick), "time goes on while a timer lies ahead");
@@ -1914,7 +2054,7 @@ mod tests {
         w.device.dsp.get_mut(&0).expect("the chain").fifo.push_back((17, 5));
         w.device.queue.push_back(18);
         w.device.t = 16;
-        w.timers.push((0, 20));
+        w.timers.push((Timer::Drain(0), 20));
         for _ in 0..4 {
             w.apply(&Event::Tick);
         }
@@ -1931,7 +2071,7 @@ mod tests {
         let mut w = world(vec![cell(Phase::Streaming(seg(0)), 0, None, 0)]);
         w.device.open(0, vec![0]);
         w.rx[0].handle = Some(1);
-        w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Default::default() }, deadline: 18 });
+        w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Default::default() }, deadline: 18, late: None });
         w.rx[0].program = VecDeque::from([RStep::End]);
         w.device.t = 16;
         assert!(!w.enabled().contains(&Event::REnd(0)), "a recv does not end early at the epilogue's end");
@@ -1994,7 +2134,7 @@ mod tests {
         assert!(w.enabled().contains(&Event::SDiscard));
         w.apply(&Event::SDiscard);
         assert_eq!(w.monitor.terminals.get(&7), Some(&Terminal::Abandoned));
-        assert_eq!(w.inbox, VecDeque::from([Input::Done { id: 7, terminal: Terminal::Abandoned }]));
+        assert_eq!(w.inbox, VecDeque::from([Input::Done { id: 7, terminal: Terminal::Abandoned, now: 0 }]));
         assert!(!w.enabled().contains(&Event::SDiscard), "the FIFO is empty");
     }
 
@@ -2273,7 +2413,7 @@ mod tests {
         push(&mut c, value(0, 5, 7), ValueState::Queued);
         let mut w = World::new(vec![c], env, params);
         w.rx[0].handle = Some(1);
-        w.timers.push((0, 5));
+        w.timers.push((Timer::Drain(0), 5));
         w.inbox.push_back(Input::Release(held(0, value(0, 9, 8), 1)));
         w.apply(&Event::BStep);
         while w.brain.ops.front().is_some() {
@@ -2325,7 +2465,7 @@ mod tests {
             w.device.open(0, carried.clone());
             w.rx[0].handle = Some(1);
             w.monitor.reserved.insert(5, (0, seg(0), 1));
-            w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Ticks::from_slice(&[8]) }, deadline: 100 });
+            w.rx[0].recv = Some(RecvCall { recv: Recv { epoch: 1, handle: 1, samples: Ticks::from_slice(&[8]) }, deadline: 100, late: None });
             w.rx[0].snap = Some(w.cells[0].snapshot());
             w.rx[0].program = VecDeque::from([RStep::Publish]);
             w.apply(&Event::RPublish(0));
@@ -2367,7 +2507,7 @@ mod tests {
 
     /// The answer's effect on the device: the restart's call has run and the streamer's next start is now.
     fn restarted(before: &World, event: &Event, after: &World) -> bool {
-        matches!(event, Event::RCall(0)) && matches!(before.rx[0].program.front(), Some(RStep::Call(RxCall::Begin { at: 10 }))) && after.device.streamers[&0].next == Some(10)
+        matches!(event, Event::RCall(0)) && matches!(before.rx[0].program.front(), Some(RStep::Call(RxCall::Begin { at: 10, .. }))) && after.device.streamers[&0].next == Some(10)
     }
 
     /// The end-now stop's call has run and the streamer holds no start, tail or waiting start.

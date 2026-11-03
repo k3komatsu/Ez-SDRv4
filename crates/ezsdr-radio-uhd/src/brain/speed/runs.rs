@@ -9,7 +9,10 @@ use ezsdr_kernel::stream::DataLink;
 use serde_json::{Value as Json, json};
 
 use super::EXPIRY_NS;
-use super::{FIRST_NS, INGRESS_LATE_NS, INGRESS_NS, Kind, LEAD_NS, LOOKAHEAD, Offset, REASONS, Tap, TapStats, Timing, Upd, WINDOW_NS, account, dist, newrt, p99_ns, set_instrument, table, today};
+use super::{
+    FIRST_NS, INGRESS_LATE_NS, INGRESS_NS, Kind, LEAD_NS, LOOKAHEAD, Offset, REASONS, Tap, TapStats, Timing, Upd, WINDOW_NS, account, dist, newrt, p99_ns, reason_index, set_instrument, table, today,
+};
+use crate::brain::core::NotReserved;
 use crate::device::{Device, Dir, FakeDevice};
 
 pub(super) struct Cond {
@@ -32,8 +35,9 @@ pub(super) struct Opts {
     /// The bound diagnostic (new runtime): per-second samples of the backlog, the in-flight occupancy, the retirements and the bound rejections,
     /// and a per-update table (apply entry and return, application tick, retirement).
     pub(super) sample: bool,
-    /// The in-flight bound of the new runtime for this run (0: the design's). A diagnostic run's parameter only; the default is unchanged.
-    pub(super) bound: usize,
+    /// The device capacity K and the chain bound D of the new runtime for this run (0: the design's). A diagnostic run's parameters only.
+    pub(super) k: usize,
+    pub(super) d: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -346,7 +350,7 @@ fn ingress_all(rig: &dyn Rig, timing: &Timing, off: &Offset, tab: &[Upd]) -> Vec
 
 /// A value was held at the in-flight bound when one of its rejections was a bound rejection; a refusal of the cell (a lost cell, a cut) is not.
 fn is_bound_hit(by_reason: &[u64]) -> bool {
-    by_reason.first().is_some_and(|n| *n > 0)
+    [NotReserved::DeviceBound, NotReserved::ChainBound].into_iter().any(|reason| by_reason.get(reason_index(reason)).is_some_and(|n| *n > 0))
 }
 
 /// Whether the update's `apply` came back after the update's own deadline (`e + 10 ms`): the update fails, whatever the DSP log shows.
@@ -538,7 +542,7 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
     let bound_hit_values = rejected.iter().filter(|r| r["bound_hit"] == json!(true)).count();
     let per_update_rows: Vec<Option<super::Row>> = acc.per.iter().map(|(row, _)| *row).collect();
     let stages = extra["stage_stamps"].as_array().map(|stamps| stage_table(stamps, &tab, &per_update_rows));
-    let bound_diag = samples.map(|samples| bound_diag(&tab, &rows, &dsp, &off, &extra, &samples, cond, opts.bound));
+    let bound_diag = samples.map(|samples| bound_diag(&tab, &rows, &dsp, &off, &extra, &samples, cond, opts.k));
     let json = json!({
         "owner": name, "kind": cond.kind.name(), "rate_hz": cond.rate_hz, "block_len": cond.block_len, "updates": tab.len(), "counters": opts.counters, "diag": opts.diag,
         "observation_s_to_last_update": (t_end_ns - s0.t_ns) as f64 / 1e9, "observation_s_to_endpoint": (s1.t_ns - s0.t_ns) as f64 / 1e9,
@@ -928,7 +932,7 @@ fn e2b_bound() {
     let capacity = env_usize("E2B_CAPACITY", 16);
     for kind in [Kind::Spaced, Kind::Bursty] {
         for bound in [4, capacity, capacity, 4] {
-            let out = run_once(Owner::New, &Cond { kind, count, rate_hz: rate, block_len }, &Opts { counters: true, sample: true, bound, ..Opts::default() });
+            let out = run_once(Owner::New, &Cond { kind, count, rate_hz: rate, block_len }, &Opts { counters: true, sample: true, k: bound, ..Opts::default() });
             emit("E2B_BOUND", out.json);
         }
     }
@@ -1143,8 +1147,8 @@ mod tests {
     #[test]
     fn only_a_rejection_at_the_bound_is_a_bound_hit() {
         assert!(is_bound_hit(&[2, 1, 0, 0, 0, 0, 0]));
-        assert!(!is_bound_hit(&[0, 357, 0, 0, 0, 0, 0]), "357 rejections of a lost cell are no bound hit");
-        assert!(!is_bound_hit(&[0; 7]));
+        assert!(!is_bound_hit(&[0, 0, 357, 0, 0, 0, 0, 0]), "357 rejections of a lost cell are no bound hit");
+        assert!(!is_bound_hit(&[0; 8]));
     }
 
     /// Each stage of the new runtime's path is the difference of two stamps.

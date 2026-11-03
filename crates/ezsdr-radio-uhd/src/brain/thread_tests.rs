@@ -226,7 +226,19 @@ impl Script {
 }
 
 pub(super) fn params() -> Params {
-    Params { horizon: 48, epilogue: 32, recv_timeout: 8, queue_cap: 1, fifo_cap: 32, drain_window: 8, packet: crate::brain::world::PACKET, call_faults: false, panic_step: None }
+    Params {
+        horizon: 48,
+        epilogue: 32,
+        recv_timeout: 8,
+        queue_cap: 1,
+        fifo_cap: 32,
+        drain_window: 8,
+        packet: crate::brain::world::PACKET,
+        call_faults: false,
+        panic_step: None,
+        k: crate::brain::core::DEVICE_BOUND,
+        d: crate::brain::core::CHAIN_BOUND,
+    }
 }
 
 /// Stream 0 streaming with `cut`, started at 0.
@@ -625,6 +637,9 @@ fn s5_brain_panic_at_the_stop() {
     brain_panic_at(1);
 }
 
+/// How many divergences of a whole-walk sweep are shrunk and printed in full.
+const SHRINK_CAP: usize = 10;
+
 /// The whole walk of each case for each seed (not only the prefixes that reach a witness), replayed on threads. A divergence is
 /// shrunk and reported with the case and seed.
 fn s1c(seeds: std::ops::RangeInclusive<u64>, include_seeded: bool) {
@@ -640,39 +655,23 @@ fn s1c(seeds: std::ops::RangeInclusive<u64>, include_seeded: bool) {
             assert!(walked.failure.is_none(), "the world's own walk fails: {name} seed {seed}");
             replayed += 1;
             if let Err(why) = check(&case.world, &walked.trace) {
-                // Only the first three divergences are shrunk (a shrink replays the run once per event).
-                let small = if divergences.len() < 3 { shrink(&case.world, &walked.trace) } else { Vec::new() };
-                // Classification: does the same trace replay equal when `S` records the device's effective instant?
-                let class = if check_with(&case.world, &walked.trace, Quirk::AcceptAtEffective).is_ok() {
-                    " [Q1 intervention A: setting only the acceptance timestamp to the effective instant restores equality]"
-                } else if check_with(&case.world, &walked.trace, Quirk::AcceptInEffect).is_ok() {
-                    " [Q1 intervention B: recording acceptance inside the device effect (timestamp and visibility together) restores equality]"
-                } else {
-                    " [UNCLASSIFIED]"
-                };
-                divergences.push(format!("{name} seed {seed}{class}: {why}\n shrunk to {} events: {small:?}", small.len()));
+                // Only the first SHRINK_CAP divergences are shrunk (a shrink replays the run once per event); the others say so.
+                let small = (divergences.len() < SHRINK_CAP).then(|| shrink(&case.world, &walked.trace));
+                let shrunk = small.map_or_else(|| format!("not shrunk (only the first {SHRINK_CAP} divergences are)"), |small| format!("shrunk to {} events: {small:?}", small.len()));
+                divergences.push(format!("{name} seed {seed}: {why}\n {shrunk}"));
             }
         }
     }
-    println!(
-        "s1c: {replayed} whole walks replayed, {} divergences ({} Q1 intervention A, {} Q1 intervention B, {} unclassified)",
-        divergences.len(),
-        divergences.iter().filter(|d| d.contains("[Q1 intervention A")).count(),
-        divergences.iter().filter(|d| d.contains("[Q1 intervention B")).count(),
-        divergences.iter().filter(|d| d.contains("[UNCLASSIFIED]")).count()
-    );
+    println!("s1c: {replayed} whole walks replayed, {} divergences", divergences.len());
     for d in &divergences {
         println!("{}", d.lines().next().unwrap_or(""));
     }
-    // The Q1 difference is pinned by `finding_q1_*` and reported here with its counts; any other difference fails.
-    let unclassified: Vec<&String> = divergences.iter().filter(|d| d.contains("[UNCLASSIFIED]")).collect();
-    assert!(unclassified.is_empty(), "{} unclassified divergences:\n{}", unclassified.len(), unclassified.iter().map(|d| d.as_str()).collect::<Vec<_>>().join("\n"));
+    assert!(divergences.is_empty(), "{} divergences:\n{}", divergences.len(), divergences.join("\n"));
 }
 
 #[test]
 fn s1c_whole_walks_smoke() {
-    // The seeded configuration's whole walks show the Q1 difference (see `finding_q1_*`): they run in the wide, ignored test.
-    s1c(1..=2, false);
+    s1c(1..=2, true);
 }
 
 #[test]
@@ -682,22 +681,23 @@ fn s1c_whole_walks_wide() {
     s1c(first..=last, true);
 }
 
-/// FINDING (Q1, test plan §13; recorded for the E3 report). `World` records a value's acceptance at the device's effective instant;
-/// production records the clock read taken after `apply` returns (`provider/control.rs:882`, qualified at `provider/core.rs:245-248`),
-/// which can be later when time passes between the device taking the command and the call's return: a sample in between is
-/// consumption evidence in the world and not in the thread run. The direction is conservative (production may keep a value as debt
-/// although it was applied and received: extra drain or flush work, and without later qualifying evidence a rejected drain or a
-/// skipped restore). This test pins that the replay difference exists (seeded configuration, seed 2, whole walk) and that the two
-/// replay interventions (acceptance timestamp := effective instant) restore equality. The interventions explain the replay
-/// difference; they do not prove production equivalence. No production change in the experiment; the migration candidate is to
-/// accept at the effective instant, which needs the device to report it. When the finding is resolved this test is replaced.
+/// Both wrappers record a timed value's acceptance where the call returns, with the same timestamp: the time source read at `S.unlock` (the
+/// device's own application instant is the device's fact and stays apart). Time passes between the effect and the unlock; the value's
+/// `accepted_at` is the tick of the unlock on both, and the thread run agrees with the world on the whole walk.
 #[test]
-fn finding_q1_acceptance_instant_differs_and_is_the_only_difference() {
-    let case = cases::seeded(2, true, 96);
-    let walked = dst::walk(&case.world, 2, cases::WALK_LIMIT);
-    let why = check(&case.world, &walked.trace).expect_err("the finding: the thread run differs from the world on this walk");
-    assert!(why.contains("published") || why.contains("evidence") || why.contains("leftovers") || why.contains("expected Rx(1) at RSend"), "{why}");
-    check_with(&case.world, &walked.trace, Quirk::AcceptAtEffective).expect("with acceptance at the effective instant the walk replays equal");
+fn acceptance_is_recorded_at_the_calls_return_in_both_wrappers() {
+    use super::world::Event::{SCheck, SEffect, SLock, SResult, SSend, STake, SUnlock, Tick};
+    let mut script = Script::new(with_command(&[]));
+    script.ev(&[STake, SCheck, SLock, SEffect(Outcome::Ok), Tick, Tick, Tick]);
+    assert_eq!(script.w.cells[0].in_flight[0].entry.accepted_at, None, "not yet: the call has not returned");
+    script.ev(&[SUnlock]);
+    assert_eq!(script.w.cells[0].in_flight[0].entry.accepted_at, Some(3), "the tick of the return, not the device's effective instant (8)");
+    script.ev(&[SResult, SSend]);
+    let rt = Runtime::start(&script.w_initial(), true, None);
+    rt.replay(&script.trace).unwrap();
+    let on_threads = rt.sh.with_cell(0, |cell| cell.in_flight[0].entry.accepted_at);
+    assert_eq!(on_threads, Some(3));
+    assert!(rt.abort(JOIN).unwrap().is_empty());
 }
 
 // ------------------------------------------------------------------------- the native lock (S8's building blocks)
@@ -822,7 +822,7 @@ fn s3c_command_routed_during_failure_cleanup_is_abandoned_not_lost() {
     rt.replay(&[SCheck, SDiscard]).expect("the command routed during the cleanup reaches the discarder");
     let terminals = rt.sh.sink().terminals.clone();
     assert_eq!(terminals, vec![(1, Terminal::Abandoned), (2, Terminal::Abandoned)]);
-    let dones: Vec<_> = rt.sh.inbox.items().into_iter().filter_map(|i| if let Input::Done { id, terminal } = i { Some((id, terminal)) } else { None }).collect();
+    let dones: Vec<_> = rt.sh.inbox.items().into_iter().filter_map(|i| if let Input::Done { id, terminal, .. } = i { Some((id, terminal)) } else { None }).collect();
     assert_eq!(dones, vec![(1, Terminal::Abandoned), (2, Terminal::Abandoned)], "each abandoned command sends its Done");
     assert!(rt.abort(JOIN).unwrap().is_empty());
 }
@@ -1013,4 +1013,60 @@ fn s3d_a_move_takes_its_outcome_from_its_own_call_not_from_a_later_probe() {
         let want = if before { Outcome::Lost } else { Outcome::Ok };
         assert_eq!(expected(&script.w_initial(), &script.trace).unwrap().terminals, vec![(1, Terminal::Call(want))], "{name}");
     }
+}
+
+/// A capacity timer replayed on threads reaches the brain as a capacity input: after the trace up to the first reservation that a capacity timer
+/// enabled (W10d), the thread run's brain is the world's brain, bookkeeping included.
+#[test]
+fn b1e_a_forced_replay_of_a_capacity_timer_leaves_the_worlds_brain() {
+    let found = (1..=300u64).find_map(|seed| {
+        let case = cases::case10(Variant::Full);
+        let walked = dst::walk(&case.world, seed, cases::WALK_LIMIT);
+        let length = *cases::witness_prefixes(&case.world, &walked.trace).get("W10d")?;
+        Some((case, walked.trace[..length].to_vec()))
+    });
+    let (case, trace) = found.expect("a walk reaches W10d");
+    let mut w = case.world.clone();
+    for event in &trace {
+        w.apply(event);
+    }
+    let rt = Runtime::start(&case.world, true, None);
+    rt.replay(&trace).unwrap();
+    let brain = rt.sh.brain();
+    assert_eq!((brain.capacity_timer, brain.now, brain.held.len()), (w.brain.capacity_timer, w.brain.now, w.brain.held.len()));
+    drop(brain);
+    assert!(rt.abort(JOIN).unwrap().is_empty());
+}
+
+/// The threads stamp a `Done` with the time source at its send, as the world does: two ticks in, the same `now`.
+#[test]
+fn b2e_the_threads_done_carries_the_time_source() {
+    use super::world::Event::{SCheck, SEffect, SLock, SResult, SSend, STake, SUnlock, Tick};
+    let mut script = Script::new(with_command(&[]));
+    script.ev(&[Tick, Tick, STake, SCheck, SLock, SEffect(Outcome::Ok), SUnlock, SResult, SSend]);
+    let rt = Runtime::start(&script.w_initial(), true, None);
+    rt.replay(&script.trace).unwrap();
+    let on_threads = rt.sh.inbox.items();
+    assert!(matches!(on_threads.last(), Some(Input::Done { id: 1, now: 2, .. })), "{on_threads:?}");
+    assert_eq!(on_threads.last(), script.w.inbox.back());
+    assert!(rt.abort(JOIN).unwrap().is_empty());
+}
+
+/// B15 (45-experiment §11): a missed start whose recv publishes a cut that is already reached sends the publication's `CutReached` first and the
+/// `LateCommand` second, on both wrappers (one function, `rules::recv_inputs`). The brain then stops the stream once; with the late command
+/// first it would end the stream at once and stop again. The thread run replays the world's whole walk and must agree on every call.
+#[test]
+fn b15_a_missed_start_after_the_cut_sends_the_boundaries_first_on_both_wrappers() {
+    let mut w = cases::single(Some(8), Vec::new(), params());
+    w.cells[0].progress = 8;
+    w.device.streamers.get_mut(&0).expect("the stream is open").late = Some(0);
+    w.device.t = 4;
+    let mut script = Script::new(w);
+    script.ev(&[RCheck(0), RSnap(0), RBegin(0), REnd(0), RPublish(0)]);
+    let sends: Vec<_> = script.w.rx[0].program.iter().filter_map(|step| if let super::world::RStep::Send(input) = step { Some(input.clone()) } else { None }).collect();
+    assert_eq!(sends, vec![Input::Boundary(super::core::Boundary::CutReached { stream: 0 }), Input::LateCommand { stream: 0, now: 4 }], "the world's order");
+    script.rest();
+    let stops = script.w.calls.iter().filter(|call| matches!(call, super::rules::DevCall::Stop { .. })).count();
+    assert_eq!(stops, 1, "stopped once, by the cut: {:?}", script.w.calls);
+    check(&script.w_initial(), &script.trace).expect("the thread run sends in the same order and agrees on every call");
 }

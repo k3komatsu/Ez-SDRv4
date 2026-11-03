@@ -16507,13 +16507,13 @@
       },
       {
         "id": "E1-19",
-        "name": "the in-flight bound is not enforced",
+        "name": "D (the chain's resident bound) is not enforced",
         "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-        "old": "cell.in_flight.len() >= bound",
-        "new": "cell.in_flight.len() >= usize::MAX",
+        "old": "cells[stream].in_flight.len() >= self.chain_bound",
+        "new": "cells[stream].in_flight.len() >= usize::MAX",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
-        "filter": "u14_in_flight_bound_holds_value"
+        "filter": "b6_d_holds_until_a_resident_leaves_and_no_timer_frees_it"
       },
       {
         "id": "E1-20",
@@ -16689,8 +16689,8 @@
         "id": "E1-51",
         "name": "a partial result retires the value (drops it from the leftovers)",
         "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-        "old": "if self.consumed(id) {",
-        "new": "if outcome == Outcome::Partial || self.consumed(id) {",
+        "old": "if self.consumed(id) || self.disposition(id) == Some(Disposition::Reported(Reason::Loss)) {",
+        "new": "if outcome == Outcome::Partial || self.consumed(id) || self.disposition(id) == Some(Disposition::Reported(Reason::Loss)) {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "u10_partial_result_is_maybe_applied_not_failure"
@@ -16851,7 +16851,7 @@
         "id": "E1-42",
         "name": "S.take of a cancelled value does not send Done{Dropped}",
         "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
-        "old": "self.inbox.push_back(Input::Done { id: cmd.id, terminal: Terminal::Dropped });",
+        "old": "self.inbox.push_back(Input::Done { id: cmd.id, terminal: Terminal::Dropped, now: self.device.t });",
         "new": "let _ = Terminal::Dropped;",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
@@ -16873,8 +16873,8 @@
         "id": "E1-63",
         "name": "a Release sends its settings command before the reservation is decided",
         "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-        "old": "self.ops.push_back(Op::Section(Section::Reserve { id }));",
-        "new": "self.ops.push_back(Op::Send(Command::Settings(SetCmd { id, change: Change::Restore { channel: 0 } }))); self.ops.push_back(Op::Section(Section::Reserve { id }));",
+        "old": "self.ops.push_back(Op::Section(Section::Reserve { id: head }));",
+        "new": "self.ops.push_back(Op::Send(Command::Settings(SetCmd { id: head, change: Change::Restore { channel: 0 } }))); self.ops.push_back(Op::Section(Section::Reserve { id: head }));",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "harness_failed_reservation_leaves_no_send"
@@ -17013,7 +17013,7 @@
         "id": "E1-87",
         "name": "a discarded settings command sends no Done to the brain",
         "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
-        "old": "inbox.push_back(Input::Done { id, terminal: Terminal::Abandoned });",
+        "old": "inbox.push_back(Input::Done { id, terminal: Terminal::Abandoned, now });",
         "new": "let _ = inbox;",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
@@ -18595,8 +18595,8 @@
       "id": "E2-54",
       "name": "S records a value's acceptance a thousand ticks late",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
-      "old": "{ (sh.effective)() } else { (sh.now)() };",
-      "new": "{ (sh.effective)() } else { (sh.now)() + 1000 };",
+      "old": "let at = (sh.now)();",
+      "new": "let at = (sh.now)() + 1000;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s7_fakedevice_value_applied_before_instant_consumed_at_it"
@@ -18742,16 +18742,6 @@
       "filter": "account_matches_by_instant_and_frequency_not_by_order"
     },
     {
-      "id": "E2-66",
-      "name": "The brain does not retry a held value when a slot of its full chain frees",
-      "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-      "old": "full.filter(|stream| self.held.iter().any(|held| held.stream == *stream))",
-      "new": "full.filter(|_| false)",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "u14b_held_value_reserved_when_a_slot_frees"
-    },
-    {
       "id": "E2-67",
       "name": "The receive executor turns a block into ticks one device tick apart whatever the decimation",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
@@ -18853,19 +18843,19 @@
     },
     {
       "id": "E2-77",
-      "name": "E2b files a rejection at the in-flight bound under the phase reason",
+      "name": "E2b files a rejection at the device bound under the phase reason",
       "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
-      "old": "NotReserved::Bound => 0,",
-      "new": "NotReserved::Bound => 1,",
+      "old": "NotReserved::DeviceBound => 0,",
+      "new": "NotReserved::DeviceBound => 2,",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
     },
     {
       "id": "E2-78",
-      "name": "The brain's refusal reader reports no refusal for a chain at the in-flight bound",
+      "name": "The brain's refusal reader reports no refusal for a value held at K or D",
       "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-      "old": "return Some(NotReserved::Bound);",
+      "old": "return Some(bound);",
       "new": "return None;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -18875,7 +18865,7 @@
       "id": "E2-79",
       "name": "E2b counts any rejection of a value as a bound hit",
       "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
-      "old": "by_reason.first().is_some_and(|n| *n > 0)",
+      "old": "[NotReserved::DeviceBound, NotReserved::ChainBound].into_iter().any(|reason| by_reason.get(reason_index(reason)).is_some_and(|n| *n > 0))",
       "new": "by_reason.iter().any(|n| *n > 0)",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -18965,8 +18955,8 @@
       "id": "E2-88",
       "name": "The brain's routing of a timer wakes the brain instead of the timer thread",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
-      "old": "sh.sched.wake(Actor::Timer);",
-      "new": "sh.sched.wake(Actor::Brain);",
+      "old": "sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((Timer::Drain(stream), at)); sh.sched.wake(Actor::Timer);",
+      "new": "sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((Timer::Drain(stream), at)); sh.sched.wake(Actor::Brain);",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline"
@@ -19023,10 +19013,10 @@
     },
     {
       "id": "E2-94",
-      "name": "A rejection at the bound is not counted as a bound rejection",
+      "name": "A rejection at K or D is not counted as a bound rejection",
       "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
-      "old": "if reason == NotReserved::Bound { self.bound_rejections.fetch_add(1, Relaxed); }",
-      "new": "if reason != NotReserved::Bound { self.bound_rejections.fetch_add(1, Relaxed); }",
+      "old": "if matches!(reason, NotReserved::DeviceBound | NotReserved::ChainBound) { self.bound_rejections.fetch_add(1, Relaxed); }",
+      "new": "if !matches!(reason, NotReserved::DeviceBound | NotReserved::ChainBound) { self.bound_rejections.fetch_add(1, Relaxed); }",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
@@ -19073,23 +19063,23 @@
     },
     {
       "id": "E2-99",
-      "name": "A held value is reserved against the design's bound, not the brain's",
+      "name": "A held value is reserved against the design's K, not the brain's",
       "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
-      "old": "let cell = &mut cells[held.stream]; if at_bound(cell, self.in_flight_bound) { return; }",
-      "new": "let cell = &mut cells[held.stream]; if at_bound(cell, IN_FLIGHT_BOUND) { return; }",
+      "old": "device_load(cells, self.now) >= self.device_bound",
+      "new": "device_load(cells, self.now) >= DEVICE_BOUND",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "u14a_the_bound_is_the_brains_own_parameter"
     },
     {
       "id": "E2-100",
-      "name": "The measured runtime ignores the bound a diagnostic run names",
+      "name": "The measured runtime ignores the K a diagnostic run names",
       "file": "crates/ezsdr-radio-uhd/src/brain/speed/newrt.rs",
-      "old": "world.brain.in_flight_bound = opts.bound;",
-      "new": "let _ = opts.bound;",
+      "old": "world.brain.device_bound = opts.k;",
+      "new": "let _ = opts.k;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
-      "filter": "the_bound_is_the_designs_unless_a_diagnostic_run_names_another"
+      "filter": "the_bounds_are_the_designs_unless_a_diagnostic_run_names_others"
     },
     {
       "id": "E2-101",
@@ -19137,8 +19127,8 @@
       "id": "E2-105",
       "name": "A booking wakes the timer thread only when it is the first",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
-      "old": "sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((stream, at)); sh.sched.wake(Actor::Timer);",
-      "new": "let first = { let mut timers = sh.timers.lock().unwrap_or_else(|e| e.into_inner()); timers.push((stream, at)); timers.len() == 1 }; if first { sh.sched.wake(Actor::Timer); }",
+      "old": "sh.timers.lock().unwrap_or_else(|e| e.into_inner()).push((Timer::Drain(stream), at)); sh.sched.wake(Actor::Timer);",
+      "new": "let first = { let mut timers = sh.timers.lock().unwrap_or_else(|e| e.into_inner()); timers.push((Timer::Drain(stream), at)); timers.len() == 1 }; if first { sh.sched.wake(Actor::Timer); }",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline"
@@ -19212,5 +19202,535 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "a_moved_booking_is_attributed_by_the_owners_own_identity_and_an_untagging_owner_is_labelled_inferred"
-    }
+    },
+      {
+        "id": "E4-01",
+        "name": "K frees one tick late: a finished value counts at its own instant",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "now < flight.entry.order.0",
+        "new": "now <= flight.entry.order.0",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b2_slow_call_holds_k_until_done_then_frees_in_that_step"
+      },
+      {
+        "id": "E4-02",
+        "name": "K counts a cancelled value until its Dropped",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "ValueState::Cancelled | ValueState::Done(_) => false,",
+        "new": "ValueState::Cancelled => true, ValueState::Done(_) => false,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b4_stop_cancel_frees_k_and_d_frees_at_dropped"
+      },
+      {
+        "id": "E4-03",
+        "name": "K counts a dropped value",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "ValueState::Cancelled | ValueState::Done(_) => false,",
+        "new": "ValueState::Cancelled | ValueState::Done(Terminal::Call(_) | Terminal::Abandoned) => false, ValueState::Done(Terminal::Dropped) => true,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b3d_each_state_counts_or_not_for_k"
+      },
+      {
+        "id": "E4-04",
+        "name": "K counts a refused value",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "ValueState::Cancelled | ValueState::Done(_) => false,",
+        "new": "ValueState::Cancelled | ValueState::Done(Terminal::Dropped | Terminal::Abandoned | Terminal::Call(Outcome::Lost)) => false, ValueState::Done(_) => true,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b3d_each_state_counts_or_not_for_k"
+      },
+      {
+        "id": "E4-05",
+        "name": "K never counts a value that finished ok or partly",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.phase != Phase::Lost && now < flight.entry.order.0",
+        "new": "false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b1_stalled_r_device_time_frees_k_in_order"
+      },
+      {
+        "id": "E4-06",
+        "name": "K is per chain, not over the device",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "device_load(cells, self.now) >= self.device_bound",
+        "new": "device_load(std::slice::from_ref(&cells[stream]), self.now) >= self.device_bound",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b5_k_is_shared_across_chains"
+      },
+      {
+        "id": "E4-07",
+        "name": "D counts only the values K counts",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cells[stream].in_flight.len() >= self.chain_bound",
+        "new": "cells[stream].in_flight.iter().filter(|flight| counts_for_k(&cells[stream], flight, self.now)).count() >= self.chain_bound",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b6_d_holds_until_a_resident_leaves_and_no_timer_frees_it"
+      },
+      {
+        "id": "E4-08",
+        "name": "D admits one value more than its bound",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cells[stream].in_flight.len() >= self.chain_bound",
+        "new": "cells[stream].in_flight.len() > self.chain_bound",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b6_d_holds_until_a_resident_leaves_and_no_timer_frees_it"
+      },
+      {
+        "id": "E4-09",
+        "name": "The held values are not re-evaluated after a Done",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::Done { .. })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b2_slow_call_holds_k_until_done_then_frees_in_that_step"
+      },
+      {
+        "id": "E4-10",
+        "name": "The held values are not re-evaluated after a consumption",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::Consumed { .. })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b6_d_holds_until_a_resident_leaves_and_no_timer_frees_it"
+      },
+      {
+        "id": "E4-11",
+        "name": "The held values are not re-evaluated after a Stop's cancel",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::Stop { .. } | Section::Drain { .. })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b4_stop_cancel_frees_k_and_d_frees_at_dropped"
+      },
+      {
+        "id": "E4-12",
+        "name": "The held values are not re-evaluated after a capacity timer",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::CapacityTimer)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b1_stalled_r_device_time_frees_k_in_order"
+      },
+      {
+        "id": "E4-13",
+        "name": "The capacity timer is booked at the latest counted instant",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": ".map(|(_, f)| f.entry.order.0) .min();",
+        "new": ".map(|(_, f)| f.entry.order.0) .max();",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b1_stalled_r_device_time_frees_k_in_order"
+      },
+      {
+        "id": "E4-14",
+        "name": "A later capacity timer replaces an earlier booking",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.capacity_timer.is_none_or(|booked| *at < booked)",
+        "new": "self.capacity_timer.is_none_or(|booked| *at > booked)",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b1_stalled_r_device_time_frees_k_in_order"
+      },
+      {
+        "id": "E4-15",
+        "name": "A stale time input lowers the brain's device time",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.now = self.now.max(now);",
+        "new": "self.now = now;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b2c_a_stale_time_input_does_not_lower_the_device_time"
+      },
+      {
+        "id": "E4-16",
+        "name": "A capacity timer is handled as a drain deadline",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.ops.push_back(Op::Section(Section::CapacityTimer));",
+        "new": "self.ops.push_back(Op::Section(Section::TimerFired { stream: 0 }));",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b8a_capacity_timer_during_a_drain_only_re_evaluates"
+      },
+      {
+        "id": "E4-17",
+        "name": "K reads R's progress as the device time",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "device_load(cells, self.now) >= self.device_bound",
+        "new": "device_load(cells, cells[stream].progress) >= self.device_bound",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b2b_r_progress_is_not_device_time"
+      },
+      {
+        "id": "E4-18",
+        "name": "A consumption retires a value whose call has not returned",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if self.consumed(id) && self.has_result(id) {",
+        "new": "if self.consumed(id) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b9_consumption_before_done_leaves_the_cell_at_done"
+      },
+      {
+        "id": "E4-19",
+        "name": "A reported left value leaves the cell at once",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cells[stream].mark_left(id);",
+        "new": "cells[stream].mark_left(id); retire(id, cells);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b7_left_value_stays_resident_and_is_consumed_later"
+      },
+      {
+        "id": "E4-20",
+        "name": "reserve ignores progress at the cut (the pinned drain keeps the phase open)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "if self.progress >= cut {",
+        "new": "if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "case12b_pinned_drain_progress_guard_micro"
+      },
+      {
+        "id": "E4-21",
+        "name": "A first-sample boundary reopens a Stopping cell",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if let Phase::Armed(segment) = cells[stream].phase {",
+        "new": "if let Phase::Armed(segment) | Phase::Stopping(segment) = cells[stream].phase {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b10_no_input_reopens_a_stopping_cell"
+      },
+      {
+        "id": "E4-22",
+        "name": "A completed start opens a Stopping cell",
+        "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "old": "Call::Begin(segment) if matches!(self.phase, Phase::Off | Phase::Uncertain) =>",
+        "new": "Call::Begin(segment) if matches!(self.phase, Phase::Off | Phase::Uncertain | Phase::Stopping(_)) =>",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b10b_only_a_stopped_cell_takes_a_completed_start"
+      },
+      {
+        "id": "E4-23",
+        "name": "The recv's late command is sent before its publication's boundaries (the shared function)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "old": "boundaries.into_iter().chain(late).collect()",
+        "new": "late.into_iter().chain(boundaries).collect()",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b15_a_missed_start_after_the_cut_sends_the_boundaries_first_on_both_wrappers"
+      },
+      {
+        "id": "E4-24",
+        "name": "The thread wrapper sends the late command first",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "for input in rules::recv_inputs(sends, ended.late_send.clone()) {",
+        "new": "for input in ended.late_send.clone().into_iter().chain(sends) {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b15_a_missed_start_after_the_cut_sends_the_boundaries_first_on_both_wrappers"
+      },
+      {
+        "id": "E4-25",
+        "name": "The forced replay of a capacity timer delivers a drain input (through the shared function)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "Timer::Capacity => Input::CapacityTimer { now }, } }",
+        "new": "Timer::Capacity => Input::Timer { stream: 0, now }, } }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b1e_a_forced_replay_of_a_capacity_timer_leaves_the_worlds_brain"
+      },
+      {
+        "id": "E4-26",
+        "name": "The timer thread delivers a capacity timer as a drain input",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "Timer::Capacity => Input::CapacityTimer { now }, } }",
+        "new": "Timer::Capacity => Input::Timer { stream: 0, now }, } }",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "s15e_the_timer_thread_delivers_a_capacity_timer_that_frees_k"
+      },
+      {
+        "id": "E4-27",
+        "name": "The brain's routing of a capacity timer wakes the brain instead of the timer thread",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": ".push((Timer::Capacity, at)); sh.sched.wake(Actor::Timer);",
+        "new": ".push((Timer::Capacity, at)); sh.sched.wake(Actor::Brain);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "s15e_the_timer_thread_delivers_a_capacity_timer_that_frees_k"
+      },
+      {
+        "id": "E4-28",
+        "name": "The world's Done carries no device time",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.inbox.push_back(Input::Done { id: hand.id, terminal, now: self.device.t });",
+        "new": "self.inbox.push_back(Input::Done { id: hand.id, terminal, now: 0 });",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "harness_done_carries_the_device_time_of_its_send"
+      },
+      {
+        "id": "E4-29",
+        "name": "The threads' Done carries no device time",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "sh.send(Input::Done { id: cmd.id, terminal, now: (sh.now)() }); true",
+        "new": "sh.send(Input::Done { id: cmd.id, terminal, now: 0 }); true",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b2e_the_threads_done_carries_the_time_source"
+      },
+      {
+        "id": "E4-30",
+        "name": "K never counts a finished value (DST: I11′)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "cell.phase != Phase::Lost && now < flight.entry.order.0",
+        "new": "false",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "bounds_cases_walk_clean"
+      },
+      {
+        "id": "E4-31",
+        "name": "The held values are not re-evaluated after a Done (DST: P6)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::Done { .. })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "bounds_cases_walk_clean"
+      },
+      {
+        "id": "E4-32",
+        "name": "No capacity timer is ever booked (DST: P6)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "self.front(vec![Op::Send(Command::CapacityTimer { at })]);",
+        "new": "let _ = at;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "bounds_cases_walk_clean"
+      },
+      {
+        "id": "E4-33",
+        "name": "A first-sample boundary reopens a Stopping cell (DST: I17)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if let Phase::Armed(segment) = cells[stream].phase {",
+        "new": "if let Phase::Armed(segment) | Phase::Stopping(segment) = cells[stream].phase {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "bounds_cases_walk_clean"
+      },
+      {
+        "id": "E4-34",
+        "name": "I11′ admits a reservation at K (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if load >= before.params.k {",
+        "new": "if load > before.params.k {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i11_device_over_k_is_violation"
+      },
+      {
+        "id": "E4-35",
+        "name": "I11′ admits a reservation at D (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if resident >= before.params.d {",
+        "new": "if resident > before.params.d {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i11_chain_over_d_is_violation_and_a_consumed_done_value_is_not_resident"
+      },
+      {
+        "id": "E4-36",
+        "name": "I17 does not match the start with one the brain issued (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "*j == k && *epoch == cell.epoch && before.monitor.starts.contains(&(k, *epoch))",
+        "new": "*j == k && *epoch == cell.epoch",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i17_stopping_reopening_without_a_completed_start_is_violation"
+      },
+      {
+        "id": "E4-37",
+        "name": "P6 ignores a due capacity timer's re-evaluation (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if w.timers.iter().any(|(timer, at)| *timer == super::core::Timer::Capacity && *at <= w.device.t) {",
+        "new": "if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6_is_silent_while_an_input_is_on_its_way_or_a_due_timer_waits"
+      },
+      {
+        "id": "E4-38",
+        "name": "The capacity-timer step check passes any change (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if !same || sends {",
+        "new": "if false {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_capacity_timer_that_stops_or_changes_a_cell_is_violation"
+      },
+      {
+        "id": "E4-39",
+        "name": "The oracle's K never counts a finished value (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "Some(Terminal::Call(Outcome::Ok | Outcome::Partial)) => !lost && w.monitor.instants.get(id).is_some_and(|e| t < *e),",
+        "new": "Some(Terminal::Call(Outcome::Ok | Outcome::Partial)) => false,",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i11_device_over_k_is_violation"
+      },
+      {
+        "id": "E4-40",
+        "name": "A request's decision is not followed by a re-evaluation (its stop's cancel frees K)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::Decide(_))",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "b4b_an_end_now_cancel_frees_k_and_reserves_the_other_chains_value_in_that_step"
+      },
+      {
+        "id": "E4-41",
+        "name": "The held values are not re-evaluated after a Done (P6b, with a Shutdown, a boundary or a timer queued behind, and an executor step between)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown)",
+        "new": "!matches!(section, Section::Reserve { .. } | Section::ReserveAll | Section::Shutdown | Section::Done { .. })",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it"
+      },
+      {
+        "id": "E4-42",
+        "name": "P6b is not checked at a step's end (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if !matches!(event, Event::BOp) || !after.brain.ops.is_empty() || after.brain.dead() {",
+        "new": "if true {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it"
+      },
+      {
+        "id": "E4-43",
+        "name": "The world records a timed value's acceptance at time 0 (not at the call's return)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "rules::accept_all(&mut self.cells, cmd.id, self.device.t);",
+        "new": "rules::accept_all(&mut self.cells, cmd.id, 0);",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "acceptance_is_recorded_at_the_calls_return_in_both_wrappers"
+      },
+      {
+        "id": "E4-44",
+        "name": "The world records the acceptance at the effect and not at the return (the unlock does not accept)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.native = None;\n                self.s_accept();",
+        "new": "self.native = None;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "acceptance_is_recorded_at_the_calls_return_in_both_wrappers"
+      },
+      {
+        "id": "E4-45",
+        "name": "The threads record the acceptance one tick after the call's return",
+        "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "old": "let at = (sh.now)();",
+        "new": "let at = (sh.now)() + 1;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "acceptance_is_recorded_at_the_calls_return_in_both_wrappers"
+      },
+      {
+        "id": "E4-46",
+        "name": "I4 asks for the same sample as the application (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "applied.sample <= fact.sample",
+        "new": "applied.sample == fact.sample",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i4_evidence_after_the_application_is_legal_and_before_it_is_not"
+      },
+      {
+        "id": "E4-47",
+        "name": "I4 accepts evidence before the application (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "applied.sample <= fact.sample",
+        "new": "applied.sample >= fact.sample",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_i4_evidence_after_the_application_is_legal_and_before_it_is_not"
+      },
+      {
+        "id": "E4-49",
+        "name": "P6a counts K at the true device time, not the brain's (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "k_load_at(before, before.brain.now) < before.params.k",
+        "new": "k_load_at(before, before.device.t) < before.params.k",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6a_a_reservation_section_reserves_a_reservable_head"
+      },
+      {
+        "id": "E4-51",
+        "name": "A reservation section skips a reservable head while another value is held (P6a)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "if cells[held.stream].reserve(held.entry.clone(), held.generation).is_err() {",
+        "new": "if self.held.len() > 1 || cells[held.stream].reserve(held.entry.clone(), held.generation).is_err() {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "bounds_cases_walk_clean"
+      },
+      {
+        "id": "E4-52",
+        "name": "P6a is not checked (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if head.entry.order.1 != *id || before.brain.dead() {",
+        "new": "if true {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6a_a_reservation_section_reserves_a_reservable_head"
+      },
+      {
+        "id": "E4-53",
+        "name": "A freeing step's record never notes its reservation section (P6b)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+        "old": "self.monitor.step_retried = true;",
+        "new": "self.monitor.step_retried = false;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it"
+      },
+      {
+        "id": "E4-54",
+        "name": "P6b exempts a step with an input queued behind it (oracle self-test)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "old": "if after.monitor.step_freeing && !after.monitor.step_retried && !after.brain.held.is_empty() {",
+        "new": "if after.monitor.step_freeing && !after.monitor.step_retried && !after.brain.held.is_empty() && after.inbox.len() <= 1 {",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it"
+      },
+      {
+        "id": "E4-55",
+        "name": "ReserveAll queues no Reserve of the head, so a freeing step retries nothing (P6b credits only a Reserve of the head)",
+        "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "old": "let id = head.entry.order.1; self.front(vec![Op::Section(Section::Reserve { id })]);",
+        "new": "let _ = head;",
+        "crate": "ezsdr-radio-uhd",
+        "test_bin": "lib",
+        "filter": "inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it"
+      }
   ]

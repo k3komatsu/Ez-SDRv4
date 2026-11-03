@@ -629,7 +629,7 @@ fn s15a_a_real_clock_run_wakes_each_idle_actor_by_its_own_queue() {
     sh.push(&sh.k_fifo, ClockCmd::Serve { stream: 0 });
     poll("K takes the command pushed to its FIFO", || !sh.k_fifo.nonempty());
     // The brain takes the input pushed to its inbox.
-    sh.send(Input::Timer { stream: 0 });
+    sh.send(Input::Timer { stream: 0, now: 0 });
     poll("the brain takes the input pushed to its inbox", || !sh.inbox.nonempty());
     sh.send(Input::Shutdown);
     poll("the brain ends", || sh.brain().exit == super::core::Exit::Terminated);
@@ -658,7 +658,40 @@ fn s15d_an_earlier_booking_wakes_a_timer_that_sleeps_on_a_later_deadline() {
     poll("the timer evaluated the later booking and sleeps on its deadline", || sh.sched.waiting(Actor::Timer).is_some_and(|n| n > idle_count));
     super::threads::route(sh, Command::Timer { stream: 0, at: earlier });
     poll("the earlier booking is delivered", || sh.timers.lock().unwrap().iter().all(|&(_, at)| at == later));
-    assert_eq!(sh.timers.lock().unwrap().clone(), vec![(0, later)], "only the earlier booking was delivered");
+    assert_eq!(sh.timers.lock().unwrap().clone(), vec![(super::core::Timer::Drain(0), later)], "only the earlier booking was delivered");
+    sh.send(Input::Shutdown);
+    poll("the brain ends", || sh.brain().exit == Exit::Terminated);
+    let panics = rt.stop(JOIN).expect("every thread joins");
+    assert!(panics.is_empty(), "{panics:?}");
+}
+
+/// The timer thread delivers a booked capacity timer as the brain's capacity input (not a drain deadline): the value A, finished ok, counts for K
+/// until its instant `at`; the held B waits for it. Once the fake's clock reaches `at` the timer thread's input frees K and the brain reserves B,
+/// so a settings command for B is routed. The wait is on the condition, with a bound far above the 80 ms it takes (note 37).
+#[test]
+fn s15e_the_timer_thread_delivers_a_capacity_timer_that_frees_k() {
+    use super::cell::{Outcome, Terminal, ValueState};
+    use super::core::{Command, Exit};
+    use super::fixtures::push;
+    let fake = Arc::new(FakeDevice::new(FakeConfig { master_clock_rate: 1000, ..FakeConfig::default() }));
+    fake.set_time_zero(false).unwrap();
+    let at = fake.time_now().unwrap() + 80;
+    let mut c = cell(Phase::Streaming(seg(0)), 0, None, 0);
+    push(&mut c, value(0, at, 1), ValueState::Done(Terminal::Call(Outcome::Ok)));
+    let mut w = World::new(vec![c], Vec::new(), super::thread_tests::params());
+    w.brain.device_bound = 1;
+    w.brain.held.push(held(0, value(0, at + 500, 2), 1));
+    // The booking the brain made (its bookkeeping is cleared only by a capacity input, not by a drain deadline).
+    w.brain.capacity_timer = Some(at);
+    let rt = Runtime::start_fake(&w, fake.clone(), 1);
+    let sh = &rt.sh;
+    // Booked through the brain's routing while the timer thread sleeps with nothing booked: the routing must wake it.
+    poll("the timer is inside its wait", || sh.sched.waiting(super::force::Actor::Timer).is_some());
+    super::threads::route(sh, Command::CapacityTimer { at });
+    poll("the capacity timer is delivered, K frees and the held value is reserved", || sh.sink().routed.iter().any(|c| matches!(c, Command::Settings(cmd) if cmd.id == 2)));
+    assert!(sh.brain().now >= at, "the delivery carried the device time");
+    assert_eq!(sh.brain().capacity_timer, None, "it arrived as a capacity input");
+    assert!(sh.timers.lock().unwrap().is_empty());
     sh.send(Input::Shutdown);
     poll("the brain ends", || sh.brain().exit == Exit::Terminated);
     let panics = rt.stop(JOIN).expect("every thread joins");

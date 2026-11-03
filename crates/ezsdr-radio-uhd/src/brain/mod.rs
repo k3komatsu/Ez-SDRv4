@@ -3,6 +3,7 @@
 //! ([`rules`]) and the resumable device model ([`model`]). Test code only until the harness
 //! of stage E1b drives it; nothing outside this module calls it.
 
+mod bounds_tests;
 mod cases;
 mod cell;
 mod conformance;
@@ -95,6 +96,9 @@ pub(crate) mod fixtures {
         w.device.open(0, vec![0]);
         w.device.t = 12;
         w.monitor.reserved.insert(1, (0, seg(0), 1));
+        // Its `Done` was taken: a consumption removes a value only after its terminal input.
+        w.brain.results.push((1, Terminal::Call(Outcome::Ok)));
+        w.monitor.done_processed.insert(1);
         w.rx[0].fifo.push_back(RxOp::Stop { at: None, epoch: 1 });
         w.brain.deferred.push(Request::Restore { channel: 0 });
         w

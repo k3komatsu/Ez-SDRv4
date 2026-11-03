@@ -6,7 +6,7 @@
 //! past is in the monitor (world.rs), never a history.
 
 use super::cell::{Drain, Outcome, Phase, Terminal, ValueState};
-use super::core::{Change, Command, Disposition, IN_FLIGHT_BOUND, Op, RxOp, Section, SetCmd};
+use super::core::{Change, Command, Disposition, Op, RxOp, Section, SetCmd};
 use super::dst::Model;
 use super::rules::RxCall;
 use super::world::{Event, Ident, RStep, SStep, Who, World};
@@ -15,14 +15,15 @@ use super::world::{Event, Ident, RStep, SStep, Who, World};
 /// and I8 (a chain applies at most one write per sample, in order).
 pub(super) fn safety(w: &World) -> Result<(), String> {
     i5_state(w)?;
-    i8(w)
+    i8(w)?;
+    p6(w)
 }
 
 /// The transition checks of one step: `before` is the state the event was taken in, `after` the
 /// state it produced.
 pub(super) fn transition(before: &World, event: &Event, after: &World) -> Result<(), String> {
     type StepCheck = fn(&World, &Event, &World) -> Result<(), String>;
-    let checks: [StepCheck; 14] = [i1, i7, i2, i3, i4, i5, i6, i9, i11, i12, i13, i14, i15, i16];
+    let checks: [StepCheck; 18] = [i1, i7, i2, i3, i4, i5, i6, i9, i11, i12, i13, i14, i15, i16, i17, capacity_timer_inert, p6a, p6b];
     for check in checks {
         check(before, event, after)?;
     }
@@ -43,13 +44,14 @@ fn same_reservation(a: &Ident, b: &Ident) -> bool {
 }
 
 /// A consumption fact agrees with the value's device application: the same reservation and, for
-/// evidence, the same sample. A leftover consumption comes at a later sample by design (u11b). The
+/// evidence, a sample at or after the application's (the acceptance is recorded where the call returns, which can be after the device
+/// applied the write: the host then credits a later sample, never an earlier one). A leftover consumption comes at a later sample by design (u11b). The
 /// channel of each observed fact is the device's (the DSP chain, the receiving streamer), so the
 /// fact is also compared with the reservation's intent: a write that reached another channel disagrees.
 fn agrees(w: &World, id: u64, fact: &Ident, same_sample: bool) -> bool {
     let intended = w.monitor.reserved.get(&id).is_some_and(|&(channel, segment, epoch)| (channel, segment, epoch) == (fact.channel, fact.segment, fact.epoch));
     match w.monitor.applied.get(&id) {
-        Some(applied) => intended && same_reservation(applied, fact) && (!same_sample || applied.sample == fact.sample),
+        Some(applied) => intended && same_reservation(applied, fact) && (!same_sample || applied.sample <= fact.sample),
         None => false,
     }
 }
@@ -330,13 +332,157 @@ fn i9(before: &World, event: &Event, _after: &World) -> Result<(), String> {
     Ok(())
 }
 
-/// I11: a reservation is refused while the cell holds the in-flight bound.
+/// K as the monitor sees it at the true device time: the values reserved whose command is queued, taken or running (no terminal, not
+/// cancelled), plus those that finished ok or partly and whose instant has not come. Written from the monitor's facts alone, a second
+/// implementation of the brain's `counts_for_k` on purpose (I11′).
+fn k_load(w: &World) -> usize {
+    k_load_at(w, w.device.t)
+}
+
+/// [`k_load`] at device time `t`: the true time, or the time the brain knows (P6's step check reads the state the step itself saw).
+fn k_load_at(w: &World, t: i64) -> usize {
+    w.monitor
+        .reserved
+        .keys()
+        .filter(|id| {
+            let lost = w.monitor.streams.get(id).is_some_and(|k| w.cells[*k].phase == Phase::Lost);
+            match w.monitor.terminals.get(id) {
+                None => !w.monitor.cancelled.contains(id),
+                Some(Terminal::Call(Outcome::Ok | Outcome::Partial)) => !lost && w.monitor.instants.get(id).is_some_and(|e| t < *e),
+                Some(_) => false,
+            }
+        })
+        .count()
+}
+
+/// D of stream `k` as the monitor sees it: the values reserved on it, minus those whose `Done` the brain took and whose obligation is over
+/// (a terminal other than ok or partial, a consumption seen, or a lost chain).
+fn d_resident(w: &World, k: usize) -> usize {
+    let lost = w.cells[k].phase == Phase::Lost;
+    w.monitor
+        .streams
+        .iter()
+        .filter(|&(_, stream)| *stream == k)
+        .filter(|&(id, _)| {
+            let over = matches!(w.monitor.terminals.get(id), Some(t) if !matches!(t, Terminal::Call(Outcome::Ok | Outcome::Partial)))
+                || w.monitor.evidence.contains_key(id)
+                || w.monitor.leftovers.contains_key(id)
+                || lost;
+            !(w.monitor.done_processed.contains(id) && over)
+        })
+        .count()
+}
+
+/// I11′: a reservation is made only while the device is below K and the chain below D, each counted from the monitor's facts.
 fn i11(before: &World, _event: &Event, after: &World) -> Result<(), String> {
     for (k, id) in reserved_by(before, after) {
-        let held = before.cells[k].in_flight.len();
-        if held >= IN_FLIGHT_BOUND {
-            return Err(format!("I11: value {id} reserved on stream {k} with {held} values in flight, the bound is {IN_FLIGHT_BOUND}"));
+        let (load, resident) = (k_load(before), d_resident(before, k));
+        if load >= before.params.k {
+            return Err(format!("I11: value {id} reserved on stream {k} with {load} values counted against the device, K is {}", before.params.k));
         }
+        if resident >= before.params.d {
+            return Err(format!("I11: value {id} reserved on stream {k} with {resident} resident values, D is {}", before.params.d));
+        }
+    }
+    Ok(())
+}
+
+/// D of stream `k` as the brain can know it (P6): the values reserved on it, minus those whose `Done` the brain took and whose obligation the
+/// brain has seen over (a terminal other than ok or partial, a consumption the brain took, or a lost chain). A consumption the receive
+/// executor published but the brain has not taken yet does not free a place the brain cannot yet use.
+fn d_known(w: &World, k: usize) -> usize {
+    let lost = w.cells[k].phase == Phase::Lost;
+    w.monitor
+        .streams
+        .iter()
+        .filter(|&(_, stream)| *stream == k)
+        .filter(|&(id, _)| {
+            let consumed = w.monitor.dispositions.get(id) == Some(&Disposition::Consumed) || w.brain.leftovers.contains(id);
+            let over = matches!(w.monitor.terminals.get(id), Some(t) if !matches!(t, Terminal::Call(Outcome::Ok | Outcome::Partial))) || consumed || lost;
+            !(w.monitor.done_processed.contains(id) && over)
+        })
+        .count()
+}
+
+/// Whether `head`, the head of the held list, could be reserved in `w` by the cell's own conditions.
+fn head_reservable(w: &World, head: &super::core::Held) -> bool {
+    w.cells[head.stream].clone().reserve(head.entry.clone(), head.generation).is_ok()
+}
+
+/// P6 (the progress half of I11′), the state check: at a state with nothing in flight toward the brain (empty inbox and operations, no
+/// pending send of an executor) the head of the held list is not reservable by the cell's conditions, K at the true device time and D
+/// together, unless a capacity timer already due will deliver the time. A missing or late timer, or time read from R's progress, shows here.
+fn p6(w: &World) -> Result<(), String> {
+    let executors_quiet = !w.settings.program.iter().any(|step| matches!(step, SStep::Send)) && !w.rx.iter().any(|r| r.program.iter().any(|step| matches!(step, RStep::Send(_))));
+    let quiet = w.inbox.is_empty() && executors_quiet && w.brain.ops.is_empty() && !w.brain.dead() && w.brain.exit == super::core::Exit::Running;
+    let Some(head) = w.brain.held.first().filter(|_| quiet) else { return Ok(()) };
+    if w.timers.iter().any(|(timer, at)| *timer == super::core::Timer::Capacity && *at <= w.device.t) {
+        return Ok(());
+    }
+    let k = head.stream;
+    if head_reservable(w, head) && k_load(w) < w.params.k && d_known(w, k) < w.params.d {
+        return Err(format!("P6: the held head {} on stream {k} is reservable (K load {}, D {}) and no re-evaluation is due", head.entry.order.1, k_load(w), d_known(w, k)));
+    }
+    Ok(())
+}
+
+/// P6a, in the section: at a reservation section event (`Reserve` of the held head, the one section that tries held values) the cells at
+/// that very event, K at the brain's time and D decide: if the head is reservable, the section reserves it. The section is one atomic event, so
+/// no executor step can matter; this catches a wrong retry decision.
+fn p6a(before: &World, event: &Event, after: &World) -> Result<(), String> {
+    let (Event::BOp, Some(Op::Section(Section::Reserve { id })), Some(head)) = (event, before.brain.ops.front(), before.brain.held.first()) else { return Ok(()) };
+    if head.entry.order.1 != *id || before.brain.dead() {
+        return Ok(());
+    }
+    let k = head.stream;
+    let reservable = head_reservable(before, head) && k_load_at(before, before.brain.now) < before.params.k && d_known(before, k) < before.params.d;
+    if reservable && after.brain.held.iter().any(|held| held.entry.order.1 == *id) {
+        return Err(format!("P6a: the reservation section left the held head {id} on stream {k} held although the cells, K (at the brain's time {}) and D allow it", before.brain.now));
+    }
+    Ok(())
+}
+
+/// P6b, the obligation: a brain step that took an input of the freeing set (every input but a release, the shutdown and a panic: each can free
+/// a bound or open a reservation condition) and ends with values held ran a `Reserve` of the held head among its operations (a `ReserveAll` alone does not count). Checked when the
+/// step's operations are done, from the monitor's record of the step; nothing is exempt, neither an executor step between the operations nor
+/// anything queued behind the step.
+fn p6b(_before: &World, event: &Event, after: &World) -> Result<(), String> {
+    if !matches!(event, Event::BOp) || !after.brain.ops.is_empty() || after.brain.dead() {
+        return Ok(());
+    }
+    if after.monitor.step_freeing && !after.monitor.step_retried && !after.brain.held.is_empty() {
+        return Err(format!("P6b: a step that took a freeing input ended with {} values held and ran no reservation section", after.brain.held.len()));
+    }
+    Ok(())
+}
+
+/// I17: a cell that is `Stopping` becomes `Armed` or `Streaming` only at the executor's completed start, the one the brain issued for the
+/// epoch the cell is in (the call carries the epoch of its `Start`).
+fn i17(before: &World, event: &Event, after: &World) -> Result<(), String> {
+    for (k, cell) in after.cells.iter().enumerate() {
+        if !matches!(before.cells[k].phase, Phase::Stopping(_)) || !matches!(cell.phase, Phase::Armed(_) | Phase::Streaming(_)) {
+            continue;
+        }
+        let confirmed = match (event, before.rx[k].program.front()) {
+            (Event::RResult(j), Some(RStep::Result(RxCall::Begin { epoch, .. }))) => *j == k && *epoch == cell.epoch && before.monitor.starts.contains(&(k, *epoch)),
+            _ => false,
+        };
+        if !confirmed {
+            return Err(format!("I17: stream {k} was Stopping and is now {:?} without a completed start the brain issued for epoch {}", cell.phase, cell.epoch));
+        }
+    }
+    Ok(())
+}
+
+/// A capacity timer's operation only re-evaluates: it changes no cell's phase, drain, outstanding command or epoch, and routes no receive command.
+fn capacity_timer_inert(before: &World, event: &Event, after: &World) -> Result<(), String> {
+    if !matches!((event, before.brain.ops.front()), (Event::BOp, Some(Op::Section(Section::CapacityTimer)))) {
+        return Ok(());
+    }
+    let same = before.cells.iter().zip(&after.cells).all(|(a, b)| (a.phase, a.drain, a.outstanding, a.epoch) == (b.phase, b.drain, b.outstanding, b.epoch));
+    let sends = routed(before, after).iter().any(|command| matches!(command, Command::Rx { .. }));
+    if !same || sends {
+        return Err("B8: a capacity timer changed a cell's phase, drain, command or epoch, or sent a receive command".to_string());
     }
     Ok(())
 }
@@ -515,7 +661,19 @@ mod tests {
     use super::*;
 
     fn params() -> Params {
-        Params { horizon: 8, epilogue: 8, recv_timeout: 8, queue_cap: 4, fifo_cap: 4, drain_window: DRAIN_WINDOW, packet: crate::brain::world::PACKET, call_faults: false, panic_step: None }
+        Params {
+            horizon: 8,
+            epilogue: 8,
+            recv_timeout: 8,
+            queue_cap: 4,
+            fifo_cap: 4,
+            drain_window: DRAIN_WINDOW,
+            packet: crate::brain::world::PACKET,
+            call_faults: false,
+            panic_step: None,
+            k: crate::brain::core::DEVICE_BOUND,
+            d: crate::brain::core::CHAIN_BOUND,
+        }
     }
 
     fn world(cells: Vec<Cell>) -> World {
@@ -652,6 +810,25 @@ mod tests {
         violates(i4(&before, &Event::BOp, &reported), "I4:");
     }
 
+    /// The acceptance is recorded where the call returns, which can be after the device applied the write: the host then credits a later
+    /// sample (legal); a sample before the application is never evidence.
+    #[test]
+    fn inv_i4_evidence_after_the_application_is_legal_and_before_it_is_not() {
+        let applied_at = |sample: i64| Ident { sample, ..ident() };
+        let mut before = world(vec![streaming()]);
+        before.monitor.reserved.insert(5, (0, seg(0), 1));
+        before.monitor.applied.insert(5, applied_at(4));
+        let mut later = before.clone();
+        later.monitor.evidence.insert(5, applied_at(6));
+        assert_eq!(i4(&before, &Event::BOp, &later), Ok(()));
+        let mut same = before.clone();
+        same.monitor.evidence.insert(5, applied_at(4));
+        assert_eq!(i4(&before, &Event::BOp, &same), Ok(()));
+        let mut earlier = before.clone();
+        earlier.monitor.evidence.insert(5, applied_at(3));
+        violates(i4(&before, &Event::BOp, &earlier), "I4:");
+    }
+
     #[test]
     fn inv_i4_unreceived_application_reported_is_legal() {
         let mut before = world(vec![streaming()]);
@@ -672,7 +849,7 @@ mod tests {
         let mut before = world(vec![cell(Phase::Streaming(seg(0)), 0, Some(16), 6)]);
         before.cells[0].epoch = 2;
         before.cells[0].retiring = Some(Retiring { epoch: 1, cut: Some(8), origin: 0, published: false });
-        before.rx[0].recv = Some(RecvCall { recv: recv(1, &[]), deadline: 20 });
+        before.rx[0].recv = Some(RecvCall { recv: recv(1, &[]), deadline: 20, late: None });
         let mut after = before.clone();
         after.cells[0].progress = 10;
         violates(before.transition(&Event::RPublish(0), &after), "I6:");
@@ -706,17 +883,222 @@ mod tests {
         violates(before.transition(&Event::RCall(0), &after), "I9:");
     }
 
-    #[test]
-    fn inv_i11_in_flight_over_bound_is_violation() {
-        let mut c = streaming();
-        for id in 1..=IN_FLIGHT_BOUND as u64 {
-            push(&mut c, value(0, 10, id), ValueState::Queued);
+    /// A value the monitor knows: reserved on stream 0 with instant `e`, and its settings terminal if any.
+    fn known(w: &mut World, id: u64, e: i64, terminal: Option<Terminal>) {
+        w.monitor.reserved.insert(id, (0, seg(0), 1));
+        w.monitor.streams.insert(id, 0);
+        w.monitor.instants.insert(id, e);
+        if let Some(terminal) = terminal {
+            w.monitor.terminals.insert(id, terminal);
         }
-        let mut before = world(vec![c]);
-        before.brain.held.push(held(0, value(0, 10, 9), 1));
+    }
+
+    /// `before` with value 9 held, and `after` with it reserved (the transition under test).
+    fn reserving(before: &mut World) -> World {
+        before.brain.held.push(held(0, value(0, 12, 9), 1));
         let mut after = before.clone();
-        push(&mut after.cells[0], value(0, 10, 9), ValueState::Queued);
+        after.brain.held.clear();
+        push(&mut after.cells[0], value(0, 12, 9), ValueState::Queued);
+        after
+    }
+
+    fn k_world(k: usize, d: usize) -> World {
+        let mut w = world(vec![streaming()]);
+        w.params.k = k;
+        w.params.d = d;
+        w
+    }
+
+    #[test]
+    fn inv_i11_device_over_k_is_violation() {
+        let mut before = k_world(2, 64);
+        known(&mut before, 1, 20, None);
+        known(&mut before, 2, 20, Some(Terminal::Call(Outcome::Ok)));
+        before.device.t = 5;
+        let after = reserving(&mut before);
         violates(before.transition(&Event::BOp, &after), "I11:");
+    }
+
+    #[test]
+    fn inv_i11_k_frees_at_the_instant_and_not_for_refused_dropped_or_cancelled() {
+        let mut before = k_world(2, 64);
+        known(&mut before, 1, 20, Some(Terminal::Call(Outcome::Ok)));
+        known(&mut before, 2, 20, Some(Terminal::Call(Outcome::Ok)));
+        before.device.t = 20;
+        let after = reserving(&mut before);
+        assert_eq!(before.transition(&Event::BOp, &after), Ok(()), "a finished value is not counted once the device time reaches its instant");
+        for terminal in [Terminal::Call(Outcome::Refused), Terminal::Dropped, Terminal::Abandoned] {
+            let mut before = k_world(1, 64);
+            known(&mut before, 1, 99, Some(terminal));
+            let after = reserving(&mut before);
+            assert_eq!(before.transition(&Event::BOp, &after), Ok(()), "{terminal:?} is not counted");
+        }
+        let mut before = k_world(1, 64);
+        known(&mut before, 1, 99, None);
+        before.monitor.cancelled.insert(1);
+        let after = reserving(&mut before);
+        assert_eq!(before.transition(&Event::BOp, &after), Ok(()), "a cancelled value is not counted");
+    }
+
+    #[test]
+    fn inv_i11_chain_over_d_is_violation_and_a_consumed_done_value_is_not_resident() {
+        let mut before = k_world(64, 2);
+        known(&mut before, 1, 3, Some(Terminal::Call(Outcome::Ok)));
+        known(&mut before, 2, 3, Some(Terminal::Call(Outcome::Ok)));
+        before.device.t = 50;
+        let after = reserving(&mut before);
+        violates(before.transition(&Event::BOp, &after), "I11:");
+        // Done taken and consumed: value 1 has left the cell.
+        before.monitor.done_processed.insert(1);
+        before.monitor.evidence.insert(1, ident());
+        let after = reserving(&mut before);
+        assert_eq!(before.transition(&Event::BOp, &after), Ok(()));
+    }
+
+    #[test]
+    fn inv_p6_a_reservable_head_with_nothing_in_flight_is_violation() {
+        let mut w = k_world(1, 64);
+        w.brain.held.push(held(0, value(0, 12, 9), 1));
+        violates(w.safety(), "P6:");
+    }
+
+    #[test]
+    fn inv_p6_is_silent_while_an_input_is_on_its_way_or_a_due_timer_waits() {
+        let mut w = k_world(1, 64);
+        w.brain.held.push(held(0, value(0, 12, 9), 1));
+        let mut busy = w.clone();
+        busy.inbox.push_back(Input::CapacityTimer { now: 0 });
+        assert_eq!(busy.safety(), Ok(()), "an input on its way");
+        let mut due = w.clone();
+        due.timers.push((crate::brain::core::Timer::Capacity, 0));
+        assert_eq!(due.safety(), Ok(()), "a due capacity timer");
+        let mut blocked = w.clone();
+        known(&mut blocked, 1, 99, None);
+        assert_eq!(blocked.safety(), Ok(()), "K is full");
+    }
+
+    /// The Done step of a K = 1 world (A finished past its instant, B held, `inbox = [Done(A, now >= e_A), Shutdown, tail]`), taken event by event
+    /// with every oracle checked: `interleave` runs an executor step (`RCheck`, which changes no cell and sends nothing) right after the
+    /// `BStep`. Returns the world after the step's operations.
+    fn done_step(tail: &[Input], interleave: bool) -> World {
+        let mut c = streaming();
+        push(&mut c, value(0, 10, 1), ValueState::Done(Terminal::Call(Outcome::Ok)));
+        let mut w = k_world(1, 64);
+        w.cells[0] = c;
+        w.rx[0].handle = Some(1);
+        known(&mut w, 1, 10, Some(Terminal::Call(Outcome::Ok)));
+        w.brain.held.push(held(0, value(0, 14, 2), 1));
+        w.inbox = VecDeque::from([Input::Done { id: 1, terminal: Terminal::Call(Outcome::Ok), now: 12 }, Input::Shutdown]);
+        w.inbox.extend(tail.iter().cloned());
+        w.device.t = 12;
+        let mut events = vec![Event::BStep];
+        if interleave {
+            events.push(Event::RCheck(0));
+        }
+        for event in events.into_iter().chain(std::iter::repeat_n(Event::BOp, 8)) {
+            if event == Event::BOp && w.brain.ops.is_empty() {
+                break;
+            }
+            let before = w.clone();
+            w.apply(&event);
+            before.transition(&event, &w).unwrap_or_else(|why| panic!("{tail:?} {event:?}: {why}"));
+        }
+        w
+    }
+
+    /// P6b: the step that took the freeing `Done` runs a reservation section and reserves B before any queued input is taken, with three queue
+    /// tails behind the `Shutdown` (nothing, an unrelated boundary, a capacity timer) and with an executor step in between.
+    #[test]
+    fn inv_p6b_the_step_that_frees_k_reserves_the_held_head_whatever_is_queued_behind_it() {
+        let tails: [&[Input]; 3] = [&[], &[Input::Boundary(super::super::core::Boundary::FirstSample { stream: 0 })], &[Input::CapacityTimer { now: 12 }]];
+        for tail in tails {
+            for interleave in [false, true] {
+                let w = done_step(tail, interleave);
+                assert!(w.monitor.step_freeing && w.monitor.step_retried, "{tail:?} {interleave}: the step ran its reservation section");
+                assert!(w.cells[0].state_of(2).is_some() && w.brain.held.is_empty(), "{tail:?} {interleave}: B was reserved by the Done's step");
+                assert_eq!(w.inbox.len(), 1 + tail.len(), "{tail:?}: the Shutdown and the tail are still queued");
+                // The same step with the retry omitted: the record says no reservation section ran, and B is still held. Neither the queue
+                // behind the step nor an executor step in between excuses it.
+                let mut omitted = w.clone();
+                omitted.monitor.step_retried = false;
+                omitted.cells[0].in_flight.retain(|f| f.entry.order.1 != 2);
+                omitted.brain.held.push(held(0, value(0, 14, 2), 1));
+                violates(omitted.transition(&Event::BOp, &omitted.clone()), "P6b:");
+                // A step of an input that does not free (a release) owes no retry, and a step that left nothing held owes none.
+                let mut release = omitted.clone();
+                release.monitor.step_freeing = false;
+                assert_eq!(release.transition(&Event::BOp, &release.clone()), Ok(()));
+                let mut empty = omitted.clone();
+                empty.brain.held.clear();
+                assert_eq!(empty.transition(&Event::BOp, &empty.clone()), Ok(()));
+            }
+        }
+    }
+
+    /// P6a: at the `Reserve` of the held head, the cells at that event, K at the brain's time and D decide; a section that skips a reservable
+    /// head is the violation, and a head the bounds refuse owes nothing.
+    #[test]
+    fn inv_p6a_a_reservation_section_reserves_a_reservable_head() {
+        let section = Op::Section(Section::Reserve { id: 9 });
+        let mut before = k_world(1, 64);
+        before.brain.held.push(held(0, value(0, 12, 9), 1));
+        before.brain.ops = VecDeque::from([section.clone()]);
+        let skipped = before.clone();
+        violates(before.transition(&Event::BOp, &skipped), "P6a:");
+        let reserved = {
+            let mut after = before.clone();
+            after.brain.held.clear();
+            after.brain.ops.clear();
+            push(&mut after.cells[0], value(0, 12, 9), ValueState::Queued);
+            after
+        };
+        assert_eq!(p6a(&before, &Event::BOp, &reserved), Ok(()));
+        // K full at the brain's time: the head is not reservable, and skipping it is right.
+        let mut full = before.clone();
+        known(&mut full, 1, 99, None);
+        push(&mut full.cells[0], value(0, 99, 1), ValueState::Taken);
+        assert_eq!(p6a(&full, &Event::BOp, &full.clone()), Ok(()));
+        // The oracle counts K at the brain's time, not the true time: A's instant has come in true time but not for the brain.
+        let mut stale = before.clone();
+        push(&mut stale.cells[0], value(0, 10, 1), ValueState::Done(Terminal::Call(Outcome::Ok)));
+        known(&mut stale, 1, 10, Some(Terminal::Call(Outcome::Ok)));
+        stale.device.t = 12;
+        stale.brain.now = 9;
+        assert_eq!(p6a(&stale, &Event::BOp, &stale.clone()), Ok(()));
+        stale.brain.now = 10;
+        violates(p6a(&stale, &Event::BOp, &stale.clone()), "P6a:");
+    }
+
+    #[test]
+    fn inv_i17_stopping_reopening_without_a_completed_start_is_violation() {
+        let mut before = world(vec![cell(Phase::Stopping(seg(0)), 0, Some(16), 0)]);
+        let mut after = before.clone();
+        after.cells[0].phase = Phase::Armed(seg(0));
+        violates(before.transition(&Event::BOp, &after), "I17:");
+        // The legal path: the completed start of the cell's epoch the brain issued.
+        before.rx[0].program = VecDeque::from([RStep::Result(RxCall::Begin { at: 0, epoch: 1 })]);
+        before.monitor.starts.insert((0, 1));
+        assert_eq!(before.transition(&Event::RResult(0), &after), Ok(()));
+        // A start of another epoch, or one the brain never issued, does not reopen it.
+        before.rx[0].program = VecDeque::from([RStep::Result(RxCall::Begin { at: 0, epoch: 0 })]);
+        before.monitor.starts.insert((0, 0));
+        violates(before.transition(&Event::RResult(0), &after), "I17:");
+        before.rx[0].program = VecDeque::from([RStep::Result(RxCall::Begin { at: 0, epoch: 1 })]);
+        before.monitor.starts.remove(&(0, 1));
+        violates(before.transition(&Event::RResult(0), &after), "I17:");
+    }
+
+    #[test]
+    fn inv_capacity_timer_that_stops_or_changes_a_cell_is_violation() {
+        let mut before = world(vec![streaming()]);
+        before.brain.ops = VecDeque::from([Op::Section(Section::CapacityTimer)]);
+        let mut after = before.clone();
+        assert_eq!(before.transition(&Event::BOp, &after), Ok(()));
+        after.cells[0].drain = Drain::Ended;
+        violates(before.transition(&Event::BOp, &after), "B8:");
+        let mut after = before.clone();
+        after.rx[0].fifo.push_back(RxOp::Terminate);
+        violates(before.transition(&Event::BOp, &after), "B8:");
     }
 
     #[test]
@@ -984,13 +1366,13 @@ mod tests {
 
     /// Exhaustive search of the smallest happy world that keeps the value, the Stop and the Shutdown:
     /// the value at sample 1, the Stop at 2 (asking for 1), the Shutdown at 2, horizon 1, epilogue 1, recv timeout and drain
-    /// window of one tick. The search is complete: 215,949 states, 516,848 transitions, about 5 s in release on sim02
-    /// (165,497 before a start below `now` could be missed, E1 fix round 2: the StartNext at 1 is delivered at 1, so a lagging
+    /// window of one tick. The search is complete: 304,486 states, 701,574 transitions, about 29 s in debug (E4a1 fix rounds: acceptance at the call's return, P6b's step record in the key; 215,949 states before, about 5 s in release on sim02; 215,949 states, 516,848 transitions, about 5 s in release on sim02 before;
+    /// 165,497 before a start below `now` could be missed, E1 fix round 2: the StartNext at 1 is delivered at 1, so a lagging
     /// actor misses it; 64,763 before the key kept the witness state a later check reads and time went on silently after
-    /// the end); every oracle passes, and all six declared witnesses are reached.
+    /// the end). Every oracle passes, and all six declared witnesses are reached.
     #[test]
     fn oracle_happy_path_passes() {
-        let config = Config { name: "oracle happy path", budget: 300_000, wall: Duration::MAX, witnesses: HAPPY_WITNESSES };
+        let config = Config { name: "oracle happy path", budget: 400_000, wall: Duration::MAX, witnesses: HAPPY_WITNESSES };
         let verdict = explore(&config, happy_world(1, 1, 1, 2, 2));
         println!("{}", verdict.report());
         assert_complete(&verdict);

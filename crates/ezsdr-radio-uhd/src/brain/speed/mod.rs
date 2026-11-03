@@ -152,17 +152,18 @@ pub(crate) enum Stage {
 }
 
 /// The reasons a reservation attempt is rejected, in the order of [`reason_index`].
-pub(crate) const REASONS: [&str; 7] = ["bound", "phase", "channel", "generation", "origin", "cut", "progress"];
+pub(crate) const REASONS: [&str; 8] = ["k", "d", "phase", "channel", "generation", "origin", "cut", "progress"];
 
 pub(crate) fn reason_index(reason: NotReserved) -> usize {
     match reason {
-        NotReserved::Bound => 0,
-        NotReserved::Refused(Refusal::Phase) => 1,
-        NotReserved::Refused(Refusal::Channel) => 2,
-        NotReserved::Refused(Refusal::Generation) => 3,
-        NotReserved::Refused(Refusal::Origin) => 4,
-        NotReserved::Refused(Refusal::Cut) => 5,
-        NotReserved::Refused(Refusal::Progress) => 6,
+        NotReserved::DeviceBound => 0,
+        NotReserved::ChainBound => 1,
+        NotReserved::Refused(Refusal::Phase) => 2,
+        NotReserved::Refused(Refusal::Channel) => 3,
+        NotReserved::Refused(Refusal::Generation) => 4,
+        NotReserved::Refused(Refusal::Origin) => 5,
+        NotReserved::Refused(Refusal::Cut) => 6,
+        NotReserved::Refused(Refusal::Progress) => 7,
     }
 }
 
@@ -207,7 +208,7 @@ impl Bench {
             agg.reserved_ns = at;
         } else if let Some(reason) = reason {
             agg.by_reason[reason_index(reason)] += 1;
-            if reason == NotReserved::Bound {
+            if matches!(reason, NotReserved::DeviceBound | NotReserved::ChainBound) {
                 self.bound_rejections.fetch_add(1, Relaxed);
             }
         }
@@ -835,7 +836,7 @@ mod tests {
             last_in_flight: Mutex::new(Vec::new()),
             clock: timing,
         };
-        let bound = Some(NotReserved::Bound);
+        let bound = Some(NotReserved::DeviceBound);
         let phase = Some(NotReserved::Refused(Refusal::Phase));
         for (id, reserved, reason) in
             [(1, false, bound), (1, false, bound), (1, false, bound), (1, false, phase), (1, true, None), (2, false, Some(NotReserved::Refused(Refusal::Cut))), (99, false, bound)]
@@ -843,11 +844,11 @@ mod tests {
             bench.reserve_attempt(id, reserved, reason);
         }
         let table = bench.reserve.lock().unwrap().clone();
-        assert_eq!((table[0].attempts, table[0].by_reason, table[0].reserved_ns != 0), (5, [3, 1, 0, 0, 0, 0, 0], true), "bound three times, phase once, then reserved");
-        assert_eq!((table[1].attempts, table[1].by_reason, table[1].reserved_ns), (1, [0, 0, 0, 0, 0, 1, 0], 0), "a cut refusal, never reserved");
+        assert_eq!((table[0].attempts, table[0].by_reason, table[0].reserved_ns != 0), (5, [3, 0, 1, 0, 0, 0, 0, 0], true), "bound three times, phase once, then reserved");
+        assert_eq!((table[1].attempts, table[1].by_reason, table[1].reserved_ns), (1, [0, 0, 0, 0, 0, 0, 1, 0], 0), "a cut refusal, never reserved");
         assert_eq!((table[2].attempts, bench.reserve_dropped.load(Relaxed)), (0, 1), "id 99 is beyond the table");
         assert_eq!(bench.bound_rejections.load(Relaxed), 3, "only the three rejections at the bound count, not the phase or cut refusals (two, so a count of the others differs)");
-        assert_eq!(REASONS[reason_index(NotReserved::Bound)], "bound");
+        assert_eq!(REASONS[reason_index(NotReserved::DeviceBound)], "k");
         assert_eq!(REASONS[reason_index(NotReserved::Refused(Refusal::Progress))], "progress");
     }
 

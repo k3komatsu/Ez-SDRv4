@@ -103,8 +103,10 @@ pub(crate) fn settings_check(failure: bool, in_hand: Option<u64>, fifo: &mut Vec
 /// A device call the receive executor makes (the cell's calls, and the lifecycle calls that have no cell state).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RxCall {
+    /// `epoch` is the epoch the brain issued the start for (I17 matches the confirmation with it).
     Begin {
         at: i64,
+        epoch: u64,
     },
     /// `epoch` is the segment the stop ends: its Finished boundary carries it.
     Stop {
@@ -152,7 +154,7 @@ impl CallResult {
 /// acknowledgement follows (a plan change). `Terminate` runs nothing.
 pub(crate) fn call_of(op: RxOp) -> Option<(RxCall, bool, bool)> {
     match op {
-        RxOp::Start { at, .. } => Some((RxCall::Begin { at }, false, false)),
+        RxOp::Start { at, epoch } => Some((RxCall::Begin { at, epoch }, false, false)),
         RxOp::Stop { epoch, .. } => Some((RxCall::Stop { epoch }, false, false)),
         RxOp::Flush => Some((RxCall::FlushStart, false, false)),
         RxOp::Open => Some((RxCall::Open, true, false)),
@@ -181,7 +183,7 @@ pub(crate) enum CallPlan {
 
 pub(crate) fn plan_call(call: RxCall, open: bool) -> CallPlan {
     match call {
-        RxCall::Begin { at } if open => CallPlan::Do(DeviceOp::Start { at }),
+        RxCall::Begin { at, .. } if open => CallPlan::Do(DeviceOp::Start { at }),
         RxCall::Stop { .. } | RxCall::PlanStop { .. } | RxCall::FlushStop if open => CallPlan::Do(DeviceOp::Stop),
         RxCall::FlushStart if open => CallPlan::Do(DeviceOp::StartNow),
         RxCall::FlushStart | RxCall::FlushStop => CallPlan::Skip(CallResult::Ok),
@@ -276,6 +278,13 @@ pub(crate) fn end_of_recv(received: Received, stream: usize, now: i64) -> Ended 
     }
 }
 
+/// The inputs a recv's end sends to the brain, in the one order both wrappers use (the experiment's choice, 45-experiment §11 B15): the
+/// publication's boundaries first (acceptance has closed in the publish, `cell.rs` `publish_planned`, before `CutReached` is sent), then the
+/// missed start's `LateCommand`, which the brain judges against the cell the publication left.
+pub(crate) fn recv_inputs(boundaries: Vec<Input>, late: Option<Input>) -> Vec<Input> {
+    boundaries.into_iter().chain(late).collect()
+}
+
 /// The handle change a call makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Handle {
@@ -304,7 +313,7 @@ pub(crate) fn after_call(cell: &mut Cell, stream: usize, call: RxCall, result: C
     let boundary = |b: Boundary| Some(Input::Boundary(b));
     let mut after = After { send: None, handle: Handle::Keep, flush_end: FlushEnd::Keep };
     match call {
-        RxCall::Begin { at } => {
+        RxCall::Begin { at, .. } => {
             let segment = SegmentKey { by: Some(cell.epoch), origin: at };
             cell.device_result(Call::Begin(segment), &result.result());
             if result == CallResult::Ok {

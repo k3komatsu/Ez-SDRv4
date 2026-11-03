@@ -7,10 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use super::cell::Phase;
-use super::core::{DRAIN_WINDOW, Input, Request};
+use super::cell::{Phase, ValueState};
+use super::core::{CHAIN_BOUND, Change, DEVICE_BOUND, DRAIN_WINDOW, Input, Request, SetCmd, Timer};
 use super::dst::{self, Config, Model, Verdict};
-use super::fixtures::{cell, held, seg, value};
+use super::fixtures::{cell, held, push, seg, value};
 use super::world::{EnvInput, EnvSlot, Event, Holder, INITIAL_OCCUPANT, Params, PubStep, RStep, World};
 use crate::provider::generator::Rng;
 
@@ -97,6 +97,8 @@ fn params(timing: Timing, horizon: i64, queue_cap: usize, call_faults: bool, pan
         packet: crate::brain::world::PACKET,
         call_faults,
         panic_step,
+        k: DEVICE_BOUND,
+        d: CHAIN_BOUND,
     }
 }
 
@@ -371,6 +373,95 @@ pub(crate) fn case9(variant: Variant) -> Case {
     Case { world, config: config(variant, ["case 9 full", "case 9 reduced", "case 9 micro"], &["W9a.ok", "W9a.partial", "W9a.refused", "W9b", "W9c"]) }
 }
 
+/// The bounds of a bounds case: K and D on top of the usual parameters.
+fn bounded(timing: Timing, horizon: i64, queue_cap: usize, k: usize, d: usize) -> Params {
+    Params { k, d, ..params(timing, horizon, queue_cap, false, None) }
+}
+
+/// Case 10 (E4a1; B1, B2, B3, B6, B9): one chain at K = 1 and D = 2 in every variant, three values released in order at spaced instants.
+/// Which value waits for K or D, and what frees it (a `Done` read at or after its instant, the capacity timer, a consumption), is left to
+/// the schedule: R may lag, S may lag, and time passes between a `Done` and its value's instant. `S.effect` is ok or partial.
+/// Micro: instants 1, 2, 3, releases in [0, 1], horizon 4.
+pub(crate) fn case10(variant: Variant) -> Case {
+    let (instants, release) = match variant {
+        Variant::Full | Variant::Reduced(_) => ([6, 10, 14], (0, 3)),
+        Variant::Micro => ([1, 2, 3], (0, 1)),
+    };
+    let horizon = variant.horizon(40, 4);
+    let mut env: Vec<EnvSlot> = instants.iter().enumerate().map(|(i, at)| input(Input::Release(held(0, value(0, *at, i as u64 + 1), 1)), release, i.checked_sub(1))).collect();
+    env.push(shutdown(horizon, variant.timing()));
+    let world = single(None, env, bounded(variant.timing(), horizon, 4, 1, 2));
+    Case { world, config: config(variant, ["case 10 full", "case 10 reduced", "case 10 micro"], &["W10a", "W10b", "W10c"]) }
+}
+
+/// Case 11 (E4a1; B4, B5): two streams at K = 1. A (channel 0) and B (channel 1) are released in order; Stop on stream 0 asks for an
+/// instant below A's, so a queued A is cancelled and frees K at the cancel, and its `Dropped` frees D later.
+/// The values are released in instant order (A before B), B on the stream without a cut. Micro: instants 2 and 3, cut 4, Stop asks for 1,
+/// windows [0, 1] and [0, 2], horizon 3.
+pub(crate) fn case11(variant: Variant) -> Case {
+    let (a, b, requested, release, stop, cut) = match variant {
+        Variant::Full | Variant::Reduced(_) => (8, 9, 5, (0, 3), (0, 8), 16),
+        Variant::Micro => (2, 3, 1, (0, 1), (0, 2), 4),
+    };
+    let horizon = variant.horizon(32, 3);
+    let env = vec![
+        input(Input::Release(held(0, value(0, a, 1), 1)), release, None),
+        input(Input::Release(held(1, value(1, b, 2), 1)), release, Some(0)),
+        input(Input::Stop { stream: 0, requested }, stop, None),
+        shutdown(horizon, variant.timing()),
+    ];
+    let cells = vec![cell(Phase::Streaming(seg(0)), 0, Some(cut), 0), cell(Phase::Streaming(seg(0)), 1, None, 0)];
+    let mut world = World::new(cells, env, bounded(variant.timing(), horizon, 4, 1, 64));
+    running(&mut world, 0, vec![0]);
+    running(&mut world, 1, vec![1]);
+    Case { world, config: config(variant, ["case 11 full", "case 11 reduced", "case 11 micro"], &["W10a", "W1b", "W11b"]) }
+}
+
+/// Case 12a (E4a1; B8, B10): K = 1, a value A that stays counted until its instant (K full), a held B behind it released later at a later
+/// instant, a Stop whose cut (full: 12; micro: 3) is above both instants, so the drain stays open, a plan change and a loss, so a capacity timer
+/// can arrive during the drain (W12a), after the epoch advanced (W12p) and after `F` is set (W12c). No reservation or stop may come out of a timer that K, D and the cell do not allow (oracle step check B8, I11′, I17).
+/// Micro: A at 1, B at 2 (released in instant order), Stop asks for 3, plan change (origin 3, epoch 2, plan cut 4) and loss both at 3, horizon 4.
+pub(crate) fn case12a(variant: Variant) -> Case {
+    let (a, b, requested, plan, plan_cut, loss_window) = match variant {
+        Variant::Full | Variant::Reduced(_) => (8, 9, 12, (20, (4, 14)), 40, (3, 24)),
+        Variant::Micro => (1, 2, 3, (3, (3, 3)), 4, (3, 3)),
+    };
+    let horizon = variant.horizon(40, 4);
+    let env = vec![
+        input(Input::Release(held(0, value(0, a, 1), 1)), (0, 2), None),
+        input(Input::Release(held(0, value(0, b, 2), 1)), (0, 3), Some(0)),
+        input(Input::Stop { stream: 0, requested }, (0, 8), None),
+        input(Input::PlanCancel { stream: 0, origin: plan.0, epoch: 2, plan_cut: Some(plan_cut) }, plan.1, None),
+        loss(loss_window),
+        shutdown(horizon, variant.timing()),
+    ];
+    let world = single(Some(plan_cut.min(16)), env, bounded(variant.timing(), horizon, 4, 1, 64));
+    Case { world, config: config(variant, ["case 12a full", "case 12a reduced", "case 12a micro"], &["W12a", "W12p", "W12c"]) }
+}
+
+/// Case 12b (E4a1; H03's second guard, I17): `Streaming` with progress 8, A queued with its command in S's FIFO, Stop(8) booked (cut =
+/// progress). When S has taken A by then, the pin keeps the drain open and the phase `Streaming`, and B (instant 4) released after the Stop is
+/// refused by the `progress >= cut` check of `reserve` alone while R has not yet published (W12b). Without it B is reserved at the cut (I2).
+pub(crate) fn case12b(variant: Variant) -> Case {
+    let horizon = variant.horizon(24, 12);
+    let env = vec![input(Input::Stop { stream: 0, requested: 8 }, (8, 9), None), input(Input::Release(held(0, value(0, 4, 2), 1)), (8, 10), Some(0)), shutdown(horizon, variant.timing())];
+    let mut c = cell(Phase::Streaming(seg(0)), 0, None, 8);
+    push(&mut c, value(0, 12, 1), ValueState::Queued);
+    let mut world = World::new(vec![c], env, bounded(variant.timing(), horizon, 4, 4, 64));
+    world.device.open(0, vec![0]);
+    world.device.start(0, 8);
+    world.device.t = 8;
+    world.rx[0].handle = Some(1);
+    let command = SetCmd { id: 1, change: Change::Timed { channel: 0, freq: 1.0, at: 12, generation: 1 } };
+    world.settings.fifo.push_back(command);
+    world.monitor.reserved.insert(1, (0, seg(0), 1));
+    world.monitor.streams.insert(1, 0);
+    world.monitor.instants.insert(1, 12);
+    world.monitor.commanded.insert(1);
+    world.monitor.released.insert(1);
+    Case { world, config: config(variant, ["case 12b full", "case 12b reduced", "case 12b micro"], &["W12b"]) }
+}
+
 /// A window `(e, l)` with `e <= l` within `[0, hi]`: two independent draws could invert it, and an
 /// inverted window never delivers.
 fn window(pick: &mut dyn FnMut(i64, i64) -> i64, hi: i64) -> (i64, i64) {
@@ -389,18 +480,22 @@ fn successor_window(pick: &mut dyn FnMut(i64, i64) -> i64, (pe, pl): (i64, i64),
 
 /// The seeded configuration (section D): two streams, four values, and the environment inputs each
 /// at a position the seed chooses in its window. `with_loss` adds a device loss at a seed-chosen tick.
-/// The epilogue is 96 (the largest cut is 80), queue capacity 2, and `horizon` is 32 or 96.
+/// The epilogue is 96 (the largest cut is 80), queue capacity 2, K = 2 and D = 3, and `horizon` is 32 or 96.
 pub(crate) fn seeded(seed: u64, with_loss: bool, horizon: i64) -> Case {
     let timing = Timing { epilogue: SEEDED_EPILOGUE, recv_timeout: RECV_TIMEOUT, drain_window: DRAIN_WINDOW, shutdown_lead: 8 };
     let mut rng = Rng(seed ^ 0x5eed_5eed);
     let mut pick = |lo: i64, hi: i64| lo + rng.below((hi - lo + 1) as u64) as i64;
     // Every window lies within [0, horizon], and the fourth slot (after the third) has a successor window.
     let limit = |hi: i64| hi.min(horizon);
-    let third = window(&mut pick, limit(19));
+    // The releases come in instant order (the timed release's order, note 38): a value queued behind one with a later instant would be
+    // applied at that later instant, and the acceptance recorded at the call's return would credit samples before it.
+    let first = window(&mut pick, limit(7));
+    let second = successor_window(&mut pick, first, limit(11));
+    let third = successor_window(&mut pick, second, limit(19));
     let mut env = vec![
-        input(Input::Release(held(0, value(0, 8, 1), 1)), window(&mut pick, limit(7)), None),
-        input(Input::Release(held(1, value(1, 12, 2), 1)), window(&mut pick, limit(11)), None),
-        input(Input::Release(held(0, value(0, 20, 3), 1)), third, None),
+        input(Input::Release(held(0, value(0, 8, 1), 1)), first, None),
+        input(Input::Release(held(1, value(1, 12, 2), 1)), second, Some(0)),
+        input(Input::Release(held(0, value(0, 20, 3), 1)), third, Some(1)),
         input(Input::Release(held(0, value(0, 20, 4), 1)), successor_window(&mut pick, third, limit(19)), Some(2)),
     ];
     let stop0 = pick(4, 40);
@@ -416,7 +511,8 @@ pub(crate) fn seeded(seed: u64, with_loss: bool, horizon: i64) -> Case {
     }
     env.push(shutdown(horizon, timing));
     let cells = vec![cell(Phase::Streaming(seg(0)), 0, None, 0), cell(Phase::Streaming(seg(0)), 1, None, 0)];
-    let mut world = World::new(cells, env, params(timing, horizon, 2, false, None));
+    // K = 2 over both chains and D = 3 per chain: four values and the Stop, plan change and loss reach both bounds in the swarm.
+    let mut world = World::new(cells, env, bounded(timing, horizon, 2, 2, 3));
     running(&mut world, 0, vec![0]);
     running(&mut world, 1, vec![1]);
     Case { world, config: Config { name: "seeded configuration", budget: BUDGET, wall: WALL, witnesses: &[] } }
@@ -545,6 +641,40 @@ fn explore_bounded(mut case: Case, budget: usize) -> Verdict<Event> {
     verdict
 }
 
+/// The micro search of a bounds case: bounded as [`explore_bounded`], and every declared witness must be reached, by the search or
+/// else by one of 300 seeded walks of the same case (a budget overrun with a missing witness is not evidence that its window was tested).
+fn explore_reaching(case: Case, budget: usize) {
+    let (world, config) = (case.world.clone(), case.config.clone());
+    let verdict = explore_bounded(case, budget);
+    let mut reached: BTreeSet<&'static str> = verdict.reached.iter().copied().collect();
+    for seed in 1..=300 {
+        if config.witnesses.iter().all(|witness| reached.contains(witness)) {
+            break;
+        }
+        let walked = dst::walk(&world, seed, WALK_LIMIT);
+        assert!(walked.failure.is_none(), "{}: walk seed {seed} fails: {:?}", config.name, walked.failure);
+        reached.extend(witnesses_along(&world, &walked.trace));
+    }
+    let missing: Vec<_> = config.witnesses.iter().filter(|witness| !reached.contains(*witness)).collect();
+    assert!(missing.is_empty(), "{}: declared witnesses not reached by the search or 300 walks: {missing:?}", config.name);
+}
+
+/// A default and an ignored full micro test of a bounds case that require every declared witness ([`explore_reaching`]).
+macro_rules! reaching_pair {
+    ($small:ident, $full:ident, $case:expr) => {
+        #[test]
+        fn $small() {
+            explore_reaching($case, SMALL_BUDGET);
+        }
+
+        #[test]
+        #[ignore = "micro search: 2M-state budget or 180 s wall in release (E4a1)"]
+        fn $full() {
+            explore_reaching($case, BUDGET);
+        }
+    };
+}
+
 fn bound(config: &mut Config, budget: usize) {
     config.budget = budget;
     config.wall = if budget >= BUDGET { WALL } else { SMALL_WALL };
@@ -660,6 +790,10 @@ fn all_cases(variant: Variant) -> Vec<Case> {
         case7c(variant),
         case8(variant),
         case9(variant),
+        case10(variant),
+        case11(variant),
+        case12a(variant),
+        case12b(variant),
     ]
 }
 
@@ -756,6 +890,10 @@ micro_pair!(case7b_late_restore_micro, case7b_late_restore_micro_full, case7b_la
 micro_pair!(case7c_failed_begin_debt_micro, case7c_failed_begin_debt_micro_full, case7c(Variant::Micro));
 micro_pair!(case8_lifecycle_across_loss_micro, case8_lifecycle_across_loss_micro_full, case8(Variant::Micro));
 micro_pair!(case9_pending_move_partial_refused_micro, case9_pending_move_partial_refused_micro_full, case9(Variant::Micro));
+reaching_pair!(case10_k_d_and_device_time_micro, case10_k_d_and_device_time_micro_full, case10(Variant::Micro));
+reaching_pair!(case11_shared_k_and_cancel_micro, case11_shared_k_and_cancel_micro_full, case11(Variant::Micro));
+reaching_pair!(case12a_capacity_timer_stopping_micro, case12a_capacity_timer_stopping_micro_full, case12a(Variant::Micro));
+reaching_pair!(case12b_pinned_drain_progress_guard_micro, case12b_pinned_drain_progress_guard_micro_full, case12b(Variant::Micro));
 
 /// The seeded configuration at horizon 32: 50 walks, each asserted free of failure, and the union of
 /// the witnesses they reach (a walk is evidence of the failures it finds, never of completeness).
@@ -770,6 +908,20 @@ fn seeded_config_reduced() {
         union.extend(witnesses_along(&case.world, &dst::walk(&case.world, seed, WALK_LIMIT).trace));
     }
     println!("seeded_config_reduced: 50 walks at horizon 32, witness union {union:?}");
+}
+
+/// The bounds cases at their full horizon, 500 seeds each (a default test, so a mutation row can be killed by the walks): no walk fails the
+/// oracles (I11′, P6, I17, the capacity-timer step check among them). A walk is evidence of the failures it finds, not of completeness.
+#[test]
+fn bounds_cases_walk_clean() {
+    for (name, build) in [("case 10", case10 as fn(Variant) -> Case), ("case 11", case11), ("case 12a", case12a), ("case 12b", case12b), ("case 5", case5), ("case 7c", case7c)] {
+        for seed in 1..=500 {
+            let case = build(Variant::Full);
+            if let Some((failure, shrunk)) = walk_failure(&case, seed) {
+                panic!("{name} seed {seed} weights {:?}: {failure}; shrunk trace {shrunk:?}", dst::weights_for(seed));
+            }
+        }
+    }
 }
 
 /// The walk sweeps (ignored): one per case at its full horizon, and one for the seeded configuration
@@ -851,6 +1003,30 @@ fn case9_pending_move_partial_refused_walks() {
 }
 
 #[test]
+#[ignore = "walk sweep (E4a1): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case10_k_d_and_device_time_walks() {
+    sweep("case 10", |_| case10(Variant::Full));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a1): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case11_shared_k_and_cancel_walks() {
+    sweep("case 11", |_| case11(Variant::Full));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a1): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case12a_capacity_timer_stopping_walks() {
+    sweep("case 12a", |_| case12a(Variant::Full));
+}
+
+#[test]
+#[ignore = "walk sweep (E4a1): EZSDR_SEEDS=a-b, run on sim02/sim03"]
+fn case12b_pinned_drain_progress_guard_walks() {
+    sweep("case 12b", |_| case12b(Variant::Full));
+}
+
+#[test]
 #[ignore = "walk sweep (stage E1b part 3b): EZSDR_SEEDS=a-b, run on sim02/sim03"]
 fn seeded_config_walks() {
     sweep("seeded configuration", |seed| seeded(seed, true, 96));
@@ -881,6 +1057,10 @@ pub(super) fn full_builders() -> Vec<(&'static str, Builder)> {
         ("case 7c", Box::new(|_| case7c(Variant::Full))),
         ("case 8", Box::new(|_| case8(Variant::Full))),
         ("case 9", Box::new(|_| case9(Variant::Full))),
+        ("case 10", Box::new(|_| case10(Variant::Full))),
+        ("case 11", Box::new(|_| case11(Variant::Full))),
+        ("case 12a", Box::new(|_| case12a(Variant::Full))),
+        ("case 12b", Box::new(|_| case12b(Variant::Full))),
         ("seeded configuration", Box::new(|seed| seeded(seed, true, 96))),
     ]
 }
@@ -968,7 +1148,7 @@ fn no_check(_: &World) -> Result<(), String> {
 /// A fired timer's drain deadline is recorded as observed in the successor (P1 depends on it).
 fn timer_recorded(before: &World, event: &Event, after: &World) -> Result<(), String> {
     if let Event::Timer(i) = event {
-        let (stream, at) = before.timers[*i];
+        let (Timer::Drain(stream), at) = before.timers[*i] else { return Ok(()) };
         if !after.monitor.drain_observed.contains(&(stream, at)) {
             return Err(format!("timer {i} fired for stream {stream} at {at} without recording its drain deadline"));
         }
@@ -1255,7 +1435,7 @@ mod tests {
     fn harness_result_precedes_send(budget: usize) {
         let state = |w: &World| {
             for input in &w.inbox {
-                if let Input::Done { id, terminal } = input {
+                if let Input::Done { id, terminal, .. } = input {
                     if w.monitor.terminals.get(id) != Some(terminal) {
                         return Err(format!("Done for {id} ({terminal:?}) is delivered before its command result is written"));
                     }
