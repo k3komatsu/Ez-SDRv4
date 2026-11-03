@@ -1,6 +1,6 @@
 # 45 の実験の報告（第 2 回，E4）
 
-Status: 報告（2026-11-04，orchestrator Opus）．owner の判断待ち（§6）．
+Status: 報告（2026-11-04，orchestrator Opus）．**owner は §6 の 1 を決めた**（2026-11-04）：計画どおり実験を終える．移行（設計メモ 45 §8）はしない．owner はさらに**機能を減らす**方向に進むと決めた：受信中・送信中にできることを機能ごとの帳簿（設計メモ 46，作成中）にまとめ，owner が利点と欠点を数えて結論を出す．§6 の 2 と 3 は，機能を制限すると残る範囲と向く形が変わりうるので，帳簿の結論の後に決める．
 第 1 回の報告：[45-report.md](45-report.md)．設計メモ：[45-uhd-decision-core.md](45-uhd-decision-core.md)（第 6 版）．計画：[45-experiment.md](45-experiment.md) §11．段階ごとの記録：`reviews/45e4-design-sol*`，`reviews/45e4a-*`，`reviews/45e4a1-*`，`reviews/45e4a2-*`，`reviews/45e4b-*`，`reviews/45e4c-*`．
 
 ## 1. 結論
