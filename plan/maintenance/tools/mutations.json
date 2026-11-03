@@ -19013,10 +19013,10 @@
     },
     {
       "id": "E2-94",
-      "name": "A rejection at K or D is not counted as a bound rejection",
+      "name": "A refusal of the cell is counted as a bound rejection",
       "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
-      "old": "if matches!(reason, NotReserved::DeviceBound | NotReserved::ChainBound) { self.bound_rejections.fetch_add(1, Relaxed); }",
-      "new": "if !matches!(reason, NotReserved::DeviceBound | NotReserved::ChainBound) { self.bound_rejections.fetch_add(1, Relaxed); }",
+      "old": "NotReserved::Refused(_) => {}",
+      "new": "NotReserved::Refused(_) => { self.bound_rejections.fetch_add(1, Relaxed); }",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
@@ -19043,10 +19043,10 @@
     },
     {
       "id": "E2-97",
-      "name": "The occupancy is not stored",
+      "name": "D's occupancy is not stored",
       "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
-      "old": "self.occupancy.store(ids.len(), Relaxed);",
-      "new": "self.occupancy.store(0, Relaxed);",
+      "old": "self.d_occupancy.store(ids.len(), Relaxed);",
+      "new": "self.d_occupancy.store(0, Relaxed);",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "the_in_flight_observation_stamps_each_value_once_when_it_leaves"
@@ -19055,8 +19055,8 @@
       "id": "E2-98",
       "name": "The brain's operation does not report the chain's in-flight values",
       "file": "crates/ezsdr-radio-uhd/src/brain/threads.rs",
-      "old": "bench.observe_in_flight(ids);",
-      "new": "let _ = ids;",
+      "old": "bench.observe_in_flight(ids, loads.0);",
+      "new": "let _ = (ids, loads);",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "a_value_applied_by_the_measured_runtime_carries_its_id_and_is_seen_retiring"
@@ -20334,5 +20334,75 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "b13t_the_join_of_a_failed_s_waits_for_its_discarder"
+    },
+    {
+      "id": "E4-118",
+      "name": "The first D rejection of a value is recorded as a K rejection (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "agg.first_d_ns = if agg.first_d_ns == 0 { at } else { agg.first_d_ns };",
+      "new": "agg.first_k_ns = if agg.first_k_ns == 0 { at } else { agg.first_k_ns };",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
+    },
+    {
+      "id": "E4-119",
+      "name": "The coupling check reads K hits where it asks for D hits (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "|u: &&CouplingUpd| before(d_hits, u.release_ns)",
+      "new": "|u: &&CouplingUpd| before(k_hits, u.release_ns)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_coupling_check_reads_hits_at_or_before_each_late_updates_release"
+    },
+    {
+      "id": "E4-120",
+      "name": "The coupling check counts updates that were not late (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "updates.iter().filter(|u| u.late).collect()",
+      "new": "updates.iter().collect()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_coupling_check_reads_hits_at_or_before_each_late_updates_release"
+    },
+    {
+      "id": "E4-121",
+      "name": "The largest D occupancy is recorded from K's load (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+      "old": "self.d_max.fetch_max(d_load, Relaxed);",
+      "new": "self.d_max.fetch_max(k_load, Relaxed);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_rejected_attempt_is_attributed_to_its_reason_per_value"
+    },
+    {
+      "id": "E4-122",
+      "name": "The preload filter leaves one preloaded entry in the accounted DSP log (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "let preload = entry.2 && skip > 0;",
+      "new": "let preload = entry.2 && skip > 1;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "the_preload_is_taken_out_of_the_dsp_log_before_the_accounting"
+    },
+    {
+      "id": "E4-123",
+      "name": "A value's own later D rejection counts as a D hit preceding its release (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "|u: &&CouplingUpd| before(d_hits, u.release_ns)",
+      "new": "|u: &&CouplingUpd| u.own_d || before(d_hits, u.release_ns)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_value_first_rejected_at_k_and_later_at_d_has_no_preceding_d_hit_of_its_own"
+    },
+    {
+      "id": "E4-124",
+      "name": "The held-at-D count reads the K flag (measurement)",
+      "file": "crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+      "old": "\"late_held_at_d\": count(&|u| u.own_d)",
+      "new": "\"late_held_at_d\": count(&|u| u.own_k)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "a_value_first_rejected_at_k_and_later_at_d_has_no_preceding_d_hit_of_its_own"
     }
   ]

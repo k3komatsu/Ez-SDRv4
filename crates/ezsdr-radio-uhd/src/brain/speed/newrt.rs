@@ -157,7 +157,10 @@ fn start_new(cond: &Cond, opts: &Opts) -> New {
         reserve_dropped: AtomicU64::new(0),
         stamps: (opts.stages || opts.sample).then(|| (0..cond.count + 16).map(|_| [AtomicI64::new(0), AtomicI64::new(0), AtomicI64::new(0), AtomicI64::new(0)]).collect()),
         bound_rejections: AtomicU64::new(0),
-        occupancy: AtomicUsize::new(0),
+        k_occupancy: AtomicUsize::new(0),
+        d_occupancy: AtomicUsize::new(0),
+        k_max: AtomicUsize::new(0),
+        d_max: AtomicUsize::new(0),
         retired: AtomicU64::new(0),
         last_in_flight: Mutex::new(Vec::new()),
         clock: timing.clone(),
@@ -237,7 +240,7 @@ impl Rig for New {
             attempted += 1;
             by_reason.iter_mut().zip(agg.by_reason).for_each(|(sum, n)| *sum += u64::from(n));
             if agg.by_reason.iter().any(|n| *n > 0) {
-                rejected.push(json!([index + 1, agg.first_ns, (agg.reserved_ns != 0).then_some(agg.reserved_ns), agg.attempts, agg.by_reason]));
+                rejected.push(json!([index + 1, agg.first_ns, (agg.reserved_ns != 0).then_some(agg.reserved_ns), agg.attempts, agg.by_reason, agg.first_k_ns, agg.first_d_ns]));
             }
         }
         let stage_stamps: Option<Vec<Json>> = b.stamps.as_ref().map(|stamps| {
@@ -259,7 +262,8 @@ impl Rig for New {
             "retire_stamps": retire_stamps,
             "release_lateness": dist(&late),
             "reservations": { "values_attempted": attempted, "rejected_attempts_by_reason": REASONS.iter().zip(by_reason).map(|(r, n)| (r.to_string(), json!(n))).collect::<serde_json::Map<_, _>>(),
-                              "values_rejected": rejected.len(), "per_value": rejected, "per_value_columns": ["id", "first_attempt_ns", "reserved_ns", "attempts", "rejections_by_reason"],
+                              "values_rejected": rejected.len(), "per_value": rejected, "per_value_columns": ["id", "first_attempt_ns", "reserved_ns", "attempts", "rejections_by_reason", "first_k_rejection_ns (0: none)", "first_d_rejection_ns (0: none)"],
+                              "max_k_load_after_an_attempt": b.k_max.load(SeqCst), "max_d_occupancy_after_an_attempt": b.d_max.load(SeqCst),
                               "reasons": REASONS, "not_recorded_ids": b.reserve_dropped.load(SeqCst) },
             "stage_stamps": stage_stamps, "stage_stamp_columns": ["id", "release_sent_ns", "brain_take_ns", "pushed_to_S_ns", "S_take_ns"],
             "blocks_published_to_sink": self.published_blocks.load(SeqCst),

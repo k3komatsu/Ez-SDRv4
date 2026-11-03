@@ -456,6 +456,7 @@ fn brain_op(sh: &Arc<Shared>, op: Op) {
     let number = sh.ops_run.fetch_add(1, Ordering::SeqCst);
     let mut attempt = None;
     let mut in_flight = None;
+    let mut loads = (0, 0);
     sh.with_cells(|cells| {
         assert!(!sh.panic_in_op.lock().unwrap_or_else(|e| e.into_inner()).contains(&number), "injected panic in a brain operation");
         let mut brain = sh.brain();
@@ -466,16 +467,20 @@ fn brain_op(sh: &Arc<Shared>, op: Op) {
         attempt = reserving.map(|(id, _, _)| (id, reserved.is_some(), reason));
         // The diagnostic's occupancy and retirement observation (stream 0 only), read where the operation ran.
         in_flight = sh.bench.as_ref().filter(|bench| bench.stamps.is_some()).map(|_| cells[0].in_flight.iter().map(|flight| flight.entry.order.1).collect::<Vec<u64>>());
+        // K's load and D's occupancy after the operation (the measurement's, stream 0 being the one chain of the experiment).
+        if sh.bench.is_some() {
+            loads = (super::core::device_load(cells, brain.now), cells[0].in_flight.len());
+        }
         if let Some(reserved) = reserved {
             let (id, channel, segment, epoch) = reserved;
             sh.sink().reservations.push((id, channel, segment, epoch));
         }
     });
     if let (Some(bench), Some((id, reserved, reason))) = (&sh.bench, attempt) {
-        bench.reserve_attempt(id, reserved, reason);
+        bench.reserve_attempt(id, reserved, reason, loads.0, loads.1);
     }
     if let (Some(bench), Some(ids)) = (&sh.bench, &in_flight) {
-        bench.observe_in_flight(ids);
+        bench.observe_in_flight(ids, loads.0);
     }
     let (dead, commands, unspawned, control_unspawned) = {
         let mut brain = sh.brain();

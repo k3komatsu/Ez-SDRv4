@@ -1,0 +1,9 @@
+**REVISE — coupling fix passes inspection; diagnosis still needs two corrections.**
+
+- **P3 — “Today never above 48 µs” is false.** `~/.cache/ezsdr-fixes/2026-11-01-n45/e4b-results/README.md:92`: spaced today rep 3, update 6375, spends **58.219 µs** inside apply (165,225 − 107,006 ns; `preload-verdict-high-spaced.txt:13`). The selected-repetition table at README lines 85–90 otherwise matches the raw rows.
+- **P2 — Startup placement remains asserted as fact.** `README.md:67` still places every run’s overflow at startup and claims subsequent backlog stays low. Lines 103–105 correctly acknowledge that verdict runs lack gap timing; line 67 must likewise restrict observations to sampled diagnostics and mark verdict-run placement **INFERRED**.
+- Both candidate causes are now explicitly **INFERRED** (`README.md:94–98`). Corrected tail counts **98 / 61 / 18**, loss totals, and **80 zero-hit records** match the raw files.
+- **Implication for fake-lock contention:** today’s actual ≤58.219 µs maximum still contrasts strongly with new’s 1,481.819 µs. Sharing the fake and lock weakens a history-cost-alone explanation; it does **not** exclude contention/starvation dependent on owner scheduling or run-time disturbance. Repetitions ran at different times, so this is not a controlled causal comparison.
+- Coupling uses nominal release consistently and compares bound-specific timestamps (`crates/ezsdr-radio-uhd/src/brain/speed/runs.rs:377–395,591–601`). The counterexample test at lines 1398–1410 distinguishes later own hits from preceding hits. E4-119/120/123/124 each have one exact anchor and assertions that distinguish their mutations (`plan/maintenance/tools/mutations.json:20349–20406`).
+
+Not checked: test or mutation execution, fresh measurements, hardware, or either prohibited holdout directory.

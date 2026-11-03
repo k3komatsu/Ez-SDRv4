@@ -133,9 +133,13 @@ pub(crate) struct Bench {
     pub(crate) stamps: Option<Vec<[AtomicI64; 4]>>,
     /// Reservation attempts rejected at the in-flight bound (counted with `counters`).
     pub(crate) bound_rejections: AtomicU64,
-    /// Diagnostic runs with `stamps`: the values in flight on stream 0 after the brain's latest operation, the retirements so far, and the ids in
-    /// flight then (the brain's thread alone writes them).
-    pub(crate) occupancy: AtomicUsize,
+    /// Diagnostic runs with `stamps`: after the brain's latest operation, K's load (the values counted over every chain at the brain's time) and
+    /// D's occupancy (the values resident on stream 0), the retirements so far, and the ids resident then (the brain's thread alone writes them).
+    pub(crate) k_occupancy: AtomicUsize,
+    pub(crate) d_occupancy: AtomicUsize,
+    /// Counter runs: the largest K load and D occupancy seen after a reservation attempt (the brain's thread alone writes them).
+    pub(crate) k_max: AtomicUsize,
+    pub(crate) d_max: AtomicUsize,
     pub(crate) retired: AtomicU64,
     last_in_flight: Mutex<Vec<u64>>,
     /// The host clock's reading, for the stamps.
@@ -167,11 +171,14 @@ pub(crate) fn reason_index(reason: NotReserved) -> usize {
     }
 }
 
-/// One value's reservation attempts: the first attempt's host ns, the reserving attempt's (0: never reserved), the attempts, and the rejections by reason.
+/// One value's reservation attempts: the first attempt's host ns, the reserving attempt's (0: never reserved), the host ns of its first rejection at
+/// K and at D (0: none), the attempts, and the rejections by reason.
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct ReserveAgg {
     pub(crate) first_ns: i64,
     pub(crate) reserved_ns: i64,
+    pub(crate) first_k_ns: i64,
+    pub(crate) first_d_ns: i64,
     pub(crate) attempts: u32,
     pub(crate) by_reason: [u32; REASONS.len()],
 }
@@ -189,11 +196,14 @@ impl Bench {
         }
     }
 
-    /// One reservation attempt of the brain (called outside every cell lock), with the reason when it was rejected.
-    pub(crate) fn reserve_attempt(&self, id: u64, reserved: bool, reason: Option<NotReserved>) {
+    /// One reservation attempt of the brain (called outside every cell lock), with the reason when it was rejected and K's load and D's occupancy
+    /// after the attempt.
+    pub(crate) fn reserve_attempt(&self, id: u64, reserved: bool, reason: Option<NotReserved>, k_load: usize, d_load: usize) {
         if !self.counters {
             return;
         }
+        self.k_max.fetch_max(k_load, Relaxed);
+        self.d_max.fetch_max(d_load, Relaxed);
         let at = self.clock.ns();
         let mut table = self.reserve.lock().unwrap_or_else(|e| e.into_inner());
         let Some(agg) = (id as usize).checked_sub(1).and_then(|i| table.get_mut(i)) else {
@@ -208,8 +218,16 @@ impl Bench {
             agg.reserved_ns = at;
         } else if let Some(reason) = reason {
             agg.by_reason[reason_index(reason)] += 1;
-            if matches!(reason, NotReserved::DeviceBound | NotReserved::ChainBound) {
-                self.bound_rejections.fetch_add(1, Relaxed);
+            match reason {
+                NotReserved::DeviceBound => {
+                    agg.first_k_ns = if agg.first_k_ns == 0 { at } else { agg.first_k_ns };
+                    self.bound_rejections.fetch_add(1, Relaxed);
+                }
+                NotReserved::ChainBound => {
+                    agg.first_d_ns = if agg.first_d_ns == 0 { at } else { agg.first_d_ns };
+                    self.bound_rejections.fetch_add(1, Relaxed);
+                }
+                NotReserved::Refused(_) => {}
             }
         }
     }
@@ -221,13 +239,15 @@ impl Bench {
         }
     }
 
-    /// The brain's operation has run: `ids` are the values in flight on stream 0 now. Each value that was in flight after the operation before and
-    /// is not now retired during this operation (stamped at the operation's end). Diagnostic runs with `stamps` only.
-    pub(crate) fn observe_in_flight(&self, ids: &[u64]) {
+    /// The brain's operation has run: `ids` are the values resident on stream 0 now (D's occupancy) and `k_load` is K's load. Each value that was
+    /// resident after the operation before and is not now retired during this operation (stamped at the operation's end). Diagnostic runs with
+    /// `stamps` only.
+    pub(crate) fn observe_in_flight(&self, ids: &[u64], k_load: usize) {
         if self.stamps.is_none() {
             return;
         }
-        self.occupancy.store(ids.len(), Relaxed);
+        self.k_occupancy.store(k_load, Relaxed);
+        self.d_occupancy.store(ids.len(), Relaxed);
         let mut last = self.last_in_flight.lock().unwrap_or_else(|e| e.into_inner());
         for id in last.iter().filter(|id| !ids.contains(id)) {
             self.stage(Stage::Retired, *id);
@@ -831,23 +851,38 @@ mod tests {
             reserve_dropped: AtomicU64::new(0),
             stamps: None,
             bound_rejections: AtomicU64::new(0),
-            occupancy: AtomicUsize::new(0),
+            k_occupancy: AtomicUsize::new(0),
+            d_occupancy: AtomicUsize::new(0),
+            k_max: AtomicUsize::new(0),
+            d_max: AtomicUsize::new(0),
             retired: AtomicU64::new(0),
             last_in_flight: Mutex::new(Vec::new()),
             clock: timing,
         };
         let bound = Some(NotReserved::DeviceBound);
         let phase = Some(NotReserved::Refused(Refusal::Phase));
-        for (id, reserved, reason) in
-            [(1, false, bound), (1, false, bound), (1, false, bound), (1, false, phase), (1, true, None), (2, false, Some(NotReserved::Refused(Refusal::Cut))), (99, false, bound)]
-        {
-            bench.reserve_attempt(id, reserved, reason);
+        let chain = Some(NotReserved::ChainBound);
+        for (id, reserved, reason, loads) in [
+            (1, false, bound, (4, 3)),
+            (1, false, bound, (4, 3)),
+            (1, false, bound, (4, 3)),
+            (1, false, phase, (2, 7)),
+            (1, true, None, (3, 5)),
+            (2, false, Some(NotReserved::Refused(Refusal::Cut)), (1, 1)),
+            (3, false, chain, (2, 64)),
+            (99, false, bound, (4, 4)),
+        ] {
+            bench.reserve_attempt(id, reserved, reason, loads.0, loads.1);
         }
         let table = bench.reserve.lock().unwrap().clone();
         assert_eq!((table[0].attempts, table[0].by_reason, table[0].reserved_ns != 0), (5, [3, 0, 1, 0, 0, 0, 0, 0], true), "bound three times, phase once, then reserved");
         assert_eq!((table[1].attempts, table[1].by_reason, table[1].reserved_ns), (1, [0, 0, 0, 0, 0, 0, 1, 0], 0), "a cut refusal, never reserved");
-        assert_eq!((table[2].attempts, bench.reserve_dropped.load(Relaxed)), (0, 1), "id 99 is beyond the table");
-        assert_eq!(bench.bound_rejections.load(Relaxed), 3, "only the three rejections at the bound count, not the phase or cut refusals (two, so a count of the others differs)");
+        assert_eq!(bench.reserve_dropped.load(Relaxed), 1, "id 99 is beyond the table");
+        assert_eq!(bench.bound_rejections.load(Relaxed), 4, "only the three K rejections and the one D rejection count, not the phase or cut refusals (two, so a count of the others differs)");
+        assert_eq!((table[0].first_k_ns != 0, table[0].first_d_ns), (true, 0), "value 1 was rejected at K, never at D");
+        assert_eq!((table[1].first_k_ns, table[1].first_d_ns), (0, 0), "a refusal is neither");
+        assert_eq!((table[2].attempts, table[2].first_k_ns, table[2].first_d_ns != 0, table[2].by_reason[1]), (1, 0, true, 1), "value 3 was rejected at D");
+        assert_eq!((bench.k_max.load(Relaxed), bench.d_max.load(Relaxed)), (4, 64), "the largest K load and D occupancy after any attempt");
         assert_eq!(REASONS[reason_index(NotReserved::DeviceBound)], "k");
         assert_eq!(REASONS[reason_index(NotReserved::Refused(Refusal::Progress))], "progress");
     }
@@ -871,24 +906,27 @@ mod tests {
             reserve_dropped: AtomicU64::new(0),
             stamps: stamps.then(|| (0..5).map(|_| std::array::from_fn(|_| AtomicI64::new(0))).collect()),
             bound_rejections: AtomicU64::new(0),
-            occupancy: AtomicUsize::new(0),
+            k_occupancy: AtomicUsize::new(0),
+            d_occupancy: AtomicUsize::new(0),
+            k_max: AtomicUsize::new(0),
+            d_max: AtomicUsize::new(0),
             retired: AtomicU64::new(0),
             last_in_flight: Mutex::new(Vec::new()),
             clock: timing.clone(),
         };
         let b = bench(true);
-        b.observe_in_flight(&[1, 2, 3]);
-        assert_eq!((b.occupancy.load(Relaxed), b.retired.load(Relaxed)), (3, 0));
-        b.observe_in_flight(&[2, 3, 4]);
-        b.observe_in_flight(&[2, 3, 4]);
-        assert_eq!((b.occupancy.load(Relaxed), b.retired.load(Relaxed)), (3, 1), "value 1 left once");
+        b.observe_in_flight(&[1, 2, 3], 2);
+        assert_eq!((b.d_occupancy.load(Relaxed), b.k_occupancy.load(Relaxed), b.retired.load(Relaxed)), (3, 2, 0), "D counts the resident values, K the load passed");
+        b.observe_in_flight(&[2, 3, 4], 4);
+        b.observe_in_flight(&[2, 3, 4], 4);
+        assert_eq!((b.d_occupancy.load(Relaxed), b.k_occupancy.load(Relaxed), b.retired.load(Relaxed)), (3, 4, 1), "value 1 left once");
         let stamped = |id: usize| b.stamps.as_ref().unwrap()[id - 1][Stage::Retired as usize].load(Relaxed) != 0;
         assert_eq!([1, 2, 3, 4].map(stamped), [true, false, false, false]);
-        b.observe_in_flight(&[]);
-        assert_eq!((b.occupancy.load(Relaxed), b.retired.load(Relaxed)), (0, 4));
+        b.observe_in_flight(&[], 0);
+        assert_eq!((b.d_occupancy.load(Relaxed), b.k_occupancy.load(Relaxed), b.retired.load(Relaxed)), (0, 0, 4));
         let off = bench(false);
-        off.observe_in_flight(&[1]);
-        assert_eq!((off.occupancy.load(Relaxed), off.retired.load(Relaxed)), (0, 0), "no observation without the stamps");
+        off.observe_in_flight(&[1], 1);
+        assert_eq!((off.d_occupancy.load(Relaxed), off.k_occupancy.load(Relaxed), off.retired.load(Relaxed)), (0, 0, 0), "no observation without the stamps");
     }
 
     #[test]

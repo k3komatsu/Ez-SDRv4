@@ -32,12 +32,15 @@ pub(super) struct Opts {
     pub(super) fault_ms: Option<u64>,
     /// The new runtime stamps each update's path (release sent, brain dequeue, push to `S`, `S` dequeue): the latency diagnostic.
     pub(super) stages: bool,
-    /// The bound diagnostic (new runtime): per-second samples of the backlog, the in-flight occupancy, the retirements and the bound rejections,
+    /// The bound diagnostic (new runtime): per-second samples of the backlog, K's load and D's occupancy, the retirements and the bound rejections,
     /// and a per-update table (apply entry and return, application tick, retirement).
     pub(super) sample: bool,
     /// The device capacity K and the chain bound D of the new runtime for this run (0: the design's). A diagnostic run's parameters only.
     pub(super) k: usize,
     pub(super) d: usize,
+    /// Timed entries applied straight to the fake's receive DSP history before the run (E4b's backlog confirmation, `E2B_PRELOAD`), for either
+    /// owner; they are not updates and are taken out of the DSP log before the accounting.
+    pub(super) preload: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -211,7 +214,7 @@ fn thread_json(readings: &[ThreadStats]) -> Json {
 }
 
 /// The bound diagnostic's sampler: one thread that reads, every 10 ms, the fake's backlog (device time minus the end of the last sample the
-/// receive returned) and the new runtime's in-flight occupancy, and closes a record each second with the second's end and extremes and the
+/// receive returned) and the new runtime's K load and D occupancy, and closes a record each second with the second's end and extremes and the
 /// second's retirements, bound rejections and blocks. All readings are of one thread at one instant, so they are synchronized with each other.
 struct Sampler {
     stop: Arc<AtomicBool>,
@@ -228,7 +231,7 @@ impl Sampler {
             .spawn(move || {
                 let begin = timing.ns();
                 let mut out = Vec::new();
-                let (mut backlog_max, mut occupancy_max) = (f64::MIN, 0usize);
+                let (mut backlog_max, mut k_max, mut d_max) = (f64::MIN, 0usize, 0usize);
                 let (mut retired0, mut rejected0, mut blocks0) = (bench.retired.load(Relaxed), bench.bound_rejections.load(Relaxed), timing.counts.blocks.load(Relaxed));
                 for tick in 1u64.. {
                     let target = begin + tick as i64 * 10_000_000;
@@ -239,14 +242,16 @@ impl Sampler {
                         std::thread::sleep(Duration::from_micros(500));
                     }
                     let backlog = (fake.time_now().unwrap_or(0) - timing.counts.last_end.load(Relaxed)) as f64 * 1000.0 / mcr;
-                    let occupancy = bench.occupancy.load(Relaxed);
+                    let (k_now, d_now) = (bench.k_occupancy.load(Relaxed), bench.d_occupancy.load(Relaxed));
                     backlog_max = backlog_max.max(backlog);
-                    occupancy_max = occupancy_max.max(occupancy);
+                    k_max = k_max.max(k_now);
+                    d_max = d_max.max(d_now);
                     if tick % 100 == 0 {
                         let (retired, rejected, blocks) = (bench.retired.load(Relaxed), bench.bound_rejections.load(Relaxed), timing.counts.blocks.load(Relaxed));
                         out.push(json!({ "second": tick / 100, "backlog_ms_end": (backlog * 1000.0).round() / 1000.0, "backlog_ms_max": (backlog_max * 1000.0).round() / 1000.0,
-                                         "in_flight_end": occupancy, "in_flight_max": occupancy_max, "retired": retired - retired0, "bound_rejections": rejected - rejected0, "blocks": blocks - blocks0 }));
-                        (backlog_max, occupancy_max, retired0, rejected0, blocks0) = (f64::MIN, 0, retired, rejected, blocks);
+                                         "k_load_end": k_now, "k_load_max": k_max, "d_occupancy_end": d_now, "d_occupancy_max": d_max, "t_end_ns": target,
+                                         "retired": retired - retired0, "bound_rejections": rejected - rejected0, "blocks": blocks - blocks0 }));
+                        (backlog_max, k_max, d_max, retired0, rejected0, blocks0) = (f64::MIN, 0, 0, retired, rejected, blocks);
                     }
                 }
                 out
@@ -353,6 +358,43 @@ fn is_bound_hit(by_reason: &[u64]) -> bool {
     [NotReserved::DeviceBound, NotReserved::ChainBound].into_iter().any(|reason| by_reason.get(reason_index(reason)).is_some_and(|n| *n > 0))
 }
 
+/// One update as the coupling check reads it: its nominal release (`e - WINDOW_NS`, the same definition for every update), whether it was late (not
+/// applied at its instant), and whether the update itself was ever rejected at D or at K (at any time).
+#[derive(Clone, Copy, Debug)]
+struct CouplingUpd {
+    release_ns: i64,
+    late: bool,
+    own_d: bool,
+    own_k: bool,
+}
+
+/// The coupling check of one repetition: for each late update, whether some value's first D rejection (its own included) had a timestamp at or
+/// before the update's nominal release, likewise K, and whether the fake's backlog exceeded 1 ms in the second that holds its release (`seconds`:
+/// `(t_end_ns, backlog_ms_max)` per sampled second; absent without the sampler). `d_hits` and `k_hits` are the host ns of each value's first D and K
+/// rejection. An update's own rejection counts as preceding only by its timestamp (it happens after the release: a value first rejected at K and later
+/// at D has no preceding D hit of its own); `late_held_at_d` and `late_held_at_k` count the late updates that were themselves rejected at that bound
+/// at any time. `late_with_d_within_50ms` counts the late updates with a D hit in the 50 ms up to the release.
+fn coupling_check(updates: &[CouplingUpd], d_hits: &[i64], k_hits: &[i64], seconds: Option<&[(i64, f64)]>) -> Json {
+    let before = |hits: &[i64], at: i64| hits.iter().any(|h| *h <= at);
+    let backlog_over = |at: i64| seconds.map(|s| s.iter().any(|(end, backlog)| *end - 1_000_000_000 < at && at <= *end && *backlog > 1.0));
+    let late: Vec<&CouplingUpd> = updates.iter().filter(|u| u.late).collect();
+    let with_d = |u: &&CouplingUpd| before(d_hits, u.release_ns);
+    let with_k = |u: &&CouplingUpd| before(k_hits, u.release_ns);
+    let count = |f: &dyn Fn(&&CouplingUpd) -> bool| late.iter().filter(|u| f(u)).count();
+    json!({
+        "late_updates": late.len(),
+        "late_with_a_preceding_d_hit": count(&with_d),
+        "late_with_a_preceding_k_hit": count(&with_k),
+        "late_with_neither": count(&|u| !with_d(u) && !with_k(u)),
+        "late_held_at_d": count(&|u| u.own_d),
+        "late_held_at_k": count(&|u| u.own_k),
+        "late_with_d_within_50ms_before_release": count(&|u| d_hits.iter().any(|h| *h <= u.release_ns && *h >= u.release_ns - 50_000_000)),
+        "late_whose_second_had_backlog_over_1ms": seconds.map(|_| count(&|u| backlog_over(u.release_ns) == Some(true))),
+        "late_with_a_preceding_d_hit_and_backlog_over_1ms": seconds.map(|_| count(&|u| with_d(u) && backlog_over(u.release_ns) == Some(true))),
+        "note": "a hit is a value's first rejection at that bound with its own timestamp; 'preceding' is at or before the update's nominal release (e - 3 ms); backlog is the sampler's per-second maximum (absent without the sampler)",
+    })
+}
+
 /// Whether the update's `apply` came back after the update's own deadline (`e + 10 ms`): the update fails, whatever the DSP log shows.
 fn returned_after_expiry(row: Option<&super::Row>, u: &Upd) -> bool {
     row.is_some_and(|r| r.ret_ns > u.e_ns + EXPIRY_NS)
@@ -417,6 +459,7 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
     let uptime0 = uptime_line();
     let (timing, fake, off, tap) = (rig.timing().clone(), rig.fake().clone(), rig.offset(), rig.link().clone());
     let mut reader = Reader::spawn(tap.clone());
+    let preloaded = (opts.preload > 0).then(|| preload_dsp_history(&fake, opts.preload));
     let base_ns = timing.ns() + FIRST_NS;
     let tab = table(cond.kind, cond.count, &off, base_ns);
     let s0 = snap(&timing, &tap, &reader);
@@ -434,7 +477,7 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
     let s1 = snap(&timing, &tap, &reader);
     let tap_stats = tap.stats();
     let rows = timing.rows();
-    let dsp = fake.dsp_log(Dir::Rx, 0);
+    let dsp = without_preload(fake.dsp_log(Dir::Rx, 0), opts.preload);
     let load1 = load_avg();
 
     let acc = account(&tab, &rows, &dsp);
@@ -522,6 +565,7 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
         unclean.push("the sink reader's thread panicked".to_owned());
     }
     // Rejected reservation attempts (the new runtime), per value with their reasons: only a rejection at the in-flight bound is a bound hit.
+    let mut hit_first: Vec<(usize, i64, Option<i64>, Option<i64>)> = Vec::new();
     let rejected: Vec<Json> = extra["reservations"]["per_value"]
         .as_array()
         .map(|values| {
@@ -531,6 +575,7 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
                     let (id, first, reserved, attempts) = (value[0].as_u64()?, value[1].as_i64()?, value[2].as_i64(), value[3].as_u64()?);
                     let by_reason: Vec<u64> = value[4].as_array()?.iter().filter_map(Json::as_u64).collect();
                     let u = tab.get(id as usize - 1)?;
+                    hit_first.push((u.i, first, value[5].as_i64().filter(|n| *n != 0), value[6].as_i64().filter(|n| *n != 0)));
                     Some(json!({ "i": u.i, "attempts": attempts, "bound_hit": is_bound_hit(&by_reason),
                         "rejections": REASONS.iter().zip(&by_reason).filter(|(_, n)| **n > 0).map(|(r, n)| (r.to_string(), json!(n))).collect::<serde_json::Map<_, _>>(),
                         "held_us": reserved.map(|r| (r - first) as f64 / 1e3), "reserved_after_instant_us": reserved.map(|r| (r - u.e_ns) as f64 / 1e3),
@@ -540,6 +585,20 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
         })
         .unwrap_or_default();
     let bound_hit_values = rejected.iter().filter(|r| r["bound_hit"] == json!(true)).count();
+    // K and D apart, per repetition: hits, the values that had one, the largest occupancy seen after an attempt, and the coupling check.
+    let reasons = &extra["reservations"]["rejected_attempts_by_reason"];
+    let (k_rejections, d_rejections) = (reasons["k"].as_u64().unwrap_or(0), reasons["d"].as_u64().unwrap_or(0));
+    let d_hits: Vec<i64> = hit_first.iter().filter_map(|h| h.3).collect();
+    let k_hits: Vec<i64> = hit_first.iter().filter_map(|h| h.2).collect();
+    let coupling_updates: Vec<CouplingUpd> = tab
+        .iter()
+        .map(|u| {
+            let own = hit_first.iter().find(|h| h.0 == u.i);
+            CouplingUpd { release_ns: u.e_ns - WINDOW_NS, late: failed[u.i], own_d: own.is_some_and(|h| h.3.is_some()), own_k: own.is_some_and(|h| h.2.is_some()) }
+        })
+        .collect();
+    let seconds: Option<Vec<(i64, f64)>> = samples.as_ref().map(|s| s.iter().filter_map(|r| Some((r["t_end_ns"].as_i64()?, r["backlog_ms_max"].as_f64()?))).collect());
+    let coupling = coupling_check(&coupling_updates, &d_hits, &k_hits, seconds.as_deref());
     let per_update_rows: Vec<Option<super::Row>> = acc.per.iter().map(|(row, _)| *row).collect();
     let stages = extra["stage_stamps"].as_array().map(|stamps| stage_table(stamps, &tab, &per_update_rows));
     let bound_diag = samples.map(|samples| bound_diag(&tab, &rows, &dsp, &off, &extra, &samples, cond, opts.k));
@@ -557,11 +616,14 @@ fn run_with(rig: Box<dyn Rig>, owner: Owner, cond: &Cond, opts: &Opts) -> Out {
                                          else { json!({ "source": "none: today's owner exposes no booking identity without a production change; requests and applies are paired by instant (INFERRED)",
                                                         "identified_applies": 0, "untagged_applies": untagged_rows }) },
                      "lookahead": LOOKAHEAD },
-        "bound_hits": { "values_with_a_bound_hit": bound_hit_values, "values_with_a_rejection": rejected.len(), "per_update": rejected },
+        "bound_hits": { "k_rejections": k_rejections, "d_rejections": d_rejections, "values_with_a_k_hit": k_hits.len(), "values_with_a_d_hit": d_hits.len(),
+                        "max_k_load": extra["reservations"]["max_k_load_after_an_attempt"], "max_d_occupancy": extra["reservations"]["max_d_occupancy_after_an_attempt"], "coupling": coupling,
+                        "values_with_a_bound_hit": bound_hit_values, "values_with_a_rejection": rejected.len(), "per_update": rejected },
         "loss": { "overflow_events": loss[0], "missing_samples": loss[1], "publication_drops": loss[2], "other_receive_results": s1.other,
                   "missing_samples_published_stream_gaps": tap_stats.missing,
                   "window": "from the owner's start to the common endpoint (stopped, drained); missing = the sink reader's gaps (leading, between, trailing), each once" },
         "reconcile": reconcile,
+        "preload": preloaded,
         "clean": unclean.is_empty(), "unclean": unclean,
         "latency_stages": stages, "bound_diag": bound_diag,
         "clock_offset_unc_ns": off.unc_ns, "load_before": load0, "load_after": load1, "uptime_before": uptime0, "owner_extra": extra, "finish": finish,
@@ -636,9 +698,9 @@ fn bound_diag(tab: &[Upd], rows: &[super::Row], dsp: &[(i64, f64, bool)], off: &
         "E2B_BOUND_UPDATES {}",
         json!({ "kind": cond.kind.name(), "bound": bound, "columns": ["i", "apply_entry_after_release_ns", "apply_return_after_release_ns", "application_tick_minus_e_ticks", "retired_after_e_ns"], "updates": table })
     );
-    json!({ "bound": if bound == 0 { json!("design (4)") } else { json!(bound) }, "samples": samples, "coincidence_1ms": coincidence(samples, 1.0), "coincidence_5ms": coincidence(samples, 5.0),
+    json!({ "bound": if bound == 0 { json!("design (K=4, D=64)") } else { json!(bound) }, "samples": samples, "coincidence_1ms": coincidence(samples, 1.0), "coincidence_5ms": coincidence(samples, 5.0),
             "application_lateness": dist(&app_late), "retired_after_e": dist(&retire_after), "application_pairing_mismatches": mismatches, "applications_paired": tick_of.len(),
-            "note": "samples: per second, end and maximum of 10 ms readings of the fake's backlog and the chain's in-flight occupancy, and the second's retirements and bound rejections" })
+            "note": "samples: per second, end and maximum of 10 ms readings of the fake's backlog, K's load (device_load at the brain's time) and D's occupancy (the chain's resident values), and the second's retirements and bound rejections; t_end_ns is the host ns at the second's end" })
 }
 
 /// What the protocol itself counted at the endpoint.
@@ -767,6 +829,18 @@ fn trial_run(owner: Owner, rate_hz: f64, block_len: usize, secs: usize, preload:
     })
 }
 
+/// The DSP log without the first `h` timed entries, which are the preload (applied before any update; an update's own entry comes at least 50 ms later).
+fn without_preload(log: Vec<(i64, f64, bool)>, h: usize) -> Vec<(i64, f64, bool)> {
+    let mut skip = h;
+    log.into_iter()
+        .filter(|entry| {
+            let preload = entry.2 && skip > 0;
+            skip -= usize::from(preload);
+            !preload
+        })
+        .collect()
+}
+
 /// The scan-cost diagnostic: `h` timed frequency values applied straight to the fake (not through an owner) with instants far in the past, so the
 /// chain's DSP history holds `h` entries before the observation (the fake scans that history per block, `device.rs` `freq_constant`). A FIFO that
 /// is full is waited for (the fake's own back-pressure); returns how long it took and how many waits there were.
@@ -846,6 +920,9 @@ fn verdict(kind: &str, today: &[Out], new: &[Out]) -> Json {
             let (clean_today, clean_new) = (is_clean(t), is_clean(n));
             json!({ "rep": rep, "p99_today_us": p99_ns(&t.acceptance).map(|v| v as f64 / 1e3), "p99_new_us": p99_ns(&n.acceptance).map(|v| v as f64 / 1e3), "loss_today": t.loss, "loss_new": n.loss,
                     "clean_today": clean_today, "clean_new": clean_new, "unclean_today": t.unclean, "unclean_new": n.unclean,
+                    "new_k_rejections": n.json["bound_hits"]["k_rejections"], "new_d_rejections": n.json["bound_hits"]["d_rejections"], "new_values_with_a_k_hit": n.json["bound_hits"]["values_with_a_k_hit"],
+                    "new_values_with_a_d_hit": n.json["bound_hits"]["values_with_a_d_hit"], "new_max_k_load": n.json["bound_hits"]["max_k_load"], "new_max_d_occupancy": n.json["bound_hits"]["max_d_occupancy"],
+                    "new_coupling": n.json["bound_hits"]["coupling"],
                     "checks": checks.iter().map(|(k, v)| json!({ *k: v })).collect::<Vec<_>>(), "pass": clean_today && clean_new && checks.iter().all(|c| c.1) })
         })
         .collect();
@@ -870,13 +947,14 @@ fn e2b_verdict() {
     let block_len = env_usize("E2B_BLOCK_LEN", 2000);
     let count = env_usize("E2B_COUNT", 10_000);
     let kinds = std::env::var("E2B_KINDS").unwrap_or_else(|_| "spaced,bursty".to_owned());
+    let preload = env_usize("E2B_PRELOAD", 0);
     emit("E2B_HOST", host_json());
     // ABBA, then BAAB (A = today, B = new).
     use Owner::{New as B, Today as A};
     for kind in kinds.split(',').map(|k| if k == "bursty" { Kind::Bursty } else { Kind::Spaced }) {
         let (mut today, mut new) = (Vec::new(), Vec::new());
         for (rep, owner) in [A, B, B, A, B, A, A, B].into_iter().enumerate() {
-            let out = run_once(owner, &Cond { kind, count, rate_hz: rate, block_len }, &Opts { counters: true, diag: false, fault_ms: None, stages: false, ..Opts::default() });
+            let out = run_once(owner, &Cond { kind, count, rate_hz: rate, block_len }, &Opts { counters: true, diag: false, fault_ms: None, stages: false, preload, ..Opts::default() });
             let mut line = out.json.clone();
             line["rep"] = json!(rep);
             line["order"] = json!("ABBA,BAAB (A=today, B=new)");
@@ -921,18 +999,19 @@ fn e2b_latency() {
     emit("E2B_LATENCY", out.json);
 }
 
-/// The paired bound diagnostic (new runtime only, never a verdict): the same condition at the in-flight bound of the design (4) and at the device's
-/// capacity (16, the fake's command queue: `FakeConfig::command_queue`, `device.rs`; the DSP FIFO holds 32, so the queue binds first), spaced and
-/// then bursty, each pair in ABBA order. Per-second samples and a per-update table come out with each run.
+/// The bound diagnostic (new runtime only, never a verdict): the same condition at the design's bounds (K = 4, D = 64), spaced and then bursty,
+/// twice each (there is no second bound value to compare: E4b measures the defaults). Per-second samples and a per-update table come out with
+/// each run.
 #[test]
 #[ignore = "E2B: run on a lab host in a release build"]
 fn e2b_bound() {
     emit("E2B_HOST", host_json());
     let (rate, block_len, count) = (env_f64("E2B_RATE_HZ", 50e6), env_usize("E2B_BLOCK_LEN", 500), env_usize("E2B_COUNT", 10_000));
-    let capacity = env_usize("E2B_CAPACITY", 16);
+    let preload = env_usize("E2B_PRELOAD", 0);
+    let runs = env_usize("E2B_BOUND_RUNS", 2);
     for kind in [Kind::Spaced, Kind::Bursty] {
-        for bound in [4, capacity, capacity, 4] {
-            let out = run_once(Owner::New, &Cond { kind, count, rate_hz: rate, block_len }, &Opts { counters: true, sample: true, k: bound, ..Opts::default() });
+        for _ in 0..runs {
+            let out = run_once(Owner::New, &Cond { kind, count, rate_hz: rate, block_len }, &Opts { counters: true, sample: true, preload, ..Opts::default() });
             emit("E2B_BOUND", out.json);
         }
     }
@@ -1311,6 +1390,61 @@ mod tests {
         assert!(source.starts_with("none") && source.contains("INFERRED"), "{source}");
     }
 
+    /// The coupling check counts, for the late updates only, a D hit or a K hit at or before the release (an update's own, or another value's first
+    /// rejection), a D hit within 50 ms, and the sampler's per-second backlog above 1 ms where the release fell.
+    /// Sol's sequence: A is released, rejected first at K, later at D, and applies late. Its own D rejection comes after its release, so no D hit
+    /// precedes the release (it was held at both bounds, which the held counts say); another value's hit counts only by its own timestamp.
+    #[test]
+    fn a_value_first_rejected_at_k_and_later_at_d_has_no_preceding_d_hit_of_its_own() {
+        let r = 1_000_000;
+        let a = CouplingUpd { release_ns: r, late: true, own_d: true, own_k: true };
+        let c = coupling_check(&[a], &[r + 20], &[r + 10], None);
+        assert_eq!((c["late_with_a_preceding_d_hit"].clone(), c["late_with_a_preceding_k_hit"].clone(), c["late_with_neither"].clone()), (json!(0), json!(0), json!(1)), "{c}");
+        assert_eq!((c["late_held_at_d"].clone(), c["late_held_at_k"].clone()), (json!(1), json!(1)), "{c}");
+        let d_only = CouplingUpd { release_ns: r, late: true, own_d: true, own_k: false };
+        let c = coupling_check(&[d_only], &[], &[], None);
+        assert_eq!((c["late_held_at_d"].clone(), c["late_held_at_k"].clone()), (json!(1), json!(0)), "held at D only: {c}");
+        // Another value's D rejection before the release precedes it; one after the release does not.
+        let b = CouplingUpd { release_ns: r, late: true, own_d: false, own_k: false };
+        let c = coupling_check(&[b], &[r - 5], &[r + 1], None);
+        assert_eq!((c["late_with_a_preceding_d_hit"].clone(), c["late_with_a_preceding_k_hit"].clone(), c["late_with_neither"].clone()), (json!(1), json!(0), json!(0)), "{c}");
+    }
+
+    #[test]
+    fn the_coupling_check_reads_hits_at_or_before_each_late_updates_release() {
+        let upd = |release_ns: i64, late: bool, own_d: bool, own_k: bool| CouplingUpd { release_ns, late, own_d, own_k };
+        let sec = 1_000_000_000;
+        let updates = [
+            upd(10 * sec + 5, true, true, false),            // late, itself held at D
+            upd(10 * sec + 900_000_000, true, false, false), // late, a D hit (the first's) 0.9 s before: preceding, not within 50 ms
+            upd(11 * sec + 100, true, false, true),          // late, itself held at K
+            upd(5 * sec + 1, true, false, false),            // late, before any hit: neither
+            upd(12 * sec, false, true, true),                // not late: never counted
+            upd(10 * sec + 950_000_000, true, false, false), // late, the same D hit 0.95 s before: preceding, not within 50 ms
+        ];
+        let d_hits = [10 * sec + 5, 12 * sec];
+        let k_hits = [11 * sec + 100];
+        let seconds = [(11 * sec, 0.4), (12 * sec, 2.5), (6 * sec, 3.0)];
+        let c = coupling_check(&updates, &d_hits, &k_hits, Some(&seconds));
+        assert_eq!(c["late_updates"], json!(5));
+        assert_eq!(c["late_with_a_preceding_d_hit"], json!(4), "{c}");
+        assert_eq!(c["late_with_a_preceding_k_hit"], json!(1), "{c}");
+        assert_eq!(c["late_with_neither"], json!(1), "{c}");
+        assert_eq!(c["late_with_d_within_50ms_before_release"], json!(1), "only the first update's release coincides with a D hit within the 50 ms up to it");
+        assert_eq!((c["late_held_at_d"].clone(), c["late_held_at_k"].clone()), (json!(1), json!(1)), "the late updates that were themselves rejected at D, at K");
+        assert_eq!(
+            c["late_whose_second_had_backlog_over_1ms"],
+            json!(2),
+            "the releases at 5 s + 1 ns (second ending at 6 s, 3.0 ms) and 11 s + 100 ns (ending at 12 s, 2.5 ms); the second ending at 11 s had 0.4 ms"
+        );
+        assert_eq!(c["late_with_a_preceding_d_hit_and_backlog_over_1ms"], json!(1), "the release at 11 s has the D hit of 10 s before it and backlog; the one at 5 s has no D hit");
+        let without = coupling_check(&updates, &d_hits, &k_hits, None);
+        assert!(without["late_whose_second_had_backlog_over_1ms"].is_null() && without["late_with_a_preceding_d_hit"] == json!(4), "no sampler: the backlog counts are absent");
+        // A hit after the release does not precede it.
+        let late_hit = coupling_check(&[upd(10, true, false, false)], &[11], &[12], None);
+        assert_eq!((late_hit["late_with_a_preceding_d_hit"].clone(), late_hit["late_with_a_preceding_k_hit"].clone(), late_hit["late_with_neither"].clone()), (json!(0), json!(0), json!(1)));
+    }
+
     /// A second is a backlog excursion above the threshold and a bound-hit second when the bound rejected an attempt in it.
     #[test]
     fn the_coincidence_counts_excursions_against_bound_hits_per_second() {
@@ -1380,6 +1514,15 @@ mod tests {
         reader.join().unwrap();
     }
 
+    /// The preload is the first timed entries of the log and nothing else: untimed entries and the updates' own entries stay.
+    #[test]
+    fn the_preload_is_taken_out_of_the_dsp_log_before_the_accounting() {
+        let log = vec![(5, 0.0, false), (0, 1.0, true), (0, 2.0, true), (0, 1.0, true), (100, 2.0, true), (200, 1.0, true)];
+        assert_eq!(without_preload(log.clone(), 3), vec![(5, 0.0, false), (100, 2.0, true), (200, 1.0, true)]);
+        assert_eq!(without_preload(log.clone(), 0), log, "no preload: the log is as it was");
+        assert_eq!(without_preload(log, 10).len(), 1, "a preload larger than the timed entries leaves only the untimed one");
+    }
+
     #[test]
     fn the_readers_missing_samples_are_its_gaps_and_its_trailing_gap_once_each() {
         assert_eq!(reader_missing_total(&read(3, 30, 0, 30), 40), 10, "a block dropped at the tail");
@@ -1399,6 +1542,11 @@ mod tests {
             assert_eq!(out.json["finish"]["joined"], json!(true), "{owner:?}: {}", out.json);
             assert_eq!(out.json["ingress"]["booking_floor"]["observed_stray_apply_instants"], json!(0), "{owner:?}");
             assert_eq!(out.json["clean"], json!(true), "{owner:?}: {}", out.json);
+            if owner == Owner::New {
+                let hits = &out.json["bound_hits"];
+                assert!(hits["k_rejections"].is_u64() && hits["d_rejections"].is_u64() && hits["max_k_load"].is_u64() && hits["max_d_occupancy"].is_u64(), "{hits}");
+                assert_eq!(hits["coupling"]["late_updates"], json!(0), "{hits}");
+            }
         }
     }
 }
