@@ -196,6 +196,7 @@ Test-plan draft 4 notes (2026-11-01): 6 budget — the measurement decides (§3.
 | 2026-11-03 | Sol's E4a test-plan review (REVISE, P2 1–6, P3 7–8, all adopted; `reviews/45e4a-plan-sol.md`): B8 reworded; the held order stops at its head (§11) |
 | 2026-11-03 | Sol's E4a1 code review (REVISE, P2 ×3, all adopted; `reviews/45e4a1-code-sol.md`): B8's window after F (abandoned by S, not refused by the brain); P6 checked when the freeing step's ops end; both wrappers record acceptance at the call's return, and the Q1 tolerance goes |
 | 2026-11-04 | E4a closed (05d95c0, ede2327). E4b: the idle-host verdicts PASS in all four conditions with 0 K and 0 D hits and no late update, but no receive backlog arose; the pre-registered backlog confirmation (H = 10,000 preload) FAILS (new p99 above 300 µs in one repetition of each kind, a 0.04 % loss excess in one bursty pair; 0 K/D hits, 0 late updates; the preload gave only a start-up transient). **Speed criterion: FAIL.** Cause of the tail excursions INFERRED (host disturbance or fake-lock contention while S is inside `apply`; today's owner at most 58 µs inside `apply` in the same runs); `reviews/45e4b-results.md` |
+| 2026-11-04 | E4c closed: the new holdout 11 of 20 found by the DST (criterion 16; 11 of 19 without N05), past bugs 4 found (the wiring omission newly, by I21), 4 cannot happen, 2 not solved. **E4 fails both criteria; per §11 the experiment ends.** Report: [45-report-e4.md](45-report-e4.md) |
 
 ## 11. The second round (E4)
 

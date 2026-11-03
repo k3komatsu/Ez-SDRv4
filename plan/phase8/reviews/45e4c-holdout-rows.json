@@ -1,0 +1,208 @@
+[
+ {
+  "id": "N01",
+  "holdout": "R01 (Sol): the brain's reservation refuses a value at the segment origin; the cell's own reserve is unchanged",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if cells[held.stream].reserve(held.entry.clone(), held.generation).is_err() {",
+  "new": "if matches!(cells[held.stream].phase, Phase::Armed(s) | Phase::Streaming(s) if held.entry.order.0 == s.origin) || cells[held.stream].reserve(held.entry.clone(), held.generation).is_err() {"
+ },
+ {
+  "id": "N02",
+  "holdout": "Stopping transition records the drain obligations of Taken only, not Maybe-applied",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": ".filter(|f| matches!(f.state, ValueState::Taken | ValueState::MaybeApplied)).map(|f| f.entry.order.1).collect()",
+  "new": ".filter(|f| matches!(f.state, ValueState::Taken)).map(|f| f.entry.order.1).collect()"
+ },
+ {
+  "id": "N03",
+  "holdout": "Procedure 2: a cut shortened to C cancels queued values only when e > C (not e >= C)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "self.cancel_queued(|e| e >= cut);",
+  "new": "self.cancel_queued(|e| e > cut);"
+ },
+ {
+  "id": "N04",
+  "holdout": "Procedure 3: commit of a publication validates the epoch only, not the cut",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "let stale = seen.epoch != self.epoch || seen.cut != self.cut || seen.revision != self.revision;",
+  "new": "let stale = seen.epoch != self.epoch;"
+ },
+ {
+  "id": "N05",
+  "holdout": "Procedure 4: flag, then loss record, and only afterwards native mark_lost",
+  "no_translation": "The model's publication is already Gate, Set, Ungate, Record, Mark (world.rs PUB_STEPS): the record precedes the mark, which is the behaviour the holdout calls wrong. The Record step is empty: nothing observable (no input to the brain, no event) happens between Record and Mark, since the loss boundary and the settings Done are sent after Mark. So no code change reproduces the error, and the invariant 'native retention before observable loss publication' has no model counterpart."
+ },
+ {
+  "id": "N06",
+  "holdout": "Procedure 4: the lifecycle admission checks F before waiting for the gate and not again under the gate",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "self.gate = Some(Holder::Rx(k)); if self.failure {",
+  "new": "self.gate = Some(Holder::Rx(k)); if false {"
+ },
+ {
+  "id": "N07",
+  "holdout": "Procedure 4: after loss, retain the streamers but free the parent native device handle",
+  "no_translation": "The model has no parent native device handle apart from the streamer handles: OwnerRelease sets `released` whether or not the mark is set, and nothing records a free of the parent. Showing the error needs a new state and a new oracle clause (both forbidden). A diagnostic row N07d records the parent's free in the destroyed ledger (a sentinel entry) so that I19 sees it; it is not a faithful translation and is not scored."
+ },
+ {
+  "id": "N07d",
+  "holdout": "(diagnostic) OwnerRelease with the native mark set also frees the parent: a sentinel entry in the destroyed ledger",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "self.teardown.as_mut().expect(\"a stopper\").released = true;",
+  "new": "if marked { self.teardown.as_mut().expect(\"a stopper\").destroyed.insert((usize::MAX, 0)); } self.teardown.as_mut().expect(\"a stopper\").released = true;",
+  "diagnostic": true
+ },
+ {
+  "id": "N08",
+  "holdout": "R08 (Sol): a Done value on the chain clears the pin for Move and StartNext (queued commitments kept)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if cells.iter().any(|cell| cell.committed(Some(channel)) || (cell.channels.contains(channel as u32) && cell.busy())) {",
+  "new": "if cells.iter().any(|cell| cell.in_flight.iter().any(|f| f.entry.channel == channel && (f.state == ValueState::Queued || (matches!(f.state, ValueState::Taken | ValueState::MaybeApplied) && !cell.in_flight.iter().any(|g| matches!(g.state, ValueState::Done(_)))))) || (cell.channels.contains(channel as u32) && cell.busy())) {",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "if cells.iter().any(|cell| cell.committed(Some(channel)) || (cell.channels.contains(channel as u32) && cell.busy())) {",
+    "new": "if cells.iter().any(|cell| cell.in_flight.iter().any(|f| f.entry.channel == channel && (f.state == ValueState::Queued || (matches!(f.state, ValueState::Taken | ValueState::MaybeApplied) && !cell.in_flight.iter().any(|g| matches!(g.state, ValueState::Done(_)))))) || (cell.channels.contains(channel as u32) && cell.busy())) {"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "if cell.pinned() || cell.flush_owed() || cell.busy()",
+    "new": "if (cell.pinned() && !cell.in_flight.iter().any(|f| matches!(f.state, ValueState::Done(_)))) || cell.flush_owed() || cell.busy()"
+   }
+  ]
+ },
+ {
+  "id": "N09",
+  "holdout": "Settlement: a completion writes its record even when the command's disposition is already settled",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "self.dispose(id, disposition);",
+  "new": "self.dispositions.push((id, disposition));",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "self.dispose(id, disposition);",
+    "new": "self.dispositions.push((id, disposition));"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "Terminal::Dropped => { self.dispose(id, Disposition::Cancelled);",
+    "new": "Terminal::Dropped => { self.dispositions.push((id, Disposition::Cancelled));"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+    "old": "Terminal::Abandoned => { self.dispose(id, Disposition::Reported(Reason::Loss));",
+    "new": "Terminal::Abandoned => { self.dispositions.push((id, Disposition::Reported(Reason::Loss)));"
+   }
+  ]
+ },
+ {
+  "id": "N10",
+  "holdout": "R10 (Sol): an empty recv of a Draining stream re-arms the drain deadline at now + window",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "let ended = rules::end_of_recv(received, k, self.device.t);",
+  "new": "let ended = rules::end_of_recv(received, k, self.device.t); if !ended.lost && ended.samples.count == 0 && self.cells[k].drain == Drain::Draining { self.timers.retain(|(timer, _)| *timer != Timer::Drain(k)); self.timers.push((Timer::Drain(k), self.device.t + self.params.drain_window)); }"
+ },
+ {
+  "id": "N11",
+  "holdout": "Native lock: the command-time bracket is split into separate lock sections",
+  "no_translation": "The model has no command-time state: S's lock section is Lock, Effect, Unlock and the device call is one atomic event (set_command_time, the apply and clear_command_time are not separate steps), and no device call of R reads a command time. A split bracket would need a device command-time field, a timed stop, and an oracle that reads it (forbidden)."
+ },
+ {
+  "id": "N12",
+  "holdout": "Bound K counted per chain instead of across the device",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "if device_load(cells, self.now) >= self.device_bound {",
+  "new": "if device_load(std::slice::from_ref(&cells[stream]), self.now) >= self.device_bound {"
+ },
+ {
+  "id": "N13",
+  "holdout": "Bound K: a finished partial failure stops counting at once (only Ok counts until its instant)",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "ValueState::Done(Terminal::Call(Outcome::Ok | Outcome::Partial)) => cell.phase != Phase::Lost && now < flight.entry.order.0,",
+  "new": "ValueState::Done(Terminal::Call(Outcome::Ok)) => cell.phase != Phase::Lost && now < flight.entry.order.0,"
+ },
+ {
+  "id": "N14",
+  "holdout": "Bound K: queued, taken and maybe-applied commands stop counting when device time reaches their instant",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "ValueState::Queued | ValueState::Taken | ValueState::MaybeApplied => true,",
+  "new": "ValueState::Queued | ValueState::Taken | ValueState::MaybeApplied => now < flight.entry.order.0,"
+ },
+ {
+  "id": "N15",
+  "holdout": "Bound D: reported left values are excluded from the chain's occupancy",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "cells[stream].in_flight.len() >= self.chain_bound",
+  "new": "cells[stream].in_flight.iter().filter(|f| !f.left).count() >= self.chain_bound"
+ },
+ {
+  "id": "N16",
+  "holdout": "Bound D: a cancelled queued value leaves the cell at the cancellation, before its Dropped input",
+  "file": "crates/ezsdr-radio-uhd/src/brain/cell.rs",
+  "old": "for flight in self.in_flight.iter_mut().filter(|f| f.state == ValueState::Queued) { if pred(flight.entry.order.0) { flight.state = ValueState::Cancelled; } }",
+  "new": "self.in_flight.retain(|f| !(f.state == ValueState::Queued && pred(f.entry.order.0)));"
+ },
+ {
+  "id": "N17",
+  "holdout": "Held queue: a capacity timer runs the drain-deadline transition",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "Section::CapacityTimer => {}",
+  "new": "Section::CapacityTimer => { for stream in 0..cells.len() { if cells[stream].drain == Drain::Draining { self.stop_send(stream, cells); } } }"
+ },
+ {
+  "id": "N18",
+  "holdout": "R18 (Sol): samples buffered while the setting call is outstanding are credited when its completion is known",
+  "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+  "old": "pub(crate) steps: usize,",
+  "new": "pub(crate) steps: usize, pub(crate) pre_return: BTreeMap<u64, (i64, Vec<(usize, Channels, Ticks)>)>,",
+  "edits": [
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "pub(crate) steps: usize,",
+    "new": "pub(crate) steps: usize, pub(crate) pre_return: BTreeMap<u64, (i64, Vec<(usize, Channels, Ticks)>)>,"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "steps: 0,",
+    "new": "steps: 0, pre_return: BTreeMap::new(),"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "omit_mark, steps, } = self;",
+    "new": "omit_mark, steps, pre_return, } = self;"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "format!(\"{steps:?}\"),",
+    "new": "format!(\"{steps:?}\"), format!(\"{pre_return:?}\"),"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "self.device.apply_timed(*channel, cmd.id, *at);",
+    "new": "self.device.apply_timed(*channel, cmd.id, *at); self.pre_return.insert(cmd.id, (self.device.t, Vec::new()));"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "let carried = self.carried(k); match rules::publish_round",
+    "new": "let carried = self.carried(k); if let Some(id) = self.settings.hand.as_ref().map(|cmd| cmd.id) { if self.cells[k].state_of(id) == Some(&ValueState::MaybeApplied) { if let Some((_, packets)) = self.pre_return.get_mut(&id) { packets.push((k, carried, call.recv.samples)); } } } match rules::publish_round"
+   },
+   {
+    "file": "crates/ezsdr-radio-uhd/src/brain/world.rs",
+    "old": "rules::accept_all(&mut self.cells, cmd.id, self.device.t);",
+    "new": "let id = cmd.id; rules::accept_all(&mut self.cells, id, self.device.t); if let Some((accepted, packets)) = self.pre_return.remove(&id) { for (k, carried, samples) in packets { let mut view = self.cells[k].clone(); view.accept(id, accepted); for (value, sample) in rules::consume_samples(&view, carried, &self.rx[k].consumed, &samples).into_iter().filter(|(value, _)| *value == id) { let left = self.cells[k].is_left(value); let ident = self.ident(value, view.in_flight.iter().find(|f| f.entry.order.1 == value).unwrap().entry.channel, sample); self.fact_log.push(Fact { leftover: left, value, stream: k, channel: ident.channel, sample }); if left { self.monitor.leftovers.entry(value).or_insert(ident); } else { self.monitor.evidence.entry(value).or_insert(ident); } self.rx[k].consumed.insert(value); self.inbox.push_back(Input::Boundary(Boundary::Consumed { id: value })); } } }"
+   }
+  ]
+ },
+ {
+  "id": "N19",
+  "holdout": "Lifecycle: each wake-up of the stopper restarts the join allowance",
+  "no_translation": "Counted not found by ruling: stopper notifications and join polls are not modelled; brain input consumption is neither."
+ },
+ {
+  "id": "N20",
+  "holdout": "Lifecycle: shutdown completion waits for an executor whose creation failed",
+  "file": "crates/ezsdr-radio-uhd/src/brain/core.rs",
+  "old": "self.exit == Exit::ShuttingDown && self.deferred.is_empty()",
+  "new": "self.exit == Exit::ShuttingDown && self.unspawned.is_empty() && self.deferred.is_empty()"
+ }
+]

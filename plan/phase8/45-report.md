@@ -1,6 +1,6 @@
 # 45 の実験の報告（E1〜E3）
 
-Status: 報告（2026-11-03，orchestrator Opus）．owner の判断待ち（§6）．
+Status: 報告（2026-11-03，orchestrator Opus）．owner は §6 の 1〜4 を決めた（2026-11-03：E4 を一度だけ行う，§4.5 の上限を分ける，模型に 4 つの概念を入れる，#76 の規則はレビューの checklist で見る）．**第 2 回の結果は [45-report-e4.md](45-report-e4.md)**．
 設計メモ：[45-uhd-decision-core.md](45-uhd-decision-core.md)．計画と経緯：[45-experiment.md](45-experiment.md)．段階ごとの記録：`reviews/45e1-*`，`reviews/45e2a-*`，`reviews/45e2b-*`，E3 の記録は `reviews/45e3-*`．
 
 ## 1. 結論
