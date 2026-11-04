@@ -1,12 +1,13 @@
 # 設計メモ 47：流れている stream を変えない（帳簿 46 の決定を spec に入れる）
 
-Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の下書きのレビュー（12 件，すべて取り入れた．§8）を入れた．**owner の決定**：§6 の O1〜O3 はすべて決まった（2026-11-04）．
+Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレビュー（12 件）と第 2 版の再レビュー（5 件）を入れた（§8）．**owner の決定**：§6 の O1〜O3 はすべて決まった（2026-11-04）．
 
 | 項目 | 内容 |
 |---|---|
 | きっかけ | owner が帳簿 [46](46-streaming-feature-ledger.md) の F1〜F9 をすべて決めた（2026-11-04，46 §8）．報告 E4 §6 の 3 の順番（owner 2026-11-04，handoff §2）の 1 番目 |
 | 決めること | 46 §8 の決定を，Radio Vocabulary（spec 07），MockRadio（spec 09），UHD Module（spec 18），Easy API（spec 16）の規則に落とす．形は案 (A)（owner 2026-11-04）：値の変更は `UpdateParameter` のまま運び，Easy API が開始の Action の前に出す．Kernel の Action の形と admission は変えない |
 | 変えないもの | Kernel の Action の形と admission の順（RS-17，RS-19，RS-49，RS-52，`crates/ezsdr-kernel/src/coordinator/admission.rs:35-286`），Stream Contract，Vision §27 の class の集合，§58，§61，§65 |
+| 変えるもの（Kernel） | Session の入口と暗黙の Spec の作り方だけ（O1：初期の設定の要求を hash と validate の前に resource の `requires` に入れる．RS-12，SB-22c・SB-T2，KC-1．§2.4）．radio の知識は Kernel に入れない |
 | 変えるもの（Vision） | §3 と §66 の Easy API の例（connect の後に `.stream = 0` とする所．§2.5） |
 | risky | はい（寿命，順序，fake と実機の境に触れる．AGENTS.md §9） |
 
@@ -72,9 +73,14 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 ### 2.4 spec 16（Easy API）
 
 - **channel の組は `connect` の時に決める**（§6 の O1）．`Radio.rx_channels[n].stream`，`tx_channels[n].stream` は Run の中では読むだけ．
+- **`connect` の初期の要求の契約**（再レビュー 1，2）：
+  - Kernel の Session の入口は，radio に依らない初期の要求（resource ごとの key と値の組）を受け取り，**hash と validate の前に**その resource の `requires` に `Constraint::Eq` として入れ，要る Vocabulary の major も暗黙の Spec の `requirements` に宣言する．radio の key を具体的な形に展開するのは Python の client（`radio.<d>.c<n>.stream = Eq(k)` など）．server の connect の frame と schema（EA-6，EA-10）に欄を足す．
+  - `tx={k: [channels…]}`・`rx={…}` の意味：**書いた方向の map はその方向の組の全部**（書いていない channel は none）．**書かなかった方向は既定**（RM-30：受信・送信とも c0 が stream 0）．**空の map はその方向の全 channel が none**．同じ channel を二つの stream に書く，存在しない channel や stream の番号，型の違いは，connect の前に client が拒む（黙って後の値を使ったり既定に戻したりしない）．sample の並びは RM-3 の logical channel の番号順のまま．radio が二つ以上ある時は，resource の名で宛先を決める．
+  - 初期の周波数・gain・rate・antenna も同じ道で渡せる（`requires` の `Eq`）．既定の BindingProfile の selector（物理の layout）には書かない．
 - **開始と設定**（Q5）：`Radio.rx_streams[k].start(at=None, *, frequency=None, gain=None, sample_rate=None, antenna=None)`．`frequency`・`gain`・`antenna` は logical channel の番号を key とする dict，`sample_rate` は stream の値．書かなかった channel は変えない．送信の `repeat(x, at=None, *, …)`・`send(…)` も同じ形．
 - **送る前に全部を確かめる**（Sol 7）：client は，channel の番号（その stream の channel か），値の型，波形を送る前に確かめる．
-- **送る順と部分的な失敗**：値の `UpdateParameter` を一つずつ出し，一つでも拒まれたら（Kernel の `Rejected`）例外を出して開始の Action を出さない．それまでに受け付けられた値は staging に残る（stream の configuration として読める）．
+- **送る順と部分的な失敗**（再レビュー 3）：値の `UpdateParameter` を一つずつ出す．各 submit の後，**Kernel の拒否，またはその Action の id を持つ Provider の booking の拒否**（O2）があれば，例外を出し，残りの値と開始の Action を出さない．submit が返るまでに分かるのは booking までの拒否で，後の configure の失敗や LatePolicy の移動の後の拒否は，非同期の event として別に扱う．待つ間に Run が終わった（終わり，freeze，timeout で完了を待たずに返った，`crates/ezsdr-kernel/src/coordinator/paced.rs:185-202`）時は，拒否の event がないことを成功と見なさず，例外にする．
+- **読み返す値は admitted の値**（再レビュー 4）：属性と `effective` が見せるのは Kernel の admitted configuration で，Provider の staging や装置に入った値ではない（KC-27）．Provider が拒んだ値も admitted には残る（今の KC-27 と同じ）．そのため，流れている stream に値を出して拒まれた後は，読み返す値と次の開始に使われる値が違いうる．この違いは文書に書く（Provider の staging を読む道は作らない）．受け付けられた値は staging に残り，次の開始に使われる．
 - **Provider の拒否の扱い**（Sol 6，§6 の O2）：Kernel の admission を通った後で Provider が拒む場合（流れている stream への change，重なる予約）は，今の client では例外にならない（`python/ezsdr/session.py:110-113` は Kernel の outcome しか見ない）．
 - 流れている stream の `frequency` などを設定すると，Provider が拒む（O2 の決め方による）．
 - repeat の差し替え：新しいメソッド（名前は設計で決める）．
@@ -101,7 +107,7 @@ Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 1. **初期の channel の組の道**：`connect` の時に組を決める入口（O1 の答え）と fixture，例（`python/examples/minimal.py` など），server の default profile の試験．
 2. **channel の組を Run の間固定**：両 Provider，VH の生成（`crates/ezsdr-radio/tests/generator/mod.rs:16-78`），parity（`crates/ezsdr-acceptance/tests/parity.rs`），Python，spec 07・09・16・18．move，from none，`Release` の holder を消す．
 3. **受信の新しい設定と開始**：「流れていない」と staging，開始の snapshot．古い受信の仕組み（時刻つきの release，受け渡し，restore）をこの段階で消す．受信の rate の変更は，実機の確認まで拒む（受け入れの条件）．
-4. **送信の空の判断，設定を伴う burst，clock の規則**：送信の rate の変更は，実機の確認まで拒む．
+4. **送信の空の判断，設定を伴う burst，clock の規則**：送信の rate の変更は，実機の確認まで拒む．**未決（再レビュー 5）**：設定を伴う burst の booking で新しい clock C を登録し，装置が設定を拒んで C が origin で終わる（RM-25）と，送信の stream に流れている SampleClock がなくなり，直した値の次の burst が Kernel の admission で拒まれる（`admission.rs:150-162`，`state.rs:336-339`）．Kernel の admission を変えずに，再試行が Provider の booking に届く道を，この段階の設計（brief とテスト計画）で決める．「失敗 → 直す → 送り直す」の系列をテスト計画に必ず入れる．
 5. **重なりの拒否と repeat の差し替え**（両 Provider，parity，Python．`python/tests/test_easy_api.py:623-630` の「repeat を二度呼ぶ」試験も新しい規則に）．
 6. **使われなくなった共有の仕組みの整理**（`timed_instant`，`covering`，queue と release の能力，schema）．
 
@@ -129,9 +135,12 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 
 2026-11-04，`openai/gpt-6.1-sol`，読むだけ，下書きに対して．12 件（DRAFT NEEDS CHANGES）．すべて取り入れた：差し替えの印（1），選んだ境目の記録（2），送信の clock の登録と origin（3），受信の「流れていない」と予約済みの開始（4），送信の受け付けの空と適用の空（5），Provider の拒否と Python（6，O2），(A) の部分的な失敗（7），区間での重なりの判断（8），差し替えの直列化（9），縦に切る段階（10），初期の組の入口と Vision の例（11，O1），rate の実機の確認を受け入れの条件に（12）．Q1〜Q6 の答えも採った（§3）．記録 [reviews/47-draft-sol.md](reviews/47-draft-sol.md)，ブリーフ [reviews/47-draft-sol-brief.md](reviews/47-draft-sol-brief.md)．
 
+第 2 版の再レビュー（2026-11-04，同じ Sol）：前回の 12 件は 9 件が閉じ，3 件（6，7，11）が一部残った．新しい指摘 5 件（NOTE NEEDS CHANGES）．すべて取り入れた（5 は段階 4 の設計で決める未決として）．O1 の RM-31 との衝突はない（既定の受信の antenna は UBX・OBX・CBX とも RX2，`design/07-radio-model.md:299-301`）．O2 の前提は VERIFIED（装置の時間の Run：`pipeline.rs:1034-1038` の `wait_finished`，MockRadio の Session：`stepping.rs:159-181` の step）．段階 1 の範囲（規則，コード，テスト，例，テスト計画の系列 10 本）は記録の「段階1のscope」にある．記録 [reviews/47-sol2.md](reviews/47-sol2.md)，ブリーフ [reviews/47-sol2-brief.md](reviews/47-sol2-brief.md)．
+
 ## Changes
 
 | 日付 | 変更 |
 |---|---|
 | 2026-11-04 | 下書き（orchestrator Opus，tree の外） |
 | 2026-11-04 | 第 2 版：Sol の 12 件と Q1〜Q6 の答えを入れて tree に入れた |
+| 2026-11-04 | 第 3 版：Sol の再レビューの 5 件（connect の初期の要求の契約と Kernel の Session の入口，組の map の意味，複合の呼び出しの止め方，読み返す値は admitted，送信の設定の拒否の後の再試行の道〈段階 4 で決める〉）を入れた．O2 の前提（submit が返る時に booking の判断が済んでいる）は，装置の時間の Run と MockRadio の Session の両方でコードで確かめられた（VERIFIED） |
