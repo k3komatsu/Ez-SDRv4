@@ -78,6 +78,12 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
   - `tx={k: [channels…]}`・`rx={…}` の意味：**書いた方向の map はその方向の組の全部**（書いていない channel は none）．**書かなかった方向と空の map は，その方向の全 channel が none**（RM-30 の既定は受信・送信ともどの stream にもない，O1 の改め）．同じ channel を二つの stream に書く，存在しない channel や stream の番号，型の違いは，connect の前に client が拒む（黙って後の値を使ったり既定に戻したりしない）．sample の並びは RM-3 の logical channel の番号順のまま．radio が二つ以上ある時は，resource の名で宛先を決める．
   - 初期の周波数・gain・rate・antenna も同じ道で渡せる（`requires` の `Eq`）．既定の BindingProfile の selector（物理の layout）には書かない．
   - **Python の形（owner 2026-11-04）**：stream ごとにまとめる．`ezsdr.connect(rx={0: ezsdr.Stream([0, 1], sample_rate=20e6, frequency={0: 2.45e9, 1: 2.46e9}, gain={0: 10})}, tx={0: [0]})`．値がなければ channel の list だけでよい．`Stream` の値の書き方は `start()` と同じ（channel の番号の dict と stream の rate，O3）．v3 の設定ファイルも一つのもの（channel のまとまり）の値を一つのオブジェクトにまとめていた（`v3/config_examples/x310_UBX_TXRX_v3.json`）．退けた案：値の種類ごとに方向で分けた dict（`frequency={"rx": {…}}` など．一つの stream の設定が散らばる）．
+  - **名前**（owner 2026-11-04）：
+    - **stream の名前は `connect` で付ける**（Easy API の中だけ）：`rx={"main": ezsdr.Stream([...])}` の key は番号（`int`）か名前（`str`）．名前で `sdr.rx_streams["main"]` のように指せる．番号は server が決める．段階 1．
+    - **channel の名前は BindingProfile の radio の selector に付ける**（段階 1b）：並びの要素を `"0:A:ubx:0#loop-rx"` とし，`#` の後ろが名前（RM-28 を改める）．名前は配線の事実（どれとどれがつながっているか，どの antenna か）で付ける．名前のない要素は今の文字列のまま（番号でだけ呼べる）．
+    - 規則：名前は profile 全体で一意（radio をまたいでも重ならない．名前だけでどの radio のどの channel かが決まる）．使えない文字は `:`，`#`，空白．数字だけの名前は禁じる．Easy API のどこでも `int` は番号，`str` は名前で，番号と名前を混ぜて書ける．一つの stream に別々の radio の channel が混ざれば拒む．selector の文字列を比べたり読んだりする所は，すべて `#` 以降を外して扱う（MockRadio，UHD Module，profile の照合，parity，試験の helper）．
+    - 解決：`connect` の引数の名前は server が profile の selector を見て番号に直す（layout にない番号の拒否と同じ場所）．`connect` の後の `start()` などは，client が `connect` の返事で受け取った名前の表で直す．Kernel，Action，key，action log，記録の識別子は番号のまま（名前と番号の対応は記録された profile から読める）．
+    - 利点：プログラムを配線から切り離せる（同じ Python のプログラムを，同じ名前を付けた別の bench の profile や MockRadio の既定の profile でそのまま走らせられる．Vision §58 の 10・14 の考え方を channel の単位で）．複数の USRP の構成で取り違えにくい．退けた案：名前を Kernel の BindingProfile の欄（`aliases`）に置く（Kernel の schema が変わる），selector の要素をオブジェクトにする（要素が文字列とオブジェクトの二通りになる），装置の場所を表す名前（番号の言い換えで，持ち運べる利点がない）．
   - **Kernel の入口**（orchestrator）：`coordinator::connect` を一つのまま，初期の要求の引数を足す（呼び出し元を直す．入口を二つ残さない）．**layout にない番号の拒否と，書かなかった channel を none にする展開**は，client が layout の channel の数を知らないので，server が Module を組み立てた後，Run を作る前に行う．型や重なりのように client だけで判断できるものは client が先に拒む．
 - **開始と設定**（Q5）：`Radio.rx_streams[k].start(at=None, *, frequency=None, gain=None, sample_rate=None, antenna=None)`．`frequency`・`gain`・`antenna` は logical channel の番号を key とする dict，`sample_rate` は stream の値．書かなかった channel は変えない．送信の `repeat(x, at=None, *, …)`・`send(…)` も同じ形．
 - **送る前に全部を確かめる**（Sol 7）：client は，channel の番号（その stream の channel か），値の型，波形を送る前に確かめる．
@@ -106,7 +112,8 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 
 各段階は AGENTS.md §9 の risky の手順で，両方の Provider，VH の生成と oracle，parity，Python を一緒に変え，tree を緑に保つ．古い系列を skip して緑にしない．対応する mutation の family も同じ段階で直す．
 
-1. **初期の channel の組の道**：`connect` の時に組を決める入口（O1 の答え）と fixture，例（`python/examples/minimal.py` など），server の default profile の試験．
+1. **初期の channel の組の道**：`connect` の時に組を決める入口（O1 の答え，stream の名前を含む）と fixture，例（`python/examples/minimal.py` など），server の default profile の試験．
+1b. **channel の名前**：selector の `#` の名前（RM-28），server の名前の解決と名前の表の受け渡し，Easy API の `str` の channel，MockRadio と UHD Module の selector の読み取り．
 2. **channel の組を Run の間固定**：両 Provider，VH の生成（`crates/ezsdr-radio/tests/generator/mod.rs:16-78`），parity（`crates/ezsdr-acceptance/tests/parity.rs`），Python，spec 07・09・16・18．move，from none，`Release` の holder を消す．
 3. **受信の新しい設定と開始**：「流れていない」と staging，開始の snapshot．古い受信の仕組み（時刻つきの release，受け渡し，restore）をこの段階で消す．受信の rate の変更は，実機の確認まで拒む（受け入れの条件）．
 4. **送信の空の判断，設定を伴う burst，clock の規則**：送信の rate の変更は，実機の確認まで拒む．**未決（再レビュー 5）**：設定を伴う burst の booking で新しい clock C を登録し，装置が設定を拒んで C が origin で終わる（RM-25）と，送信の stream に流れている SampleClock がなくなり，直した値の次の burst が Kernel の admission で拒まれる（`admission.rs:150-162`，`state.rs:336-339`）．Kernel の admission を変えずに，再試行が Provider の booking に届く道を，この段階の設計（brief とテスト計画）で決める．「失敗 → 直す → 送り直す」の系列をテスト計画に必ず入れる．
