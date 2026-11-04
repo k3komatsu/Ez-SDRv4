@@ -35,7 +35,7 @@ The values of MR-3 come from these sources, each marked in the table:
   | `block_len_jitter` | bool | false | MR-12 |
   | `rx_test_pattern` | str, `"zero"` or `"ramp"` | `"zero"` | MR-13 |
   | `arm_after` | list of str, each a `ResourceId` path | `[]` | other instances' ids this one arms after (SB-39) |
-  | `rx`, `tx` | `x3xx`: list of layout element strings; `ideal`: integer channel count 0…64 | required for `x3xx`; `ideal` defaults to 1 and 0 | the layout and channel order (design 33 D5, D12, RM-28) |
+  | `rx`, `tx` | `x3xx`: list of layout element strings, each with an optional `#<name>` (RM-28); `ideal`: integer channel count 0…64 | required for `x3xx`; `ideal` defaults to 1 and 0 | the layout and channel order (design 33 D5, D12, RM-28) |
   | `master_clock_hz`, `image`, `links`, `link_gbps` | list of one int or str | 200 000 000, `hg`, 1, and the image's own speed (1 for `hg`, 10 for `xg`; RM-28) | the values the `x3xx` layout selector accepts; `master_clock_hz` must be 200 MHz, `image` `hg` or `xg`, `links` 1 or 2, and `link_gbps` 10 or 1 (design 33 D5) |
 
   `MockRadio::with_medium(self, medium: Arc<ezsdr_sim::channel::Medium>) -> MockRadio` hands the instance the Run's SimulationChannel medium (spec 11 CH-6); a runtime that constructs the MockRadios of one Run hands each of them a clone of one `Medium` (MR-31).
@@ -508,3 +508,4 @@ A transmit port and `TX_UNDERFLOW` (Phase 10); `ALIGNMENT` injection, with the U
 | 2026-10-28 | MR-34, MR-20, §6 | A receive segment a refusal leaves out of the plan still counts for planning (RM-25), so the next segment begins where it would had the change not been refused: MR-34's Ceiling no longer assumes the owner handles a refusal, and the refusal tests' origins are the unrefused plan's | [design note 43](../plan/phase8/43-refusal-keeps-origins.md), Phase 8 stage 43a |
 | 2026-10-31 | MR-34 | L1: extend the receive phase Ceiling to include a late UHD-control handoff caused by an unbegun covering segment or head-of-line delay; the Mock's timed/untimed classification remains based on its logical timeline | [design note 44](../plan/phase8/44-device-chain-state.md) §3.8, Phase 8 L1 |
 | 2026-11-04 | MR-5 | the default membership is RM-30's: no channel in a stream, receive `c0` included | [Phase 8 note 47](../plan/phase8/47-no-change-while-streaming.md) stage 1 |
+| 2026-11-04 | MR-2 | the `rx`/`tx` selector entries may carry a `#<name>`, which changes nothing the Mock builds (RM-28) | [Phase 8 note 47](../plan/phase8/47-no-change-while-streaming.md) stage 1b |

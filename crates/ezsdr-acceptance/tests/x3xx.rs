@@ -94,6 +94,31 @@ fn d3_the_two_providers_describe_one_layout_alike() {
 }
 
 #[test]
+fn d3_a_named_selector_gives_each_provider_its_unnamed_description() {
+    // RM-28: within each Provider the named selector builds the tree of the plain one; across Providers
+    // only the board-derived surfaces are compared, as D3 does (the Providers differ in command lead).
+    for (board, front) in [("ubx", "UBX"), ("obx", "OBX"), ("cbx", "CBX-120")] {
+        let plain = vec![format!("0:A:{board}:0"), format!("0:B:{board}:0")];
+        let named = vec![format!("0:A:{board}:0#in"), format!("0:B:{board}:0#aux")];
+        let named_out = vec![format!("0:A:{board}:0#out"), format!("0:B:{board}:0")];
+        let device = || Arc::new(FakeDevice::new(FakeConfig { front_ends: vec![front, front], ..FakeConfig::default() })) as Arc<dyn ezsdr_radio_uhd::Device>;
+        let mock = |rx: &[String], tx: &[String]| MockRadio::from_binding(&mock_binding(ezsdr_acceptance::layout::x3xx_selector(rx, tx))).unwrap();
+        let uhd = |rx: &[String], tx: &[String]| UhdRadio::from_binding(&uhd_binding(ezsdr_acceptance::layout::x3xx_selector(rx, tx)), device()).unwrap();
+        let (plain_mock, named_mock) = (mock(&plain, &plain), mock(&named, &named_out));
+        let (plain_uhd, named_uhd) = (uhd(&plain, &plain), uhd(&named, &named_out));
+        assert_eq!(plain_mock.instance().tree, named_mock.instance().tree, "{board}: MockRadio's tree");
+        assert_eq!(plain_uhd.instance().tree, named_uhd.instance().tree, "{board}: the UHD Module's tree");
+        for name in BOARD_KEYS {
+            let key = Key::parse(name).unwrap();
+            assert_eq!(named_mock.instance().tree.capabilities.get(&key), named_uhd.instance().tree.capabilities.get(&key), "{board}: `{name}`");
+        }
+        for key in ["radio.rx.c0.frequency_hz", "radio.tx.c0.frequency_hz"] {
+            assert_eq!(default_of(&named_mock, key), default_of(&named_uhd, key), "{board}: the default `{key}`");
+        }
+    }
+}
+
+#[test]
 fn d3_the_layout_decides_the_channels_on_both_providers() {
     // Asymmetric layouts: the length of each direction's list is its channel count, and
     // the rate grid does not depend on the layout at all.

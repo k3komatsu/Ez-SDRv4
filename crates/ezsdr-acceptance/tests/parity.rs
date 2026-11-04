@@ -529,6 +529,32 @@ fn vh_8_the_two_providers_prepare_one_layout_alike() {
 }
 
 #[test]
+fn vh_8_a_named_selector_prepares_as_the_unnamed_one_on_both_providers() {
+    // RM-28: a name after `#` reaches no Provider's behaviour. For each layout, written plain and named: each
+    // Provider's `effective` and declared SampleClocks equal its own plain ones and the other Provider's.
+    let values = [("radio.rx.c0.frequency_hz", eq(Scalar::try_from(1.1e9).unwrap())), ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(10e6).unwrap()))];
+    type Case<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str], &'a [&'a str], Vec<&'a str>);
+    let cases: [Case; 2] = [
+        (&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0"], &["0:A:ubx:0#loop-rx", "0:B:ubx:0#mon"], &["0:A:ubx:0#loop-tx"], vec!["UBX", "UBX"]),
+        (&["0:A:ubx:0", "0:B:basic_rx:0"], &["0:A:ubx:0"], &["0:A:ubx:0", "0:B:basic_rx:0#aux"], &["0:A:ubx:0#out"], vec!["UBX", "BasicRX"]),
+    ];
+    for (index, (rx, tx, named_rx, named_tx, front_ends)) in cases.into_iter().enumerate() {
+        let rigs = |rx: &[&str], tx: &[&str], tag: &str| {
+            let config = FakeConfig { front_ends: front_ends.clone(), serial: format!("vh8-named-{index}-{tag}"), ..FakeConfig::default() };
+            (MockRig::new(selector(rx, tx), &values), UhdRig::new(selector(rx, tx), &values, config).unwrap())
+        };
+        let (plain_mock, plain_uhd) = rigs(rx, tx, "plain");
+        let (named_mock, named_uhd) = rigs(named_rx, named_tx, "named");
+        assert_eq!(plain_mock.effective, named_mock.effective, "case {index}: the Mock's effective configuration");
+        assert_eq!(plain_uhd.effective, named_uhd.effective, "case {index}: the UHD Module's effective configuration");
+        assert_eq!(named_mock.effective, named_uhd.effective, "case {index}: the Providers agree on a named selector");
+        assert_eq!((plain_mock.declared(), plain_uhd.declared()), (named_mock.declared(), named_uhd.declared()), "case {index}: the declared SampleClocks");
+        assert_eq!(named_mock.declared(), named_uhd.declared(), "case {index}");
+        assert!(!named_mock.declared().is_empty());
+    }
+}
+
+#[test]
 fn vh_8_a_refusal_is_the_same_key_and_reason() {
     // Design 33 §6: the same Spec refused by both, with the same `(key, reason)` — the
     // `RM-` rules are the description's, which both Providers share.

@@ -2,27 +2,32 @@
 //! wrote into the radio-independent `InitialRequests` the Kernel's Session entry takes.
 //! It runs after the Modules are built and before the Kernel is entered, because only
 //! then are a layout's channel and stream counts known, so a request for a channel the
-//! layout lacks is refused here and no Run exists.
+//! layout lacks is refused here and no Run exists. A channel name is resolved here too, from
+//! the radios' selectors (RM-28): a stream of names goes to the radio that owns them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ezsdr_kernel::coordinator::Assembly;
 use ezsdr_kernel::session::InitialRequests;
 use ezsdr_kernel::spec::{Finite, Ident, Key, Scalar};
+use ezsdr_radio::channels::{canonical_number, name_error};
 use ezsdr_radio::{Concrete, keys};
 
-use crate::protocol::{ChannelRef, ResourceInit, StreamInit, StreamNames};
+use crate::protocol::{ChannelRef, DirectionNames, ResourceInit, StreamInit};
 
-/// The requests for every named resource and the numbers given to stream names.
-pub(crate) fn expand(initial: &BTreeMap<String, ResourceInit>, assembly: &Assembly) -> Result<(InitialRequests, BTreeMap<String, StreamNames>), String> {
+/// The requests for every named resource and the numbers given to stream names. `tables` are
+/// the radios' channel names (`catalogue::channel_tables`).
+pub(crate) fn expand(initial: &BTreeMap<String, ResourceInit>, assembly: &Assembly, tables: &BTreeMap<String, DirectionNames>) -> Result<(InitialRequests, BTreeMap<String, DirectionNames>), String> {
     let mut requests = InitialRequests::new();
     let mut names = BTreeMap::new();
     let mut taken_names = BTreeSet::new();
-    for (resource, init) in initial {
+    let empty = DirectionNames::default();
+    for (resource, init) in &route(initial, tables)? {
+        let table = tables.get(resource).unwrap_or(&empty);
         let ident = Ident::parse(resource).map_err(|e| format!("EA-10: {resource}: {e}"))?;
         let provider = assembly.providers.get(&ident).ok_or_else(|| format!("EA-10: initial streams name {resource}, which is no radio of this profile"))?;
         let mut keys_of = BTreeMap::new();
-        let mut given = StreamNames::default();
+        let mut given = DirectionNames::default();
         for (direction, streams) in [("rx", &init.rx), ("tx", &init.tx)] {
             let count = provider
                 .instance()
@@ -33,8 +38,9 @@ pub(crate) fn expand(initial: &BTreeMap<String, ResourceInit>, assembly: &Assemb
                 .count() as u32;
             let numbers = number_streams(direction, streams, count, &mut taken_names)?;
             let mut in_stream = BTreeSet::new();
+            let by_name = if direction == "rx" { &table.rx } else { &table.tx };
             for (stream, number) in streams.iter().zip(&numbers) {
-                let channels = channels_of(stream, count, &mut in_stream)?;
+                let channels = channels_of(stream, count, &mut in_stream, by_name)?;
                 if let Some(name) = &stream.name {
                     (if direction == "rx" { &mut given.rx } else { &mut given.tx }).insert(name.clone(), *number);
                 }
@@ -45,12 +51,16 @@ pub(crate) fn expand(initial: &BTreeMap<String, ResourceInit>, assembly: &Assemb
                     keys_of.insert(key(&keys::stream(direction, *number))?, number_value(rate, "sample_rate")?);
                 }
                 for (leaf, values) in [("frequency_hz", &stream.frequency), ("gain_db", &stream.gain)] {
+                    let mut valued = BTreeSet::new();
                     for (channel, value) in values {
-                        keys_of.insert(key(&keys::channel(direction, member(channel, &channels)?, leaf))?, number_value(*value, leaf)?);
+                        let number = member(channel, &channels, by_name, &mut valued, leaf)?;
+                        keys_of.insert(key(&keys::channel(direction, number, leaf))?, number_value(*value, leaf)?);
                     }
                 }
+                let mut valued = BTreeSet::new();
                 for (channel, value) in &stream.antenna {
-                    keys_of.insert(key(&keys::channel(direction, member(channel, &channels)?, "antenna"))?, Scalar::Str(value.clone()));
+                    let number = member(channel, &channels, by_name, &mut valued, "antenna")?;
+                    keys_of.insert(key(&keys::channel(direction, number, "antenna"))?, Scalar::Str(value.clone()));
                 }
             }
         }
@@ -72,7 +82,7 @@ fn number_streams(direction: &str, streams: &[StreamInit], count: u32, taken_nam
                 }
             }
             (None, Some(name)) => {
-                if name.is_empty() || name.bytes().all(|b| b.is_ascii_digit()) || name.contains([':', '#']) || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                if name_error(name).is_some() {
                     return Err(format!("EA-10: {name:?} is not a stream name"));
                 }
                 if !taken_names.insert(name.clone()) {
@@ -104,13 +114,13 @@ fn number_streams(direction: &str, streams: &[StreamInit], count: u32, taken_nam
 }
 
 /// A stream's channels, each a number the layout has and in no other stream of the
-/// direction (`seen`); a name is a later stage's (EA-10).
-fn channels_of(stream: &StreamInit, count: u32, seen: &mut BTreeSet<u32>) -> Result<Vec<u32>, String> {
+/// direction (`seen`); a name is its number in `by_name`, where `route` has already found it (EA-10a).
+fn channels_of(stream: &StreamInit, count: u32, seen: &mut BTreeSet<u32>, by_name: &BTreeMap<String, u32>) -> Result<Vec<u32>, String> {
     let mut channels = Vec::new();
     for channel in &stream.channels {
         let number = match channel {
             ChannelRef::Number(number) => *number,
-            ChannelRef::Name(name) => return Err(format!("EA-10: channel name {name:?}: channel names need stage 1b")),
+            ChannelRef::Name(name) => by_name[name],
         };
         if number >= count {
             return Err(format!("RM-4: no such channel c{number}"));
@@ -123,13 +133,77 @@ fn channels_of(stream: &StreamInit, count: u32, seen: &mut BTreeSet<u32>) -> Res
     Ok(channels)
 }
 
-/// The channel a value's key names, which must be one of its stream's (EA-10).
-fn member(text: &str, channels: &[u32]) -> Result<u32, String> {
-    let number: u32 = text.parse().map_err(|_| format!("EA-10: value key {text:?}: channel names need stage 1b"))?;
-    if text != number.to_string() {
-        return Err(format!("EA-10: value key {text:?} is not a channel number as written (a decimal without sign or leading zero)"));
+/// The channel a value's key names, which must be one of its stream's and valued once: a key is
+/// a number when it is a canonical ASCII decimal and a name otherwise (EA-10a).
+fn member(text: &str, channels: &[u32], by_name: &BTreeMap<String, u32>, valued: &mut BTreeSet<u32>, what: &str) -> Result<u32, String> {
+    let number = match canonical_number(text) {
+        Some(number) => number,
+        None => by_name[text],
+    };
+    if !channels.contains(&number) {
+        return Err(format!("EA-10: c{number} has a value but is not a channel of its stream"));
     }
-    if channels.contains(&number) { Ok(number) } else { Err(format!("EA-10: c{number} has a value but is not a channel of its stream")) }
+    if !valued.insert(number) {
+        return Err(format!("EA-10: {what} has two values for c{number}"));
+    }
+    Ok(number)
+}
+
+/// The radio that owns channel name `name`, and the direction it is a channel of.
+fn owner_of<'a>(name: &str, tables: &'a BTreeMap<String, DirectionNames>) -> Result<(&'a str, &'static str), String> {
+    if name_error(name).is_some() {
+        return Err(format!("EA-10: {name:?} is not a channel name"));
+    }
+    for (radio, table) in tables {
+        if table.rx.contains_key(name) {
+            return Ok((radio, "rx"));
+        }
+        if table.tx.contains_key(name) {
+            return Ok((radio, "tx"));
+        }
+    }
+    Err(format!("EA-10: no channel is named {name:?}"))
+}
+
+/// Puts each stream under the radio it belongs to (EA-10a): the owner of the channel names it
+/// mentions, whatever resource it was written under; a stream with no name stays where it
+/// was written. Names of two radios, or of the other direction, or beside a number of a
+/// radio that does not own them, are refused.
+fn route(initial: &BTreeMap<String, ResourceInit>, tables: &BTreeMap<String, DirectionNames>) -> Result<BTreeMap<String, ResourceInit>, String> {
+    let mut routed: BTreeMap<String, ResourceInit> = BTreeMap::new();
+    for (resource, init) in initial {
+        if init.rx.is_empty() && init.tx.is_empty() {
+            routed.entry(resource.clone()).or_default();
+        }
+        for (direction, streams) in [("rx", &init.rx), ("tx", &init.tx)] {
+            for stream in streams {
+                let keys: Vec<&str> = stream.frequency.keys().chain(stream.gain.keys()).chain(stream.antenna.keys()).map(String::as_str).collect();
+                let mut mentioned: Vec<&str> = stream.channels.iter().filter_map(|c| if let ChannelRef::Name(name) = c { Some(name.as_str()) } else { None }).collect();
+                mentioned.extend(keys.iter().copied().filter(|key| canonical_number(key).is_none()));
+                let numbered = stream.channels.iter().any(|c| matches!(c, ChannelRef::Number(_))) || keys.iter().any(|key| canonical_number(key).is_some());
+                let mut owner: Option<&str> = None;
+                for name in mentioned {
+                    let (radio, named_direction) = owner_of(name, tables)?;
+                    if named_direction != direction {
+                        let (is, wanted) = if named_direction == "tx" { ("a transmit", "receive") } else { ("a receive", "transmit") };
+                        return Err(format!("EA-10: {name:?} is {is} channel, not a {wanted} channel"));
+                    }
+                    match owner {
+                        Some(other) if other != radio => return Err(format!("EA-10: a stream mixes the channels of radios {other} and {radio}")),
+                        _ => owner = Some(radio),
+                    }
+                }
+                let home = match owner {
+                    Some(radio) if numbered && radio != resource => return Err(format!("EA-10: a stream mixes channel numbers of {resource} with channel names of radio {radio}")),
+                    Some(radio) => radio,
+                    None => resource,
+                };
+                let target = routed.entry(home.to_owned()).or_default();
+                (if direction == "rx" { &mut target.rx } else { &mut target.tx }).push(stream.clone());
+            }
+        }
+    }
+    Ok(routed)
 }
 
 fn number_value(value: f64, what: &str) -> Result<Scalar, String> {

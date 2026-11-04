@@ -12948,7 +12948,7 @@
    "id": "P948",
    "name": "a layout that is not slot A on a UBX or OBX still gets the raw probes",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if ![\"0:A:ubx:0\", \"0:A:obx:0\"].contains(&element) {",
+   "old": "if ![\"0:A:ubx:0\", \"0:A:obx:0\"].contains(&channels::split_entry(element).0) {",
    "new": "if false {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -16497,23 +16497,23 @@
     },
     {
       "id": "P1334",
-      "name": "EA-10: a digit-only stream name is accepted",
-      "file": "crates/ezsdr-server/src/initial.rs",
-      "old": "name.is_empty() || name.bytes().all(|b| b.is_ascii_digit())",
-      "new": "name.is_empty() || false",
-      "crate": "ezsdr-server",
-      "test_bin": "protocol",
-      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+      "name": "RM-28, EA-10a: a digit-only name is accepted",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "name.bytes().all(|b| b.is_ascii_digit())",
+      "new": "false",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_the_name_rule_cases"
     },
     {
       "id": "P1335",
       "name": "EA-10: a channel given by name is read as channel 0",
       "file": "crates/ezsdr-server/src/initial.rs",
-      "old": "ChannelRef::Name(name) => return Err(format!(\"EA-10: channel name {name:?}: channel names need stage 1b\")),",
+      "old": "ChannelRef::Name(name) => by_name[name],",
       "new": "ChannelRef::Name(_) => 0,",
       "crate": "ezsdr-server",
       "test_bin": "protocol",
-      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+      "filter": "ea_10_a_channel_name_is_resolved_to_its_number"
     },
     {
       "id": "P1336",
@@ -16539,8 +16539,8 @@
       "id": "P1338",
       "name": "EA-10: a value for a channel its stream does not hold is accepted",
       "file": "crates/ezsdr-server/src/initial.rs",
-      "old": "if channels.contains(&number) { Ok(number) }",
-      "new": "if true { Ok(number) }",
+      "old": "if !channels.contains(&number) {",
+      "new": "if false {",
       "crate": "ezsdr-server",
       "test_bin": "protocol",
       "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
@@ -16603,8 +16603,8 @@
       "id": "P1345",
       "name": "EA-16: a value for a channel outside its stream is accepted",
       "file": "python/ezsdr/session.py",
-      "old": "                if number not in channels:",
-      "new": "                if False:",
+      "old": "if not member and not others:",
+      "new": "if False:",
       "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
     },
     {
@@ -16651,8 +16651,8 @@
       "id": "P1351",
       "name": "EA-16: a transmit stream reads the receive names",
       "file": "python/ezsdr/session.py",
-      "old": "names.get(\"tx\", {}))",
-      "new": "names.get(\"rx\", {}))",
+      "old": "\"sample_rate_hz\")], names.get(\"tx\", {}))",
+      "new": "\"sample_rate_hz\")], names.get(\"rx\", {}))",
       "python": "test_easy_api.ConnectRequests.test_ea_16_a_name_is_looked_up_in_its_own_direction"
     },
     {
@@ -16665,33 +16665,33 @@
     },
     {
       "id": "P1353",
-      "name": "EA-10: a value key written 00 or +0 names channel 0 again",
-      "file": "crates/ezsdr-server/src/initial.rs",
-      "old": "if text != number.to_string() {",
-      "new": "if false {",
-      "crate": "ezsdr-server",
-      "test_bin": "protocol",
-      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+      "name": "RM-28, EA-10a: a canonical number is any digits, so 00 and 01 name a channel again",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "(text == \"0\" || !text.starts_with('0'))",
+      "new": "true",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_number_is_a_canonical_ascii_decimal"
     },
     {
       "id": "P1354",
-      "name": "EA-10: a control character is allowed in a stream name",
-      "file": "crates/ezsdr-server/src/initial.rs",
+      "name": "RM-28, EA-10a: a control character is allowed in a name",
+      "file": "crates/ezsdr-radio/src/channels.rs",
       "old": "c.is_whitespace() || c.is_control()",
       "new": "c.is_whitespace()",
-      "crate": "ezsdr-server",
-      "test_bin": "protocol",
-      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_the_name_rule_cases"
     },
     {
       "id": "P1355",
-      "name": "EA-10: a stream name of non-ASCII digits is all digits",
-      "file": "crates/ezsdr-server/src/initial.rs",
+      "name": "RM-28, EA-10a: a name of non-ASCII digits is all digits",
+      "file": "crates/ezsdr-radio/src/channels.rs",
       "old": "name.bytes().all(|b| b.is_ascii_digit())",
       "new": "name.chars().all(char::is_numeric)",
-      "crate": "ezsdr-server",
-      "test_bin": "protocol",
-      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_the_name_rule_cases"
     },
     {
       "id": "P1356",
@@ -16734,5 +16734,255 @@
       "crate": "ezsdr-kernel",
       "test_bin": "spec_binding",
       "filter": "sb_02_a_key_is_owned_by_the_vocabulary_that_declares_it"
+    },
+    {
+      "id": "P1361",
+      "name": "RM-28: a layout entry keeps its #name when the element is read",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "Some((element, name)) => (element, Some(name)),",
+      "new": "Some((_, name)) => (raw, Some(name)),",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_selector_name_does_not_change_the_layout"
+    },
+    {
+      "id": "P1362",
+      "name": "RM-28: a name may repeat across rx and tx of one radio",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "seen.insert(name.to_owned(), (direction, position))",
+      "new": "seen.insert(format!(\"{direction}{name}\"), (direction, position))",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_name_is_used_once_in_a_radio"
+    },
+    {
+      "id": "P1363",
+      "name": "RM-28: a name may repeat within a direction",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "if let Some((other, at)) = seen.insert(name.to_owned(), (direction, position)) {",
+      "new": "if let Some((other, at)) = seen.insert(name.to_owned(), (direction, position)).filter(|_| false) {",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_name_is_used_once_in_a_radio"
+    },
+    {
+      "id": "P1364",
+      "name": "RM-28: a channel without a name is left out of the name list, shifting the numbers",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "(if direction == \"rx\" { &mut names.rx } else { &mut names.tx }).push(name.map(str::to_owned));",
+      "new": "if name.is_some() { (if direction == \"rx\" { &mut names.rx } else { &mut names.tx }).push(name.map(str::to_owned)); }",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_selector_name_does_not_change_the_layout"
+    },
+    {
+      "id": "P1365",
+      "name": "RM-28: receive names are read as transmit names",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "(if direction == \"rx\" { &mut names.rx } else { &mut names.tx })",
+      "new": "(if direction == \"rx\" { &mut names.tx } else { &mut names.rx })",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_selector_name_does_not_change_the_layout"
+    },
+    {
+      "id": "P1366",
+      "name": "RM-28: the layout reader does not check the names",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "names_of(selector)?;",
+      "new": "let _ = names_of(selector);",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_the_name_rule_cases"
+    },
+    {
+      "id": "P1367",
+      "name": "EA-10a: a sign is part of a canonical number, so +0 is channel 0",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "text.bytes().all(|b| b.is_ascii_digit())",
+      "new": "text.bytes().all(|b| b.is_ascii_digit() || b == b'+')",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_a_number_is_a_canonical_ascii_decimal"
+    },
+    {
+      "id": "P1368",
+      "name": "RM-28: a # may be part of a name",
+      "file": "crates/ezsdr-radio/src/channels.rs",
+      "old": "name.contains([':', '#'])",
+      "new": "name.contains([':'])",
+      "crate": "ezsdr-radio",
+      "test_bin": "channels",
+      "filter": "rm_28_the_name_rule_cases"
+    },
+    {
+      "id": "P1369",
+      "name": "EA-7: a name used by two radios of a profile is accepted",
+      "file": "crates/ezsdr-server/src/catalogue.rs",
+      "old": "if other != name {",
+      "new": "if false {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_09_a_name_is_unique_in_the_whole_profile"
+    },
+    {
+      "id": "P1370",
+      "name": "EA-7: only receive names count toward the profile-wide uniqueness and the table",
+      "file": "crates/ezsdr-server/src/catalogue.rs",
+      "old": "[(&names.rx, &mut table.rx), (&names.tx, &mut table.tx)]",
+      "new": "[(&names.rx, &mut table.rx)]",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_connected_carries_the_channel_name_table"
+    },
+    {
+      "id": "P1371",
+      "name": "EA-7: assemble does not look at channel names (a child profile)",
+      "file": "crates/ezsdr-server/src/catalogue.rs",
+      "old": "channel_tables(&profile)?;",
+      "new": "let _ = channel_tables(&profile);",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_14_a_child_run_repeats_its_parent_s_selector_names_included"
+    },
+    {
+      "id": "P1372",
+      "name": "EA-10a: connect expands initial against no names",
+      "file": "crates/ezsdr-server/src/lib.rs",
+      "old": "initial::expand(&initial.unwrap_or_default(), &assembly, &channels)",
+      "new": "initial::expand(&initial.unwrap_or_default(), &assembly, &Default::default())",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_channel_name_is_resolved_to_its_number"
+    },
+    {
+      "id": "P1373",
+      "name": "EA-10: connected returns no channel names",
+      "file": "crates/ezsdr-server/src/lib.rs",
+      "old": "streams, channels, };",
+      "new": "streams, channels: Default::default(), };",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_connected_carries_the_channel_name_table"
+    },
+    {
+      "id": "P1374",
+      "name": "EA-10a: a name of the other direction is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if named_direction != direction {",
+      "new": "if false {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_name_that_cannot_be_resolved_is_refused"
+    },
+    {
+      "id": "P1375",
+      "name": "EA-10a: a stream may mix names of two radios",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "Some(other) if other != radio =>",
+      "new": "Some(other) if false =>",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_of_two_radios_is_refused"
+    },
+    {
+      "id": "P1376",
+      "name": "EA-10a: a channel number of one radio may sit beside names of another",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "Some(radio) if numbered && radio != resource =>",
+      "new": "Some(radio) if false =>",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_of_two_radios_is_refused"
+    },
+    {
+      "id": "P1377",
+      "name": "EA-10a: a stream of names stays under the resource it was written under",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "Some(radio) => radio,",
+      "new": "Some(_) => resource,",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_of_names_goes_to_the_radio_that_owns_them"
+    },
+    {
+      "id": "P1378",
+      "name": "EA-10a: an empty initial for a resource is dropped, so a resource that is no radio passes",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if init.rx.is_empty() && init.tx.is_empty() {",
+      "new": "if false {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1379",
+      "name": "EA-10a: a name in a value key does not decide the stream's radio",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "mentioned.extend(keys.iter().copied().filter(|key| canonical_number(key).is_none()));",
+      "new": "mentioned.extend(None::<&str>);",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_of_two_radios_is_refused"
+    },
+    {
+      "id": "P1380",
+      "name": "EA-10a: two value keys for one channel are accepted, the later winning",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if !valued.insert(number) {",
+      "new": "if false {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_name_that_cannot_be_resolved_is_refused"
+    },
+    {
+      "id": "P1381",
+      "name": "EA-10a: a value key is a number when it parses as one",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "match canonical_number(text) {",
+      "new": "match text.parse::<u32>().ok() {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_key_is_a_number_only_when_it_is_a_canonical_ascii_decimal"
+    },
+    {
+      "id": "P1382",
+      "name": "EA-16: a transmit channel looks its name up in the receive names",
+      "file": "python/ezsdr/session.py",
+      "old": "_indices(effective, \"tx\", \"c\", \"stream\")], channel_names.get(\"tx\", {}))",
+      "new": "_indices(effective, \"tx\", \"c\", \"stream\")], channel_names.get(\"rx\", {}))",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_a_channel_is_reached_by_its_name"
+    },
+    {
+      "id": "P1383",
+      "name": "EA-16: an unknown channel name does not name the known ones",
+      "file": "python/ezsdr/session.py",
+      "old": "raise KeyError(f\"no channel is named {key!r}; the selector names {sorted(self._names)}\")",
+      "new": "raise KeyError(f\"no channel is named {key!r}\")",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_a_channel_is_reached_by_its_name"
+    },
+    {
+      "id": "P1384",
+      "name": "EA-16: a channel name skips the name rule",
+      "file": "python/ezsdr/session.py",
+      "old": "_name(value, \"channel\") if isinstance(value, str) else _whole(value, what)",
+      "new": "value if isinstance(value, str) else _whole(value, what)",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_the_name_rule_matches_the_server"
+    },
+    {
+      "id": "P1385",
+      "name": "EA-16: a number beside names only is refused here though the server alone can tell",
+      "file": "python/ezsdr/session.py",
+      "old": "member, others = (ref in numbers, names_in) if isinstance(ref, int) else (ref in names_in, numbers)",
+      "new": "member, others = (ref in numbers, []) if isinstance(ref, int) else (ref in names_in, [])",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_leaves_a_mixed_reference_to_the_server"
+    },
+    {
+      "id": "P1386",
+      "name": "EA-16: a stream name skips the name rule",
+      "file": "python/ezsdr/session.py",
+      "old": "_name(key, \"stream\")",
+      "new": "key",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_the_name_rule_matches_the_server"
     }
   ]

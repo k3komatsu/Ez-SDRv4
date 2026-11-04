@@ -12,6 +12,8 @@ use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{Ident, Scalar, Value};
 use ezsdr_kernel::time::ClockRegistry;
 
+use crate::protocol::DirectionNames;
+
 const RADIO: &str = "ezsdr.radio.mock";
 const SINK: &str = "ezsdr.sink.capture";
 const EXECUTOR: &str = "ezsdr.exec.native";
@@ -53,12 +55,41 @@ fn registries() -> Result<(ModuleRegistry, AdmissionCheckRegistry, EventKindRegi
     Ok((registry, checks, kinds))
 }
 
+/// The channel names of every radio of the profile, one table per radio (RM-28, EA-10): the
+/// names its selector gives, as numbers by direction. A name used by two radios is refused
+/// whether or not a call uses names; a radio that names nothing has an empty table.
+pub fn channel_tables(profile: &BindingProfile) -> Result<BTreeMap<String, DirectionNames>, String> {
+    let mut tables = BTreeMap::new();
+    let mut owners: BTreeMap<String, &Ident> = BTreeMap::new();
+    for (name, binding) in &profile.bindings {
+        if ![RADIO, UHD].contains(&binding.module.id.as_str()) {
+            continue;
+        }
+        let names = ezsdr_radio::channels::names_of(&binding.selector).map_err(|why| format!("EA-7: {name}: {why}"))?;
+        let mut table = DirectionNames::default();
+        for (list, numbers) in [(&names.rx, &mut table.rx), (&names.tx, &mut table.tx)] {
+            for (number, channel) in list.iter().enumerate() {
+                let Some(channel) = channel else { continue };
+                if let Some(other) = owners.insert(channel.clone(), name) {
+                    if other != name {
+                        return Err(format!("EA-7: the channel name {channel} is used by {other} and by {name}; a name is used once in a profile"));
+                    }
+                }
+                numbers.insert(channel.clone(), number as u32);
+            }
+        }
+        tables.insert(name.to_string(), table);
+    }
+    Ok(tables)
+}
+
 /// Builds the Assembly of one Run from its BindingProfile document: every binding
 /// must name a Module of the catalogue, the native Executor gets `implementations`, and
 /// a binding of `ezsdr.radio.uhd` its device from `open_device` (UHD's when `None`)
 /// (EA-7). The refusal is a message naming the binding.
 pub fn assemble(profile_doc: &serde_json::Value, inputs: BTreeMap<ContentHash, Vec<u8>>, implementations: Vec<Implementation>, open_device: Option<&OpenDevice>) -> Result<Assembly, String> {
     let profile = BindingProfile::from_json(profile_doc).map_err(|error| error.to_string())?;
+    channel_tables(&profile)?;
     let (registry, checks, kinds) = registries()?;
     let clocks = Arc::new(ClockRegistry::new());
     let authority_binding = profile.bindings.get(&profile.authority).ok_or_else(|| format!("EA-7: the authority {} is not bound", profile.authority))?;

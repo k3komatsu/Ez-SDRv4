@@ -2116,7 +2116,7 @@ pub fn raw_probes_applicable(selector: Option<&Json>) -> Result<(), String> {
     let Some(selector) = selector else { return Ok(()) };
     for key in ["rx", "tx"] {
         if let Some(element) = selector.get(key).and_then(Json::as_array).and_then(|elements| elements.first()).and_then(Json::as_str) {
-            if !["0:A:ubx:0", "0:A:obx:0"].contains(&element) {
+            if !["0:A:ubx:0", "0:A:obx:0"].contains(&channels::split_entry(element).0) {
                 return Err(format!("the raw probes drive slot A's UBX or OBX at 1 GHz, and this layout's `{key}` channel 0 is `{element}`"));
             }
         }

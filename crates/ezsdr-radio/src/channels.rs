@@ -2,7 +2,7 @@
 //! stream key per logical channel (RM-27…RM-32, design 33 D1…D9).
 //!
 //! It reads the selector's layout — `"<timekeeper>:<slot>:<board>:<frontend>"` per logical
-//! channel — and exposes each channel's configuration under its own numbered key (RM-27).
+//! channel, with an optional `#<name>` after it (RM-28) — and exposes each channel's configuration under its own numbered key (RM-27).
 
 use std::collections::BTreeMap;
 
@@ -175,7 +175,71 @@ pub fn from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, String
     let tx = list("tx")?;
     let layout = Layout::X3xx { master_clock_hz, image, links, link_gbps, rx, tx };
     check_layout(&layout)?;
+    names_of(selector)?;
     Ok(layout)
+}
+
+/// The names a layout's channels carry, by logical channel number in each direction (RM-28).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ChannelNames {
+    /// The receive channels' names; `None` for an entry without one.
+    pub rx: Vec<Option<String>>,
+    /// The transmit channels' names.
+    pub tx: Vec<Option<String>>,
+}
+
+/// Why `name` is no channel or stream name, or `None` when it is one (RM-28, EA-10a): it is
+/// non-empty, not only ASCII digits, and holds no `:`, `#`, white space or control character.
+pub fn name_error(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("is empty")
+    } else if name.bytes().all(|b| b.is_ascii_digit()) {
+        Some("is only the digits 0-9")
+    } else if name.contains([':', '#']) || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        Some("holds ':', '#', white space or a control character")
+    } else {
+        None
+    }
+}
+
+/// The number `text` spells when it is a canonical ASCII decimal (digits only, no leading zero,
+/// a `u32`); any other spelling is a name (EA-10a).
+pub fn canonical_number(text: &str) -> Option<u32> {
+    let canonical = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) && (text == "0" || !text.starts_with('0'));
+    if canonical { text.parse().ok() } else { None }
+}
+
+/// The part of a layout entry before its `#name`, and the name (RM-28). The one place `#` is read.
+pub fn split_entry(raw: &str) -> (&str, Option<&str>) {
+    match raw.split_once('#') {
+        Some((element, name)) => (element, Some(name)),
+        None => (raw, None),
+    }
+}
+
+/// Reads the names of the selector's `rx` and `tx` lists (RM-28): each must follow
+/// [`name_error`], and no name is used twice in the radio, in either direction. A selector
+/// whose `rx` or `tx` is no list of strings (`ideal`'s counts) names nothing.
+pub fn names_of(selector: &BTreeMap<Ident, Value>) -> Result<ChannelNames, String> {
+    let mut names = ChannelNames::default();
+    let mut seen: BTreeMap<String, (&str, usize)> = BTreeMap::new();
+    for direction in ["rx", "tx"] {
+        let Some(Value::List(values)) = selector.get(&ident(direction)) else { continue };
+        for (position, value) in values.iter().enumerate() {
+            let Scalar::Str(raw) = value else { continue };
+            let name = split_entry(raw).1;
+            if let Some(name) = name {
+                if let Some(why) = name_error(name) {
+                    return Err(format!("the layout's `{direction}` element at position {position} `{raw}` has the name `{name}`, which {why}"));
+                }
+                if let Some((other, at)) = seen.insert(name.to_owned(), (direction, position)) {
+                    return Err(format!("the layout's `{direction}` element at position {position} `{raw}` repeats the name `{name}` of `{other}` position {at}"));
+                }
+            }
+            (if direction == "rx" { &mut names.rx } else { &mut names.tx }).push(name.map(str::to_owned));
+        }
+    }
+    Ok(names)
 }
 
 /// Reads the `ideal` selector's channel counts (RM-28): integers 0…64, one channel for
@@ -195,7 +259,7 @@ pub fn ideal_from_selector(selector: &BTreeMap<Ident, Value>) -> Result<Layout, 
 /// Parses one `"<timekeeper>:<slot>:<board>:<frontend>"` element, naming its position
 /// and value in every refusal (RM-28).
 fn element(raw: &str, direction: &str, position: usize) -> Result<Element, String> {
-    let fields: Vec<&str> = raw.split(':').collect();
+    let fields: Vec<&str> = split_entry(raw).0.split(':').collect();
     let Ok([timekeeper, slot, board, frontend]) = <[&str; 4]>::try_from(fields.as_slice()) else {
         return Err(format!("the layout's `{direction}` element at position {position} `{raw}` is not `<timekeeper>:<slot>:<board>:<frontend>`"));
     };

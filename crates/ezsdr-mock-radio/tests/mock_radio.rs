@@ -380,6 +380,14 @@ fn mr_02_from_binding_refusals() {
     b = binding("x3xx");
     b.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:A:ubx:0")]));
     assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("position 1 repeats"), "the repeated pair is refused");
+    // A name after `#` (RM-28): a bad one, an empty one and a repeated one are refused with the entry, and no Run is needed.
+    for (rx, tx) in [(&["0:A:ubx:0#"][..], &[][..]), (&["0:A:ubx:0#7"], &[]), (&["0:A:ubx:0#a b"], &[]), (&["0:A:ubx:0#a", "0:B:ubx:0#a"], &[]), (&["0:A:ubx:0#a"], &["0:A:ubx:0#a"])] {
+        b = binding("x3xx");
+        b.selector.insert(Ident::parse("rx").unwrap(), Value::List(rx.iter().map(|e| Scalar::from(*e)).collect()));
+        b.selector.insert(Ident::parse("tx").unwrap(), Value::List(tx.iter().map(|e| Scalar::from(*e)).collect()));
+        let message = MockRadio::from_binding(&b).err().unwrap().message;
+        assert!(message.starts_with("MR-2: ") && message.contains(rx.last().unwrap()), "{rx:?} {tx:?}: {message}");
+    }
     b = binding("x3xx");
     b.selector.insert(Ident::parse("rx").unwrap(), Value::List(vec![Scalar::from("0:B:ubx:0")]));
     assert!(MockRadio::from_binding(&b).is_ok(), "slot B at position 0 is the channel order");
@@ -446,6 +454,21 @@ fn mr_02_from_binding_refusals() {
     b = binding("x3xx");
     b.selector.clear();
     assert!(MockRadio::from_binding(&b).err().unwrap().message.contains("needs `rx`"));
+}
+
+#[test]
+fn mr_02_a_named_selector_builds_the_unnamed_radio() {
+    // RM-28: a name after `#` is the selector's own and reaches nothing the Provider builds.
+    let build = |rx: &[&str], tx: &[&str]| {
+        let mut b = binding("x3xx");
+        b.selector.insert(Ident::parse("rx").unwrap(), Value::List(rx.iter().map(|e| Scalar::from(*e)).collect()));
+        b.selector.insert(Ident::parse("tx").unwrap(), Value::List(tx.iter().map(|e| Scalar::from(*e)).collect()));
+        MockRadio::from_binding(&b).unwrap()
+    };
+    let plain = build(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let named = build(&["0:A:ubx:0#loop-rx", "0:B:ubx:0#mon"], &["0:A:ubx:0#loop-tx", "0:B:ubx:0"]);
+    assert_eq!(plain.instance(), named.instance(), "the instance: id, tree, fidelity, sections");
+    assert_eq!(serde_json::to_string(&plain.instance().tree).unwrap(), serde_json::to_string(&named.instance().tree).unwrap());
 }
 
 #[test]

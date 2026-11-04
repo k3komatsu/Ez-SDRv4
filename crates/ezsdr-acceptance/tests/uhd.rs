@@ -221,8 +221,17 @@ fn uhd_57_the_session_loopback_captures_what_it_transmits() {
 /// A Session on a FakeDevice the test keeps, asking `requests` of the radio at `connect`, advanced
 /// `ms` past T0; the device's call trace and the Run.
 fn session_on(requests: &[(&str, Scalar)], envelope: Json, ms: i64) -> (Arc<FakeDevice>, RunHandle) {
+    session_with_layout(requests, envelope, ms, None)
+}
+
+/// As [`session_on`], the radio's `rx` and `tx` lists replaced by `layout` when given.
+fn session_with_layout(requests: &[(&str, Scalar)], envelope: Json, ms: i64, layout: Option<(Json, Json)>) -> (Arc<FakeDevice>, RunHandle) {
     let temp = rig::TempDir::new("uhd-initial");
-    let profile = rig::uhd_profile(&temp.0, true, envelope);
+    let mut profile = rig::uhd_profile(&temp.0, true, envelope);
+    if let Some((rx, tx)) = layout {
+        profile["bindings"]["radio"]["selector"]["rx"] = rx;
+        profile["bindings"]["radio"]["selector"]["tx"] = tx;
+    }
     let device = fake_device();
     let assembly = rig::assemble_on(&profile, BTreeMap::new(), device.clone());
     let mut run = coordinator::connect(&profile, &support::asking("radio", requests), assembly, Lease::attached()).expect("the Session's entry is valid");
@@ -286,6 +295,40 @@ fn uhd_59_initial_values_are_applied_before_the_streamers_open() {
     assert_eq!(manifest.action_log.len(), 0, "no call but connect asked for any of it");
     let rx = manifest.clocks.sample_clocks.iter().find(|c| c.stream.path() == "usrp/rx/s0").expect("the receive clock");
     assert_eq!((rx.nominal_rate.num(), rx.nominal_rate.den()), (2_000_000, 1), "the first clock has the asked rate");
+}
+
+#[test]
+fn uhd_59_a_named_selector_calls_the_device_as_the_unnamed_one() {
+    // RM-28: the same Session on the same layout written plain and with names: the device sees the same
+    // calls, none carrying a name, and the Manifest has the same clocks.
+    let envelope = json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 999_000_000.0, "hi_hz": 1_001_000_000.0 }], "max_gain_db": 20.0, "tx_enabled": [true, true] } });
+    let requests = [
+        ("radio.rx.c1.stream", Scalar::Int(0)),
+        ("radio.rx.s0.sample_rate_hz", num(2.0e6)),
+        ("radio.rx.c1.frequency_hz", num(1.0005e9)),
+        ("radio.rx.c1.gain_db", num(10.0)),
+        ("radio.rx.c1.antenna", Scalar::from("RX2")),
+        ("radio.tx.c0.stream", Scalar::Int(0)),
+        ("radio.tx.s0.sample_rate_hz", num(2.0e6)),
+        ("radio.tx.c0.frequency_hz", num(1.0005e9)),
+        ("radio.tx.c0.gain_db", num(5.0)),
+    ];
+    let run = |layout: (Json, Json)| {
+        let (device, run) = session_with_layout(&requests, envelope.clone(), 5, Some(layout));
+        assert!(matches!(run.state(), ezsdr_kernel::run::RunState::Running {}), "{:?}", run.state());
+        let manifest = run.finish();
+        // `rx_start`'s argument is a device time read from the wall clock; the call itself is compared.
+        let calls: Vec<String> = device.calls().into_iter().map(|call| if call.starts_with("rx_start") { "rx_start".to_owned() } else { call }).collect();
+        // The clocks' origins are wall-clock device times; their streams and rates are the Session's.
+        let clocks: Vec<(String, u64)> = manifest.clocks.sample_clocks.iter().map(|c| (c.stream.path().to_owned(), c.nominal_rate.num())).collect();
+        (calls, clocks)
+    };
+    let plain = run((json!(["0:B:ubx:0", "0:A:ubx:0"]), json!(["0:A:ubx:0", "0:B:ubx:0"])));
+    let named = run((json!(["0:B:ubx:0#side-rx", "0:A:ubx:0#main-rx"]), json!(["0:A:ubx:0#main-tx", "0:B:ubx:0"])));
+    assert_eq!(plain.0, named.0, "the same device calls");
+    assert_eq!(plain.1, named.1, "the same clocks");
+    assert!(first(&named.0, "apply rx 1") < first(&named.0, "rx_open"), "{:?}", named.0);
+    assert!(!named.0.iter().any(|call| call.contains('#')), "a name reached the device: {:?}", named.0);
 }
 
 #[test]

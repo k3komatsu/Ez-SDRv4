@@ -686,6 +686,55 @@ class EasyApi(unittest.TestCase):
         for row in range(2):
             rotation(y[row], x[row])
 
+    def named_profile(self, rx: list, tx: list, couplings: list) -> dict:
+        """The default profile with the radio's layout lists and the simulated channel replaced (RM-28)."""
+        profile = self.default_profile()
+        profile["bindings"]["radio"]["selector"]["rx"] = rx
+        profile["bindings"]["radio"]["selector"]["tx"] = tx
+        profile["environment"]["sim.channel"]["couplings"] = [
+            {"tx": "radio", "tx_channel": t, "rx": "radio", "rx_channel": r, "gain_db": 0.0} for t, r in couplings
+        ]
+        return profile
+
+    def test_ea_16_a_channel_is_reached_by_its_name_through_a_server(self) -> None:
+        profile = self.named_profile(["0:A:ubx:0#loop-rx", "0:B:ubx:0"], ["0:A:ubx:0#loop-tx", "0:B:ubx:0#spare-tx"], [(0, 0)])
+        stream = ezsdr.Stream(["loop-rx"], gain={"loop-rx": 12}, frequency={0: 2.45e9})
+        with self.connect(profile, rx={"main": stream}, tx={0: ["loop-tx"]}) as sdr:
+            self.assertEqual(sdr.rx_channels["loop-rx"].stream, 0)
+            self.assertEqual((sdr.rx_channels["loop-rx"].gain, sdr.rx_channels["loop-rx"].frequency), (12.0, 2.45e9))
+            self.assertEqual((sdr.rx_channels[1].stream, sdr.tx_channels["loop-tx"].stream, sdr.tx_channels["spare-tx"].stream), (-1, 0, -1))
+            self.assertEqual(sdr.rx_channels["loop-rx"]._number, sdr.rx_channels[0]._number)
+            with self.assertRaises(KeyError) as raised:
+                sdr.rx_channels["nowhere"]
+            self.assertIn("['loop-rx']", str(raised.exception), "only the named entry is known; the second is reached by number")
+            with self.assertRaises(KeyError):
+                sdr.rx_channels["loop-tx"]
+            self.assertEqual(sdr.rx_streams["main"].channels, [0])
+        # A name the server does not know is refused with its text, before any Run.
+        for streams, message in (({"rx": {0: ["nowhere"]}}, "no channel is named \"nowhere\""), ({"rx": {0: ["loop-tx"]}}, "is a transmit channel, not a receive channel")):
+            with self.subTest(streams=streams):
+                with self.assertRaises(ezsdr.Error) as raised:
+                    self.connect(profile, **streams)
+                self.assertIn(message, str(raised.exception))
+
+    def test_ea_16_one_program_of_names_runs_on_two_layouts(self) -> None:
+        def program(sdr: ezsdr.Session) -> np.ndarray:
+            sdr.tx_streams["out"].repeat(ramp())
+            self.wait_for_tx_signal(sdr)
+            return sdr.rx_streams["main"].capture(2000)
+
+        streams = {"rx": {"main": ezsdr.Stream(["loop-rx"])}, "tx": {"out": ["loop-tx"]}}
+        first = self.named_profile(["0:A:ubx:0#loop-rx", "0:B:ubx:0#spare-rx"], ["0:A:ubx:0#loop-tx", "0:B:ubx:0#spare-tx"], [(0, 0)])
+        # The same names on other numbers, and the coupling that is the same wire on them.
+        second = self.named_profile(["0:B:ubx:0#spare-rx", "0:A:ubx:0#loop-rx"], ["0:B:ubx:0#spare-tx", "0:A:ubx:0#loop-tx"], [(1, 1)])
+        for profile, number in ((first, 0), (second, 1)):
+            with self.subTest(loop_rx=number):
+                with self.connect(profile, **streams) as sdr:
+                    self.assertEqual((sdr.rx_channels["loop-rx"]._number, sdr.tx_channels["loop-tx"]._number), (number, number))
+                    self.assertEqual((sdr.rx_streams["main"].channels, sdr.tx_streams["out"].channels), ([number], [number]), "the stream holds the named channel, whatever its number")
+                    _, phasor = rotation(program(sdr), ramp())
+                    self.assertAlmostEqual(abs(phasor), 1.0, places=5)
+
     def test_ea_16_connect_initial_values(self) -> None:
         # The values a Session asks for are its first ones: no logged call, and the effective
         # configuration holds them as asked, a rate the grid lacks coerced like a SetParameter's.
@@ -797,7 +846,10 @@ class ConnectRequests(unittest.TestCase):
             "a bool channel": ({"rx": {0: [True]}}, "non-negative integer"),
             "a float channel": ({"rx": {0: [0.0]}}, "non-negative integer"),
             "a negative channel": ({"tx": {0: [-1]}}, "non-negative integer"),
-            "a channel name": ({"rx": {0: ["loop-rx"]}}, "channel names need stage 1b"),
+            "a channel name that is no name": ({"rx": {0: ["a b"]}}, "'a b' is not a channel name"),
+            "a digit-only channel name": ({"rx": {0: ["12"]}}, "'12' is not a channel name"),
+            "a channel name twice": ({"rx": {0: ["loop-rx", "loop-rx"]}}, "'loop-rx' is in two places"),
+            "a channel name in two streams": ({"rx": {0: ["loop-rx"], 1: ["loop-rx"]}}, "'loop-rx' is in two places"),
             "a negative stream": ({"rx": {-1: [0]}}, "non-negative integer"),
             "a bool stream": ({"rx": {True: [0]}}, "non-negative integer"),
             "an empty name": ({"rx": {"": [0]}}, "is not a stream name"),
@@ -819,7 +871,9 @@ class ConnectRequests(unittest.TestCase):
             "channels that are a string": ({"rx": {0: "01"}}, "a list"),
             "a direction that is a list": ({"rx": [0]}, "dict"),
             "a value outside the stream": ({"rx": {0: ezsdr.Stream([0], gain={1: 5})}}, "not a channel of rx stream 0"),
-            "a value keyed by a name": ({"rx": {0: ezsdr.Stream([0], gain={"a": 5})}}, "channel names need stage 1b"),
+            "a value keyed by a name no channel of the stream is": ({"rx": {0: ezsdr.Stream(["x"], gain={"y": 5})}}, "names 'y', which is not a channel of rx stream 0"),
+            "a value keyed by a bad name": ({"rx": {0: ezsdr.Stream(["x"], gain={"a b": 5})}}, "'a b' is not a channel name"),
+            "a bool value key": ({"rx": {0: ezsdr.Stream(["x"], gain={True: 5})}}, "non-negative integer"),
             "a bool frequency": ({"rx": {0: ezsdr.Stream([0], frequency={0: True})}}, "finite number"),
             "a NaN rate": ({"rx": {0: ezsdr.Stream([0], sample_rate=float("nan"))}}, "finite number"),
             "an infinite gain": ({"tx": {0: ezsdr.Stream([0], gain={0: float("inf")})}}, "finite number"),
@@ -830,6 +884,52 @@ class ConnectRequests(unittest.TestCase):
         for what, (streams, message) in cases.items():
             with self.subTest(what):
                 self.assertIn(message, self.refused(**streams))
+
+    def test_ea_16_connect_takes_channel_names(self) -> None:
+        # A `str` is a name and an `int` a number, anywhere a channel is written (RM-28, EA-16).
+        stream = ezsdr.Stream([0, "loop-rx"], gain={"loop-rx": 5, 0: 6}, antenna={"loop-rx": "RX2"})
+        frame = self.frame(rx={"main": stream}, tx={0: ["loop-tx"]})
+        self.assertEqual(frame["initial"]["radio"]["rx"], [{"name": "main", "channels": [0, "loop-rx"], "gain": {"loop-rx": 5.0, "0": 6.0}, "antenna": {"loop-rx": "RX2"}}])
+        self.assertEqual(frame["initial"]["radio"]["tx"], [{"number": 0, "channels": ["loop-tx"]}])
+
+    def test_ea_16_connect_leaves_a_mixed_reference_to_the_server(self) -> None:
+        # Whether a number and a name are one channel only the selector says, so neither is refused here.
+        for stream in (ezsdr.Stream([0], gain={"loop-rx": 5}), ezsdr.Stream(["loop-rx"], gain={0: 5}), ezsdr.Stream([0, "loop-rx"], gain={"loop-rx": 5, 0: 6})):
+            with self.subTest(stream=stream):
+                self.assertEqual(len(self.frame(rx={0: stream})["initial"]["radio"]["rx"]), 1)
+
+    def test_ea_16_the_name_rule_matches_the_server(self) -> None:
+        # One case list for the Rust parser, the server and this client (crates/ezsdr-radio/tests/fixtures/names.json).
+        cases = json.loads((Path(__file__).resolve().parents[2] / "crates/ezsdr-radio/tests/fixtures/names.json").read_text())
+        for name in cases["good"]:
+            with self.subTest(good=name):
+                self.assertEqual(self.frame(rx={0: [name]})["initial"]["radio"]["rx"][0]["channels"], [name])
+                self.assertEqual(self.frame(rx={name: [0]})["initial"]["radio"]["rx"][0]["name"], name)
+        for name in cases["bad"]:
+            with self.subTest(bad=name):
+                self.assertIn("is not a channel name", self.refused(rx={0: [name]}))
+                self.assertIn("is not a stream name", self.refused(rx={name: [0]}))
+
+    def test_ea_16_a_channel_is_reached_by_its_name(self) -> None:
+        at = {"domain": self.ROOT, "ticks": 0}
+        session = ezsdr.Session(Mock(), {
+            "run": "test", "dir": "", "profile": {"bindings": {}}, "start_instant": at, "now": at, "root_rate": {"num": 1, "den": 1},
+            "channels": {"radio": {"rx": {"loop-rx": 0, "late": 2}, "tx": {"loop-tx": 1}}, "second": {"rx": {}, "tx": {}}},
+        })
+        effective = {f"radio.{d}.c{n}.stream": -1 for d in ("rx", "tx") for n in range(3)}
+        session._call = Mock(return_value=({"effective": {"radio": effective, "second": {"radio.rx.c0.stream": -1}}}, b""))
+        radio = session.radio("radio")
+        self.assertEqual((radio.rx_channels["loop-rx"]._number, radio.rx_channels["late"]._number, radio.tx_channels["loop-tx"]._number), (0, 2, 1))
+        self.assertEqual((radio.rx_channels["loop-rx"]._direction, radio.tx_channels["loop-tx"]._direction), ("rx", "tx"))
+        self.assertEqual((radio.rx_channels[1]._number, len(radio.rx_channels), [c._number for c in radio.tx_channels]), (1, 3, [0, 1, 2]), "numbers, length and iteration are the list's")
+        with self.assertRaises(KeyError) as raised:
+            radio.rx_channels["nowhere"]
+        self.assertIn("['late', 'loop-rx']", str(raised.exception))
+        with self.assertRaises(KeyError):
+            radio.rx_channels["loop-tx"]  # a transmit name is no receive channel
+        with self.assertRaises(KeyError):
+            radio.tx_channels["loop-rx"]
+        self.assertEqual(session.radio("second").rx_channels._names, {}, "a radio that names nothing is reached by number only")
 
     def test_ea_16_a_name_is_looked_up_in_its_own_direction(self) -> None:
         session = ezsdr.Session(Mock(), {

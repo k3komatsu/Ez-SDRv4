@@ -6931,6 +6931,37 @@ fn ur_30_the_device_section_names_the_subdev_spec() {
 }
 
 #[test]
+fn ur_30_a_named_selector_records_and_sets_the_unnamed_subdev_spec() {
+    // RM-28: a name after `#` never reaches the device. The recorded spec is the string the device was given,
+    // and the whole call log equals the plain selector's.
+    let build = |serial: &str, selector: Json| {
+        let device = fake(FakeConfig { serial: serial.to_owned(), ..FakeConfig::default() });
+        let radio = UhdRadio::from_binding(&binding(selector, Some(x3xx())), device.clone()).unwrap();
+        (radio, device)
+    };
+    let (plain, plain_device) = build("ur30-named-plain", json!({ "args": ARGS, "rx": ["0:B:ubx:0", "0:A:ubx:0"], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }));
+    let (named, named_device) = build("ur30-named-named", json!({ "args": ARGS, "rx": ["0:B:ubx:0#in-b", "0:A:ubx:0#in-a"], "tx": ["0:A:ubx:0#out-a", "0:B:ubx:0"] }));
+    let spec = |radio: &UhdRadio| section_of(radio.instance(), "device")["subdev_spec"].clone();
+    assert_eq!(spec(&named), spec(&plain));
+    assert_eq!(spec(&named)["rx"], "B:0 A:0");
+    assert_eq!(spec(&named)["tx"], "A:0 B:0");
+    let strip = |calls: Vec<String>| calls.into_iter().filter(|call| !call.starts_with("serial")).collect::<Vec<_>>();
+    assert_eq!(strip(named_device.calls()), strip(plain_device.calls()), "the same device calls");
+    assert!(calls(&named_device, "set_subdev_spec").contains(&"set_subdev_spec rx B:0 A:0".to_owned()), "{:?}", named_device.calls());
+    assert!(!named_device.calls().iter().any(|call| call.contains('#')), "a name reached the device: {:?}", named_device.calls());
+}
+
+#[test]
+fn ur_05_a_bad_selector_name_is_refused_before_the_device_is_touched() {
+    let device = fake(FakeConfig { serial: "ur05-bad-name".to_owned(), ..FakeConfig::default() });
+    for rx in [json!(["0:A:ubx:0#"]), json!(["0:A:ubx:0#7"]), json!(["0:A:ubx:0#a b"]), json!(["0:A:ubx:0#a", "0:B:ubx:0#a"])] {
+        let error = UhdRadio::from_binding(&binding(json!({ "args": ARGS, "rx": rx.clone() }), Some(x3xx())), device.clone()).err().expect("refused");
+        assert!(error.message.starts_with("UR-5: ") && error.message.contains("name"), "{rx}: {}", error.message);
+    }
+    assert!(!device.calls().iter().any(|call| call.starts_with("set_subdev_spec") || call.starts_with("serial")), "the device was touched: {:?}", device.calls());
+}
+
+#[test]
 fn ur_30_the_device_section_records_the_serial() {
     // UR-30: the serial is the record that lets an operator tell two devices apart (H4).
     let device = fake(FakeConfig { serial: "F00BA2".to_owned(), ..FakeConfig::default() });
@@ -8706,6 +8737,19 @@ fn the_selector_environment_names_only_the_layout_image_and_links() {
 }
 
 #[test]
+fn a_named_layout_element_has_its_boards_frequency_and_description() {
+    // RM-28: the helpers read the board before the `#name`, and the Provider's own parse accepts the named layout.
+    let device = fake(obx_and_cbx());
+    let dir = TempDir::new();
+    with_selector(json!({ "rx": ["0:A:obx:0#in", "0:B:cbx:0#aux"], "tx": ["0:A:obx:0#out", "0:B:cbx:0"] }), || {
+        assert_eq!((channel_hz(&*device, Dir::Tx, 0), channel_hz(&*device, Dir::Tx, 1), channel_hz(&*device, Dir::Rx, 1)), (1e9, 2.45e9, 2.45e9));
+        let doc = bench_profile(&*device, &dir, json!({}), json!({}), false);
+        let binding = measurement::radio_binding(&doc).unwrap();
+        measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).unwrap();
+    });
+}
+
+#[test]
 fn an_installed_selector_keeps_its_layout_and_gives_each_channel_its_own_band() {
     // The bench profile used to overwrite `rx` and `tx` with the device's slot-A layout; an explicit layout now stays, and
     // each transmit channel has its board's frequency, a band around it and an enable entry (RM-33).
@@ -8923,6 +8967,17 @@ fn raw_probes_are_inapplicable_when_channel_zero_is_not_slot_a_on_a_ubx_or_obx()
     assert!(applicable(None).is_ok() && applicable(Some(json!({ "image": ["xg"] }))).is_ok());
     assert!(applicable(Some(json!({ "rx": ["0:A:obx:0", "0:B:cbx:0"], "tx": ["0:A:obx:0", "0:B:cbx:0"] }))).is_ok());
     assert!(applicable(Some(json!({ "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }))).is_ok());
+    // A name after `#` is not part of the board (RM-28): the named layouts apply and are refused as the plain ones are.
+    assert!(applicable(Some(json!({ "rx": ["0:A:ubx:0#in"], "tx": ["0:A:ubx:0#out"] }))).is_ok());
+    assert!(applicable(Some(json!({ "rx": ["0:A:obx:0#in", "0:B:cbx:0#aux"], "tx": ["0:A:obx:0#out"] }))).is_ok());
+    for bad in [
+        json!({ "rx": ["0:B:cbx:0#in"] }),
+        json!({ "tx": ["0:B:ubx:0#out"] }),
+        json!({ "rx": ["0:A:cbx:0#in"], "tx": ["0:A:ubx:0#out"] }),
+        json!({ "rx": ["0:A:ubx:0#in", "0:B:ubx:0"], "tx": ["0:B:obx:0#out"] }),
+    ] {
+        assert!(applicable(Some(bad.clone())).is_err(), "{bad}");
+    }
     for bad in [json!({ "rx": ["0:B:cbx:0"] }), json!({ "tx": ["0:A:cbx:0"] }), json!({ "rx": ["0:A:obx:0"], "tx": ["0:B:obx:0"] }), json!({ "rx": ["0:A:basic_rx:0"] })] {
         assert!(applicable(Some(bad.clone())).is_err(), "{bad}");
     }

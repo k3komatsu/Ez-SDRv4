@@ -118,10 +118,12 @@ except Exception:
 if ("rx" in selector) != ("tx" in selector):
     sys.exit(3)
 # The raw probes drive device channel 0 (slot A) at 1 GHz; they run unless the rx or tx channel 0 of the selector is something else.
-probes = all(not v or v[0] in ("0:A:ubx:0", "0:A:obx:0") for v in (selector.get("rx"), selector.get("tx")))
+# A layout element may carry a `#name` after the board (RM-28); the comparison is on the element before it.
+def board(e): return e.split("#", 1)[0]
+probes = all(not v or board(v[0]) in ("0:A:ubx:0", "0:A:obx:0") for v in (selector.get("rx"), selector.get("tx")))
 # Preflight tests (hw_*) run without the selector and drive slot A, so slot A is named whenever one is requested.
 slot_a = probes or os.environ.get("PREFLIGHT") == "1"
-print(", ".join((["slot A board (raw probes and preflight tests)"] if slot_a else []) + [e for e in tx if not (slot_a and e.startswith("0:A:"))]) or "none")
+print(", ".join((["slot A board (raw probes and preflight tests)"] if slot_a else []) + [board(e) for e in tx if not (slot_a and board(e).startswith("0:A:"))]) or "none")
 ') || {
         if (($? == 3)); then printf '%s\n' 'run-record: EZSDR_MEASUREMENT_SELECTOR must give both rx and tx, or neither (the missing one would be inherited, and its transmitters not confirmed)' >&2
         else printf '%s\n' 'run-record: EZSDR_MEASUREMENT_SELECTOR must be a JSON object whose tx is a list of strings' >&2; fi

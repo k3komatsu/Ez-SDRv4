@@ -21,7 +21,7 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, Rational, TimePoint};
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
-use ezsdr_server::protocol::{ChannelRef, ErrorKind, ProtocolError, Reply, ReplyFrame, Request, ResourceInit, Response, StreamInit, StreamNames};
+use ezsdr_server::protocol::{ChannelRef, DirectionNames, ErrorKind, ProtocolError, Reply, ReplyFrame, Request, ResourceInit, Response, StreamInit};
 use ezsdr_server::{Config, Exit, Handled, Server, serve};
 use serde_json::json;
 
@@ -432,7 +432,7 @@ fn ea_10_a_failed_connect_writes_its_manifest() {
 
 type Initial = Option<BTreeMap<String, ResourceInit>>;
 /// The radio's effective values and the stream names the reply gave.
-type Joined = (BTreeMap<Key, Value>, BTreeMap<String, StreamNames>);
+type Joined = (BTreeMap<Key, Value>, BTreeMap<String, DirectionNames>);
 
 /// `initial` for the default profile's `radio`.
 fn radio_init(rx: Vec<StreamInit>, tx: Vec<StreamInit>) -> Initial {
@@ -561,19 +561,19 @@ fn ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run() {
         ("a channel twice in one stream", rx(vec![numbered(0, &[1, 1])]), "channel c1 is given twice"),
         ("a stream number twice", rx(vec![numbered(0, &[0]), numbered(0, &[1])]), "rx stream s0 is given twice"),
         ("a number and a name", rx(vec![StreamInit { name: Some("x".to_owned()), ..numbered(0, &[0]) }]), "exactly one of number and name"),
-        ("a channel name", rx(vec![StreamInit { channels: vec![ChannelRef::Name("loop-rx".to_owned())], ..numbered(0, &[]) }]), "channel names need stage 1b"),
+        ("a channel name this profile does not give", rx(vec![StreamInit { channels: vec![ChannelRef::Name("loop-rx".to_owned())], ..numbered(0, &[]) }]), "no channel is named \"loop-rx\""),
         ("a value for a channel the stream lacks", rx(vec![StreamInit { gain: BTreeMap::from([("1".to_owned(), 5.0)]), ..numbered(0, &[0]) }]), "c1 has a value but is not a channel of its stream"),
         (
-            "a value key written \"00\" beside \"0\"",
+            "a value key written \"00\" beside \"0\" is no number and no legal name",
             rx(vec![StreamInit { gain: BTreeMap::from([("0".to_owned(), 5.0), ("00".to_owned(), 6.0)]), ..numbered(0, &[0]) }]),
-            "not a channel number as written",
+            "\"00\" is not a channel name",
         ),
         (
-            "a value key written \"+0\" beside \"0\"",
+            "a value key written \"+0\" is a name, and this profile gives none",
             rx(vec![StreamInit { gain: BTreeMap::from([("0".to_owned(), 5.0), ("+0".to_owned(), 6.0)]), ..numbered(0, &[0]) }]),
-            "not a channel number as written",
+            "no channel is named \"+0\"",
         ),
-        ("a value keyed by a name", rx(vec![StreamInit { gain: BTreeMap::from([("loop-rx".to_owned(), 5.0)]), ..numbered(0, &[0]) }]), "channel names need stage 1b"),
+        ("a value keyed by a name this profile does not give", rx(vec![StreamInit { gain: BTreeMap::from([("loop-rx".to_owned(), 5.0)]), ..numbered(0, &[0]) }]), "no channel is named \"loop-rx\""),
         ("a rate that is not finite", rx(vec![StreamInit { sample_rate: Some(f64::NAN), ..numbered(0, &[0]) }]), "sample_rate is not a finite number"),
         ("a frequency that is not finite", rx(vec![StreamInit { frequency: BTreeMap::from([("0".to_owned(), f64::INFINITY)]), ..numbered(0, &[0]) }]), "frequency_hz is not a finite number"),
         ("a resource that is no radio", Some(BTreeMap::from([("rec".to_owned(), ResourceInit::default())])), "no radio of this profile"),
@@ -587,6 +587,396 @@ fn ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run() {
     // The boundary the refusals sit on: the last channel and the last stream of each direction.
     let (effective, _) = connect_with(&mut server, radio_init(vec![numbered(1, &[1])], vec![numbered(1, &[0, 1])])).expect("the last stream and channel exist");
     assert_eq!((membership(&effective, "rx"), membership(&effective, "tx")), (vec![-1, 1], vec![1, 1]));
+    finish(&mut server);
+}
+
+// ---------------------------------------------------------------- channel names (RM-28, EA-10a)
+
+type Tables = BTreeMap<String, DirectionNames>;
+
+/// The default profile with the radio's layout lists replaced.
+fn profile_with(dir: &Path, rx: &[&str], tx: &[&str]) -> serde_json::Value {
+    let mut profile = ezsdr_server::default_profile(&dir.to_string_lossy());
+    profile["bindings"]["radio"]["selector"]["rx"] = json!(rx);
+    profile["bindings"]["radio"]["selector"]["tx"] = json!(tx);
+    profile
+}
+
+/// The owner's named layout: rx c0 `loop-rx`, c1 `side`; tx c0 `loop-tx`, c1 unnamed.
+fn named_profile(dir: &Path) -> serde_json::Value {
+    profile_with(dir, &["0:A:ubx:0#loop-rx", "0:B:ubx:0#side"], &["0:A:ubx:0#loop-tx", "0:B:ubx:0"])
+}
+
+/// A second Mock radio, `second`, with one channel each way, named `r2-rx` and `r2-tx`.
+fn two_radios(dir: &Path) -> serde_json::Value {
+    let mut profile = named_profile(dir);
+    let mut second = profile["bindings"]["radio"].clone();
+    second["selector"]["id"] = json!("second");
+    second["selector"]["rx"] = json!(["0:A:ubx:0#r2-rx"]);
+    second["selector"]["tx"] = json!(["0:A:ubx:0#r2-tx"]);
+    profile["bindings"]["second"] = second;
+    profile
+}
+
+struct Named {
+    effective: BTreeMap<Ident, BTreeMap<Key, Value>>,
+    streams: Tables,
+    channels: Tables,
+}
+
+fn connect_profile(server: &mut Server, profile: serde_json::Value, initial: Initial) -> Result<Named, ProtocolError> {
+    match server.handle(Request::Connect { profile: Some(profile), lease: None, initial }, Vec::new()).reply {
+        Reply::Result(Response::Connected { effective, streams, channels, .. }) => Ok(Named { effective, streams, channels }),
+        Reply::Result(other) => panic!("{other:?}"),
+        Reply::Error(error) => Err(error),
+    }
+}
+
+fn radio_values<'a>(connected: &'a Named, radio: &str) -> &'a BTreeMap<Key, Value> {
+    &connected.effective[&Ident::parse(radio).unwrap()]
+}
+
+fn name_ref(name: &str) -> ChannelRef {
+    ChannelRef::Name(name.to_owned())
+}
+
+fn init_of(radio: &str, rx: Vec<StreamInit>, tx: Vec<StreamInit>) -> Initial {
+    Some(BTreeMap::from([(radio.to_owned(), ResourceInit { rx, tx })]))
+}
+
+fn stream_of(number: u32, channels: Vec<ChannelRef>) -> StreamInit {
+    StreamInit { number: Some(number), channels, ..StreamInit::default() }
+}
+
+fn bad_names() -> Vec<String> {
+    let cases: serde_json::Value = serde_json::from_str(include_str!("../../ezsdr-radio/tests/fixtures/names.json")).unwrap();
+    cases["bad"].as_array().unwrap().iter().map(|name| name.as_str().unwrap().to_owned()).collect()
+}
+
+#[test]
+fn ea_10_a_named_selector_connects_as_the_unnamed_one_and_the_record_holds_numbers() {
+    // RM-28: the same layout with and without names, the same call by numbers: the same effective
+    // values, Spec, admission and log; the names are only in the recorded profile, never in a key,
+    // a target or an event.
+    let run = |profile_of: &dyn Fn(&Path) -> serde_json::Value| {
+        let temp = TempDir::new("named-same");
+        let mut server = greeted(&temp.0);
+        let initial = init_of("radio", vec![StreamInit { gain: BTreeMap::from([("1".to_owned(), 7.0)]), sample_rate: Some(2.0e6), ..numbered(0, &[0, 1]) }], vec![numbered(0, &[0])]);
+        let connected = connect_profile(&mut server, profile_of(&temp.0), initial).expect("connects");
+        let entry = submit(&mut server, set("radio.rx.c1.gain_db", Value::num(9.0).unwrap()), Vec::new());
+        assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+        submit(&mut server, repeat(), Vec::new());
+        let (manifest, _) = finish(&mut server);
+        (connected.effective, manifest)
+    };
+    let (plain_effective, plain) = run(&|dir| profile_with(dir, &["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]));
+    let (named_effective, named) = run(&|dir| named_profile(dir));
+    assert_eq!(plain_effective, named_effective, "the effective values");
+    let section = |m: &Manifest, name: &str| serde_json::to_value(m).unwrap()[name].clone();
+    for name in ["spec", "admission", "action_log", "events", "clocks"] {
+        assert_eq!(section(&plain, name), section(&named, name), "{name}");
+        let text = section(&named, name).to_string();
+        assert!(!text.contains("loop-rx") && !text.contains("side") && !text.contains("loop-tx") && !text.contains('#'), "{name} holds a name: {text}");
+    }
+    let radio_keys = named.action_log.iter().map(|entry| format!("{:?}", entry.action)).collect::<String>();
+    assert!(radio_keys.contains("radio.rx.c1.gain_db"), "the log's key is the numbered one: {radio_keys}");
+    assert!(section(&named, "binding").to_string().contains("0:A:ubx:0#loop-rx"), "the recorded profile carries the names");
+    assert!(!section(&plain, "binding").to_string().contains('#'));
+    assert_ne!(section(&plain, "binding"), section(&named, "binding"));
+}
+
+#[test]
+fn ea_09_a_bad_selector_name_is_refused_before_any_run() {
+    let temp = TempDir::new("bad-selector-name");
+    let mut server = greeted(&temp.0);
+    let mut refuse = |rx: &[&str], tx: &[&str], needle: &str| {
+        let error = connect_profile(&mut server, profile_with(&temp.0, rx, tx), None).err().expect("refused");
+        assert_eq!(error.kind, ErrorKind::Refused, "{rx:?} {tx:?}");
+        assert!(error.message.starts_with("EA-7: radio: ") && error.message.contains(needle), "{rx:?} {tx:?}: {}", error.message);
+    };
+    for name in bad_names() {
+        refuse(&[&format!("0:A:ubx:0#{name}")], &[], "has the name");
+    }
+    refuse(&["0:A:ubx:0#a", "0:B:ubx:0#a"], &[], "repeats the name `a`");
+    refuse(&["0:A:ubx:0#a"], &["0:A:ubx:0#a"], "repeats the name `a`");
+    assert_no_run(&server);
+}
+
+#[test]
+fn ea_09_a_name_is_unique_in_the_whole_profile() {
+    let temp = TempDir::new("name-unique");
+    let mut server = greeted(&temp.0);
+    let clash = |rx: &str, tx: &str| {
+        let mut profile = two_radios(&temp.0);
+        profile["bindings"]["second"]["selector"]["rx"] = json!([rx]);
+        profile["bindings"]["second"]["selector"]["tx"] = json!([tx]);
+        profile
+    };
+    // Whether or not the call uses names, and in either direction.
+    for (profile, initial) in [
+        (clash("0:A:ubx:0#loop-rx", "0:A:ubx:0#r2-tx"), None),
+        (clash("0:A:ubx:0#r2-rx", "0:A:ubx:0#loop-tx"), None),
+        (clash("0:A:ubx:0#loop-tx", "0:A:ubx:0#r2-tx"), init_of("radio", vec![numbered(0, &[0])], Vec::new())),
+        (clash("0:A:ubx:0#side", "0:A:ubx:0#r2-tx"), init_of("second", Vec::new(), vec![numbered(0, &[0])])),
+    ] {
+        let error = connect_profile(&mut server, profile, initial).err().expect("refused");
+        assert_eq!(error.kind, ErrorKind::Refused);
+        assert!(error.message.starts_with("EA-7: the channel name ") && error.message.contains("radio and by second") || error.message.contains("second and by radio"), "{}", error.message);
+        assert_no_run(&server);
+    }
+    let connected = connect_profile(&mut server, two_radios(&temp.0), None).expect("distinct names connect");
+    assert_eq!(connected.channels.len(), 2);
+    finish(&mut server);
+}
+
+#[test]
+fn ea_10_a_channel_name_is_resolved_to_its_number() {
+    let temp = TempDir::new("name-resolve");
+    let mut server = greeted(&temp.0);
+    let at = |connected: &Named, key: &str| radio_values(connected, "radio")[&Key::parse(key).unwrap()].clone();
+    // A number beside a name, and value keys by name or by number: `loop-rx` is c0, held here as the number 0, and `side` is c1.
+    let initial = init_of(
+        "radio",
+        vec![StreamInit {
+            gain: BTreeMap::from([("side".to_owned(), 5.0), ("0".to_owned(), 6.0)]),
+            frequency: BTreeMap::from([("loop-rx".to_owned(), 2.4e9)]),
+            ..stream_of(0, vec![ChannelRef::Number(0), name_ref("side")])
+        }],
+        vec![StreamInit { antenna: BTreeMap::from([("loop-tx".to_owned(), "TX/RX".to_owned())]), ..stream_of(0, vec![name_ref("loop-tx")]) }],
+    );
+    let connected = connect_profile(&mut server, named_profile(&temp.0), initial).expect("connects");
+    assert_eq!((membership(radio_values(&connected, "radio"), "rx"), membership(radio_values(&connected, "radio"), "tx")), (vec![0, 0], vec![0, -1]));
+    assert_eq!(at(&connected, "radio.rx.c1.gain_db"), Value::num(5.0).unwrap(), "`side` is c1");
+    assert_eq!(at(&connected, "radio.rx.c0.gain_db"), Value::num(6.0).unwrap(), "the number 0 is c0");
+    assert_eq!(at(&connected, "radio.rx.c0.frequency_hz"), Value::num(2.4e9).unwrap(), "`loop-rx` is c0");
+    assert_eq!(at(&connected, "radio.tx.c0.antenna"), Value::from("TX/RX".to_owned()));
+    finish(&mut server);
+    // A number for a channel its stream holds by name, and a name for one it holds by number.
+    let mut server = greeted(&TempDir::new("name-resolve-mixed").0);
+    let temp = TempDir::new("name-resolve-b");
+    let initial = init_of(
+        "radio",
+        vec![
+            StreamInit { gain: BTreeMap::from([("0".to_owned(), 3.0)]), ..stream_of(0, vec![name_ref("loop-rx")]) },
+            StreamInit { gain: BTreeMap::from([("side".to_owned(), 4.0)]), ..stream_of(1, vec![ChannelRef::Number(1)]) },
+        ],
+        Vec::new(),
+    );
+    let connected = connect_profile(&mut server, named_profile(&temp.0), initial).expect("both spellings of one channel are the one channel");
+    assert_eq!(at(&connected, "radio.rx.c0.gain_db"), Value::num(3.0).unwrap());
+    assert_eq!(at(&connected, "radio.rx.c1.gain_db"), Value::num(4.0).unwrap());
+    finish(&mut server);
+}
+
+#[test]
+fn ea_10_a_key_is_a_number_only_when_it_is_a_canonical_ascii_decimal() {
+    // `+0`, `-0` and full-width digits are legal names; with them on c1, a number-looking parse would pick c0.
+    let temp = TempDir::new("name-spelling");
+    let mut server = greeted(&temp.0);
+    for name in ["+0", "-0", "\u{ff11}", "00a"] {
+        let profile = profile_with(&temp.0, &["0:A:ubx:0", &format!("0:B:ubx:0#{name}")], &["0:A:ubx:0", "0:B:ubx:0"]);
+        let initial = init_of("radio", vec![StreamInit { gain: BTreeMap::from([(name.to_owned(), 5.0)]), ..stream_of(0, vec![name_ref(name)]) }], Vec::new());
+        let connected = connect_profile(&mut server, profile, initial).unwrap_or_else(|e| panic!("{name:?}: {}", e.message));
+        assert_eq!(membership(radio_values(&connected, "radio"), "rx"), vec![-1, 0], "{name:?} is c1");
+        assert_eq!(radio_values(&connected, "radio")[&Key::parse("radio.rx.c1.gain_db").unwrap()], Value::num(5.0).unwrap(), "{name:?}");
+        assert_eq!(connected.channels["radio"].rx[name], 1);
+        finish(&mut server);
+        server = greeted(&TempDir::new("name-spelling-next").0);
+    }
+    // Digits only is never a name: written with a leading zero, past u32 or full of zeros, it is refused.
+    for text in ["00", "01", "4294967296", "18446744073709551616"] {
+        let initial = init_of("radio", vec![StreamInit { gain: BTreeMap::from([(text.to_owned(), 5.0)]), ..stream_of(0, vec![ChannelRef::Number(0)]) }], Vec::new());
+        let error = connect_profile(&mut server, named_profile(&temp.0), initial).err().expect(text);
+        assert!(error.message.contains("is not a channel name"), "{text}: {}", error.message);
+        assert_no_run(&server);
+    }
+    // A channel written as a name that is digits only is refused the same way.
+    let error = connect_profile(&mut server, named_profile(&temp.0), init_of("radio", vec![stream_of(0, vec![name_ref("1")])], Vec::new())).err().unwrap();
+    assert!(error.message.contains("is not a channel name"), "{}", error.message);
+}
+
+#[test]
+fn ea_10_a_name_that_cannot_be_resolved_is_refused() {
+    let temp = TempDir::new("name-refused");
+    let mut server = greeted(&temp.0);
+    let rx = |stream: StreamInit| init_of("radio", vec![stream], Vec::new());
+    let tx = |stream: StreamInit| init_of("radio", Vec::new(), vec![stream]);
+    let cases: Vec<(&str, Initial, &str)> = vec![
+        ("an unknown name", rx(stream_of(0, vec![name_ref("nowhere")])), "no channel is named \"nowhere\""),
+        ("a transmit name in rx", rx(stream_of(0, vec![name_ref("loop-tx")])), "is a transmit channel, not a receive channel"),
+        ("a receive name in tx", tx(stream_of(0, vec![name_ref("side")])), "is a receive channel, not a transmit channel"),
+        ("a name twice", rx(stream_of(0, vec![name_ref("side"), name_ref("side")])), "channel c1 is given twice"),
+        ("a name and its number", rx(stream_of(0, vec![name_ref("side"), ChannelRef::Number(1)])), "channel c1 is given twice"),
+        (
+            "a name in two streams",
+            rx(stream_of(0, vec![name_ref("side")]))
+                .map(|mut i| {
+                    i.get_mut("radio").unwrap().rx.push(stream_of(1, vec![name_ref("side")]));
+                    i
+                })
+                .unwrap()
+                .into(),
+            "channel c1 is given twice",
+        ),
+        (
+            "two value keys for one channel",
+            rx(StreamInit { gain: BTreeMap::from([("1".to_owned(), 5.0), ("side".to_owned(), 6.0)]), ..stream_of(0, vec![ChannelRef::Number(1)]) }),
+            "gain_db has two values for c1",
+        ),
+        (
+            "two antenna keys for one channel",
+            rx(StreamInit { antenna: BTreeMap::from([("1".to_owned(), "RX2".to_owned()), ("side".to_owned(), "TX/RX".to_owned())]), ..stream_of(0, vec![name_ref("side")]) }),
+            "antenna has two values for c1",
+        ),
+        (
+            "a value for a name not in the stream",
+            rx(StreamInit { gain: BTreeMap::from([("side".to_owned(), 5.0)]), ..stream_of(0, vec![name_ref("loop-rx")]) }),
+            "c1 has a value but is not a channel of its stream",
+        ),
+        (
+            "a value keyed by a name of the other direction",
+            rx(StreamInit { gain: BTreeMap::from([("loop-tx".to_owned(), 5.0)]), ..stream_of(0, vec![ChannelRef::Number(0)]) }),
+            "is a transmit channel, not a receive channel",
+        ),
+    ];
+    for (what, initial, message) in cases {
+        let error = connect_profile(&mut server, named_profile(&temp.0), initial).err().expect(what);
+        assert_eq!(error.kind, ErrorKind::Refused, "{what}: {}", error.message);
+        assert!(error.message.contains(message), "{what}: {}", error.message);
+        assert_no_run(&server);
+    }
+}
+
+#[test]
+fn ea_10_a_stream_of_names_goes_to_the_radio_that_owns_them() {
+    let temp = TempDir::new("name-owner");
+    let mut server = greeted(&temp.0);
+    // Written under `radio`, a radio that exists, and under a key that names no radio at all.
+    for key in ["radio", "nowhere"] {
+        let initial = init_of(key, vec![StreamInit { name: Some("main".to_owned()), number: None, ..stream_of(0, vec![name_ref("r2-rx")]) }], vec![stream_of(0, vec![name_ref("r2-tx")])]);
+        let connected = connect_profile(&mut server, two_radios(&temp.0), initial).unwrap_or_else(|e| panic!("{key}: {}", e.message));
+        assert_eq!(connected.effective[&Ident::parse("second").unwrap()][&Key::parse("radio.rx.c0.stream").unwrap()], Value::from(0), "{key}");
+        assert_eq!(membership(radio_values(&connected, "radio"), "rx"), vec![-1, -1], "{key}: the radio of the key keeps its defaults");
+        assert_eq!(connected.streams["second"].rx["main"], 0, "{key}: the stream name is the owner's");
+        assert!(!connected.streams.contains_key("radio"), "{key}");
+        finish(&mut server);
+        server = greeted(&TempDir::new("name-owner-next").0);
+    }
+    // Stream numbers are the owner's: two streams numbered 0 on two radios are two streams; two on one radio are not.
+    let initial = init_of("radio", vec![stream_of(0, vec![name_ref("side")]), stream_of(0, vec![name_ref("r2-rx")])], Vec::new());
+    let connected = connect_profile(&mut server, two_radios(&temp.0), initial).expect("one stream 0 on each radio");
+    assert_eq!(
+        (membership(radio_values(&connected, "radio"), "rx"), connected.effective[&Ident::parse("second").unwrap()][&Key::parse("radio.rx.c0.stream").unwrap()].clone()),
+        (vec![-1, 0], Value::from(0))
+    );
+    finish(&mut server);
+    let mut server = greeted(&TempDir::new("name-owner-twice").0);
+    let initial = init_of("radio", vec![stream_of(0, vec![name_ref("side")]), stream_of(0, vec![name_ref("loop-rx")])], Vec::new());
+    let error = connect_profile(&mut server, two_radios(&temp.0), initial).err().expect("refused");
+    assert!(error.message.contains("rx stream s0 is given twice"), "{}", error.message);
+    // A stream of numbers is not moved: under a key naming no radio it is refused as before.
+    let error = connect_profile(&mut server, two_radios(&temp.0), init_of("nowhere", vec![numbered(0, &[0])], Vec::new())).err().expect("refused");
+    assert!(error.message.contains("no radio of this profile"), "{}", error.message);
+    assert_no_run(&server);
+}
+
+#[test]
+fn ea_10_a_stream_of_two_radios_is_refused() {
+    let temp = TempDir::new("name-mixed");
+    let mut server = greeted(&temp.0);
+    let rx = |stream: StreamInit| init_of("radio", vec![stream], Vec::new());
+    let cases: Vec<(&str, Initial, &str)> = vec![
+        ("names of two radios", rx(stream_of(0, vec![name_ref("loop-rx"), name_ref("r2-rx")])), "mixes the channels of radios"),
+        ("a number of radio, a name of second", rx(stream_of(0, vec![ChannelRef::Number(0), name_ref("r2-rx")])), "mixes channel numbers of radio with channel names of radio second"),
+        (
+            "a value key by number beside a name of second",
+            rx(StreamInit { gain: BTreeMap::from([("0".to_owned(), 1.0)]), ..stream_of(0, vec![name_ref("r2-rx")]) }),
+            "mixes channel numbers of radio with channel names of radio second",
+        ),
+        (
+            "a value key by name of second beside a number",
+            rx(StreamInit { gain: BTreeMap::from([("r2-rx".to_owned(), 1.0)]), ..stream_of(0, vec![ChannelRef::Number(0)]) }),
+            "mixes channel numbers of radio with channel names of radio second",
+        ),
+        (
+            "a number written under the other radio",
+            init_of("second", vec![stream_of(0, vec![ChannelRef::Number(0), name_ref("side")])], Vec::new()),
+            "mixes channel numbers of second with channel names of radio radio",
+        ),
+    ];
+    for (what, initial, message) in cases {
+        let error = connect_profile(&mut server, two_radios(&temp.0), initial).err().expect(what);
+        assert_eq!(error.kind, ErrorKind::Refused, "{what}");
+        assert!(error.message.contains(message), "{what}: {}", error.message);
+        assert_no_run(&server);
+    }
+    // The same number and name on the radio that owns both is one stream.
+    let connected =
+        connect_profile(&mut server, two_radios(&temp.0), init_of("second", vec![stream_of(0, vec![ChannelRef::Number(0)])], vec![stream_of(0, vec![name_ref("r2-tx")])])).expect("one radio");
+    assert_eq!(connected.effective[&Ident::parse("second").unwrap()][&Key::parse("radio.tx.c0.stream").unwrap()], Value::from(0));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_10_connected_carries_the_channel_name_table() {
+    let temp = TempDir::new("name-table");
+    let mut server = greeted(&temp.0);
+    let table = |pairs: &[(&str, u32)]| pairs.iter().map(|(name, n)| ((*name).to_owned(), *n)).collect::<BTreeMap<_, _>>();
+    // With no `initial`, and an unnamed second tx entry: the table lists only named entries, by position.
+    let connected = connect_profile(&mut server, named_profile(&temp.0), None).expect("connects");
+    assert_eq!(connected.channels["radio"].rx, table(&[("loop-rx", 0), ("side", 1)]));
+    assert_eq!(connected.channels["radio"].tx, table(&[("loop-tx", 0)]));
+    assert_eq!(connected.channels.len(), 1);
+    finish(&mut server);
+    // A name on the second entry only keeps its position; an entry per radio, empty for an unnamed one.
+    let mut server = greeted(&TempDir::new("name-table-two").0);
+    let mut profile = two_radios(&temp.0);
+    profile["bindings"]["radio"]["selector"]["rx"] = json!(["0:A:ubx:0", "0:B:ubx:0#late"]);
+    profile["bindings"]["second"]["selector"]["rx"] = json!(["0:A:ubx:0"]);
+    profile["bindings"]["second"]["selector"]["tx"] = json!(["0:A:ubx:0"]);
+    let connected = connect_profile(&mut server, profile, init_of("radio", vec![numbered(0, &[0])], Vec::new())).expect("connects");
+    assert_eq!(connected.channels["radio"].rx, table(&[("late", 1)]));
+    assert_eq!(connected.channels["second"], DirectionNames::default(), "a radio that names nothing has an empty table");
+    assert_eq!(connected.channels.len(), 2, "the sink and the Authority are no radios");
+    finish(&mut server);
+    // An `ideal` radio names nothing.
+    let mut server = greeted(&TempDir::new("name-table-ideal").0);
+    let mut profile = named_profile(&temp.0);
+    profile["bindings"]["radio"]["profile"] = json!({ "name": "ideal", "version": { "major": 2, "minor": 0, "patch": 0 } });
+    profile["bindings"]["radio"]["selector"] = json!({ "id": "radio", "rx": 2, "tx": 2 });
+    let connected = connect_profile(&mut server, profile, None).expect("connects");
+    assert_eq!(connected.channels["radio"], DirectionNames::default());
+    finish(&mut server);
+}
+
+#[test]
+fn ea_14_a_child_run_repeats_its_parent_s_selector_names_included() {
+    // A name is part of the binding (RM-28): the Kernel keeps the selector opaque, so a child whose
+    // binding drops or changes a name binds another instance than its parent (RS-25a).
+    let temp = TempDir::new("name-child");
+    let mut server = greeted(&temp.0);
+    let parent = named_profile(&temp.0);
+    connect_profile(&mut server, parent.clone(), init_of("radio", vec![numbered(0, &[0])], Vec::new())).expect("connects");
+    let child = |profile: serde_json::Value| ezsdr_server::without_feeds(&profile);
+    let derived = ok(run_child(&mut server, receive_spec(1_000), None, Some(10_000_000)));
+    let Response::Ran { entry, .. } = derived else { panic!() };
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "the derived profile repeats the names");
+    let Response::Ran { entry, .. } = ok(run_child(&mut server, receive_spec(1_000), Some(child(parent.clone())), Some(10_000_000))) else { panic!() };
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "the same names: {:?}", entry.outcome);
+    let mut stripped = parent.clone();
+    stripped["bindings"]["radio"]["selector"]["rx"] = json!(["0:A:ubx:0", "0:B:ubx:0"]);
+    let mut renamed = parent.clone();
+    renamed["bindings"]["radio"]["selector"]["rx"] = json!(["0:A:ubx:0#loop-in", "0:B:ubx:0#side"]);
+    for (what, profile) in [("names removed", stripped), ("a name changed", renamed)] {
+        let Response::Ran { entry, manifest: None, .. } = ok(run_child(&mut server, receive_spec(1_000), Some(child(profile)), Some(10_000_000))) else { panic!("{what}") };
+        let Outcome::Rejected { violations } = entry.outcome else { panic!("{what}: admitted") };
+        assert!(violations[0].reason.starts_with("RS-25a: radio binds an instance its parent does not"), "{what}: {}", violations[0].reason);
+    }
+    // A child's own profile with a duplicate name is refused at assembly, as a connect's is.
+    let mut clash = two_radios(&temp.0);
+    clash["bindings"]["second"]["selector"]["rx"] = json!(["0:A:ubx:0#loop-rx"]);
+    let refused = err(run_child(&mut server, receive_spec(1_000), Some(child(clash)), Some(10_000_000)));
+    assert!(refused.message.contains("a name is used once in a profile"), "{}", refused.message);
     finish(&mut server);
 }
 
@@ -659,7 +1049,7 @@ fn ea_06_connect_initial_is_in_the_schema() {
     let channel = &request["$defs"]["ChannelRef"];
     let kinds: Vec<_> = channel["anyOf"].as_array().unwrap().iter().map(|v| v["type"].as_str().unwrap().to_owned()).collect();
     assert_eq!(kinds, ["integer", "string"], "{channel}");
-    assert!(reply.to_string().contains("\"streams\"") && reply.to_string().contains("\"StreamNames\""));
+    assert!(reply.to_string().contains("\"streams\"") && reply.to_string().contains("\"DirectionNames\"") && reply.to_string().contains("\"channels\""));
 }
 
 #[test]

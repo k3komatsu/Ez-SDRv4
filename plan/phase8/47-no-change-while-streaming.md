@@ -116,6 +116,7 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 1. **初期の channel の組の道**：`connect` の時に組を決める入口（O1 の答え，stream の名前を含む）と fixture，例（`python/examples/minimal.py` など），server の default profile の試験．
    **済**（2026-11-04）：`coordinator::connect(profile, initial, assembly, lease)`，server の `initial::expand`（配置にない channel・stream は Run の前に拒む），Python の `connect(rx=, tx=, radio=)` と `ezsdr.Stream`，既定はどの channel も stream に入らない（RM-30）．Sol のコードレビューで major 2 件（Vocabulary の持ち主を prefix で決めていた，Spec の prefix の検査が Vocabulary の id を prefix と読んでいた〈前からの不具合〉，SB-2 の文を直した），minor 3 件，すべて直した．gate は J33 が生き残り（RS-19 の floor を殺していた `v58_13` が初期の道に移った），実行中の有効化のテストを足して付け替え，PASS．記録 `reviews/47s1-*`．
 1b. **channel の名前**：selector の `#` の名前（RM-28），server の名前の解決と名前の表の受け渡し，Easy API の `str` の channel，MockRadio と UHD Module の selector の読み取り．
+   **済**（2026-11-04）：`#` を読むのは `split_entry` の一か所，名前の規則は `name_error` の一つ（stream の名前と共有，Rust と Python は同じ `names.json` で試す），profile 全体の一意は `catalogue::assemble`．数は ASCII の十進の正規の綴りだけで，ほかの綴りは名前．名前だけの stream は名前を持つ radio へ移る．`connected.channels` が名前の表．**名前は binding の一部**（Kernel は selector を開かない．子の Run は親の selector を名前まで同じに書く．RM-28，RS-25a，orchestrator の裁定）．既定の profile には名前を付けていない（owner への問い）．Sol の計画のレビューで major 4 件・minor 2 件，コードのレビューは PASS．記録 `reviews/47s1b-*`．
 2. **channel の組を Run の間固定**：両 Provider，VH の生成（`crates/ezsdr-radio/tests/generator/mod.rs:16-78`），parity（`crates/ezsdr-acceptance/tests/parity.rs`），Python，spec 07・09・16・18．move，from none，`Release` の holder を消す．
 3. **受信の新しい設定と開始**：「流れていない」と staging，開始の snapshot．古い受信の仕組み（時刻つきの release，受け渡し，restore）をこの段階で消す．受信の rate の変更は，実機の確認まで拒む（受け入れの条件）．
 4. **送信の空の判断，設定を伴う burst，clock の規則**：送信の rate の変更は，実機の確認まで拒む．**未決（再レビュー 5）**：設定を伴う burst の booking で新しい clock C を登録し，装置が設定を拒んで C が origin で終わる（RM-25）と，送信の stream に流れている SampleClock がなくなり，直した値の次の burst が Kernel の admission で拒まれる（`admission.rs:150-162`，`state.rs:336-339`）．Kernel の admission を変えずに，再試行が Provider の booking に届く道を，この段階の設計（brief とテスト計画）で決める．「失敗 → 直す → 送り直す」の系列をテスト計画に必ず入れる．
@@ -157,3 +158,4 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 | 2026-11-04 | 第 2 版：Sol の 12 件と Q1〜Q6 の答えを入れて tree に入れた |
 | 2026-11-04 | 第 3 版：Sol の再レビューの 5 件（connect の初期の要求の契約と Kernel の Session の入口，組の map の意味，複合の呼び出しの止め方，読み返す値は admitted，送信の設定の拒否の後の再試行の道〈段階 4 で決める〉）を入れた．O2 の前提（submit が返る時に booking の判断が済んでいる）は，装置の時間の Run と MockRadio の Session の両方でコードで確かめられた（VERIFIED） |
 | 2026-11-04 | 段階 1 を済とした（§4） |
+| 2026-11-04 | 段階 1b を済とした（§4） |

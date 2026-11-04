@@ -421,6 +421,23 @@ class _Streams(list):
         return super().__getitem__(key)
 
 
+class _Channels(list):
+    """A radio's channels of one direction: ``channels[n]`` is channel ``n``, ``channels["loop-rx"]``
+    the channel its BindingProfile selector names ``"loop-rx"`` (RM-28, EA-16)."""
+
+    def __init__(self, channels: Iterable[Any], names: Mapping[str, int]):
+        super().__init__(channels)
+        self._names = dict(names)
+        self._by_number = {channel._number: channel for channel in self}
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            if key not in self._names:
+                raise KeyError(f"no channel is named {key!r}; the selector names {sorted(self._names)}")
+            return self._by_number[self._names[key]]
+        return super().__getitem__(key)
+
+
 class Radio:
     """A radio binding of the Session's profile."""
 
@@ -428,8 +445,9 @@ class Radio:
         self.name = name
         effective = session.effective[name]
         names = session._stream_names.get(name, {})
-        self.rx_channels = [_Channel(session, name, "rx", n) for n in _indices(effective, "rx", "c", "stream")]
-        self.tx_channels = [_Channel(session, name, "tx", n) for n in _indices(effective, "tx", "c", "stream")]
+        channel_names = session._channel_names.get(name, {})
+        self.rx_channels = _Channels([_Channel(session, name, "rx", n) for n in _indices(effective, "rx", "c", "stream")], channel_names.get("rx", {}))
+        self.tx_channels = _Channels([_Channel(session, name, "tx", n) for n in _indices(effective, "tx", "c", "stream")], channel_names.get("tx", {}))
         self.rx_streams = _Streams([Rx(session, name, k) for k in _indices(effective, "rx", "s", "sample_rate_hz")], names.get("rx", {}))
         self.tx_streams = _Streams([Tx(session, name, k) for k in _indices(effective, "tx", "s", "sample_rate_hz")], names.get("tx", {}))
 
@@ -490,6 +508,8 @@ class Session:
         self._epoch: Optional[dict] = connected.get("root_epoch")
         # The numbers the server gave the streams `connect` named, per radio (EA-10).
         self._stream_names: Dict[str, Dict[str, Dict[str, int]]] = connected.get("streams", {})
+        # The channels the selectors name, per radio: name -> number by direction (RM-28, EA-10).
+        self._channel_names: Dict[str, Dict[str, Dict[str, int]]] = connected.get("channels", {})
         self._waited = 0
         # The instant `aligned` gives the timed calls in its block (EA-16).
         self._aligned: Optional[dict] = None
@@ -716,21 +736,19 @@ class Session:
 @dataclass(frozen=True)
 class Stream:
     """One stream ``connect`` sets up (EA-10, EA-16): its logical ``channels`` and the values
-    it starts with. ``frequency``, ``gain`` and ``antenna`` are keyed by channel number, as in
-    ``start()``; ``sample_rate`` is the stream's own."""
+    it starts with. A channel, and a key of ``frequency``, ``gain`` and ``antenna``, is a number
+    (``int``) or a name (``str``) the radio's selector gives (RM-28), as in ``start()``;
+    ``sample_rate`` is the stream's own."""
 
-    channels: Sequence[int]
+    channels: Sequence[Union[int, str]]
     sample_rate: Optional[float] = None
-    frequency: Optional[Mapping[int, float]] = None
-    gain: Optional[Mapping[int, float]] = None
-    antenna: Optional[Mapping[int, str]] = None
+    frequency: Optional[Mapping[Union[int, str], float]] = None
+    gain: Optional[Mapping[Union[int, str], float]] = None
+    antenna: Optional[Mapping[Union[int, str], str]] = None
 
 
 def _whole(value: Any, what: str) -> int:
-    """A non-negative integer that is not a bool (EA-16); a ``str`` is a channel name, which
-    needs a later stage (EA-10)."""
-    if isinstance(value, str):
-        raise Error(f"EA-16: {what} {value!r}: channel names need stage 1b")
+    """A non-negative integer that is not a bool (EA-16)."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
         raise Error(f"EA-16: {what} must be a non-negative integer, not {value!r}")
     return int(value)
@@ -742,10 +760,16 @@ def _finite(value: Any, what: str) -> float:
     return float(value)
 
 
-def _stream_name(name: str) -> str:
+def _name(name: str, kind: str) -> str:
+    """A stream or channel name (EA-10a, RM-28): the one rule, the server's `name_error`."""
     if not name or all("0" <= c <= "9" for c in name) or any(c in ":#" or c.isspace() or unicodedata.category(c) == "Cc" for c in name):
-        raise Error(f"EA-16: {name!r} is not a stream name: it is empty, only the digits 0-9, or holds ':', '#', white space or a control character")
+        raise Error(f"EA-16: {name!r} is not a {kind} name: it is empty, only the digits 0-9, or holds ':', '#', white space or a control character")
     return name
+
+
+def _channel(value: Any, what: str) -> Union[int, str]:
+    """A channel: an ``int`` is its number and a ``str`` its name (EA-16)."""
+    return _name(value, "channel") if isinstance(value, str) else _whole(value, what)
 
 
 def _stream_inits(direction: str, streams: Optional[Mapping[Union[int, str], Any]], names: set) -> List[dict]:
@@ -759,7 +783,7 @@ def _stream_inits(direction: str, streams: Optional[Mapping[Union[int, str], Any
     for key, value in streams.items():
         init: Dict[str, Any] = {}
         if isinstance(key, str):
-            name = _stream_name(key)
+            name = _name(key, "stream")
             if name in names:
                 raise Error(f"EA-16: the stream name {name!r} is used twice")
             names.add(name)
@@ -769,10 +793,11 @@ def _stream_inits(direction: str, streams: Optional[Mapping[Union[int, str], Any
         stream = value if isinstance(value, Stream) else Stream(value)
         if isinstance(stream.channels, (str, bytes, Mapping)) or not isinstance(stream.channels, (list, tuple, range)):
             raise Error(f"EA-16: the channels of {direction} stream {key!r} are a list, not {type(stream.channels).__name__}")
-        channels = [_whole(c, f"{direction} channel") for c in stream.channels]
+        channels = [_channel(c, f"{direction} channel") for c in stream.channels]
         for channel in channels:
+            label = f"c{channel}" if isinstance(channel, int) else repr(channel)
             if channel in seen:
-                raise Error(f"EA-16: {direction} channel c{channel} is in two places (a channel is in one stream)")
+                raise Error(f"EA-16: {direction} channel {label} is in two places (a channel is in one stream)")
             seen.add(channel)
         init["channels"] = channels
         if stream.sample_rate is not None:
@@ -784,11 +809,17 @@ def _stream_inits(direction: str, streams: Optional[Mapping[Union[int, str], Any
             if not isinstance(values, Mapping):
                 raise Error(f"EA-16: {field} is a dict keyed by channel, not {type(values).__name__}")
             out = {}
+            numbers = [c for c in channels if isinstance(c, int)]
+            names_in = [c for c in channels if isinstance(c, str)]
             for channel, item in values.items():
-                number = _whole(channel, f"{field} channel")
-                if number not in channels:
-                    raise Error(f"EA-16: {field} names c{number}, which is not a channel of {direction} stream {key!r}")
-                out[str(number)] = convert(item, field)
+                ref = _channel(channel, f"{field} channel")
+                # A number and a name may stand for one channel, which only the server can tell: refuse
+                # here only a key no channel of the stream can be (EA-16).
+                member, others = (ref in numbers, names_in) if isinstance(ref, int) else (ref in names_in, numbers)
+                if not member and not others:
+                    label = f"c{ref}" if isinstance(ref, int) else repr(ref)
+                    raise Error(f"EA-16: {field} names {label}, which is not a channel of {direction} stream {key!r}")
+                out[str(ref)] = convert(item, field)
             init[field] = out
         inits.append(init)
     return inits

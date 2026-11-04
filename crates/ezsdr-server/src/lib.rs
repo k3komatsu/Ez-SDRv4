@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ezsdr_exec_native::Implementation;
+use ezsdr_kernel::binding::BindingProfile;
 use ezsdr_kernel::coordinator::{self, RunHandle, RunHandleError};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::manifest::Manifest;
@@ -210,7 +211,11 @@ impl Server {
         };
         // EA-10: the radios' channel counts are known only now, so a request for a channel or
         // stream the layout lacks is refused here, before the Kernel creates a Run.
-        let (requests, streams) = match initial::expand(&initial.unwrap_or_default(), &assembly) {
+        let channels = match BindingProfile::from_json(&profile).map_err(|e| e.to_string()).and_then(|parsed| catalogue::channel_tables(&parsed)) {
+            Ok(channels) => channels,
+            Err(message) => return fail(ErrorKind::Refused, message),
+        };
+        let (requests, streams) = match initial::expand(&initial.unwrap_or_default(), &assembly, &channels) {
             Ok(expanded) => expanded,
             Err(message) => return fail(ErrorKind::Refused, message),
         };
@@ -245,6 +250,7 @@ impl Server {
                 _ => unreachable!("the primary root is a registered Root (KC-3)"),
             },
             streams,
+            channels,
         };
         self.live = Some(Live { run, clocks, profile, device_paced });
         Handled::ok(response)

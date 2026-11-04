@@ -94,14 +94,15 @@ pub enum ChannelRef {
     Name(String),
 }
 
-/// The stream numbers the server gave to names, per direction (EA-10).
+/// A table from names to numbers, per direction (EA-10): the stream numbers the server gave
+/// to stream names, or the channel numbers a selector's names stand for.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct StreamNames {
-    /// Receive stream names.
+pub struct DirectionNames {
+    /// Receive names.
     #[serde(default)]
     pub rx: BTreeMap<String, u32>,
-    /// Transmit stream names.
+    /// Transmit names.
     #[serde(default)]
     pub tx: BTreeMap<String, u32>,
 }
@@ -232,7 +233,11 @@ pub enum Response {
         root_epoch: EpochRef,
         /// The number the server gave each named stream, per resource (EA-10).
         #[serde(default)]
-        streams: BTreeMap<String, StreamNames>,
+        streams: BTreeMap<String, DirectionNames>,
+        /// The channel numbers of the names each radio's selector gives (RM-28, EA-10): one
+        /// entry per Provider radio of the profile, empty for a radio that names nothing.
+        #[serde(default)]
+        channels: BTreeMap<String, DirectionNames>,
     },
     /// The logged entry, admitted or rejected (EA-11).
     Submitted {

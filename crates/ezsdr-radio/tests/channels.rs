@@ -165,6 +165,83 @@ fn rm_27_the_layout_builder_keys_are_declared() {
     }
 }
 
+/// The name rule's cases, shared with the server's and Python's suites (RM-28, EA-10a).
+fn name_cases() -> (Vec<String>, Vec<String>) {
+    let cases: JsonValue = serde_json::from_str(include_str!("fixtures/names.json")).unwrap();
+    let list = |key: &str| cases[key].as_array().unwrap().iter().map(|name| name.as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    (list("good"), list("bad"))
+}
+
+fn names(layout: &[Option<&str>]) -> Vec<Option<String>> {
+    layout.iter().map(|name| name.map(str::to_owned)).collect()
+}
+
+#[test]
+fn rm_28_a_selector_name_does_not_change_the_layout() {
+    // Each pair is one layout written plain and written with names; the names are the positions' own.
+    type Case<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str], &'a [&'a str], &'a [Option<&'a str>], &'a [Option<&'a str>]);
+    let cases: [Case; 4] = [
+        (
+            &["0:A:ubx:0", "0:B:basic_rx:0", "0:B:basic_rx:1"],
+            &["0:A:ubx:0", "0:B:lf_tx:0"],
+            &["0:A:ubx:0#loop-rx", "0:B:basic_rx:0", "0:B:basic_rx:1#aux"],
+            &["0:A:ubx:0", "0:B:lf_tx:0#lf"],
+            &[Some("loop-rx"), None, Some("aux")],
+            &[None, Some("lf")],
+        ),
+        (&["0:B:basic_rx:1", "0:B:basic_rx:0"], &[], &["0:B:basic_rx:1#second", "0:B:basic_rx:0#first"], &[], &[Some("second"), Some("first")], &[]),
+        (&["0:A:obx:0"], &["0:A:obx:0"], &["0:A:obx:0#in"], &["0:A:obx:0#out"], &[Some("in")], &[Some("out")]),
+        (&["0:B:cbx:0", "0:A:cbx:0"], &["0:B:cbx:0"], &["0:B:cbx:0", "0:A:cbx:0#a"], &["0:B:cbx:0"], &[None, Some("a")], &[None]),
+    ];
+    for (rx, tx, named_rx, named_tx, rx_names, tx_names) in cases {
+        let plain = channels::from_selector(&layout_selector(rx, tx)).unwrap();
+        let named = channels::from_selector(&layout_selector(named_rx, named_tx)).unwrap();
+        assert_eq!(plain, named, "a name is no part of the layout: {named_rx:?}");
+        assert_eq!(Description::new(&plain, 2_000, &terms()), Description::new(&named, 2_000, &terms()));
+        let read = channels::names_of(&layout_selector(named_rx, named_tx)).unwrap();
+        assert_eq!((read.rx, read.tx), (names(rx_names), names(tx_names)), "the number of a name is its position among all the entries");
+        assert_eq!(channels::names_of(&layout_selector(rx, tx)).unwrap().rx, vec![None; rx.len()]);
+    }
+    // `ideal` counts name nothing.
+    assert_eq!(channels::names_of(&selector(&[("rx", Value::from(2_i64)), ("tx", Value::from(1_i64))])).unwrap(), channels::ChannelNames::default());
+}
+
+#[test]
+fn rm_28_the_name_rule_cases() {
+    let (good, bad) = name_cases();
+    for name in &good {
+        assert_eq!(channels::name_error(name), None, "{name:?}");
+        assert!(channels::from_selector(&layout_selector(&[&format!("0:A:ubx:0#{name}")], &[])).is_ok(), "{name:?} is a selector name");
+    }
+    for name in &bad {
+        assert!(channels::name_error(name).is_some(), "{name:?}");
+        let error = channels::from_selector(&layout_selector(&[&format!("0:A:ubx:0#{name}")], &[])).unwrap_err();
+        assert!(error.contains("`rx` element at position 0") && error.contains("has the name"), "{name:?}: {error}");
+    }
+    // A second `#` is part of the name, which the rule refuses; the position and the whole entry are named.
+    let error = channels::from_selector(&layout_selector(&["0:A:ubx:0", "0:B:ubx:0#a#b"], &[])).unwrap_err();
+    assert!(error.contains("position 1 `0:B:ubx:0#a#b`"), "{error}");
+}
+
+#[test]
+fn rm_28_a_name_is_used_once_in_a_radio() {
+    for (rx, tx) in [(&["0:A:ubx:0#a", "0:B:ubx:0#a"][..], &[][..]), (&[][..], &["0:A:ubx:0#a", "0:B:ubx:0#a"][..]), (&["0:A:ubx:0#a"][..], &["0:A:ubx:0#a"][..])] {
+        let error = channels::from_selector(&layout_selector(rx, tx)).unwrap_err();
+        assert!(error.contains("repeats the name `a`"), "{rx:?} {tx:?}: {error}");
+    }
+    assert!(channels::from_selector(&layout_selector(&["0:A:ubx:0#a"], &["0:A:ubx:0#b"])).is_ok(), "a duplex front end carries two names");
+}
+
+#[test]
+fn rm_28_a_number_is_a_canonical_ascii_decimal() {
+    for (text, number) in [("0", Some(0)), ("7", Some(7)), ("10", Some(10)), ("4294967295", Some(4_294_967_295))] {
+        assert_eq!(channels::canonical_number(text), number, "{text}");
+    }
+    for text in ["", "+0", "-0", "00", "01", "\u{ff11}", "4294967296", "1.0", " 1", "a"] {
+        assert_eq!(channels::canonical_number(text), None, "{text:?}");
+    }
+}
+
 #[test]
 fn rm_28_the_layout_analysis_cases() {
     let Layout::X3xx { master_clock_hz, image, links, link_gbps, rx, tx } = owner_layout() else { panic!("an x3xx layout") };
