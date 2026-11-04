@@ -1742,16 +1742,21 @@ impl Direct {
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
+        let mut keys = json!({ "args": ARGS });
+        keys.as_object_mut().unwrap().extend(selector.as_object().cloned().unwrap_or_default());
+        let mut radio = UhdRadio::from_binding(&binding(keys, Some(x3xx())), tested).unwrap();
+        // RM-30: no channel is in a stream unless a request puts it there; these runs receive on c0.
+        let mut constraints = constraints.to_vec();
+        if radio.instance().tree.capabilities.contains_key(&Key::parse("radio.rx.c0.stream").unwrap()) && !constraints.iter().any(|(name, _)| *name == "radio.rx.c0.stream") {
+            constraints.push(("radio.rx.c0.stream", Scalar::from(0)));
+        }
         let fragment = Fragment {
             id: Ident::parse("radio").unwrap(),
             instance: ezsdr_radio_uhd::module_ref(),
             role: Role::Provider,
-            content: json!({ "selector": {}, "requested": request(constraints) }),
+            content: json!({ "selector": {}, "requested": request(&constraints) }),
             after: Vec::new(),
         };
-        let mut keys = json!({ "args": ARGS });
-        keys.as_object_mut().unwrap().extend(selector.as_object().cloned().unwrap_or_default());
-        let mut radio = UhdRadio::from_binding(&binding(keys, Some(x3xx())), tested).unwrap();
         radio.prepare(&fragment, ctx).unwrap();
         radio.arm().unwrap();
         Direct { radio, device, queue, events, time, root, clocks, delivered: Vec::new(), _authority: authority }
@@ -6892,7 +6897,7 @@ fn ur_25_a_layout_instance_s_throughput_rule_is_judged_at_runtime() {
     assert!(timing.as_array().unwrap().iter().all(|row| !(row["what"] == "cold_change" && row["key"] == "radio.rx.c1.stream")), "{timing}");
     let device = fake(FakeConfig { serial: "ur25-rm32-prepare".to_owned(), ..FakeConfig::default() });
     let mut radio = UhdRadio::from_binding(&binding(json!({ "args": ARGS }), Some(x3xx())), device.clone()).unwrap();
-    let constraints = [("radio.rx.s0.sample_rate_hz", Scalar::try_from(20e6).unwrap()), ("radio.rx.c1.stream", Scalar::from(0))];
+    let constraints = [("radio.rx.s0.sample_rate_hz", Scalar::try_from(20e6).unwrap()), ("radio.rx.c0.stream", Scalar::from(0)), ("radio.rx.c1.stream", Scalar::from(0))];
     let error = direct_prepare(&mut radio, device.clone(), ExecutionClass::HardwareInLoop, Vec::new(), &constraints).unwrap_err();
     assert_eq!(error.message, format!("UR-12: {reason}"));
 }

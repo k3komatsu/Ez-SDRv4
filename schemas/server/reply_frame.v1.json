@@ -2320,6 +2320,14 @@
             "start_instant": {
               "$ref": "#/$defs/TimePoint",
               "description": "T0."
+            },
+            "streams": {
+              "additionalProperties": {
+                "$ref": "#/$defs/StreamNames"
+              },
+              "default": {},
+              "description": "The number the server gave each named stream, per resource (EA-10).",
+              "type": "object"
             }
           },
           "required": [
@@ -3325,6 +3333,33 @@
           "type": "object"
         }
       ]
+    },
+    "StreamNames": {
+      "additionalProperties": false,
+      "description": "The stream numbers the server gave to names, per direction (EA-10).",
+      "properties": {
+        "rx": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Receive stream names.",
+          "type": "object"
+        },
+        "tx": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Transmit stream names.",
+          "type": "object"
+        }
+      },
+      "type": "object"
     },
     "Target": {
       "description": "What an Action addresses, in the Spec's own names and tagged by role: a resource\nwith a sub-path below it, an output, or a graph component. The Kernel resolves it\nper role (KC-23); a name the Spec does not declare in that role is refused.\n\nRule: RS-49, KC-23, SB-16.",

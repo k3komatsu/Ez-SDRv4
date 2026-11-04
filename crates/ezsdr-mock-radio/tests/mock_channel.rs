@@ -188,7 +188,12 @@ fn prepare(world: &World, options: Options<'_>) -> Result<Radio, ModuleError> {
         ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
         ctx
     };
-    let requested = Requested { resource: rid(&id), constraints: options.constraints.iter().map(|(name, constraint)| (key(name), constraint.clone())).collect() };
+    // RM-30: no channel is in a stream unless a request puts it there; these runs receive on c0.
+    let mut constraints: Vec<_> = options.constraints.iter().map(|(name, constraint)| (key(name), constraint.clone())).collect();
+    if !constraints.iter().any(|(name, _)| name.as_str() == "radio.rx.c0.stream") {
+        constraints.push((key("radio.rx.c0.stream"), Constraint::Eq { value: Scalar::Int(0) }));
+    }
+    let requested = Requested { resource: rid(&id), constraints: constraints.into_iter().collect() };
     let fragment =
         Fragment { id: Ident::parse(options.fragment).unwrap(), instance: module_ref(), role: Role::Provider, content: json!({ "selector": {}, "requested": requested }), after: Vec::new() };
     mock.prepare(&fragment, ctx)?;

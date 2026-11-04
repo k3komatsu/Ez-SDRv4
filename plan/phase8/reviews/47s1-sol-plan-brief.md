@@ -1,0 +1,14 @@
+You are read-only (edit nothing, never run cargo fmt, no git state changes, no builds) in ~/local_work/Ez-SDRv4 at main b3d39ab.
+
+Review the stage-1 TEST PLAN at ~/.cache/ezsdr-fixes/2026-11-04-n46/test-plan-s1.md for note 47 stage 1 (the initial channel set and configuration at connect). Inputs: the implementer's brief ~/.cache/ezsdr-fixes/2026-11-04-n46/brief-s1.md (plus the orchestrator's later message, summarised: no channel joins a stream by default in either direction; connect(rx={stream: ezsdr.Stream(channels, sample_rate=..., frequency={ch: v}, ...) or [channels]}, tx=...), keys int stream number or str stream name; one coordinator::connect(profile, initial, assembly, lease); the server expands channel sets and refuses bad numbers after assemble, before coordinator::connect; channel names from the selector are stage 1b and are refused in stage 1), the orchestrator's rulings ~/.cache/ezsdr-fixes/2026-11-04-n46/rulings-s1-plan.md, the design plan/phase8/47-no-change-while-streaming.md §2.4, §4, §6, and your own earlier stage-1 scope plan/phase8/reviews/47-sol2.md §4.
+
+AGENTS.md §9 step 3: FIRST write your own failure scenarios for this stage from its purpose, the existing code (crates/ezsdr-kernel session and coordinator connect, crates/ezsdr-server protocol and lib, python/ezsdr/session.py, crates/ezsdr-radio channels defaults, both Providers' initial configuration paths) and the specs, and only then compare them with the plan.
+
+Check:
+1. Every sequence in the plan: does the named test observe what it claims (which value, record, call trace, Manifest field), and would the stated wrong behaviour fail it? Point out tests that cannot fail, or that observe the wrong thing.
+2. Missing sequences: your scenarios the plan does not cover (identity/hash of the implicit Spec, validation order, refusal before any Run exists, sink link with no producer, two Providers, the existing callers of connect, schema freeze, Python examples, anything else).
+3. Mutation rows P1319 onward: does each anchor exist exactly once in the current code (token anchors for Rust, exact substrings otherwise), mutate the intended behaviour with minimal text, and is its expected killing test right? Check the re-anchoring of P49 and P137 and any other existing row the default change breaks (search plan/*/tools/mutations.json).
+4. Scope: anything the plan includes that belongs to later stages, or misses from stage 1.
+5. The D3 (SB-45 coercion policy for initial requires) and D4 (a link whose producer port has no stream) questions: answer them from the code with path:line if you can, marking VERIFIED/INFERRED.
+
+Output: findings (each: plan section, problem, evidence path:line, correction; severity major/minor; majors with a minimal operation sequence and the wrong observable outcome), then a table of rows with OK/FIX. End with one line: PLAN OK, or PLAN NEEDS CHANGES with the number of findings.

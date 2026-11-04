@@ -2590,7 +2590,7 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
 fn candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, super::TempDir), String> {
     let dir = super::TempDir::new();
     let doc = super::bench_profile(&*device, &dir, Json::Object(Default::default()), super::bench_envelope(&*device), true);
-    let run = ezsdr_kernel::coordinator::connect(&doc, super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)), Lease::attached())
+    let run = ezsdr_kernel::coordinator::connect(&doc, &super::rx0(&doc), super::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing)), Lease::attached())
         .map_err(|error| error.to_string())?;
     Ok((run, dir))
 }

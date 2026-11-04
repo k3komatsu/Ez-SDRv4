@@ -22,8 +22,7 @@ def found(y: np.ndarray) -> int:
     return int(np.argmax(peak))
 
 
-with ezsdr.connect() as sdr:
-    sdr.tx_channels[0].stream = 0
+with ezsdr.connect(rx={0: [0]}, tx={0: [0]}) as sdr:
     sdr.tx.repeat(x)
     # A capture meant to start at an instant names one ahead of the Run's time (EA-17).
     ahead = sdr.after(0.05)

@@ -84,6 +84,7 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
     - 規則：名前は profile 全体で一意（radio をまたいでも重ならない．名前だけでどの radio のどの channel かが決まる）．使えない文字は `:`，`#`，空白．数字だけの名前は禁じる．Easy API のどこでも `int` は番号，`str` は名前で，番号と名前を混ぜて書ける．一つの stream に別々の radio の channel が混ざれば拒む．selector の文字列を比べたり読んだりする所は，すべて `#` 以降を外して扱う（MockRadio，UHD Module，profile の照合，parity，試験の helper）．
     - 解決：`connect` の引数の名前は server が profile の selector を見て番号に直す（layout にない番号の拒否と同じ場所）．`connect` の後の `start()` などは，client が `connect` の返事で受け取った名前の表で直す．Kernel，Action，key，action log，記録の識別子は番号のまま（名前と番号の対応は記録された profile から読める）．
     - 利点：プログラムを配線から切り離せる（同じ Python のプログラムを，同じ名前を付けた別の bench の profile や MockRadio の既定の profile でそのまま走らせられる．Vision §58 の 10・14 の考え方を channel の単位で）．複数の USRP の構成で取り違えにくい．退けた案：名前を Kernel の BindingProfile の欄（`aliases`）に置く（Kernel の schema が変わる），selector の要素をオブジェクトにする（要素が文字列とオブジェクトの二通りになる），装置の場所を表す名前（番号の言い換えで，持ち運べる利点がない）．
+  - **段階 1 の細かい裁定**（orchestrator 2026-11-04，テスト計画の問い）：stream の名前は一回の `connect` の中で受信と送信をまたいで一意．受信の stream がない radio での `capture` などは EA-16 の別名の規則と同じく `Error`（`connect(rx=...)` を案内する）．番号で書く `rx`/`tx` は一台の radio を設定する（`radio=`，既定 `"radio"`．複数の radio をまとめて書くのは channel の名前〈段階 1b〉か 8b）．`connect` の返事に名前と番号の対応 `Connected.streams` を足す（reply の schema の変更．O2 の返事の変更と同じ段階で）．
   - **Kernel の入口**（orchestrator）：`coordinator::connect` を一つのまま，初期の要求の引数を足す（呼び出し元を直す．入口を二つ残さない）．**layout にない番号の拒否と，書かなかった channel を none にする展開**は，client が layout の channel の数を知らないので，server が Module を組み立てた後，Run を作る前に行う．型や重なりのように client だけで判断できるものは client が先に拒む．
 - **開始と設定**（Q5）：`Radio.rx_streams[k].start(at=None, *, frequency=None, gain=None, sample_rate=None, antenna=None)`．`frequency`・`gain`・`antenna` は logical channel の番号を key とする dict，`sample_rate` は stream の値．書かなかった channel は変えない．送信の `repeat(x, at=None, *, …)`・`send(…)` も同じ形．
 - **送る前に全部を確かめる**（Sol 7）：client は，channel の番号（その stream の channel か），値の型，波形を送る前に確かめる．
@@ -113,6 +114,7 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 各段階は AGENTS.md §9 の risky の手順で，両方の Provider，VH の生成と oracle，parity，Python を一緒に変え，tree を緑に保つ．古い系列を skip して緑にしない．対応する mutation の family も同じ段階で直す．
 
 1. **初期の channel の組の道**：`connect` の時に組を決める入口（O1 の答え，stream の名前を含む）と fixture，例（`python/examples/minimal.py` など），server の default profile の試験．
+   **済**（2026-11-04）：`coordinator::connect(profile, initial, assembly, lease)`，server の `initial::expand`（配置にない channel・stream は Run の前に拒む），Python の `connect(rx=, tx=, radio=)` と `ezsdr.Stream`，既定はどの channel も stream に入らない（RM-30）．Sol のコードレビューで major 2 件（Vocabulary の持ち主を prefix で決めていた，Spec の prefix の検査が Vocabulary の id を prefix と読んでいた〈前からの不具合〉，SB-2 の文を直した），minor 3 件，すべて直した．gate は J33 が生き残り（RS-19 の floor を殺していた `v58_13` が初期の道に移った），実行中の有効化のテストを足して付け替え，PASS．記録 `reviews/47s1-*`．
 1b. **channel の名前**：selector の `#` の名前（RM-28），server の名前の解決と名前の表の受け渡し，Easy API の `str` の channel，MockRadio と UHD Module の selector の読み取り．
 2. **channel の組を Run の間固定**：両 Provider，VH の生成（`crates/ezsdr-radio/tests/generator/mod.rs:16-78`），parity（`crates/ezsdr-acceptance/tests/parity.rs`），Python，spec 07・09・16・18．move，from none，`Release` の holder を消す．
 3. **受信の新しい設定と開始**：「流れていない」と staging，開始の snapshot．古い受信の仕組み（時刻つきの release，受け渡し，restore）をこの段階で消す．受信の rate の変更は，実機の確認まで拒む（受け入れの条件）．
@@ -154,3 +156,4 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 | 2026-11-04 | 下書き（orchestrator Opus，tree の外） |
 | 2026-11-04 | 第 2 版：Sol の 12 件と Q1〜Q6 の答えを入れて tree に入れた |
 | 2026-11-04 | 第 3 版：Sol の再レビューの 5 件（connect の初期の要求の契約と Kernel の Session の入口，組の map の意味，複合の呼び出しの止め方，読み返す値は admitted，送信の設定の拒否の後の再試行の道〈段階 4 で決める〉）を入れた．O2 の前提（submit が返る時に booking の判断が済んでいる）は，装置の時間の Run と MockRadio の Session の両方でコードで確かめられた（VERIFIED） |
+| 2026-11-04 | 段階 1 を済とした（§4） |

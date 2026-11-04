@@ -161,13 +161,14 @@ fn start_spec(spec_doc: &serde_json::Value, profile_doc: &serde_json::Value, ass
     Ok(run)
 }
 
-/// Derives and starts an implicit Session Spec after validating the Lease (KC-1, KC-35).
-pub fn connect(profile_doc: &serde_json::Value, assembly: Assembly, lease: Lease) -> Result<RunHandle, SpecError> {
+/// Derives and starts an implicit Session Spec after validating the Lease (KC-1, KC-35);
+/// `initial` enters the Spec's `requires` before it is hashed (RS-12).
+pub fn connect(profile_doc: &serde_json::Value, initial: &crate::session::InitialRequests, assembly: Assembly, lease: Lease) -> Result<RunHandle, SpecError> {
     let profile = BindingProfile::from_json(profile_doc)?;
     lease.validate().map_err(|e| SpecError::Structural { reason: format!("KC-1: RS-21: {e}") })?;
     let providers: BTreeMap<Ident, &dyn Provider> = assembly.providers.iter().map(|(name, provider)| (name.clone(), &**provider)).collect();
     let sinks: BTreeMap<Ident, &dyn Sink> = assembly.sinks.iter().map(|(name, sink)| (name.clone(), &**sink)).collect();
-    let spec = state::contain_all(|| crate::session::implicit_spec(&profile, &assembly.registry, &providers, &sinks))
+    let spec = state::contain_all(|| crate::session::implicit_spec(&profile, &assembly.registry, &providers, &sinks, initial))
         .map_err(|_| SpecError::Structural { reason: "KC-30: a Module panicked during validate".to_owned() })??;
     drop((providers, sinks));
     let (spec_section, binding_section) = sections(&spec, &profile, assembly.spec_source.clone())?;

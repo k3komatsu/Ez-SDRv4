@@ -302,7 +302,7 @@ pub(super) fn check_bindings(spec: &ExperimentSpec, profile: &BindingProfile, in
 ///
 /// Rule: SB-T4.
 pub(super) fn check_structure(spec: &ExperimentSpec, profile: &BindingProfile, inputs: &CompileInputs<'_>) -> Result<(), SpecError> {
-    spec.check_key_prefixes()?;
+    spec.check_key_prefixes(inputs.registry)?;
     check_keys(spec, inputs)?;
     // SB-11: `requirements.vocabularies` lists the Vocabulary **majors** this Spec's
     // keys belong to. Nothing read `major`, so a Spec declaring `test 2` ran against

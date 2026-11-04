@@ -682,7 +682,7 @@
   "new": "        let _ = origin;\n",
   "crate": "ezsdr-acceptance",
   "test_bin": "v58",
-  "filter": "v58_13_session_manifest_has_log_waveform_and_capture"
+  "filter": "rs_19_an_untimed_repeat_after_an_enable_starts_at_the_new_clock_origin"
  },
  {
   "id": "J34",
@@ -4087,8 +4087,8 @@
   "id": "P22",
   "name": "a numbered declaration is never consulted (SB-2a)",
   "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
-  "old": "            .find_map(|v| v.keys.iter().find(|d| d.declares(key)))",
-  "new": "            .find_map(|v| v.keys.iter().find(|d| d.indexed.is_none() && d.declares(key)))",
+  "old": "self.vocabulary_of(key)?.keys.iter().find(|d| d.declares(key))",
+  "new": "self.vocabulary_of(key)?.keys.iter().find(|d| d.indexed.is_none() && d.declares(key))",
   "crate": "ezsdr-kernel",
   "test_bin": "module_api",
   "filter": "sb_02a_a_numbered_declaration_declares_the_indexed_keys"
@@ -4349,10 +4349,10 @@
  },
  {
   "id": "P49",
-  "name": "RM-30: no channel is in stream 0 by default",
+  "name": "RM-30: a Present stream constraint gets stream 0, not no stream",
   "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "    if direction == Direction::Rx && number == 0 { 0 } else { -1 }",
-  "new": "    -1",
+  "old": "coerce_stream(constraint, channels.len() as i64 - 1, -1)",
+  "new": "coerce_stream(constraint, channels.len() as i64 - 1, 0)",
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_30_coerce_cases"
@@ -4593,16 +4593,6 @@
   "file": "crates/ezsdr-radio/src/channels.rs",
   "old": "                if members > 0 && first.is_none() {",
   "new": "                if members > 0 {",
-  "crate": "ezsdr-radio",
-  "test_bin": "channels",
-  "filter": "rm_32_throughput_cases"
- },
- {
-  "id": "P75",
-  "name": "RM-30: an instance-wide violation no requested key carries is dropped",
-  "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "            let key = self.attributed(&violation, request).unwrap_or(violation);",
-  "new": "            let Some(key) = self.attributed(&violation, request) else { continue };",
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_32_throughput_cases"
@@ -5192,10 +5182,10 @@
  },
  {
   "id": "P137",
-  "name": "every layout channel starts in no stream, so the default membership is lost",
+  "name": "every layout channel starts in stream 0, so no channel is in no stream by default (RM-30)",
   "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "fn default_stream(direction: Direction, number: u32) -> i64 {\n    if direction == Direction::Rx && number == 0 { 0 } else { -1 }\n}",
-  "new": "fn default_stream(direction: Direction, number: u32) -> i64 {\n    let _ = (direction, number);\n    -1\n}",
+  "old": "defaults.insert(channel_setting(direction, number, \"stream\"), Value::from(-1_i64));",
+  "new": "defaults.insert(channel_setting(direction, number, \"stream\"), Value::from(0_i64));",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_38_the_tree_and_capabilities_are_the_layout_s"
@@ -16354,5 +16344,395 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "h4_the_measurement_finds_the_apply_recorded_at_its_instant"
+    },
+    {
+      "id": "P1319",
+      "name": "RS-12: a Session's initial requests are not put into the resource's requires",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "initial.get(name).into_iter().flatten()",
+      "new": "initial.get(name).into_iter().flatten().take(0)",
+      "crate": "ezsdr-kernel",
+      "test_bin": "run_session",
+      "filter": "rs_12_initial_requests_enter_requires_and_declare_the_major"
+    },
+    {
+      "id": "P1320",
+      "name": "RS-12: an initial request is a Min constraint, not an Eq",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "Constraint::Eq { value: value.clone() }",
+      "new": "Constraint::Min { value: value.clone() }",
+      "crate": "ezsdr-kernel",
+      "test_bin": "run_session",
+      "filter": "rs_12_initial_requests_enter_requires_and_declare_the_major"
+    },
+    {
+      "id": "P1321",
+      "name": "RS-12: the Vocabulary of an initial key is not declared in the Spec's requirements",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "spec.requirements.vocabularies.push(crate::spec::VocabularyReq { id: v.id.clone(), major: v.version.major });",
+      "new": "let _ = v;",
+      "crate": "ezsdr-kernel",
+      "test_bin": "run_session",
+      "filter": "rs_12_initial_requests_enter_requires_and_declare_the_major"
+    },
+    {
+      "id": "P1322",
+      "name": "RS-12: the declared major of an initial key's Vocabulary is one too high",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "major: v.version.major }",
+      "new": "major: v.version.major + 1 }",
+      "crate": "ezsdr-kernel",
+      "test_bin": "coordinator",
+      "filter": "rs_12_initial_requests_reach_the_provider_through_connect"
+    },
+    {
+      "id": "P1323",
+      "name": "RS-12: one Vocabulary is declared once for each of its initial keys",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "!spec.requirements.vocabularies.iter().any(|r| r.id == v.id)",
+      "new": "true",
+      "crate": "ezsdr-kernel",
+      "test_bin": "run_session",
+      "filter": "rs_12_initial_requests_enter_requires_and_declare_the_major"
+    },
+    {
+      "id": "P1324",
+      "name": "RS-12: an initial request naming no Provider resource is accepted",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "if !spec.resources.contains_key(name) {",
+      "new": "if false {",
+      "crate": "ezsdr-kernel",
+      "test_bin": "run_session",
+      "filter": "rs_12_session_initial_requests_name_a_provider_resource"
+    },
+    {
+      "id": "P1325",
+      "name": "RS-12: every Provider resource takes the first resource's initial requests",
+      "file": "crates/ezsdr-kernel/src/session.rs",
+      "old": "initial.get(name).into_iter().flatten()",
+      "new": "initial.values().next().into_iter().flatten()",
+      "crate": "ezsdr-kernel",
+      "test_bin": "spec_binding",
+      "filter": "sb_22c_initial_requests_go_to_the_resource_they_name"
+    },
+    {
+      "id": "P1326",
+      "name": "KC-1: connect derives the implicit Spec without the initial requests",
+      "file": "crates/ezsdr-kernel/src/coordinator/mod.rs",
+      "old": "&providers, &sinks, initial))",
+      "new": "&providers, &sinks, &Default::default()))",
+      "crate": "ezsdr-kernel",
+      "test_bin": "coordinator",
+      "filter": "rs_12_initial_requests_reach_the_provider_through_connect"
+    },
+    {
+      "id": "P1327",
+      "name": "RS-12: a Vocabulary owns a key by its prefix alone, not by declaring it",
+      "file": "crates/ezsdr-kernel/src/module_api/registry.rs",
+      "old": ".find(|v| v.keys.iter().any(|d| d.declares(key)))",
+      "new": ".find(|v| v.keys.iter().any(|_| true))",
+      "crate": "ezsdr-kernel",
+      "test_bin": "run_session",
+      "filter": "rs_12_an_initial_key_declares_the_vocabulary_that_declares_it"
+    },
+    {
+      "id": "P1328",
+      "name": "EA-10: the server passes no initial requests to the Kernel",
+      "file": "crates/ezsdr-server/src/lib.rs",
+      "old": "coordinator::connect(&profile, &requests, assembly,",
+      "new": "coordinator::connect(&profile, &Default::default(), assembly,",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_direction_list_is_the_whole_channel_set"
+    },
+    {
+      "id": "P1329",
+      "name": "EA-10: a stream number equal to the layout's stream count is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if number >= count { return Err(format!(\"RM-4: no such stream s{number}\")); }",
+      "new": "if number > count { return Err(format!(\"RM-4: no such stream s{number}\")); }",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1330",
+      "name": "EA-10: a channel number equal to the layout's channel count is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if number >= count { return Err(format!(\"RM-4: no such channel c{number}\")); }",
+      "new": "if number > count { return Err(format!(\"RM-4: no such channel c{number}\")); }",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1331",
+      "name": "EA-10: a channel in two streams of one direction is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if !seen.insert(number) {",
+      "new": "if false && !seen.insert(number) {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1332",
+      "name": "EA-10: a stream number given twice is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if !claimed.insert(*number) {",
+      "new": "if false && !claimed.insert(*number) {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1333",
+      "name": "EA-10: a stream name used in both directions is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if !taken_names.insert(name.clone()) {",
+      "new": "if false && !taken_names.insert(name.clone()) {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+    },
+    {
+      "id": "P1334",
+      "name": "EA-10: a digit-only stream name is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "name.is_empty() || name.bytes().all(|b| b.is_ascii_digit())",
+      "new": "name.is_empty() || false",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+    },
+    {
+      "id": "P1335",
+      "name": "EA-10: a channel given by name is read as channel 0",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "ChannelRef::Name(name) => return Err(format!(\"EA-10: channel name {name:?}: channel names need stage 1b\")),",
+      "new": "ChannelRef::Name(_) => 0,",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1336",
+      "name": "EA-10: a name takes number 0 whether or not an explicit stream claimed it",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "while claimed.contains(&next) {",
+      "new": "while false && claimed.contains(&next) {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_named_stream_gets_a_number_from_the_server"
+    },
+    {
+      "id": "P1337",
+      "name": "EA-10: the reply names no stream's number",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "(if direction == \"rx\" { &mut given.rx } else { &mut given.tx }).insert(name.clone(), *number);",
+      "new": "let _ = (name, number);",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_named_stream_gets_a_number_from_the_server"
+    },
+    {
+      "id": "P1338",
+      "name": "EA-10: a value for a channel its stream does not hold is accepted",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if channels.contains(&number) { Ok(number) }",
+      "new": "if true { Ok(number) }",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1339",
+      "name": "EA-10: a value that is not finite is read as 0",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "Finite::new(value).map(Scalar::Num)",
+      "new": "Finite::new(if value.is_finite() { value } else { 0.0 }).map(Scalar::Num)",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1340",
+      "name": "EA-10: initial requests for a resource are checked against the first radio",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "assembly.providers.get(&ident)",
+      "new": "assembly.providers.values().next()",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_initial_requests_name_their_resource"
+    },
+    {
+      "id": "P1341",
+      "name": "UR-12: a receive stream is not configured in prepare",
+      "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
+      "old": "if !channels.is_empty() {\n                    let rate = self.description.stream_rate(&config, dir, k);",
+      "new": "if !channels.is_empty() && dir == Dir::Tx {\n                    let rate = self.description.stream_rate(&config, dir, k);",
+      "crate": "ezsdr-acceptance",
+      "test_bin": "uhd",
+      "filter": "uhd_59_initial_values_are_applied_before_the_streamers_open"
+    },
+    {
+      "id": "P1342",
+      "name": "EA-16: a bool is a channel number",
+      "file": "python/ezsdr/session.py",
+      "old": "if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:",
+      "new": "if not isinstance(value, (int, np.integer)) or value < 0:",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1343",
+      "name": "EA-16: a channel in two streams is accepted",
+      "file": "python/ezsdr/session.py",
+      "old": "            if channel in seen:",
+      "new": "            if False:",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1344",
+      "name": "EA-16: a digit-only stream name is accepted",
+      "file": "python/ezsdr/session.py",
+      "old": "if not name or all(\"0\" <= c <= \"9\" for c in name) or",
+      "new": "if not name or False or",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1345",
+      "name": "EA-16: a value for a channel outside its stream is accepted",
+      "file": "python/ezsdr/session.py",
+      "old": "                if number not in channels:",
+      "new": "                if False:",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1346",
+      "name": "EA-16: a stream name used in both directions is accepted",
+      "file": "python/ezsdr/session.py",
+      "old": "            if name in names:",
+      "new": "            if False:",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1347",
+      "name": "EA-16: an empty direction is not sent",
+      "file": "python/ezsdr/session.py",
+      "old": "    if rx is not None or tx is not None:",
+      "new": "    if rx or tx:",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_sends_every_direction_it_was_given"
+    },
+    {
+      "id": "P1348",
+      "name": "EA-16: radio= does not name the target",
+      "file": "python/ezsdr/session.py",
+      "old": "(\"radio\" if radio is None else radio)",
+      "new": "\"radio\"",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_radio_names_the_target"
+    },
+    {
+      "id": "P1349",
+      "name": "EA-16: a stream's sample rate is sent as a frequency",
+      "file": "python/ezsdr/session.py",
+      "old": "init[\"sample_rate\"] = _finite(stream.sample_rate, \"sample_rate\")",
+      "new": "init[\"frequency\"] = {\"0\": _finite(stream.sample_rate, \"sample_rate\")}",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_sends_every_direction_it_was_given"
+    },
+    {
+      "id": "P1350",
+      "name": "EA-16: a stream name resolves to stream 0",
+      "file": "python/ezsdr/session.py",
+      "old": "            key = self._names[key]",
+      "new": "            key = 0",
+      "python": "test_easy_api.EasyApi.test_ea_16_connect_names_a_stream"
+    },
+    {
+      "id": "P1351",
+      "name": "EA-16: a transmit stream reads the receive names",
+      "file": "python/ezsdr/session.py",
+      "old": "names.get(\"tx\", {}))",
+      "new": "names.get(\"rx\", {}))",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_a_name_is_looked_up_in_its_own_direction"
+    },
+    {
+      "id": "P1352",
+      "name": "EA-16: the receive alias of a stream with no channel is read",
+      "file": "python/ezsdr/session.py",
+      "old": "            streams[0]._need_channels()",
+      "new": "            pass",
+      "python": "test_easy_api.EasyApi.test_ea_16_default_connect_has_no_stream"
+    },
+    {
+      "id": "P1353",
+      "name": "EA-10: a value key written 00 or +0 names channel 0 again",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "if text != number.to_string() {",
+      "new": "if false {",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run"
+    },
+    {
+      "id": "P1354",
+      "name": "EA-10: a control character is allowed in a stream name",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "c.is_whitespace() || c.is_control()",
+      "new": "c.is_whitespace()",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+    },
+    {
+      "id": "P1355",
+      "name": "EA-10: a stream name of non-ASCII digits is all digits",
+      "file": "crates/ezsdr-server/src/initial.rs",
+      "old": "name.bytes().all(|b| b.is_ascii_digit())",
+      "new": "name.chars().all(char::is_numeric)",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_10_a_stream_name_is_used_once_across_both_directions"
+    },
+    {
+      "id": "P1356",
+      "name": "EA-16: a control character is allowed in a stream name",
+      "file": "python/ezsdr/session.py",
+      "old": " or unicodedata.category(c) == \"Cc\"",
+      "new": "",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1357",
+      "name": "EA-16: a stream name of non-ASCII digits is all digits",
+      "file": "python/ezsdr/session.py",
+      "old": "all(\"0\" <= c <= \"9\" for c in name)",
+      "new": "name.isdigit()",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_a_name_is_the_same_rule_as_the_servers"
+    },
+    {
+      "id": "P1358",
+      "name": "EA-16: an empty radio is accepted",
+      "file": "python/ezsdr/session.py",
+      "old": "(not isinstance(radio, str) or not radio)",
+      "new": "(not isinstance(radio, str))",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1359",
+      "name": "EA-16: radio= with no stream to set up is accepted",
+      "file": "python/ezsdr/session.py",
+      "old": "if radio is not None and rx is None and tx is None:",
+      "new": "if False:",
+      "python": "test_easy_api.ConnectRequests.test_ea_16_connect_refuses_a_bad_map_before_any_request"
+    },
+    {
+      "id": "P1360",
+      "name": "SB-2: a key's owner is judged by the declared id it starts with, not by the registered declaration",
+      "file": "crates/ezsdr-kernel/src/spec.rs",
+      "old": "Some(owner) => declared(&owner.id),",
+      "new": "Some(_) => self.requirements.vocabularies.iter().any(|r| key.has_prefix(&r.id)),",
+      "crate": "ezsdr-kernel",
+      "test_bin": "spec_binding",
+      "filter": "sb_02_a_key_is_owned_by_the_vocabulary_that_declares_it"
     }
   ]

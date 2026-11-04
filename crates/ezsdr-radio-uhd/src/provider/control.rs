@@ -7053,6 +7053,7 @@ mod tests {
         let (core, device, time, _events) = two_stream_rig();
         let _frozen = hold(&core, &time, &device);
         let mut values = core.description.defaults();
+        values.insert(key("radio.rx.c0.stream"), Value::from(0));
         values.insert(key("radio.rx.c1.stream"), Value::from(1));
         let start = Start { t0: 0, rx: vec![Some((Channels::first(1), 200)), Some((Channels::first(2).without(0), 200))], tx: vec![None] };
         let (to_tx, _tx) = channel();

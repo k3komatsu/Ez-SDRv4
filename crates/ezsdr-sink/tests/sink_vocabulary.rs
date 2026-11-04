@@ -373,7 +373,7 @@ fn hd_06_capture_reaches_the_sink_as_a_timed_update() {
             }]
         }
     });
-    let mut run = connect(&profile, assembly, Lease::attached()).expect("the Session connects");
+    let mut run = connect(&profile, &Default::default(), assembly, Lease::attached()).expect("the Session connects");
     let entry = run
         .submit(
             SessionAction::Vocabulary {

@@ -1675,7 +1675,8 @@ mod tests {
         let t0 = core.now();
         let (old, successor) = (Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, Config { channels: Channels::first(2), ratio: Rational::new(200, 1).unwrap() });
         let (cut, e, next_origin) = (t0 + ms(12), t0 + ms(8), t0 + ms(20));
-        let config = core.description.defaults();
+        let mut config = core.description.defaults();
+        config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         let rx_start = {
             let mut starts = vec![None; core.description.stream_count(Dir::Rx)];
             starts[0] = Some((old.channels, 200));
@@ -1767,7 +1768,8 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let t0 = core.now();
         let (cut, e) = (t0 + ms(7), t0 + ms(8));
-        let config = core.description.defaults();
+        let mut config = core.description.defaults();
+        config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
         let mut rx_start = vec![None; core.description.stream_count(Dir::Rx)];
         rx_start[0] = Some((Channels::first(1), 200));
         let (to_tx, _tx) = std::sync::mpsc::channel();

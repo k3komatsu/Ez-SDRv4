@@ -1066,13 +1066,14 @@ impl ExperimentSpec {
         serde_json::from_value(doc.clone()).map_err(|e| SpecError::Structural { reason: format!("SB-9: {e}") })
     }
 
-    /// Refuses a key whose prefix belongs to no Vocabulary this Spec declares in
-    /// `requirements`, with `UnknownKeyPrefix` (SB-2, MA-34). One scan
+    /// Refuses a key whose owner is not a Vocabulary this Spec declares in `requirements`,
+    /// with `UnknownKeyPrefix` (SB-2, MA-34). The owner is the registered Vocabulary that
+    /// declares the key ([`ModuleRegistry::vocabulary_of`]), not any declared id the key
+    /// happens to start with: ids may differ from prefixes and prefixes nest and are shared. One scan
     /// ([`keyed_entries`](Self::keyed_entries)) covers every key position, so this
     /// check and `validate`'s declaration check cannot see different positions
     /// (pre-freeze item 3).
-    pub fn check_key_prefixes(&self) -> Result<(), SpecError> {
-        let declared: Vec<&Namespace> = self.requirements.vocabularies.iter().map(|v| &v.id).collect();
+    pub fn check_key_prefixes(&self, registry: &crate::module_api::ModuleRegistry) -> Result<(), SpecError> {
         for entry in self.keyed_entries() {
             let key = match &entry {
                 KeyedEntry::Constraint { key, .. } | KeyedEntry::Output { key, .. } | KeyedEntry::Coercion { key } => *key,
@@ -1085,7 +1086,14 @@ impl ExperimentSpec {
                     key
                 }
             };
-            if !key.is_extension() && !declared.iter().any(|ns| key.has_prefix(ns)) {
+            let declared = |id: &Namespace| self.requirements.vocabularies.iter().any(|r| r.id == *id);
+            let owned = match registry.vocabulary_of(key) {
+                Some(owner) => declared(&owner.id),
+                // No registered Vocabulary declares it: `validate`'s declaration check names that
+                // (SB-2a), so here only a declared id it starts with lets it pass.
+                None => self.requirements.vocabularies.iter().any(|r| key.has_prefix(&r.id)),
+            };
+            if !key.is_extension() && !owned {
                 return Err(SpecError::UnknownKeyPrefix { key: key.to_string() });
             }
         }

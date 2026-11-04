@@ -43,6 +43,69 @@ pub struct ReplyFrame {
     pub body_bytes: u64,
 }
 
+/// One resource's initial streams, per direction (EA-10). A direction that is absent or
+/// empty puts every one of its channels in no stream (RM-30).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceInit {
+    /// The receive streams.
+    #[serde(default)]
+    pub rx: Vec<StreamInit>,
+    /// The transmit streams.
+    #[serde(default)]
+    pub tx: Vec<StreamInit>,
+}
+
+/// One stream `connect` sets up (EA-10): its number or its name, its channels and the
+/// values it starts with. The keys of `frequency`, `gain` and `antenna` are channels of
+/// this stream.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamInit {
+    /// The stream's number; exactly one of `number` and `name` is given.
+    #[serde(default)]
+    pub number: Option<u32>,
+    /// The stream's name, for which the server picks the number.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The logical channels in the stream.
+    pub channels: Vec<ChannelRef>,
+    /// The stream's sample rate.
+    #[serde(default)]
+    pub sample_rate: Option<f64>,
+    /// Initial frequencies by channel.
+    #[serde(default)]
+    pub frequency: BTreeMap<String, f64>,
+    /// Initial gains by channel.
+    #[serde(default)]
+    pub gain: BTreeMap<String, f64>,
+    /// Initial antennas by channel.
+    #[serde(default)]
+    pub antenna: BTreeMap<String, String>,
+}
+
+/// A channel of a stream: its number, or its name (a name needs a later stage, EA-10).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChannelRef {
+    /// A logical channel number.
+    Number(u32),
+    /// A channel name.
+    Name(String),
+}
+
+/// The stream numbers the server gave to names, per direction (EA-10).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamNames {
+    /// Receive stream names.
+    #[serde(default)]
+    pub rx: BTreeMap<String, u32>,
+    /// Transmit stream names.
+    #[serde(default)]
+    pub tx: BTreeMap<String, u32>,
+}
+
 /// What a client asks (EA-4).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -60,6 +123,10 @@ pub enum Request {
         /// The Lease; Attached when absent.
         #[serde(default)]
         lease: Option<Lease>,
+        /// What the Session asks of each radio at `connect`: per resource name, its streams
+        /// (EA-10); absent means every channel in no stream (RM-30).
+        #[serde(default)]
+        initial: Option<BTreeMap<String, ResourceInit>>,
     },
     /// Submits one Session Action; the body, if any, is its waveform (EA-11).
     Submit {
@@ -163,6 +230,9 @@ pub enum Response {
         /// What the primary root's tick zero is (TM-3), from which a client finds a PPS
         /// edge when it is `pps` (EA-10, EA-16).
         root_epoch: EpochRef,
+        /// The number the server gave each named stream, per resource (EA-10).
+        #[serde(default)]
+        streams: BTreeMap<String, StreamNames>,
     },
     /// The logged entry, admitted or rejected (EA-11).
     Submitted {

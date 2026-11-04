@@ -188,6 +188,13 @@ impl ModuleRegistry {
         self.vocabularies.get(id)
     }
 
+    /// The registered Vocabulary that declares `key`: one whose prefix the key carries and whose
+    /// `keys` cover it. Prefixes nest and may be shared, so the prefix alone does not decide
+    /// it; this is the one place ownership is decided (SB-2, SB-2a, RS-12).
+    pub fn vocabulary_of(&self, key: &Key) -> Option<&VocabularyDescriptor> {
+        self.vocabularies.values().filter(|v| key.has_prefix(&v.prefix)).find(|v| v.keys.iter().any(|d| d.declares(key)))
+    }
+
     /// Every registered Module, in `(id, version)` order (MA-32).
     pub fn modules(&self) -> impl Iterator<Item = &ModuleDescriptor> {
         self.modules.values()
@@ -214,7 +221,7 @@ impl ModuleRegistry {
     ///
     /// Rule: MA-34, SB-2, SB-2a.
     pub fn key_decl(&self, key: &Key) -> Option<&KeyDecl> {
-        self.vocabularies.values().filter(|v| key.has_prefix(&v.prefix)).find_map(|v| v.keys.iter().find(|d| d.declares(key)))
+        self.vocabulary_of(key)?.keys.iter().find(|d| d.declares(key))
     }
 
     /// The compilation a Vocabulary declares for one of its verbs (RS-13a, RS-14).

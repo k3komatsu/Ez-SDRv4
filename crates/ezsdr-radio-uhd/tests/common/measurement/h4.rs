@@ -47,7 +47,7 @@ fn h4_candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnve
     let doc = common::bench_profile(&*device, &dir, Json::Object(Default::default()), common::bench_envelope(&*device), true);
     let mut assembly = common::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing));
     assembly.registry.register_vocabulary(h4_gain_vocabulary()).map_err(|error| error.to_string())?;
-    let run = ezsdr_kernel::coordinator::connect(&doc, assembly, Lease::attached()).map_err(|error| error.to_string())?;
+    let run = ezsdr_kernel::coordinator::connect(&doc, &super::super::rx0(&doc), assembly, Lease::attached()).map_err(|error| error.to_string())?;
     Ok((run, dir))
 }
 

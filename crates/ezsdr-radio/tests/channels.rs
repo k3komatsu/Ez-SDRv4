@@ -369,7 +369,7 @@ fn rm_29_the_ideal_layout_builds_its_tree_and_defaults() {
     let report = description.coerce(&id, &present_all(&description)).unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
     assert_eq!(report.applied.len(), configuration_keys(&description).len());
-    assert_eq!(value_of(&report, "radio.rx.c0.stream"), Value::from(0_i64));
+    assert_eq!(value_of(&report, "radio.rx.c0.stream"), Value::from(-1_i64));
     assert_eq!(value_of(&report, "radio.rx.c1.stream"), Value::from(-1_i64));
     assert_eq!(value_of(&report, "radio.rx.c2.stream"), Value::from(-1_i64));
     assert_eq!(value_of(&report, "radio.tx.c0.stream"), Value::from(-1_i64));
@@ -387,12 +387,16 @@ fn rm_30_coerce_cases() {
     let id = ResourceId::parse("dev").unwrap();
     let coerce = |pairs: &[(&str, Constraint)]| description.coerce(&id, &request(pairs)).unwrap();
 
-    // RM-30's defaults: exactly the layout's configuration keys, receive `c0` in
-    // stream 0 and every other channel in none.
+    // RM-30's defaults: exactly the layout's configuration keys, every channel of both
+    // directions in no stream, by the layout's own defaults and by `coerce`'s `Present`.
+    let defaults = description.defaults();
+    let memberships: Vec<_> = defaults.iter().filter(|(key, _)| key.as_str().ends_with(".stream")).collect();
+    assert_eq!(memberships.len(), 5, "three receive and two transmit channels: {memberships:?}");
+    assert!(memberships.iter().all(|(_, value)| **value == Value::from(-1_i64)), "{memberships:?}");
     let defaults_report = description.coerce(&id, &present_all(&description)).unwrap();
     assert!(defaults_report.rejected.is_empty(), "{:?}", defaults_report.rejected);
     assert_eq!(defaults_report.applied.len(), configuration_keys(&description).len());
-    assert_eq!(value_of(&defaults_report, "radio.rx.c0.stream"), Value::from(0_i64));
+    assert_eq!(value_of(&defaults_report, "radio.rx.c0.stream"), Value::from(-1_i64));
     assert_eq!(value_of(&defaults_report, "radio.rx.c1.stream"), Value::from(-1_i64));
     assert_eq!(value_of(&defaults_report, "radio.rx.c2.stream"), Value::from(-1_i64));
     assert_eq!(value_of(&defaults_report, "radio.tx.c0.stream"), Value::from(-1_i64));
@@ -496,6 +500,22 @@ fn rm_30_coerce_cases() {
     }
     let report = coerce(&[("radio.rx.bogus", eq_int(1))]);
     assert_eq!(rejection(&report, "radio.rx.bogus").reason, "RM-4: not a radio key");
+}
+
+#[test]
+fn rm_30_default_antennas_meet_rm_31_on_every_board() {
+    // RM-30 puts no channel in a stream, and a Session that asks for a transmit channel in one keeps
+    // every receive channel's default antenna: RX2 on a duplex board, so RM-31 is not in the way.
+    for board in ["ubx", "obx", "cbx"] {
+        let element = format!("0:A:{board}:0");
+        let description = description_of(&[element.as_str()], &[element.as_str()]);
+        let mut configuration = description.defaults();
+        assert_eq!(configuration[&key("radio.rx.c0.antenna")], Value::from("RX2"), "{board}");
+        assert!(description.violations(&configuration).is_empty(), "{board}: no stream, no violation");
+        configuration.insert(key("radio.tx.c0.stream"), Value::from(0_i64));
+        configuration.insert(key("radio.rx.c0.stream"), Value::from(0_i64));
+        assert!(description.violations(&configuration).is_empty(), "{board}: {:?}", description.violations(&configuration));
+    }
 }
 
 #[test]
@@ -657,9 +677,6 @@ fn rm_32_throughput_cases() {
     let report = pinched.coerce(&id, &request(&[("radio.rx.c1.stream", eq_int(0)), ("radio.rx.s1.sample_rate_hz", eq_num(1_000_000.0))])).unwrap();
     assert!(rejection(&report, "radio.rx.s1.sample_rate_hz").reason.starts_with("RM-32: "));
     assert!(!report.applied.contains_key(&key("radio.rx.s1.sample_rate_hz")));
-    // A violation no requested key carries is refused under its own key, not dropped.
-    let report = pinched.coerce(&id, &request(&[("radio.rx.c0.frequency_hz", eq_num(1_000_000_000.0))])).unwrap();
-    assert!(rejection(&report, "radio.rx.s0.sample_rate_hz").reason.starts_with("RM-32: "));
 }
 
 /// RM-33's check over one fragment's configuration.

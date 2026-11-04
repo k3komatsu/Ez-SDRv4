@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "ChannelRef": {
+      "anyOf": [
+        {
+          "description": "A logical channel number.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "description": "A channel name.",
+          "type": "string"
+        }
+      ],
+      "description": "A channel of a stream: its number, or its name (a name needs a later stage, EA-10)."
+    },
     "ClockDomainId": {
       "additionalProperties": false,
       "description": "Identifies a `ClockDomain`.\n\nRule: TM-11 (`01-time-model.md`), X7.",
@@ -194,6 +209,17 @@
           "additionalProperties": false,
           "description": "Opens the Session, with the default profile when `profile` is absent (EA-9, EA-10).",
           "properties": {
+            "initial": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ResourceInit"
+              },
+              "default": null,
+              "description": "What the Session asks of each radio at `connect`: per resource name, its streams\n(EA-10); absent means every channel in no stream (RM-30).",
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "lease": {
               "anyOf": [
                 {
@@ -442,6 +468,29 @@
         }
       ]
     },
+    "ResourceInit": {
+      "additionalProperties": false,
+      "description": "One resource's initial streams, per direction (EA-10). A direction that is absent or\nempty puts every one of its channels in no stream (RM-30).",
+      "properties": {
+        "rx": {
+          "default": [],
+          "description": "The receive streams.",
+          "items": {
+            "$ref": "#/$defs/StreamInit"
+          },
+          "type": "array"
+        },
+        "tx": {
+          "default": [],
+          "description": "The transmit streams.",
+          "items": {
+            "$ref": "#/$defs/StreamInit"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "Scalar": {
       "anyOf": [
         {
@@ -641,6 +690,76 @@
           "type": "object"
         }
       ]
+    },
+    "StreamInit": {
+      "additionalProperties": false,
+      "description": "One stream `connect` sets up (EA-10): its number or its name, its channels and the\nvalues it starts with. The keys of `frequency`, `gain` and `antenna` are channels of\nthis stream.",
+      "properties": {
+        "antenna": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Initial antennas by channel.",
+          "type": "object"
+        },
+        "channels": {
+          "description": "The logical channels in the stream.",
+          "items": {
+            "$ref": "#/$defs/ChannelRef"
+          },
+          "type": "array"
+        },
+        "frequency": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "default": {},
+          "description": "Initial frequencies by channel.",
+          "type": "object"
+        },
+        "gain": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "default": {},
+          "description": "Initial gains by channel.",
+          "type": "object"
+        },
+        "name": {
+          "default": null,
+          "description": "The stream's name, for which the server picks the number.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "number": {
+          "default": null,
+          "description": "The stream's number; exactly one of `number` and `name` is given.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sample_rate": {
+          "default": null,
+          "description": "The stream's sample rate.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channels"
+      ],
+      "type": "object"
     },
     "Target": {
       "description": "What an Action addresses, in the Spec's own names and tagged by role: a resource\nwith a sub-path below it, an output, or a graph component. The Kernel resolves it\nper role (KC-23); a name the Spec does not declare in that role is refused.\n\nRule: RS-49, KC-23, SB-16.",

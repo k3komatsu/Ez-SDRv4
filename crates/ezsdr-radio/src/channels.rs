@@ -418,8 +418,8 @@ impl Description {
         capabilities
     }
 
-    /// RM-30's defaults: only the receive channel `c0` is in a stream, every other
-    /// channel is in none, and every stream starts at 1 Msps.
+    /// RM-30's defaults: every channel of both directions is in no stream, and every
+    /// stream starts at 1 Msps.
     pub fn defaults(&self) -> BTreeMap<Key, Value> {
         let mut defaults = BTreeMap::new();
         for direction in [Direction::Rx, Direction::Tx] {
@@ -429,7 +429,7 @@ impl Description {
                 defaults.insert(channel_setting(direction, number, "frequency_hz"), Value::from(num(channel.default_frequency_hz)));
                 defaults.insert(channel_setting(direction, number, "gain_db"), Value::from(num(0.0)));
                 defaults.insert(channel_setting(direction, number, "antenna"), Value::from(channel.default_antenna.as_str()));
-                defaults.insert(channel_setting(direction, number, "stream"), Value::from(default_stream(direction, number)));
+                defaults.insert(channel_setting(direction, number, "stream"), Value::from(-1_i64));
             }
             for k in 0..channels.len() {
                 defaults.insert(stream_setting(direction, k as u32), Value::from(num(DEFAULT_SAMPLE_RATE_HZ)));
@@ -505,7 +505,7 @@ impl Description {
             "frequency_hz" => coerce_numeric(key, constraint, &channel.frequency, Some(&Value::from(num(channel.default_frequency_hz))), false),
             "gain_db" => coerce_numeric(key, constraint, &channel.gain, Some(&Value::from(num(0.0))), false),
             "antenna" => coerce_antenna(constraint, &channel.antennas, Some(&Value::from(channel.default_antenna.as_str()))),
-            "stream" => coerce_stream(constraint, channels.len() as i64 - 1, default_stream(direction, number)),
+            "stream" => coerce_stream(constraint, channels.len() as i64 - 1, -1),
             _ => {
                 let capability = match leaf {
                     "frequency_step_hz" => CapabilityValue::One { value: num(channel.frequency.step()) },
@@ -749,10 +749,6 @@ fn channel_setting(direction: Direction, number: u32, leaf: &str) -> Key {
 
 fn stream_setting(direction: Direction, number: u32) -> Key {
     Key::parse(&keys::stream(direction.name(), number)).expect("a declared radio key")
-}
-
-fn default_stream(direction: Direction, number: u32) -> i64 {
-    if direction == Direction::Rx && number == 0 { 0 } else { -1 }
 }
 
 fn stream_of(effective: &BTreeMap<Key, Value>, direction: Direction, number: u32) -> i64 {

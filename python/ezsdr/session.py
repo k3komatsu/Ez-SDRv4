@@ -11,10 +11,12 @@ import hashlib
 import json
 import math
 import os
+import unicodedata
 from contextlib import contextmanager
+from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -242,6 +244,10 @@ class _Stream:
 
     sample_rate = _param("sample_rate")
 
+    def _need_channels(self) -> None:
+        if not self.channels:
+            raise Error(f"EA-16: {self._direction} stream s{self._number} holds no channel; give connect({self._direction}=...) the channels it uses")
+
     @property
     def channels(self) -> List[int]:
         effective = self._session.effective[self._radio]
@@ -399,21 +405,40 @@ class Tx(_Stream):
         return _admitted(self._session.submit(action, data))
 
 
+class _Streams(list):
+    """A radio's streams of one direction: ``streams[k]`` is stream ``k``, ``streams["main"]``
+    the stream ``connect`` named ``"main"`` (EA-16)."""
+
+    def __init__(self, streams: Iterable[Any], names: Mapping[str, int]):
+        super().__init__(streams)
+        self._names = dict(names)
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            if key not in self._names:
+                raise KeyError(f"no stream is named {key!r}; connect names {sorted(self._names)}")
+            key = self._names[key]
+        return super().__getitem__(key)
+
+
 class Radio:
     """A radio binding of the Session's profile."""
 
     def __init__(self, session: "Session", name: str):
         self.name = name
         effective = session.effective[name]
+        names = session._stream_names.get(name, {})
         self.rx_channels = [_Channel(session, name, "rx", n) for n in _indices(effective, "rx", "c", "stream")]
         self.tx_channels = [_Channel(session, name, "tx", n) for n in _indices(effective, "tx", "c", "stream")]
-        self.rx_streams = [Rx(session, name, k) for k in _indices(effective, "rx", "s", "sample_rate_hz")]
-        self.tx_streams = [Tx(session, name, k) for k in _indices(effective, "tx", "s", "sample_rate_hz")]
+        self.rx_streams = _Streams([Rx(session, name, k) for k in _indices(effective, "rx", "s", "sample_rate_hz")], names.get("rx", {}))
+        self.tx_streams = _Streams([Tx(session, name, k) for k in _indices(effective, "tx", "s", "sample_rate_hz")], names.get("tx", {}))
 
     def _first_stream(self, direction: str) -> Any:
         streams = self.rx_streams if direction == "rx" else self.tx_streams
         if not streams:
             raise Error(f"EA-16: radio {self.name} has no {direction} stream 0")
+        if direction == "rx":
+            streams[0]._need_channels()
         return streams[0]
 
     @property
@@ -463,6 +488,8 @@ class Session:
         self._rate = Fraction(connected["root_rate"]["num"], connected["root_rate"]["den"])
         # What the primary root's tick zero is, the Kernel's EpochRef (TM-3, EA-10).
         self._epoch: Optional[dict] = connected.get("root_epoch")
+        # The numbers the server gave the streams `connect` named, per radio (EA-10).
+        self._stream_names: Dict[str, Dict[str, Dict[str, int]]] = connected.get("streams", {})
         self._waited = 0
         # The instant `aligned` gives the timed calls in its block (EA-16).
         self._aligned: Optional[dict] = None
@@ -686,17 +713,119 @@ class Session:
         self.close()
 
 
+@dataclass(frozen=True)
+class Stream:
+    """One stream ``connect`` sets up (EA-10, EA-16): its logical ``channels`` and the values
+    it starts with. ``frequency``, ``gain`` and ``antenna`` are keyed by channel number, as in
+    ``start()``; ``sample_rate`` is the stream's own."""
+
+    channels: Sequence[int]
+    sample_rate: Optional[float] = None
+    frequency: Optional[Mapping[int, float]] = None
+    gain: Optional[Mapping[int, float]] = None
+    antenna: Optional[Mapping[int, str]] = None
+
+
+def _whole(value: Any, what: str) -> int:
+    """A non-negative integer that is not a bool (EA-16); a ``str`` is a channel name, which
+    needs a later stage (EA-10)."""
+    if isinstance(value, str):
+        raise Error(f"EA-16: {what} {value!r}: channel names need stage 1b")
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise Error(f"EA-16: {what} must be a non-negative integer, not {value!r}")
+    return int(value)
+
+
+def _finite(value: Any, what: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)) or not math.isfinite(value):
+        raise Error(f"EA-16: {what} must be a finite number, not {value!r}")
+    return float(value)
+
+
+def _stream_name(name: str) -> str:
+    if not name or all("0" <= c <= "9" for c in name) or any(c in ":#" or c.isspace() or unicodedata.category(c) == "Cc" for c in name):
+        raise Error(f"EA-16: {name!r} is not a stream name: it is empty, only the digits 0-9, or holds ':', '#', white space or a control character")
+    return name
+
+
+def _stream_inits(direction: str, streams: Optional[Mapping[Union[int, str], Any]], names: set) -> List[dict]:
+    """The wire's ``StreamInit`` of each stream of ``streams``, refusing what the client can
+    judge alone before any request (EA-16)."""
+    if streams is None:
+        return []
+    if not isinstance(streams, Mapping):
+        raise Error(f"EA-16: connect's {direction} is a dict of stream -> Stream or channel list, not {type(streams).__name__}")
+    inits, seen = [], set()
+    for key, value in streams.items():
+        init: Dict[str, Any] = {}
+        if isinstance(key, str):
+            name = _stream_name(key)
+            if name in names:
+                raise Error(f"EA-16: the stream name {name!r} is used twice")
+            names.add(name)
+            init["name"] = name
+        else:
+            init["number"] = _whole(key, f"{direction} stream number")
+        stream = value if isinstance(value, Stream) else Stream(value)
+        if isinstance(stream.channels, (str, bytes, Mapping)) or not isinstance(stream.channels, (list, tuple, range)):
+            raise Error(f"EA-16: the channels of {direction} stream {key!r} are a list, not {type(stream.channels).__name__}")
+        channels = [_whole(c, f"{direction} channel") for c in stream.channels]
+        for channel in channels:
+            if channel in seen:
+                raise Error(f"EA-16: {direction} channel c{channel} is in two places (a channel is in one stream)")
+            seen.add(channel)
+        init["channels"] = channels
+        if stream.sample_rate is not None:
+            init["sample_rate"] = _finite(stream.sample_rate, "sample_rate")
+        for field, convert in (("frequency", _finite), ("gain", _finite), ("antenna", _text)):
+            values = getattr(stream, field)
+            if values is None:
+                continue
+            if not isinstance(values, Mapping):
+                raise Error(f"EA-16: {field} is a dict keyed by channel, not {type(values).__name__}")
+            out = {}
+            for channel, item in values.items():
+                number = _whole(channel, f"{field} channel")
+                if number not in channels:
+                    raise Error(f"EA-16: {field} names c{number}, which is not a channel of {direction} stream {key!r}")
+                out[str(number)] = convert(item, field)
+            init[field] = out
+        inits.append(init)
+    return inits
+
+
+def _text(value: Any, what: str) -> str:
+    if not isinstance(value, str):
+        raise Error(f"EA-16: {what} must be a string, not {value!r}")
+    return value
+
+
 def connect(
     profile: Optional[dict] = None,
     *,
     server: Optional[str] = None,
     runs_dir: Optional[str] = None,
     lease: Optional[dict] = None,
+    radio: Optional[str] = None,
+    rx: Optional[Mapping[Union[int, str], Union[Stream, Sequence[int]]]] = None,
+    tx: Optional[Mapping[Union[int, str], Union[Stream, Sequence[int]]]] = None,
 ) -> Session:
     """Opens a Session (Vision §3): the server's default profile when ``profile`` is
-    ``None``. The Session stands at T0, the instant its devices start."""
-    connection = Connection(server, runs_dir)
+    ``None``. The Session stands at T0, the instant its devices start.
+
+    ``rx`` and ``tx`` set the radio ``radio`` (default ``"radio"``) up: each maps a stream,
+    by number or by name, to a ``Stream`` or a plain list of channels, and a direction's map
+    is its whole channel set — a channel it leaves out is in no stream, and so is every channel
+    of a direction left out (RM-30). ``sdr.rx_streams["main"]`` reaches a named stream."""
     request: Dict[str, Any] = {"op": "connect"}
+    if radio is not None and (not isinstance(radio, str) or not radio):
+        raise Error(f"EA-16: radio names a resource, a non-empty string, not {radio!r}")
+    if radio is not None and rx is None and tx is None:
+        raise Error("EA-16: radio= names the radio rx and tx set up, and none was given")
+    if rx is not None or tx is not None:
+        names: set = set()
+        request["initial"] = {("radio" if radio is None else radio): {"rx": _stream_inits("rx", rx, names), "tx": _stream_inits("tx", tx, names)}}
+    connection = Connection(server, runs_dir)
     if profile is not None:
         request["profile"] = profile
     if lease is not None:

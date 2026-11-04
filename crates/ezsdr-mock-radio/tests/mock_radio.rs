@@ -298,11 +298,16 @@ impl Harness {
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
+        // RM-30: no channel is in a stream unless a request puts it there; these runs receive on c0.
+        let mut constraints = constraints.to_vec();
+        if mock.instance().tree.capabilities.contains_key(&key("radio.rx.c0.stream")) && !constraints.iter().any(|(name, _)| *name == "radio.rx.c0.stream") {
+            constraints.push(("radio.rx.c0.stream", eq(Scalar::from(0))));
+        }
         let fragment = Fragment {
             id: Ident::parse("radio").unwrap(),
             instance: module_ref(),
             role: Role::Provider,
-            content: serde_json::json!({ "selector": {}, "requested": request(constraints) }),
+            content: serde_json::json!({ "selector": {}, "requested": request(&constraints) }),
             after: Vec::new(),
         };
         let prepared = mock.prepare(&fragment, ctx)?;

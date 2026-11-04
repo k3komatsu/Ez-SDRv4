@@ -229,6 +229,12 @@ fn harness_links(options: Layout<'_>, extra: &[(&str, BackPressure, usize)]) -> 
 }
 
 fn harness_links_with_inputs(options: Layout<'_>, extra: &[(&str, BackPressure, usize)], inputs: BTreeMap<ContentHash, Arc<[u8]>>) -> Result<Harness, ModuleError> {
+    build_layout(options, extra, inputs, true)
+}
+
+/// RM-30: no channel is in a stream unless the request puts it there. `rx0` has the runs that
+/// are not about the default receive on c0 (so also the ones that name no stream) put it there.
+fn build_layout(options: Layout<'_>, extra: &[(&str, BackPressure, usize)], inputs: BTreeMap<ContentHash, Arc<[u8]>>, rx0: bool) -> Result<Harness, ModuleError> {
     let version = if options.profile == "x3xx" { Version::new(0, 1, 0) } else { Version::new(2, 0, 0) };
     let mut selector =
         BTreeMap::from([(Ident::parse("id").unwrap(), Value::from(options.id.to_owned())), (Ident::parse("rx").unwrap(), options.rx.clone()), (Ident::parse("tx").unwrap(), options.tx.clone())]);
@@ -238,6 +244,10 @@ fn harness_links_with_inputs(options: Layout<'_>, extra: &[(&str, BackPressure, 
     let binding = Binding { module: module_ref(), selector, profile: Some(ProfileRef { name: options.profile.to_owned(), version }), feed: None };
     let mock = MockRadio::from_binding(&binding)?;
     let streams: Vec<ResourceId> = mock.instance().tree.children.iter().map(|child| child.id.clone()).collect();
+    let mut constraints = options.constraints.to_vec();
+    if rx0 && mock.instance().tree.capabilities.contains_key(&key("radio.rx.c0.stream")) && !constraints.iter().any(|(name, _)| *name == "radio.rx.c0.stream") {
+        constraints.push(("radio.rx.c0.stream", eq(Scalar::from(0))));
+    }
     let mut mock = mock.with_medium(Medium::new());
     let clocks = Arc::new(ClockRegistry::new());
     clocks.register(ClockDomain::root(ROOT, Rational::new(1_000_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "test".to_owned() })).unwrap();
@@ -268,7 +278,7 @@ fn harness_links_with_inputs(options: Layout<'_>, extra: &[(&str, BackPressure, 
         ctx.host_budget = RelativeBudget::new(Duration::new(HOST, 5_000_000_000)).unwrap();
         ctx
     };
-    let requested = Requested { resource: rid(options.id), constraints: options.constraints.iter().map(|(name, constraint)| (key(name), constraint.clone())).collect() };
+    let requested = Requested { resource: rid(options.id), constraints: constraints.iter().map(|(name, constraint)| (key(name), constraint.clone())).collect() };
     let fragment =
         Fragment { id: Ident::parse("radio").unwrap(), instance: module_ref(), role: Role::Provider, content: serde_json::json!({ "selector": {}, "requested": requested }), after: Vec::new() };
     let prepared = mock.prepare(&fragment, ctx)?;
@@ -280,6 +290,11 @@ fn built(options: Layout<'_>) -> Harness {
         Ok(harness) => harness,
         Err(error) => panic!("prepare the layout Mock: {error}"),
     }
+}
+
+/// As [`built`], with no channel put in a stream: the layout's defaults themselves (RM-30).
+fn built_defaults(options: Layout<'_>) -> Harness {
+    build_layout(options, &[], BTreeMap::new(), false).unwrap_or_else(|error| panic!("prepare the layout Mock: {error}"))
 }
 
 fn built_with_inputs(options: Layout<'_>, inputs: BTreeMap<ContentHash, Arc<[u8]>>) -> Harness {
@@ -434,7 +449,7 @@ fn mr_38_keys_is_an_unknown_selector_key() {
 
 #[test]
 fn mr_38_the_tree_and_capabilities_are_the_layout_s() {
-    let harness = built(Layout { profile: "x3xx", id: "mock", rx: mixed(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &[], env: &[], ports: &["rx0"] });
+    let harness = built_defaults(Layout { profile: "x3xx", id: "mock", rx: mixed(), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &[], env: &[], ports: &["rx0"] });
     let tree = &harness.mock.instance().tree;
     assert_eq!(tree.kind.as_str(), "radio.device");
     assert_eq!(tree.children.iter().map(|child| child.id.path()).collect::<Vec<_>>(), ["mock/rx/s0", "mock/rx/s1", "mock/rx/s2", "mock/tx/s0"]);
@@ -464,10 +479,10 @@ fn mr_38_the_tree_and_capabilities_are_the_layout_s() {
     );
     assert!(!tree.capabilities.contains_key(&key("radio.rx.coherent")));
     assert_eq!(tree.capabilities[&key("radio.tx.repeat_align_samples")], one(Scalar::from(2)));
-    // RM-30's defaults: receive channel 0 in stream 0, every other channel in none, each
+    // RM-30's defaults: every channel in no stream, each
     // front end's own default frequency and antenna, and every stream at 1 Msps.
     let default = |name: &str| harness.effective[&key(name)].clone();
-    assert_eq!(default("radio.rx.c0.stream"), Value::from(0));
+    assert_eq!(default("radio.rx.c0.stream"), Value::from(-1));
     assert_eq!(default("radio.rx.c1.stream"), Value::from(-1));
     assert_eq!(default("radio.rx.c2.stream"), Value::from(-1));
     assert_eq!(default("radio.tx.c0.stream"), Value::from(-1));
@@ -489,7 +504,7 @@ fn mr_38_the_tree_and_capabilities_are_the_layout_s() {
 
     // `ideal` has no motherboard: its channels are `ideal` front ends and its counts are
     // the selector's (RM-28, RM-29).
-    let ideal = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &[], env: &[], ports: &["rx0"] });
+    let ideal = built_defaults(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(0), selector: &[], constraints: &[], env: &[], ports: &["rx0"] });
     let tree = &ideal.mock.instance().tree;
     assert_eq!(tree.children.iter().map(|child| child.id.path()).collect::<Vec<_>>(), ["mock/rx/s0", "mock/rx/s1"]);
     assert_eq!(tree.ports.iter().map(|port| port.name.as_str()).collect::<Vec<_>>(), ["rx0", "rx1"]);

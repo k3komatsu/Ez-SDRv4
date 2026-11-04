@@ -395,7 +395,95 @@ fn sb_02_unknown_key_prefix_refused() {
     let mut spec = spec_with([(id("radio"), resource("test.device", &[("radio.rx.s0.sample_rate_hz", Constraint::Eq { value: Scalar::from(2) })]))].into_iter().collect());
     spec.requirements.vocabularies.clear();
     spec.requirements.vocabularies.push(ezsdr_kernel::spec::VocabularyReq { id: ns("test"), major: 1 });
-    assert!(matches!(spec.check_key_prefixes(), Err(SpecError::UnknownKeyPrefix { .. })));
+    assert!(matches!(spec.check_key_prefixes(&registry()), Err(SpecError::UnknownKeyPrefix { .. })));
+}
+
+/// The test registry with its keys split over two Vocabularies of one prefix (`test`@1 and
+/// `test.b`@3, which declares `test.grid`), and, when `nested`, a third on the nested prefix
+/// `test.deep` (@2, declaring `test.deep.count`).
+fn split_registry(nested: bool) -> ModuleRegistry {
+    let mut whole = test_vocabulary();
+    let at = whole.keys.iter().position(|d| d.key.as_str() == "test.grid").expect("declared");
+    let grid = whole.keys.remove(at);
+    let vocabulary = |id: &str, prefix: &str, major: u32, keys: Vec<ezsdr_kernel::spec::KeyDecl>| ezsdr_kernel::module_api::VocabularyDescriptor {
+        id: ns(id),
+        version: ezsdr_kernel::module_api::Version::new(major, 0, 0),
+        prefix: ns(prefix),
+        keys,
+        event_kinds: Vec::new(),
+        verbs: Vec::new(),
+        checks: Vec::new(),
+    };
+    let mut reg = ModuleRegistry::new();
+    reg.register_vocabulary(whole).expect("fresh");
+    reg.register_vocabulary(vocabulary("test.b", "test", 3, vec![grid.clone()])).expect("a second Vocabulary on the prefix");
+    if nested {
+        let count = ezsdr_kernel::spec::KeyDecl { key: key("test.deep.count"), ..grid };
+        reg.register_vocabulary(vocabulary("test.deep", "test.deep", 2, vec![count])).expect("a nested prefix");
+    }
+    register_modules(&mut reg);
+    reg
+}
+
+fn register_modules(reg: &mut ModuleRegistry) {
+    reg.register(test_provider_descriptor(), Factories { provider: true, authority: true, ..Factories::default() }).expect("registers");
+    reg.register(test_sink_descriptor(), Factories { sink: true, ..Factories::default() }).expect("registers");
+    reg.register(support::test_executor_descriptor(), Factories { executor: true, ..Factories::default() }).expect("registers");
+    reg.register(support::test_link_module_descriptor(), Factories { link: true, ..Factories::default() }).expect("registers");
+    reg.register_link_descriptor(support::test_link_descriptor()).expect("registers the Link descriptor");
+}
+
+#[test]
+fn sb_02_a_key_is_owned_by_the_vocabulary_that_declares_it() {
+    // SB-2: the owner is the registered Vocabulary that declares the key, and the Spec must declare
+    // that one; a declared id the key merely starts with is not its owner.
+    let ask = |reg: &ModuleRegistry, declared: &[(&str, u32)], key_name: &str| {
+        let mut spec = spec_with([(id("radio"), resource("test.device", &[(key_name, Constraint::Eq { value: Scalar::from(20) })]))].into_iter().collect());
+        spec.requirements.vocabularies = declared.iter().map(|(v, major)| ezsdr_kernel::spec::VocabularyReq { id: ns(v), major: *major }).collect();
+        spec.check_key_prefixes(reg).map(|()| spec)
+    };
+    let unknown = |r: Result<ExperimentSpec, SpecError>| matches!(r, Err(SpecError::UnknownKeyPrefix { .. }));
+    // One prefix, two Vocabularies: `test.grid` is `test.b`'s though `test` is its prefix.
+    let shared = split_registry(false);
+    assert!(unknown(ask(&shared, &[("test", 1)], "test.grid")), "declaring only `test` does not declare the owner `test.b`");
+    assert!(ask(&shared, &[("test.b", 3)], "test.grid").is_ok(), "declaring the owner is enough, though its id is no prefix of the key's");
+    assert!(ask(&shared, &[("test", 1)], "test.count").is_ok());
+    assert!(unknown(ask(&shared, &[("test.b", 3)], "test.count")));
+    // Nested prefixes: `test.deep.count` is `test.deep`'s.
+    let nested = split_registry(true);
+    assert!(unknown(ask(&nested, &[("test", 1)], "test.deep.count")));
+    assert!(ask(&nested, &[("test", 1), ("test.deep", 2)], "test.deep.count").is_ok());
+    // A key no registered Vocabulary declares is `validate`'s declaration check's to refuse (SB-2a),
+    // as `sb_02_the_ext_owner_is_checked_at_every_key_position` pins.
+    assert!(ask(&nested, &[("test", 1), ("test.deep", 2)], "test.deep.missing").is_ok());
+}
+
+#[test]
+fn sb_22c_a_session_asking_a_shared_prefix_key_validates_and_declares_its_owner() {
+    // RS-12 declares `test.b`@3 for `test.grid` and `validate` accepts that declaration.
+    let mut fx = Fixture::new();
+    fx.is_session = true;
+    fx.registry = split_registry(false);
+    let provider = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &provider);
+    let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
+    let profile = profile_binding(&["radio"]);
+    let ask: ezsdr_kernel::session::InitialRequests = [(id("radio"), [(key("test.grid"), Scalar::try_from(20.0).unwrap())].into_iter().collect())].into_iter().collect();
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &no_sinks, &ask).expect("derives");
+    assert_eq!(spec.requirements.vocabularies, vec![ezsdr_kernel::spec::VocabularyReq { id: ns("test.b"), major: 3 }]);
+    validate(&spec, &profile, &fx.inputs(&providers)).expect("the Session's own request validates");
+    // The same Spec as a Spec Run's, declaring only `test`@1 (the Vocabulary whose prefix the key has).
+    let mut run_spec = spec.clone();
+    run_spec.requirements.vocabularies = vec![ezsdr_kernel::spec::VocabularyReq { id: ns("test"), major: 1 }];
+    let e = validate(&run_spec, &profile, &fx.inputs(&providers)).expect_err("the owner is not declared");
+    assert!(matches!(e, SpecError::UnknownKeyPrefix { ref key } if key == "test.grid"), "{e:?}");
+    // Nested prefixes through `validate`: `test.deep.count` is `test.deep`'s, so a Spec declaring only
+    // `test` is refused for it before any matching happens.
+    fx.registry = split_registry(true);
+    let mut deep = minimal_spec();
+    deep.resources.get_mut(&id("radio")).expect("radio").requires.insert(key("test.deep.count"), Constraint::Eq { value: Scalar::from(1) });
+    let e = validate(&deep, &profile, &fx.inputs(&providers)).expect_err("the owner `test.deep` is not declared");
+    assert!(matches!(e, SpecError::UnknownKeyPrefix { ref key } if key == "test.deep.count"), "{e:?}");
 }
 
 // ---------------------------------------------------------------- matching
@@ -1010,7 +1098,7 @@ fn sb_39_a_sink_and_an_island_fragment_carry_their_declarations() {
     fx.is_session = true;
     let mut session = profile_binding(&["radio"]);
     session.bindings.insert(id("rec"), ezsdr_kernel::binding::Binding { feed: Some(radio_feed(4)), ..bind("ezsdr.test.sink") });
-    let implicit = ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &fx.sinks).expect("derives");
+    let implicit = ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &fx.sinks, &Default::default()).expect("derives");
     select_test_links(&implicit, &mut session);
     let built = validate_then_plan(&implicit, &session, &fx.inputs(&providers)).expect("the Session plans");
     assert_eq!(serde_json::from_value::<OutputReq>(content(&built, "rec")).expect("an OutputReq"), output("rec"));
@@ -1514,7 +1602,7 @@ fn rs_12_a_session_compiles_through_the_whole_pipeline() {
     );
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks).expect("builds the implicit Spec");
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks, &Default::default()).expect("builds the implicit Spec");
     // The recorder's feed is a data link like any other and needs a selected Link
     // (SB-25, D75); the implicit Spec does not read `placements`.
     select_test_links(&spec, &mut profile);
@@ -1557,7 +1645,7 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     profile.bindings.get_mut(&id("radio")).expect("bound").module = rr.clone();
     profile.bindings.insert(id("rec"), ezsdr_kernel::binding::Binding { module: rr.clone(), feed: Some(feed.clone()), selector: BTreeMap::new(), profile: None });
     // Bound once per role: `radio` is the resource, `rec` the output.
-    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks).expect("builds the implicit Spec");
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks, &Default::default()).expect("builds the implicit Spec");
     assert_eq!(spec.resources.keys().collect::<Vec<_>>(), [&id("radio")]);
     assert_eq!(spec.outputs.iter().map(|o| &o.id).collect::<Vec<_>>(), [&id("rec")]);
     select_test_links(&spec, &mut profile);
@@ -1570,7 +1658,7 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     let mut once = profile_binding(&[]);
     once.bindings.insert(id("radio"), ezsdr_kernel::binding::Binding { module: rr.clone(), feed: Some(feed), selector: BTreeMap::new(), profile: None });
     let sinks_once: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("radio"), &sink as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
-    let spec = ezsdr_kernel::session::implicit_spec(&once, &fx.registry, &providers, &sinks_once).expect("builds");
+    let spec = ezsdr_kernel::session::implicit_spec(&once, &fx.registry, &providers, &sinks_once, &Default::default()).expect("builds");
     assert!(spec.resources.is_empty() && spec.outputs.len() == 1, "{spec:?}");
 
     // A Provider+Executor Module (an RFNoC-style device) bound as `radio` and, named
@@ -1588,7 +1676,7 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     fpga.bindings.insert(id("fpga"), ezsdr_kernel::binding::Binding { module: px, feed: None, selector: BTreeMap::new(), profile: None });
     fpga.placements.islands.push(IslandDecl { id: ezsdr_kernel::id::IslandId::local(0), executor: id("fpga"), components: Vec::new(), affinity: None, rt_policy: None });
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let spec = ezsdr_kernel::session::implicit_spec(&fpga, &fx.registry, &providers2, &no_sinks).expect("the Island's executor name is not a resource");
+    let spec = ezsdr_kernel::session::implicit_spec(&fpga, &fx.registry, &providers2, &no_sinks, &Default::default()).expect("the Island's executor name is not a resource");
     assert_eq!(spec.resources.keys().collect::<Vec<_>>(), [&id("radio")]);
     // A `feed` on that executor binding would give the name a second role: the
     // derivation reads the Island's name first (SB-T2 row 1), and `validate` refuses the
@@ -1596,7 +1684,7 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     let mut fed = fpga.clone();
     fed.bindings.get_mut(&id("fpga")).expect("bound").feed =
         Some(ezsdr_kernel::spec::SinkFeed { port: PortRef { component: id("radio"), port: id("rx") }, policy: BackPressure::DropOldest, capacity: 4 });
-    let fed_spec = ezsdr_kernel::session::implicit_spec(&fed, &fx.registry, &providers2, &no_sinks).expect("derives");
+    let fed_spec = ezsdr_kernel::session::implicit_spec(&fed, &fx.registry, &providers2, &no_sinks, &Default::default()).expect("derives");
     let px = mref("ezsdr.test.radio_fpga");
     fx.authorities.get_mut(&id("radio")).expect("radio").module = px.clone();
     let exec = fx.executors[&id("exec")].clone();
@@ -1607,7 +1695,7 @@ fn rs_12_a_multi_role_module_is_bound_once_per_role() {
     // two roles, not a missing instance.
     let mut not_a_sink = profile_binding(&["radio"]);
     not_a_sink.bindings.get_mut(&id("radio")).expect("bound").feed = fed.bindings[&id("fpga")].feed.clone();
-    let refused = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &one_provider("radio", &TestProvider::new("radio", 2)), &no_sinks);
+    let refused = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &one_provider("radio", &TestProvider::new("radio", 2)), &no_sinks, &Default::default());
     assert!(matches!(&refused, Err(SpecError::WrongBindingRole { expected, .. }) if expected == "Sink"), "{refused:?}");
 }
 
@@ -3702,7 +3790,7 @@ fn sb_22c_session_derivation_table() {
     profile.authority = id("sim");
     let p = TestProvider::new("radio", 2);
     let providers = one_provider("radio", &p);
-    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks).expect("derives");
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &sinks, &Default::default()).expect("derives");
     assert_eq!(spec.resources.keys().collect::<Vec<_>>(), [&id("radio")]);
     assert_eq!(spec.resources[&id("radio")].kind, ns("test.device"), "the instance's own root kind");
     assert!(spec.resources[&id("radio")].requires.is_empty());
@@ -3717,7 +3805,7 @@ fn sb_22c_session_derivation_table() {
     // Row 5: a feedless Sink binding fills no slot, and `validate` refuses it.
     let mut spare = planned.clone();
     spare.bindings.insert(id("spare"), bind("ezsdr.test.sink"));
-    let spec5 = ezsdr_kernel::session::implicit_spec(&spare, &fx.registry, &providers, &sinks).expect("derives");
+    let spec5 = ezsdr_kernel::session::implicit_spec(&spare, &fx.registry, &providers, &sinks, &Default::default()).expect("derives");
     assert_eq!(spec5, spec);
     assert!(refusal(validate(&spec5, &spare, &fx.inputs(&providers))).contains("SB-22d: binding spare plays no role"));
 
@@ -3732,7 +3820,7 @@ fn sb_22c_session_derivation_table() {
     fx2.is_session = true;
     fx2.authorities.insert(id("clock"), AuthorityDescriptor { module: mref("ezsdr.test.provider"), governs: Vec::new(), pacing: Pacing::FreeRunning });
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let session = ezsdr_kernel::session::implicit_spec(&clocked, &fx2.registry, &both, &no_sinks).expect("derives");
+    let session = ezsdr_kernel::session::implicit_spec(&clocked, &fx2.registry, &both, &no_sinks, &Default::default()).expect("derives");
     assert_eq!(session.resources.keys().collect::<Vec<_>>(), [&id("clock"), &id("radio")]);
     let built = validate_then_plan(&session, &clocked, &fx2.inputs(&both)).expect("plans");
     assert_eq!(roles_of(&built).get("clock"), Some(&Role::Provider));
@@ -3748,20 +3836,53 @@ fn sb_22c_session_derivation_table() {
         p.bindings.get_mut(&id("rec")).expect("bound").module = v9.clone();
         p
     };
-    let reason = refusal(ezsdr_kernel::session::implicit_spec(&unregistered_sink(&profile), &fx.registry, &providers, &sinks));
+    let reason = refusal(ezsdr_kernel::session::implicit_spec(&unregistered_sink(&profile), &fx.registry, &providers, &sinks, &Default::default()));
     assert!(reason.contains("SB-22e: binding rec names Module ezsdr.test.sink 9.0.0, which is not registered"), "{reason}");
     let mut not_a_sink = profile.clone();
     not_a_sink.bindings.get_mut(&id("rec")).expect("bound").module = mref("ezsdr.test.provider");
-    let e = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &providers, &no_sinks).expect_err("role before instance");
+    let e = ezsdr_kernel::session::implicit_spec(&not_a_sink, &fx.registry, &providers, &no_sinks, &Default::default()).expect_err("role before instance");
     assert!(matches!(&e, SpecError::WrongBindingRole { expected, .. } if expected == "Sink"), "{e:?}");
-    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &no_sinks)).contains("SB-22f: no Sink instance for binding rec"));
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &no_sinks, &Default::default())).contains("SB-22f: no Sink instance for binding rec"));
     // Row 2 also reads the Sink's first artifact kind: one that writes none has none to
     // give its output (RS-12).
     let mute = cf32_sink().writing(Vec::new());
     let mute_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = [(id("rec"), &mute as &dyn ezsdr_kernel::module_api::Sink)].into_iter().collect();
-    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &mute_sinks)).contains("RS-12: Sink binding rec declares no artifact kind"));
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &mute_sinks, &Default::default())).contains("RS-12: Sink binding rec declares no artifact kind"));
     let no_providers: BTreeMap<Ident, &dyn Provider> = BTreeMap::new();
-    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &no_providers, &sinks)).contains("SB-22f: no Provider instance for binding radio"));
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &no_providers, &sinks, &Default::default())).contains("SB-22f: no Provider instance for binding radio"));
+}
+
+#[test]
+fn sb_22c_initial_requests_go_to_the_resource_they_name() {
+    // RS-12: a Session's initial requests enter the `requires` of the Provider resource they
+    // name and no other.
+    let mut two = distinct_instances(profile_binding(&["radio", "second"]), &["radio", "second"]);
+    two.authority = id("radio");
+    let (radio, second) = (TestProvider::new("radio", 2), TestProvider::new("second", 2));
+    let both: BTreeMap<Ident, &dyn Provider> = [(id("radio"), &radio as &dyn Provider), (id("second"), &second as &dyn Provider)].into_iter().collect();
+    let fx = Fixture::new();
+    let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
+    let ask: ezsdr_kernel::session::InitialRequests = [(id("second"), [(key("test.count"), ezsdr_kernel::spec::Scalar::Int(2))].into_iter().collect())].into_iter().collect();
+    let spec = ezsdr_kernel::session::implicit_spec(&two, &fx.registry, &both, &no_sinks, &ask).expect("derives");
+    assert!(spec.resources[&id("radio")].requires.is_empty(), "the other resource asks for nothing");
+    assert_eq!(spec.resources[&id("second")].requires.keys().collect::<Vec<_>>(), [&key("test.count")]);
+}
+
+#[test]
+fn sb_22c_an_initial_key_no_vocabulary_owns_is_unknown_key_prefix() {
+    // RS-12 declares the Vocabulary of each initial key from the registry; a key none of them
+    // owns is declared by nobody, so `validate` refuses it as it refuses a Spec's own.
+    let mut fx = Fixture::new();
+    fx.is_session = true;
+    let provider = TestProvider::new("radio", 2);
+    let providers = one_provider("radio", &provider);
+    let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
+    let profile = profile_binding(&["radio"]);
+    let ask: ezsdr_kernel::session::InitialRequests = [(id("radio"), [(key("zzz.x"), ezsdr_kernel::spec::Scalar::Int(1))].into_iter().collect())].into_iter().collect();
+    let spec = ezsdr_kernel::session::implicit_spec(&profile, &fx.registry, &providers, &no_sinks, &ask).expect("derives");
+    assert!(spec.requirements.vocabularies.is_empty(), "no registered Vocabulary owns zzz");
+    let e = validate(&spec, &profile, &fx.inputs(&providers)).expect_err("an undeclared key");
+    assert!(matches!(e, SpecError::UnknownKeyPrefix { ref key } if key == "zzz.x"), "{e:?}");
 }
 
 #[test]
@@ -3800,7 +3921,7 @@ fn sb_22d_exactly_the_slots_are_bound() {
     let mut session = profile_binding(&["radio"]);
     bind_exec(&mut session);
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let implicit = ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &no_sinks).expect("builds");
+    let implicit = ezsdr_kernel::session::implicit_spec(&session, &fx.registry, &providers, &no_sinks, &Default::default()).expect("builds");
     assert!(refusal(validate(&implicit, &session, &fx.inputs(&providers))).contains("SB-22d: binding exec plays no role"));
 }
 
@@ -3853,7 +3974,7 @@ fn sb_22e_the_module_holds_the_role() {
     let want = "SB-22e: binding radio names Module ezsdr.test.provider 2.0.0, which is not registered";
     assert!(refusal(validate(&spec, &unregistered, &fx.inputs(&providers2))).contains(want));
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    assert!(refusal(ezsdr_kernel::session::implicit_spec(&unregistered, &fx.registry, &providers2, &no_sinks)).contains(want));
+    assert!(refusal(ezsdr_kernel::session::implicit_spec(&unregistered, &fx.registry, &providers2, &no_sinks, &Default::default())).contains(want));
 }
 
 #[test]
@@ -3952,7 +4073,7 @@ fn sb_22g_feed_is_a_session_sink_binding_s_only() {
     exec_fed.bindings.get_mut(&id("exec")).expect("bound").feed = Some(radio_feed(4));
     exec_fed.placements.islands.push(island(0, "exec"));
     let no_sinks: BTreeMap<Ident, &dyn ezsdr_kernel::module_api::Sink> = BTreeMap::new();
-    let implicit = ezsdr_kernel::session::implicit_spec(&exec_fed, &session.registry, &providers, &no_sinks).expect("derives");
+    let implicit = ezsdr_kernel::session::implicit_spec(&exec_fed, &session.registry, &providers, &no_sinks, &Default::default()).expect("derives");
     assert!(refusal(validate(&implicit, &exec_fed, &session.inputs(&providers))).contains("SB-22g: binding exec carries `feed` and fills no Sink slot"));
     // A Session output whose binding carries no feed, or another one.
     let sink = cf32_sink();

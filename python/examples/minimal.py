@@ -6,8 +6,7 @@ import ezsdr
 
 x = np.exp(2j * np.pi * np.arange(1000) / 100).astype(np.complex64) * 0.5
 
-with ezsdr.connect() as sdr:
-    sdr.tx_channels[0].stream = 0
+with ezsdr.connect(rx={0: [0]}, tx={0: [0]}) as sdr:
     sdr.tx.repeat(x)
     y = sdr.rx.capture(100_000)
 

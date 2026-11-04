@@ -61,9 +61,7 @@ t = np.arange(1000)
 wave = (0.4 * np.exp(2j * np.pi * 100e3 * t / 1e6)).astype(np.complex64)
 
 try:
-    sdr = ezsdr.connect(profile=profile, runs_dir="/bench/runs")
-    sdr.set("radio", "radio.tx.c0.frequency_hz", 1e9)
-    sdr.tx_channels[0].stream = 0
+    sdr = ezsdr.connect(profile=profile, runs_dir="/bench/runs", tx={0: ezsdr.Stream([0], frequency={0: 1e9})})
     sdr.tx.repeat(wave)
     note("session-dir", sdr.dir)
     note("tx-started", "ok")

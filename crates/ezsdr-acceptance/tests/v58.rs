@@ -11,7 +11,7 @@ use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
-use support::{T0, artifact, end_session, finish_at, output, resource, root, section, session_run, source, spec_run};
+use support::{T0, artifact, end_session, finish_at, loopback_run, output, resource, root, section, session_run, source, spec_run};
 
 fn complete(spec: &serde_json::Value, profile_name: &str, selector: serde_json::Value, environment: serde_json::Value, test: &str, horizon: i64) -> Manifest {
     let temp = rig::TempDir::new(test);
@@ -376,11 +376,10 @@ fn v58_12_jitter_leaves_the_capture_unchanged() {
 fn v58_13_session_manifest_has_log_waveform_and_capture() {
     let temp = rig::TempDir::new("v58-13");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
-    let mut run = session_run(&temp, &profile);
+    let mut run = loopback_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     let (bytes, _) = experiments::waveform(1_000);
-    let a = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap();
     let b = run
         .submit(
             SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
@@ -399,18 +398,44 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
             None,
         )
         .unwrap();
-    assert_eq!([a.seq, b.seq, c.seq], [0, 1, 2]);
-    assert!([a, b, c].iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
-    // Past the new transmit clock's origin, a start lead after the enable (RM-25).
+    assert_eq!([b.seq, c.seq], [0, 1], "the first logged call is the repeat: connect put the channels in their streams");
+    assert!([b, c].iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
     let manifest = end_session(run, clock, T0 + 60_000_000);
-    assert_eq!(manifest.action_log.len(), 3);
+    assert_eq!(manifest.action_log.len(), 2);
     assert_eq!(manifest.inputs.len(), 1);
     assert_eq!(artifact(&manifest, "rec", 0).size_bytes, 40_000);
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
     assert_eq!(bursts[0].end, ezsdr_kernel::stream::BurstEnd::Stop);
-    // RS-19: the untimed repeat is admitted at the new clock's origin, not before it, so it
-    // starts there on time.
+    // RS-19: the untimed repeat is admitted no earlier than the transmit clock allows, so it
+    // starts on time.
+    assert_eq!(bursts[0].late_by, None);
+    assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
+}
+
+#[test]
+fn rs_19_an_untimed_repeat_after_an_enable_starts_at_the_new_clock_origin() {
+    // Receive c0 only, then the runtime enable of tx c0: the new transmit clock begins a start lead later
+    // (RM-25) and RS-19 admits the untimed repeat no earlier than that origin. This moves to the stage-4
+    // clock path when the setter goes (note 47 stage 2).
+    let temp = rig::TempDir::new("rs-19-enable");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let mut run = session_run(&temp, &profile);
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    let (bytes, _) = experiments::waveform(1_000);
+    let enable = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap();
+    let repeat = run
+        .submit(
+            SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
+            Some(&bytes),
+        )
+        .unwrap();
+    assert!([enable, repeat].iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
+    let manifest = end_session(run, clock, T0 + 60_000_000);
+    let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
+    assert_eq!(bursts.len(), 1);
+    // The burst starts at tick 0 of its own (new) clock, on time.
     assert_eq!((bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), bursts[0].late_by), (0, None));
     assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
@@ -759,13 +784,14 @@ fn v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order
     let run = |tx: &str| {
         let temp = rig::TempDir::new(&format!("v58-08-session-{tx}"));
         let profile = rig::link_session_profile("ideal", tx, "b", &temp.0, coupling(tx, "b", 0.0, 0, None, 0));
-        let mut run = session_run(&temp, &profile);
+        let assembly = rig::assemble(&profile, BTreeMap::new());
+        let initial = support::rx0_tx0(&assembly);
+        let mut run = support::session_run_with(&temp, &profile, assembly, &initial);
         let clock = root(&run);
         run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
         let (bytes, _) = experiments::waveform_of(&samples);
-        let entries = [
-            run.submit(SessionAction::SetParameter { target: resource(tx), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap(),
-            run.submit(
+        let entries = [run
+            .submit(
                 SessionAction::Vocabulary {
                     ns: Namespace::parse("sink").unwrap(),
                     verb: Ident::parse("capture").unwrap(),
@@ -775,8 +801,7 @@ fn v58_08_a_session_hears_a_burst_from_its_first_sample_in_either_instance_order
                 },
                 None,
             )
-            .unwrap(),
-        ];
+            .unwrap()];
         // T0 + 1 999 000 ns is the instant of the receiver's sample 1 999, the last of its
         // first block; the burst starts there, in the round that could have published it.
         run.advance_to(TimePoint::new(clock, T0 + 1_999_000)).unwrap();
@@ -816,13 +841,12 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
     let temp = rig::TempDir::new("v57-loopback");
     let environment = json!({ "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 }] } });
     let profile = rig::session_profile("ideal", json!({ "id": "mock" }), &temp.0, environment);
-    let mut run = session_run(&temp, &profile);
+    let mut run = loopback_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     let samples = ramp(1_000);
     let (bytes, _) = experiments::waveform_of(&samples);
     let entries = [
-        run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap(),
         run.submit(
             SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
             Some(&bytes),
@@ -842,6 +866,7 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
     ];
     assert!(entries.iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
     let manifest = end_session(run, clock, T0 + 20_000_000);
+    assert_eq!(manifest.action_log.len(), 2, "the repeat and the capture: no Action put a channel in a stream, connect did");
     let capture = artifact(&manifest, "rec", 0);
     let first = capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap();
     let received = rig::read_capture(capture, 1).remove(0);
@@ -850,6 +875,149 @@ fn v57_a_software_loopback_session_captures_what_it_transmits() {
         let k = first + index as i64;
         assert_eq!(*sample, samples[((k - 1_000) % 1_000) as usize], "captured sample {k}");
     }
+}
+
+// ---------------------------------------------------------------- connect's initial streams (RS-12, RM-30)
+
+fn bursts_of(manifest: &Manifest) -> usize {
+    section(manifest, "mock", "ezsdr.radio.mock.bursts").as_array().map_or(0, Vec::len)
+}
+
+#[test]
+fn v58_a_default_session_has_no_stream_and_nothing_flows() {
+    // RM-30: no channel is in a stream unless the Session asks. The default profile still links the
+    // radio's `rx0` to its recorder, and the Session connects, advances and ends with nothing flowing.
+    for profile_name in ["x3xx", "ideal"] {
+        let temp = rig::TempDir::new(&format!("v58-no-stream-{profile_name}"));
+        let profile = rig::session_profile(profile_name, json!({ "id": "mock" }), &temp.0, json!({}));
+        let assembly = rig::assemble(&profile, BTreeMap::new());
+        let run = support::session_run_with(&temp, &profile, assembly, &Default::default());
+        assert!(matches!(run.state(), RunState::Running {}), "{profile_name}: {:?}", run.state());
+        let clock = root(&run);
+        let effective = &run.effective()[&Ident::parse("radio").unwrap()];
+        for number in 0..2 {
+            for direction in ["rx", "tx"] {
+                assert_eq!(effective[&Key::parse(&format!("radio.{direction}.c{number}.stream")).unwrap()], Value::from(-1), "{profile_name}: {direction} c{number}");
+            }
+        }
+        let manifest = end_session(run, clock, T0 + 100_000_000);
+        assert!(manifest.clocks.sample_clocks.is_empty(), "{profile_name}: no stream, no SampleClock: {:?}", manifest.clocks.sample_clocks);
+        assert!(manifest.artifacts.is_empty(), "{profile_name}: nothing was recorded");
+        assert_eq!(manifest.action_log.len(), 0);
+    }
+}
+
+#[test]
+fn v58_membership_alone_transmits_nothing() {
+    // A transmit channel in a stream gives the stream its clock and sends no waveform (RM-30).
+    let temp = rig::TempDir::new("v58-membership-alone");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let assembly = rig::assemble(&profile, BTreeMap::new());
+    let initial = support::asking("radio", &[("radio.rx.c0.stream", ezsdr_kernel::spec::Scalar::Int(0)), ("radio.tx.c0.stream", ezsdr_kernel::spec::Scalar::Int(0))]);
+    let mut run = support::session_run_with(&temp, &profile, assembly, &initial);
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 5_000_000)).unwrap();
+    let capture = SessionAction::Vocabulary {
+        ns: Namespace::parse("sink").unwrap(),
+        verb: Ident::parse("capture").unwrap(),
+        target: output("rec"),
+        at: None,
+        params: BTreeMap::from([(Key::parse("sink.capture_samples").unwrap(), Value::from(2_000))]),
+    };
+    run.submit(capture, None).unwrap();
+    let manifest = end_session(run, clock, T0 + 20_000_000);
+    assert!(manifest.clocks.sample_clocks.iter().any(|c| c.stream.path() == "mock/tx/s0"), "the transmit stream has its clock");
+    assert_eq!(bursts_of(&manifest), 0, "no burst was sent");
+    assert!(rig::read_capture(artifact(&manifest, "rec", 0), 1).remove(0).iter().all(|s| *s == (0.0, 0.0)), "nothing was transmitted into the receiver");
+}
+
+#[test]
+fn v58_connect_two_streams_each_have_their_own_clock() {
+    // Streams are set at connect: two receive and two transmit streams of one channel each, a
+    // SampleClock for each, and no Action that put a channel in a stream.
+    let temp = rig::TempDir::new("v58-two-streams");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let assembly = rig::assemble(&profile, BTreeMap::new());
+    let one = ezsdr_kernel::spec::Scalar::Int(1);
+    let zero = ezsdr_kernel::spec::Scalar::Int(0);
+    let initial = support::asking("radio", &[("radio.rx.c0.stream", zero.clone()), ("radio.rx.c1.stream", one.clone()), ("radio.tx.c0.stream", zero), ("radio.tx.c1.stream", one)]);
+    let run = support::session_run_with(&temp, &profile, assembly, &initial);
+    let clock = root(&run);
+    let manifest = end_session(run, clock, T0 + 20_000_000);
+    let mut streams: Vec<_> = manifest.clocks.sample_clocks.iter().map(|c| c.stream.path().to_owned()).collect();
+    streams.sort();
+    // The recorder is linked to `rx0` only, and a receive stream with no link has no block to give a clock.
+    assert_eq!(streams, ["mock/rx/s0", "mock/tx/s0", "mock/tx/s1"], "one clock for each stream that runs, none shared");
+    assert_eq!(manifest.action_log.len(), 0, "connect did it all");
+}
+
+#[test]
+fn v58_initial_values_are_the_first_values() {
+    // The rate a Session asks for at connect is the rate of its first SampleClock, and the
+    // configuration it starts with holds the frequency and gain; a rate the grid does not hold is
+    // coerced under a Session's `warn` and recorded (SB-45).
+    let temp = rig::TempDir::new("v58-initial-values");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let assembly = rig::assemble(&profile, BTreeMap::new());
+    let num = |x: f64| ezsdr_kernel::spec::Scalar::Num(ezsdr_kernel::spec::Finite::new(x).unwrap());
+    let initial = support::asking(
+        "radio",
+        &[
+            ("radio.rx.c0.stream", ezsdr_kernel::spec::Scalar::Int(0)),
+            ("radio.rx.s0.sample_rate_hz", num(19.5e6)),
+            ("radio.rx.c0.frequency_hz", num(2.45e9)),
+            ("radio.rx.c0.gain_db", num(10.0)),
+            ("radio.rx.c0.antenna", ezsdr_kernel::spec::Scalar::from("TX/RX")),
+        ],
+    );
+    let run = support::session_run_with(&temp, &profile, assembly, &initial);
+    let clock = root(&run);
+    let effective = run.effective()[&Ident::parse("radio").unwrap()].clone();
+    assert_eq!(effective[&Key::parse("radio.rx.s0.sample_rate_hz").unwrap()], Value::num(20.0e6).unwrap(), "coerced to the grid");
+    assert_eq!(effective[&Key::parse("radio.rx.c0.frequency_hz").unwrap()], Value::num(2.45e9).unwrap());
+    assert_eq!(effective[&Key::parse("radio.rx.c0.gain_db").unwrap()], Value::num(10.0).unwrap());
+    assert_eq!(effective[&Key::parse("radio.rx.c0.antenna").unwrap()], Value::from("TX/RX"));
+    let manifest = end_session(run, clock, T0 + 5_000_000);
+    let rx = manifest.clocks.sample_clocks.iter().find(|c| c.stream.path() == "mock/rx/s0").expect("the receive clock");
+    assert_eq!((rx.nominal_rate.num(), rx.nominal_rate.den()), (20_000_000, 1), "the first clock has the asked rate");
+    let preview = manifest.admission.coercions_preview.iter().find(|item| item.coercion.key.as_str() == "radio.rx.s0.sample_rate_hz").expect("the coercion is recorded");
+    assert_eq!((preview.coercion.requested.clone(), preview.coercion.applied.clone()), (Value::num(19.5e6).unwrap(), Value::num(20.0e6).unwrap()));
+    assert_eq!(manifest.spec.body["resources"]["radio"]["requires"]["radio.rx.s0.sample_rate_hz"]["value"], 19.5e6, "the Spec holds what was asked, not what was applied");
+    assert_eq!(manifest.spec.body["requirements"]["vocabularies"], json!([{ "id": "radio", "major": 2 }]));
+}
+
+#[test]
+fn v58_connect_refuses_what_the_layout_cannot_carry_at_validate() {
+    // The rules a Spec's `requires` meets, RM-31 and RM-32 among them, judge an initial request at
+    // Validate, before anything is prepared (SB-39).
+    let ask = |requests: &[(&str, ezsdr_kernel::spec::Scalar)], name: &str| {
+        let temp = rig::TempDir::new(name);
+        // One 10 GbE link, as the default profile has (RM-32).
+        let selector = json!({ "id": "mock", "master_clock_hz": [200_000_000], "image": ["hg"], "links": [1], "link_gbps": [10] });
+        let profile = rig::session_profile("x3xx", selector, &temp.0, json!({}));
+        let assembly = rig::assemble(&profile, BTreeMap::new());
+        let run = support::session_run_with(&temp, &profile, assembly, &support::asking("radio", requests));
+        run.finish()
+    };
+    use ezsdr_kernel::spec::{Finite, Scalar};
+    let num = |x: f64| Scalar::Num(Finite::new(x).unwrap());
+    // RM-31: a transmit channel in a stream and the same board's receive antenna on TX/RX.
+    let duplex = ask(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.c0.antenna", Scalar::from("TX/RX"))], "v58-rm31");
+    assert!(matches!(duplex.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "{:?}", duplex.termination.reason);
+    assert!(duplex.admission.rejected.iter().any(|item| item.reason.starts_with("RM-31") && item.reason.contains("transmit channel c0")), "{:?}", duplex.admission.rejected);
+    assert!(duplex.clocks.sample_clocks.is_empty(), "nothing started");
+    // RM-32: 200 + 100 Msps is over one 10 GbE link; 200 + 50 is exactly at it.
+    let streams =
+        |second: f64| [("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.c1.stream", Scalar::Int(1)), ("radio.rx.s0.sample_rate_hz", num(200.0e6)), ("radio.rx.s1.sample_rate_hz", num(second))];
+    let over = ask(&streams(100.0e6), "v58-rm32-over");
+    assert!(matches!(over.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "{:?}", over.termination.reason);
+    assert!(over.admission.rejected.iter().any(|item| item.reason.starts_with("RM-32")), "{:?}", over.admission.rejected);
+    assert!(over.clocks.sample_clocks.is_empty());
+    let at = ask(&streams(50.0e6), "v58-rm32-at");
+    assert!(!matches!(at.termination.reason, Termination::Failed { .. }), "{:?}", at.termination.reason);
+    // A key no Vocabulary owns is refused at Validate too, and the Run exists to say so (RS-12).
+    let unknown = ask(&[("zzz.x", Scalar::Int(1))], "v58-unknown-key");
+    assert!(matches!(unknown.termination.reason, Termination::Failed { stage: Stage::Validate, .. }), "{:?}", unknown.termination.reason);
 }
 
 #[test]

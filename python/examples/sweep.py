@@ -11,7 +11,10 @@ def build_experiment(gain_db):
         "resources": {
             "radio": {
                 "kind": "radio.device",
-                "requires": {"radio.rx.c0.gain_db": {"kind": "eq", "value": gain_db}},
+                "requires": {
+                    "radio.rx.c0.stream": {"kind": "eq", "value": 0},
+                    "radio.rx.c0.gain_db": {"kind": "eq", "value": gain_db},
+                },
             }
         },
         "outputs": [

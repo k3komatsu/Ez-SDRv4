@@ -437,6 +437,7 @@ fn run(sequence: &Sequence) -> Record {
     device.tx_open(0, &[0, 1]).unwrap();
     let (to_tx, from_tx) = channel();
     let mut config = core.description.defaults();
+    config.insert(key("radio.rx.c0.stream"), Value::from(0));
     config.insert(key("radio.tx.c0.stream"), Value::from(0));
     let start = super::Start { t0: T0, rx: vec![Some((ezsdr_radio::timeline::Channels::first(1), 200))], tx: vec![Some((tx, ezsdr_radio::timeline::Channels::first(1)))] };
     let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);

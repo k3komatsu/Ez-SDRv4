@@ -53,8 +53,7 @@ The system may become sophisticated internally, but basic use must remain simple
 ```python
 import ezsdr
 
-with ezsdr.connect() as sdr:
-    sdr.tx_channels[0].stream = 0
+with ezsdr.connect(rx={0: [0]}, tx={0: [0]}) as sdr:
     sdr.tx.repeat(x)
     y = sdr.rx.capture(100_000)
 ```
@@ -62,12 +61,7 @@ with ezsdr.connect() as sdr:
 A slightly more explicit experiment should remain natural:
 
 ```python
-with ezsdr.connect() as sdr:
-    sdr.rx_channels[0].frequency = 2.45e9
-    sdr.rx.sample_rate = 20e6
-    sdr.rx_channels[0].gain = 20
-
-    sdr.tx_channels[0].stream = 0
+with ezsdr.connect(rx={0: ezsdr.Stream([0], sample_rate=20e6, frequency={0: 2.45e9}, gain={0: 20})}, tx={0: [0]}) as sdr:
     sdr.tx.repeat(x)
     y = sdr.rx.capture(1_000_000)
 ```
@@ -103,11 +97,11 @@ Interactive use is a long-lived context in which the user changes configuration,
 
 > **`connect()` opens a Session. A Session is a Run whose ExperimentSpec is implicit and whose Manifest records an action log.**
 
-`connect()` derives the Session's implicit Spec from the BindingProfile, hashes it like any other, compiles it through the whole pipeline and leaves the Run running. Every Easy API call is one entry in a densely numbered action log with its runtime TimePoint (§15) and its outcome, rejected calls included, and nothing bypasses the log. Before anything is dispatched, each Action passes the Kernel's one admission order, in which the parameter's declared update class (§27) is checked before the same check set that `validate()` applies to a Spec — the registered admission checks, the RF envelope (§52) among them, and the coercion policy (§11) — and a rejected Action is logged and never reaches the real-time path (invariant 10). The Kernel's Session verbs are lifecycle verbs only — `SetParameter`, `Stop` with an optional target, `Release`, `Adopt`, `Renew`, `RunChild` — while domain verbs such as repeating a waveform or capturing are namespaced Vocabulary verbs that compile to Kernel Actions as their Vocabulary declares. The TimingEnvelope and PerformanceEnvelope (§13) are to be checked on this path as well; no Phase 1 rule does so yet, because both are opaque until the Radio Model (Phase 2). A Session changes parameters only through declared update classes and never changes structure. `sdr.run(spec)` creates a child Run with its own profile under the Session's Lease; replaying a Session re-applies its admitted entries and refuses a profile with a different hash. The default Lease is attached, so leaving the `with` block stops TX and releases resources; a detached Lease needs a TTL and is recorded in the Manifest (§53).
+`connect()` derives the Session's implicit Spec from the BindingProfile and the streams the caller asks for (the channels it uses, and their starting rate, frequency and gain: intent, so in the Spec and not in the BindingProfile), hashes it like any other, compiles it through the whole pipeline and leaves the Run running. Every Easy API call is one entry in a densely numbered action log with its runtime TimePoint (§15) and its outcome, rejected calls included, and nothing bypasses the log. Before anything is dispatched, each Action passes the Kernel's one admission order, in which the parameter's declared update class (§27) is checked before the same check set that `validate()` applies to a Spec — the registered admission checks, the RF envelope (§52) among them, and the coercion policy (§11) — and a rejected Action is logged and never reaches the real-time path (invariant 10). The Kernel's Session verbs are lifecycle verbs only — `SetParameter`, `Stop` with an optional target, `Release`, `Adopt`, `Renew`, `RunChild` — while domain verbs such as repeating a waveform or capturing are namespaced Vocabulary verbs that compile to Kernel Actions as their Vocabulary declares. The TimingEnvelope and PerformanceEnvelope (§13) are to be checked on this path as well; no Phase 1 rule does so yet, because both are opaque until the Radio Model (Phase 2). A Session changes parameters only through declared update classes and never changes structure. `sdr.run(spec)` creates a child Run with its own profile under the Session's Lease; replaying a Session re-applies its admitted entries and refuses a profile with a different hash. The default Lease is attached, so leaving the `with` block stops TX and releases resources; a detached Lease needs a TTL and is recorded in the Manifest (§53).
 
 Normative: [design/04-run-and-session.md](../04-run-and-session.md), rules RS-4, RS-12…RS-25a; the implicit Spec's derivation in [design/03-spec-and-binding.md](../03-spec-and-binding.md), SB-22c; the Python client, its server and the protocol between them in [design/16-easy-api.md](../16-easy-api.md); child Runs in [design/06-kernel-coordinator.md](../06-kernel-coordinator.md), KC-37a; the admission order in the same spec, KC-24.
 
-Assigning the transmit channel to stream 0, then calling `sdr.tx.repeat(x); y = sdr.rx.capture(N)`, yields a Manifest containing the waveform hash, the capture's first sample time and validity flags, and the effective RF configuration.
+Asking at `connect` for the transmit channel in stream 0 and the receive channel in a stream, then calling `sdr.tx.repeat(x); y = sdr.rx.capture(N)`, yields a Manifest containing the waveform hash, the capture's first sample time and validity flags, and the effective RF configuration.
 
 ---
 

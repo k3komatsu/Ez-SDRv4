@@ -116,6 +116,22 @@ fn d3_the_layout_decides_the_channels_on_both_providers() {
 }
 
 #[test]
+fn d3_the_two_providers_default_every_channel_to_no_stream() {
+    // RM-30: no channel of either direction is in a stream by default, on both Providers alike.
+    let selector = ezsdr_acceptance::layout::x3xx_selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
+    let mock = MockRadio::from_binding(&mock_binding(selector.clone())).unwrap();
+    let device = Arc::new(FakeDevice::new(FakeConfig::default())) as Arc<dyn ezsdr_radio_uhd::Device>;
+    let uhd = UhdRadio::from_binding(&uhd_binding(selector), device).unwrap();
+    for provider in [&mock as &dyn Provider, &uhd as &dyn Provider] {
+        for direction in ["rx", "tx"] {
+            for channel in 0..2 {
+                assert_eq!(default_of(provider, &format!("radio.{direction}.c{channel}.stream")), Value::from(-1), "{direction} c{channel}");
+            }
+        }
+    }
+}
+
+#[test]
 fn d3_a_layout_without_receive_channels_requests_none_on_both_providers() {
     // An empty receive layout has no receive channel or stream keys.
     let selector = ezsdr_acceptance::layout::x3xx_selector(&[] as &[&str], &["0:A:ubx:0"]);

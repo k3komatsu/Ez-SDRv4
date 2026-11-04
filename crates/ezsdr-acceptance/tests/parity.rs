@@ -95,6 +95,16 @@ fn requested(constraints: &[(&str, Constraint)]) -> Requested {
     Requested { resource: rid("radio"), constraints: constraints.iter().map(|(name, constraint)| (key(name), constraint.clone())).collect() }
 }
 
+/// RM-30: no channel is in a stream unless a request puts it there; these comparisons receive on
+/// c0, so a request that does not name it gets it, on both providers alike.
+fn with_rx0<'a>(provider: &dyn ezsdr_kernel::module_api::Provider, constraints: &[(&'a str, Constraint)]) -> Vec<(&'a str, Constraint)> {
+    let mut constraints = constraints.to_vec();
+    if provider.instance().tree.capabilities.contains_key(&Key::parse("radio.rx.c0.stream").unwrap()) && !constraints.iter().any(|(name, _)| *name == "radio.rx.c0.stream") {
+        constraints.push(("radio.rx.c0.stream", Constraint::Eq { value: Scalar::from(0) }));
+    }
+    constraints
+}
+
 fn fragment(module: ModuleRef, constraints: &[(&str, Constraint)]) -> Fragment {
     Fragment {
         id: Ident::parse("radio").unwrap(),
@@ -236,7 +246,8 @@ impl MockRig {
             ctx.host_budget = RelativeBudget::new(Duration::new(ClockDomainId::HOST_MONOTONIC, 5_000_000_000)).unwrap();
             ctx
         };
-        let prepared = mock.prepare(&fragment(ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }, constraints), ctx).unwrap();
+        let constraints = with_rx0(&mock, constraints);
+        let prepared = mock.prepare(&fragment(ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }, &constraints), ctx).unwrap();
         MockRig { mock, clocks, time, root, actions, effective: prepared.effective, events, rx_links }
     }
 
@@ -368,7 +379,8 @@ impl UhdRig {
             ctx
         };
         let mut radio = UhdRadio::from_binding(&uhd_binding(selector), device.clone())?;
-        let prepared = radio.prepare(&fragment(ezsdr_radio_uhd::module_ref(), constraints), ctx)?;
+        let constraints = with_rx0(&radio, constraints);
+        let prepared = radio.prepare(&fragment(ezsdr_radio_uhd::module_ref(), &constraints), ctx)?;
         Ok(UhdRig { radio, device, clocks, time, root, actions: queue, effective: prepared.effective, events, seen_events: Mutex::new(Vec::new()), rx_links, _authority: authority })
     }
 

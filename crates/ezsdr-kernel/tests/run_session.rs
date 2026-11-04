@@ -815,7 +815,7 @@ fn rs_12_session_implicit_spec_hashed() {
     let reg = registry();
     let profile = session_profile();
     let provider = TestProvider::new("radio", 2);
-    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink())).expect("builds");
+    let spec = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink()), &Default::default()).expect("builds");
     assert_eq!(spec.version, 1);
     assert_eq!(spec.resources.len(), 1);
     assert!(spec.resources[&id("radio")].requires.is_empty(), "empty requires");
@@ -828,6 +828,103 @@ fn rs_12_session_implicit_spec_hashed() {
     let hash = ContentHash::of(&spec).expect("hashes");
     assert_eq!(hash, ContentHash::of(&spec).expect("hashes"));
     assert!(hash.as_str().starts_with("sha256:"));
+}
+
+/// An `InitialRequests` of one resource's `test.*` keys (RS-12).
+fn initial(resource: &str, requests: &[(&str, ezsdr_kernel::spec::Scalar)]) -> ezsdr_kernel::session::InitialRequests {
+    [(id(resource), requests.iter().map(|(name, value)| (key(name), value.clone())).collect())].into_iter().collect()
+}
+
+#[test]
+fn rs_12_initial_requests_enter_requires_and_declare_the_major() {
+    use ezsdr_kernel::spec::{Constraint, Scalar};
+    let reg = registry();
+    let profile = session_profile();
+    let provider = TestProvider::new("radio", 2);
+    let build = |requests: &ezsdr_kernel::session::InitialRequests| implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink()), requests).expect("builds");
+
+    // Two keys of one Vocabulary: each is an `Eq` in the named resource's `requires`, and the
+    // Vocabulary is declared once, at the registered major (SB-11).
+    let spec = build(&initial("radio", &[("test.count", Scalar::Int(2)), ("test.flag", Scalar::Bool(true))]));
+    let requires = &spec.resources[&id("radio")].requires;
+    assert_eq!(requires.len(), 2);
+    assert_eq!(requires[&key("test.count")], Constraint::Eq { value: Scalar::Int(2) });
+    assert_eq!(requires[&key("test.flag")], Constraint::Eq { value: Scalar::Bool(true) });
+    assert_eq!(spec.requirements.vocabularies, vec![ezsdr_kernel::spec::VocabularyReq { id: ns("test"), major: 1 }]);
+
+    // No request leaves the Spec as before: empty `requires`, no Vocabulary, the same hash as an
+    // empty map for any other reason (RS-12).
+    let plain = build(&Default::default());
+    assert!(plain.resources[&id("radio")].requires.is_empty());
+    assert!(plain.requirements.vocabularies.is_empty());
+    assert_eq!(ContentHash::of(&plain).unwrap(), ContentHash::of(&build(&initial("radio", &[]))).unwrap(), "an empty request map for the resource adds nothing");
+}
+
+#[test]
+fn rs_12_the_same_initial_requests_hash_alike_and_others_differently() {
+    use ezsdr_kernel::spec::Scalar;
+    let reg = registry();
+    let profile = session_profile();
+    let provider = TestProvider::new("radio", 2);
+    let hash = |requests: &[(&str, Scalar)]| ContentHash::of(&implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink()), &initial("radio", requests)).unwrap()).unwrap();
+    let a = hash(&[("test.count", Scalar::Int(2)), ("test.flag", Scalar::Bool(true))]);
+    assert_eq!(a, hash(&[("test.flag", Scalar::Bool(true)), ("test.count", Scalar::Int(2))]), "the order the requests are given in is not part of the Spec");
+    assert_ne!(a, hash(&[("test.count", Scalar::Int(3)), ("test.flag", Scalar::Bool(true))]), "another value is another Spec");
+    assert_ne!(a, hash(&[("test.count", Scalar::Int(2))]), "another set of keys is another Spec");
+}
+
+/// A Vocabulary `id` of major `major` with the Int keys `keys` (RS-12's ownership tests).
+fn vocabulary_of_ints(id: &str, major: u32, keys: &[&str]) -> ezsdr_kernel::module_api::VocabularyDescriptor {
+    use ezsdr_kernel::spec::{CoercionPolicy, KeyDecl, ValueKind};
+    let decl = |name: &&str| KeyDecl { key: key(name), indexed: None, kind: ValueKind::Int, coercible: false, coercion_default: CoercionPolicy::Reject, update_class: None };
+    ezsdr_kernel::module_api::VocabularyDescriptor {
+        id: ns(id),
+        version: ezsdr_kernel::module_api::Version::new(major, 0, 0),
+        prefix: ns(id),
+        keys: keys.iter().map(decl).collect(),
+        event_kinds: Vec::new(),
+        verbs: Vec::new(),
+        checks: Vec::new(),
+    }
+}
+
+#[test]
+fn rs_12_an_initial_key_declares_the_vocabulary_that_declares_it() {
+    use ezsdr_kernel::spec::{Scalar, VocabularyReq};
+    // Nested prefixes: `test.deep.count` carries the prefix `test`, but `test.deep`@2 declares it.
+    let mut nested = registry();
+    nested.register_vocabulary(vocabulary_of_ints("test.deep", 2, &["test.deep.count"])).expect("a nested prefix registers");
+    // Two Vocabularies with one prefix and disjoint keys (the Radio-style split).
+    let mut shared = ModuleRegistry::new();
+    shared.register_vocabulary(vocabulary_of_ints("alpha", 1, &["alpha.one"])).expect("fresh");
+    let mut beta = vocabulary_of_ints("alpha", 3, &["alpha.two"]);
+    beta.id = ns("alpha.beta");
+    shared.register_vocabulary(beta).expect("a second Vocabulary with the prefix of the first");
+    let declared = |reg: &ModuleRegistry, name: &str| reg.vocabulary_of(&key(name)).map(|v| (v.id.as_str().to_owned(), v.version.major));
+    assert_eq!(declared(&nested, "test.deep.count"), Some(("test.deep".to_owned(), 2)));
+    assert_eq!(declared(&nested, "test.count"), Some(("test".to_owned(), 1)));
+    assert_eq!(declared(&nested, "test.deep.missing"), None, "no Vocabulary declares it, so none is named");
+    assert_eq!(declared(&shared, "alpha.one"), Some(("alpha".to_owned(), 1)));
+    assert_eq!(declared(&shared, "alpha.two"), Some(("alpha.beta".to_owned(), 3)));
+    // Through the Spec: the major `validate` checks is the declaring Vocabulary's.
+    let profile = session_profile();
+    let provider = TestProvider::new("radio", 2);
+    let spec = implicit_spec(&profile, &nested, &bound(&provider), &sinks(&test_sink()), &initial("radio", &[("test.deep.count", Scalar::Int(1)), ("test.count", Scalar::Int(2))])).expect("builds");
+    let mut majors: Vec<_> = spec.requirements.vocabularies.iter().map(|VocabularyReq { id, major }| (id.as_str().to_owned(), *major)).collect();
+    majors.sort();
+    assert_eq!(majors, [("test".to_owned(), 1), ("test.deep".to_owned(), 2)]);
+}
+
+#[test]
+fn rs_12_session_initial_requests_name_a_provider_resource() {
+    use ezsdr_kernel::spec::Scalar;
+    let reg = registry();
+    let profile = session_profile();
+    let provider = TestProvider::new("radio", 2);
+    let refused = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink()), &initial("recorder", &[("test.count", Scalar::Int(2))])).expect_err("a Sink is no Provider resource");
+    assert!(refused.to_string().contains("RS-12: initial requests name recorder, which is no Provider resource"), "{refused}");
+    let refused = implicit_spec(&profile, &reg, &bound(&provider), &sinks(&test_sink()), &initial("nobody", &[])).expect_err("an unbound name is refused even when it asks for nothing");
+    assert!(refused.to_string().contains("RS-12: initial requests name nobody"), "{refused}");
 }
 
 #[test]

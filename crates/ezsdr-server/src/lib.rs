@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod catalogue;
+mod initial;
 pub mod protocol;
 
 mod transport;
@@ -137,7 +138,7 @@ impl Server {
         }
         match request {
             Request::Hello { .. } => fail(ErrorKind::Protocol, "EA-4: hello was already said"),
-            Request::Connect { profile, lease } => self.connect(profile, lease),
+            Request::Connect { profile, lease, initial } => self.connect(profile, lease, initial),
             request => {
                 let Some(live) = self.live.as_mut() else {
                     return fail(ErrorKind::Protocol, "EA-4: no Session is connected");
@@ -187,7 +188,7 @@ impl Server {
         }
     }
 
-    fn connect(&mut self, profile: Option<serde_json::Value>, lease: Option<Lease>) -> Handled {
+    fn connect(&mut self, profile: Option<serde_json::Value>, lease: Option<Lease>, initial: Option<BTreeMap<String, protocol::ResourceInit>>) -> Handled {
         if self.live.is_some() {
             return fail(ErrorKind::Protocol, "EA-4: a Session is already connected");
         }
@@ -207,9 +208,15 @@ impl Server {
             Ok(assembly) => assembly,
             Err(message) => return fail(ErrorKind::Refused, message),
         };
+        // EA-10: the radios' channel counts are known only now, so a request for a channel or
+        // stream the layout lacks is refused here, before the Kernel creates a Run.
+        let (requests, streams) = match initial::expand(&initial.unwrap_or_default(), &assembly) {
+            Ok(expanded) => expanded,
+            Err(message) => return fail(ErrorKind::Refused, message),
+        };
         let clocks = assembly.clocks.clone();
         let device_paced = assembly.authority.descriptor().pacing == Pacing::Device;
-        let mut run = match coordinator::connect(&profile, assembly, lease.unwrap_or_default()) {
+        let mut run = match coordinator::connect(&profile, &requests, assembly, lease.unwrap_or_default()) {
             Ok(run) => run,
             Err(error) => return fail(ErrorKind::Refused, error.to_string()),
         };
@@ -237,6 +244,7 @@ impl Server {
                 Ok(ClockDomainKind::Root { epoch, .. }) => epoch,
                 _ => unreachable!("the primary root is a registered Root (KC-3)"),
             },
+            streams,
         };
         self.live = Some(Live { run, clocks, profile, device_paced });
         Handled::ok(response)

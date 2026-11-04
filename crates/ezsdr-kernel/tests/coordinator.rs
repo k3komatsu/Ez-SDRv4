@@ -196,7 +196,52 @@ fn executor_docs() -> (serde_json::Value, serde_json::Value) {
 fn session_with_provider(provider: Box<dyn ezsdr_kernel::module_api::Provider>) -> ezsdr_kernel::coordinator::RunHandle {
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
     assembly.providers.insert(Ident::parse("radio").unwrap(), provider);
-    connect(&profile_one(), assembly, Lease::attached()).expect("valid Session entry")
+    connect(&profile_one(), &Default::default(), assembly, Lease::attached()).expect("valid Session entry")
+}
+
+/// A Session whose radio is `provider`, asking `requests` of it at `connect` (RS-12).
+fn session_asking(provider: TestProvider, requests: &[(&str, Scalar)]) -> Result<ezsdr_kernel::coordinator::RunHandle, ezsdr_kernel::spec::SpecError> {
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(provider));
+    let initial = [(Ident::parse("radio").unwrap(), requests.iter().map(|(name, value)| (Key::parse(name).unwrap(), value.clone())).collect())].into_iter().collect();
+    connect(&profile_one(), &initial, assembly, Lease::attached())
+}
+
+#[test]
+fn rs_12_initial_requests_reach_the_provider_through_connect() {
+    // The implicit Spec's `requires` goes through the whole pipeline: the Provider is asked in
+    // validation and again in prepare, and the configuration the Session starts with holds the value.
+    let provider = TestProvider::new("radio", 2);
+    let calls = provider.coerce_calls.clone();
+    let run = session_asking(provider, &[("test.count", Scalar::Int(2))]).expect("a request the capability satisfies connects");
+    assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("test.count").unwrap()), Some(&Value::from(2)));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "the Provider is asked once in validation and once in prepare, both with the request (SB-39, SB-41)");
+    let plain = session_asking(TestProvider::new("radio", 2), &[]).expect("connects");
+    assert!(!plain.effective()[&Ident::parse("radio").unwrap()].contains_key(&Key::parse("test.count").unwrap()), "no request, no value");
+    let (with, without) = (run.finish().spec, plain.finish().spec);
+    assert_ne!(with.hash, without.hash, "the Manifest's Spec is the one that carries the request");
+    assert_eq!(with.body["resources"]["radio"]["requires"]["test.count"], serde_json::json!({ "kind": "eq", "value": 2 }));
+    assert_eq!(with.body["requirements"]["vocabularies"], serde_json::json!([{ "id": "test", "major": 1 }]));
+}
+
+#[test]
+fn rs_12_an_initial_request_is_judged_like_a_spec_requires() {
+    // Validation refuses what no capability satisfies and the Provider cannot coerce (SB-6,
+    // SB-7), and a coercible value follows a Session's policy, `warn` (SB-45): applied, with the
+    // coercion and a warning, where a Spec Run's `reject` would refuse it.
+    let refused = session_asking(TestProvider::new("radio", 2), &[("test.count", Scalar::Int(3))]).expect("a refused Session is a failed Run, not an Err");
+    assert!(matches!(refused.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, .. } }), "{:?}", refused.state());
+    let _ = refused.finish();
+    let provider = TestProvider::new("radio", 2).with_grid(20.0);
+    let calls = provider.coerce_calls.clone();
+    let run = session_asking(provider, &[("test.grid", Scalar::Num(ezsdr_kernel::spec::Finite::new(19.0).unwrap()))]).expect("connects");
+    assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("test.grid").unwrap()], Value::num(20.0).unwrap(), "the coerced value is what the Session starts with");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "once in validation and once in prepare");
+    let manifest = run.finish();
+    let report = &manifest.prepare.reports[&Ident::parse("radio").unwrap()];
+    assert!(report.coercions.iter().any(|c| c.key == Key::parse("test.grid").unwrap() && c.requested == Value::num(19.0).unwrap() && c.applied == Value::num(20.0).unwrap()), "{:?}", report.coercions);
 }
 
 #[test]
@@ -829,7 +874,7 @@ fn rs_45_hash_equal_for_equal_inputs() {
     assert_eq!((&terse.binding.hash, &terse.binding.body), (&spelled.binding.hash, &spelled.binding.body));
     // A Session records its profile the same way (`connect`).
     for profile in [profile_one(), spelled_profile] {
-        let session = connect(&profile, with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio"), Lease::attached()).expect("valid Session entry").finish();
+        let session = connect(&profile, &Default::default(), with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio"), Lease::attached()).expect("valid Session entry").finish();
         assert_eq!((&session.binding.hash, &session.binding.body), (&terse.binding.hash, &terse.binding.body));
     }
 }
@@ -853,7 +898,7 @@ fn rs_38_spec_source_is_recorded_outside_the_spec_hash() {
     // A Session records the caller's value too, as opaque provenance.
     let mut assembly = with_provider(rig(Pacing::FreeRunning).assembly, "radio", "radio");
     assembly.spec_source = Some(source.clone());
-    let mut session = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut session = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     session.disconnect();
     assert_eq!(session.finish().spec.source, Some(source));
 }
@@ -981,7 +1026,7 @@ fn kc_24_a_burst_to_a_non_provider_target_is_refused() {
     });
     let probe = Probe::new();
     let assembly = output_assembly(&probe, None, None);
-    let mut run = connect(&profile, assembly, Lease::attached()).expect("Session profile is valid");
+    let mut run = connect(&profile, &Default::default(), assembly, Lease::attached()).expect("Session profile is valid");
     if !matches!(run.state(), RunState::Running {}) {
         let manifest = run.finish();
         panic!("Session failed during connect: {:?}", failure(&manifest));
@@ -1015,7 +1060,7 @@ fn kc_24_a_burst_time_on_an_unrelated_root_is_refused() {
     rig.assembly
         .providers
         .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx")));
-    let mut run = connect(&profile_one(), rig.assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), rig.assembly, Lease::attached()).unwrap();
     let entry = run
         .submit(
             SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: Some(TimePoint::new(other, 5)), params: BTreeMap::new() },
@@ -1159,7 +1204,7 @@ fn rs_17_a_session_rate_change_is_coerced_by_its_provider() {
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
     assembly.registry = run_registry_classed();
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2).with_grid(20.0), &probe)));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.grid").unwrap(), value: Value::num(19.5).unwrap() }, None).unwrap();
     assert!(matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
         if coercions.iter().any(|c| c.requested == Value::num(19.5).unwrap() && c.applied == Value::num(20.0).unwrap())));
@@ -1177,7 +1222,7 @@ fn rs_17_a_kind_only_coercion_is_recorded() {
     let mut assembly = rig(Pacing::FreeRunning).assembly;
     assembly.registry = run_registry_classed();
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_grid(0.001)));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.grid").unwrap(), value: Value::from(3) }, None).unwrap();
     assert!(
         matches!(entry.outcome, Outcome::Admitted { ref coercions, .. }
@@ -1214,7 +1259,7 @@ fn rs_17_a_session_change_beyond_a_joint_limit_is_refused() {
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
     assembly.registry = run_registry_classed();
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_joint_limit(50.0).with_effective("test.count", Value::from(2))));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run.submit(SessionAction::SetParameter { target: support::target("radio"), key: Key::parse("test.grid").unwrap(), value: Value::num(40.0).unwrap() }, None).unwrap();
     assert!(matches!(entry.outcome, Outcome::Rejected { ref violations }
         if violations.iter().any(|v| v.check == ns("ezsdr.coercion") && v.key == Some(Key::parse("test.grid").unwrap()))));
@@ -1272,7 +1317,7 @@ fn kc_28_a_waveform_is_an_input_before_admission() {
     let probe = Probe::new();
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx")));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let bytes = vec![0u8; 800];
     let entry = run
         .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&bytes))
@@ -1297,7 +1342,7 @@ fn kc_28_an_untimed_burst_is_admitted_at_now_plus_lead() {
                 .registering_at_arm("radio/tx"),
         ),
     );
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run
         .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&[0u8; 80]))
         .unwrap();
@@ -1319,7 +1364,7 @@ fn kc_28_an_untimed_update_verb_to_a_resource_waits_for_the_provider_lead() {
         Ident::parse("radio").unwrap(),
         Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2).with_min_command_lead(Duration::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 2_000_000)), &probe)),
     );
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run
         .submit(
             SessionAction::Vocabulary {
@@ -1365,7 +1410,7 @@ fn untimed_burst_lands_at_its_clock_s_origin(lead_ns: Option<i64>) {
     assembly
         .providers
         .insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", provider, &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx").with_arm_origin_after(5_000_000)));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run
         .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&[0u8; 80]))
         .unwrap();
@@ -1384,7 +1429,7 @@ fn kc_36_detached_lease_expiry_ends_the_run() {
     let mut rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
     let lease = Lease::detached(5000, false, "tok", &*rig.host).unwrap();
     rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), rig.assembly, lease).unwrap();
     run.disconnect();
     rig.host.advance(5000);
     run.check_lease();
@@ -1412,7 +1457,7 @@ fn kc_37_run_child_is_refused() {
 #[test]
 fn kc_35_connect_refuses_an_invalid_lease() {
     let lease = Lease { mode: LeaseMode::Detached { ttl_ms: 0, renewable: false }, token: Some("t".to_owned()), holder: None, expires_at_host: None, adoptions: 0, released: false };
-    let error = match connect(&profile_one(), rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly, lease) {
+    let error = match connect(&profile_one(), &Default::default(), rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly, lease) {
         Ok(_) => panic!("zero TTL is refused"),
         Err(error) => error,
     };
@@ -2256,7 +2301,7 @@ fn kc_36_finish_checks_an_expired_detached_lease() {
     let mut rig = rig(Pacing::FreeRunning);
     let lease = Lease::detached(5000, false, "tok", &*rig.host).unwrap();
     rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), rig.assembly, lease).unwrap();
     run.disconnect();
     rig.host.advance(5000);
     let manifest = run.finish();
@@ -2273,7 +2318,7 @@ fn rs_24_both_refused_lease_outcomes_are_logged() {
     let mut first = rig(Pacing::FreeRunning);
     let lease = Lease::detached(5000, true, "tok", &*first.host).unwrap();
     first.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-    let mut run = connect(&profile_one(), first.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), first.assembly, lease).unwrap();
     let wrong = SessionAction::Adopt { token: "wrong".to_owned() };
     let entry = run.submit(wrong.clone(), None).unwrap();
     let Outcome::Rejected { violations } = entry.outcome else { panic!("a wrong token is refused, not admitted: {:?}", entry.outcome) };
@@ -2286,7 +2331,7 @@ fn rs_24_both_refused_lease_outcomes_are_logged() {
     let mut fixed = rig(Pacing::FreeRunning);
     let lease = Lease::detached(5000, false, "tok", &*fixed.host).unwrap();
     fixed.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-    let mut run = connect(&profile_one(), fixed.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), fixed.assembly, lease).unwrap();
     let renew = SessionAction::Renew {};
     let entry = run.submit(renew.clone(), None).unwrap();
     let Outcome::Rejected { violations } = entry.outcome else { panic!("a non-renewable Lease is refused, not admitted: {:?}", entry.outcome) };
@@ -2459,7 +2504,7 @@ fn kb_01_a_provider_reads_a_session_waveform_by_hash() {
     let probe = Probe::new();
     let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx")));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let bytes: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
     let entry = run
         .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&bytes))
@@ -2478,7 +2523,7 @@ fn kb_01_b_the_store_keeps_no_unverified_entry() {
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx")));
     let bytes: Vec<u8> = (0..800u32).map(|i| (i % 251) as u8).collect();
     assembly.inputs.insert(ezsdr_kernel::hash::ContentHash::of_bytes(&bytes), vec![1, 2, 3]);
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
     let entry = run
         .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&bytes))
         .unwrap();
@@ -2889,7 +2934,7 @@ fn kf_03_rs_25a_refusals() {
         let mut assembly = rig(Pacing::FreeRunning).assembly;
         assembly.checks = checks();
         assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-        connect(&parent_profile, assembly, Lease::attached()).expect("valid Session entry")
+        connect(&parent_profile, &Default::default(), assembly, Lease::attached()).expect("valid Session entry")
     };
     let mut other_selector = parent_profile.clone();
     other_selector["bindings"]["radio"]["selector"] = serde_json::json!({ "slot": "elsewhere" });
@@ -2962,7 +3007,7 @@ fn kf_03_a_child_inherits_the_lease() {
     let mut rig = rig(Pacing::FreeRunning);
     let lease = Lease::detached(5000, true, "tok", &*rig.host).unwrap();
     rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), rig.assembly, lease).unwrap();
     let (_, child) = run.run_child(&spec_one(), &profile_one(), child_assembly(), &mut drive_to(100)).unwrap();
     let child = child.unwrap();
     assert!(matches!(child.lease.mode, LeaseMode::Detached { .. }), "the child holds its parent's Lease, not an Attached one of its own");
@@ -3028,7 +3073,7 @@ fn two_emitters(at_a: i64, at_b: i64, probe: &Probe) -> ezsdr_kernel::coordinato
         let provider = SteppedProvider::new(name, TestProvider::new(name, 2), probe).with_wakeups(&[at_a, at_b, 9_000]).emitting("test.custom", ezsdr_kernel::event::Severity::Info, at);
         assembly.providers.insert(Ident::parse(name).unwrap(), Box::new(provider));
     }
-    connect(&profile, assembly, Lease::attached()).expect("valid Session entry")
+    connect(&profile, &Default::default(), assembly, Lease::attached()).expect("valid Session entry")
 }
 
 #[test]
@@ -3076,7 +3121,7 @@ fn kf_02_wait_for_answers_ended_first() {
     let probe = Probe::new();
     let provider = SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).with_wakeups(&[50]).emitting("test.custom", ezsdr_kernel::event::Severity::Info, 50);
     rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(provider));
-    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), rig.assembly, lease).unwrap();
     run.advance_to(TimePoint::new(root, 60)).unwrap();
     run.disconnect();
     rig.host.advance(5_000);
@@ -3110,7 +3155,7 @@ fn kf_03_a_lease_that_expires_during_a_child_ends_the_child_first() {
     let lease = Lease::detached(1_000, false, "tok", &*rig.host).unwrap();
     rig.assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
     let host = rig.host.clone();
-    let mut run = connect(&profile_one(), rig.assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), rig.assembly, lease).unwrap();
     run.disconnect();
     let mut child_assembly = child_assembly();
     child_assembly.host_clock = Arc::new(FakeHostClock::new());
@@ -3133,7 +3178,7 @@ fn kf_03_the_parents_checks_judge_the_child() {
     let mut assembly = rig(Pacing::FreeRunning).assembly;
     assembly.checks = run_checks(true);
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2)));
-    let mut run = connect(&profile, assembly, Lease::attached()).unwrap();
+    let mut run = connect(&profile, &Default::default(), assembly, Lease::attached()).unwrap();
     let mut child_assembly = rig(Pacing::FreeRunning).assembly;
     child_assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(TestProvider::new("radio", 2).with_effective("test.grid", Value::num(5.0).unwrap())));
     let (entry, child) = run.run_child(&spec_one(), &profile, child_assembly, &mut drive_to(100)).unwrap();
@@ -3522,7 +3567,7 @@ fn rs_14_a_capture_reaches_the_output_it_names_with_two_sinks_bound() {
     let mut assembly = output_assembly(&probe, None, None);
     assembly.registry = run_registry_classed();
     assembly.sinks.insert(Ident::parse("rec2").unwrap(), Box::new(RecordingSink::new("rec2", &probe)));
-    let mut run = connect(&profile, assembly, Lease::attached()).expect("Session profile is valid");
+    let mut run = connect(&profile, &Default::default(), assembly, Lease::attached()).expect("Session profile is valid");
     assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
     let entry = run
         .submit(
@@ -3860,7 +3905,7 @@ fn kc_24_an_admission_refusal_leaves_no_configuration_and_no_action_id() {
     let mut assembly = rig(Pacing::FreeRunning).assembly;
     assembly.registry = run_registry_classed();
     assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(KindWrongProvider::new(TestProvider::new("radio", 2).stepped())));
-    let mut run = connect(&profile_one(), assembly, Lease::attached()).expect("valid Session entry");
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).expect("valid Session entry");
     let set = |key_name: &str, value: Value| SessionAction::SetParameter { target: support::target("radio"), key: Key::parse(key_name).unwrap(), value };
 
     let refused = run.submit(set("test.gain", Value::num(3.0).unwrap()), None).unwrap();
@@ -3932,7 +3977,7 @@ fn kc_24_a_update_is_refused_by_the_same_check_at_a_session_and_at_arm() {
         let mut assembly = rig(Pacing::FreeRunning).assembly;
         assembly.registry = run_registry_classed();
         assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(KindWrongProvider::new(TestProvider::new("radio", 2).stepped())));
-        let mut run = connect(&profile_one(), assembly, Lease::attached()).expect("valid Session entry");
+        let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).expect("valid Session entry");
         // A valid value first, so the refusal below has a configuration to leave
         // alone rather than an absent key to agree with (KC-25).
         let good = run.submit(set("test.flag", Value::from(true)), None).unwrap();

@@ -2,6 +2,7 @@
 //! server's catalogue assembles one, on any `Device` (spec 18 §6, UR-34).
 #![allow(dead_code, unused_imports)]
 
+use ezsdr_kernel::session::InitialRequests;
 use ezsdr_kernel::spec::Scalar;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -453,8 +454,20 @@ pub fn spec_run(spec: &Json, profile: &Json, device: Arc<dyn Device>, inputs: BT
     start_spec_run(spec, profile, assembly(profile, device, inputs, |r| r)).unwrap()
 }
 
+/// RM-30: no channel is in a stream unless a Session asks. The request that puts receive channel
+/// c0 in stream 0, which most runs receive on, if the profile's radio has a receive channel.
+pub fn rx0(profile: &Json) -> InitialRequests {
+    let has_rx = profile["bindings"]["radio"]["selector"]["rx"].as_array().is_none_or(|rx| !rx.is_empty());
+    let requests = if has_rx { BTreeMap::from([(Key::parse("radio.rx.c0.stream").unwrap(), Scalar::from(0))]) } else { BTreeMap::new() };
+    BTreeMap::from([(Ident::parse("radio").unwrap(), requests)])
+}
+
 pub fn session(profile: &Json, device: Arc<dyn Device>) -> RunHandle {
-    let run = connect(profile, assembly(profile, device, BTreeMap::new(), |r| r), Lease::attached()).unwrap();
+    session_with(profile, device, &rx0(profile))
+}
+
+pub fn session_with(profile: &Json, device: Arc<dyn Device>, initial: &InitialRequests) -> RunHandle {
+    let run = connect(profile, initial, assembly(profile, device, BTreeMap::new(), |r| r), Lease::attached()).unwrap();
     assert!(matches!(run.state(), RunState::Running {}), "{:?}", run.state());
     run
 }

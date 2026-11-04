@@ -339,7 +339,7 @@ fn kg_02_a_failed_sink_is_not_stepped_again() {
 }
 
 fn session(assembly: Assembly, profile: &serde_json::Value) -> RunHandle {
-    let run = connect(profile, assembly, Lease::attached()).unwrap();
+    let run = connect(profile, &Default::default(), assembly, Lease::attached()).unwrap();
     running(&run);
     run
 }
@@ -468,7 +468,7 @@ fn kg_02_a_detached_lease_expires_while_no_call_runs() {
     let probe = Probe::new();
     let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe));
     let lease = Lease::detached(50, false, "token", &SystemHostClock::new()).unwrap();
-    let mut run = connect(&profile_one(), assembly, lease).unwrap();
+    let mut run = connect(&profile_one(), &Default::default(), assembly, lease).unwrap();
     running(&run);
     run.disconnect();
     assert!(probe.wait_for("radio:stop", Wall::from_millis(500)));
@@ -479,7 +479,7 @@ fn kg_02_a_detached_lease_expires_while_no_call_runs() {
 fn detached_session(probe: &Probe, ttl_ms: u64) -> RunHandle {
     let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", probe));
     let lease = Lease::detached(ttl_ms, true, "token", &SystemHostClock::new()).unwrap();
-    let run = connect(&profile_one(), assembly, lease).unwrap();
+    let run = connect(&profile_one(), &Default::default(), assembly, lease).unwrap();
     running(&run);
     run
 }
@@ -670,7 +670,7 @@ fn kc_46b_under_orderly_the_data_thread_steps_on_after_its_stop() {
     let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).publishing(100, Wall::from_millis(1)).with_stop_tail(2));
     let assembly = sink(assembly, RecordingSink::new("rec", &probe).recording_threads(), &probe);
     let lease = Lease::detached(50, false, "token", &SystemHostClock::new()).unwrap();
-    let mut run = connect(&session_sink_profile(), assembly, lease).unwrap();
+    let mut run = connect(&session_sink_profile(), &Default::default(), assembly, lease).unwrap();
     running(&run);
     run.disconnect();
     assert!(probe.wait_for_count("radio:tail", 2, Wall::from_secs(1)));

@@ -21,7 +21,7 @@ use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, Rational, TimePoint};
 use ezsdr_radio_uhd::{Device, FakeConfig, FakeDevice};
-use ezsdr_server::protocol::{ErrorKind, ProtocolError, Reply, ReplyFrame, Request, Response};
+use ezsdr_server::protocol::{ChannelRef, ErrorKind, ProtocolError, Reply, ReplyFrame, Request, ResourceInit, Response, StreamInit, StreamNames};
 use ezsdr_server::{Config, Exit, Handled, Server, serve};
 use serde_json::json;
 
@@ -69,9 +69,29 @@ fn greeted(dir: &Path) -> Server {
     server
 }
 
+/// RM-30: no channel is in a stream unless a Session asks; most runs receive on c0.
+fn rx0() -> Initial {
+    Some(BTreeMap::from([("radio".to_owned(), ResourceInit { rx: vec![StreamInit { number: Some(0), channels: vec![ChannelRef::Number(0)], ..StreamInit::default() }], tx: Vec::new() })]))
+}
+
+/// As [`rx0`], and transmit channel c0 in stream 0 too: a loopback.
+fn loopback() -> Initial {
+    Some(BTreeMap::from([(
+        "radio".to_owned(),
+        ResourceInit {
+            rx: vec![StreamInit { number: Some(0), channels: vec![ChannelRef::Number(0)], ..StreamInit::default() }],
+            tx: vec![StreamInit { number: Some(0), channels: vec![ChannelRef::Number(0)], ..StreamInit::default() }],
+        },
+    )]))
+}
+
 fn connected(dir: &Path) -> (Server, TimePoint) {
+    connected_with(dir, rx0())
+}
+
+fn connected_with(dir: &Path, initial: Initial) -> (Server, TimePoint) {
     let mut server = greeted(dir);
-    let Response::Connected { now, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { now, .. } = ok(server.handle(Request::Connect { profile: None, lease: None, initial }, Vec::new())) else { panic!("connect") };
     (server, now)
 }
 
@@ -233,8 +253,8 @@ fn ea_04_requests() {
     let mut server = greeted(&temp.0);
     assert_eq!(err(server.handle(Request::Submit { action: set("radio.tx.c0.stream", Value::from(0)) }, Vec::new())).kind, ErrorKind::Protocol);
     assert_eq!(err(server.handle(Request::Hello { protocol: 2 }, Vec::new())).kind, ErrorKind::Protocol);
-    ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
-    assert_eq!(err(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())).kind, ErrorKind::Protocol);
+    ok(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new()));
+    assert_eq!(err(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new())).kind, ErrorKind::Protocol);
     assert_eq!(err(server.handle(Request::Status {}, vec![1])).kind, ErrorKind::Protocol, "a request without a body refuses one");
     assert_eq!(err(server.handle(Request::Advance { to: None, by: None }, Vec::new())).kind, ErrorKind::Protocol);
     finish(&mut server);
@@ -298,10 +318,10 @@ fn ea_07_a_profile_naming_an_unknown_module_is_refused() {
     let mut profile = ezsdr_server::default_profile(&temp.0.to_string_lossy());
     profile["bindings"]["radio"]["module"]["id"] = json!("ezsdr.radio.nonexistent");
     let mut server = greeted(&temp.0);
-    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
     assert_eq!(error.message, "EA-7: radio: no Module ezsdr.radio.nonexistent in this server");
-    ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
+    ok(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new()));
     finish(&mut server);
 }
 
@@ -348,12 +368,11 @@ fn ea_08_the_manifests_are_written_to_the_session_directory() {
 #[test]
 fn ea_09_the_default_profile_loops_back() {
     let temp = TempDir::new("loopback");
-    let (mut server, _) = connected(&temp.0);
+    let (mut server, _) = connected_with(&temp.0, loopback());
     let waveform = ramp(1_000);
-    assert!(matches!(submit(&mut server, set("radio.tx.c0.stream", Value::Scalar(Scalar::Int(0))), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), waveform.clone()).outcome, Outcome::Admitted { .. }));
-    // The transmit clock the enable starts begins the `x3xx` 50 ms start lead later, and
-    // the untimed repeat there, on time (RS-19, RM-25).
+    // The untimed repeat goes out 2 ms after it is admitted (RS-19), and 60 ms of Run time
+    // puts the waveform on the air (RM-25).
     let (now, _, _) = status(&mut server);
     server.handle(Request::Advance { to: None, by: Some(Duration::new(now.domain(), 60_000_000)) }, Vec::new());
     let (uri, _) = capture_uri(&mut server, 3_000);
@@ -384,7 +403,7 @@ fn ea_09_the_default_profile_loops_back() {
 fn ea_10_connect_stands_at_t0() {
     let temp = TempDir::new("t0");
     let mut server = greeted(&temp.0);
-    let Response::Connected { now, start_instant, dir, profile, root_epoch, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
+    let Response::Connected { now, start_instant, dir, profile, root_epoch, .. } = ok(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new())) else { panic!() };
     assert_eq!(now, start_instant);
     assert_eq!(now.ticks_in(now.domain()).unwrap(), 2_000_000_000, "the 2 s start lead on a nanosecond root");
     // The simulated root's epoch is no PPS edge (EA-10).
@@ -400,13 +419,247 @@ fn ea_10_a_failed_connect_writes_its_manifest() {
     std::fs::write(&blocker, b"").unwrap();
     let profile = ezsdr_server::default_profile(&blocker.join("captures").to_string_lossy());
     let mut server = greeted(&temp.0);
-    let handled = server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new());
+    let handled = server.handle(Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new());
     assert!(handled.exit);
     let error = err(handled);
     assert_eq!(error.kind, ErrorKind::Ended);
     assert!(matches!(error.termination, Some(Termination::Failed { stage: Stage::Prepare, .. })));
     let written: Manifest = serde_json::from_str(&std::fs::read_to_string(server.dir().unwrap().join("manifest.json")).unwrap()).unwrap();
     assert!(matches!(written.termination.reason, Termination::Failed { stage: Stage::Prepare, .. }));
+}
+
+// ---------------------------------------------------------------- connect's initial streams (EA-10, RS-12)
+
+type Initial = Option<BTreeMap<String, ResourceInit>>;
+/// The radio's effective values and the stream names the reply gave.
+type Joined = (BTreeMap<Key, Value>, BTreeMap<String, StreamNames>);
+
+/// `initial` for the default profile's `radio`.
+fn radio_init(rx: Vec<StreamInit>, tx: Vec<StreamInit>) -> Initial {
+    Some(BTreeMap::from([("radio".to_owned(), ResourceInit { rx, tx })]))
+}
+
+fn numbered(number: u32, channels: &[u32]) -> StreamInit {
+    StreamInit { number: Some(number), channels: channels.iter().map(|c| ChannelRef::Number(*c)).collect(), ..StreamInit::default() }
+}
+
+fn named(name: &str, channels: &[u32]) -> StreamInit {
+    StreamInit { number: None, name: Some(name.to_owned()), ..numbered(0, channels) }
+}
+
+/// `connect` with `initial`; the reply's effective values of `radio` and its stream names.
+fn connect_with(server: &mut Server, initial: Initial) -> Result<Joined, ProtocolError> {
+    let handled = server.handle(Request::Connect { profile: None, lease: None, initial }, Vec::new());
+    match handled.reply {
+        Reply::Result(Response::Connected { mut effective, streams, .. }) => Ok((effective.remove(&Ident::parse("radio").unwrap()).unwrap(), streams)),
+        Reply::Result(other) => panic!("{other:?}"),
+        Reply::Error(error) => Err(error),
+    }
+}
+
+fn membership(effective: &BTreeMap<Key, Value>, direction: &str) -> Vec<i64> {
+    (0..2)
+        .map(|n| match &effective[&Key::parse(&format!("radio.{direction}.c{n}.stream")).unwrap()] {
+            Value::Scalar(Scalar::Int(k)) => *k,
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+/// That no Run was made: the server wrote no Manifest, which every failed Run it makes does (EA-10).
+fn assert_no_run(server: &Server) {
+    assert!(!server.dir().unwrap().join("manifest.json").exists(), "a Run was created and sealed");
+}
+
+#[test]
+fn ea_09_the_default_profile_connects_with_no_stream() {
+    // RM-30: no channel is in a stream unless the Session asks; the default profile's recorder
+    // is still linked to the radio's receive port `rx0`, and the Session connects and nothing flows.
+    let temp = TempDir::new("no-stream");
+    let mut server = greeted(&temp.0);
+    let (effective, streams) = connect_with(&mut server, None).expect("connects");
+    assert_eq!((membership(&effective, "rx"), membership(&effective, "tx")), (vec![-1, -1], vec![-1, -1]));
+    assert!(streams.get("radio").is_none_or(|names| names.rx.is_empty() && names.tx.is_empty()));
+    let (now, rate, _) = status(&mut server);
+    ok(server.handle(Request::Advance { to: None, by: Some(seconds(now, rate, 1)) }, Vec::new()));
+    let Response::Status { sample_clocks, .. } = ok(server.handle(Request::Status {}, Vec::new())) else { panic!() };
+    assert!(sample_clocks.is_empty(), "no stream, no SampleClock: {sample_clocks:?}");
+    let (manifest, _) = finish(&mut server);
+    assert!(manifest.artifacts.is_empty(), "nothing was recorded");
+    assert!(manifest.clocks.sample_clocks.is_empty());
+}
+
+#[test]
+fn ea_10_a_direction_list_is_the_whole_channel_set() {
+    let temp = TempDir::new("whole-set");
+    let mut server = greeted(&temp.0);
+    let (effective, _) = connect_with(&mut server, radio_init(Vec::new(), vec![numbered(0, &[1])])).expect("connects");
+    assert_eq!(membership(&effective, "tx"), vec![-1, 0], "the one channel listed, and not c0");
+    assert_eq!(membership(&effective, "rx"), vec![-1, -1], "a direction left out is in no stream");
+    let (manifest, _) = finish(&mut server);
+    let requires = &manifest.spec.body["resources"]["radio"]["requires"];
+    assert_eq!(requires["radio.tx.c1.stream"], json!({ "kind": "eq", "value": 0 }), "the request reaches the Spec: {requires}");
+    assert_eq!(manifest.spec.body["requirements"]["vocabularies"], json!([{ "id": "radio", "major": 2 }]));
+}
+
+#[test]
+fn ea_10_two_streams_and_an_empty_direction() {
+    let temp = TempDir::new("two-streams");
+    let mut server = greeted(&temp.0);
+    let (effective, _) = connect_with(&mut server, radio_init(vec![numbered(1, &[0]), numbered(0, &[1])], Vec::new())).expect("connects");
+    assert_eq!(membership(&effective, "rx"), vec![1, 0], "streams by number, whatever order they are listed in");
+    let (manifest, _) = finish(&mut server);
+    assert_eq!(manifest.spec.body["resources"]["radio"]["requires"].as_object().unwrap().len(), 2, "only what was listed is asked");
+    // `[]` and an absent direction are the same Session: every channel in no stream.
+    let mut empty = greeted(&TempDir::new("empty").0);
+    let (effective, _) = connect_with(&mut empty, radio_init(Vec::new(), Vec::new())).expect("connects");
+    assert_eq!((membership(&effective, "rx"), membership(&effective, "tx")), (vec![-1, -1], vec![-1, -1]));
+}
+
+#[test]
+fn ea_10_a_named_stream_gets_a_number_from_the_server() {
+    let temp = TempDir::new("named");
+    let mut server = greeted(&temp.0);
+    let (effective, streams) = connect_with(&mut server, radio_init(vec![named("main", &[0]), numbered(0, &[1])], vec![named("out", &[0]), named("aux", &[1])])).expect("connects");
+    assert_eq!(membership(&effective, "rx"), vec![1, 0], "the explicit 0 is kept and the name takes the smallest number left");
+    assert_eq!(membership(&effective, "tx"), vec![0, 1], "names are numbered in request order");
+    let names = &streams["radio"];
+    assert_eq!((names.rx.get("main"), names.tx.get("out"), names.tx.get("aux")), (Some(&1), Some(&0), Some(&1)));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_10_a_stream_name_is_used_once_across_both_directions() {
+    let temp = TempDir::new("names");
+    let mut server = greeted(&temp.0);
+    let error = connect_with(&mut server, radio_init(vec![named("main", &[0])], vec![named("main", &[0])])).expect_err("one name for an rx and a tx stream");
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert!(error.message.contains("stream name main is used twice"), "{}", error.message);
+    assert_no_run(&server);
+    // One rule in both languages: non-empty, not only the digits 0-9, no ':', '#', white space or control character.
+    for bad in ["", "3", "0123456789", "a:b", "a#b", "a b", "a\tb", "\u{1c}", "\u{3000}", "a\u{85}", "a\u{7f}"] {
+        let error = connect_with(&mut server, radio_init(vec![named(bad, &[0])], Vec::new())).expect_err("not a stream name");
+        assert!(error.message.contains("is not a stream name"), "{bad:?}: {}", error.message);
+    }
+    let (_, streams) =
+        connect_with(&mut server, radio_init(vec![named("main", &[0]), named("\u{ff11}\u{ff12}", &[1])], vec![named("out", &[0])])).expect("distinct names connect, full-width digits among them");
+    assert_eq!((streams["radio"].rx["main"], streams["radio"].tx["out"]), (0, 0));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_10_a_request_the_layout_cannot_meet_is_refused_before_any_run() {
+    let temp = TempDir::new("refused");
+    let mut server = greeted(&temp.0);
+    let (rx, tx) = (|streams: Vec<StreamInit>| radio_init(streams, Vec::new()), |streams: Vec<StreamInit>| radio_init(Vec::new(), streams));
+    let cases: Vec<(&str, Initial, &str)> = vec![
+        ("a channel past the last", rx(vec![numbered(0, &[2])]), "RM-4: no such channel c2"),
+        ("the last channel is c1, not c0", tx(vec![numbered(0, &[0, 1, 2])]), "RM-4: no such channel c2"),
+        ("a stream past the last", rx(vec![numbered(2, &[0])]), "RM-4: no such stream s2"),
+        ("a name takes a number past the last", rx(vec![named("a", &[0]), named("b", &[1]), named("c", &[])]), "RM-4: no such stream s2"),
+        ("a channel in two streams", rx(vec![numbered(0, &[0]), numbered(1, &[0])]), "channel c0 is given twice"),
+        ("a channel twice in one stream", rx(vec![numbered(0, &[1, 1])]), "channel c1 is given twice"),
+        ("a stream number twice", rx(vec![numbered(0, &[0]), numbered(0, &[1])]), "rx stream s0 is given twice"),
+        ("a number and a name", rx(vec![StreamInit { name: Some("x".to_owned()), ..numbered(0, &[0]) }]), "exactly one of number and name"),
+        ("a channel name", rx(vec![StreamInit { channels: vec![ChannelRef::Name("loop-rx".to_owned())], ..numbered(0, &[]) }]), "channel names need stage 1b"),
+        ("a value for a channel the stream lacks", rx(vec![StreamInit { gain: BTreeMap::from([("1".to_owned(), 5.0)]), ..numbered(0, &[0]) }]), "c1 has a value but is not a channel of its stream"),
+        (
+            "a value key written \"00\" beside \"0\"",
+            rx(vec![StreamInit { gain: BTreeMap::from([("0".to_owned(), 5.0), ("00".to_owned(), 6.0)]), ..numbered(0, &[0]) }]),
+            "not a channel number as written",
+        ),
+        (
+            "a value key written \"+0\" beside \"0\"",
+            rx(vec![StreamInit { gain: BTreeMap::from([("0".to_owned(), 5.0), ("+0".to_owned(), 6.0)]), ..numbered(0, &[0]) }]),
+            "not a channel number as written",
+        ),
+        ("a value keyed by a name", rx(vec![StreamInit { gain: BTreeMap::from([("loop-rx".to_owned(), 5.0)]), ..numbered(0, &[0]) }]), "channel names need stage 1b"),
+        ("a rate that is not finite", rx(vec![StreamInit { sample_rate: Some(f64::NAN), ..numbered(0, &[0]) }]), "sample_rate is not a finite number"),
+        ("a frequency that is not finite", rx(vec![StreamInit { frequency: BTreeMap::from([("0".to_owned(), f64::INFINITY)]), ..numbered(0, &[0]) }]), "frequency_hz is not a finite number"),
+        ("a resource that is no radio", Some(BTreeMap::from([("rec".to_owned(), ResourceInit::default())])), "no radio of this profile"),
+    ];
+    for (what, initial, message) in cases {
+        let error = connect_with(&mut server, initial).expect_err(what);
+        assert_eq!(error.kind, ErrorKind::Refused, "{what}: {}", error.message);
+        assert!(error.message.contains(message), "{what}: {}", error.message);
+        assert_no_run(&server);
+    }
+    // The boundary the refusals sit on: the last channel and the last stream of each direction.
+    let (effective, _) = connect_with(&mut server, radio_init(vec![numbered(1, &[1])], vec![numbered(1, &[0, 1])])).expect("the last stream and channel exist");
+    assert_eq!((membership(&effective, "rx"), membership(&effective, "tx")), (vec![-1, 1], vec![1, 1]));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_10_a_wrong_typed_initial_is_a_protocol_error() {
+    // The frame's types are the schema's: a string where a list of channels goes never reaches a Session.
+    let temp = TempDir::new("typed");
+    let connect = "{\"request\":{\"op\":\"connect\",\"initial\":{\"radio\":{\"rx\":[{\"number\":0,\"channels\":\"all\"}]}}}}\n";
+    let (frames, _) = serve_bytes(&temp.0, [HELLO.as_bytes(), connect.as_bytes()].concat());
+    assert_eq!(error_of(&frames[1].0).kind, ErrorKind::Protocol, "{:?}", frames[1].0.reply);
+    let unknown = "{\"request\":{\"op\":\"connect\",\"initial\":{\"radio\":{\"rx\":[{\"number\":0,\"channels\":[0],\"bandwidth\":1}]}}}}\n";
+    let (frames, _) = serve_bytes(&temp.0, [HELLO.as_bytes(), unknown.as_bytes()].concat());
+    assert_eq!(error_of(&frames[1].0).kind, ErrorKind::Protocol, "an unknown member is refused, not ignored: {:?}", frames[1].0.reply);
+}
+
+#[test]
+fn ea_10_initial_requests_name_their_resource() {
+    // Two radios: the numbered maps configure the one the resource name gives, and the other keeps RM-30's defaults.
+    let temp = TempDir::new("two-radios");
+    let mut profile = ezsdr_server::default_profile(&temp.0.to_string_lossy());
+    let mut second = profile["bindings"]["radio"].clone();
+    second["selector"]["id"] = json!("second");
+    // One channel each way, so a channel c1 is the first radio's and no one else's.
+    second["selector"]["rx"] = json!(["0:A:ubx:0"]);
+    second["selector"]["tx"] = json!(["0:B:ubx:0"]);
+    profile["bindings"]["second"] = second;
+    let mut server = greeted(&temp.0);
+    let initial = |channel| Some(BTreeMap::from([("second".to_owned(), ResourceInit { rx: vec![numbered(0, &[channel])], tx: Vec::new() })]));
+    let error = err(server.handle(Request::Connect { profile: Some(profile.clone()), lease: None, initial: initial(1) }, Vec::new()));
+    assert!(error.message.contains("RM-4: no such channel c1"), "`second` has one receive channel: {}", error.message);
+    assert_no_run(&server);
+    let initial = initial(0);
+    let Response::Connected { effective, .. } = ok(server.handle(Request::Connect { profile: Some(profile), lease: None, initial }, Vec::new())) else { panic!() };
+    let rx_c0 = |name: &str| effective[&Ident::parse(name).unwrap()][&Key::parse("radio.rx.c0.stream").unwrap()].clone();
+    assert_eq!((rx_c0("second"), rx_c0("radio")), (Value::from(0), Value::from(-1)));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_09_initial_requests_mean_the_same_under_every_profile_source() {
+    // The built-in default, the same profile sent explicitly and one a configured file holds ask the same.
+    let temp = TempDir::new("sources");
+    let initial = || radio_init(vec![numbered(0, &[1])], vec![numbered(0, &[0])]);
+    let reply = |config: Config, profile: Option<serde_json::Value>| {
+        let mut server = Server::new(config);
+        ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
+        let Response::Connected { effective, .. } = ok(server.handle(Request::Connect { profile, lease: None, initial: initial() }, Vec::new())) else { panic!() };
+        finish(&mut server);
+        effective
+    };
+    let profile = ezsdr_server::default_profile(&temp.0.to_string_lossy());
+    let path = temp.0.join("lab.json");
+    std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let built_in = reply(config(&temp.0), None);
+    assert_eq!(built_in, reply(config(&temp.0), Some(profile)), "the profile sent explicitly");
+    assert_eq!(built_in, reply(Config { default_profile: Some(path), ..config(&temp.0) }, None), "the configured default profile");
+    let radio = &built_in[&Ident::parse("radio").unwrap()];
+    assert_eq!((membership(radio, "rx"), membership(radio, "tx")), (vec![-1, 0], vec![0, -1]));
+}
+
+#[test]
+fn ea_06_connect_initial_is_in_the_schema() {
+    // The frames' committed schemas carry the initial streams, with a channel an integer or a
+    // name (so that channel names add no schema change) and the server's name table in the reply.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../schemas/server");
+    let request: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("request_frame.v1.json")).unwrap()).unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("reply_frame.v1.json")).unwrap()).unwrap();
+    let text = request.to_string();
+    assert!(text.contains("\"initial\"") && text.contains("\"StreamInit\"") && text.contains("\"ChannelRef\""), "{text}");
+    let channel = &request["$defs"]["ChannelRef"];
+    let kinds: Vec<_> = channel["anyOf"].as_array().unwrap().iter().map(|v| v["type"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(kinds, ["integer", "string"], "{channel}");
+    assert!(reply.to_string().contains("\"streams\"") && reply.to_string().contains("\"StreamNames\""));
 }
 
 #[test]
@@ -658,7 +911,7 @@ fn ea_15_every_exit_writes_the_manifest() {
     assert_eq!(written.termination.reason, Termination::Stopped { cause: StopCause::ClientDisconnect {} });
     let mut greeted = Server::new(config(&runs.0));
     ok(greeted.handle(Request::Hello { protocol: 2 }, Vec::new()));
-    ok(greeted.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
+    ok(greeted.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new()));
     let dir = greeted.dir().unwrap().to_path_buf();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _held = greeted;
@@ -674,7 +927,7 @@ fn ea_10_a_run_that_ends_on_its_way_to_t0_writes_its_manifest() {
     let mut profile = ezsdr_server::default_profile(&temp.0.join("captures").to_string_lossy());
     profile["environment"]["sim.faults"] = json!([{ "at_ns": 0, "fault": "device_lost", "target": "radio" }]);
     let mut server = greeted(&temp.0);
-    let handled = server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new());
+    let handled = server.handle(Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new());
     assert!(handled.exit);
     let error = err(handled);
     assert_eq!(error.kind, ErrorKind::Ended);
@@ -774,7 +1027,7 @@ fn fake_server(dir: &Path) -> (Server, Arc<AtomicU64>) {
 
 fn fake_session(dir: &Path) -> (Server, Arc<AtomicU64>) {
     let (mut server, opened) = fake_server(dir);
-    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(dir)), lease: None }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(dir)), lease: None, initial: rx0() }, Vec::new())) else { panic!("connect") };
     (server, opened)
 }
 
@@ -820,7 +1073,7 @@ fn ea_12_a_duration_is_whole_root_ticks() {
     // has its horizon at least 1 000 000 000 ticks after its `now` (as nanoseconds, 400 000 000).
     let temp = TempDir::new("duration-ticks");
     let (mut server, _) = fake_server(&temp.0);
-    let Response::Connected { now, root_rate, .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { now, root_rate, .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: rx0() }, Vec::new())) else { panic!("connect") };
     assert_eq!(root_rate, Rational::new(200_000_000, 1).unwrap());
     let (at, _, _) = status(&mut server);
     capture_at(&mut server, 100, TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + 20_000_000));
@@ -836,7 +1089,7 @@ fn ea_12_a_duration_is_whole_root_ticks() {
 fn ea_07_a_uhd_profile_without_the_feature_is_refused() {
     let temp = TempDir::new("uhd-refused");
     let mut server = greeted(&temp.0);
-    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: rx0() }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
     if cfg!(feature = "uhd") {
         // UHD's own refusal: nothing answers at TEST-NET-1.
@@ -887,7 +1140,7 @@ fn ea_07_the_uhd_authority_takes_the_binding_s_sources() {
         profile["bindings"]["radio"]["selector"]["clock_source"] = json!(clock_source);
         // UR-6 accepts the Authority's own root, a PPS root only with a locked clock, and
         // `connected` names its epoch (EA-10).
-        let Response::Connected { root_epoch, .. } = ok(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new())) else { panic!() };
+        let Response::Connected { root_epoch, .. } = ok(server.handle(Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new())) else { panic!() };
         assert_eq!(root_epoch, epoch, "{clock_source}");
         let calls = device.calls();
         assert!(calls.iter().any(|c| *c == format!("set_sources {clock_source} external")), "{calls:?}");
@@ -912,8 +1165,7 @@ fn ea_07_the_device_is_released_when_the_session_ends() {
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
-    ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
-    assert!(matches!(submit(&mut server, set("radio.tx.c0.stream", Value::Scalar(Scalar::Int(0))), Vec::new()).outcome, Outcome::Admitted { .. }));
+    ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: loopback() }, Vec::new()));
     assert!(matches!(submit(&mut server, repeat(), ramp(1_000)).outcome, Outcome::Admitted { .. }));
     finish(&mut server);
     assert!(made.lock().unwrap().upgrade().is_none(), "a thread still holds the device after the Session ended");
@@ -942,7 +1194,7 @@ fn ea_07_a_reference_that_does_not_lock_refuses_the_connect_with_its_reason() {
     // reference does not lock either: the client is told so.
     let temp = TempDir::new("uhd-unlocked");
     let (mut server, opened) = unlocking_server(&temp.0, &[0, 1]);
-    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: rx0() }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
     assert!(error.message.starts_with(UNLOCKED), "{}", error.message);
     assert_eq!(opened.load(Ordering::SeqCst), 2);
@@ -954,7 +1206,7 @@ fn ea_07_a_reference_that_locks_on_the_reopen_connects() {
     // Session runs, and its Manifest records the reopen with the first error.
     let temp = TempDir::new("uhd-reopened");
     let (mut server, opened) = unlocking_server(&temp.0, &[0]);
-    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: rx0() }, Vec::new())) else { panic!("connect") };
     assert_eq!(opened.load(Ordering::SeqCst), 2);
     let (manifest, _) = finish(&mut server);
     let usrp = EventSource::Node { node: ResourceId::parse("usrp").unwrap() };
@@ -978,7 +1230,7 @@ fn ea_07_the_reopen_of_one_device_is_not_a_second_binding() {
     });
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
-    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: rx0() }, Vec::new())) else { panic!("connect") };
     assert_eq!(opened.load(Ordering::SeqCst), 2);
     let (manifest, _) = finish(&mut server);
     let usrp = EventSource::Node { node: ResourceId::parse("usrp").unwrap() };
@@ -994,7 +1246,7 @@ fn ea_07_the_reopen_can_be_switched_off() {
     let (mut server, opened) = unlocking_server(&temp.0, &[0]);
     let mut profile = uhd_profile(&temp.0);
     profile["bindings"]["radio"]["selector"]["reopen_on_unlock"] = json!(false);
-    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new()));
     assert!(error.message.starts_with(UNLOCKED), "{}", error.message);
     assert_eq!(opened.load(Ordering::SeqCst), 1);
 }
@@ -1013,7 +1265,7 @@ fn ea_07_a_lost_device_ends_the_session_with_its_manifest() {
     let open: ezsdr_server::OpenDevice = Arc::new(move |_args: &str| Ok(held.clone() as Arc<dyn Device>));
     let mut server = Server::new(Config { open_device: Some(open), ..config(&temp.0) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
-    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(&temp.0)), lease: None, initial: rx0() }, Vec::new())) else { panic!("connect") };
     let lost = EventKind::parse(EventKind::DEVICE_LOST).unwrap();
     let (now, rate, _) = status(&mut server);
     let _ = server.handle(Request::WaitFor { kinds: vec![lost], from: 0, within: Some(seconds(now, rate, 5)), until: None }, Vec::new());
@@ -1029,7 +1281,7 @@ fn ea_07_two_uhd_bindings_are_refused() {
     let (mut server, opened) = fake_server(&temp.0);
     let mut profile = uhd_profile(&temp.0);
     profile["bindings"]["second"] = profile["bindings"]["radio"].clone();
-    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: Some(profile), lease: None, initial: None }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
     assert_eq!(error.message, "EA-7: one USRP per Run in this server (Phase 7)");
     assert_eq!(opened.load(Ordering::SeqCst), 0, "refused before any device opens");
@@ -1044,14 +1296,14 @@ fn ea_09_the_configured_default_profile_is_used() {
     std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
     let mut server = Server::new(Config { default_profile: Some(path), ..config(&temp.0) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
-    let Response::Connected { profile: used, .. } = ok(server.handle(Request::Connect { profile: None, lease: None }, Vec::new())) else { panic!() };
+    let Response::Connected { profile: used, .. } = ok(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new())) else { panic!() };
     assert_eq!(used, profile);
     finish(&mut server);
 
     let missing = temp.0.join("missing.json");
     let mut server = Server::new(Config { default_profile: Some(missing.clone()), ..config(&temp.0) });
     ok(server.handle(Request::Hello { protocol: 2 }, Vec::new()));
-    let error = err(server.handle(Request::Connect { profile: None, lease: None }, Vec::new()));
+    let error = err(server.handle(Request::Connect { profile: None, lease: None, initial: None }, Vec::new()));
     assert_eq!(error.kind, ErrorKind::Refused);
     assert!(error.message.starts_with(&format!("EA-9: {}: ", missing.display())), "{}", error.message);
 }

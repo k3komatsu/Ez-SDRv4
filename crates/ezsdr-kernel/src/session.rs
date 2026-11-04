@@ -11,7 +11,7 @@ use crate::hash::ContentHash;
 use crate::module_api::{CompileRule, ModuleRegistry, Role};
 use crate::plan::{apply_coercion, coercion_policy};
 use crate::run::RunError;
-use crate::spec::{Coercion, CoercionPolicy, ExperimentSpec, Ident, Key, Namespace, ResourceReq, SpecError, Value, Warning};
+use crate::spec::{Coercion, CoercionPolicy, Constraint, ExperimentSpec, Ident, Key, Namespace, ResourceReq, SpecError, Value, Warning};
 use crate::time::{AbsoluteDeadline, TimePoint};
 
 /// The Session action envelope: a closed set, and **not** the Kernel Action set.
@@ -428,6 +428,11 @@ pub(crate) fn compile(action: &SessionAction, registry: &ModuleRegistry, earlies
 
 // ---------------------------------------------------------------- the implicit Spec
 
+/// What a Session asks of its Providers at `connect`, radio-independent: per resource
+/// name, key to value. Each entry enters that resource's `requires` as an `Eq`, before the
+/// implicit Spec is hashed (RS-12, SB-22c).
+pub type InitialRequests = BTreeMap<Ident, BTreeMap<Key, crate::spec::Scalar>>;
+
 /// Builds a Session's implicit ExperimentSpec from the BindingProfile, one binding at
 /// a time, by the first row of spec 03's table SB-T2 that applies (SB-22c):
 ///
@@ -457,6 +462,7 @@ pub fn implicit_spec(
     registry: &ModuleRegistry,
     providers: &BTreeMap<Ident, &dyn crate::module_api::Provider>,
     sinks: &BTreeMap<Ident, &dyn crate::module_api::Sink>,
+    initial: &InitialRequests,
 ) -> Result<ExperimentSpec, SpecError> {
     let mut spec = ExperimentSpec { version: 1, ..ExperimentSpec::default() };
     let island_executors: BTreeSet<&Ident> = profile.placements.islands.iter().map(|i| &i.executor).collect();
@@ -486,10 +492,25 @@ pub fn implicit_spec(
         // resource per binding with empty `requires`" (finding D21).
         if module.roles.contains(&Role::Provider) {
             let provider = providers.get(name).ok_or_else(|| missing("Provider instance", name))?;
-            spec.resources.insert(name.clone(), ResourceReq { kind: provider.instance().tree.kind.clone(), requires: BTreeMap::new(), needs: BTreeMap::new(), extensions: BTreeMap::new() });
+            let requires = initial.get(name).into_iter().flatten().map(|(key, value)| (key.clone(), Constraint::Eq { value: value.clone() })).collect();
+            spec.resources.insert(name.clone(), ResourceReq { kind: provider.instance().tree.kind.clone(), requires, needs: BTreeMap::new(), extensions: BTreeMap::new() });
         }
         // Rows 4 and 5 add nothing: the Authority's own slot comes from `authority`
         // (SB-22b), and a binding with no slot is `validate`'s to refuse (SB-22d).
+    }
+    // RS-12: an initial request names a Provider resource, and its key's Vocabulary is
+    // declared at its registered major, so `validate` judges the request like any `requires`.
+    for (name, requests) in initial {
+        if !spec.resources.contains_key(name) {
+            return Err(SpecError::Structural { reason: format!("RS-12: initial requests name {name}, which is no Provider resource") });
+        }
+        for key in requests.keys() {
+            if let Some(v) = registry.vocabulary_of(key)
+                && !spec.requirements.vocabularies.iter().any(|r| r.id == v.id)
+            {
+                spec.requirements.vocabularies.push(crate::spec::VocabularyReq { id: v.id.clone(), major: v.version.major });
+            }
+        }
     }
     Ok(spec)
 }
