@@ -1,0 +1,15 @@
+You are read-only (edit nothing, never run cargo fmt, no git state changes, no builds) in ~/local_work/Ez-SDRv4. A gate is running remotely on this tree; do not touch it.
+
+Review the DRAFT design note at ~/.cache/ezsdr-fixes/2026-11-04-n46/47-draft.md (Japanese; it will become plan/phase8/47-*.md). It turns the owner's decisions recorded in plan/phase8/46-streaming-feature-ledger.md §8 into rules for spec 07 (design/07-radio-model.md), spec 09 (design/09-mock-radio.md), spec 18 (design/18-uhd-radio.md) and spec 16 (design/16-easy-api.md), without changing the Kernel's Action shapes or admission (design/04-run-and-session.md RS-17, RS-19, RS-49, RS-52; design/06-kernel-coordinator.md). The owner's decisions are settled: do not argue for reversing them. Note: the note-45 experiment code crates/ezsdr-radio-uhd/src/brain/ is being deleted in the working tree; ignore it.
+
+Before reading the draft's §2-§3, write your own short list of what the decisions in 46 §8 require each spec to change, so your check is not anchored to the draft.
+
+Then check, with path:line evidence (and UHD 4.10 source URLs where hardware behaviour matters, marked VERIFIED/INFERRED):
+1. Does §2 match 46 §8? Any decision missing, misstated, or a rule that contradicts it?
+2. The removal inventory: list, per spec, every rule (RM/MR/UR/EA ids, and named tests) and every production region (path:line ranges) and mutation-row family that the change removes or must rewrite in crates/ezsdr-radio, crates/ezsdr-mock-radio, crates/ezsdr-radio-uhd, python/. For each item you call removable, say whether a remaining feature (Stop/start_rx, exact TX continuation, repeat switch, TX recovery F8, T3 at open, loss, Provider::stop) still uses it.
+3. Answer Q1-Q6 of §3 independently, each with a recommendation and its reason. For Q1 check RS-19 and how the Kernel fills `at` for an action without one, and whether a Vocabulary verb can compile to a TxBurst that the Provider rounds to a period boundary without a Kernel change. For Q2 check what UHD/X3x0 requires before a TX rate change (samples still in flight). For Q6 check the actual admission order in crates/ezsdr-kernel and the Provider's booking.
+4. §4 staging: can each stage leave the tree green (tests, Mock/UHD parity tests, VH differential tests, Python suites)? Name any stage that cannot and how to split it.
+5. New races or lifecycle hazards the change itself introduces (for example: a cold change accepted on a stopped receive stream while a start_rx for it is already booked; a TX change accepted on an idle stream while a burst for the same stream is being admitted; a repeat switch racing Stop, loss or Provider::stop; the switch boundary vs the TX handed cursor). Give each as a minimal operation sequence and its wrong observable outcome.
+6. Anything in Vision (design/vision/*.md, §27, §58, §61, §65) the draft says is unchanged but is in fact affected.
+
+Output: findings (each with the draft section, what is wrong or missing, evidence, and the correction), then the removal inventory as a table, then Q1-Q6 answers. End with one line: DRAFT OK, or DRAFT NEEDS CHANGES with the number of findings.
