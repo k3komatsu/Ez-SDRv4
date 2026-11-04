@@ -1,6 +1,6 @@
 # 設計メモ 47：流れている stream を変えない（帳簿 46 の決定を spec に入れる）
 
-Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の下書きのレビュー（12 件，すべて取り入れた．§8）を入れた．**owner に決めてもらうこと**が §6 に三つある（一つずつ）．
+Status: 第 2 版（2026-11-04，orchestrator Opus）．Sol の下書きのレビュー（12 件，すべて取り入れた．§8）を入れた．**owner の決定**：§6 の O1〜O3 はすべて決まった（2026-11-04）．
 
 | 項目 | 内容 |
 |---|---|
@@ -118,6 +118,7 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 - **O2 Provider の拒否を Easy API でどう見せるか**（Sol 6）：Kernel の admission を通った後の Provider の拒否（流れている stream への change，重なる予約）を，例外にするか．
   **決定（owner 2026-11-04）：(a)．** server が submit した Action の id を持つ `radio.COMMAND_REJECTED`（RM-22 の `action`）を集めて submit の返事に入れ，Python はそれがあれば `Rejected` を投げる．根拠：装置の時間で進む Run では，Kernel は Action を渡した後 Provider が処理し終えるまで待つ（KC-21a，MA-14b）ので，submit が返る時には拒否の event が出ている（INFERRED）．確かめること：simulation の Run（MockRadio）でも submit が返る時に判断が済んでいるか．変えるもの：server の返事の frame と schema（EA-6，EA-11），Python の client．退けた案：(b) event と Manifest にだけ残す（流れている stream への設定が黙って成功したように見える），(c) 「流れている」の判断を Kernel の admission に移す（Kernel に radio の事情を持ち込む）．
 - **O3 Easy API の値の渡し方**（Q5）：channel ごとの dict でよいか．
+  **決定（owner 2026-11-04）：dict．** `frequency`・`gain`・`antenna` は logical channel の番号を key とする dict，`sample_rate` は stream の値．書かなかった channel は変えない．その stream にない番号は client が送る前に拒む．止めている stream には，今の channel ごとの属性（`rx_channels[n].frequency = …`）でも値を入れられる．退けた案：数値一つで全 channel（channel ごとに違う値を書けない），数値と dict の両方（形が二通りになり規則と試験が増える），並びの list（位置と番号を取り違えやすい）．
 
 ## 7. 見込み（INFERRED）
 
