@@ -116,6 +116,7 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 - **O1 channel の組をどこで決めるか**（Sol 11）：今の Session は，`connect` の後で `sdr.tx_channels[0].stream = 0` として送信の channel を stream に入れる（既定の layout では送信の channel はどの stream にもない，RM-30）．F4a (d) でこれができなくなるので，`connect` の時に決める入口が要る．
   **決定（owner 2026-11-04）：(a) と (b) の両方．** (a) `connect` に初期の設定を渡せるようにする（例 `ezsdr.connect(tx={0: [0]}, rx={0: [0, 1]})`）．Session の暗黙の Spec の初期の設定の要求になる（channel の組は intent なので Spec の側．BindingProfile には書かない）．周波数や rate の初期値も同じ道で渡せる．(b) 既定の layout で送信の channel 0 も stream 0 に入れる（RM-30．受信の channel 0 と対称）．確かめること：RM-31（duplex の board の受信の antenna）と既定の antenna が合うか．合わなければ既定の antenna も合わせる．退けた案：BindingProfile に書く（intent と binding の分け方に反する），(b) だけ（二つ以上の channel の Session が組めない）．
 - **O2 Provider の拒否を Easy API でどう見せるか**（Sol 6）：Kernel の admission を通った後の Provider の拒否（流れている stream への change，重なる予約）を，例外にするか．
+  **決定（owner 2026-11-04）：(a)．** server が submit した Action の id を持つ `radio.COMMAND_REJECTED`（RM-22 の `action`）を集めて submit の返事に入れ，Python はそれがあれば `Rejected` を投げる．根拠：装置の時間で進む Run では，Kernel は Action を渡した後 Provider が処理し終えるまで待つ（KC-21a，MA-14b）ので，submit が返る時には拒否の event が出ている（INFERRED）．確かめること：simulation の Run（MockRadio）でも submit が返る時に判断が済んでいるか．変えるもの：server の返事の frame と schema（EA-6，EA-11），Python の client．退けた案：(b) event と Manifest にだけ残す（流れている stream への設定が黙って成功したように見える），(c) 「流れている」の判断を Kernel の admission に移す（Kernel に radio の事情を持ち込む）．
 - **O3 Easy API の値の渡し方**（Q5）：channel ごとの dict でよいか．
 
 ## 7. 見込み（INFERRED）
