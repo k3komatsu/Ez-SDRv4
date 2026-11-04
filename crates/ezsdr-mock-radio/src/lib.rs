@@ -15,7 +15,6 @@ use ezsdr_kernel::event::{Action, ActionId, Event, EventHandle, EventKind, Event
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId};
 use ezsdr_kernel::module_api::InputStore;
-use ezsdr_kernel::module_api::UpdateClass;
 use ezsdr_kernel::module_api::{
     ActionReceiver, CoerceReport, Dispatched, Driving, Endpoint, ExecutionClass, KERNEL_API, ModuleDescriptor, ModuleError, ModuleRef, PrepareContext, Provider, ProviderInstance, Requested, Role,
     StepOutcome, StopMode, Version, VersionReq, VocabularyRequirement,
@@ -23,9 +22,9 @@ use ezsdr_kernel::module_api::{
 use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::spec::{Ident, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, PublishOutcome, SampleBlock};
-use ezsdr_kernel::time::{AbsoluteDeadline, ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
-use ezsdr_radio::timeline::{self, Item, Kind, Line, NO_RELEASE, Segment, StreamKey};
-use ezsdr_radio::{Addressed, Concrete, channels, x3xx};
+use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
+use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey};
+use ezsdr_radio::{Addressed, channels, x3xx};
 use ezsdr_sim::channel::{Medium, RootInstant};
 use ezsdr_sim::{FaultEntry, FaultKind, SimRng};
 
@@ -34,12 +33,6 @@ pub use profile::{BLOCK_LEN, Profile, ProfileKind};
 
 /// The reason a lost device gives for everything it cancels or refuses (MR-20).
 const DEVICE_LOST: &str = "MR-20: device lost";
-/// The reason a `cold_change_refused` fault gives the change it refuses (MR-20).
-const REFUSED_CHANGE: &str = "MR-18: the cold change was refused";
-/// The reason a refused `cold` change gives the bursts booked on the clock it started (MR-18).
-const REFUSED_BURST: &str = "MR-18: cancelled by a refused cold change";
-/// The reason a transmit burst receives while a refusal halts its stream (MR-25).
-const HALTED_STREAM: &str = "MR-25: the stream is halted by a refused change";
 
 fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"), version: Version::new(2, 0, 0) }
@@ -95,7 +88,6 @@ pub struct MockRadio {
     sync_end: Option<i64>,
     wakeup: Option<ScheduleHandle>,
     device_lost_reported: bool,
-    updates: BTreeMap<(i64, u64), PendingUpdate>,
     next_order: u64,
     medium: Option<std::sync::Arc<Medium>>,
     channel: Option<ChannelMode>,
@@ -202,8 +194,6 @@ struct TxStream {
     clocks: Vec<TxClock>,
     /// The index in `clocks` of the current transmit clock.
     cur: Option<usize>,
-    /// Bursts booked on a transmit clock a pending change starts, by its index (KC-21a).
-    later: Vec<(usize, HeldBurst)>,
     /// The current clock's tracker (MR-15).
     tracker: Option<BurstTracker>,
     /// The current clock's device framing model (MR-15, MR-24).
@@ -218,28 +208,11 @@ struct TxStream {
     stop_cut: Option<TxFront>,
     /// The instance-wide transmitter, read by logical channel and clock segment (MR-32).
     plan: Option<std::sync::Arc<channel::TxShared>>,
-    /// The last segment whose untimed tunes were taken, by its origin and arrival order (MR-34).
-    tuned: Option<(i64, Option<u64>)>,
 }
 
 impl TxStream {
     fn new(node: ResourceId, path: String) -> TxStream {
-        TxStream {
-            node,
-            path,
-            clock: None,
-            clocks: Vec::new(),
-            cur: None,
-            later: Vec::new(),
-            tracker: None,
-            device: DeviceModel::new(),
-            held: BTreeMap::new(),
-            open: None,
-            front: None,
-            stop_cut: None,
-            plan: None,
-            tuned: None,
-        }
+        TxStream { node, path, clock: None, clocks: Vec::new(), cur: None, tracker: None, device: DeviceModel::new(), held: BTreeMap::new(), open: None, front: None, stop_cut: None, plan: None }
     }
 }
 
@@ -263,10 +236,9 @@ struct ScheduledFault {
 
 impl ScheduledFault {
     /// MR-20: whether the fault fires in the step's ordered loop at its instant, cutting the
-    /// block in progress and waking the step. A `cold_change_refused` fault has no instant of
-    /// its own: it refuses the change it names when that change applies (MR-18).
+    /// block in progress and waking the step.
     fn fires(&self) -> bool {
-        !self.resolved && self.entry.fault != FaultKind::ColdChangeRefused
+        !self.resolved
     }
 }
 
@@ -311,31 +283,12 @@ fn merge_front(front: Option<i64>, candidate: Option<i64>) -> Option<i64> {
     }
 }
 
-struct PendingUpdate {
-    key: ezsdr_kernel::spec::Key,
-    /// The value `coerce` applied when it was booked (MR-18).
-    value: Value,
-    class: UpdateClass,
-    /// Transmit streams switched by this cold change: stream, new clock, and the number of
-    /// clocks their plans held when it was booked (RM-25, MR-18, RM-34).
-    tx: Vec<(usize, Option<usize>, usize)>,
-    /// The lines this `cold` change names — the streams whose plan can hold the segment it
-    /// begins (MR-18, MR-20); none for an update that starts no segment.
-    cold: Vec<(Direction, usize)>,
-}
-
-enum ColdChange {
-    Streams(Vec<(Direction, usize)>),
-    Move { direction: Direction, from: usize, to: usize, channel: u32 },
-}
-
 #[derive(Clone, Copy)]
 enum WorkKind {
     Fault { index: usize },
     HeldBurst { stream: usize, start: i64 },
-    Update { effective: i64 },
     RxBegin { stream: usize, origin: i64 },
-    Tune { direction: Direction, stream: usize, key: (i64, Option<u64>) },
+    Tune { stream: usize, key: (i64, Option<u64>) },
 }
 
 impl MockRadio {
@@ -466,7 +419,6 @@ impl MockRadio {
             sync_end: None,
             wakeup: None,
             device_lost_reported: false,
-            updates: BTreeMap::new(),
             next_order: 0,
             medium: None,
             channel: None,
@@ -501,12 +453,6 @@ impl MockRadio {
     /// Whether `key` is a configuration key of this instance's key set (RM-5, RM-27).
     fn is_configuration(&self, key: &ezsdr_kernel::spec::Key) -> bool {
         ezsdr_radio::channels::is_configuration(key)
-    }
-
-    /// MR-18's and RM-27's class an update of `key` must state; `None` when `key` is no
-    /// configuration key of this instance or its declaration states no class.
-    fn update_class_of(&self, key: &ezsdr_kernel::spec::Key) -> Option<UpdateClass> {
-        ezsdr_radio::channels::update_class(key)
     }
 
     /// RM-3, RM-30: the channel set and sample rate stream `k` of `direction` has in
@@ -777,7 +723,6 @@ impl MockRadio {
             }
             FaultKind::RxSequenceError => (kf.saturating_add(i64::from(self.profile.block_len())), ezsdr_radio::payloads::RxOverflowCause::Sequence),
             FaultKind::DeviceLost => unreachable!("a loss ends the device (MR-20)"),
-            FaultKind::ColdChangeRefused => unreachable!("a refused cold change fires on its change (MR-20)"),
         };
         let lost = kg - kf;
         if let Some(rx) = self.rx[k].running.as_mut() {
@@ -830,9 +775,6 @@ impl MockRadio {
         let now = time.now(root).and_then(|t| t.ticks_in(root)).map_err(|error| self.reject(format!("MR-14: {error}")))?;
         let mut next: Option<i64> = None;
         let mut wake = |tick: i64| next = Some(next.map_or(tick, |next| next.min(tick)));
-        for (tick, _) in self.updates.keys() {
-            wake(*tick);
-        }
         if self.started {
             self.faults.iter().filter(|fault| fault.fires()).for_each(|fault| wake(fault.tick));
             for k in 0..self.rx.len() {
@@ -945,7 +887,7 @@ impl MockRadio {
     }
 
     /// Cuts every burst of transmit stream `k`'s current clock at sample `k_cut` and
-    /// withdraws the bursts that start at or after it, as a stop or a cold change does
+    /// withdraws the bursts that start at or after it, as a stop does
     /// (MR-32).
     fn cut_segments(&mut self, k: usize, k_cut: i64) {
         let generation = self.tx_gen(k);
@@ -1006,108 +948,59 @@ impl MockRadio {
         self.emit_event(&self.tx[k].path, ezsdr_radio::kinds::TIME_ERROR, Severity::Error, payload, now_tx)
     }
 
-    fn record_update(&mut self, key: &ezsdr_kernel::spec::Key, value: &Value, at: i64) {
-        #[derive(serde::Serialize)]
-        struct Applied<'a> {
-            key: &'a ezsdr_kernel::spec::Key,
-            value: &'a Value,
-            at: TimePoint,
-        }
-        let row = Applied { key, value, at: TimePoint::new(self.root.expect("root"), at) };
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("applied")) {
-            rows.push(serde_json::to_value(row).expect("applied row"));
-        }
-    }
-
-    /// MR-34: the stream and origin of the segment of a receiving stream (one with a link,
-    /// MR-39) that covers receive channel `channel` at `t` (`timeline::covering`, RM-36).
-    fn covering_rx(&self, channel: u32, t: i64) -> Option<(usize, i64)> {
-        (0..self.rx.len()).filter(|k| !self.rx[*k].links.is_empty()).find_map(|k| {
-            let line = self.lines.line(Self::rx_key(k))?;
-            timeline::covering(&line.plan, channel, t).map(|segment| (k, segment.origin))
-        })
-    }
-
-    /// MR-34: the first segment of stream `k`'s line after the one it last tuned, by origin and
-    /// arrival order.
-    fn tune_next(&self, direction: Direction, k: usize) -> Option<(i64, Option<u64>)> {
-        let line = self.lines.line(stream_key(direction, k))?;
-        let tuned = match direction {
-            Direction::Rx => self.rx[k].tuned,
-            Direction::Tx => self.tx[k].tuned,
-        };
+    /// MR-34: the first segment of receive stream `k`'s line after the one it last tuned, by
+    /// origin and arrival order.
+    fn tune_next(&self, k: usize) -> Option<(i64, Option<u64>)> {
+        let line = self.lines.line(stream_key(Direction::Rx, k))?;
+        let tuned = self.rx[k].tuned;
         line.plan.iter().map(|segment| (segment.origin, segment.by)).find(|key| tuned.is_none_or(|tuned| *key > tuned))
     }
 
-    /// MR-34: stream `k`'s segment `key` begins at `tick` with an untimed tune of every channel
-    /// it carries. A transmit clock cut at its own origin never runs, so it takes none. The
-    /// stream's first segment has no arrival order and takes none of these: its phases are drawn
-    /// at `prepare`.
-    fn tune(&mut self, direction: Direction, k: usize, key: (i64, Option<u64>), tick: i64) {
-        match direction {
-            Direction::Rx => self.rx[k].tuned = Some(key),
-            Direction::Tx => self.tx[k].tuned = Some(key),
-        }
-        if direction == Direction::Rx && self.rx[k].links.is_empty() {
+    /// MR-34: receive stream `k`'s segment `key` begins at `tick` with an untimed tune of every
+    /// channel it carries. The stream's first segment has no arrival order and takes none of
+    /// these: its phases are drawn at `prepare`.
+    fn tune(&mut self, k: usize, key: (i64, Option<u64>), tick: i64) {
+        self.rx[k].tuned = Some(key);
+        if self.rx[k].links.is_empty() {
             return;
         }
-        let Some(line) = self.lines.line(stream_key(direction, k)) else { return };
+        let Some(line) = self.lines.line(stream_key(Direction::Rx, k)) else { return };
         let Some(index) = line.plan.iter().position(|segment| (segment.origin, segment.by) == key) else { return };
         let segment = line.plan[index];
-        if segment.by.is_none() || (direction == Direction::Tx && segment.cut == Some(0)) {
+        if segment.by.is_none() {
             return;
         }
         let channels: Vec<u32> = segment.config.channels.iter().collect();
-        self.untimed_tune(direction, &channels, tick);
+        self.untimed_tune(&channels, tick);
     }
 
-    /// MR-34: each named channel of `direction` takes a fresh LO phase at `tick` and loses the
-    /// coherence a timed tune gave it (`phase_fixed` 0); a `deterministic` channel keeps its
-    /// zero phase and its coherence. The Manifest's coherence of the segments it is in follows.
-    fn untimed_tune(&mut self, direction: Direction, channels: &[u32], tick: i64) {
+    /// MR-34: each named receive channel takes a fresh LO phase at `tick`; a `deterministic`
+    /// channel keeps its zero phase.
+    fn untimed_tune(&mut self, channels: &[u32], tick: i64) {
         for number in channels {
-            match direction {
-                Direction::Rx => {
-                    if let Some(mode) = self.channel.as_mut() {
-                        if let Some(model) = mode.rx_channels.get_mut(*number as usize) {
-                            if model.phase_behavior != "deterministic" {
-                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));
-                                model.phase_fixed.set(tick, 0.0);
-                            }
-                        }
-                    }
-                }
-                Direction::Tx => {
-                    if let (Some(mode), Some(shared)) = (self.channel.as_mut(), self.tx.iter().find_map(|stream| stream.plan.clone())) {
-                        let mut plan = shared.plan();
-                        if let Some(model) = plan.channel_models.get_mut(*number as usize) {
-                            if model.phase_behavior != "deterministic" {
-                                model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));
-                                model.phase_fixed.set(tick, 0.0);
-                            }
-                        }
+            if let Some(mode) = self.channel.as_mut() {
+                if let Some(model) = mode.rx_channels.get_mut(*number as usize) {
+                    if model.phase_behavior != "deterministic" {
+                        model.phase.set(tick, channel::lo_phase(&mut mode.lo_retune));
                     }
                 }
             }
-            self.update_layout_segment_coherence(direction, *number, tick);
         }
     }
 
     /// MR-27: records the logical channel order of a layout SampleClock segment.
-    fn layout_phase_basis(&self, direction: Direction, channels: &[u32], at: i64) -> (String, bool) {
+    fn layout_phase_basis(&self, direction: Direction, channels: &[u32]) -> (String, bool) {
         if self.channel.is_none() {
             return ("unmodelled".to_owned(), false);
         }
-        let at = RootInstant::tick(at);
         let mut fixed = true;
-        let mut timed = false;
         for number in channels {
-            let (behavior, is_fixed) = match direction {
+            let behavior = match direction {
                 Direction::Rx => {
                     let Some(model) = self.channel.as_ref().and_then(|mode| mode.rx_channels.get(*number as usize)) else {
                         return ("unmodelled".to_owned(), false);
                     };
-                    (model.phase_behavior.as_str().to_owned(), model.phase_fixed.at(at) >= 0.5)
+                    model.phase_behavior.clone()
                 }
                 Direction::Tx => {
                     let Some(shared) = self.tx.iter().find_map(|stream| stream.plan.clone()) else {
@@ -1117,74 +1010,14 @@ impl MockRadio {
                     let Some(model) = plan.channel_models.get(*number as usize) else {
                         return ("unmodelled".to_owned(), false);
                     };
-                    (model.phase_behavior.clone(), model.phase_fixed.at(at) >= 0.5)
+                    model.phase_behavior.clone()
                 }
             };
-            match behavior.as_str() {
-                "deterministic" => {}
-                "random_unless_timed_tune" => {
-                    timed = true;
-                    fixed &= is_fixed;
-                }
-                _ => fixed = false,
+            if behavior != "deterministic" {
+                fixed = false;
             }
         }
-        if !fixed {
-            ("none".to_owned(), false)
-        } else if timed {
-            ("timed_tune".to_owned(), true)
-        } else {
-            ("deterministic".to_owned(), true)
-        }
-    }
-
-    /// MR-27, D13: a timed tune updates the coherent basis of each affected segment.
-    fn update_layout_segment_coherence(&mut self, direction: Direction, channel: u32, tick: i64) {
-        if self.channel.is_none() {
-            return;
-        }
-        let Some(serde_json::Value::Array(rows)) = self.instance.sections.get(&section("segments")) else {
-            return;
-        };
-        let pending: Vec<(usize, i64, Vec<u32>)> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| {
-                if row["direction"] != if direction == Direction::Rx { "rx" } else { "tx" } || !row["channels"].as_array()?.iter().any(|number| number.as_u64() == Some(u64::from(channel))) {
-                    return None;
-                }
-                let origin = row["origin"]["ticks"].as_i64()?;
-                let end = row["ended_at"]["ticks"].as_i64();
-                if end.is_some_and(|end| (tick >= end) || (tick < origin && end <= origin)) {
-                    return None;
-                }
-                let channels = row["channels"].as_array()?.iter().filter_map(|number| number.as_u64().map(|number| number as u32)).collect();
-                Some((index, origin.max(tick), channels))
-            })
-            .collect();
-        for (index, at, channels) in pending {
-            let (basis, valid) = self.layout_phase_basis(direction, &channels, at);
-            let entry = serde_json::json!({ "at": TimePoint::new(self.root.expect("prepared root"), at), "basis": basis, "valid": valid });
-            if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
-                let is_origin = at == rows[index]["origin"]["ticks"].as_i64().unwrap_or(at);
-                let Some(coherence) = rows.get_mut(index).and_then(|row| row["coherence"].as_array_mut()) else {
-                    continue;
-                };
-                if is_origin {
-                    if let Some(first) = coherence.first_mut() {
-                        *first = entry;
-                    } else {
-                        coherence.push(entry);
-                    }
-                } else if coherence.last().is_some_and(|last| last["at"]["ticks"].as_i64() == Some(at)) {
-                    if let Some(last) = coherence.last_mut() {
-                        *last = entry;
-                    }
-                } else {
-                    coherence.push(entry);
-                }
-            }
-        }
+        if fixed { ("deterministic".to_owned(), true) } else { ("none".to_owned(), false) }
     }
 
     fn end_layout_segment(&mut self, direction: Direction, k: usize, origin: i64, sequence: Option<u64>, at: i64) {
@@ -1204,7 +1037,7 @@ impl MockRadio {
     fn record_layout_segment(&mut self, direction: Direction, k: usize, origin: i64, sequence: Option<u64>, channels: timeline::Channels) {
         let channel_numbers: Vec<u32> = channels.iter().collect();
         let phase_behavior: Vec<&str> = channel_numbers.iter().map(|number| self.profile.channel_model_terms(direction, *number as usize).0).collect();
-        let (basis, valid) = self.layout_phase_basis(direction, &channel_numbers, origin);
+        let (basis, valid) = self.layout_phase_basis(direction, &channel_numbers);
         let row = serde_json::json!({
             "direction": if direction == Direction::Rx { "rx" } else { "tx" },
             "stream": k,
@@ -1279,12 +1112,6 @@ impl MockRadio {
         for k in 0..self.tx.len() {
             self.stop_tx(k, now, reason, cancel_reason)?;
         }
-        for k in 0..self.tx.len() {
-            self.cancel_later(k, reason, cancel_reason)?;
-        }
-        for _ in std::mem::take(&mut self.updates) {
-            self.record_rejected_action("update_parameter", reason, now);
-        }
         self.record_pending_faults();
         if let Some(handle) = self.wakeup.take() {
             if let Some(time) = &self.time {
@@ -1296,13 +1123,13 @@ impl MockRadio {
         let abort = mode == StopMode::Abort && cancel_reason != ezsdr_radio::CancelReason::Loss;
         let delivered: Vec<Option<i64>> = self.rx.iter().map(|stream| stream.running.as_ref().filter(|_| abort).map(|rx| rx.next)).collect();
         for (k, delivered) in delivered.into_iter().enumerate() {
-            self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered, refused: false, kind: Kind::End { abort } })?;
+            self.book_rx(k, Item { e: now, seq, ready: now, delivered, refused: false, kind: Kind::End { abort } })?;
         }
         for k in 0..self.tx.len() {
             if self.lines.line(Self::tx_key(k)).is_none() {
                 continue;
             }
-            self.book_tx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } })?;
+            self.book_tx(k, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::End { abort } })?;
             self.tx_reconcile(k)?;
         }
         // An orderly stop delivers the block in progress up to its cut; a loss has (MR-20).
@@ -1490,11 +1317,6 @@ impl MockRadio {
                 include(held.order, held.start, held.len, held.repeat);
             }
         }
-        for (later, held) in &self.tx[k].later {
-            if *later == index {
-                include(held.order, held.start, held.len, held.repeat);
-            }
-        }
         let front = if self.profile.timing().tx_in_flight_ns == 0 {
             None
         } else {
@@ -1539,59 +1361,6 @@ impl MockRadio {
             }
         }
         Ok(())
-    }
-
-    /// MR-18: transmit stream `k`'s clock `to` is current from a change's instant, with a
-    /// new `BurstTracker` and `DeviceModel`; the bursts booked on it are held, and those on a
-    /// clock the change passed (one of the first `passed`) are cancelled.
-    fn tx_switch(&mut self, k: usize, to: Option<usize>, passed: usize) -> Result<(), ModuleError> {
-        self.tx[k].cur = to;
-        let tracker = self.tx_now(k).map(|clock| BurstTracker::new(clock.domain));
-        self.tx[k].tracker = tracker;
-        self.tx[k].device = DeviceModel::new();
-        let later = std::mem::take(&mut self.tx[k].later);
-        let now = self.root.zip(self.time.as_ref()).and_then(|(root, time)| time.now(root).and_then(|t| t.ticks_in(root)).ok()).unwrap_or(0);
-        for (index, held) in later {
-            if Some(index) == to {
-                self.tx[k].held.insert(held.start, held);
-            } else if index < passed {
-                self.forget_later(k, index, held.start);
-                self.record_cancelled_burst("MR-18: cancelled by a cold change", now, ezsdr_radio::CancelReason::ColdChange)?;
-            } else {
-                self.tx[k].later.push((index, held));
-            }
-        }
-        Ok(())
-    }
-
-    /// Cancels the bursts booked on transmit stream `k`'s clocks not yet current (RM-16,
-    /// MR-25).
-    fn cancel_later(&mut self, k: usize, reason: &str, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
-        let now = self.root.zip(self.time.as_ref()).and_then(|(root, time)| time.now(root).and_then(|t| t.ticks_in(root)).ok()).unwrap_or(0);
-        for (index, held) in std::mem::take(&mut self.tx[k].later) {
-            self.forget_later(k, index, held.start);
-            self.record_cancelled_burst(reason, now, cancel_reason)?;
-        }
-        Ok(())
-    }
-
-    /// Withdraws a cancelled burst of transmit stream `k`'s clock `index` from the channel
-    /// (MR-32).
-    fn forget_later(&mut self, k: usize, index: usize, start: i64) {
-        let Some(shared) = self.tx[k].plan.clone() else { return };
-        if let Some(clock) = self.tx[k].clocks.get(index) {
-            shared.plan().segments.remove(&(clock.origin, clock.by, k, index as u32 + 1, start));
-        }
-    }
-
-    /// The configuration in force at `e` for an update received with `order`: the applied
-    /// one and every pending update before it in UC-2's order (MR-18).
-    fn projected(&self, e: i64, order: u64) -> BTreeMap<ezsdr_kernel::spec::Key, Value> {
-        let mut config = self.config.clone();
-        for update in self.updates.range(..(e, order)).map(|(_, update)| update) {
-            config.insert(update.key.clone(), update.value.clone());
-        }
-        config
     }
 
     /// RM-25, M3: root ticks per sample at `rate` on this profile, from the decimation
@@ -1648,7 +1417,7 @@ impl MockRadio {
                     Ok(())
                 }
             },
-            Action::UpdateParameter { key, value, class, at, .. } => self.handle_update(id, node, key, value, class, at, now),
+            Action::UpdateParameter { .. } => self.handle_update(id, now),
             // RM-16, MR-25: a `Stop` of the device or of a stream cancels no update; on
             // receive it is a cut at its instant, on transmit it ends the bursts. A `Stop`
             // of the device stops every stream of the instance; one of a stream node names
@@ -1667,10 +1436,9 @@ impl MockRadio {
                 for (direction, k) in streams {
                     if direction == Direction::Tx {
                         self.stop_tx(k, now, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop)?;
-                        self.cancel_later(k, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop)?;
                     } else {
                         let seq = self.arrival();
-                        self.book_rx(k, Item { e: now, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop })?;
+                        self.book_rx(k, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop })?;
                     }
                 }
                 Ok(())
@@ -1687,8 +1455,8 @@ impl MockRadio {
                     Err(error) => return self.reject_action_at(Some(id), "command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
                 };
                 let seq = self.arrival();
-                let (e, _) = timeline::command_instant(self.lines.line(Self::rx_key(k)), requested, now, seq, false);
-                self.book_rx(k, Item { e, seq, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Start })?;
+                let e = timeline::command_instant(self.lines.line(Self::rx_key(k)), requested, now);
+                self.book_rx(k, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start })?;
                 Ok(())
             }
             other => {
@@ -1718,29 +1486,14 @@ impl MockRadio {
         let metadata_empty = metadata.is_empty();
         let root = self.root.expect("prepared root");
         let tx_id = self.tx[k].node.clone();
-        // MR-25: a stream a refused change has halted plays no burst at or after the cut of the
-        // clock the refusal cut, until its next `cold` change or `start_rx`; a clock a later
-        // `cold` change in the plan starts is taken, as UR-21's `book_burst` takes it.
-        let halted = self.lines.line(Self::tx_key(k)).is_some_and(|line| line.halted(now));
-        // The burst's clock: the stream's current one, or one a booked change starts
-        // (KC-21a, RM-25).
-        let clock = self.tx[k]
-            .clocks
-            .iter()
-            .position(|clock| clock.domain == at.time_point.domain())
-            .filter(|index| self.tx[k].cur.is_none_or(|current| *index >= current))
-            .filter(|index| Some(*index) == self.tx[k].cur || self.lines.line(Self::tx_key(k)).and_then(|line| line.plan.get(*index)).is_some_and(|segment| segment.cut.is_none_or(|cut| cut > 0)));
+        // The burst's clock: the stream's current one (KC-21a, RM-25).
+        let clock = self.tx[k].clocks.iter().position(|clock| clock.domain == at.time_point.domain()).filter(|index| Some(*index) == self.tx[k].cur);
         let Some(index) = clock else {
-            let reason = if self.tx[k].cur.is_none() && self.tx_later_clock(k).is_none() {
-                "MR-16: no transmit channel is configured"
-            } else {
-                "MR-16: target, clock, waveform size, channel count or metadata is invalid"
-            };
+            let reason = if self.tx[k].cur.is_none() { "MR-16: no transmit channel is configured" } else { "MR-16: target, clock, waveform size, channel count or metadata is invalid" };
             self.reject_action_at(Some(id), "tx_burst", reason, now)?;
             return Ok(());
         };
-        let current = Some(index) == self.tx[k].cur;
-        let channels = if current { self.effective_stream_channels(Direction::Tx, k) } else { self.lines.line(Self::tx_key(k)).map_or(0, |line| i64::from(line.plan[index].config.channels.count())) };
+        let channels = self.effective_stream_channels(Direction::Tx, k);
         let unit = channels.max(0) as u64 * 8;
         if node != Some(&tx_id) || channels <= 0 || size_bytes == 0 || unit == 0 || size_bytes % unit != 0 || !metadata_empty {
             self.refuse_tx_burst(id, now)?;
@@ -1817,20 +1570,12 @@ impl MockRadio {
                 return Ok(());
             }
         }
-        // MR-25: a burst whose start is at or after the cut of the halted stream's clock plays
-        // nothing; the clock the refused change started is ended at its origin, which the lookup
-        // above refuses.
-        let cut = self.lines.line(Self::tx_key(k)).and_then(|line| line.plan.get(index)).and_then(|segment| segment.cut);
-        if halted && cut.is_some_and(|cut| start >= cut) {
-            self.reject_action_at(Some(id), "tx_burst", HALTED_STREAM, now)?;
-            return Ok(());
-        }
         let start_v = time::v_of(origin, ratio, start).ok_or_else(|| ModuleError::rejected("MR-16: burst time overflow"))?;
         let refusal = if start_v < self.sync_end.unwrap_or(i64::MIN) {
             Some("MR-16: burst begins before synchronization")
-        } else if (current && self.tx[k].held.contains_key(&start)) || self.tx[k].later.iter().any(|(later, held)| *later == index && held.start == start) {
+        } else if self.tx[k].held.contains_key(&start) {
             Some("MR-16: a held burst already has this start")
-        } else if current && self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {
+        } else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {
             Some("MR-16: burst begins at or before the open burst's next sample")
         } else {
             None
@@ -1862,19 +1607,9 @@ impl MockRadio {
             open: BurstOpen { waveform_len: Some(waveform_len), late: (!matches!(policy, LateOutcome::OnTime {})).then_some(policy), requested_target: requested },
             order: self.next_order,
         };
-        if current {
-            self.tx[k].held.insert(start, held);
-        } else {
-            self.tx[k].later.push((index, held));
-        }
+        self.tx[k].held.insert(start, held);
         self.next_order = self.next_order.saturating_add(1);
         Ok(())
-    }
-
-    /// Whether a transmit clock stream `k`'s booked change starts has been registered.
-    fn tx_later_clock(&self, k: usize) -> Option<usize> {
-        let first = self.tx[k].cur.map_or(0, |current| current + 1);
-        (first < self.tx[k].clocks.len()).then_some(first)
     }
 
     fn emit_tx_until(&mut self, k: usize, until: i64, extra_cut: Option<i64>) -> Result<bool, ModuleError> {
@@ -1970,351 +1705,10 @@ impl MockRadio {
         Ok(progressed)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn handle_update(
-        &mut self,
-        id: ActionId,
-        node: Option<&ResourceId>,
-        key: ezsdr_kernel::spec::Key,
-        value: Value,
-        class: UpdateClass,
-        at: Option<AbsoluteDeadline>,
-        now: i64,
-    ) -> Result<(), ModuleError> {
-        // RM-12, D14: the node names the instance or one of its streams and selects the
-        // SpecTime clock alone; what changes is what `key` says.
-        let addressed = match self.addressed(node) {
-            Addressed::Instance | Addressed::Stream { .. } => true,
-            Addressed::Other => false,
-        };
-        let Some(expected) = self.update_class_of(&key).filter(|_| addressed) else {
-            self.reject_action_at(Some(id), "update_parameter", "MR-18: target or configuration key is not updateable", now)?;
-            return Ok(());
-        };
-        if class != expected {
-            self.reject_action_at(Some(id), "update_parameter", "MR-18: update class does not match the Radio Model key", now)?;
-            return Ok(());
-        }
-        let root = self.root.expect("root");
-        let clocks = self.clocks.as_ref().expect("clocks");
-        let requested_tick = match at {
-            Some(deadline) => match time::to_v(clocks, root, deadline.time_point) {
-                Ok(tick) => Some(tick),
-                Err(error) => {
-                    self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: timed instant cannot be converted: {error}"), now)?;
-                    return Ok(());
-                }
-            },
-            None => None,
-        };
-        let late = |requested: i64, applied: i64| {
-            serde_json::to_value(ezsdr_radio::payloads::LateCommandPayload { key: Some(key.clone()), requested: TimePoint::new(root, requested), applied: TimePoint::new(root, applied) })
-                .expect("late command payload")
-        };
-        let order = self.next_order;
-        let tick = if expected == UpdateClass::HardwareTimed {
-            // RM-21 (design 38 D2 (1), S4): the floor is the device lead or the instant of a
-            // timed update booked earlier inside the release window, whichever is later; the
-            // late judgement precedes the queue's, and the depth counts the bookings whose
-            // instant has not come.
-            let timing = self.profile.timing();
-            let lead = time::ns_to_v(clocks, root, timing.min_timed_command_lead_ns).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
-            let window = time::ns_to_v(clocks, root, timing.release_window_ns).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
-            let earlier = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::HardwareTimed).map(|((effective, _), _)| *effective);
-            let (tick, is_late) = timeline::timed_instant(requested_tick, now, lead, window, earlier);
-            if is_late {
-                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), tick), TimePoint::new(root, now))?;
-            }
-            let depth = timing.command_queue_depth as usize;
-            let pending = self.updates.iter().filter(|((effective, _), update)| update.class == UpdateClass::HardwareTimed && *effective > now).count();
-            if pending >= depth {
-                let payload = serde_json::to_value(ezsdr_radio::payloads::CommandQueueFullPayload { key: key.clone(), depth: depth as i64 }).expect("queue full payload");
-                self.emit_event("", ezsdr_radio::kinds::COMMAND_QUEUE_FULL, Severity::Error, payload, TimePoint::new(root, now))?;
-                self.record_rejected_action("update_parameter", "MR-18: hardware-timed command queue is full", now);
-                return Ok(());
-            }
-            tick
-        } else {
-            // RM-25, RM-27: a layout instance's `cold` change never takes effect before a
-            // `cold` change the instance received earlier, of whatever direction, stream or
-            // line, nor before a receive stream's start; one so floored is late (UC-2). The
-            // judgement is `ezsdr_radio::timeline`'s one function, shared with the UHD
-            // Module (item 11).
-            let direction = key_direction(&key);
-            let start = (direction == Some(Direction::Rx) && self.started).then_some(self.start_tick).flatten();
-            let floor = self.updates.iter().filter(|(_, update)| update.class == UpdateClass::Cold).map(|((effective, _), _)| *effective);
-            let (e, is_late) = timeline::layout_instant(requested_tick, now, start, floor);
-            if is_late {
-                self.emit_event("", ezsdr_radio::kinds::LATE_COMMAND, Severity::Warning, late(requested_tick.unwrap_or(now), e), TimePoint::new(root, now))?;
-            }
-            e
-        };
-        // The configuration the instance's updates leave in effect at `e`: the applied one and
-        // every pending one before it in UC-2's order (MR-18).
-        let projected = self.projected(tick, order);
-        let mut candidate = projected.clone();
-        candidate.insert(key.clone(), value.clone());
-        // Resolve membership at the Provider's instance-wide effective instant before any
-        // line is booked. `book_move` then receives that instant and only enforces its line
-        // invariants (RM-25, RM-34).
-        let cold = if expected == UpdateClass::Cold { Some(self.cold_streams(&key, &projected, &candidate)) } else { None };
-        // MR-18, RM-7: `coerce` over the configuration projected to `e`; a refusal changes nothing.
-        let constraints = candidate.iter().filter_map(|(key, value)| Some((key.clone(), ezsdr_kernel::spec::Constraint::Eq { value: value.as_scalar()?.clone() }))).collect();
-        let requested = Requested { resource: self.instance.id.clone(), constraints };
-        let report = self.profile.coerce(&self.instance.id, &requested).map_err(|error| ModuleError::rejected(format!("MR-18: {error}")))?;
-        if let Some(rejected) = report.rejected.first() {
-            self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: {}", rejected.reason), now)?;
-            return Ok(());
-        }
-        let applied = report.applied.get(&key).cloned().unwrap_or(value);
-        candidate.insert(key.clone(), applied.clone());
-        let move_change = matches!(&cold, Some(ColdChange::Move { .. }));
-        // MR-18, MR-20: the lines this change names, whose plan holds the segment it begins.
-        let cold_lines = match &cold {
-            Some(ColdChange::Streams(streams)) => streams.clone(),
-            Some(ColdChange::Move { direction, from, to, .. }) => vec![(*direction, *from), (*direction, *to)],
-            None => Vec::new(),
-        };
-        if !move_change {
-            self.next_order = self.next_order.saturating_add(1);
-        }
-        // RM-25, RM-27: a `cold` change is planned on its stream's line when booked,
-        // with the set and rate the configuration leaves in effect at `e`; a transmit one
-        // registers its clock and ends its predecessor now (VH-2).
-        let mut tx = Vec::new();
-        match cold {
-            Some(ColdChange::Move { direction, from, to, channel }) => {
-                let from_key = stream_key(direction, from);
-                let to_key = stream_key(direction, to);
-                if self.lines.line(from_key).is_none() || self.lines.line(to_key).is_none() {
-                    self.reject_action_at(Some(id), "update_parameter", &format!("RM-34: no line for move of channel c{channel} from stream s{from} to s{to}"), now)?;
-                    return Ok(());
-                }
-                let mut lines = self.lines.clone();
-                match lines.book_move(from_key, to_key, channel, Some(tick), now, order, now) {
-                    Ok((effective, _)) if effective == tick => {
-                        self.lines = lines;
-                    }
-                    Ok((effective, _)) => {
-                        self.reject_action_at(Some(id), "update_parameter", &format!("RM-34: move's line instant {effective} differs from the Provider instant {tick}"), now)?;
-                        return Ok(());
-                    }
-                    Err(error) => {
-                        self.reject_action_at(Some(id), "update_parameter", &format!("RM-34: move of channel c{channel} from stream s{from} to stream s{to} was refused ({error:?})"), now)?;
-                        return Ok(());
-                    }
-                }
-                if direction == Direction::Tx {
-                    for k in [from, to] {
-                        let count = self.lines.line(Self::tx_key(k)).map_or(0, |line| line.plan.len());
-                        let to_clock = self.lines.line(Self::tx_key(k)).and_then(|line| line.plan.iter().position(|segment| segment.by == Some(order)));
-                        self.tx_reconcile(k)?;
-                        tx.push((k, to_clock, count));
-                    }
-                }
-            }
-            Some(ColdChange::Streams(streams)) => {
-                for (direction, k) in streams {
-                    let stream = stream_key(direction, k);
-                    let Some(old) = self.lines.line(stream).map(|line| line.stream.config) else { continue };
-                    let (channels, rate) = self.stream_set(direction, k, &candidate);
-                    let ratio = if !channels.is_empty() { self.ratio(rate)? } else { self.ratio(rate).unwrap_or(old.ratio) };
-                    let item = Item { e: tick, seq: order, ready: now, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(timeline::Config { channels, ratio }) };
-                    if direction == Direction::Rx {
-                        self.book_rx(k, item)?;
-                    } else {
-                        self.book_tx(k, item)?;
-                        let count = self.lines.line(stream).map_or(0, |line| line.plan.len());
-                        let to_clock = self.lines.line(stream).and_then(|line| line.plan.iter().position(|segment| segment.by == Some(order)));
-                        self.tx_reconcile(k)?;
-                        tx.push((k, to_clock, count));
-                    }
-                }
-            }
-            None => {}
-        }
-        if move_change {
-            self.next_order = self.next_order.saturating_add(1);
-        }
-        self.updates.insert((tick, order), PendingUpdate { key, value: applied, class, tx, cold: cold_lines });
-        Ok(())
-    }
-
-    /// RM-27, RM-34: the streams a `cold` change names in the configuration at its effective
-    /// instant; a membership change between two streams is one move.
-    fn cold_streams(&self, key: &ezsdr_kernel::spec::Key, projected: &BTreeMap<ezsdr_kernel::spec::Key, Value>, candidate: &BTreeMap<ezsdr_kernel::spec::Key, Value>) -> ColdChange {
-        let Some(concrete) = ezsdr_radio::concrete(key) else { return ColdChange::Streams(Vec::new()) };
-        match concrete {
-            Concrete::Stream { rx, number } => ColdChange::Streams(vec![(direction_of(rx), number as usize)]),
-            Concrete::Channel { rx, number, leaf: "antenna" } => {
-                let direction = direction_of(rx);
-                let k = self.channel_stream(candidate, direction, number);
-                ColdChange::Streams(if k < 0 { Vec::new() } else { vec![(direction, k as usize)] })
-            }
-            Concrete::Channel { rx, number, leaf: "stream" } => {
-                let direction = direction_of(rx);
-                let side = if rx { "rx" } else { "tx" };
-                let stream = ezsdr_radio::keys::channel(side, number, "stream");
-                let Some(is) = int_config_opt(candidate, &stream) else {
-                    // A value of another kind: the configuration's judgement refuses the
-                    // change, and it names no stream.
-                    return ColdChange::Streams(Vec::new());
-                };
-                let was = int_config_opt(projected, &stream).unwrap_or(-1);
-                if was == is {
-                    ColdChange::Streams(Vec::new())
-                } else if was < 0 {
-                    ColdChange::Streams(vec![(direction, is as usize)])
-                } else if is < 0 {
-                    ColdChange::Streams(vec![(direction, was as usize)])
-                } else {
-                    ColdChange::Move { direction, from: was as usize, to: is as usize, channel: number }
-                }
-            }
-            _ => ColdChange::Streams(Vec::new()),
-        }
-    }
-
-    /// RM-30: the stream a layout configuration puts logical channel `number` of
-    /// `direction` in, or −1 when it is in none.
-    fn channel_stream(&self, configuration: &BTreeMap<ezsdr_kernel::spec::Key, Value>, direction: Direction, number: u32) -> i64 {
-        let description = self.profile.channels();
-        description.stream_of(configuration, direction == Direction::Rx, number)
-    }
-
-    /// MR-18: at `e` the value applies and is recorded; a transmit `cold` change ends the old
-    /// clock's bursts at its cut and makes its own clock current. MR-20: a `cold` change the
-    /// instance's `cold_change_refused` fault names is refused at `e` instead — the value stays
-    /// the configuration of record, the stream halts, and a transmit clock the change booked
-    /// ends at its origin with the bursts on it cancelled.
-    fn apply_update(&mut self, tick: i64, effective: i64, order: u64) -> Result<(), ModuleError> {
-        let Some(update) = self.updates.remove(&(effective, order)) else {
-            return Ok(());
-        };
-        let refused = self.refusal(effective, order, &update.cold);
-        self.config.insert(update.key.clone(), update.value.clone());
-        self.record_update(&update.key, &update.value, tick);
-        self.apply_layout_channel_update(&update.key, &update.value, tick);
-        if let Some((index, line)) = refused {
-            self.lines.refuse(stream_key(line.0, line.1), order).map_err(rm25)?;
-            for (direction, k) in &update.cold {
-                self.forget_refused_segment(*direction, *k, order);
-            }
-            self.faults[index].applied = true;
-            self.faults[index].resolved = true;
-            self.record_fault(index, 0);
-            self.reject_action_at(None, "update_parameter", REFUSED_CHANGE, tick)?;
-        }
-        for (k, to, passed) in update.tx {
-            self.stop_tx(k, tick, "MR-18: cancelled by a cold change", ezsdr_radio::CancelReason::ColdChange)?;
-            match refused {
-                None => self.tx_switch(k, to, passed)?,
-                Some(_) => {
-                    if let Some(index) = to {
-                        self.cancel_booked(k, index, REFUSED_BURST, tick)?;
-                    }
-                    self.tx_reconcile(k)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// MR-27: drops the row of a receive segment the refused change began at its own instant. A
-    /// receive segment cut with no sample has no segment of the plan (RM-25) and no row either.
-    fn forget_refused_segment(&mut self, direction: Direction, k: usize, seq: u64) {
-        if direction != Direction::Rx {
-            return;
-        }
-        if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
-            rows.retain(|row| !(row["direction"] == "rx" && row["stream"].as_u64() == Some(k as u64) && row["sequence"].as_u64() == Some(seq)));
-        }
-    }
-
-    /// MR-20: the `cold_change_refused` fault that refuses the change received with `seq` at
-    /// `e`, and the line whose plan starts the segment it begins — the fault's instant at or
-    /// before `e`, and the first change in `(e, seq)` order whose segment the plan holds. A
-    /// change the plan gives no segment — one to a stopped or a linkless stream, or one a
-    /// later booking has already cut away — is no candidate, and the fault keeps waiting.
-    fn refusal(&self, e: i64, seq: u64, lines: &[(Direction, usize)]) -> Option<(usize, (Direction, usize))> {
-        let index = self.faults.iter().position(|fault| !fault.resolved && fault.entry.fault == FaultKind::ColdChangeRefused && fault.tick <= e)?;
-        let line = lines.iter().copied().find(|(direction, k)| self.lines.line(stream_key(*direction, *k)).is_some_and(|line| line.plan.iter().any(|segment| segment.by == Some(seq))))?;
-        Some((index, line))
-    }
-
-    /// MR-18: withdraws the bursts held on transmit stream `k`'s clock `index` — the clock the
-    /// refused change booked — recording each as cancelled and leaving the other clocks'.
-    fn cancel_booked(&mut self, k: usize, index: usize, reason: &str, now: i64) -> Result<(), ModuleError> {
-        let kept = std::mem::take(&mut self.tx[k].later);
-        for (later, held) in kept {
-            if later == index {
-                self.forget_later(k, later, held.start);
-                self.record_cancelled_burst(reason, now, ezsdr_radio::CancelReason::ColdChange)?;
-            } else {
-                self.tx[k].later.push((later, held));
-            }
-        }
-        Ok(())
-    }
-
-    /// Updates only the named logical channel's SimulationChannel timelines (MR-33, MR-34).
-    fn apply_layout_channel_update(&mut self, key: &ezsdr_kernel::spec::Key, value: &Value, tick: i64) {
-        let Some(Concrete::Channel { rx, number, leaf }) = ezsdr_radio::concrete(key) else {
-            return;
-        };
-        let Some(value) = value.as_scalar().and_then(|value| match value {
-            Scalar::Num(value) => Some(value.get()),
-            Scalar::Int(value) => Some(*value as f64),
-            _ => None,
-        }) else {
-            return;
-        };
-        if leaf == "gain_db" {
-            if rx {
-                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {
-                    model.gain_db.set(tick, value);
-                }
-            } else if let Some(shared) = self.tx.iter().find_map(|stream| stream.plan.clone()) {
-                if let Some(model) = shared.plan().channel_models.get_mut(number as usize) {
-                    model.gain_db.set(tick, value);
-                }
-            }
-        } else if leaf == "frequency_hz" {
-            if rx {
-                // MR-34: timed only if the segment that covers the channel at `tick` began at least the release window before it.
-                let window = self.profile.timing().release_window_ns;
-                let window = self.clocks.as_deref().zip(self.root).and_then(|(clocks, root)| time::ns_to_v(clocks, root, window).ok()).unwrap_or(i64::MAX);
-                let timed = self.covering_rx(number, tick).is_some_and(|(_, origin)| origin.saturating_add(window) <= tick);
-                if let Some(mode) = self.channel.as_mut() {
-                    if let Some(model) = mode.rx_channels.get_mut(number as usize) {
-                        let phase = match model.phase_behavior.as_str() {
-                            "random_unless_timed_tune" if timed => model.timed_phase,
-                            "random_unless_timed_tune" | "random" => channel::lo_phase(&mut mode.lo_retune),
-                            _ => 0.0,
-                        };
-                        model.frequency_hz.set(tick, value);
-                        model.phase.set(tick, phase);
-                        model.phase_fixed.set(tick, if model.phase_behavior == "deterministic" || (model.phase_behavior != "random" && timed) { 1.0 } else { 0.0 });
-                    }
-                }
-            } else if let (Some(mode), Some(shared)) = (self.channel.as_mut(), self.tx.iter().find_map(|stream| stream.plan.clone())) {
-                let phase = {
-                    let plan = shared.plan();
-                    plan.channel_models.get(number as usize).map(|model| match model.phase_behavior.as_str() {
-                        "random_unless_timed_tune" => model.timed_phase,
-                        "random" => channel::lo_phase(&mut mode.lo_retune),
-                        _ => 0.0,
-                    })
-                };
-                let mut plan = shared.plan();
-                if let Some(model) = plan.channel_models.get_mut(number as usize) {
-                    model.frequency_hz.set(tick, value);
-                    model.phase.set(tick, phase.unwrap_or(0.0));
-                    model.phase_fixed.set(tick, if model.phase_behavior != "random" { 1.0 } else { 0.0 });
-                }
-            }
-            self.update_layout_segment_coherence(direction_of(rx), number, tick);
-        }
+    /// MR-18: a radio key has no update class, so a Run-time update of one is refused (the Kernel
+    /// refuses it first; this is the Provider's own guard for a harness that calls it directly).
+    fn handle_update(&mut self, id: ActionId, now: i64) -> Result<(), ModuleError> {
+        self.reject_action_at(Some(id), "update_parameter", "MR-18: target or configuration key is not updateable", now)
     }
 
     /// The step's ordered loop up to `u` (RM-25, MR-20): every stream's receive segment
@@ -2338,19 +1732,12 @@ impl MockRadio {
             // earlier than `now + min_timed_command_lead_ns` (MR-18's `earliest`), so with a lead
             // above zero it never lands on an instant the loop has passed. The `ideal` profile's
             // lead is 0, but it is deterministic, and an untimed tune leaves its phases as they are
-            // (MR-34). MA-30 does not order an instant's Actions before the loop passes that instant,
-            // so a `cold` change at `now` that equals the origin of a transmit clock the loop has
-            // already passed cuts that clock at sample 0 after its untimed tune has drawn (design 09
-            // MR-34's ceiling).
+            // (MR-34). MA-30 does not order an instant's Actions before the loop passes that instant
+            // (design 09 MR-34's ceiling).
             if self.started {
                 for k in 0..self.rx.len() {
-                    if let Some(key) = self.tune_next(Direction::Rx, k) {
-                        candidates.push((key.0, 2, tune_order(Direction::Rx, k), WorkKind::Tune { direction: Direction::Rx, stream: k, key }));
-                    }
-                }
-                for k in 0..self.tx.len() {
-                    if let Some(key) = self.tune_next(Direction::Tx, k) {
-                        candidates.push((key.0, 2, tune_order(Direction::Tx, k), WorkKind::Tune { direction: Direction::Tx, stream: k, key }));
+                    if let Some(key) = self.tune_next(k) {
+                        candidates.push((key.0, 2, tune_order(k), WorkKind::Tune { stream: k, key }));
                     }
                 }
             }
@@ -2361,9 +1748,8 @@ impl MockRadio {
                     Some((tick, 1, burst.order, WorkKind::HeldBurst { stream: k, start: *start }))
                 }));
             }
-            candidates.extend(self.updates.keys().map(|(effective, order)| (*effective, 1, *order, WorkKind::Update { effective: *effective })));
             candidates.sort_by_key(|(tick, rank, order, _)| (*tick, *rank, *order));
-            let Some((tick, _, order, kind)) = candidates.first().copied() else {
+            let Some((tick, _, _, kind)) = candidates.first().copied() else {
                 break;
             };
             if tick > u {
@@ -2399,20 +1785,18 @@ impl MockRadio {
                         self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::Loss)?;
                         return Err(ModuleError { kind: ezsdr_kernel::module_api::ModuleErrorKind::DeviceLost, message: DEVICE_LOST.to_owned(), detail: serde_json::Value::Null });
                     }
-                    FaultKind::ColdChangeRefused => unreachable!("a refused cold change is no fault of the step's loop (MR-20)"),
                 },
                 WorkKind::HeldBurst { stream, start } => {
                     if let Some(held) = self.tx[stream].held.remove(&start) {
                         self.tx[stream].open = Some(OpenBurst { start: held.start, len: held.len, repeat: held.repeat, next: held.start, first: true, open: held.open, order: held.order });
                     }
                 }
-                WorkKind::Update { effective } => self.apply_update(tick, effective, order)?,
                 WorkKind::RxBegin { stream, origin } => match self.rx_next_segment(stream).filter(|segment| segment.origin == origin) {
                     Some(segment) => self.rx_begin(stream, segment, None)?,
                     None => self.rx[stream].from = origin.saturating_add(1),
                 },
-                WorkKind::Tune { direction, stream, key } => {
-                    self.tune(direction, stream, key, tick);
+                WorkKind::Tune { stream, key } => {
+                    self.tune(stream, key, tick);
                     continue;
                 }
             }
@@ -2438,39 +1822,16 @@ fn rm25(error: ezsdr_kernel::time::TimeError) -> ModuleError {
     ModuleError::rejected(format!("RM-25: {error}"))
 }
 
-/// The integer `configuration` holds for `name`, if it holds one.
-fn int_config_opt(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> Option<i64> {
-    let key = ezsdr_kernel::spec::Key::parse(name).expect("radio key");
-    match config.get(&key).and_then(Value::as_scalar) {
-        Some(Scalar::Int(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-/// RM-29: the direction an RM-27 key's `rx` flag names.
-fn direction_of(rx: bool) -> Direction {
-    if rx { Direction::Rx } else { Direction::Tx }
-}
-
-/// RM-27: the direction a layout configuration key belongs to, when it names a channel or a
-/// stream of one; `None` for an instance-wide key.
-fn key_direction(key: &ezsdr_kernel::spec::Key) -> Option<Direction> {
-    match ezsdr_radio::concrete(key) {
-        Some(Concrete::Stream { rx, .. }) | Some(Concrete::Channel { rx, .. }) => Some(direction_of(rx)),
-        _ => None,
-    }
-}
-
 /// The key the instance's lines hold a stream under (RM-29, RM-34).
 fn stream_key(direction: Direction, k: usize) -> StreamKey {
     (direction, k as u32)
 }
 
-/// MR-34's order of the untimed tunes at one instant, among themselves: receive before
-/// transmit, then by stream number. `advance` takes them after the receive segment beginnings,
-/// the faults, the held bursts and the updates of the same instant (rank 2).
-fn tune_order(direction: Direction, k: usize) -> u64 {
-    (u64::from(direction == Direction::Tx) << 32) + k as u64 + 1
+/// MR-34's order of the untimed tunes at one instant, among themselves: by stream number.
+/// `advance` takes them after the receive segment beginnings, the faults, the held bursts and
+/// the updates of the same instant (rank 2).
+fn tune_order(k: usize) -> u64 {
+    k as u64 + 1
 }
 
 fn num_config(config: &BTreeMap<ezsdr_kernel::spec::Key, Value>, name: &str) -> f64 {
@@ -2590,19 +1951,16 @@ impl Provider for MockRadio {
                     return Err(self.reject(format!("MR-31: a coupling {} -> {} names a channel beyond this profile's {max}", coupling.tx, coupling.rx)));
                 }
                 let mut lo = SimRng::new(seed, &format!("{}/lo", self.selector_id()));
-                let mut phases = |direction, count: usize, timed: bool| {
+                let mut phases = |direction, count: usize| {
                     (0..count)
                         .map(|number| {
                             let (behavior, _) = self.profile.channel_model_terms(direction, number);
-                            let draw = if timed { behavior == "random_unless_timed_tune" } else { behavior != "deterministic" };
-                            if draw { channel::lo_phase(&mut lo) } else { 0.0 }
+                            if behavior != "deterministic" { channel::lo_phase(&mut lo) } else { 0.0 }
                         })
                         .collect::<Vec<_>>()
                 };
-                let rx_phase = phases(Direction::Rx, rx_max as usize, false);
-                let tx_phase = phases(Direction::Tx, tx_max as usize, false);
-                let rx_timed = phases(Direction::Rx, rx_max as usize, true);
-                let tx_timed = phases(Direction::Tx, tx_max as usize, true);
+                let rx_phase = phases(Direction::Rx, rx_max as usize);
+                let tx_phase = phases(Direction::Tx, tx_max as usize);
                 let rx_channels = (0..rx_max as usize)
                     .map(|number| {
                         let side = "rx";
@@ -2611,8 +1969,6 @@ impl Provider for MockRadio {
                             gain_db: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "gain_db"))),
                             frequency_hz: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "frequency_hz"))),
                             phase: channel::Timeline::new(rx_phase[number]),
-                            phase_fixed: channel::Timeline::new(if behavior == "deterministic" { 1.0 } else { 0.0 }),
-                            timed_phase: rx_timed[number],
                             phase_behavior: behavior.to_owned(),
                             path_delay_samples: delay,
                         }
@@ -2626,8 +1982,6 @@ impl Provider for MockRadio {
                             gain_db: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "gain_db"))),
                             frequency_hz: channel::Timeline::new(num_config(&config, &ezsdr_radio::keys::channel(side, number as u32, "frequency_hz"))),
                             phase: channel::Timeline::new(tx_phase[number]),
-                            phase_fixed: channel::Timeline::new(if behavior == "deterministic" { 1.0 } else { 0.0 }),
-                            timed_phase: tx_timed[number],
                             phase_behavior: behavior.to_owned(),
                             path_delay_samples: delay,
                         }
@@ -2712,7 +2066,9 @@ impl Provider for MockRadio {
                     self.record_layout_segment(Direction::Tx, k, segment.origin, segment.by, segment.config.channels);
                 }
             }
-            self.tx_switch(k, current, 0)?;
+            self.tx[k].cur = current;
+            self.tx[k].tracker = self.tx_now(k).map(|clock| BurstTracker::new(clock.domain));
+            self.tx[k].device = DeviceModel::new();
         }
         self.armed = true;
         Ok(())
@@ -2754,7 +2110,7 @@ impl Provider for MockRadio {
                 let line = self.line(Direction::Rx, k, target, &self.config)?;
                 self.lines.insert(Self::rx_key(k), line);
                 let seq = self.arrival();
-                self.lines.book(Self::rx_key(k), Item { e: target, seq, ready: target, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Stop }).map_err(rm25)?;
+                self.lines.book(Self::rx_key(k), Item { e: target, seq, ready: target, delivered: None, refused: false, kind: Kind::Stop }).map_err(rm25)?;
                 continue;
             }
             let line = self.line(Direction::Rx, k, target, &self.config)?;
@@ -2841,7 +2197,6 @@ impl Provider for MockRadio {
         self.rx = rx;
         self.tx = tx;
         self.wakeup = None;
-        self.updates.clear();
         self.faults.clear();
         self.clocks = None;
         self.time = None;
@@ -2909,30 +2264,14 @@ mod cancellation_tests {
         let stream = ResourceId::parse("radio/tx/s0").unwrap();
         let mut tx_clocks = Vec::new();
         let mut segments = BTreeMap::new();
-        for index in 0..3 {
-            let origin = index as i64 * 1_000;
-            let by = (index > 0).then_some(index as u64);
-            let handle = clocks.declare_sample_clock(stream.clone(), root, Rational::new(200, 1).unwrap()).unwrap();
-            let domain = clocks.register_sample_clock(&handle, origin).unwrap();
-            tx_clocks.push(TxClock { handle, domain, origin, by, ended: false });
-            if index < 2 {
-                let start = if index == 1 { 30 } else { 20 };
-                segments.insert(
-                    (origin, by, 0, index as u32 + 1, start),
-                    channel::Segment {
-                        origin,
-                        ratio: Rational::new(200, 1).unwrap(),
-                        start,
-                        len: 1,
-                        repeat: false,
-                        channels: 1,
-                        channel_numbers: vec![0],
-                        samples: vec![0.0f32, 0.0].into(),
-                        end: None,
-                    },
-                );
-            }
-        }
+        let (origin, by, start) = (0, None, 20);
+        let handle = clocks.declare_sample_clock(stream.clone(), root, Rational::new(200, 1).unwrap()).unwrap();
+        let domain = clocks.register_sample_clock(&handle, origin).unwrap();
+        tx_clocks.push(TxClock { handle, domain, origin, by, ended: false });
+        segments.insert(
+            (origin, by, 0, 1, start),
+            channel::Segment { origin, ratio: Rational::new(200, 1).unwrap(), start, len: 1, repeat: false, channels: 1, channel_numbers: vec![0], samples: vec![0.0f32, 0.0].into(), end: None },
+        );
         let shared = channel::TxShared::new(channel::TxPlan { segments, channel_models: Vec::new() });
         let (mut registry, mut admission, mut kinds) =
             (ezsdr_kernel::module_api::ModuleRegistry::new(), ezsdr_kernel::binding::AdmissionCheckRegistry::new(), ezsdr_kernel::policy::EventKindRegistry::with_kernel_kinds());
@@ -2951,20 +2290,17 @@ mod cancellation_tests {
         radio.tx[0].tracker = Some(BurstTracker::new(radio.tx[0].clocks[0].domain));
         radio.tx[0].plan = Some(shared.clone());
         radio.tx[0].held.insert(20, held(20));
-        radio.tx[0].later.push((1, held(30)));
         (radio, shared, events)
     }
 
     #[test]
-    fn cancelled_held_and_later_bursts_release_the_shared_reservations() {
+    fn a_cancelled_held_burst_releases_the_shared_reservation() {
         let (mut radio, shared, events) = radio_with_reservations();
         radio.stop_tx(0, 0, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop).unwrap();
-        radio.cancel_later(0, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop).unwrap();
         assert!(radio.tx[0].held.is_empty());
-        assert!(radio.tx[0].later.is_empty());
         assert!(shared.plan().segments.is_empty());
         let rows = radio.instance.sections[&section("rejected")].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows.iter().all(|row| row["reason"] == "MR-25: cancelled by stop"), "{rows:?}");
         assert!(events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
     }
@@ -2985,30 +2321,11 @@ mod cancellation_tests {
     }
 
     #[test]
-    fn cold_change_and_loss_do_not_remember_a_stop_front() {
-        for reason in [ezsdr_radio::CancelReason::ColdChange, ezsdr_radio::CancelReason::Loss] {
-            let (mut radio, _, _) = radio_with_reservations();
-            radio.tx[0].open = Some(OpenBurst { start: 20, len: 1, repeat: true, next: 25, first: false, open: BurstOpen::default(), order: 1 });
-            radio.stop_tx(0, 0, "test termination", reason).unwrap();
-            assert!(radio.tx[0].front.is_none(), "{reason:?} must cut at its instant");
-        }
-    }
-
-    #[test]
-    fn a_cold_change_skipping_a_future_clock_releases_its_reservation() {
-        let (mut radio, shared, events) = radio_with_reservations();
-        radio.tx[0].held.clear();
-        radio.tx[0].later.clear();
-        radio.tx[0].later.push((1, held(30)));
-        radio.tx_switch(0, Some(2), 2).unwrap();
-        assert!(radio.tx[0].later.is_empty());
-        assert!(shared.plan().segments.keys().all(|(_, _, stream, generation, _)| *stream != 0 || *generation != 2));
-        let rows = radio.instance.sections[&section("rejected")].as_array().unwrap();
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0]["reason"], "MR-18: cancelled by a cold change");
-        let rejected: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
-        assert_eq!(rejected.len(), 1, "{rejected:?}");
-        assert_eq!(rejected[0].payload["reason"], "MR-18: cancelled by a cold change");
+    fn a_loss_does_not_remember_a_stop_front() {
+        let (mut radio, _, _) = radio_with_reservations();
+        radio.tx[0].open = Some(OpenBurst { start: 20, len: 1, repeat: true, next: 25, first: false, open: BurstOpen::default(), order: 1 });
+        radio.stop_tx(0, 0, "test termination", ezsdr_radio::CancelReason::Loss).unwrap();
+        assert!(radio.tx[0].front.is_none(), "a loss must cut at its instant");
     }
 }
 

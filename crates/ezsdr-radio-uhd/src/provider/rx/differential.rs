@@ -21,8 +21,8 @@ use ezsdr_kernel::module_api::{Fidelity, StopMode};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::{ManualTimeAuthority, Rational, TimePoint};
 use ezsdr_radio::kinds;
-use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Segment, Stream, plan};
-use generator::{Change, Fault, Op, Sequence, Terms};
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Segment, Stream, plan};
+use generator::{Fault, Op, Sequence, Terms};
 
 use super::super::control::ColdConfig;
 use super::super::core::{Core, booked_stream, lock};
@@ -72,10 +72,8 @@ fn extra(seed: u64, sequence: &Sequence) -> Extra {
         1 => Some((at, StopMode::Abort)),
         _ => None,
     };
-    let rate = sequence.ops().find_map(|(_, op)| match op {
-        Op::Cold { direction: Direction::Rx, change: Change::Rate(rate), .. } => Some(*rate),
-        _ => None,
-    });
+    // A configure is made by a `start_rx` only (a Run's settings change only at its start), at the stream's 1 MS/s.
+    let rate = sequence.ops().any(|(_, op)| matches!(op, Op::StartRx)).then_some(1_000_000);
     let block = if draw(seed, 5, 3) == 0 { 65_536 } else { 2_000 };
     let lag = MS * draw(seed, 6, 3) as i64;
     // Past every origin and cut the sequence's commands plan, by two receive calls at the
@@ -95,7 +93,7 @@ fn terms(block: i64) -> Terms {
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
     let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, release_window: ticks(description.timing.release_window_ns), allowance: ticks(DELIVERY_ALLOWANCE_NS) };
-    Terms { t0: T0, root_hz: 200_000_000, timed_lead: 0, release_window: 0, stream }
+    Terms { t0: T0, root_hz: 200_000_000, stream }
 }
 
 fn rate_of(config: Config) -> f64 {
@@ -114,7 +112,7 @@ fn rm_26_the_timeline_against_uhd_rx() {
     let mut failed = Vec::new();
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
     for seed in 0..1_000 {
-        let sequence = generator::sequence(seed, &generator::RATES);
+        let sequence = generator::sequence(seed);
         let extra = extra(seed, &sequence);
         let observed = run(&sequence, &extra);
         let (problems, floored) = compare(&sequence, &extra, &observed);
@@ -187,7 +185,7 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
         .map(|item| Item { refused: observed.refused.contains(&item.seq), ..*item })
         .collect();
     if let Some((at, mode)) = stop {
-        booked.push(Item { e: at, seq: STOP_SEQ, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort: mode == StopMode::Abort } });
+        booked.push(Item { e: at, seq: STOP_SEQ, ready: at, delivered: None, refused: false, kind: Kind::End { abort: mode == StopMode::Abort } });
     }
     booked.sort_by_key(|item| (item.ready, item.seq));
     // Every segment any plan had, in the order of their origins, as the device would run it
@@ -513,7 +511,7 @@ impl World {
             Ev::Book(item) if self.stopped.is_none_or(|at| item.ready <= at) => {
                 let mut streams = lock(&core.streams);
                 let stream = booked_stream(Dir::Rx);
-                if matches!(item.kind, Kind::Cold(_) | Kind::Start) {
+                if item.kind == Kind::Start {
                     streams.stream_mut(stream).configs.insert(item.seq, Arc::new(ColdConfig::new(BTreeMap::new())));
                 }
                 assert!(streams.book(&core, stream, item), "booked");

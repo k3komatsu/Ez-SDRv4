@@ -663,8 +663,9 @@ fn ea_10_a_named_selector_connects_as_the_unnamed_one_and_the_record_holds_numbe
         let mut server = greeted(&temp.0);
         let initial = init_of("radio", vec![StreamInit { gain: BTreeMap::from([("1".to_owned(), 7.0)]), sample_rate: Some(2.0e6), ..numbered(0, &[0, 1]) }], vec![numbered(0, &[0])]);
         let connected = connect_profile(&mut server, profile_of(&temp.0), initial).expect("connects");
+        // A radio value has no update class: refused, and still logged by its numbered key.
         let entry = submit(&mut server, set("radio.rx.c1.gain_db", Value::num(9.0).unwrap()), Vec::new());
-        assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+        assert!(matches!(entry.outcome, Outcome::Rejected { .. }));
         submit(&mut server, repeat(), Vec::new());
         let (manifest, _) = finish(&mut server);
         (connected.effective, manifest)
@@ -1055,8 +1056,8 @@ fn ea_06_connect_initial_is_in_the_schema() {
 #[test]
 fn ea_11_submit_returns_the_logged_entry() {
     let temp = TempDir::new("submit");
-    let (mut server, _) = connected(&temp.0);
-    let admitted = submit(&mut server, set("radio.tx.c0.stream", Value::from(0)), Vec::new());
+    let (mut server, _) = connected_with(&temp.0, loopback());
+    let admitted = submit(&mut server, repeat(), ramp(1_000));
     let rejected = submit(&mut server, set("radio.rx.s0.sample_rate_hz", Value::num(1.0e12).unwrap()), Vec::new());
     assert!(matches!(admitted.outcome, Outcome::Admitted { .. }));
     assert!(matches!(rejected.outcome, Outcome::Rejected { .. }), "a rejection is a result, not an error");
@@ -1416,8 +1417,12 @@ fn fake_server(dir: &Path) -> (Server, Arc<AtomicU64>) {
 }
 
 fn fake_session(dir: &Path) -> (Server, Arc<AtomicU64>) {
+    fake_session_with(dir, rx0())
+}
+
+fn fake_session_with(dir: &Path, initial: Initial) -> (Server, Arc<AtomicU64>) {
     let (mut server, opened) = fake_server(dir);
-    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(dir)), lease: None, initial: rx0() }, Vec::new())) else { panic!("connect") };
+    let Response::Connected { .. } = ok(server.handle(Request::Connect { profile: Some(uhd_profile(dir)), lease: None, initial }, Vec::new())) else { panic!("connect") };
     (server, opened)
 }
 
@@ -1492,10 +1497,9 @@ fn ea_07_a_uhd_profile_without_the_feature_is_refused() {
 #[test]
 fn ea_07_a_session_on_the_fake_device() {
     let temp = TempDir::new("uhd-session");
-    let (mut server, opened) = fake_session(&temp.0);
+    let (mut server, opened) = fake_session_with(&temp.0, loopback());
     assert_eq!(opened.load(Ordering::SeqCst), 1);
     let wave: Vec<u8> = ramp(1_000);
-    assert!(matches!(submit(&mut server, set("radio.tx.c0.stream", Value::Scalar(Scalar::Int(0))), Vec::new()).outcome, Outcome::Admitted { .. }));
     assert!(matches!(submit(&mut server, repeat(), wave.clone()).outcome, Outcome::Admitted { .. }));
     let (now, _, _) = status(&mut server);
     // The repeat starts within a restart lead (50 ms); a capture 100 ms ahead is inside it.

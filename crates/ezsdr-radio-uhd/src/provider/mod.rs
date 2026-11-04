@@ -691,8 +691,7 @@ impl Provider for UhdRadio {
             return Ok(());
         };
         // RM-16, VH-2: the streams end at the stop instant, booked at once, which uhd-rx and
-        // uhd-tx read at their next turn; then uhd-control cancels the held timed commands and
-        // records the plans.
+        // uhd-tx read at their next turn; then uhd-control records the plans.
         let at = {
             let mut streams = lock(&core.streams);
             let at = core.now();
@@ -814,15 +813,8 @@ mod tests {
         core.rx_chain[k].lock().adopt_start(core::SegmentKey { by: Some(1), origin: 0 }, 0);
     }
 
-    fn indebted_off_rx_chain(core: &Core, k: usize) {
-        let mut chain = core.rx_chain[k].lock();
-        chain.adopt_start(core::SegmentKey { by: Some(1), origin: 0 }, 0);
-        chain.hand(core::RxEntry { order: (1, 1), channel: 0, value: 1e9, accepted_at: Some(0) }, || Ok(()), || 0).unwrap();
-        chain.stop_result(Ok(())).unwrap();
-    }
-
     #[test]
-    fn rx_chain_prepare_open_requires_idle_empty_debt() {
+    fn rx_chain_prepare_open_requires_an_idle_chain() {
         let mut radio = prepared_with(1, 0);
         let (core, device, _, _) = test_support::rig_with_links(vec![Arc::new(NoLink)]);
         let prepared = radio.prepared.as_mut().unwrap();
@@ -836,13 +828,13 @@ mod tests {
     }
 
     #[test]
-    fn rx_chain_cleanup_close_requires_idle_empty_debt() {
+    fn rx_chain_cleanup_close_requires_an_idle_chain() {
         let mut radio = prepared_with(1, 0);
         let core = radio.prepared.as_ref().unwrap().core.clone();
-        indebted_off_rx_chain(&core, 0);
+        active_rx_chain(&core, 0);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| radio.cleanup()));
-        assert!(result.is_err(), "cleanup cannot close streams while an RX debt remains");
+        assert!(result.is_err(), "cleanup cannot close streams while an RX chain is active");
         assert!(radio.prepared.is_none(), "cleanup reached its guarded close_streams boundary");
     }
 
@@ -1070,7 +1062,6 @@ mod tests {
         let chain = core.rx_chain[0].lock();
         assert_eq!(chain.device(), core::RxDevice::Uncertain);
         assert_eq!(chain.segment(), None);
-        assert!(chain.debt().is_empty());
         assert!(chain.end_now());
         assert_eq!(chain.terminate(), Some(StopMode::Abort));
         drop(chain);

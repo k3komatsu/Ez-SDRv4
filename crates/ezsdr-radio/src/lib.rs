@@ -155,11 +155,10 @@ fn indexed_key_decl(name: &str, kind: ValueKind, coercible: bool, coercion_defau
 const NUMBERED_SEGMENT: u8 = 2;
 
 /// RM-4's and RM-27's key declarations together, in RM-1's order: the one table the
-/// Vocabulary advertises and, through [`channels::update_class`], a Provider's reading of a
+/// Vocabulary advertises and, a Provider's reading of a
 /// layout configuration key's class comes from.
 pub(crate) fn radio_keys() -> Vec<KeyDecl> {
     use CoercionPolicy::{Reject, Warn};
-    use UpdateClass::{Cold, HardwareTimed};
     use ValueKind::{Bool, Int, Num, Str};
 
     let mut declarations = vec![
@@ -181,16 +180,17 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
     ];
     for direction in ["rx", "tx"] {
+        // Note 47 stage 2: no radio value changes during a Run in either direction (RM-27 `—`).
         let declaration = |word: &str, leaf: &str| format!("radio.{direction}.{word}.{leaf}");
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_hz"), Num, true, Reject, Some(HardwareTimed)));
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_db"), Num, true, Warn, Some(HardwareTimed)));
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "antenna"), Str, false, Reject, Some(Cold)));
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "stream"), Int, false, Reject, Some(Cold)));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_hz"), Num, true, Reject, None));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_db"), Num, true, Warn, None));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "antenna"), Str, false, Reject, None));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "stream"), Int, false, Reject, None));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_step_hz"), Num, false, Reject, None));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_step_db"), Num, false, Reject, None));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "phase_behavior_on_retune"), Str, false, Reject, None));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "path_delay_samples"), Int, false, Reject, None));
-        declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, Some(Cold)));
+        declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, None));
     }
     declarations
 }

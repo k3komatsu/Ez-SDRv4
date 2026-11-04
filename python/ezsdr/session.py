@@ -178,24 +178,29 @@ def samples(data: bytes, artifact: dict) -> np.ndarray:
 
 
 _PARAMS = {
-    "frequency": ("frequency_hz", float),
-    "sample_rate": ("sample_rate_hz", float),
-    "gain": ("gain_db", float),
-    "antenna": ("antenna", str),
-    "stream": ("stream", int),
+    "frequency": "frequency_hz",
+    "sample_rate": "sample_rate_hz",
+    "gain": "gain_db",
+    "antenna": "antenna",
+    "stream": "stream",
 }
 
 
 def _param(name: str) -> property:
-    suffix, convert = _PARAMS[name]
+    suffix = _PARAMS[name]
 
     def get(self: Any) -> Any:
         return _effective(self._session, self._radio, self._key(suffix))
 
     def set_(self: Any, value: Any) -> None:
-        self._session.set(self._radio, self._key(suffix), convert(value))
+        # A radio value has no update class: it is asked for at connect and cannot change during the Run (RM-27, EA-16).
+        raise Error(
+            f"EA-16: {self._key(suffix)} cannot change during a Run; ask for it at connect: "
+            f"connect({self._direction}=ezsdr.Stream(...)) or connect({self._direction}=[ezsdr.Stream(...)]), "
+            f"and read the new value back from the connected Session"
+        )
 
-    return property(get, set_, doc="The effective value; setting it submits SetParameter.")
+    return property(get, set_, doc="The effective value, as the Session asked for it at connect; it cannot be set during the Run.")
 
 
 def _effective(session: "Session", radio: str, key: str) -> Any:

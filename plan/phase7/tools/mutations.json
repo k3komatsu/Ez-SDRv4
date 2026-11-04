@@ -385,16 +385,6 @@
   "filter": "mr_09_the_transmit_clock_starts_on_its_lattice"
  },
  {
-  "id": "V06",
-  "name": "the cold origin at e again",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?,",
-  "new": "Ok(Segment { origin: narrow(earliest)?,",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_18_a_cold_change_starts_its_clock_on_the_lattice"
- },
- {
   "id": "V07",
   "name": "two UHD bindings accepted",
   "file": "crates/ezsdr-server/src/catalogue.rs",
@@ -573,16 +563,6 @@
   "filter": "ur_15_start_cases"
  },
  {
-  "id": "U13",
-  "name": "uhd-control takes the next Action before finishing the current",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            while let Some(dispatched) = self.actions.recv() {\n                if !self.core.is_lost() {\n                    self.book(dispatched);\n                }\n                self.release();\n            }",
-  "new": "            let mut taken = Vec::new();\n            while let Some(dispatched) = self.actions.recv() {\n                taken.push(dispatched);\n            }\n            for dispatched in taken {\n                if !self.core.is_lost() {\n                    self.book(dispatched);\n                }\n                self.release();\n            }",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_14_actions_are_finished_before_the_next_recv"
- },
- {
   "id": "U14",
   "name": "the late decision uses the 5 ms lead",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
@@ -634,36 +614,6 @@
   "filter": "ur_23_bursts_go_out_in_target_order"
  },
   {
-    "id": "U20",
-  "name": "the command queue not counted",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "        if pending + 1 > depth {",
-    "new": "        if false && pending + 1 > depth {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_24_hardware_timed_updates"
- },
- {
-  "id": "U21",
-  "name": "a late timed update applied where LATE_COMMAND says (UR-24, S12)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        let (e, late) = timeline::timed_instant(requested, now, lead, window, self.booked.iter().copied());",
-  "new": "        let (e, late) = timeline::timed_instant(requested, now, 0, window, self.booked.iter().copied());",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_24_hardware_timed_updates"
- },
- {
-  "id": "U22",
-  "name": "a cold change's clock not taken for bookings at receipt",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "streams.stream(stream).clocks.last().map(|(clock, _)| *clock).zip(",
-  "new": "streams.stream(stream).clocks.first().map(|(clock, _)| *clock).zip(",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_rate_change_admits_a_burst_on_the_new_clock"
- },
- {
   "id": "U23",
   "name": "e2 not on the new lattice",
   "file": "crates/ezsdr-radio/src/timeline.rs",
@@ -837,36 +787,6 @@
   "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
-  "id": "U37",
-  "name": "timed commands released at receipt",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            if e - now > window {\n                break;\n            }\n",
-  "new": "            let _ = window;\n",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_24_a_far_future_update_does_not_delay_a_nearer_one"
- },
- {
-  "id": "U38",
-  "name": "Provider::stop does not cancel held commands",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "        self.settle(at, why, lost);\n        let plan = lock(&self.core.streams).record();",
-  "new": "        let plan = lock(&self.core.streams).record();",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_24_stop_cancels_held_commands"
- },
- {
-  "id": "U39",
-  "name": "enabling a direction opens the streamer without configuring it",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                    Some(self.core.configure(dir, &entries, rate, k))",
-  "new": "                    { let _ = &entries; Some(Ok(0)) }",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_enabling_tx_applies_the_configuration"
- },
- {
   "id": "U40",
   "name": "an RX owner accepts a rate mismatch at the switch",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
@@ -875,16 +795,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"
- },
- {
-  "id": "U41",
-  "name": "uhd-control waits for the plan's last origin before a booking returns",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            self.colds.insert((e, seq), (key.clone(), value));\n            self.core.timing(json!({ \"what\": \"cold_change\"",
-  "new": "            while streams.line(stream).and_then(|line| line.plan.last()).is_some_and(|segment| self.core.now() < segment.origin) {\n                std::thread::sleep(POLL);\n            }\n            self.colds.insert((e, seq), (key.clone(), value));\n            self.core.timing(json!({ \"what\": \"cold_change\"",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_14_booking_does_not_wait_for_a_future_cold_switch"
  },
  {
   "id": "U42",
@@ -947,26 +857,6 @@
   "filter": "ur_07_a_read_bracketed_wider_than_1_ms_is_discarded"
  },
  {
-  "id": "R04",
-  "name": "a cold change takes effect at its booking, ignoring its instant (P0-3, L08)",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "    let asked = at.unwrap_or(now);\n    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);",
-  "new": "    let asked = now;\n    let floor = line.filter(|line| line.stream.direction == Direction::Rx).map_or(i64::MIN, |line| line.stream.origin);",
-  "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_25_a_start_rx_takes_the_line_lock_once_for_its_instant_and_its_booking"
- },
- {
-  "id": "R05",
-  "name": "the switch ignores held commands due by e2 (L09)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            .filter(|(_, timed)| timed.dir == dir)",
-  "new": "            .filter(|(_, timed)| false && timed.dir == dir)",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_25_the_switch_applies_the_configuration_in_effect_at_e2"
- },
-  {
    "id": "R06",
   "name": "a continued device burst given a timed start-of-burst inside it (P1-4, L10; §11 F3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -983,8 +873,8 @@
   "old": "if ezsdr_radio::cancellation_reports(cancel_reason) {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
   "new": "if false {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
   "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_cold_transmit_change_cancels_the_held_bursts"
+  "test_bin": "lib",
+  "filter": "ur_23_a_clock_ending_at_its_cut_cancels_a_held_burst_and_releases_its_reservation"
  },
  {
   "id": "R08",
@@ -1067,16 +957,6 @@
   "filter": "ur_25_a_receive_session_follows_its_recorded_plan"
  },
   {
-    "id": "R21",
-   "name": "UR-24's depth check drops the newly booked command's slot",
-   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "        if pending + 1 > depth {",
-   "new": "        if pending > depth {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_24_a_release_without_a_live_channel_takes_the_command_queue_slots"
- },
- {
   "id": "R24",
   "name": "the layout's CBX default frequency comes from its front end",
   "file": "crates/ezsdr-radio/src/channels.rs",
@@ -1167,26 +1047,6 @@
   "filter": "ur_17_a_request_ends_at_the_pending_cut"
  },
  {
-  "id": "B06",
-  "name": "the old stream's tail after a late switch published (Review N, B1)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "if first_tick < clock.origin || first_tick < stream.not_before {",
-  "new": "if first_tick < clock.origin {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
- },
- {
-  "id": "B07",
-  "name": "a Timeout at the cut ends the stream, however late its samples (Review N, B2)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-    "old": "        let ended = cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));",
-    "new": "        let ended = cut.is_some_and(|cut| i128::from(now) >= i128::from(cut));",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_25_a_late_switch_drops_the_old_stream_s_tail"
- },
- {
   "id": "B08",
   "name": "a Kernel burst's end is the device burst's at once again, as at bc0db98 (Review N, B3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -1227,16 +1087,6 @@
   "filter": "ur_25_a_stream_silent_before_e1_switches_before_e2"
  },
  {
-  "id": "B13",
-  "name": "UR-29's silence check off while a cut is pending (Review N, N7)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-    "old": "        let lost = cut.is_none_or(|cut| now < cut)",
-    "new": "        let lost = cut.is_none()",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_29_a_stream_silent_before_a_far_cut_is_a_lost_device"
- },
- {
   "id": "B14",
   "name": "an empty end-of-burst instead of the held sample (Review O, O-B1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -1254,7 +1104,7 @@
   "new": "        let call = 0;\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
+  "filter": "ur_25_a_start_booked_anywhere_in_a_long_receive_call_is_on_time"
  },
   {
    "id": "B16",
@@ -1324,7 +1174,7 @@
   "new": "        let call = core.block_len as i64;\n",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_25_a_cold_change_booked_anywhere_in_a_long_receive_call_is_on_time"
+  "filter": "ur_25_a_start_booked_anywhere_in_a_long_receive_call_is_on_time"
  },
  {
   "id": "B23",
@@ -1599,16 +1449,6 @@
   "filter": "ur_07_callbacks_run_outside_the_schedule_lock"
  },
  {
-  "id": "C02",
-  "name": "a released timed command not recorded as issued (the exit review's UR-24 clause)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "            row[\"issued\"] = json!(true);",
-  "new": "            row[\"issued\"] = json!(false);",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_24_a_released_command_is_not_recalled_by_stop"
- },
- {
   "id": "C03",
   "name": "a move onto a held burst's start not refused (the exit review's UR-21 clause)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -1647,5 +1487,45 @@
   "crate": "ezsdr-kernel",
   "test_bin": "coordinator",
   "filter": "rs_36_a_dropped_stopping_body_ends_the_run"
+ },
+ {
+  "id": "V06",
+  "name": "the cold origin at e again",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "Ok(Segment { origin: narrow(ceil_div(earliest, num) * num)?,",
+  "new": "Ok(Segment { origin: narrow(earliest)?,",
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_26_the_timeline_cases"
+ },
+ {
+  "id": "U13",
+  "name": "uhd-control takes the next Action before finishing the current",
+  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+  "old": "            while let Some(dispatched) = self.actions.recv() {\n                if !self.core.is_lost() {\n                    self.book(dispatched);\n                }\n            }",
+  "new": "            let mut taken = Vec::new();\n            while let Some(dispatched) = self.actions.recv() {\n                taken.push(dispatched);\n            }\n            for dispatched in taken {\n                if !self.core.is_lost() {\n                    self.book(dispatched);\n                }\n            }",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "lib",
+  "filter": "ur_14_each_action_is_booked_before_the_next_recv"
+ },
+ {
+  "id": "B06",
+  "name": "the old stream's tail after a late switch published (Review N, B1)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "if first_tick < clock.origin || first_tick < stream.not_before {",
+  "new": "if first_tick < clock.origin {",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_stopped_stream_ends_at_its_cut_and_its_late_tail_stays_off_the_new_clock"
+ },
+ {
+  "id": "B07",
+  "name": "a Timeout at the cut ends the stream, however late its samples (Review N, B2)",
+  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+  "old": "        let ended = cut.is_some_and(|cut| quiet && i128::from(now) >= i128::from(cut) + i128::from(span));",
+  "new": "        let ended = cut.is_some_and(|cut| i128::from(now) >= i128::from(cut));",
+  "crate": "ezsdr-radio-uhd",
+  "test_bin": "fake",
+  "filter": "ur_25_a_stopped_stream_ends_at_its_cut_and_its_late_tail_stays_off_the_new_clock"
  }
 ]

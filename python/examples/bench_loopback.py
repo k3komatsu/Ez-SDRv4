@@ -22,7 +22,7 @@ def found(y: np.ndarray) -> int:
     return int(np.argmax(peak))
 
 
-with ezsdr.connect(rx={0: [0]}, tx={0: [0]}) as sdr:
+with ezsdr.connect(rx={0: ezsdr.Stream([0], sample_rate=19.5e6)}, tx={0: [0]}) as sdr:
     sdr.tx.repeat(x)
     # A capture meant to start at an instant names one ahead of the Run's time (EA-17).
     ahead = sdr.after(0.05)
@@ -30,14 +30,13 @@ with ezsdr.connect(rx={0: [0]}, tx={0: [0]}) as sdr:
     # Whether a capture at an instant just passed still starts there: EA-17's INFERRED case.
     t = sdr.sleep(0.1)
     z = sdr.rx.capture(N, at=t)
-    sdr.rx.sample_rate = 19.5e6
-    print(f"sample rate {sdr.rx.sample_rate} S/s (coerced, a new SampleClock)")
-    # The RF envelope limits what is emitted (RM-19): a transmit retune outside it.
+    print(f"sample rate {sdr.rx.sample_rate} S/s (19.5 MS/s asked at connect, coerced)")
+    # A radio value has no update class: a retune during the Run is refused (RM-27).
     try:
-        sdr.tx_channels[0].frequency = 2.4e9
-        print("the transmit retune outside the RF envelope was admitted: check radio.rf_envelope")
+        sdr.set("radio", "radio.tx.c0.frequency_hz", 2.4e9)
+        print("the transmit retune was admitted: check radio.tx.c0.frequency_hz's update class")
     except ezsdr.Rejected as rejected:
-        print(f"the transmit retune outside the RF envelope was refused: {rejected}")
+        print(f"the transmit retune during the Run was refused: {rejected}")
 
 manifest = sdr.manifest
 captures = [a for listed in manifest["artifacts"].values() for a in listed if a["continuity"]]

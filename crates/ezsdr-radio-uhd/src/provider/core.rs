@@ -11,10 +11,10 @@ use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
 #[cfg(test)]
 use ezsdr_kernel::spec::Key;
 use ezsdr_kernel::stream::{DataLink, Direction};
-use ezsdr_kernel::time::{ClockRegistry, Rational, TimeAuthority, TimePoint};
+use ezsdr_kernel::time::{ClockRegistry, TimeAuthority, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, NO_RELEASE, StreamKey};
+use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey};
 use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
@@ -22,8 +22,6 @@ use super::mode::{DescriptionExt, channel_list};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 use crate::device::{Iq, TxCode, TxReport};
 use crate::host::{ClockGuard, ClockMutex};
-
-const POLL: Wall = Wall::from_millis(1);
 
 /// A guard of the instance's state (UR-25): a `MutexGuard`, except that the test build counts
 /// how many `core::lock` guards this thread holds — `streams`, `rec`, `held` and `rates` all
@@ -63,7 +61,7 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> Locked<'_, T> {
 }
 
 /// UR-25: the caller holds no guard of the instance's state — `streams`, `rec`, `held` or
-/// `rates` —, so the configuration's `updates` may be taken. The whole of the check: the
+/// `rates` —, so a publication that takes them may begin. The whole of the check: the
 /// other order (`rec` taken before `streams`) is not detected.
 pub(crate) fn assert_line_free(what: &str) {
     #[cfg(test)]
@@ -89,15 +87,6 @@ pub(crate) struct Clock {
     pub n: i64,
 }
 
-/// A timed receive DDC write not yet proven consumed by a sample from this stream.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RxEntry {
-    pub order: (i64, u64),
-    pub channel: usize,
-    pub value: f64,
-    pub accepted_at: Option<i64>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct SegmentKey {
     pub by: Option<u64>,
@@ -112,7 +101,6 @@ pub(crate) enum RxDevice {
         at: i64,
     },
     Streaming,
-    Flushing,
     Uncertain,
     Lost,
 }
@@ -124,24 +112,12 @@ pub(crate) struct RxIntent {
     terminate: Option<StopMode>,
 }
 
-#[derive(Default)]
-pub(crate) enum Restore {
-    #[default]
-    NotAsked,
-    Planned(BTreeMap<usize, f64>),
-    Done,
-}
-
-/// One receive stream's device state and the owner intent serialized with control's handoff.
+/// One receive stream's device state and the owner's intent.
 #[derive(Default)]
 pub(crate) struct RxChain {
     device: RxDevice,
     intent: RxIntent,
     segment: Option<SegmentKey>,
-    debt: Vec<RxEntry>,
-    left: Vec<RxEntry>,
-    latest: BTreeMap<usize, RxEntry>,
-    restore: Restore,
 }
 
 impl RxChain {
@@ -160,33 +136,14 @@ impl RxChain {
     pub fn terminate(&self) -> Option<StopMode> {
         self.intent.terminate
     }
-    pub fn debt(&self) -> &[RxEntry] {
-        &self.debt
-    }
-    pub fn left(&self) -> &[RxEntry] {
-        &self.left
-    }
-    pub fn latest(&self) -> &BTreeMap<usize, RxEntry> {
-        &self.latest
-    }
-    pub fn restore(&self) -> &Restore {
-        &self.restore
-    }
-
-    pub fn eligible(&self, segment: SegmentKey, instant: i64) -> bool {
-        self.segment == Some(segment) && matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming) && instant >= segment.origin
-    }
-
     pub fn adopt_start(&mut self, segment: SegmentKey, at: i64) {
         assert!(matches!(self.device, RxDevice::Off));
-        assert!(self.debt.is_empty());
         self.segment = Some(segment);
         self.device = RxDevice::Armed { at };
     }
 
     pub fn begin_result(&mut self, segment: SegmentKey, at: i64, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
         assert!(matches!(self.device, RxDevice::Off | RxDevice::Uncertain));
-        assert!(self.debt.is_empty());
         match result {
             Ok(()) => {
                 self.segment = Some(segment);
@@ -236,30 +193,6 @@ impl RxChain {
         self.intent.terminate.get_or_insert(mode);
     }
 
-    /// Provisional debt is visible while `apply` runs; refusal removes it, loss is terminal.
-    pub fn hand(&mut self, entry: RxEntry, apply: impl FnOnce() -> Result<(), DeviceError>, accepted_at: impl FnOnce() -> i64) -> Result<(), DeviceError> {
-        assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));
-        self.debt.push(entry.clone());
-        match apply() {
-            Ok(()) => {
-                let accepted_at = accepted_at();
-                let accepted = RxEntry { accepted_at: Some(accepted_at), ..entry };
-                if let Some(debt) = self.debt.iter_mut().find(|debt| debt.order == accepted.order && debt.channel == accepted.channel) {
-                    debt.accepted_at = Some(accepted_at);
-                }
-                self.latest.insert(accepted.channel, accepted);
-                Ok(())
-            }
-            Err(error) => {
-                self.debt.retain(|debt| debt.order != entry.order || debt.channel != entry.channel);
-                if error.lost {
-                    self.device = RxDevice::Lost;
-                }
-                Err(error)
-            }
-        }
-    }
-
     pub fn stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
         assert!(matches!(self.device, RxDevice::Armed { .. } | RxDevice::Streaming));
         match result {
@@ -274,71 +207,15 @@ impl RxChain {
         }
     }
 
-    pub fn flush_start_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
-        assert!(matches!(self.device, RxDevice::Off));
-        match result {
-            Ok(()) => {
-                self.device = RxDevice::Flushing;
-                Ok(())
-            }
-            Err(error) => {
-                if error.lost {
-                    self.device = RxDevice::Lost;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    pub fn flush_stop_result(&mut self, result: Result<(), DeviceError>) -> Result<(), DeviceError> {
-        assert!(matches!(self.device, RxDevice::Flushing));
-        match result {
-            Ok(()) => {
-                self.device = RxDevice::Off;
-                Ok(())
-            }
-            Err(error) => {
-                self.device = if error.lost { RxDevice::Lost } else { RxDevice::Uncertain };
-                Err(error)
-            }
-        }
-    }
-
-    pub fn consume(&mut self, sample_ticks: i64, channels: Channels, first_tick: i64, samples: &[Vec<Iq>]) {
-        for (index, channel) in channels.iter().enumerate() {
-            let Some(samples) = samples.get(index) else { continue };
-            for sample in 0..samples.len() {
-                let tick = i128::from(first_tick) + sample as i128 * i128::from(sample_ticks);
-                let channel = channel as usize;
-                let left = self.left.iter().position(|entry| entry.channel == channel);
-                if let Some(position) = left {
-                    let entry = &self.left[position];
-                    if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {
-                        self.left.remove(position);
-                    }
-                } else if let Some(position) = self.debt.iter().position(|entry| entry.channel == channel) {
-                    let entry = &self.debt[position];
-                    if tick >= i128::from(entry.order.0) && tick >= i128::from(entry.accepted_at.unwrap_or(i64::MIN)) {
-                        self.debt.remove(position);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn lose(&mut self) -> Vec<RxEntry> {
+    pub fn lose(&mut self) {
         self.device = RxDevice::Lost;
-        self.report_debt()
     }
 
-    /// Transfers this segment's remaining obligations to persistent, already-reported `left`.
-    pub fn finish(&mut self) -> Vec<RxEntry> {
+    pub fn finish(&mut self) {
         assert!(matches!(self.device, RxDevice::Off | RxDevice::Uncertain | RxDevice::Lost));
-        let reported = self.report_debt();
         self.segment = None;
         self.intent.cut = None;
         self.intent.end_now = false;
-        reported
     }
 
     pub fn abandon_unowned(&mut self) {
@@ -348,26 +225,6 @@ impl RxChain {
         self.segment = None;
         self.intent.end_now = true;
         self.intent.terminate.get_or_insert(StopMode::Abort);
-    }
-
-    pub fn plan_restore(&mut self, values: BTreeMap<usize, f64>) {
-        self.restore = Restore::Planned(values);
-    }
-
-    pub fn take_restore(&mut self) -> Option<BTreeMap<usize, f64>> {
-        match std::mem::replace(&mut self.restore, Restore::Done) {
-            Restore::Planned(values) => Some(values),
-            other => {
-                self.restore = other;
-                None
-            }
-        }
-    }
-
-    fn report_debt(&mut self) -> Vec<RxEntry> {
-        let entries = std::mem::take(&mut self.debt);
-        self.left.extend(entries.iter().cloned());
-        entries
     }
 }
 
@@ -388,8 +245,8 @@ impl Clock {
 /// uhd-tx a configuration their device refused, the thread that finds the device lost the
 /// loss, and `Provider::stop` the streams' end. What belongs to the instance stays on
 /// [`Streams`] (`seq`, `ended`, `stop`, `version`); what belongs to a stream is in its
-/// [`StreamState`] (RM-29, design 33 D15). Lock order: a segment configuration's `updates`,
-/// then this, then `rec`; never held across a device call.
+/// [`StreamState`] (RM-29, design 33 D15). Lock order: this, then `rec`; never held across a
+/// device call.
 pub(crate) struct Streams {
     /// The instance's lines, one per stream, keyed by `(direction, k)` (RM-25, RM-29,
     /// RM-34); none for a receive side with no link.
@@ -469,14 +326,8 @@ pub(crate) enum Holder {
     /// Nobody: an owner or uhd-control may take the stream.
     #[default]
     Free,
-    /// Its owner: a receive or transmit segment's device calls, with the move's `seq` while
-    /// that command is still unrecorded or refused (RM-34, UR-25).
-    Owner { seq: Option<u64> },
-    /// The idle stream's own owner closing its streamer, which another line needs (UR-25, RM-34).
-    Release,
-    /// uhd-control's enable from no stream, from the section that decides it until the
-    /// section that books it or ends it without one (UR-25).
-    FromNone,
+    /// Its owner: a receive or transmit segment's device calls (UR-25).
+    Owner,
 }
 
 /// A holder taken from a stream, to be given back once the section that booked its outcome is
@@ -499,51 +350,6 @@ impl Drop for Claim {
     }
 }
 
-/// A planned segment, as a stream's phase and its owner name it: origin, configuration and
-/// the command that began it (UR-17, UR-25).
-pub(crate) type Segment = (i64, Config, Option<u64>);
-
-/// What a stream's owner is doing with it (UR-17, UR-25). Only [`Streams`]'s transitions
-/// change it; the phase is one value, so a stream the owner has not begun cannot be idle and
-/// active at once.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Phase {
-    /// The owner has nothing to begin.
-    Idle,
-    /// The owner has a segment or a switch to begin, or finished one and has not looked for
-    /// the next.
-    Pending,
-    /// The owner is processing a segment; `delivered` is uhd-rx's, the first sample of the
-    /// segment not yet delivered, and `segment` is absent when the plan has none where the
-    /// owner is (a loss during `start`, or a transmit clock past the plan).
-    Active { segment: Option<Segment>, delivered: Option<(i64, Config, i64)> },
-}
-
-impl Default for Phase {
-    /// `StreamState::default` is the state before `start`: nothing begun, but not idle.
-    fn default() -> Phase {
-        Phase::Pending
-    }
-}
-
-impl Phase {
-    pub(crate) fn is_idle(self) -> bool {
-        matches!(self, Phase::Idle)
-    }
-    pub(crate) fn active(self) -> Option<Segment> {
-        match self {
-            Phase::Active { segment, .. } => segment,
-            _ => None,
-        }
-    }
-    pub(crate) fn delivered(self) -> Option<(i64, Config, i64)> {
-        match self {
-            Phase::Active { delivered, .. } => delivered,
-            _ => None,
-        }
-    }
-}
-
 /// One stream's own state (RM-29, design 33 D15): stream `k` of its direction, and not the
 /// instance's other streams.
 #[derive(Default)]
@@ -552,25 +358,22 @@ pub(crate) struct StreamState {
     pub configs: BTreeMap<u64, Arc<ColdConfig>>,
     /// The device's record of the stream's streamer (UR-13, UR-36): its channel set.
     pub set: DeviceSet,
-    /// The streamer's open generation: every successful open of the stream — whoever opened it,
-    /// uhd-control's enable from no stream included — is a new streamer with a new report queue,
-    /// which the correlations of the bursts in flight are told from (UR-36, UR-28).
+    /// The streamer's open generation: every successful open of the stream is a new streamer with a
+    /// new report queue, which the correlations of the bursts in flight are told from (UR-36,
+    /// UR-28).
     pub generation: u64,
     /// The command of the segment whose configuration the device was last given, `seq`; none
     /// after a failed configure or open. The owner configures again unless this is its own
     /// segment's command and the record holds its set open (UR-36).
     pub configured: Option<u64>,
-    /// Segments its owner finished processing; a segment with a finite cut remains needed
-    /// until its owner records completion (A2).
-    pub completed: Vec<Segment>,
     /// Who may call the stream's device and whether uhd-tx's report read is in flight
     /// (UR-25).
     claims: Claims,
-    /// What the owner is doing with the stream (UR-17, UR-25).
-    phase: Phase,
-    /// The transmit clocks registered, in the order of the transmit plan's segments, and
-    /// whether each has ended (RM-25).
-    pub clocks: Vec<(Clock, bool)>,
+    /// uhd-rx's segment: its origin and configuration, and the first sample of it not yet
+    /// delivered (UR-17, RM-16); none while it delivers nothing.
+    delivered: Option<(i64, Config, i64)>,
+    /// The transmit clock registered at `arm` (RM-25): none or one.
+    pub clocks: Vec<Clock>,
 }
 
 /// The key the instance's lines hold `dir`'s stream `k` under (RM-29).
@@ -578,14 +381,6 @@ pub(crate) fn stream_key(dir: Dir, k: usize) -> StreamKey {
     match dir {
         Dir::Rx => (Direction::Rx, k as u32),
         Dir::Tx => (Direction::Tx, k as u32),
-    }
-}
-
-/// The direction a stream's key names (RM-29).
-pub(crate) fn dir_of(stream: StreamKey) -> Dir {
-    match stream.0 {
-        Direction::Rx => Dir::Rx,
-        Direction::Tx => Dir::Tx,
     }
 }
 
@@ -617,54 +412,16 @@ impl Streams {
         self.stream(stream).claims.holder
     }
 
-    /// Whether uhd-tx's report read is in flight (UR-25).
-    pub fn reading(&self, stream: StreamKey) -> bool {
-        self.stream(stream).claims.reading
-    }
-
     /// UR-25: takes `stream` for its owner's device calls; `None`, with nothing changed, when
     /// another holder has it.
     #[must_use]
-    pub fn claim_owner(&mut self, stream: StreamKey, seq: Option<u64>) -> Option<Claim> {
+    pub fn claim_owner(&mut self, stream: StreamKey) -> Option<Claim> {
         let claims = &mut self.stream_mut(stream).claims;
         if claims.holder != Holder::Free {
             return None;
         }
-        claims.holder = Holder::Owner { seq };
-        Some(Claim { stream, holder: Holder::Owner { seq } })
-    }
-
-    /// UR-25, RM-34: takes an idle, active-less `stream` for its owner's close of a
-    /// streamer another line needs; `None` when it is held or not idle.
-    #[must_use]
-    pub fn claim_release(&mut self, stream: StreamKey) -> Option<Claim> {
-        let idle = self.is_idle(stream);
-        let active = self.active(stream).is_some();
-        let state = self.stream_mut(stream);
-        if state.claims.holder != Holder::Free || !idle || active {
-            return None;
-        }
-        state.claims.holder = Holder::Release;
-        Some(Claim { stream, holder: Holder::Release })
-    }
-
-    /// UR-25: takes `stream` for uhd-control's enable from no stream. A report read in flight
-    /// does not refuse it: the enable waits for that read before its first device call.
-    #[must_use]
-    pub fn claim_from_none(&mut self, stream: StreamKey) -> Option<Claim> {
-        let claims = &mut self.stream_mut(stream).claims;
-        if claims.holder != Holder::Free {
-            return None;
-        }
-        claims.holder = Holder::FromNone;
-        Some(Claim { stream, holder: Holder::FromNone })
-    }
-
-    /// UR-25: the from-none enable holds the stream and no report read is in flight, so its
-    /// first device call may be made.
-    pub fn may_call_from_none(&self, stream: StreamKey) -> bool {
-        let claims = &self.stream(stream).claims;
-        claims.holder == Holder::FromNone && !claims.reading
+        claims.holder = Holder::Owner;
+        Some(Claim { stream, holder: Holder::Owner })
     }
 
     /// UR-25: uhd-tx takes the stream for a report read; `false`, with nothing changed, when
@@ -720,70 +477,34 @@ impl Streams {
         }
     }
 
-    /// UR-25: `start` gives the stream `held` (it has a segment from T0, or a clock) or
-    /// nothing to begin.
-    pub fn starting(&mut self, stream: StreamKey, held: bool) {
-        self.stream_mut(stream).phase = if held { Phase::Pending } else { Phase::Idle };
-    }
-
-    /// UR-25: uhd-rx's search for the next planned segment found one or none.
-    pub fn search(&mut self, stream: StreamKey, found: bool) {
-        self.stream_mut(stream).phase = if found { Phase::Pending } else { Phase::Idle };
-    }
-
-    /// UR-17, UR-25: uhd-rx begins a segment; `delivered` is the first sample not delivered
-    /// (zero), named by the clock and configuration uhd-rx's stream has.
-    pub fn started(&mut self, stream: StreamKey, segment: Option<Segment>, origin: i64, config: Config) {
-        self.stream_mut(stream).phase = Phase::Active { segment, delivered: Some((origin, config, 0)) };
+    /// UR-17, UR-25: uhd-rx begins a segment; the first sample not delivered is zero, named by the
+    /// clock and configuration uhd-rx's stream has.
+    pub fn started(&mut self, stream: StreamKey, origin: i64, config: Config) {
+        self.stream_mut(stream).delivered = Some((origin, config, 0));
     }
 
     /// UR-17: uhd-rx delivered its segment up to `k`.
     pub fn delivered(&mut self, stream: StreamKey, origin: i64, config: Config, k: i64) {
-        let phase = &mut self.stream_mut(stream).phase;
-        if let Phase::Active { delivered, .. } = phase {
-            *delivered = Some((origin, config, k));
+        if let Some(delivered) = self.stream_mut(stream).delivered.as_mut() {
+            *delivered = (origin, config, k);
         }
     }
 
-    /// UR-17, UR-25: the owner finishes its segment: its phase clears and the segment is
-    /// returned for `complete`, by the caller that records it.
-    pub fn finished(&mut self, stream: StreamKey) -> Option<Segment> {
-        let phase = &mut self.stream_mut(stream).phase;
-        let active = std::mem::replace(phase, Phase::Pending);
-        active.active()
-    }
-
-    /// UR-25: uhd-tx reads its plan: `clock` is its current clock, `switch` a change it has
-    /// not made, `segment` the planned segment at its clock's index.
-    pub fn plan_read(&mut self, stream: StreamKey, clock: bool, switch: bool, segment: Option<Segment>) {
-        self.stream_mut(stream).phase = if clock {
-            Phase::Active { segment, delivered: None }
-        } else if switch {
-            Phase::Pending
-        } else {
-            Phase::Idle
-        };
-    }
-
-    /// The stream's phase, as the transitions left it (UR-25).
-    pub fn phase(&self, stream: StreamKey) -> Phase {
-        self.stream(stream).phase
-    }
-
-    /// UR-25: the owner has nothing to begin.
-    pub fn is_idle(&self, stream: StreamKey) -> bool {
-        self.phase(stream).is_idle()
-    }
-
-    /// The segment the stream's owner is processing (A2).
-    pub fn active(&self, stream: StreamKey) -> Option<Segment> {
-        self.phase(stream).active()
+    /// UR-17: the owner finishes its segment.
+    pub fn finished(&mut self, stream: StreamKey) {
+        self.stream_mut(stream).delivered = None;
     }
 
     /// UR-17, RM-16: the first sample of the segment uhd-rx is delivering that it has not yet
     /// delivered.
     pub fn first_undelivered(&self, stream: StreamKey) -> Option<(i64, Config, i64)> {
-        self.phase(stream).delivered()
+        self.stream(stream).delivered
+    }
+
+    /// Whether uhd-tx's report read is in flight (UR-25), as a test reads it.
+    #[cfg(test)]
+    pub fn reading(&self, stream: StreamKey) -> bool {
+        self.stream(stream).claims.reading
     }
 
     /// The line of `stream`, if it has one.
@@ -821,15 +542,9 @@ impl Streams {
         if self.lines.line(stream).is_none() {
             return false;
         }
-        let moved = self.lines.move_lines(seq);
         match self.lines.refuse(stream, seq) {
             Ok(refused) => {
-                if let Some((from, to)) = moved.filter(|_| refused) {
-                    self.changed(core, from);
-                    self.changed(core, to);
-                } else {
-                    self.changed(core, stream);
-                }
+                self.changed(core, stream);
                 refused
             }
             Err(error) => {
@@ -849,7 +564,7 @@ impl Streams {
         let seq = if lost { 0 } else { self.next_seq() };
         for dir in [Dir::Rx, Dir::Tx] {
             for k in 0..self.count(dir) {
-                self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::End { abort } });
+                self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } });
             }
         }
     }
@@ -870,7 +585,7 @@ impl Streams {
     /// command are pruned: nothing booked later takes effect before it, and no command before
     /// it can be refused any more.
     pub fn prune(&mut self, stream: StreamKey, by: Option<u64>) {
-        let Some(e) = by.and_then(|by| self.lines.line(stream).and_then(|held| held.items.iter().find(|item| item.seq == by).map(|item| timeline::effective(&held.items, item)))) else { return };
+        let Some(e) = by.and_then(|by| self.lines.line(stream).and_then(|held| held.items.iter().find(|item| item.seq == by).map(|item| item.e))) else { return };
         self.lines.prune_stream(stream, e);
         let kept: Vec<u64> = self.lines.line(stream).map(|line| line.items.iter().map(|item| item.seq).collect()).unwrap_or_default();
         self.stream_mut(stream).configs.retain(|seq, _| kept.contains(seq));
@@ -882,13 +597,11 @@ impl Streams {
         let state = self.stream(stream);
         line.plan
             .iter()
-            .enumerate()
-            .map(|(index, segment)| Planned {
+            .map(|segment| Planned {
                 segment: *segment,
                 k: stream.1 as usize,
                 settings: segment.by.and_then(|by| state.configs.get(&by)).cloned(),
                 refused: segment.by.is_some_and(|by| line.items.iter().any(|item| item.seq == by && item.refused)),
-                clock: (stream.0 == Direction::Tx).then(|| state.clocks.get(index).map(|(clock, _)| *clock)).flatten(),
             })
             .collect()
     }
@@ -907,49 +620,6 @@ impl Streams {
                 }
             }
             _ => Owner::Open,
-        }
-    }
-
-    /// Another stream's recorded streamer owns any channel in `set` (D2, D3).
-    pub fn held_elsewhere(&self, stream: StreamKey, set: Channels) -> Option<StreamKey> {
-        (0..self.count(dir_of(stream))).map(|k| stream_key(dir_of(stream), k)).find(|other| {
-            *other != stream
-                && match self.stream(*other).set {
-                    DeviceSet::Open(open) => open.iter().any(|channel| set.contains(channel)),
-                    DeviceSet::Unknown => false,
-                }
-        })
-    }
-
-    /// An earlier, unprocessed segment owns the channel before `origin` (A2's finite chain).
-    pub fn needed_before(&self, stream: StreamKey, set: Channels, origin: i64) -> bool {
-        (0..self.count(dir_of(stream))).map(|k| stream_key(dir_of(stream), k)).any(|other| {
-            if other == stream {
-                return false;
-            }
-            let state = self.stream(other);
-            self.planned(other).iter().any(|planned| {
-                let identity = (planned.segment.origin, planned.segment.config, planned.segment.by);
-                planned.segment.origin <= origin
-                    && !planned.refused
-                    && !state.completed.contains(&identity)
-                    && !planned.segment.cut.is_some_and(|cut| planned.segment.instant(cut).is_ok_and(|end| end <= planned.segment.origin))
-                    && planned.segment.config.channels.iter().any(|channel| set.contains(channel))
-            })
-        })
-    }
-
-    /// A move destination waits only for its source's configuration of that same move.
-    pub fn move_source_busy(&self, stream: StreamKey, seq: Option<u64>) -> bool {
-        let Some(seq) = seq else { return false };
-        self.lines.move_lines(seq).is_some_and(|(from, to)| to == stream && self.holder(from) == Holder::Owner { seq: Some(seq) })
-    }
-
-    /// Records a segment its owner finished carrying out.
-    pub fn complete(&mut self, stream: StreamKey, segment: (i64, Config, Option<u64>)) {
-        let completed = &mut self.stream_mut(stream).completed;
-        if !completed.contains(&segment) {
-            completed.push(segment);
         }
     }
 
@@ -992,42 +662,18 @@ impl Streams {
         self.stream_mut(stream).configured = mark;
     }
 
-    /// A plan changed: the transmit clocks follow it (RM-25, VH-2).
+    /// A plan changed: uhd-tx reads its own again (UR-25), and a transmit clock whose segment
+    /// the plan now cuts ends at the cut (RM-25, VH-2).
     pub fn changed(&mut self, core: &Core, stream: StreamKey) {
         self.version += 1;
-        if stream.0 == Direction::Tx {
-            if let Err(error) = self.reconcile(core, stream) {
+        // A loss or `Provider::stop` at or before the clock's origin cuts its segment there; a
+        // clock the registry already ended is not ended again.
+        let cut = self.stream(stream).clocks.first().copied().zip(self.lines.line(stream).and_then(|line| line.plan.first()).and_then(|segment| segment.cut));
+        if let Some((clock, cut)) = cut.filter(|(clock, _)| !core.clocks.get(clock.domain).is_ok_and(|domain| domain.ended_at.is_some())) {
+            if let Err(error) = core.clocks.end(clock.domain, core.at(clock.instant(cut))) {
                 core.command_rejected(None, "update_parameter", &format!("UR-25: {error}"));
             }
         }
-        let planned: Vec<_> = self.lines.line(stream).into_iter().flat_map(|line| &line.plan).map(|segment| (segment.origin, segment.config, segment.by)).collect();
-        self.stream_mut(stream).completed.retain(|done| planned.contains(done));
-    }
-
-    /// Each transmit segment's clock, registered when its change is booked and ended at its
-    /// cut once the plan has one; a clock registered for a change the plan no longer has — one
-    /// booked after `Provider::stop`'s instant — ends at its origin (KC-21a, VH-2).
-    fn reconcile(&mut self, core: &Core, stream: StreamKey) -> Result<(), String> {
-        let plan = self.lines.line(stream).map_or_else(Vec::new, |line| line.plan.clone());
-        for (index, segment) in plan.iter().enumerate() {
-            if self.stream(stream).clocks.len() == index {
-                let clock = core.register_in(dir_of(stream), stream.1 as usize, segment.config.ratio.num() as i64, segment.origin)?;
-                self.stream_mut(stream).clocks.push((clock, false));
-            }
-            let (clock, ended) = &mut self.stream_mut(stream).clocks[index];
-            if let Some(cut) = segment.cut.filter(|_| !*ended) {
-                core.clocks.end(clock.domain, core.at(clock.instant(cut))).map_err(|e| e.to_string())?;
-                *ended = true;
-            }
-        }
-        let state = self.stream_mut(stream);
-        for (clock, ended) in state.clocks.iter_mut().skip(plan.len()).filter(|(_, ended)| !*ended) {
-            if let Err(error) = core.clocks.end(clock.domain, core.at(clock.origin)) {
-                core.reject_note(json!({ "clock_not_ended": error.to_string() }));
-            }
-            *ended = true;
-        }
-        Ok(())
     }
 
     /// UR-30: the plans the streams were carried out by, each segment's stream, the command
@@ -1079,7 +725,7 @@ pub(crate) struct Core {
     pub device: Arc<dyn Device>,
     /// Serializes streamer open/close admission with publishing device loss (UR-29).
     device_gate: Mutex<()>,
-    /// Each receive chain's owner transitions and control handovers share a clock lock (L1).
+    /// Each receive chain's owner transitions share a clock lock (L1).
     pub rx_chain: Vec<ClockMutex<RxChain>>,
     /// A timed TX DSP write and the open-time flush share each channel's gate (D9b-1a).
     tx_dsp_gates: Vec<ClockMutex<()>>,
@@ -1411,18 +1057,12 @@ impl Core {
     }
 
     /// UR-13, UR-36: the device's open of `k`'s streamer of `dir` on `set`; the record is the
-    /// caller's (see `record_opened`), so that an enable from no stream records its open in the
-    /// line-lock section it already takes (UR-25).
+    /// caller's (see `record_opened`).
     pub fn lock_tx_dsp(&self, channels: &[usize]) -> Vec<ClockGuard<'_, ()>> {
         let mut channels = channels.to_vec();
         channels.sort_unstable();
         channels.dedup();
         channels.into_iter().filter_map(|channel| self.tx_dsp_gates.get(channel)).map(ClockMutex::lock).collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn tx_dsp_waiters(&self, channel: usize) -> usize {
-        self.tx_dsp_gates.get(channel).map_or(0, ClockMutex::waiters)
     }
 
     pub fn lock_tx_reports(&self, stream: usize) -> ClockGuard<'_, ()> {
@@ -1614,8 +1254,7 @@ impl Core {
     }
 
     /// UR-13, UR-36: opens `k`'s streamer of `dir` on `set` and compares its rates. The owner
-    /// and `arm` call this with `streams` released (UR-25); uhd-control's enable from no stream
-    /// uses `open_device` and `check_opened` itself, and records the outcome in its own section.
+    /// and `arm` call this with `streams` released (UR-25).
     pub fn open_streamer(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         let stream = stream_key(dir, k);
         let opened = if dir == Dir::Tx { self.open_tx_device(k, set).map(|_| ()) } else { self.open_device(dir, k, set) };
@@ -1645,7 +1284,6 @@ impl Core {
     fn assert_rx_chain_reusable(&self, k: usize, operation: &str) {
         let chain = self.rx_chain[k].lock();
         assert!(matches!(chain.device, RxDevice::Off | RxDevice::Uncertain | RxDevice::Lost), "L1: RX {operation} requires an idle device chain, got {:?}", chain.device);
-        assert!(chain.debt.is_empty(), "L1: RX {operation} requires empty debt, got {:?}", chain.debt.iter().map(|entry| (entry.order, entry.channel)).collect::<Vec<_>>());
     }
 
     #[cfg(not(test))]
@@ -1658,73 +1296,6 @@ impl Core {
         }
     }
 
-    /// Releases an idle stream's streamer only when another line still has an unprocessed
-    /// segment that needs one of its channels (D1, A2).
-    pub fn release_unneeded(&self, dir: Dir, k: usize) -> bool {
-        let stream = stream_key(dir, k);
-        let claim = {
-            let mut streams = lock(&self.streams);
-            if self.is_lost() {
-                return false;
-            }
-            let state = streams.stream(stream);
-            if !streams.is_idle(stream) || streams.active(stream).is_some() {
-                return false;
-            }
-            let DeviceSet::Open(set) = state.set else { return false };
-            if !streams.needed_before(stream, set, i64::MAX) {
-                return false;
-            }
-            let Some(claim) = streams.claim_release(stream) else { return false };
-            claim
-        };
-        // UR-25, UR-29: the claim is taken; a loss found now gives it back before the close.
-        self.probe("release_claimed", None);
-        if self.is_lost() {
-            lock(&self.streams).give_back(claim);
-            return false;
-        }
-        self.close_device(dir, k);
-        let mut streams = lock(&self.streams);
-        streams.record_open(stream, None);
-        streams.give_back(claim);
-        true
-    }
-
-    /// Waits for another stream's recorded streamer to release a target segment's channels.
-    /// The segment is read again after each wait; an absent, refused, stopped or changed
-    /// segment is an abort, not a refusal (A4).
-    fn await_release(&self, dir: Dir, k: usize, expected: &Planned) -> Option<Planned> {
-        let stream = stream_key(dir, k);
-        let mut waiting_since = None;
-        loop {
-            let streams = lock(&self.streams);
-            if self.is_lost() || streams.stop.is_some() {
-                return None;
-            }
-            let current = streams.planned(stream).into_iter().find(|planned| planned.segment == expected.segment)?;
-            if current.refused {
-                return None;
-            }
-            if let Some(since) = waiting_since {
-                if dir == Dir::Tx && streams.line(stream).is_some_and(|line| line.items.iter().any(|item| item.seq > since && item.kind == Kind::Stop)) {
-                    return None;
-                }
-            }
-            if streams.held_elsewhere(stream, current.set()).is_none() && !streams.needed_before(stream, current.set(), current.segment.origin) && !streams.move_source_busy(stream, current.segment.by)
-            {
-                return Some(current);
-            }
-            let first_wait = waiting_since.is_none();
-            waiting_since.get_or_insert(streams.seq);
-            drop(streams);
-            if first_wait {
-                self.probe("wait_release", None);
-            }
-            self.device.host().sleep(POLL);
-        }
-    }
-
     /// The owner's device calls for a segment it begins (UR-13, UR-36): the record decides what
     /// is opened and configured. Each device call is made with `streams` released, and its
     /// outcome is recorded after it; a successful open moves the record's generation on, which
@@ -1732,7 +1303,7 @@ impl Core {
     /// On error, the caller books the refusal before giving the claim back (UR-25).
     pub fn owner_configure(&self, dir: Dir, k: usize, next: &Planned) -> Result<bool, (DeviceError, Claim)> {
         let stream = stream_key(dir, k);
-        let (mut current, mut step, release_first, claim) = {
+        let (current, step, claim) = {
             let mut streams = lock(&self.streams);
             if self.is_lost() {
                 return Ok(false);
@@ -1748,30 +1319,9 @@ impl Core {
             if step == Owner::Nothing {
                 return Ok(true);
             }
-            let release_first = step == Owner::Open
-                && (streams.held_elsewhere(stream, current.set()).is_some()
-                    || streams.needed_before(stream, current.set(), current.segment.origin)
-                    || streams.move_source_busy(stream, current.segment.by));
-            let Some(claim) = streams.claim_owner(stream, current.segment.by) else { return Ok(false) };
-            (current, step, release_first, claim)
+            let Some(claim) = streams.claim_owner(stream) else { return Ok(false) };
+            (current, step, claim)
         };
-        if release_first {
-            if self.is_lost() {
-                lock(&self.streams).give_back(claim);
-                return Ok(false);
-            }
-            let open = lock(&self.streams).stream(stream).set;
-            if matches!(open, DeviceSet::Open(_)) {
-                self.close_device(dir, k);
-                lock(&self.streams).record_open(stream, None);
-            }
-            let Some(latest) = self.await_release(dir, k, &current) else {
-                lock(&self.streams).give_back(claim);
-                return Ok(false);
-            };
-            current = latest;
-            step = Owner::Open;
-        }
         let opened = if step == Owner::Open { self.open_streamer(dir, k, current.set()) } else { Ok(()) };
         if let Err(error) = opened {
             lock(&self.streams).record_configured(stream, None);
@@ -1800,10 +1350,12 @@ impl Core {
         self.register_in(dir, 0, n, origin)
     }
 
-    /// Declares and registers stream `k`'s clock with origin `origin` (UR-12, RM-25).
+    /// Declares and registers stream `k`'s clock with origin `origin` (UR-12, RM-25), for the
+    /// unit rigs.
+    #[cfg(test)]
     pub fn register_in(&self, dir: Dir, k: usize, n: i64, origin: i64) -> Result<Clock, String> {
         let stream = self.description.stream_node(&self.id, dir, k);
-        let ratio = Rational::new(n as u64, 1).map_err(|e| e.to_string())?;
+        let ratio = ezsdr_kernel::time::Rational::new(n as u64, 1).map_err(|e| e.to_string())?;
         let handle = self.clocks.declare_sample_clock(stream, self.root, ratio).map_err(|e| e.to_string())?;
         let domain = self.clocks.register_sample_clock(&handle, origin).map_err(|e| e.to_string())?;
         Ok(Clock { domain, origin, n })
@@ -1851,10 +1403,6 @@ mod tests {
         SegmentKey { by: Some(7), origin: 100 }
     }
 
-    fn rx_entry(seq: u64) -> RxEntry {
-        RxEntry { order: (100, seq), channel: 0, value: 1.001e9, accepted_at: Some(101) }
-    }
-
     #[test]
     fn rx_chain_adopt_start_transitions() {
         let mut chain = RxChain::default();
@@ -1862,13 +1410,9 @@ mod tests {
         chain.adopt_start(segment, 90);
         assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
         assert_eq!(chain.segment(), Some(segment));
-        assert!(chain.debt().is_empty());
-        assert!(chain.left().is_empty());
-        assert!(chain.latest().is_empty());
         assert_eq!(chain.cut(), None);
         assert!(!chain.end_now());
         assert_eq!(chain.terminate(), None);
-        assert!(matches!(chain.restore(), Restore::NotAsked));
     }
 
     #[test]
@@ -1899,7 +1443,6 @@ mod tests {
                         assert_eq!(chain.segment(), None);
                     }
                 }
-                assert!(chain.debt().is_empty());
             }
         }
     }
@@ -1948,44 +1491,6 @@ mod tests {
     }
 
     #[test]
-    fn rx_chain_hand_transitions() {
-        for outcome in [0, 1, 2] {
-            let mut chain = RxChain::default();
-            chain.adopt_start(rx_segment(), 90);
-            let result = chain.hand(
-                rx_entry(1),
-                || match outcome {
-                    0 => Ok(()),
-                    1 => Err(DeviceError::failed("scripted refusal")),
-                    _ => Err(DeviceError { lost: true, message: "scripted loss".to_owned() }),
-                },
-                || 105,
-            );
-            match outcome {
-                0 => {
-                    assert!(result.is_ok());
-                    assert_eq!(chain.debt().len(), 1);
-                    assert_eq!(chain.debt()[0].accepted_at, Some(105));
-                    assert_eq!(chain.latest().get(&0).unwrap().accepted_at, Some(105));
-                    assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
-                }
-                1 => {
-                    assert!(!result.unwrap_err().lost);
-                    assert!(chain.debt().is_empty());
-                    assert!(chain.latest().is_empty());
-                    assert_eq!(chain.device(), RxDevice::Armed { at: 90 });
-                }
-                _ => {
-                    assert!(result.unwrap_err().lost);
-                    assert!(chain.debt().is_empty());
-                    assert!(chain.latest().is_empty());
-                    assert_eq!(chain.device(), RxDevice::Lost);
-                }
-            }
-        }
-    }
-
-    #[test]
     fn rx_chain_stop_transitions() {
         for outcome in [0, 1, 2] {
             let mut chain = RxChain::default();
@@ -2007,65 +1512,25 @@ mod tests {
     }
 
     #[test]
-    fn rx_chain_flush_transitions() {
-        let mut chain = RxChain::default();
-        assert!(chain.flush_start_result(Ok(())).is_ok());
-        assert_eq!(chain.device(), RxDevice::Flushing);
-        assert!(chain.flush_stop_result(Ok(())).is_ok());
-        assert_eq!(chain.device(), RxDevice::Off);
-
-        let mut chain = RxChain::default();
-        assert!(chain.flush_start_result(Err(DeviceError::failed("start refusal"))).is_err());
-        assert_eq!(chain.device(), RxDevice::Off);
-        let mut chain = RxChain::default();
-        assert!(chain.flush_start_result(Err(DeviceError { lost: true, message: "start loss".to_owned() })).is_err());
-        assert_eq!(chain.device(), RxDevice::Lost);
-        for (error, expected) in [(DeviceError::failed("stop refusal"), RxDevice::Uncertain), (DeviceError { lost: true, message: "stop loss".to_owned() }, RxDevice::Lost)] {
-            let mut chain = RxChain::default();
-            chain.flush_start_result(Ok(())).unwrap();
-            assert!(chain.flush_stop_result(Err(error)).is_err());
-            assert_eq!(chain.device(), expected);
-        }
-    }
-
-    #[test]
     fn rx_chain_finish_transitions() {
         for device in [RxDevice::Off, RxDevice::Uncertain, RxDevice::Lost] {
-            let entry = rx_entry(1);
-            let mut chain = RxChain {
-                device,
-                intent: RxIntent { cut: Some(80), end_now: true, terminate: Some(StopMode::Abort) },
-                segment: Some(rx_segment()),
-                debt: vec![entry.clone()],
-                latest: BTreeMap::from([(0, entry.clone())]),
-                restore: Restore::Planned(BTreeMap::from([(0, 1e9)])),
-                left: Vec::new(),
-            };
-            assert_eq!(chain.finish().as_slice(), std::slice::from_ref(&entry));
+            let mut chain = RxChain { device, intent: RxIntent { cut: Some(80), end_now: true, terminate: Some(StopMode::Abort) }, segment: Some(rx_segment()) };
+            chain.finish();
             assert_eq!(chain.device(), device);
             assert_eq!(chain.segment(), None);
-            assert!(chain.debt().is_empty());
-            assert_eq!(chain.left(), std::slice::from_ref(&entry));
-            assert_eq!(chain.latest().get(&0).unwrap().value, entry.value);
             assert_eq!(chain.cut(), None);
             assert!(!chain.end_now());
             assert_eq!(chain.terminate(), Some(StopMode::Abort));
-            assert!(matches!(chain.restore(), Restore::Planned(values) if values.get(&0) == Some(&1e9)));
         }
     }
 
     #[test]
     fn rx_chain_lose_is_terminal() {
-        for prior in [RxDevice::Off, RxDevice::Armed { at: 90 }, RxDevice::Streaming, RxDevice::Flushing, RxDevice::Uncertain, RxDevice::Lost] {
-            let entry = rx_entry(1);
-            let mut chain = RxChain { device: prior, segment: Some(rx_segment()), debt: vec![entry.clone()], latest: BTreeMap::from([(0, entry.clone())]), ..RxChain::default() };
-            assert_eq!(chain.lose().as_slice(), std::slice::from_ref(&entry));
+        for prior in [RxDevice::Off, RxDevice::Armed { at: 90 }, RxDevice::Streaming, RxDevice::Uncertain, RxDevice::Lost] {
+            let mut chain = RxChain { device: prior, segment: Some(rx_segment()), ..RxChain::default() };
+            chain.lose();
             assert_eq!(chain.device(), RxDevice::Lost);
-            assert_eq!(chain.debt().len(), 0);
-            assert_eq!(chain.left(), std::slice::from_ref(&entry));
-            assert!(chain.lose().is_empty(), "loss reports each entry once");
-            assert_eq!(chain.latest().get(&0).unwrap().value, entry.value);
-            assert_eq!(chain.finish(), []);
+            chain.finish();
             assert_eq!(chain.device(), RxDevice::Lost);
             assert_eq!(chain.segment(), None);
         }
@@ -2082,22 +1547,17 @@ mod tests {
         assert_eq!(chain.cut(), Some(150));
         assert!(chain.end_now());
         assert_eq!(chain.terminate(), Some(StopMode::Abort));
-        assert!(chain.debt().is_empty());
-        assert!(chain.latest().is_empty());
     }
 
     #[test]
     fn rx_chain_abandon_unowned_preserves_loss() {
-        let entry = rx_entry(1);
-        let mut chain = RxChain { debt: vec![entry.clone()], ..RxChain::default() };
+        let mut chain = RxChain::default();
         chain.lose();
         chain.abandon_unowned();
         assert_eq!(chain.device(), RxDevice::Lost);
         assert_eq!(chain.segment(), None);
-        assert_eq!(chain.left(), &[entry]);
         assert!(chain.end_now());
         assert_eq!(chain.terminate(), Some(StopMode::Abort));
-        assert!(chain.finish().is_empty(), "loss debt is reported only once");
     }
 
     #[test]
@@ -2360,50 +1820,12 @@ mod tests {
         two_by_two_with_device().0
     }
 
-    fn waiting_move() -> (Arc<Core>, Arc<crate::device::FakeDevice>, Planned, StreamKey, StreamKey, u64) {
-        let (core, device) = two_by_two_with_device();
-        let (from, to) = (stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 0));
-        let ratio = Rational::new(200, 1).unwrap();
-        let rx_line = |channels| {
-            Line::new(timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config: Config { channels, ratio },
-                lead: 0,
-                call: 0,
-                release_window: core.ticks(core.description.timing.release_window_ns),
-                allowance: 0,
-            })
-        };
-        device.rx_open(0, &[0]).unwrap();
-        device.rx_open(1, &[1]).unwrap();
-        let mut streams = lock(&core.streams);
-        streams.lines.insert(from, rx_line(Channels::first(2).without(0)));
-        streams.lines.insert(to, rx_line(Channels::first(1)));
-        streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
-        streams.stream_mut(to).set = DeviceSet::Open(Channels::first(1));
-        let seq = 1;
-        streams.lines.book_move(from, to, 1, Some(10_000), 0, seq, 0).unwrap();
-        streams.changed(&core, from);
-        streams.changed(&core, to);
-        let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).expect("the destination move segment");
-        drop(streams);
-        (core, device, next, from, to, seq)
-    }
-
     fn active_rx_chain(core: &Core, k: usize) {
         core.rx_chain[k].lock().adopt_start(SegmentKey { by: Some(1), origin: 0 }, 0);
     }
 
-    fn indebted_off_rx_chain(core: &Core, k: usize) {
-        let mut chain = core.rx_chain[k].lock();
-        chain.adopt_start(SegmentKey { by: Some(1), origin: 0 }, 0);
-        chain.hand(RxEntry { order: (1, 1), channel: 0, value: 1e9, accepted_at: Some(0) }, || Ok(()), || 0).unwrap();
-        chain.stop_result(Ok(())).unwrap();
-    }
-
     #[test]
-    fn rx_chain_reuse_guard_rejects_active_open_and_debt_close() {
+    fn rx_chain_reuse_guard_rejects_open_and_close_of_an_active_chain() {
         let (core, device) = two_by_two_with_device();
         active_rx_chain(&core, 0);
         let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2412,51 +1834,9 @@ mod tests {
         assert!(opened.is_err(), "an Armed chain cannot be reopened");
         assert!(!device.calls().iter().any(|call| call.starts_with("rx_open")), "the guard runs before the device call: {:?}", device.calls());
 
-        indebted_off_rx_chain(&core, 1);
-        let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| core.close_device(Dir::Rx, 1)));
-        assert!(closed.is_err(), "an Off chain with outstanding debt cannot be closed");
+        let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| core.close_device(Dir::Rx, 0)));
+        assert!(closed.is_err(), "an Armed chain cannot be closed");
         assert!(!device.calls().iter().any(|call| call.starts_with("rx_close")), "the guard runs before the device call: {:?}", device.calls());
-    }
-
-    #[test]
-    fn rx_chain_reconfigure_close_requires_idle_empty_debt() {
-        let (core, device, next, from, to, seq) = waiting_move();
-        let source = lock(&core.streams).claim_owner(from, Some(seq)).expect("the move source is busy");
-        active_rx_chain(&core, to.1 as usize);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = core.owner_configure(Dir::Rx, to.1 as usize, &next);
-        }));
-        assert!(result.is_err(), "the owner's release-before-open close is guarded");
-        assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "the reconfigure did not close an active chain: {:?}", device.calls());
-        lock(&core.streams).give_back(source);
-    }
-
-    #[test]
-    fn rx_chain_release_unneeded_close_requires_idle_empty_debt() {
-        let (core, device, _next, from, _to, _seq) = waiting_move();
-        lock(&core.streams).search(from, false);
-        indebted_off_rx_chain(&core, from.1 as usize);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| core.release_unneeded(Dir::Rx, from.1 as usize)));
-        assert!(result.is_err(), "release_unneeded cannot close a chain with debt");
-        assert!(!device.calls().iter().any(|call| call == "rx_close 1"), "the debt-bearing chain was not closed: {:?}", device.calls());
-    }
-
-    #[test]
-    fn rx_chain_open_failure_close_requires_idle_empty_debt() {
-        let (core, device) = two_by_two_with_device();
-        let rates_core = core.clone();
-        super::super::test_support::probe(&core, "rates", move |_| active_rx_chain(&rates_core, 0));
-        lock(&core.rates)[Dir::Rx as usize] = Some(Err("scripted rate-check refusal".to_owned()));
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = core.open_streamer(Dir::Rx, 0, Channels::first(1));
-        }));
-        assert!(result.is_err(), "open_streamer cannot clean up by closing an active chain");
-        let calls = device.calls();
-        assert!(calls.iter().any(|call| call == "rx_open 0 [0]"), "the open preceded its rate check: {calls:?}");
-        assert!(!calls.iter().any(|call| call == "rx_close 0"), "the invalid chain prevented cleanup close: {calls:?}");
     }
 
     #[test]
@@ -2536,336 +1916,6 @@ mod tests {
     }
 
     #[test]
-    fn ur_34_a_waited_open_waits_for_a_finite_unprocessed_move_segment() {
-        let (core, _device) = two_by_two_with_device();
-        let (a, b, c) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1), stream_key(Dir::Rx, 2));
-        let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream { direction: Direction::Rx, origin: 0, config: Config { channels, ratio }, lead: 0, call: 0, release_window: 0, allowance: 0 });
-        let (middle, destination) = {
-            let mut streams = lock(&core.streams);
-            *streams = Streams::with_streams(3, 1);
-            streams.lines.insert(a, line(Channels::first(1)));
-            streams.lines.insert(b, line(Channels::first(0).with(1)));
-            streams.lines.insert(c, line(Channels::first(0)));
-            streams.lines.book_move(a, b, 0, Some(1_000), 0, 1, 0).unwrap();
-            streams.changed(&core, a);
-            streams.changed(&core, b);
-            streams.lines.book_move(b, c, 0, Some(3_000), 0, 2, 0).unwrap();
-            streams.changed(&core, b);
-            streams.changed(&core, c);
-            let a_initial = streams.planned(a).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
-            streams.complete(a, (a_initial.segment.origin, a_initial.segment.config, a_initial.segment.by));
-            let middle = streams.planned(b).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
-            assert!(middle.segment.cut.is_some_and(|cut| middle.segment.instant(cut).is_ok_and(|end| end > middle.segment.origin)), "B has a finite segment with samples");
-            let destination = streams.planned(c).into_iter().find(|planned| planned.segment.by == Some(2)).unwrap();
-            streams.stream_mut(b).set = DeviceSet::Unknown;
-            (middle, destination)
-        };
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-finite-chain", move || {
-                let _ = done.send(worker.await_release(Dir::Rx, c.1 as usize, &destination));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "C waits for B's finite segment despite B's Unknown device set");
-        assert!(result_rx.try_recv().is_err(), "the destination did not pass B's unfinished segment");
-        {
-            let mut streams = lock(&core.streams);
-            streams.complete(b, (middle.segment.origin, middle.segment.config, middle.segment.by));
-        }
-        owner.join().unwrap();
-        assert!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap().is_some(), "the owner continued after B completed");
-    }
-
-    #[test]
-    fn ur_34_a_waited_open_waits_for_same_move_source_configuration() {
-        let (core, device, next, from, to, seq) = waiting_move();
-        let claim = {
-            let mut streams = lock(&core.streams);
-            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
-            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            streams.stream_mut(from).set = DeviceSet::Unknown;
-            streams.claim_owner(from, Some(seq)).expect("the source is free")
-        };
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-move-source", move || {
-                let _ = done.send(worker.await_release(Dir::Rx, to.1 as usize, &next));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination reached its source wait");
-        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "it did not open during the source configure: {:?}", device.calls());
-        {
-            let mut streams = lock(&core.streams);
-            assert!(streams.refuse(&core, from, seq), "the source's refusal refuses the move");
-            streams.give_back(claim);
-        }
-        let interrupted_on_refusal = result_rx.recv_timeout(Wall::from_secs(10)).is_ok_and(|result| result.is_none());
-        if !interrupted_on_refusal {
-            core.device_lost("test: release wait did not re-read the refused plan");
-        }
-        owner.join().unwrap();
-        assert!(interrupted_on_refusal, "the refused plan was not re-read before the watchdog");
-        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "the destination stayed unopened: {:?}", device.calls());
-    }
-
-    #[test]
-    fn ur_34_a_move_destination_waits_for_source_busy_after_channel_release() {
-        let (core, device) = two_by_two_with_device();
-        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
-        let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| {
-            Line::new(timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config: Config { channels, ratio },
-                lead: 0,
-                call: 0,
-                release_window: core.ticks(core.description.timing.release_window_ns),
-                allowance: 0,
-            })
-        };
-        device.rx_open(0, &[0]).unwrap();
-        let (next, claim) = {
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(from, line(Channels::first(2)));
-            streams.lines.insert(to, line(Channels::first(0)));
-            streams.lines.book_move(from, to, 1, Some(10_000), 0, 1, 0).unwrap();
-            streams.changed(&core, from);
-            streams.changed(&core, to);
-            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
-            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
-            let claim = streams.claim_owner(from, Some(1)).expect("the source is free");
-            let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
-            (next, claim)
-        };
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-move-destination", move || {
-                let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &next));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination waits when the source released the moved channel but still configures the move");
-        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the destination stayed unopened: {:?}", device.calls());
-        {
-            let mut streams = lock(&core.streams);
-            assert!(streams.refuse(&core, from, 1), "source refusal records the move on both lines");
-            streams.give_back(claim);
-        }
-        owner.join().unwrap();
-        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)), "the refused destination segment was interrupted");
-        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the refused destination never opened: {:?}", device.calls());
-    }
-
-    #[test]
-    fn ur_34_a_release_skips_a_stream_held_busy_by_from_none() {
-        let (core, device) = two_by_two_with_device();
-        let stream = stream_key(Dir::Rx, 0);
-        let claim = {
-            let mut streams = lock(&core.streams);
-            let state = streams.stream_mut(stream);
-            state.set = DeviceSet::Open(Channels::first(1));
-            streams.search(stream, false);
-            streams.claim_from_none(stream).expect("the stream is free")
-        };
-        assert!(!core.release_unneeded(Dir::Rx, 0), "a from-none owner still holds the stream");
-        assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "the owner's close overlapped from-none: {:?}", device.calls());
-        {
-            let streams = lock(&core.streams);
-            assert_eq!(streams.holder(stream), Holder::FromNone);
-        }
-        lock(&core.streams).give_back(claim);
-    }
-
-    #[test]
-    fn ur_34_a_release_closes_an_idle_streamer_needed_by_a_move() {
-        let (core, device, _next, from, _to, _seq) = waiting_move();
-        lock(&core.streams).search(from, false);
-        assert!(core.release_unneeded(Dir::Rx, from.1 as usize));
-        assert!(device.calls().iter().any(|call| call == "rx_close 1"), "{:?}", device.calls());
-        assert_eq!(lock(&core.streams).stream(from).set, DeviceSet::Unknown);
-    }
-
-    #[test]
-    fn ur_34_a_release_keeps_an_idle_streamer_with_no_peer_need() {
-        let (core, device) = two_by_two_with_device();
-        let stream = stream_key(Dir::Rx, 0);
-        device.rx_open(0, &[1]).unwrap();
-        {
-            let mut streams = lock(&core.streams);
-            let state = streams.stream_mut(stream);
-            state.set = DeviceSet::Open(Channels::first(0).with(1));
-            streams.search(stream, false);
-        }
-        assert!(!core.release_unneeded(Dir::Rx, 0));
-        assert!(!device.calls().iter().any(|call| call == "rx_close 0"), "{:?}", device.calls());
-        assert_eq!(lock(&core.streams).stream(stream).set, DeviceSet::Open(Channels::first(0).with(1)));
-    }
-
-    #[test]
-    fn ur_34_a_waited_open_reloads_a_move_refused_while_it_waits() {
-        let (core, device, next, from, to, seq) = waiting_move();
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-test", move || {
-                let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its device wait");
-        let mark = device.calls().len();
-        {
-            let mut streams = lock(&core.streams);
-            assert!(streams.refuse(&core, from, seq), "the source's device refusal refuses the move");
-        }
-        owner.join().unwrap();
-        let result = result_rx.recv_timeout(Wall::from_secs(10)).unwrap();
-        assert!(matches!(result, Ok(false)), "the stale segment was interrupted: {result:?}");
-        assert!(lock(&core.streams).line(to).unwrap().halted(10_000));
-        assert!(!device.calls()[mark..].iter().any(|call| call == "rx_open 0 [0, 1]"), "the stale destination was not opened: {:?}", device.calls());
-        assert_eq!(lock(&core.streams).holder(to), Holder::Free, "the interrupted owner released its claim");
-    }
-
-    #[test]
-    fn ur_34_a_owner_does_not_open_a_move_plan_removed_before_its_turn() {
-        let (core, device) = two_by_two_with_device();
-        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
-        let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| {
-            Line::new(timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config: Config { channels, ratio },
-                lead: 0,
-                call: 0,
-                release_window: core.ticks(core.description.timing.release_window_ns),
-                allowance: 0,
-            })
-        };
-        device.rx_open(0, &[0]).unwrap();
-        let stale = {
-            let mut streams = lock(&core.streams);
-            *streams = Streams::with_streams(2, 2);
-            streams.lines.insert(from, line(Channels::first(2)));
-            streams.lines.insert(to, line(Channels::first(0)));
-            streams.lines.book_move(from, to, 1, Some(10_000), 0, 1, 0).unwrap();
-            streams.changed(&core, from);
-            streams.changed(&core, to);
-            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
-            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
-            let stale = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(1)).unwrap();
-            assert!(streams.refuse(&core, from, 1), "the source refusal removes the destination plan");
-            stale
-        };
-
-        assert!(matches!(core.owner_configure(Dir::Rx, to.1 as usize, &stale), Ok(false)));
-        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [1]"), "the removed plan never opens: {:?}", device.calls());
-    }
-
-    #[test]
-    fn ur_34_a_waited_open_aborts_when_the_planned_segment_changes() {
-        let (core, device) = two_by_two_with_device();
-        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
-        let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| {
-            Line::new(timeline::Stream {
-                direction: Direction::Rx,
-                origin: 0,
-                config: Config { channels, ratio },
-                lead: 0,
-                call: 0,
-                release_window: core.ticks(core.description.timing.release_window_ns),
-                allowance: 0,
-            })
-        };
-        device.rx_open(0, &[0]).unwrap();
-        let next = {
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(from, line(Channels::first(1)));
-            streams.lines.insert(to, line(Channels::first(0)));
-            let seq = streams.next_seq();
-            assert!(streams.book(&core, to, Item { e: 10_000, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }));
-            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
-            let initial = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).unwrap();
-            streams.complete(from, (initial.segment.origin, initial.segment.config, initial.segment.by));
-            streams.stream_mut(to).configs.insert(seq, Arc::new(ColdConfig::new(BTreeMap::new())));
-            streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).unwrap()
-        };
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let expected = next.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-replan", move || {
-                let _ = done.send(worker.owner_configure(Dir::Rx, to.1 as usize, &expected));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the destination reaches its source wait");
-        let changed_by = {
-            let mut streams = lock(&core.streams);
-            let seq = streams.next_seq();
-            assert!(
-                streams.book(
-                    &core,
-                    to,
-                    Item {
-                        e: next.segment.origin + 5_000,
-                        seq,
-                        ready: core.now(),
-                        release: NO_RELEASE,
-                        delivered: None,
-                        refused: false,
-                        kind: Kind::Cold(Config { channels: next.segment.config.channels, ratio: Rational::new(100, 1).unwrap() }),
-                    }
-                ),
-                "the destination plan changes without a refusal"
-            );
-            let new = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(seq)).expect("the accepted replacement segment");
-            assert!(new.segment.origin > next.segment.origin && new.segment.config.ratio == Rational::new(100, 1).unwrap() && !new.refused);
-            streams.record_open(from, None);
-            seq
-        };
-        owner.join().unwrap();
-        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
-        assert!(!device.calls().iter().any(|call| call == "rx_open 1 [0]"), "the stale segment did not open: {:?}", device.calls());
-        assert_eq!(lock(&core.streams).holder(to), Holder::Free, "the interrupted owner gave back its claim after replan {changed_by}");
-    }
-
-    #[test]
     fn ur_34_a_rate_refusal_leaves_the_stream_record_unknown() {
         let (core, device) = two_by_two_with_device();
         lock(&core.rates)[Dir::Rx as usize] = Some(Err("UR-13: test rate-set refusal".to_owned()));
@@ -2881,225 +1931,19 @@ mod tests {
     }
 
     #[test]
-    fn ur_34_a_waited_open_ends_at_device_loss_without_closing_after_loss() {
-        let (core, device, next, _from, _to, _seq) = waiting_move();
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-loss-wait", move || {
-                let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
-        core.device_lost("test: lost while waiting for a streamer");
-        owner.join().unwrap();
-        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
-        let log = device.calls();
-        let marked = log.iter().position(|call| call == "mark_lost").unwrap();
-        assert!(!log[marked + 1..].iter().any(|call| call.starts_with("rx_close") || call.starts_with("rx_open")), "a lost device is never closed or reopened: {log:?}");
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
-    }
-
-    #[test]
-    fn ur_34_a_waited_open_ends_at_provider_stop_without_opening() {
-        let (core, device, next, _from, _to, _seq) = waiting_move();
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("rx-stop-wait", move || {
-                let _ = done.send(worker.owner_configure(Dir::Rx, 0, &next));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the owner reached its wait");
-        {
-            let mut streams = lock(&core.streams);
-            let at = core.now();
-            streams.stop = Some((at, StopMode::Orderly));
-            streams.end(&core, at, false, false);
-        }
-        owner.join().unwrap();
-        assert!(matches!(result_rx.recv_timeout(Wall::from_secs(10)).unwrap(), Ok(false)));
-        assert!(!device.calls().iter().any(|call| call == "rx_open 0 [0, 1]"), "{:?}", device.calls());
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Rx, 0)), Holder::Free);
-    }
-
-    #[test]
-    fn ur_34_a_waited_transmit_open_observes_provider_stop_with_a_later_cold_reserved() {
-        let (core, device) = two_by_two_with_device();
-        let (from, to) = (stream_key(Dir::Tx, 1), stream_key(Dir::Tx, 0));
-        let ratio = Rational::new(200, 1).unwrap();
-        let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: Config { channels, ratio }, lead: 1_000, call: 0, release_window: 0, allowance: 0 });
-        device.tx_open(1, &[0]).unwrap();
-        let (source, next) = {
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(from, line(Channels::first(1)));
-            streams.lines.insert(to, line(Channels::first(0)));
-            streams.stream_mut(from).set = DeviceSet::Open(Channels::first(1));
-            let move_seq = streams.next_seq();
-            streams.lines.book_move(from, to, 0, Some(10_000), 0, move_seq, 0).unwrap();
-            streams.changed(&core, from);
-            streams.changed(&core, to);
-            streams.stream_mut(to).configs.insert(move_seq, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-            let cold_seq = streams.next_seq();
-            assert!(streams.book(
-                &core,
-                to,
-                Item { e: 20_000, seq: cold_seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(Config { channels: Channels::first(1), ratio }) }
-            ));
-            streams.changed(&core, to);
-            let source = streams.planned(from).into_iter().find(|planned| planned.segment.by.is_none()).expect("the old source segment");
-            let next = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(move_seq)).expect("the moved transmit segment");
-            assert!(next.segment.cut.is_some_and(|cut| next.segment.instant(cut).unwrap() > next.segment.origin));
-            (source, next)
-        };
-
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let next_for_owner = next.clone();
-        let (done, result_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("tx-stop-with-later-cold", move || {
-                let _ = done.send(worker.owner_configure(Dir::Tx, 0, &next_for_owner));
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(Wall::from_secs(10)).is_ok(), "the transmit owner reached its release wait");
-        let still_planned = {
-            let mut streams = lock(&core.streams);
-            streams.stop = Some((5_000, StopMode::Orderly));
-            streams.end(&core, 5_000, false, false);
-            streams.planned(to).iter().any(|planned| planned.segment == next.segment)
-        };
-        core.close_device(Dir::Tx, 1);
-        {
-            let mut streams = lock(&core.streams);
-            streams.record_open(from, None);
-            streams.complete(from, (source.segment.origin, source.segment.config, source.segment.by));
-        }
-        owner.join().unwrap();
-        let result = result_rx.recv_timeout(Wall::from_secs(10)).unwrap();
-        let calls = device.calls();
-        assert!(still_planned, "TX End before the origin leaves the reserved move segment in the plan");
-        assert!(!result.unwrap(), "Provider stop ends the wait");
-        assert!(!calls.iter().any(|call| call == "tx_open 0 [0]"), "no target streamer opens after stop: {calls:?}");
-        assert_eq!(lock(&core.streams).holder(to), Holder::Free);
-    }
-
-    #[test]
-    fn ur_25_a_transmit_move_after_a_refused_source_change_begins_the_destination_as_if_not_refused() {
-        // RM-25, RM-34 (design 43): the source's change C (2 MS/s, due 100 ms, origin 150 ms) is
-        // refused, and a move of channel 0 into the empty destination, due at 300 ms, is booked at
-        // 100 ms. The destination's clock is registered for 350 ms (a lead after the cut C would
-        // have had), whether or not C is refused; C's own clock ends at its origin, 150 ms.
-        let run = |refuse: bool| {
-            let core = two_by_two();
-            let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
-            let ms = |n: i64| core.ticks(n * 1_000_000);
-            let line = |channels| {
-                Line::new(timeline::Stream {
-                    direction: Direction::Tx,
-                    origin: 0,
-                    config: Config { channels, ratio: Rational::new(200, 1).unwrap() },
-                    lead: ms(50),
-                    call: 0,
-                    release_window: 0,
-                    allowance: 0,
-                })
-            };
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(from, line(Channels::first(1)));
-            streams.lines.insert(to, line(Channels::first(0)));
-            let seq = streams.next_seq();
-            assert!(streams.book(
-                &core,
-                from,
-                Item {
-                    e: ms(100),
-                    seq,
-                    ready: 0,
-                    release: NO_RELEASE,
-                    delivered: None,
-                    refused: false,
-                    kind: Kind::Cold(Config { channels: Channels::first(1), ratio: Rational::new(100, 1).unwrap() })
-                }
-            ));
-            if refuse {
-                assert!(streams.refuse(&core, from, seq));
-            }
-            let moved = streams.next_seq();
-            streams.lines.book_move(from, to, 0, Some(ms(300)), ms(100), moved, ms(100)).unwrap();
-            streams.changed(&core, from);
-            streams.changed(&core, to);
-            let destination = streams.planned(to).into_iter().find(|planned| planned.segment.by == Some(moved)).expect("the destination's segment");
-            let source = streams.planned(from);
-            drop(streams);
-            let records = core.clocks.sample_clock_records();
-            let ended = |clock: Clock| records.iter().find(|record| record.domain == clock.domain).and_then(|record| record.ended_at.map(|at| at.ticks_in(record.root).unwrap()));
-            let (clock, c_clock) = (destination.clock.expect("the destination's clock"), source[1].clock.expect("C's clock"));
-            (destination.segment.origin, clock.origin, ended(c_clock), ms(350), ms(150), ms(300))
-        };
-        let (plain, plain_clock, plain_end, expected, origin, cut) = run(false);
-        let (refused, refused_clock, refused_end, ..) = run(true);
-        assert_eq!((plain, plain_clock), (expected, expected));
-        assert_eq!((refused, refused_clock), (expected, expected), "the destination begins a lead after the cut C would have had");
-        assert_eq!(plain_end, Some(cut));
-        assert_eq!(refused_end, Some(origin), "the refused clock's record ends at its origin");
-    }
-
-    #[test]
-    fn ur_34_a_refused_move_reconciles_both_transmit_clocks() {
-        let core = two_by_two();
-        let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
-        let ratio = Rational::new(200, 1).unwrap();
-        let config = |channels| Config { channels, ratio };
-        let line = |channels| Line::new(timeline::Stream { direction: Direction::Tx, origin: 0, config: config(channels), lead: core.ticks(50_000_000), call: 0, release_window: 0, allowance: 0 });
-        {
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(from, line(Channels::first(2)));
-            streams.lines.insert(to, line(Channels::first(3).without(0).without(1)));
-            let e = 10_000 * 200;
-            streams.lines.book_move(from, to, 1, Some(e), 0, 1, 0).unwrap();
-            streams.changed(&core, from);
-            streams.changed(&core, to);
-            assert!(streams.refuse(&core, from, 1), "the move is refused on both lines");
-            assert!(streams.line(from).unwrap().halted(e));
-            assert!(streams.line(to).unwrap().halted(e));
-        }
-        let streams = lock(&core.streams);
-        let source = streams.stream(from).clocks.clone();
-        let destination = streams.stream(to).clocks.clone();
-        drop(streams);
-        let records = core.clocks.sample_clock_records();
-        let record = |clock: &Clock| records.iter().find(|record| record.domain == clock.domain).expect("a clock's record");
-        assert_eq!(source.len(), 2, "the source's refused segment clock was registered: {source:?}");
-        assert_eq!(destination.len(), 2, "the destination's refused segment clock was registered: {destination:?}");
-        for (_, ended) in [&source, &destination].into_iter().flat_map(|clocks| clocks.iter()) {
-            assert!(*ended, "both lines' clocks were reconciled after refusal: {source:?} {destination:?}");
-        }
-        let old_source = record(&source[0].0);
-        assert_eq!(old_source.ended_at.unwrap().ticks_in(old_source.root).unwrap(), 10_000 * 200, "the old source clock ends at the move cut");
-        let old_destination = record(&destination[0].0);
-        assert_eq!(old_destination.ended_at.unwrap().ticks_in(old_destination.root).unwrap(), 10_000 * 200, "the old destination clock ends at the move cut");
-        for (clock, _) in [&source[1], &destination[1]] {
-            let refused = record(clock);
-            assert_eq!(refused.ended_at.unwrap().ticks_in(refused.root).unwrap(), refused.origin.ticks_in(refused.root).unwrap(), "a refused move clock ends at its own origin");
-        }
+    fn ur_36_the_owner_step_follows_the_record() {
+        // UR-36: nothing when the record has the set open and configured for that command; a configure when only
+        // the command differs, or none was recorded; an open when the set is not the open one.
+        let mut streams = Streams::with_streams(2, 2);
+        let (k, set) = (stream_key(Dir::Rx, 0), Channels::first(1));
+        assert_eq!(streams.owner_step(k, set, Some(4)), Owner::Open, "nothing is open");
+        streams.record_open(k, Some(set));
+        assert_eq!(streams.owner_step(k, set, Some(4)), Owner::Configure, "open, not configured");
+        assert_eq!(streams.owner_step(k, Channels::first(2), Some(4)), Owner::Open, "another set");
+        streams.record_configured(k, Some(4));
+        assert_eq!(streams.owner_step(k, set, Some(4)), Owner::Nothing, "this command's configuration stands");
+        assert_eq!(streams.owner_step(k, set, Some(5)), Owner::Configure, "another command");
+        assert_eq!(streams.owner_step(k, set, None), Owner::Configure, "the first segment has no command");
     }
 
     #[test]
@@ -3110,7 +1954,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             for (stream, k) in [(stream_key(Dir::Rx, 0), 1_000), (stream_key(Dir::Rx, 1), 500)] {
-                streams.started(stream, Some((0, cfg(1), None)), 0, cfg(1));
+                streams.started(stream, 0, cfg(1));
                 streams.delivered(stream, 0, cfg(1), k);
             }
             streams.end(&core, 5_000, true, false);
@@ -3123,7 +1967,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             for (stream, k) in [(stream_key(Dir::Rx, 0), 3_000), (stream_key(Dir::Rx, 1), 500)] {
-                streams.started(stream, Some((0, cfg(1), None)), 0, cfg(1));
+                streams.started(stream, 0, cfg(1));
                 streams.delivered(stream, 0, cfg(1), k);
             }
             streams.end(&core, 400_000, false, false);
@@ -3149,6 +1993,47 @@ mod tests {
         }
     }
 
+    /// The two-by-two rig with transmit stream 0's clock registered at root tick `origin`, as `arm`
+    /// does, and its line planned from there.
+    fn tx_clock_at(origin: i64) -> (Arc<Core>, Clock) {
+        let core = two_by_two();
+        let clock = core.register_in(Dir::Tx, 0, 200, origin).unwrap();
+        {
+            let mut streams = lock(&core.streams);
+            streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![clock];
+            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(timeline::Stream { direction: Direction::Tx, origin, config: cfg(1), lead: 0, call: 2_000, release_window: 0, allowance: 0 }));
+        }
+        (core, clock)
+    }
+
+    /// The `ended_at` root tick of the transmit clock `clock`'s registry record.
+    fn tx_clock_end(core: &Core, clock: Clock) -> Option<i64> {
+        let record = core.clocks.sample_clock_records().into_iter().find(|record| record.domain == clock.domain).expect("the clock is registered");
+        record.ended_at.map(|end| end.ticks_in(record.root).unwrap())
+    }
+
+    #[test]
+    fn ur_23_a_transmit_clock_the_plan_cuts_at_its_origin_ends_there() {
+        // RM-25, VH-2: a Provider::stop at or before the clock's origin (S <= O) cuts the
+        // segment at sample 0 and ends the clock at O; after O the plan has no cut and the
+        // clock stays open. A booking after the end does not end it again.
+        const O: i64 = 10_000;
+        for (stop, ended) in [(O - 4_000, Some(O)), (O, Some(O)), (O + 400, None)] {
+            let (core, clock) = tx_clock_at(O);
+            lock(&core.streams).end(&core, stop, false, false);
+            assert_eq!(lock(&core.streams).planned(stream_key(Dir::Tx, 0))[0].segment.cut, ended.map(|_| 0), "S {stop}");
+            assert_eq!(tx_clock_end(&core, clock), ended, "S {stop}");
+            let mut streams = lock(&core.streams);
+            streams.changed(&core, stream_key(Dir::Tx, 0));
+            assert!(lock(&core.rec).rejected.is_empty(), "S {stop}: {:?}", lock(&core.rec).rejected);
+        }
+        // A loss: the same end through the thread that finds it, which bypasses the owner's work.
+        let (core, clock) = tx_clock_at(O);
+        core.device_lost("scripted loss");
+        assert_eq!(tx_clock_end(&core, clock), Some(O));
+        assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
+    }
+
     // ------------------------------------------------------------ 1b-6a: the holder and the read
 
     #[test]
@@ -3156,155 +2041,19 @@ mod tests {
         let mut streams = Streams::with_streams(1, 1);
         let k = stream_key(Dir::Rx, 0);
         assert_eq!(streams.holder(k), Holder::Free);
-        let claim = streams.claim_owner(k, None).expect("a free stream");
-        assert_eq!(streams.holder(k), Holder::Owner { seq: None });
-        assert!(streams.claim_owner(k, Some(7)).is_none());
-        assert!(streams.claim_from_none(k).is_none());
-        assert!(streams.claim_release(k).is_none());
-        assert_eq!(streams.holder(k), Holder::Owner { seq: None });
+        let claim = streams.claim_owner(k).expect("a free stream");
+        assert_eq!(streams.holder(k), Holder::Owner);
+        assert!(streams.claim_owner(k).is_none());
+        assert_eq!(streams.holder(k), Holder::Owner);
         streams.give_back(claim);
         assert_eq!(streams.holder(k), Holder::Free);
-        let claim = streams.claim_owner(k, Some(9)).expect("free again");
-        assert_eq!(streams.holder(k), Holder::Owner { seq: Some(9) });
-        assert!(!streams.move_source_busy(k, Some(9)), "no move names this stream");
+        let claim = streams.claim_owner(k).expect("free again");
+        assert_eq!(streams.holder(k), Holder::Owner);
         streams.give_back(claim);
         assert_eq!(streams.holder(k), Holder::Free);
     }
 
-    #[test]
-    fn ur_25_a_claim_release_needs_a_free_idle_stream_with_no_active_segment() {
-        let mut streams = Streams::with_streams(1, 1);
-        let k = stream_key(Dir::Rx, 0);
-        streams.search(k, false);
-        let claim = streams.claim_release(k).expect("idle and free");
-        assert_eq!(streams.holder(k), Holder::Release);
-        assert!(streams.claim_owner(k, None).is_none());
-        assert!(streams.claim_from_none(k).is_none());
-        assert!(streams.claim_release(k).is_none());
-        streams.give_back(claim);
-        assert_eq!(streams.holder(k), Holder::Free);
-
-        streams.search(k, true);
-        assert!(streams.claim_release(k).is_none(), "not idle");
-        assert_eq!(streams.holder(k), Holder::Free);
-        streams.started(k, Some((0, cfg(1), None)), 0, cfg(1));
-        assert!(streams.claim_release(k).is_none(), "an active segment");
-        let _ = streams.finished(k);
-
-        let claim = streams.claim_owner(k, None).expect("free");
-        streams.search(k, false);
-        assert!(streams.claim_release(k).is_none(), "the holder alone refuses");
-        assert_eq!(streams.holder(k), Holder::Owner { seq: None });
-        streams.give_back(claim);
-        let claim = streams.claim_release(k).expect("idle, free, no active segment");
-        streams.give_back(claim);
-    }
-
-    // ------------------------------------------------------------ 1b-6b: the owner's phase
-
-    #[test]
-    fn ur_25_a_stream_starts_idle_or_waiting() {
-        // UR-25: `start` gives a stream with a segment from T0 (or a transmit clock) a
-        // `Pending` phase and one without anything to begin `Idle`; the default state before
-        // `start` is not idle, so a release does not close its streamer.
-        let mut streams = Streams::with_streams(1, 1);
-        let (rx, tx) = (stream_key(Dir::Rx, 0), stream_key(Dir::Tx, 0));
-        assert_eq!(streams.phase(rx), Phase::Pending, "the default before start");
-        assert_eq!(streams.phase(tx), Phase::Pending);
-        assert!(!streams.is_idle(rx));
-        assert!(streams.active(rx).is_none());
-        assert!(streams.claim_release(rx).is_none(), "a stream before start is not idle");
-
-        streams.starting(rx, false);
-        assert_eq!(streams.phase(rx), Phase::Idle);
-        let claim = streams.claim_release(rx).expect("start gave the stream nothing to begin");
-        streams.give_back(claim);
-
-        streams.starting(rx, true);
-        assert_eq!(streams.phase(rx), Phase::Pending);
-        assert!(!streams.is_idle(rx));
-        assert!(streams.active(rx).is_none());
-
-        streams.starting(tx, true);
-        assert_eq!(streams.phase(tx), Phase::Pending, "a transmit clock waits for its first plan read");
-        streams.starting(tx, false);
-        assert_eq!(streams.phase(tx), Phase::Idle);
-    }
-
-    #[test]
-    fn ur_26_a_receive_start_without_a_segment_stays_active() {
-        // RM-16: uhd-rx begins its T0 stream even when the plan no longer has its segment (a
-        // loss during `start`): the phase is active with no segment, and the delivered tuple
-        // stays; finishing it records nothing and leaves the stream pending.
-        let mut streams = Streams::with_streams(1, 1);
-        let rx = stream_key(Dir::Rx, 0);
-        let config = cfg(1);
-        streams.started(rx, None, 0, config);
-        assert_eq!(streams.phase(rx), Phase::Active { segment: None, delivered: Some((0, config, 0)) });
-        assert!(!streams.is_idle(rx));
-        streams.delivered(rx, 0, config, 500);
-        assert_eq!(streams.first_undelivered(rx), Some((0, config, 500)), "the tuple is kept");
-
-        assert_eq!(streams.finished(rx), None);
-        assert_eq!(streams.phase(rx), Phase::Pending);
-        assert_eq!(streams.first_undelivered(rx), None);
-        assert!(streams.stream(rx).completed.is_empty(), "no segment to record");
-    }
-
-    #[test]
-    fn ur_25_a_search_leaves_the_stream_pending_or_idle() {
-        // UR-25: the search for the next planned segment moves the stream between `Pending`
-        // and `Idle` only, and a found segment is not yet active.
-        let mut streams = Streams::with_streams(1, 1);
-        let k = stream_key(Dir::Rx, 0);
-        streams.search(k, true);
-        assert_eq!(streams.phase(k), Phase::Pending);
-        assert!(!streams.is_idle(k));
-        assert!(streams.active(k).is_none(), "a planned segment is not begun");
-        assert!(streams.claim_release(k).is_none(), "the owner found a segment to begin");
-
-        streams.search(k, false);
-        assert_eq!(streams.phase(k), Phase::Idle);
-        let claim = streams.claim_release(k).expect("nothing left to begin");
-        streams.give_back(claim);
-
-        // Unreachable in production (`begin` runs only with no stream), but the phase is one
-        // value: a later search replaces an active segment rather than leaving it beside Idle.
-        streams.started(k, Some((0, cfg(1), None)), 0, cfg(1));
-        streams.search(k, false);
-        assert_eq!(streams.phase(k), Phase::Idle);
-        assert!(streams.active(k).is_none());
-    }
-
-    #[test]
-    fn ur_17_a_receive_segment_moves_from_pending_to_active_to_pending() {
-        // UR-17: a found segment becomes active with its floor at zero, each block moves the
-        // floor, and finishing returns the segment for the caller's record. A floor written
-        // while the stream is not active is not kept.
-        let mut streams = Streams::with_streams(1, 1);
-        let k = stream_key(Dir::Rx, 0);
-        let config = cfg(1);
-        let segment = (0, config, None);
-        streams.search(k, true);
-        streams.delivered(k, 0, config, 500);
-        assert_eq!(streams.phase(k), Phase::Pending);
-        assert_eq!(streams.first_undelivered(k), None, "nothing is being delivered");
-
-        streams.started(k, Some(segment), 0, config);
-        assert_eq!(streams.phase(k), Phase::Active { segment: Some(segment), delivered: Some((0, config, 0)) });
-        streams.delivered(k, 0, config, 3_000);
-        assert_eq!(streams.first_undelivered(k), Some((0, config, 3_000)));
-
-        assert_eq!(streams.finished(k), Some(segment));
-        assert_eq!(streams.phase(k), Phase::Pending);
-        assert_eq!(streams.first_undelivered(k), None);
-        streams.delivered(k, 0, config, 4_000);
-        assert_eq!(streams.phase(k), Phase::Pending, "a finished segment's floor cannot reappear");
-        assert!(streams.stream(k).completed.is_empty(), "the caller records completion");
-
-        streams.complete(k, segment);
-        assert_eq!(streams.stream(k).completed, [segment]);
-    }
+    // ------------------------------------------------------------ 1b-6b: the owner's delivered floor
 
     #[test]
     fn ur_26_a_finished_stream_clears_only_its_own_floor() {
@@ -3313,14 +2062,13 @@ mod tests {
         // no longer running, at the end's instant instead.
         let core = two_by_two();
         let (rx0, rx1) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
-        let segment = (0, cfg(1), None);
         {
             let mut streams = lock(&core.streams);
             for (stream, k) in [(rx0, 3_000), (rx1, 500)] {
-                streams.started(stream, Some(segment), 0, cfg(1));
+                streams.started(stream, 0, cfg(1));
                 streams.delivered(stream, 0, cfg(1), k);
             }
-            assert_eq!(streams.finished(rx1), Some(segment));
+            streams.finished(rx1);
             assert_eq!(streams.first_undelivered(rx0), Some((0, cfg(1), 3_000)), "stream 0's floor stands");
             assert_eq!(streams.first_undelivered(rx1), None, "stream 1's floor is cleared");
             streams.end(&core, 800_000, true, false);
@@ -3328,35 +2076,6 @@ mod tests {
         let streams = lock(&core.streams);
         assert_eq!(streams.planned(rx0)[0].segment.cut, Some(3_000), "stream 0's own delivered floor");
         assert_eq!(streams.planned(rx1)[0].segment.cut, Some(4_000), "stream 1 is cut at the end's instant, not its old floor");
-    }
-
-    #[test]
-    fn ur_25_a_claim_from_none_admits_a_read_in_flight() {
-        let mut streams = Streams::with_streams(1, 1);
-        let k = stream_key(Dir::Rx, 0);
-        assert!(streams.begin_read(k));
-        let claim = streams.claim_from_none(k).expect("a read does not refuse from-none");
-        assert_eq!(streams.holder(k), Holder::FromNone);
-        assert!(streams.claim_from_none(k).is_none(), "a from-none claim is not taken twice");
-        assert!(!streams.may_call_from_none(k), "the read is in flight");
-        streams.end_read(k);
-        assert!(streams.may_call_from_none(k));
-        assert!(!streams.reading(k));
-        streams.give_back(claim);
-        assert_eq!(streams.holder(k), Holder::Free);
-
-        let claim = streams.claim_from_none(k).expect("free again");
-        assert!(!streams.begin_read(k), "a from-none holder owns the stream");
-        assert!(!streams.reading(k));
-        streams.give_back(claim);
-        let claim = streams.claim_owner(k, Some(1)).expect("free");
-        assert!(!streams.may_call_from_none(k));
-        streams.give_back(claim);
-        streams.search(k, false);
-        let claim = streams.claim_release(k).expect("free, idle");
-        assert!(!streams.may_call_from_none(k));
-        streams.give_back(claim);
-        assert!(!streams.may_call_from_none(k), "a free stream is not a from-none holder");
     }
 
     #[test]
@@ -3371,16 +2090,9 @@ mod tests {
         streams.end_read(k);
         assert!(!streams.reading(k));
 
-        let claim = streams.claim_owner(k, None).expect("free");
+        let claim = streams.claim_owner(k).expect("free");
         assert!(!streams.begin_read(k));
         assert!(!streams.reading(k));
-        streams.give_back(claim);
-        let claim = streams.claim_from_none(k).expect("free");
-        assert!(!streams.begin_read(k), "a from-none enable owns the stream");
-        streams.give_back(claim);
-        streams.search(k, false);
-        let claim = streams.claim_release(k).expect("free, idle");
-        assert!(!streams.begin_read(k));
         streams.give_back(claim);
     }
 
@@ -3394,29 +2106,14 @@ mod tests {
         assert_eq!(streams.holder(k), Holder::Free);
         streams.end_read(k);
 
-        let claim = streams.claim_owner(k, Some(3)).expect("free");
+        let claim = streams.claim_owner(k).expect("free");
         streams.begin_shutdown_read(k);
         assert!(streams.reading(k));
-        assert_eq!(streams.holder(k), Holder::Owner { seq: Some(3) });
+        assert_eq!(streams.holder(k), Holder::Owner);
         streams.end_read(k);
         streams.give_back(claim);
 
-        let claim = streams.claim_from_none(k).expect("free");
-        streams.begin_shutdown_read(k);
-        assert!(streams.reading(k));
-        assert_eq!(streams.holder(k), Holder::FromNone);
-        streams.end_read(k);
-        streams.give_back(claim);
-
-        streams.search(k, false);
-        let claim = streams.claim_release(k).expect("free, idle");
-        streams.begin_shutdown_read(k);
-        assert!(streams.reading(k));
-        assert_eq!(streams.holder(k), Holder::Release);
-        streams.end_read(k);
-        streams.give_back(claim);
-
-        let claim = streams.claim_from_none(k).expect("free");
+        let claim = streams.claim_owner(k).expect("free");
         streams.begin_shutdown_read(k);
         streams.begin_shutdown_read(k);
         assert!(streams.reading(k), "a second shutdown read leaves it set");
@@ -3433,10 +2130,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "UR-25: a claim of Owner { seq: None } was not given back")]
+    #[should_panic(expected = "UR-25: a claim of Owner was not given back")]
     fn ur_25_a_claim_dropped_without_give_back_panics_in_the_test_build() {
         let mut streams = Streams::with_streams(1, 1);
-        let claim = streams.claim_owner(stream_key(Dir::Rx, 0), None).expect("free");
+        let claim = streams.claim_owner(stream_key(Dir::Rx, 0)).expect("free");
         drop(claim);
     }
 
@@ -3444,67 +2141,14 @@ mod tests {
     fn ur_25_a_give_back_of_another_holder_panics_in_the_test_build_and_changes_nothing() {
         let mut streams = Streams::with_streams(1, 1);
         let k = stream_key(Dir::Rx, 0);
-        let claim = streams.claim_owner(k, None).expect("free");
+        let claim = streams.claim_owner(k).expect("free");
         let wrong = Claim { stream: k, holder: Holder::Free };
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             streams.give_back(wrong);
         }));
         assert!(caught.is_err(), "a claim the stream does not hold is refused");
-        assert_eq!(streams.holder(k), Holder::Owner { seq: None }, "the real holder is untouched");
+        assert_eq!(streams.holder(k), Holder::Owner, "the real holder is untouched");
         streams.give_back(claim);
         assert_eq!(streams.holder(k), Holder::Free);
-    }
-
-    #[test]
-    fn ur_25_move_source_busy_reads_the_owner_of_the_move() {
-        let mut streams = Streams::with_streams(2, 1);
-        let (from, to) = (stream_key(Dir::Rx, 0), stream_key(Dir::Rx, 1));
-        let ratio = Rational::new(200, 1).unwrap();
-        let rx_line = |channels| Line::new(timeline::Stream { direction: Direction::Rx, origin: 0, config: Config { channels, ratio }, lead: 0, call: 0, release_window: 0, allowance: 0 });
-        streams.lines.insert(from, rx_line(Channels::first(2)));
-        streams.lines.insert(to, rx_line(Channels::first(1)));
-        streams.lines.book_move(from, to, 1, Some(10_000), 0, 7, 0).unwrap();
-
-        let claim = streams.claim_owner(from, Some(7)).expect("free");
-        assert!(streams.move_source_busy(to, Some(7)));
-        assert!(!streams.move_source_busy(to, Some(8)), "another command's move");
-        assert!(!streams.move_source_busy(to, None));
-        streams.give_back(claim);
-
-        let claim = streams.claim_owner(from, Some(8)).expect("free");
-        assert!(!streams.move_source_busy(to, Some(7)), "a different seq");
-        streams.give_back(claim);
-        let claim = streams.claim_from_none(from).expect("free");
-        assert!(!streams.move_source_busy(to, Some(7)), "from-none is not the owner");
-        streams.give_back(claim);
-        streams.search(from, false);
-        let claim = streams.claim_release(from).expect("free, idle");
-        assert!(!streams.move_source_busy(to, Some(7)), "release is not the owner");
-        streams.give_back(claim);
-        assert!(!streams.move_source_busy(to, Some(7)), "free is not the owner");
-    }
-
-    #[test]
-    fn ur_34_a_release_gives_back_a_claim_when_loss_arrives_after_the_claim() {
-        let (core, device, _next, from, _to, _seq) = waiting_move();
-        lock(&core.streams).search(from, false);
-        let before = device.calls().len();
-        let (entered, reached) = std::sync::mpsc::channel();
-        let (resume, wait) = std::sync::mpsc::channel();
-        let wait = std::sync::Mutex::new(wait);
-        super::super::test_support::probe(&core, "release_claimed", move |_| {
-            let _ = entered.send(());
-            let _ = wait.lock().unwrap().recv();
-        });
-        let worker = core.clone();
-        let release = std::thread::spawn(move || worker.release_unneeded(Dir::Rx, from.1 as usize));
-        reached.recv_timeout(Wall::from_secs(10)).expect("the release took its claim");
-        assert_eq!(lock(&core.streams).holder(from), Holder::Release);
-        core.device_lost("test: a loss between the release claim and its close");
-        let _ = resume.send(());
-        assert!(!release.join().expect("the release thread"), "the lost stream is not closed");
-        assert_eq!(lock(&core.streams).holder(from), Holder::Free, "the claim is given back");
-        assert_eq!(lock(&core.streams).stream(from).set, DeviceSet::Open(Channels::first(1)), "no close is recorded");
-        assert!(!device.calls()[before..].iter().any(|call| call == "rx_close 1"), "{:?}", device.calls());
     }
 }

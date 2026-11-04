@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
-use ezsdr_kernel::module_api::{CoerceReport, ModuleRegistry, RejectedRequest, Requested, UpdateClass};
+use ezsdr_kernel::module_api::{CoerceReport, ModuleRegistry, RejectedRequest, Requested};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{CapabilityValue, CoercionPolicy, Constraint, Ident, Key, Namespace, Scalar, Value, ValueKind};
 use ezsdr_radio::channels::{self, Description, Layout};
@@ -136,10 +136,10 @@ fn rm_27_the_layout_builder_keys_are_declared() {
 
     // Every declaration of RM-27's table, both directions.
     let rows = [
-        ("frequency_hz", ValueKind::Num, true, CoercionPolicy::Reject, Some(UpdateClass::HardwareTimed)),
-        ("gain_db", ValueKind::Num, true, CoercionPolicy::Warn, Some(UpdateClass::HardwareTimed)),
-        ("antenna", ValueKind::Str, false, CoercionPolicy::Reject, Some(UpdateClass::Cold)),
-        ("stream", ValueKind::Int, false, CoercionPolicy::Reject, Some(UpdateClass::Cold)),
+        ("frequency_hz", ValueKind::Num, true, CoercionPolicy::Reject, None),
+        ("gain_db", ValueKind::Num, true, CoercionPolicy::Warn, None),
+        ("antenna", ValueKind::Str, false, CoercionPolicy::Reject, None),
+        ("stream", ValueKind::Int, false, CoercionPolicy::Reject, None),
         ("frequency_step_hz", ValueKind::Num, false, CoercionPolicy::Reject, None),
         ("gain_step_db", ValueKind::Num, false, CoercionPolicy::Reject, None),
         ("phase_behavior_on_retune", ValueKind::Str, false, CoercionPolicy::Reject, None),
@@ -161,7 +161,7 @@ fn rm_27_the_layout_builder_keys_are_declared() {
         assert_eq!(declaration.kind, ValueKind::Num);
         assert!(declaration.coercible);
         assert_eq!(declaration.coercion_default, CoercionPolicy::Reject);
-        assert_eq!(declaration.update_class, Some(UpdateClass::Cold));
+        assert_eq!(declaration.update_class, None);
     }
 }
 

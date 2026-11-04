@@ -2,14 +2,13 @@
 use super::core::Core;
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, Iq, RxRecv, Settings, TxReport};
 use crate::host::HostClock;
-use ezsdr_kernel::event::{Event, EventCollector, EventHandle, EventKind, EventSink, EventSource, Severity, Target};
+use ezsdr_kernel::event::{EventCollector, EventSink, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::ResourceId;
 use ezsdr_kernel::module_api::{Fidelity, ModuleRegistry, Pacing};
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
-use ezsdr_kernel::run::RunError;
 use ezsdr_kernel::spec::{Ident, Scalar, Value};
-use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority, TimePoint};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, EpochRef, ManualTimeAuthority, Rational, TimeAuthority};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,40 +110,6 @@ pub(super) fn rig_with_links_on(
     per_stream[k] = links;
     let (core, time, events) = rig_on_description_links(device.clone(), per_stream, BTreeMap::new(), description);
     (core, device, time, events)
-}
-
-/// `rig_on_description` through a sink that witnesses which events are emitted while the line lock
-/// is held (UR-25): the test keeps the witness and reads it.
-pub(super) fn rig_on_description_witness(
-    device: Arc<dyn Device>,
-    links: Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>,
-    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
-    description: ezsdr_radio::channels::Description,
-) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
-    rig_on_description_links_witness(device, vec![links], inputs, description)
-}
-
-/// `rig_on_description_links` through a sink that witnesses control-path events.
-pub(super) fn rig_on_description_links_witness(
-    device: Arc<dyn Device>,
-    links: Vec<Vec<Arc<dyn ezsdr_kernel::stream::DataLink>>>,
-    inputs: BTreeMap<ContentHash, Arc<[u8]>>,
-    description: ezsdr_radio::channels::Description,
-) -> (Arc<Core>, Arc<ManualTimeAuthority>, Arc<SectionWitness>) {
-    let clocks = Arc::new(ClockRegistry::new());
-    let root = clocks.allocate_id().unwrap();
-    clocks.register(ClockDomain::root(root, Rational::new(200_000_000, 1).unwrap(), EpochRef::Arbitrary { set_by: "uhd.test".to_owned() })).unwrap();
-    let time = Arc::new(ManualTimeAuthority::new(clocks.clone(), root, &[], Pacing::FreeRunning).unwrap());
-    let mut kinds = EventKindRegistry::with_kernel_kinds();
-    ezsdr_radio::register(&mut ModuleRegistry::new(), &mut ezsdr_kernel::binding::AdmissionCheckRegistry::new(), &mut kinds).unwrap();
-    let pairs: Vec<_> = ["usrp", "usrp/rx/s0", "usrp/tx/s0", "usrp/rx/s1", "usrp/tx/s1", "usrp/rx/s2", "usrp/tx/s2", "usrp/rx/s3", "usrp/tx/s3"]
-        .iter()
-        .flat_map(|s| kinds.kinds().into_iter().map(move |k| (EventSource::Node { node: ResourceId::parse(s).unwrap() }, k)))
-        .collect();
-    let witness = Arc::new(SectionWitness::new(Arc::new(EventCollector::new(&pairs, &kinds.kinds(), 4096, &Policy::default()))));
-    let core = core_on(device, clocks, time.clone(), witness.clone(), inputs, links, description);
-    witness.watch(&core);
-    (core, time, witness)
 }
 
 /// The rig's `Core` on `sink`.
@@ -386,21 +351,9 @@ impl LockSpy {
         *self.rx_packet_max.lock().unwrap() = Some(samples);
     }
 
-    pub fn rx_apply_pending(&self) -> Vec<RxApplyPending> {
-        self.rx_apply_pending.lock().unwrap().clone()
-    }
-
     /// Every call the fake behind the spy saw, in order.
     pub fn log(&self) -> Vec<String> {
         self.inner.calls()
-    }
-
-    pub fn dsp_pending(&self, dir: Dir, chan: usize) -> usize {
-        self.inner.dsp_pending(dir, chan)
-    }
-
-    pub fn dsp_log(&self, dir: Dir, chan: usize) -> Vec<(i64, f64, bool)> {
-        self.inner.dsp_log(dir, chan)
     }
 
     pub fn set_time(&self, ticks: i64) {
@@ -409,11 +362,6 @@ impl LockSpy {
 
     pub fn time_now(&self) -> Result<i64, DeviceError> {
         self.inner.time_now()
-    }
-
-    /// Whether the line lock was held at each host clock read since `watch`, in order (UR-25).
-    pub fn host_held(&self) -> Vec<bool> {
-        self.hosts.lock().unwrap().clone()
     }
 
     /// Holds the next call of `name` before it reaches the device (UR-25).
@@ -432,14 +380,6 @@ impl LockSpy {
 
     pub fn refuse_rx_stop(&self, error: DeviceError) {
         *self.rx_stop_error.lock().unwrap() = Some(error);
-    }
-
-    pub fn refuse_rx_apply(&self, error: DeviceError) {
-        *self.rx_apply_error.lock().unwrap() = Some(error);
-    }
-
-    pub fn refuse_rx_start(&self, error: DeviceError) {
-        *self.rx_start_error.lock().unwrap() = Some(error);
     }
 
     /// Records the call, fails when its caller holds the line, and holds it at its gate.
@@ -622,24 +562,8 @@ impl ApplyFails {
         ApplyFails::of(inner, dir, chan, false, true)
     }
 
-    /// The first timed `apply` of `dir` — of `chan`, when one is named — fails.
-    pub fn timed(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
-        ApplyFails::of(inner, dir, chan, true, false)
-    }
-
-    /// The first timed `apply` of `dir` — of `chan`, when one is named — fails as a lost device.
-    pub fn timed_lost(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
-        ApplyFails::of(inner, dir, chan, true, true)
-    }
-
     fn of(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>, timed: bool, lost: bool) -> ApplyFails {
         ApplyFails { inner, dir, chan, timed: Some(timed), lost, fired: AtomicBool::new(false), attempts: Mutex::new(Vec::new()) }
-    }
-
-    /// Every `apply` the wrapper was given, in order, as the test sees an attempt: a refusal
-    /// and an apply the device never took alike.
-    pub fn attempts(&self) -> Vec<(Dir, usize, Option<i64>)> {
-        self.attempts.lock().unwrap().clone()
     }
 }
 
@@ -973,53 +897,6 @@ impl Device for ReportFeed {
     }
     fn host(&self) -> HostClock {
         self.inner.host()
-    }
-}
-
-/// An event sink that records whether each control-path event was emitted while the
-/// instance's line lock was held (UR-25): the witness for a command whose instant and
-/// booking are one critical section — no other section of the Provider emits inside it, and
-/// the rigs are single-threaded, so the lock it meets is its own caller's.
-pub(super) struct SectionWitness {
-    inner: Arc<EventCollector>,
-    core: Mutex<Weak<Core>>,
-    seen: Mutex<Vec<(String, bool)>>,
-}
-
-impl SectionWitness {
-    pub fn new(inner: Arc<EventCollector>) -> SectionWitness {
-        SectionWitness { inner, core: Mutex::new(Weak::new()), seen: Mutex::new(Vec::new()) }
-    }
-
-    /// The Core this sink serves, taken once the rig has built it.
-    pub fn watch(&self, core: &Arc<Core>) {
-        *self.core.lock().unwrap() = Arc::downgrade(core);
-    }
-
-    /// The events emitted since the last call, each with whether the line lock was held.
-    pub fn events(&self) -> Vec<(String, bool)> {
-        std::mem::take(&mut *self.seen.lock().unwrap())
-    }
-
-    /// Records the event's kind and whether the line lock is held now.
-    fn observe(&self, kind: &EventKind) {
-        let held = self.core.lock().unwrap().upgrade().is_some_and(|core| core.streams.try_lock().is_err());
-        self.seen.lock().unwrap().push((kind.as_str().to_owned(), held));
-    }
-}
-
-impl EventSink for SectionWitness {
-    fn resolve(&self, source: &EventSource, kind: &EventKind) -> Result<EventHandle, RunError> {
-        self.inner.resolve(source, kind)
-    }
-
-    fn emit(&self, handle: EventHandle, time: TimePoint, severity: Severity, payload: &[u8]) -> Result<(), RunError> {
-        self.inner.emit(handle, time, severity, payload)
-    }
-
-    fn emit_control(&self, event: Event) -> Result<(), RunError> {
-        self.observe(&event.kind);
-        self.inner.emit_control(event)
     }
 }
 

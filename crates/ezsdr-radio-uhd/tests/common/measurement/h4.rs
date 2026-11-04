@@ -1,54 +1,21 @@
-//! H4 scheduler/submission proxies. These are observations, not wake-up latency or RF execution.
+//! H4 transmit headroom and load. These are observations, not wake-up latency or RF execution.
+//! The Session asks for receive and transmit c0 at 10 MS/s at connect and repeats a burst with no
+//! Run-time update (note 47 stage 2); the dispatch proxy of timed gain updates is gone.
 
 use super::super as common;
 use super::*;
 use common::probe_device::ProbeDevice;
-use std::time::{Duration as Wall, Instant};
 
-pub const H4_DISPATCH_UPDATES: usize = 200;
+pub const H4_WINDOW_MS: i64 = 2_000;
 const H4_RATE_HZ: u64 = 10_000_000;
-const H4_PERIOD_NS: u64 = 10_000_000;
-const H4_FIRST_LEAD_NS: u64 = 50_000_000;
-const H4_APPLY_WAIT: Wall = Wall::from_secs(2);
 const CLOCK_RATE_TOLERANCE_PPM: i128 = 1_000;
 
-// The Radio vocabulary has no timed gain verb; this test-only verb exercises its existing timed Session update path.
-fn h4_gain_vocabulary() -> ezsdr_kernel::module_api::VocabularyDescriptor {
-    let id = ezsdr_kernel::spec::Namespace::parse("ezsdr.h4").expect("valid H4 vocabulary");
-    ezsdr_kernel::module_api::VocabularyDescriptor {
-        id: id.clone(),
-        version: ezsdr_kernel::module_api::Version::new(1, 0, 0),
-        prefix: id,
-        keys: Vec::new(),
-        event_kinds: Vec::new(),
-        verbs: vec![ezsdr_kernel::module_api::VerbDecl {
-            verb: ezsdr_kernel::spec::Ident::parse("set_rx_gain").expect("valid H4 verb"),
-            compiles_to: ezsdr_kernel::module_api::CompileRule::UpdateParameter { key: ezsdr_kernel::spec::Key::parse("radio.rx.c0.gain_db").expect("declared radio gain key") },
-        }],
-        checks: Vec::new(),
-    }
-}
-
-fn h4_gain_action(at: TimePoint, gain: f64) -> ezsdr_kernel::session::SessionAction {
-    ezsdr_kernel::session::SessionAction::Vocabulary {
-        ns: ezsdr_kernel::spec::Namespace::parse("ezsdr.h4").expect("valid H4 vocabulary"),
-        verb: ezsdr_kernel::spec::Ident::parse("set_rx_gain").expect("valid H4 verb"),
-        target: common::resource("radio"),
-        at: Some(at),
-        params: std::collections::BTreeMap::from([(
-            ezsdr_kernel::spec::Key::parse("radio.rx.c0.gain_db").expect("declared radio gain key"),
-            ezsdr_kernel::spec::Value::num(gain).expect("finite H4 gain"),
-        )]),
-    }
-}
-
-fn h4_candidate_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, common::TempDir), String> {
-    let dir = common::TempDir::new();
-    let doc = common::bench_profile(&*device, &dir, Json::Object(Default::default()), common::bench_envelope(&*device), true);
-    let mut assembly = common::assembly(&doc, device, Default::default(), |radio| radio.with_measurement_timing(timing));
-    assembly.registry.register_vocabulary(h4_gain_vocabulary()).map_err(|error| error.to_string())?;
-    let run = ezsdr_kernel::coordinator::connect(&doc, &super::super::rx0(&doc), assembly, Lease::attached()).map_err(|error| error.to_string())?;
-    Ok((run, dir))
+/// Receive and transmit c0 in stream 0, both at 10 MS/s, asked at connect (RM-30).
+fn h4_initial(_profile: &Json) -> ezsdr_kernel::session::InitialRequests {
+    let rate = ezsdr_kernel::spec::Scalar::try_from(H4_RATE_HZ as f64).expect("a finite rate");
+    let requests = ["radio.rx.c0.stream", "radio.tx.c0.stream"].map(|key| (Key::parse(key).unwrap(), ezsdr_kernel::spec::Scalar::from(0)));
+    let rates = ["radio.rx.s0.sample_rate_hz", "radio.tx.s0.sample_rate_hz"].map(|key| (Key::parse(key).unwrap(), rate.clone()));
+    BTreeMap::from([(ezsdr_kernel::spec::Ident::parse("radio").unwrap(), requests.into_iter().chain(rates).collect())])
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,16 +98,6 @@ fn clock_rate_matches(anchors: [ClockAnchor; 2], master_clock_hz: u64) -> bool {
     difference <= tolerance + bracket_tolerance
 }
 
-/// Signed delay from the mapped release-window instant to the Device::apply entry.
-pub fn dispatch_delay(entry_host_ns: u64, e: i64, release_window_ticks: i64, anchors: [ClockAnchor; 2], master_clock_hz: u64) -> Result<(i64, i64, HostInterval), String> {
-    let release_tick = e.checked_sub(release_window_ticks).ok_or("release-window tick underflow")?;
-    let mapped = map_device_tick(anchors, release_tick, master_clock_hz)?;
-    let entry = i128::from(entry_host_ns);
-    let lower = i64::try_from(entry - i128::from(mapped.upper_ns)).map_err(|_| "dispatch delay underflow".to_owned())?;
-    let upper = i64::try_from(entry - i128::from(mapped.lower_ns)).map_err(|_| "dispatch delay overflow".to_owned())?;
-    Ok((lower, upper, mapped))
-}
-
 fn host_to_device_tick(anchors: [ClockAnchor; 2], host_ns: u64, master_clock_hz: u64) -> Option<i64> {
     let midpoint = |anchor: ClockAnchor| i128::from(anchor.host_before_ns) + (i128::from(anchor.host_after_ns) - i128::from(anchor.host_before_ns)) / 2;
     let h0 = midpoint(anchors[0]);
@@ -158,13 +115,6 @@ fn host_to_device_tick(anchors: [ClockAnchor; 2], host_ns: u64, master_clock_hz:
         return None;
     }
     i64::try_from(d0 + (i128::from(host_ns) - h0) * (d1 - d0) / span).ok()
-}
-
-fn clock_anchor_json(anchor: Option<ClockAnchor>) -> Json {
-    match anchor {
-        Some(anchor) => json!({ "device_tick": anchor.device_tick, "host_before_ns": anchor.host_before_ns, "host_after_ns": anchor.host_after_ns }),
-        None => json!({ "status": "unavailable" }),
-    }
 }
 
 /// Headroom is the nominal next-sample submission margin, not RF execution time.
@@ -327,208 +277,31 @@ fn cpu_delta(before: Option<Json>, after: Option<Json>) -> Json {
     json!({ "total_ticks": total, "busy_ticks": busy, "busy_percent": if total == 0 { Json::Null } else { json!(100.0 * busy as f64 / total as f64) } })
 }
 
-fn matching_timed_apply(probe: &ProbeDevice, e: i64) -> Option<Json> {
-    probe.matching_timed_apply(e)
-}
-
-fn await_timed_apply(probe: &ProbeDevice, e: i64, manual: bool) -> Option<Json> {
-    if manual {
-        return matching_timed_apply(probe, e);
-    }
-    let deadline = Instant::now() + H4_APPLY_WAIT;
-    loop {
-        if let Some(row) = matching_timed_apply(probe, e) {
-            return Some(row);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Wall::from_millis(1));
-    }
-}
-
-/// Where a timed update's apply falls against the TX interval, in device ticks: before it starts, inside it, or at or after its end.
-fn tx_overlap(tx_interval_ambiguous: bool, has_delay: bool, apply_tick: Option<i64>, tx_start_tick: Option<i64>, tx_end_tick: Option<i64>) -> &'static str {
-    match (tx_interval_ambiguous, has_delay, apply_tick, tx_start_tick, tx_end_tick) {
-        (false, true, Some(apply), Some(start), Some(_)) if apply < start => "before_tx",
-        (false, true, Some(apply), Some(_), Some(end)) if apply < end => "concurrent",
-        (false, true, Some(_), Some(_), Some(_)) => "after_tx_end",
-        _ => "ambiguous",
-    }
-}
-
-/// Puts a timed update's clock mapping and dispatch delay into its row from the apply the probe saw and the anchors that bracket it.
-fn map_dispatch_row(row: &mut Json, anchor_before: Option<ClockAnchor>, after: Option<ClockAnchor>, apply: Option<&Json>, e: i64, window_ticks: i64, master: u64) {
-    if let (Some(anchor_before), Some(anchor_after), Some(apply_row)) = (anchor_before, after, apply) {
-        let anchors = [anchor_before, anchor_after];
-        match dispatch_delay(apply_row["host_entry_ns"].as_u64().unwrap_or_default(), e, window_ticks, anchors, master) {
-            Ok((lower, upper, mapped)) => {
-                row["dispatch_delay_ns"] = json!({ "lower": lower, "upper": upper });
-                row["clock_mapping"] = json!({ "status": "mapped", "release_host_interval_ns": [mapped.lower_ns, mapped.upper_ns],
-                        "anchor_span_ticks": mapped.anchor_span_ticks, "anchor_span_host_ns": mapped.anchor_span_host_ns,
-                        "anchor_before_age_ns": mapped.before_age_ns, "anchor_after_age_ns": mapped.after_age_ns,
-                        "bracket_width_ns": mapped.bracket_width_ns, "rate_assumption": "host and device clocks are treated as affine between these anchors (INFERRED)" });
-            }
-            Err(reason) => row["clock_mapping"] = json!({ "status": "unavailable", "reason": reason }),
-        }
-    } else {
-        row["clock_mapping"] = json!({ "status": "unavailable", "reason": "timed apply or bracketed time_now anchor was missing" });
-    }
-}
-
-/// What the applied updates were against the TX interval, from `classify_dispatch_rows`.
-#[derive(Debug, Default)]
-struct Classified {
-    successful_delays: Vec<(i64, i64)>,
-    concurrent_dispatch_count: usize,
-    after_tx_end_count: usize,
-    overlap_ambiguous_count: usize,
-    before_tx_count: usize,
-    successful_apply_count: usize,
-}
-
-/// Classifies each applied update against the TX interval and keeps the dispatch delays of the concurrent ones only.
-fn classify_dispatch_rows(
-    dispatch_rows: &mut [Json],
-    tx_anchors: Option<(ClockAnchor, ClockAnchor)>,
-    tx_interval_ambiguous: bool,
-    tx_start_tick: Option<i64>,
-    tx_end_tick: Option<i64>,
-    master: u64,
-) -> Classified {
-    let mut counts = Classified::default();
-    let Classified { successful_delays, concurrent_dispatch_count, after_tx_end_count, overlap_ambiguous_count, before_tx_count, successful_apply_count } = &mut counts;
-    for row in dispatch_rows.iter_mut() {
-        if row["apply_called"] != true || row["apply"]["result"]["error"].is_string() {
-            continue;
-        }
-        *successful_apply_count += 1;
-        let Some(entry_ns) = row["apply"]["host_entry_ns"].as_u64() else {
-            row["tx_overlap"] = json!("ambiguous");
-            *overlap_ambiguous_count += 1;
-            continue;
-        };
-        let apply_tick = tx_anchors.and_then(|(start, end)| host_to_device_tick([start, end], entry_ns, master));
-        let overlap = tx_overlap(tx_interval_ambiguous, row["dispatch_delay_ns"].is_object(), apply_tick, tx_start_tick, tx_end_tick);
-        row["tx_overlap"] = json!(overlap);
-        match overlap {
-            "concurrent" if row["dispatch_delay_ns"].is_object() => {
-                *concurrent_dispatch_count += 1;
-                successful_delays.push((row["dispatch_delay_ns"]["lower"].as_i64().unwrap_or_default(), row["dispatch_delay_ns"]["upper"].as_i64().unwrap_or_default()));
-            }
-            "after_tx_end" => *after_tx_end_count += 1,
-            "ambiguous" | "concurrent" => *overlap_ambiguous_count += 1,
-            "before_tx" => *before_tx_count += 1,
-            _ => (),
-        }
-    }
-    counts
-}
-
-/// The TX interval ends at the earliest of the ends the observations name.
-fn earliest_tx_end(tx_end_ticks: Vec<i64>) -> Option<i64> {
-    tx_end_ticks.into_iter().min()
-}
-
-/// Runs the Session-to-Provider H4 probe. `updates` is 200 on hardware and small in the fake rehearsal.
-pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<MeasurementGroup, String> {
-    if updates == 0 || updates > H4_DISPATCH_UPDATES {
-        return Err(format!("H4 needs 1..={H4_DISPATCH_UPDATES} timed gain updates"));
-    }
-    let trials = observation_trials(updates)?;
+/// Runs the H4 probe: a repeat for `window_ms` (`H4_WINDOW_MS` on hardware, short in the fake rehearsal), the transmit headroom of each send and the CPU and thread load meanwhile.
+pub fn measure_h4_load(probe: Arc<ProbeDevice>, window_ms: i64) -> Result<MeasurementGroup, String> {
+    let trials = observation_trials(1)?;
     let device: Arc<dyn Device> = probe.clone();
     let cpu_before = proc_cpu_stat();
-    let timing = default_timing();
     let master = device.master_clock_rate();
-    let window_ns = u64::try_from(timing.release_window_ns).map_err(|_| "negative release window")?;
-    let window_ticks = ticks_for_ns(window_ns, master)?;
-    let step_ticks = ticks_for_ns(H4_PERIOD_NS, master)?;
-    let first_lead_ticks = ticks_for_ns(H4_FIRST_LEAD_NS, master)?;
     let mut group = MeasurementGroup::default();
     group.conditions.push(Condition {
-        id: "h4-rx-gain-with-tx-repeat".to_owned(),
+        id: "h4-rx-tx-repeat".to_owned(),
         streams: vec![stream_condition(Direction::Rx, 0, vec![0], H4_RATE_HZ as f64), stream_condition(Direction::Tx, 0, vec![0], H4_RATE_HZ as f64)],
         concurrent: vec![stream_ref(Direction::Rx, 0), stream_ref(Direction::Tx, 0)],
         reopened: false,
     });
-    let (mut run, _dir) = h4_candidate_session(device.clone(), timing)?;
-    common::past_t0(&mut run, common::ms(100));
-    for key in ["radio.rx.s0.sample_rate_hz", "radio.tx.s0.sample_rate_hz"] {
-        let value = ezsdr_kernel::spec::Value::num(H4_RATE_HZ as f64).ok_or("invalid H4 sample rate")?;
-        let entry = run.submit(common::set(key, value), None).map_err(|error| error.to_string())?;
-        if !common::admitted(&entry) {
-            return Err(format!("H4 stream rate was not admitted for `{key}`: {:?}", entry.outcome));
-        }
-        common::wait(&mut run, common::ms(20));
-    }
-    enable_tx(&mut run)?;
+    let (mut run, _dir) = candidate_session_asking(device.clone(), default_timing(), h4_initial)?;
+    await_tx(&mut run);
     let (waveform, _) = common::transmit_waveform(1_000);
     let start_anchor = probe.clock_anchor().ok().map(|(device_tick, host_before_ns, host_after_ns)| ClockAnchor { device_tick, host_before_ns, host_after_ns });
     start_repeat(&mut run, &waveform)?;
-    let first = probe.time_now().map_err(|error| error.message)?;
-    let first_e = first.checked_add(window_ticks).and_then(|tick| tick.checked_add(first_lead_ticks)).ok_or("H4 first target overflow")?;
-    let manual = device.host().is_manual();
-    let mut dispatch_rows = Vec::with_capacity(updates);
-    let mut thread_snapshot = None;
-    let mut stop_after: Option<String> = None;
-    for index in 0..updates {
-        let e = first_e.checked_add(i64::try_from(index).map_err(|_| "H4 update index overflow")?.checked_mul(step_ticks).ok_or("H4 update offset overflow")?).ok_or("H4 target overflow")?;
-        let gain = if index % 2 == 0 { 1.0 } else { 0.0 };
-        if let Some(reason) = &stop_after {
-            dispatch_rows.push(json!({ "index": index, "direction": "rx", "channel": 0, "setting": "gain_db", "e": e,
-                "requested_gain_db": gain, "status": "not_submitted", "reason": reason }));
-            continue;
-        }
-        let anchor_before = probe.clock_anchor().ok().map(|(device_tick, host_before_ns, host_after_ns)| ClockAnchor { device_tick, host_before_ns, host_after_ns });
-        let action = h4_gain_action(TimePoint::new(run.now().domain(), e), gain);
-        let entry = match run.submit(action, None) {
-            Ok(entry) => entry,
-            Err(error) => {
-                stop_after = Some(error.to_string());
-                dispatch_rows.push(json!({ "index": index, "direction": "rx", "channel": 0, "setting": "gain_db", "e": e,
-                    "requested_gain_db": gain, "status": "submit_error", "error": error.to_string(), "apply_called": false }));
-                continue;
-            }
-        };
-        if !common::admitted(&entry) {
-            stop_after = Some(format!("timed gain update was not admitted: {:?}", entry.outcome));
-            dispatch_rows.push(json!({ "index": index, "direction": "rx", "channel": 0, "setting": "gain_db", "e": e,
-                "requested_gain_db": gain, "status": "rejected", "apply_called": false, "outcome": format!("{:?}", entry.outcome) }));
-            continue;
-        }
-        if manual {
-            let root = run.now().domain();
-            advance_root(&mut run, root, e)?;
-        }
-        let apply = await_timed_apply(&probe, e, manual);
-        let after = probe.clock_anchor().ok().map(|(device_tick, host_before_ns, host_after_ns)| ClockAnchor { device_tick, host_before_ns, host_after_ns });
-        let session_action = match &entry.action {
-            ezsdr_kernel::session::SessionAction::Vocabulary { ns, verb, .. } => format!("{}.{}", ns.as_str(), verb.as_str()),
-            _ => "unexpected-session-action".to_owned(),
-        };
-        let mut row = json!({ "index": index, "direction": "rx", "channel": 0, "setting": "gain_db", "e": e,
-            "release_window_ns": window_ns, "requested_gain_db": gain, "accepted": true, "session_action": session_action,
-            "apply_called": apply.is_some(), "apply": apply.clone() });
-        row["clock_anchors"] = json!({ "before": clock_anchor_json(anchor_before), "after": clock_anchor_json(after) });
-        if thread_snapshot.is_none() && apply.is_some() {
-            thread_snapshot = Some(proc_thread_snapshot());
-        }
-        map_dispatch_row(&mut row, anchor_before, after, apply.as_ref(), e, window_ticks, master);
-        if apply.is_none() {
-            stop_after = Some("timed apply was not observed; later updates were not submitted".to_owned());
-        } else if apply.as_ref().is_some_and(|row| row["result"]["error"].is_string()) {
-            stop_after = Some("timed apply failed; later updates were not submitted".to_owned());
-        }
-        dispatch_rows.push(row);
-    }
-    let root = run.now().domain();
+    common::wait(&mut run, common::ms(window_ms));
     let manifest = run.finish();
-    let headroom_after = probe.clock_anchor().ok().map(|(device_tick, host_before_ns, host_after_ns)| ClockAnchor { device_tick, host_before_ns, host_after_ns });
+    let end_anchor = probe.clock_anchor().ok().map(|(device_tick, host_before_ns, host_after_ns)| ClockAnchor { device_tick, host_before_ns, host_after_ns });
     let probe_rows = probe.rows();
     let probe_rows_dropped = probe.dropped_rows();
     let tx_send_rows: Vec<Json> = probe_rows.iter().filter(|row| row["call"] == "tx_send").cloned().collect();
     let tx_rows: Vec<Json> = tx_send_rows.iter().filter(|row| row["tx_flush"] != true).cloned().collect();
-    let time_now_rows: Vec<Json> = probe_rows.iter().filter(|row| row["call"] == "time_now").cloned().collect();
     let tx_underflows: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == "radio.TX_UNDERFLOW").collect();
     let mut underflow_ticks = Vec::new();
     let mut underflow_unconvertible = Vec::new();
@@ -538,147 +311,28 @@ pub fn measure_h4_dispatch(probe: Arc<ProbeDevice>, updates: usize) -> Result<Me
             Err(error) => underflow_unconvertible.push(error),
         }
     }
-    let tx_clock = manifest.clocks.sample_clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/tx/s0"));
-    let tx_sample_clock_underflows =
-        tx_underflows.iter().filter(|event| manifest.clocks.sample_clocks.iter().any(|clock| clock.stream.to_string().ends_with("usrp/tx/s0") && clock.domain == event.time.domain())).count();
-    let mut tx_start_tick = tx_clock.and_then(|clock| (clock.root == root).then(|| clock.origin.ticks_in(root).ok()).flatten());
-    let tx_end_tick = tx_clock.and_then(|clock| (clock.root == root).then(|| clock.ended_at.and_then(|end| end.ticks_in(root).ok())).flatten());
-    let run_end_tick = manifest.termination.at.and_then(|end| end.ticks_in(root).ok());
-    let mut tx_end_ticks = underflow_ticks.clone();
-    tx_end_ticks.extend(tx_end_tick);
-    tx_end_ticks.extend(run_end_tick);
-    // The repeat's normal stop is an end-of-burst send with no samples (the device may count it as one): not a failed payload send.
-    let incomplete_tx_sends = tx_rows
-        .iter()
-        .filter(|row| !(row["eob"] == true && !row["result"]["error"].is_string() && row["sample_counts"].as_array().is_some_and(|counts| counts.iter().all(|count| count.as_u64() == Some(0)))))
-        .filter(|row| {
-            let accepted = row["result"]["accepted_samples"].as_u64();
-            let counts = row["sample_counts"].as_array();
-            row["result"]["error"].is_string()
-                || accepted.is_none_or(|accepted| accepted == 0 || counts.is_none_or(|counts| counts.is_empty() || counts.iter().any(|count| count.as_u64() != Some(accepted))))
-        })
-        .count();
-    let tx_start_send_ns = tx_rows
-        .iter()
-        .find(|row| {
-            row["sob"] == true
-                && row["result"]["accepted_samples"]
-                    .as_u64()
-                    .is_some_and(|accepted| accepted > 0 && row["sample_counts"].as_array().is_some_and(|counts| !counts.is_empty() && counts.iter().all(|count| count.as_u64() == Some(accepted))))
-        })
-        .and_then(|row| row["host_after_ns"].as_u64())
-        .and_then(|ns| i64::try_from(ns).ok());
-    let mut tx_interval_ambiguous = !underflow_unconvertible.is_empty() || tx_start_tick.is_none();
-    let mut tx_mapping_errors = Vec::new();
-    let tx_anchors = start_anchor.zip(headroom_after);
-    if let (Some((start, end)), Some(send_ns)) = (tx_anchors, tx_start_send_ns) {
-        if let Some(send_tick) = host_to_device_tick([start, end], send_ns as u64, master) {
-            tx_start_tick = tx_start_tick.map(|tick| tick.max(send_tick));
-        } else {
-            tx_interval_ambiguous = true;
-            tx_mapping_errors.push("the first complete TX send could not be mapped to root time".to_owned());
-        }
-    }
-    if let Some((start, end)) = tx_anchors {
-        for row in tx_rows.iter().filter(|row| {
-            row["result"]["error"].is_string()
-                || row["eob"] == true
-                || row["result"]["accepted_samples"]
-                    .as_u64()
-                    .is_none_or(|accepted| accepted == 0 || row["sample_counts"].as_array().is_none_or(|counts| counts.is_empty() || counts.iter().any(|count| count.as_u64() != Some(accepted))))
-        }) {
-            if let Some(ns) = row["host_after_ns"].as_u64() {
-                if let Some(tick) = host_to_device_tick([start, end], ns, master) {
-                    tx_end_ticks.push(tick);
-                } else {
-                    tx_interval_ambiguous = true;
-                    tx_mapping_errors.push("a TX send end could not be mapped to root time".to_owned());
-                }
-            }
-        }
-    } else {
-        tx_interval_ambiguous = true;
-        tx_mapping_errors.push("the enclosing host/device clock anchors were unavailable".to_owned());
-    }
-    let tx_end_tick = earliest_tx_end(tx_end_ticks);
-    if tx_start_tick.is_none() || tx_end_tick.is_none() {
-        tx_interval_ambiguous = true;
-    }
-    if !underflow_unconvertible.is_empty() || !tx_mapping_errors.is_empty() {
-        tx_interval_ambiguous = true;
-    }
-    let headroom_rows = match (start_anchor, headroom_after) {
+    let headroom_rows = match (start_anchor, end_anchor) {
         (Some(start), Some(end)) if underflow_unconvertible.is_empty() => tx_headroom(&tx_rows, [start, end], master, H4_RATE_HZ, &underflow_ticks),
         _ => Vec::new(),
     };
-    let Classified { successful_delays, concurrent_dispatch_count, after_tx_end_count, overlap_ambiguous_count, before_tx_count, successful_apply_count } =
-        classify_dispatch_rows(&mut dispatch_rows, tx_anchors, tx_interval_ambiguous, tx_start_tick, tx_end_tick, master);
-    let delay_lower: Vec<i64> = successful_delays.iter().map(|(lower, _)| *lower).collect();
-    let delay_upper: Vec<i64> = successful_delays.iter().map(|(_, upper)| *upper).collect();
     let headroom_lower: Vec<i64> = headroom_rows.iter().filter_map(|row| row["headroom_ns"]["lower"].as_i64()).collect();
     let headroom_upper: Vec<i64> = headroom_rows.iter().filter_map(|row| row["headroom_ns"]["upper"].as_i64()).collect();
-    let cpu_after = proc_cpu_stat();
-    let accepted_count = dispatch_rows.iter().filter(|row| row["accepted"] == true).count();
-    let rejected_count = dispatch_rows.iter().filter(|row| row["status"] == "rejected").count();
-    let submit_error_count = dispatch_rows.iter().filter(|row| row["status"] == "submit_error").count();
-    let apply_called_count = dispatch_rows.iter().filter(|row| row["apply_called"] == true).count();
-    let apply_not_called_count = dispatch_rows.iter().filter(|row| row["accepted"] == true && row["apply_called"] == false).count();
-    let not_submitted_count = dispatch_rows.iter().filter(|row| row["status"] == "not_submitted").count();
-    let apply_error_count = dispatch_rows.iter().filter(|row| row["apply"]["result"]["error"].is_string()).count();
-    let tx_send_count = tx_send_rows.len();
-    let tx_end_reason = if !underflow_unconvertible.is_empty() {
-        "unconvertible_tx_underflow"
-    } else if !underflow_ticks.is_empty() {
-        "tx_underflow"
-    } else if incomplete_tx_sends > 0 {
-        "incomplete_tx_send"
-    } else {
-        "run_termination"
-    };
-    let partial = stop_after.is_some()
-        || tx_end_tick.is_none()
-        || tx_start_tick.is_none()
-        || tx_interval_ambiguous
-        || incomplete_tx_sends > 0
-        || !underflow_ticks.is_empty()
-        || probe_rows_dropped > 0
-        || concurrent_dispatch_count != successful_apply_count;
-    let mut result = json!({
+    let partial = start_anchor.is_none() || end_anchor.is_none() || headroom_rows.is_empty() || !underflow_ticks.is_empty() || !underflow_unconvertible.is_empty() || probe_rows_dropped > 0;
+    let result = json!({
         "status": if partial { "partial" } else { "complete" },
-        "timed_updates": dispatch_rows, "requested_update_count": updates,
-        "master_clock_hz": master, "sample_rate_hz": H4_RATE_HZ,
-        "release_window_ns": window_ns, "release_window_ticks": window_ticks,
-        "accepted_count": accepted_count, "rejected_count": rejected_count,
-        "submit_error_count": submit_error_count, "apply_called_count": apply_called_count,
-        "apply_not_called_count": apply_not_called_count, "apply_error_count": apply_error_count,
-        "not_submitted_count": not_submitted_count, "stop_reason": stop_after,
-        "dispatch_delay_lower_ns": distribution(&delay_lower), "dispatch_delay_upper_ns": distribution(&delay_upper),
-    });
-    let mut tx_result = json!({
-        "concurrent_dispatch_update_count": concurrent_dispatch_count,
-        "dispatch_updates_after_tx_end_count": after_tx_end_count,
-        "dispatch_updates_before_tx_start_count": before_tx_count,
-        "dispatch_updates_overlap_ambiguous_count": overlap_ambiguous_count,
-        "dispatch_delay_proxy": "uhd-control timed-apply entry minus the host-mapped release-window instant; not scheduler wake-up latency",
-        "tx_send_count": tx_send_count, "tx_payload_send_count": tx_rows.len(),
-        "tx_flush_send_count": tx_send_rows.iter().filter(|row| row["tx_flush"] == true).count(),
-        "tx_send_records": tx_send_rows, "tx_headroom": headroom_rows,
+        "master_clock_hz": master, "sample_rate_hz": H4_RATE_HZ, "window_ms": window_ms,
+        "tx_send_count": tx_send_rows.len(), "tx_payload_send_count": tx_rows.len(),
+        "tx_headroom": headroom_rows,
         "probe_rows_retained_count": probe_rows.len(), "probe_rows_dropped_count": probe_rows_dropped,
-        "time_now_records": time_now_rows,
         "tx_headroom_lower_ns": distribution(&headroom_lower), "tx_headroom_upper_ns": distribution(&headroom_upper),
         "tx_headroom_proxy": "nominal next-sample submission margin; not RF execution time",
         "tx_underflow_events": tx_underflows.len(), "tx_underflow_converted_events": underflow_ticks.len(),
-        "tx_underflow_sample_clock_events": tx_sample_clock_underflows,
         "tx_underflow_unconvertible_events": underflow_unconvertible.len(), "tx_underflow_unconvertible_reasons": underflow_unconvertible,
-        "tx_active_root_start_tick": tx_start_tick, "tx_end_root_tick": tx_end_tick,
-        "tx_end_reason": tx_end_reason, "tx_end_mapping_errors": tx_mapping_errors,
-        "thread_policy_affinity": thread_snapshot.unwrap_or_else(proc_thread_snapshot),
-        "cpu_stat_during_probe": cpu_delta(cpu_before, cpu_after),
+        "thread_policy_affinity": proc_thread_snapshot(),
+        "cpu_stat_during_probe": cpu_delta(cpu_before, proc_cpu_stat()),
         "clock_note": "host/device affine mapping is INFERRED; anchors must agree with the master clock within 1,000 ppm plus measured bracket uncertainty; bracket widths are not a long-horizon error bound",
     });
-    result.as_object_mut().unwrap().append(tx_result.as_object_mut().unwrap());
-    let observations = vec![observation("hw_h4_dispatch", "tests/hardware.rs::hw_h4_dispatch", Some("h4-rx-gain-with-tx-repeat".to_owned()), trials, result)?];
-    group.observations = observations;
+    group.observations = vec![observation("hw_h4_load", "tests/hardware.rs::hw_h4_load", Some("h4-rx-tx-repeat".to_owned()), trials, result)?];
     Ok(group)
 }
 
@@ -691,84 +345,10 @@ mod tests {
     }
 
     #[test]
-    fn h4_tx_overlap_classifies_an_apply_against_the_tx_interval() {
-        let at = |apply| tx_overlap(false, true, Some(apply), Some(100), Some(200));
-        assert_eq!(at(99), "before_tx");
-        assert_eq!(at(100), "concurrent", "the start is inside");
-        assert_eq!(at(199), "concurrent");
-        assert_eq!(at(200), "after_tx_end", "the end is outside");
-        assert_eq!(at(201), "after_tx_end");
-        assert_eq!(tx_overlap(true, true, Some(150), Some(100), Some(200)), "ambiguous");
-        assert_eq!(tx_overlap(false, false, Some(150), Some(100), Some(200)), "ambiguous");
-        assert_eq!(tx_overlap(false, true, None, Some(100), Some(200)), "ambiguous");
-    }
-
-    #[test]
-    fn h4_the_measurement_finds_the_apply_recorded_at_its_instant() {
-        // A timed apply recorded by a direct call at a far-future instant: the lookup the measurement waits on has no scheduling in it.
-        use ezsdr_radio_uhd::Device;
-        let probe = ProbeDevice::new(common::fake(common::one_obx()));
-        let e = 1_000_000_000_000;
-        let _ = probe.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { gain: Some(1.0), ..ezsdr_radio_uhd::Settings::default() }, Some(e));
-        for manual in [true, false] {
-            let row = await_timed_apply(&probe, e, manual).expect("the apply recorded at e is found");
-            assert_eq!(row["e"], e);
-            assert_eq!(row["gain_only"], true);
-        }
-        assert!(await_timed_apply(&probe, e + 1, true).is_none(), "an apply at another instant is not the update's");
-    }
-
-    #[test]
-    fn h4_the_gain_update_is_booked_at_its_instant() {
-        let point = TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 5);
-        let ezsdr_kernel::session::SessionAction::Vocabulary { at, .. } = h4_gain_action(point, 1.0) else { panic!("a vocabulary action") };
-        assert_eq!(at, Some(point));
-    }
-
-    #[test]
-    fn h4_a_successful_dispatch_maps_into_its_row_and_a_missing_anchor_does_not() {
-        let [before, after] = anchors();
-        let apply = json!({ "host_entry_ns": 700 });
-        let mut row = json!({});
-        map_dispatch_row(&mut row, Some(before), Some(after), Some(&apply), 100, 0, 200_000_000);
-        assert_eq!(row["clock_mapping"]["status"], "mapped", "{row}");
-        let (lower, upper, _) = dispatch_delay(700, 100, 0, [before, after], 200_000_000).unwrap();
-        assert_eq!(row["dispatch_delay_ns"], json!({ "lower": lower, "upper": upper }));
-        for (b, a, apply) in [(None, Some(after), Some(&apply)), (Some(before), None, Some(&apply)), (Some(before), Some(after), None)] {
-            let mut row = json!({});
-            map_dispatch_row(&mut row, b, a, apply, 100, 0, 200_000_000);
-            assert_eq!(row["clock_mapping"]["status"], "unavailable", "{row}");
-            assert!(!row["dispatch_delay_ns"].is_object());
-        }
-    }
-
-    #[test]
-    fn h4_an_underflow_ends_tx_and_later_applied_gain_updates_are_excluded_from_the_distribution() {
-        // Anchors map host ns to device ticks as tick = (ns - 100) / 5. The TX underflow is at tick 40 and the Run ends at 400: the interval ends at the earlier.
-        let [before, after] = anchors();
-        let end = earliest_tx_end(vec![40, 400]).unwrap();
-        assert_eq!(end, 40);
-        let applied = |host_ns: u64| json!({ "apply_called": true, "apply": { "host_entry_ns": host_ns, "result": { "applied": true } }, "dispatch_delay_ns": { "lower": 1, "upper": 2 } });
-        // Applies at ticks 20 (during TX), 60 and 80 (after the underflow, gain still applied), and one that failed.
-        let mut rows = vec![applied(200), applied(400), applied(500), json!({ "apply_called": true, "apply": { "host_entry_ns": 300, "result": { "error": "failed" } } })];
-        let counts = classify_dispatch_rows(&mut rows, Some((before, after)), false, Some(10), Some(end), 200_000_000);
-        assert_eq!((counts.concurrent_dispatch_count, counts.after_tx_end_count, counts.before_tx_count, counts.overlap_ambiguous_count), (1, 2, 0, 0), "{rows:?}");
-        assert_eq!(counts.successful_apply_count, 3, "a failed apply is not a successful one");
-        assert_eq!(counts.successful_delays, [(1, 2)], "only the update during TX enters the distribution");
-        assert_eq!(rows.iter().map(|row| row["tx_overlap"].as_str()).collect::<Vec<_>>(), [Some("concurrent"), Some("after_tx_end"), Some("after_tx_end"), None]);
-        // Without the bracketing anchors nothing is placed.
-        let mut rows = vec![applied(200)];
-        let counts = classify_dispatch_rows(&mut rows, None, false, Some(10), Some(end), 200_000_000);
-        assert_eq!((counts.concurrent_dispatch_count, counts.overlap_ambiguous_count), (0, 1));
-    }
-
-    #[test]
-    fn h4_dispatch_maps_signed_intervals_and_refuses_bad_anchors() {
-        let (lower, upper, mapped) = dispatch_delay(490, 100, 0, anchors(), 200_000_000).unwrap();
-        assert!(lower < 0 && upper < 0, "negative dispatch delay is retained: {lower}..{upper}");
-        assert!(lower <= upper, "delay interval endpoints stay ordered: {lower}..{upper}");
+    fn h4_mapping_gives_an_ordered_interval_and_refuses_bad_anchors() {
+        let mapped = map_device_tick(anchors(), 100, 200_000_000).unwrap();
+        assert!(mapped.lower_ns <= mapped.midpoint_ns && mapped.midpoint_ns <= mapped.upper_ns, "{mapped:?}");
         assert!(mapped.bracket_width_ns > 0);
-        assert!(dispatch_delay(700, 100, 0, anchors(), 200_000_000).unwrap().0 > 0);
         assert!(map_device_tick([anchors()[1], anchors()[0]], 100, 200_000_000).is_err());
         assert!(map_device_tick(anchors(), 201, 200_000_000).is_err());
         let stalled = [anchors()[0], ClockAnchor { device_tick: 0, host_before_ns: 1_090, host_after_ns: 1_110 }];

@@ -11,17 +11,15 @@ use ezsdr_kernel::binding::{AdmissionCheckRegistry, Binding, Violation};
 use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventSource, Target};
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
-use ezsdr_kernel::module_api::{
-    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleErrorKind, ModuleRef, Pacing, PrepareContext, ProfileRef, Provider, Requested, Role, UpdateClass, Version,
-};
+use ezsdr_kernel::module_api::{ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleErrorKind, ModuleRef, Pacing, PrepareContext, ProfileRef, Provider, Requested, Role, Version};
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
-use ezsdr_kernel::time::{AbsoluteDeadline, ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget, TimePoint};
+use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget, TimePoint};
 use ezsdr_mock_radio::MockRadio;
-use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Lines, NO_RELEASE, Segment, Stream, StreamKey};
-use generator::{Change, Class, Entry, Event, Fault, Op, Sequence, Terms};
+use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Lines, Segment, Stream, StreamKey};
+use generator::{Class, Entry, Event, Fault, Op, Sequence, Terms};
 
 #[path = "../../ezsdr-radio/tests/generator/mod.rs"]
 mod generator;
@@ -40,21 +38,10 @@ fn divergent(profile: &str, class: Class) -> &'static [&'static str] {
     DIVERGENT.iter().find(|(p, c, _)| *p == profile && *c == class).map_or(&[], |(_, _, fields)| fields)
 }
 
-/// Fields printed as well for a sequence holding a 3 MS/s transmit change.
-const FRACTIONAL_TX: &[&str] = &[];
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum LayoutChange {
-    Rate { stream: u32, rate: u64 },
-    Membership { channel: u32, stream: i64 },
-}
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum LayoutOp {
     Stop { device: bool, stream: Option<u32> },
     StartRx { stream: u32 },
-    Cold { direction: Direction, change: LayoutChange, at_ns: Option<i64> },
-    Timed { direction: Direction, channel: u32, gain_db: f64, at_ns: Option<i64> },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -70,47 +57,12 @@ impl LayoutSequence {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct TransitionCounts {
-    leave: usize,
-    return_to_occupied: usize,
-    move_between_streams: usize,
-    join_empty_stream: usize,
-}
-
 fn direction_index(direction: Direction) -> usize {
     usize::from(direction == Direction::Tx)
 }
 
-fn add_membership(round: &mut Vec<LayoutOp>, state: &mut [[Option<u32>; 2]; 2], counts: &mut TransitionCounts, direction: Direction, channel: u32, target: i64, at_ns: Option<i64>) {
-    let direction_index = direction_index(direction);
-    let channel_index = channel as usize;
-    let before = state[direction_index][channel_index];
-    let after = u32::try_from(target).ok();
-    if before == after {
-        return;
-    }
-    match (before, after) {
-        (Some(_), None) => counts.leave += 1,
-        (Some(_), Some(_)) => counts.move_between_streams += 1,
-        (None, Some(stream)) => {
-            if state[direction_index].iter().enumerate().any(|(index, held)| index != channel_index && *held == Some(stream)) {
-                counts.return_to_occupied += 1;
-            } else {
-                counts.join_empty_stream += 1;
-            }
-        }
-        (None, None) => unreachable!(),
-    }
-    state[direction_index][channel_index] = after;
-    round.push(LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream: target }, at_ns });
-}
-
-/// Expands the old 0/1/2 channel-count input into the equivalent c<n>.stream changes,
-/// then guarantees one generated example of each membership transition in every seed.
-fn layout_sequence(seed: u64, sequence: &Sequence) -> (LayoutSequence, TransitionCounts) {
-    let mut state = [[Some(0), None], [Some(0), None]];
-    let mut counts = TransitionCounts::default();
+/// Expands the generator's `Stop` and `start_rx` over both receive streams of the layout.
+fn layout_sequence(sequence: &Sequence) -> LayoutSequence {
     let mut rounds = Vec::new();
     for (at, ops) in &sequence.rounds {
         let mut layout_ops = Vec::new();
@@ -127,51 +79,13 @@ fn layout_sequence(seed: u64, sequence: &Sequence) -> (LayoutSequence, Transitio
                         layout_ops.push(LayoutOp::StartRx { stream });
                     }
                 }
-                Op::Cold { direction, change: Change::Channels(channels), at_ns } => {
-                    for channel in 0..2 {
-                        add_membership(&mut layout_ops, &mut state, &mut counts, direction, channel, if channel < u32::from(channels) { 0 } else { -1 }, at_ns);
-                    }
-                }
-                Op::Cold { direction, change: Change::Rate(rate), at_ns } => {
-                    for stream in 0..2 {
-                        layout_ops.push(LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, at_ns });
-                    }
-                }
-                Op::Timed { direction, gain_db, at_ns } => {
-                    layout_ops.push(LayoutOp::Timed { direction, channel: 0, gain_db, at_ns });
-                }
             }
         }
         rounds.push((*at, layout_ops));
     }
-
-    let latest = sequence
-        .ops()
-        .map(|(round, op)| {
-            let at = match op {
-                Op::Cold { at_ns, .. } | Op::Timed { at_ns, .. } => at_ns.unwrap_or(0),
-                _ => 0,
-            };
-            round.max(at)
-        })
-        .max()
-        .unwrap_or(0)
-        .max(0);
-    let tail = latest + 10 * MS;
-    let direction = if seed % 2 == 0 { Direction::Rx } else { Direction::Tx };
-    for (offset, channel, stream) in [(0, 0, 0), (1, 1, 1), (10, 0, -1), (20, 0, 1), (30, 1, 0), (40, 0, 0), (50, 1, -1), (60, 1, 1)] {
-        let mut ops = Vec::new();
-        add_membership(&mut ops, &mut state, &mut counts, direction, channel, stream, None);
-        rounds.push((tail + offset * MS, ops));
-    }
-    (LayoutSequence { class: sequence.class, rounds, faults: sequence.faults.clone() }, counts)
+    LayoutSequence { class: sequence.class, rounds, faults: sequence.faults.clone() }
 }
 
-fn fractional_tx(sequence: &LayoutSequence) -> bool {
-    sequence.ops().any(|(_, op)| matches!(op, LayoutOp::Cold { direction: Direction::Tx, change: LayoutChange::Rate { rate: 3_000_000, .. }, .. }))
-}
-
-/// RM-25's layout floor is instance-wide, unlike the old generator's per-direction floor.
 fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
     let terms = terms(profile, Direction::Rx, Channels::first(0));
     let mut entries: Vec<_> = sequence
@@ -183,31 +97,17 @@ fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
             Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
         })
         .collect();
-    let mut floor = i64::MIN;
-    let mut timed: Vec<i64> = Vec::new();
-    for (index, (round, op)) in sequence.ops().enumerate() {
+    // A `Stop` and a `start_rx` take effect at their receipt.
+    for (index, (round, _)) in sequence.ops().enumerate() {
         let receipt = terms.t0 + terms.ticks(round);
-        let at = |at_ns: &Option<i64>| at_ns.map(|ns| terms.t0 + terms.ticks(ns));
-        let e = match op {
-            LayoutOp::Stop { .. } | LayoutOp::StartRx { .. } => receipt,
-            LayoutOp::Cold { at_ns, .. } => {
-                floor = at(at_ns).unwrap_or(receipt).max(receipt).max(floor);
-                floor
-            }
-            LayoutOp::Timed { at_ns, .. } => {
-                let (e, _) = ezsdr_radio::timeline::timed_instant(at(at_ns), receipt, terms.timed_lead, terms.release_window, timed.iter().copied());
-                timed.push(e);
-                e
-            }
-        };
-        entries.push(Entry { e, seq: (sequence.faults.len() + index) as u64, receipt, event: Event::Op(index) });
+        entries.push(Entry { e: receipt, seq: (sequence.faults.len() + index) as u64, receipt, event: Event::Op(index) });
     }
     entries.sort_by_key(|entry| (entry.e, entry.seq));
     entries
 }
 
 /// What layer 1 observes: per-stream SampleClocks, blocks with stream/clock/channel count,
-/// applied `cold` and `hardware_timed` rows, refused Actions, fault rows, and non-loss errors.
+/// refused Actions, fault rows, and non-loss errors.
 type BlockRecord = (u32, usize, i64, u32, u16, BlockFlags, Option<u64>);
 
 #[derive(PartialEq, Debug, Default)]
@@ -215,8 +115,6 @@ struct Record {
     rx_clocks: Vec<(u32, i64, Option<i64>)>,
     tx_clocks: Vec<(u32, i64, Option<i64>)>,
     blocks: Vec<BlockRecord>,
-    cold: Vec<(String, f64, i64)>,
-    timed: Vec<(String, f64, i64)>,
     rejected: usize,
     faults: Vec<(String, bool, u64)>,
     error: Option<String>,
@@ -240,8 +138,6 @@ impl Record {
         from("rx_clocks", &self.rx_clocks, &observed.rx_clocks);
         from("tx_clocks", &self.tx_clocks, &observed.tx_clocks);
         from("blocks", &self.blocks, &observed.blocks);
-        from("cold", &self.cold, &observed.cold);
-        from("timed", &self.timed, &observed.timed);
         from("faults", &self.faults, &observed.faults);
         eprintln!("rejected {} {}, error {:?} {:?}", self.rejected, observed.rejected, self.error, observed.error);
     }
@@ -251,8 +147,6 @@ impl Record {
             ("rx_clocks", self.rx_clocks == other.rx_clocks),
             ("tx_clocks", self.tx_clocks == other.tx_clocks),
             ("blocks", self.blocks == other.blocks),
-            ("cold", self.cold == other.cold),
-            ("timed", self.timed == other.timed),
             ("rejected", self.rejected == other.rejected),
             ("faults", self.faults == other.faults),
             ("error", self.error == other.error),
@@ -265,19 +159,13 @@ impl Record {
 }
 
 /// A profile's timeline terms; `x3xx` with VH-4's ready term (one receive call of
-/// 2 000 samples, 3 ms) and the timed lead of MR-3.
+/// 2 000 samples, 3 ms).
 fn terms(profile: &str, direction: Direction, channels: Channels) -> Terms {
-    let (lead, call, allowance, timed_lead, release_window) = if profile == "ideal" { (0, 0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 2 * MS, 3 * MS) };
+    let (lead, call, allowance, release_window) = if profile == "ideal" { (0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 3 * MS) };
     // The transmit clock starts at `arm`, at 0 (RM-25); the receive clock at T0.
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels, ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
-    Terms {
-        t0: T0,
-        root_hz: 1_000_000_000,
-        timed_lead,
-        release_window,
-        stream: Stream { direction, origin, config, lead, call, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance },
-    }
+    Terms { t0: T0, root_hz: 1_000_000_000, stream: Stream { direction, origin, config, lead, call, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance } }
 }
 
 fn line_key(direction: Direction, stream: u32) -> StreamKey {
@@ -306,16 +194,9 @@ fn rm_26_the_timeline_against_mockradio() {
     let shown: Option<u64> = std::env::var("EZSDR_TIMELINE_SEED").ok().and_then(|seed| seed.parse().ok());
     let mut summary: BTreeMap<(&str, Class), (usize, Divergences)> = BTreeMap::new();
     let mut failed = Vec::new();
-    let mut transitions = TransitionCounts::default();
     for seed in 0..1_000 {
-        // 3 MS/s, 1 000/3 ticks a sample, is an `ideal` rate only.
-        let (profile, rates) = if seed % 2 == 0 { ("ideal", &generator::FRACTIONAL_RATES[..]) } else { ("x3xx", &generator::RATES[..]) };
-        let generated = generator::sequence(seed, rates);
-        let (sequence, seen) = layout_sequence(seed, &generated);
-        transitions.leave += seen.leave;
-        transitions.return_to_occupied += seen.return_to_occupied;
-        transitions.move_between_streams += seen.move_between_streams;
-        transitions.join_empty_stream += seen.join_empty_stream;
+        let profile = if seed % 2 == 0 { "ideal" } else { "x3xx" };
+        let sequence = layout_sequence(&generator::sequence(seed));
         let expected = expect(profile, &sequence);
         let observed = run(profile, &sequence);
         let diverged = observed.diverged(&expected);
@@ -323,7 +204,7 @@ fn rm_26_the_timeline_against_mockradio() {
             eprintln!("seed {seed}, {profile}: {sequence:?}");
             expected.show(&observed);
         }
-        let printed = |field: &&str| divergent(profile, sequence.class).contains(field) || (fractional_tx(&sequence) && FRACTIONAL_TX.contains(field));
+        let printed = |field: &&str| divergent(profile, sequence.class).contains(field);
         let gated: Vec<_> = diverged.iter().filter(|field| !printed(field)).collect();
         if !gated.is_empty() {
             failed.push(format!("seed {seed}, {profile}, {:?}: {gated:?}", sequence.class));
@@ -340,20 +221,12 @@ fn rm_26_the_timeline_against_mockradio() {
         let equal: Vec<_> = divergent(profile, *class).iter().filter(|field| !fields.contains_key(*field)).collect();
         eprintln!("layer 1, {profile}, {class:?}: {count} sequences; printed {fields:?}; listed but equal {equal:?}");
     }
-    eprintln!(
-        "layout membership transitions in 1,000 seeds: leave={}, return={}, move={}, empty-stream join={}",
-        transitions.leave, transitions.return_to_occupied, transitions.move_between_streams, transitions.join_empty_stream
-    );
-    assert!(
-        transitions.leave > 0 && transitions.return_to_occupied > 0 && transitions.move_between_streams > 0 && transitions.join_empty_stream > 0,
-        "each layout membership transition must be generated: {transitions:?}"
-    );
     assert!(failed.is_empty(), "{} sequences differ (EZSDR_TIMELINE_SEED=<seed> shows one), the first: {:#?}", failed.len(), &failed[..failed.len().min(20)]);
 }
 
 fn book(lines: &mut Lines, stream: StreamKey, entry: &Entry, kind: Kind) {
     lines
-        .book(stream, Item { e: entry.e, seq: entry.seq, ready: entry.receipt, release: NO_RELEASE, delivered: None, refused: false, kind })
+        .book(stream, Item { e: entry.e, seq: entry.seq, ready: entry.receipt, delivered: None, refused: false, kind })
         .unwrap_or_else(|error| panic!("timeline refused {stream:?} at {}: {error:?}", entry.e));
 }
 
@@ -371,7 +244,7 @@ fn active_rx(lines: &Lines, entry: &Entry) -> Vec<(u32, Option<u64>)> {
         .collect()
 }
 
-fn book_operation(profile: &str, lines: &mut Lines, entry: &Entry, op: LayoutOp) {
+fn book_operation(lines: &mut Lines, entry: &Entry, op: LayoutOp) {
     match op {
         LayoutOp::Stop { device: true, .. } => {
             for direction in [Direction::Rx, Direction::Tx] {
@@ -383,44 +256,12 @@ fn book_operation(profile: &str, lines: &mut Lines, entry: &Entry, op: LayoutOp)
         LayoutOp::Stop { device: false, stream: Some(stream) } => book(lines, line_key(Direction::Rx, stream), entry, Kind::Stop),
         LayoutOp::Stop { device: false, stream: None } => unreachable!(),
         LayoutOp::StartRx { stream } => book(lines, line_key(Direction::Rx, stream), entry, Kind::Start),
-        LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, .. } => {
-            let key = line_key(direction, stream);
-            let mut config = lines.config_at(key, entry.e);
-            config.ratio = terms(profile, direction, config.channels).ratio(rate);
-            book(lines, key, entry, Kind::Cold(config));
-        }
-        LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream }, .. } => {
-            let from = (0..2).find(|index| lines.config_at(line_key(direction, *index), entry.e).channels.contains(channel));
-            match (from, u32::try_from(stream).ok()) {
-                (Some(from), Some(to)) if from != to => {
-                    let result = lines
-                        .book_move(line_key(direction, from), line_key(direction, to), channel, Some(entry.e), entry.receipt, entry.seq, entry.receipt)
-                        .unwrap_or_else(|error| panic!("timeline refused move c{channel} s{from}->s{to} at {}: {error:?}", entry.e));
-                    assert_eq!(result.0, entry.e, "layout move instant");
-                }
-                (Some(from), None) => {
-                    let key = line_key(direction, from);
-                    let mut config = lines.config_at(key, entry.e);
-                    config.channels = config.channels.without(channel);
-                    book(lines, key, entry, Kind::Cold(config));
-                }
-                (None, Some(to)) => {
-                    let key = line_key(direction, to);
-                    let mut config = lines.config_at(key, entry.e);
-                    config.channels = config.channels.with(channel);
-                    book(lines, key, entry, Kind::Cold(config));
-                }
-                _ => unreachable!("layout generator emits only membership changes"),
-            }
-        }
-        LayoutOp::Timed { .. } => {}
     }
 }
 
 /// The timeline's account of each layout stream, with applied rows, refusals, blocks and faults.
 fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
     let schedule = layout_schedule(profile, sequence);
-    let ops: Vec<_> = sequence.ops().map(|(_, op)| *op).collect();
     let mut lines = initial_lines(profile);
     let mut record = Record::default();
     let mut fault_rows = Vec::new();
@@ -428,13 +269,13 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
 
     // Actions received before a loss have already booked their lines, even when their later
     // effective instant is cancelled by that loss. Actions received at or after it do not.
-    let op_entries: Vec<_> = (0..ops.len()).map(|index| schedule.iter().find(|entry| entry.event == Event::Op(index)).copied().unwrap()).collect();
+    let op_entries: Vec<_> = (0..sequence.ops().count()).map(|index| schedule.iter().find(|entry| entry.event == Event::Op(index)).copied().unwrap()).collect();
     for (index, (_, op)) in sequence.ops().enumerate() {
         let entry = op_entries[index];
         if loss_at.is_some_and(|loss| entry.receipt >= loss) {
             continue;
         }
-        book_operation(profile, &mut lines, &entry, *op);
+        book_operation(&mut lines, &entry, *op);
     }
 
     let mut lost_device = false;
@@ -460,21 +301,10 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
                     fault_rows.push((entry.e, entry.seq, kind, selected.is_some(), selected, active));
                 }
             }
-            Event::Op(index) => {
-                let op = ops[index];
+            Event::Op(_) => {
                 if loss_at.is_some_and(|loss| entry.e >= loss) {
                     record.rejected += 1;
                     continue;
-                }
-                match op {
-                    LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, .. } => {
-                        record.cold.push((format!("radio.{}.s{stream}.sample_rate_hz", side(direction)), rate as f64, entry.e))
-                    }
-                    LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream }, .. } => {
-                        record.cold.push((format!("radio.{}.c{channel}.stream", side(direction)), stream as f64, entry.e))
-                    }
-                    LayoutOp::Timed { direction, channel, gain_db, .. } => record.timed.push((format!("radio.{}.c{channel}.gain_db", side(direction)), gain_db, entry.e)),
-                    LayoutOp::Stop { .. } | LayoutOp::StartRx { .. } => {}
                 }
             }
         }
@@ -559,10 +389,6 @@ fn receive(stream: u32, clock: usize, segment: &Segment, faults: &[(i64, u64, Op
 /// Each stream's SampleClocks as `(stream, origin, ended)`.
 fn clocks(stream: u32, segments: &[Segment]) -> Vec<(u32, i64, Option<i64>)> {
     segments.iter().map(|s| (stream, s.origin, s.cut.map(|k| s.instant(k).unwrap()))).collect()
-}
-
-fn side(direction: Direction) -> &'static str {
-    if direction == Direction::Rx { "rx" } else { "tx" }
 }
 
 fn name(fault: Fault) -> &'static str {
@@ -698,7 +524,6 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
             _ => {}
         }
     };
-    let at = |ns: Option<i64>| ns.map(|ns| AbsoluteDeadline::new(TimePoint::new(ROOT, T0 + ns)));
     for (round, ops) in &sequence.rounds {
         for op in ops {
             let mut queue = actions.0.lock().unwrap();
@@ -707,27 +532,6 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
                 LayoutOp::Stop { device: false, stream: Some(stream) } => Action::Stop { target: Some(tgt(&format!("mock/rx/s{stream}"))) },
                 LayoutOp::Stop { device: false, stream: None } => unreachable!(),
                 LayoutOp::StartRx { stream } => Action::Command { target: tgt(&format!("mock/rx/s{stream}")), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
-                LayoutOp::Cold { direction, change: LayoutChange::Rate { stream, rate }, at_ns } => Action::UpdateParameter {
-                    target: tgt("mock"),
-                    key: key(&format!("radio.{}.s{stream}.sample_rate_hz", side(direction))),
-                    value: Value::num(rate as f64).unwrap(),
-                    class: UpdateClass::Cold,
-                    at: at(at_ns),
-                },
-                LayoutOp::Cold { direction, change: LayoutChange::Membership { channel, stream }, at_ns } => Action::UpdateParameter {
-                    target: tgt("mock"),
-                    key: key(&format!("radio.{}.c{channel}.stream", side(direction))),
-                    value: Value::from(stream),
-                    class: UpdateClass::Cold,
-                    at: at(at_ns),
-                },
-                LayoutOp::Timed { direction, channel, gain_db, at_ns } => Action::UpdateParameter {
-                    target: tgt("mock"),
-                    key: key(&format!("radio.{}.c{channel}.gain_db", side(direction))),
-                    value: Value::num(gain_db).unwrap(),
-                    class: UpdateClass::HardwareTimed,
-                    at: at(at_ns),
-                },
             });
         }
         step(&mut mock, T0 + round);
@@ -736,7 +540,6 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
     let records = clocks.sample_clock_records();
     let section = |name: &str| mock.instance().sections[&Namespace::parse(&format!("ezsdr.radio.mock.{name}")).unwrap()].clone();
     let rows = |name: &str| section(name).as_array().unwrap().clone();
-    let applied: Vec<_> = rows("applied").iter().map(|r| (r["key"].as_str().unwrap().to_owned(), r["value"].as_f64().unwrap(), r["at"]["ticks"].as_i64().unwrap())).collect();
     let clocks_of = |direction: &str, stream: u32| -> Vec<(u32, i64, Option<i64>)> {
         let name = format!("mock/{direction}/s{stream}");
         records.iter().filter(|r| r.stream == rid(&name)).map(|r| (stream, r.origin.ticks_in(ROOT).unwrap(), r.ended_at.map(|t| t.ticks_in(ROOT).unwrap()))).collect()
@@ -758,8 +561,6 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
         rx_clocks,
         tx_clocks,
         blocks,
-        cold: applied.iter().filter(|r| !r.0.ends_with("gain_db")).cloned().collect(),
-        timed: applied.into_iter().filter(|r| r.0.ends_with("gain_db")).collect(),
         rejected: rows("rejected").len(),
         faults: rows("faults").iter().map(|r| (r["fault"].as_str().unwrap().to_owned(), r["applied"].as_bool().unwrap(), r["lost"].as_u64().unwrap())).collect(),
         error,

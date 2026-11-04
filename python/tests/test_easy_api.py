@@ -119,7 +119,7 @@ class EasyApi(unittest.TestCase):
         with self.connect(tx={0: [0]}) as sdr:
             sdr.tx.repeat(ramp())
             with self.assertRaises(ezsdr.Rejected):
-                sdr.rx.sample_rate = 1e12
+                sdr.set("radio", "radio.rx.s0.sample_rate_hz", 1e12)
             sdr.rx.capture(100)
         self.assertIsNotNone(sdr.manifest["hash"], "the Manifest is sealed")
         self.assertEqual(Path(sdr.manifest_path), Path(sdr.dir) / "manifest.json")
@@ -128,49 +128,55 @@ class EasyApi(unittest.TestCase):
         self.assertEqual(outcomes, ["admitted", "rejected", "admitted"], "the rejected call is logged too")
 
     def test_v58_16_a_rejected_call_raises_and_is_logged(self) -> None:
+        # A radio value has no update class: the Kernel rejects a change during the Run (RM-27); the RF envelope is checked on the initial values.
         profile = self.default_profile()
         profile["environment"]["radio.rf_envelope"] = {"allowed_bands": [{"lo_hz": 2.4e9, "hi_hz": 2.5e9}]}
         with self.connect(profile, tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
             with self.assertRaises(ezsdr.Rejected) as raised:
-                sdr.tx_channels[0].frequency = 2.6e9
-            self.assertTrue(any(v["check"] == "radio.rf_envelope" and v["key"] == "radio.tx.c0.frequency_hz" for v in raised.exception.violations))
+                sdr.set("radio", "radio.tx.c0.frequency_hz", 2.6e9)
+            self.assertTrue(any(v["check"] == "ezsdr.update_class" and v["key"] == "radio.tx.c0.frequency_hz" for v in raised.exception.violations), raised.exception.violations)
             self.assertEqual(sdr.tx_channels[0].frequency, 2.45e9, "the rejected value was never applied")
         self.assertEqual(sdr.manifest["action_log"][-1], raised.exception.entry)
 
     # -- Vision §3's second snippet
 
     def test_v3_parameters_through_attributes(self) -> None:
-        with self.connect() as sdr:
-            sdr.rx_channels[0].frequency = 2.45e9
-            sdr.rx.sample_rate = 20e6
-            sdr.rx_channels[0].gain = 20
-            sdr.rx_channels[0].antenna = "TX/RX"
-            self.assertEqual((sdr.rx_channels[0].frequency, sdr.rx.sample_rate, sdr.rx_channels[0].gain, sdr.rx_channels[0].antenna), (2.45e9, 20e6, 20.0, "TX/RX"))
-            entry = sdr.set("radio", "radio.rx.s0.sample_rate_hz", 19.5e6)
-            self.assertEqual(sdr.rx.sample_rate, 20e6, "19.5 Msps is coerced to the x3xx grid")
-            coercion = entry["outcome"]["coercions"][0]
-            self.assertEqual((coercion["key"], coercion["requested"], coercion["applied"]), ("radio.rx.s0.sample_rate_hz", 19.5e6, 20e6))
+        # A radio value is asked for at connect and read through the attributes; it cannot change during the Run (RM-27, EA-16).
+        stream = ezsdr.Stream([0], sample_rate=19.5e6, frequency={0: 2.45e9}, gain={0: 20}, antenna={0: "TX/RX"})
+        with self.connect(rx={0: stream}) as sdr:
+            self.assertEqual((sdr.rx_channels[0].frequency, sdr.rx.sample_rate, sdr.rx_channels[0].gain, sdr.rx_channels[0].antenna), (2.45e9, 20e6, 20.0, "TX/RX"), "19.5 Msps is coerced to the x3xx grid at connect")
+            for setter in (
+                lambda: setattr(sdr.rx_channels[0], "frequency", 2.4e9),
+                lambda: setattr(sdr.rx, "sample_rate", 10e6),
+                lambda: setattr(sdr.rx_channels[0], "gain", 10),
+                lambda: setattr(sdr.rx_channels[0], "antenna", "RX2"),
+            ):
+                with self.assertRaises(ezsdr.Error) as refused:
+                    setter()
+                self.assertIn("connect(rx=ezsdr.Stream(", str(refused.exception))
+            self.assertEqual((sdr.rx_channels[0].frequency, sdr.rx.sample_rate), (2.45e9, 20e6), "nothing changed")
+        self.assertEqual(sdr.manifest["action_log"], [], "a client refusal submits nothing")
 
     def test_ea_16_channel_keys_and_stream_membership(self) -> None:
-        with self.connect() as sdr:
+        # The channels' values and stream membership are asked for at connect; the setters refuse during the Run
+        # (a client Error naming connect), and the Kernel's refusal stays pinned through `set` (RS-52).
+        tx = ezsdr.Stream([0], frequency={0: 2.45e9}, gain={0: 10}, antenna={0: "TX/RX"})
+        with self.connect(rx={1: ezsdr.Stream([0], sample_rate=20e6, frequency={0: 2.45e9}, gain={0: 10}, antenna={0: "RX2"})}, tx={0: tx}) as sdr:
             rx, tx = sdr.rx_channels[0], sdr.tx_channels[0]
-            rx.frequency, rx.gain, rx.antenna = 2.45e9, 10, "RX2"
-            rx.stream = 1
-            tx.frequency, tx.gain, tx.antenna = 2.45e9, 10, "TX/RX"
-            tx.stream = 0
-            sdr.rx_streams[1].sample_rate = 20e6
             self.assertEqual((rx.frequency, rx.gain, rx.antenna, rx.stream), (2.45e9, 10.0, "RX2", 1))
             self.assertEqual((tx.frequency, tx.gain, tx.antenna, tx.stream), (2.45e9, 10.0, "TX/RX", 0))
             self.assertEqual((sdr.rx_streams[0].channels, sdr.rx_streams[1].channels), ([], [0]))
             self.assertEqual((sdr.tx_streams[0].channels, sdr.tx_streams[1].channels), ([0], []))
             self.assertEqual(sdr.rx_streams[1].sample_rate, 20e6)
-        self.assertEqual([entry["action"]["kind"] for entry in sdr.manifest["action_log"]], ["set_parameter"] * 9)
-        self.assertEqual(
-            [entry["action"].get("key") for entry in sdr.manifest["action_log"]],
-            ["radio.rx.c0.frequency_hz", "radio.rx.c0.gain_db", "radio.rx.c0.antenna", "radio.rx.c0.stream",
-             "radio.tx.c0.frequency_hz", "radio.tx.c0.gain_db", "radio.tx.c0.antenna", "radio.tx.c0.stream",
-             "radio.rx.s1.sample_rate_hz"],
-        )
+            for setter in (lambda: setattr(rx, "stream", 0), lambda: setattr(tx, "gain", 0), lambda: setattr(sdr.rx_streams[1], "sample_rate", 10e6)):
+                with self.assertRaises(ezsdr.Error):
+                    setter()
+            with self.assertRaises(ezsdr.Rejected) as raised:
+                sdr.set("radio", "radio.rx.c0.stream", 0)
+            self.assertTrue(any(v["check"] == "ezsdr.update_class" and v["key"] == "radio.rx.c0.stream" for v in raised.exception.violations), raised.exception.violations)
+            self.assertEqual(rx.stream, 1, "the rejected value was never applied")
+        self.assertEqual([entry["action"]["kind"] for entry in sdr.manifest["action_log"]], ["set_parameter"])
+        self.assertEqual(sdr.manifest["action_log"][-1]["outcome"]["kind"], "rejected")
 
     def test_ea_16_stream_channels_are_read_only(self) -> None:
         with self.connect() as sdr:
@@ -178,19 +184,20 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(stream.channels, [0])
             with self.assertRaises(AttributeError):
                 stream.channels = [1]
-            sdr.rx_channels[1].stream = 0
-            self.assertEqual(stream.channels, [0, 1])
+            with self.assertRaises(ezsdr.Error):
+                sdr.rx_channels[1].stream = 0
+            self.assertEqual(stream.channels, [0], "membership is fixed during the Run")
 
     def test_ea_16_radio_side_is_stream_zero(self) -> None:
-        with self.connect() as sdr:
+        # The streams differ in rate at connect (the setters refuse during the Run), so an alias of another stream shows.
+        rx = {0: ezsdr.Stream([0], sample_rate=2e6), 1: ezsdr.Stream([1], sample_rate=20e6)}
+        tx = {0: ezsdr.Stream([0], sample_rate=2e6), 1: ezsdr.Stream([1], sample_rate=20e6)}
+        with self.connect(rx=rx, tx=tx) as sdr:
             radio = sdr.radio()
             self.assertIs(radio.rx, radio.rx_streams[0])
             self.assertIs(radio.tx, radio.tx_streams[0])
-            sdr.rx_streams[1].sample_rate = 20e6
-            sdr.tx_streams[1].sample_rate = 20e6
-            sdr.tx_streams[0].sample_rate = 2e6
-            self.assertEqual(sdr.rx.sample_rate, sdr.radio().rx_streams[0].sample_rate)
-            self.assertEqual(sdr.tx.sample_rate, sdr.radio().tx_streams[0].sample_rate)
+            self.assertEqual((sdr.rx.sample_rate, sdr.tx.sample_rate), (2e6, 2e6))
+            self.assertEqual((sdr.rx_streams[1].sample_rate, sdr.tx_streams[1].sample_rate), (20e6, 20e6))
             self.assertEqual(sdr.rx_channels[0].stream, radio.rx_channels[0].stream)
             self.assertEqual(sdr.rx_streams[0].channels, radio.rx_streams[0].channels)
 
@@ -366,7 +373,7 @@ class EasyApi(unittest.TestCase):
                 sdr.rx.capture(10_000_000, timeout=0.001)
             sdr.stop()
             with self.assertRaises(ezsdr.RunEnded) as ended:
-                sdr.rx_channels[0].gain = 1
+                sdr.set("radio", "radio.rx.c0.gain_db", 1)
             self.assertEqual(ended.exception.termination, {"kind": "stopped", "cause": {"kind": "client"}})
         self.assertEqual(sdr.manifest["termination"]["reason"], {"kind": "stopped", "cause": {"kind": "client"}})
 
@@ -543,14 +550,16 @@ class EasyApi(unittest.TestCase):
             t = sdr.sleep(0.0041)
         self.assertEqual(t, a)
 
-    def test_ea_17_a_capture_across_a_rate_change_is_refused(self) -> None:
+    def test_ea_17_a_capture_across_a_restart_is_refused(self) -> None:
         with self.connect() as sdr:
             sdr.submit({
                 "kind": "vocabulary", "ns": "sink", "verb": "capture", "target": {"kind": "output", "output": "rec"},
                 "at": None, "params": {"sink.capture_samples": 20_000},
             })
             sdr.sleep(0.005)
-            sdr.rx.sample_rate = 2e6
+            sdr.rx.stop()
+            sdr.sleep(0.002)
+            sdr.rx.start()
             event = sdr.wait_for([ezsdr.session.CAPTURE_WRITTEN], timeout=1.0)
             artifact = event["payload"]["artifact"]
             self.assertEqual(len(artifact["continuity"]), 2)
@@ -558,14 +567,12 @@ class EasyApi(unittest.TestCase):
                 ezsdr.samples(sdr.read(artifact), artifact)
 
     def test_ea_16_rx_stop_then_start(self) -> None:
-        # EA-16, RM-12, RM-21 (spec 22, VH-1, VH-6): after rx.stop() a change starts nothing;
-        # rx.start() starts the stream again on a new SampleClock at the configuration in
-        # force; calls act in the order made.
+        # EA-16, RM-12, RM-21 (spec 22, VH-1, VH-6): after rx.stop() nothing starts the stream;
+        # rx.start() starts it again on a new SampleClock at the configuration in force;
+        # calls act in the order made.
         with self.connect() as sdr:
             sdr.rx.stop()
-            sdr.sleep(0.002)
-            sdr.rx.sample_rate = 2e6
-            sdr.sleep(0.06)
+            sdr.sleep(0.062)
             with self.assertRaises(ezsdr.CaptureTimeout):
                 sdr.rx.capture(1000, timeout=0.2)
             sdr.rx.start()
@@ -574,8 +581,6 @@ class EasyApi(unittest.TestCase):
             sdr.sleep(0.01)
             at = sdr.after(0.02)
             sdr.rx.start(at=at)
-            self.assertEqual(len(sdr.rx.capture(1000)), 1000)
-            sdr.rx.sample_rate = 1e6
             self.assertEqual(len(sdr.rx.capture(1000)), 1000)
             sdr.rx.start()
             sdr.rx.stop()
@@ -587,15 +592,15 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(len(sdr.rx.capture(1000)), 1000)
             self.assertEqual(len(sdr.effective["radio"]), 20)
         # The first segment, stopped at T0 before its first sample, has no clock (RM-25); the
-        # four others end at their cuts, the last at the Session's close.
+        # three others end at their cuts, the last at the Session's close.
         clocks = [c for c in sdr.manifest["clocks"]["sample_clocks"] if c["stream"]["path"] == "radio/rx/s0"]
-        self.assertEqual(len(clocks), 4, clocks)
+        self.assertEqual(len(clocks), 3, clocks)
         self.assertTrue(all(c.get("ended_at") is not None for c in clocks), clocks)
-        self.assertEqual([c["root_ticks_per_tick"]["num"] for c in clocks], [500, 500, 1000, 1000], clocks)
+        self.assertEqual([c["root_ticks_per_tick"]["num"] for c in clocks], [1000, 1000, 1000], clocks)
         # The start, received 20 ms before its `at`, is ready then: its clock begins the start
         # lead after its receipt, the later of that and `at` (RM-25).
         lead, received = 50_000_000, at["ticks"] - 20_000_000
-        self.assertLessEqual(abs(clocks[1]["origin"]["ticks"] - max(at["ticks"], received + lead)), 500, (clocks, at))
+        self.assertLessEqual(abs(clocks[1]["origin"]["ticks"] - max(at["ticks"], received + lead)), 1000, (clocks, at))
 
     def test_ea_16_repeat_uses_stream_membership_without_setting_it(self) -> None:
         with self.connect(tx={0: [0]}) as sdr:

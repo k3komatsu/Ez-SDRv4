@@ -7,11 +7,11 @@ use ezsdr_kernel::event::EventKind;
 use ezsdr_kernel::manifest::Manifest;
 use ezsdr_kernel::run::{CleanupMode, RunState, Stage, StopCause, Termination};
 use ezsdr_kernel::session::{Outcome, SessionAction};
-use ezsdr_kernel::spec::{Ident, Key, Namespace, Value};
+use ezsdr_kernel::spec::{Ident, Key, Namespace, Scalar, Value};
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use serde_json::json;
-use support::{T0, artifact, end_session, finish_at, loopback_run, output, resource, root, section, session_run, source, spec_run};
+use support::{T0, artifact, asking, end_session, finish_at, loopback_run, output, resource, root, section, session_run, source, spec_run};
 
 fn complete(spec: &serde_json::Value, profile_name: &str, selector: serde_json::Value, environment: serde_json::Value, test: &str, horizon: i64) -> Manifest {
     let temp = rig::TempDir::new(test);
@@ -296,11 +296,10 @@ fn v58_07_manifest_records_every_input_and_output() {
 fn v58_11_short_lead_burst_is_a_time_error() {
     let temp = rig::TempDir::new("v58-11-short");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
-    let mut run = session_run(&temp, &profile);
+    let mut run = loopback_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     let (bytes, _) = experiments::waveform(1_000);
-    run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap();
     run.submit(
         SessionAction::Vocabulary {
             ns: Namespace::parse("radio").unwrap(),
@@ -313,18 +312,18 @@ fn v58_11_short_lead_burst_is_a_time_error() {
     )
     .unwrap();
     let manifest = end_session(run, clock, T0 + 60_000_000);
-    // The new transmit clock starts x3xx's start lead after the change, at T0 + 51 ms
-    // (RM-25); the burst for T0 + 2 ms is its sample −49 000, before that origin, so it is
-    // late by 49 ms and starts at the origin (RM-15).
+    // The transmit clock the Session asked for at connect begins at T0 + 3 ms (RM-25); the burst
+    // for T0 + 2 ms is its tick T0/1000 + 2 000 (1 ms before the origin), before that origin, so it is late by 1 ms and starts at
+    // the origin (RM-15).
     let events: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["cause"], "late");
     assert_eq!(events[0].payload["outcome"], "send_asap");
-    assert_eq!(events[0].payload["late_by_ns"], 49_000_000);
-    assert_eq!(events[0].payload["target"]["ticks"], -49_000);
+    assert_eq!(events[0].payload["late_by_ns"], 1_000_000);
+    assert_eq!(events[0].payload["target"]["ticks"], T0 / 1_000 + 2_000);
     let burst: ezsdr_kernel::stream::BurstRecord = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts")[0].clone()).unwrap();
-    assert_eq!(burst.late_by.unwrap().ticks_in(burst.late_by.unwrap().domain()).unwrap(), 49_000_000);
-    assert_eq!(burst.target.ticks_in(burst.target.domain()).unwrap(), 0);
+    assert_eq!(burst.late_by.unwrap().ticks_in(burst.late_by.unwrap().domain()).unwrap(), 1_000_000);
+    assert_eq!(burst.target.ticks_in(burst.target.domain()).unwrap(), T0 / 1_000 + 3_000);
 }
 
 #[test]
@@ -414,29 +413,27 @@ fn v58_13_session_manifest_has_log_waveform_and_capture() {
 }
 
 #[test]
-fn rs_19_an_untimed_repeat_after_an_enable_starts_at_the_new_clock_origin() {
-    // Receive c0 only, then the runtime enable of tx c0: the new transmit clock begins a start lead later
-    // (RM-25) and RS-19 admits the untimed repeat no earlier than that origin. This moves to the stage-4
-    // clock path when the setter goes (note 47 stage 2).
+fn rs_19_an_untimed_repeat_in_a_session_starts_at_the_clock_origin() {
+    // A Session that asked for tx c0 at connect: the transmit clock begins a start lead after the Run's start
+    // (RM-25) and RS-19 admits the untimed repeat no earlier than that origin.
     let temp = rig::TempDir::new("rs-19-enable");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
-    let mut run = session_run(&temp, &profile);
+    let mut run = loopback_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
     let (bytes, _) = experiments::waveform(1_000);
-    let enable = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(0) }, None).unwrap();
     let repeat = run
         .submit(
             SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
             Some(&bytes),
         )
         .unwrap();
-    assert!([enable, repeat].iter().all(|entry| matches!(entry.outcome, Outcome::Admitted { .. })));
+    assert!(matches!(repeat.outcome, Outcome::Admitted { .. }));
     let manifest = end_session(run, clock, T0 + 60_000_000);
     let bursts: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(section(&manifest, "mock", "ezsdr.radio.mock.bursts").clone()).unwrap();
     assert_eq!(bursts.len(), 1);
-    // The burst starts at tick 0 of its own (new) clock, on time.
-    assert_eq!((bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), bursts[0].late_by), (0, None));
+    // The burst starts at the clock's origin (T0 + 3 ms), on time.
+    assert_eq!((bursts[0].target.ticks_in(bursts[0].target.domain()).unwrap(), bursts[0].late_by), (T0 / 1_000 + 3_000, None));
     assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR));
 }
 
@@ -518,66 +515,59 @@ fn v58_15_repeat_wraps_without_a_gap() {
 }
 
 #[test]
-fn v58_16_runtime_retune_outside_the_rf_envelope_is_rejected() {
+fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_runtime_change_has_no_class() {
+    // Note 47 stage 2: the envelope is checked on the initial values; a change during the Run is refused as a key with no update class (RM-27).
     let temp = rig::TempDir::new("v58-16-rf");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }] } }));
-    let mut run = session_run(&temp, &profile);
+    let connect = |frequency: f64| {
+        let assembly = rig::assemble(&profile, BTreeMap::new());
+        let initial = asking("radio", &[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", Scalar::Num(ezsdr_kernel::spec::Finite::new(frequency).unwrap()))]);
+        ezsdr_kernel::coordinator::connect(&profile, &initial, assembly, ezsdr_kernel::run::Lease::attached())
+    };
+    let refused = connect(2.6e9).expect("a refused Session is a failed Run");
+    assert!(
+        matches!(refused.state(), RunState::CleanedUp { termination: Termination::Failed { reason, .. } } if reason.contains("radio.rf_envelope")),
+        "an initial frequency outside the band is refused by the envelope: {:?}",
+        refused.state()
+    );
+    let mut run = connect(2.45e9).expect("an initial frequency inside the band connects");
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
-    let submit =
-        |run: &mut ezsdr_kernel::coordinator::RunHandle, key: &str, value| run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }, None).unwrap();
-    let a = submit(&mut run, "radio.tx.c0.frequency_hz", Value::num(2.45e9).unwrap());
-    let b = submit(&mut run, "radio.tx.c0.stream", Value::from(0));
-    let c = submit(&mut run, "radio.tx.c0.frequency_hz", Value::num(2.6e9).unwrap());
-    assert!(matches!(a.outcome, Outcome::Admitted { .. }));
-    assert!(matches!(b.outcome, Outcome::Admitted { .. }));
-    let Outcome::Rejected { violations } = c.outcome else { panic!("outside band was admitted") };
-    assert!(violations.iter().any(|violation| violation.check.as_str() == "radio.rf_envelope" && violation.key.as_ref().is_some_and(|key| key.as_str() == "radio.tx.c0.frequency_hz")));
-    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.c0.frequency_hz").unwrap()], Value::num(2.45e9).unwrap());
-    end_session(run, clock, T0 + 5_000_000);
-}
-
-#[test]
-fn kc_24_a_burst_after_the_transmit_clock_ends_is_refused_at_admission() {
-    let temp = rig::TempDir::new("kc-24-ended-tx");
-    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
-    let mut run = session_run(&temp, &profile);
-    let clock = root(&run);
-    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
-    for channels in [1, 0] {
-        let entry = run
-            .submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.stream").unwrap(), value: Value::from(if channels == 0 { -1 } else { 0 }) }, None)
-            .unwrap();
-        assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let mut refused_seqs = Vec::new();
+    for frequency in [2.45e9, 2.6e9] {
+        let entry = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.frequency_hz").unwrap(), value: Value::num(frequency).unwrap() }, None).unwrap();
+        refused_seqs.push(entry.seq);
+        let Outcome::Rejected { violations } = entry.outcome else { panic!("a runtime radio value change was admitted") };
+        assert!(violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class" && violation.reason.contains("declares no update class")), "{violations:?}");
     }
-    let (bytes, _) = experiments::waveform(1_000);
-    let entry = run
-        .submit(
-            SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: Default::default() },
-            Some(&bytes),
-        )
-        .unwrap();
-    let Outcome::Rejected { violations } = entry.outcome else { panic!("a burst on an ended transmit clock was admitted") };
-    assert!(violations.iter().any(|violation| violation.reason.starts_with("SC-23: ") && violation.reason.ends_with("has no running transmit SampleClock")));
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.c0.frequency_hz").unwrap()], Value::num(2.45e9).unwrap());
     let manifest = end_session(run, clock, T0 + 5_000_000);
-    assert_eq!(section(&manifest, "mock", "ezsdr.radio.mock.rejected").as_array().unwrap().len(), 0);
+    for seq in refused_seqs {
+        assert!(manifest.action_log.iter().any(|logged| logged.seq == seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection of action {seq} is logged");
+    }
 }
 
 #[test]
-fn v58_16_runtime_rate_beyond_the_envelope_is_rejected() {
+fn v58_16_a_rate_beyond_the_envelope_is_refused_at_connect_and_a_runtime_change_has_no_class() {
     let temp = rig::TempDir::new("v58-16-rate");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let assembly = rig::assemble(&profile, BTreeMap::new());
+    let initial = asking("radio", &[("radio.rx.c0.stream", Scalar::Int(0)), ("radio.rx.s0.sample_rate_hz", Scalar::Num(ezsdr_kernel::spec::Finite::new(200.0e6).unwrap()))]);
+    // The envelope is checked on the initial value, at validation (RM-32).
+    let coerced = ezsdr_kernel::coordinator::connect(&profile, &initial, assembly, ezsdr_kernel::run::Lease::attached()).expect("connects");
+    assert!(matches!(&coerced.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, reason } } if reason.contains("RM-32")), "{:?}", coerced.state());
+    let _ = coerced.finish();
     let mut run = session_run(&temp, &profile);
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
-    let a = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.rx.c1.stream").unwrap(), value: Value::from(0) }, None).unwrap();
-    let prior = run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.rx.s0.sample_rate_hz").unwrap()].clone();
-    let b = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.rx.s0.sample_rate_hz").unwrap(), value: Value::num(200.0e6).unwrap() }, None).unwrap();
-    assert!(matches!(a.outcome, Outcome::Admitted { .. }));
-    let Outcome::Rejected { violations } = b.outcome else { panic!("over-envelope rate was admitted") };
-    assert!(violations.iter().any(|violation| violation.check.as_str() == "ezsdr.coercion" && violation.reason.contains("RM-32")));
-    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.rx.s0.sample_rate_hz").unwrap()], prior);
-    end_session(run, clock, T0 + 5_000_000);
+    let prior = run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("radio.rx.s0.sample_rate_hz").unwrap()).cloned();
+    let entry = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.rx.s0.sample_rate_hz").unwrap(), value: Value::num(200.0e6).unwrap() }, None).unwrap();
+    let Outcome::Rejected { violations } = &entry.outcome else { panic!("a runtime radio value change was admitted") };
+    assert!(violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class" && violation.reason.contains("declares no update class")), "{violations:?}");
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("radio.rx.s0.sample_rate_hz").unwrap()).cloned(), prior);
+    let seq = entry.seq;
+    let manifest = end_session(run, clock, T0 + 5_000_000);
+    assert!(manifest.action_log.iter().any(|logged| logged.seq == seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");
 }
 
 // ---------------------------------------------------------------- Phase 3: the SimulationChannel
@@ -1034,81 +1024,32 @@ fn v58_03_a_run_reproduces_from_its_own_manifest() {
 }
 
 #[test]
-fn mr_34_a_scheduled_receive_retune_inside_a_running_segment_is_a_timed_tune() {
-    // A Spec Run's scheduled `update_parameter` reaches the Provider before T0 (KC-17, KC-18),
-    // yet a retune due 5 ms into the first receive segment is a timed tune (MR-34): the captured
-    // samples carry the timed-tune constant from it on, and the segment's coherence says so.
-    let temp = rig::TempDir::new("mr-34-scheduled-retune");
+fn mr_34_a_scheduled_radio_value_update_is_refused_at_validate() {
+    // Note 47 stage 2: a radio value has no update class (RM-27), so a Spec's `schedule` cannot change one (RS-52, SB-16).
+    let temp = rig::TempDir::new("mr-34-scheduled-refused");
     let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
     let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
     spec["schedule"].as_array_mut().unwrap().push(json!({
         "at": { "clock": "radio", "offset_ticks": 5_000 },
         "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": "radio.rx.c0.frequency_hz", "value": 1.0e9 }
     }));
-    let environment = json!({ "sim.seed": 7, "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0, "delay_ns": 0 }] } });
-    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, environment);
-    let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
-    let clock = root(&run);
-    let manifest = finish_at(run, clock, T0 + 30_000_000);
-    let capture = artifact(&manifest, "rec", 0);
-    let first = capture.continuity[0].first.ticks_in(capture.continuity[0].first.domain()).unwrap();
-    let samples = rig::read_capture(capture, 1).remove(0);
-    // The layout is two UBX channels per direction: draws are rx0, rx1, tx0, tx1, then the timed constants rx0, rx1, tx0, tx1.
-    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
-    let draws: Vec<f64> = (0..8).map(|_| 2.0 * std::f64::consts::PI * ((lo.next_u64() >> 11) as f64 / (1u64 << 53) as f64)).collect();
-    let (rx0, tx0, rx0_timed) = (draws[0], draws[2], draws[4]);
-    let heard = |k: i64| samples[(k - first) as usize];
-    let near = |actual: (f32, f32), phase: f64| {
-        let expected = ((0.5 * phase.cos()) as f32, (0.5 * phase.sin()) as f32);
-        assert!((actual.0 - expected.0).abs() < 1e-5 && (actual.1 - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
-    };
-    near(heard(3_000), tx0 - rx0);
-    near(heard(8_000), tx0 - rx0_timed);
-    near(heard(15_000), tx0 - rx0_timed);
-    let segments = section(&manifest, "mock", "ezsdr.radio.mock.segments").as_array().unwrap();
-    let rx = segments.iter().find(|row| row["direction"] == "rx" && row["stream"] == 0).expect("the receive segment");
-    let last = rx["coherence"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!(last["at"]["ticks"], T0 + 5_000_000);
-    assert_eq!(last["basis"], "timed_tune");
-}
-
-#[test]
-fn mr_34_a_scheduled_receive_update_inside_a_refused_change_span_is_untimed() {
-    // RM-25 (design 43), KC-17, MR-34: a Spec Run's timed entries reach the Provider before T0, so
-    // no receive time is fixed. C1 (rate, due T0 + 10 ms) is refused by the first `cold_change_refused`
-    // fault, C2 (due T0 + 70 ms) cuts the refused segment at T0 + 124 ms and begins S3 at T0 +
-    // 127 ms: the receive successor waits the release window before its old-rate call and lead
-    // (RM-25). A retune due T0 + 75 ms, before S3 and covered by no segment, is an untimed tune:
-    // S3's entry row has no coherent basis and no timed row follows it. The refused segment has
-    // no row.
-    let temp = rig::TempDir::new("mr-34-refused-span");
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let assembly = rig::assemble(&profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let run = ezsdr_kernel::coordinator::start_spec_run(&spec, &profile, assembly).expect("a refused Spec is a failed Run");
+    assert!(
+        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, reason } } if reason.contains("radio.rx.c0.frequency_hz")),
+        "the schedule's radio value update is the reason: {:?}",
+        run.state()
+    );
+    // The control: the same Spec without that schedule item is not refused at Validate.
+    let mut control = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
+    control["schedule"].as_array_mut().unwrap().push(json!({
+        "at": { "clock": "radio", "offset_ticks": 5_000 },
+        "action": { "kind": "stop", "target": { "kind": "resource", "resource": "radio", "path": "" } }
+    }));
     let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
-    let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
-    for (offset_ticks, key, value) in [(10_000, "radio.rx.s0.sample_rate_hz", 2.0e6), (70_000, "radio.rx.s0.sample_rate_hz", 1.0e6), (75_000, "radio.rx.c0.frequency_hz", 1.0e9)] {
-        spec["schedule"].as_array_mut().unwrap().push(json!({
-            "at": { "clock": "radio", "offset_ticks": offset_ticks },
-            "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": key, "value": value }
-        }));
-    }
-    let environment = json!({
-        "sim.seed": 7,
-        "sim.channel": { "couplings": [{ "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0, "delay_ns": 0 }] },
-        "sim.faults": [{ "at_ns": 1_000_000, "fault": "cold_change_refused", "target": "radio" }]
-    });
-    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, environment);
-    let run = spec_run(&temp, &spec, &profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
-    let clock = root(&run);
-    let manifest = finish_at(run, clock, T0 + 300_000_000);
-    let segments = section(&manifest, "mock", "ezsdr.radio.mock.segments").as_array().unwrap();
-    let rx: Vec<&serde_json::Value> = segments.iter().filter(|row| row["direction"] == "rx" && row["stream"] == 0).collect();
-    let origins: Vec<i64> = rx.iter().map(|row| row["origin"]["ticks"].as_i64().unwrap()).collect();
-    assert_eq!(origins, [T0, T0 + 127_000_000], "S2, the refused segment, has no row");
-    let s3 = rx[1]["coherence"].as_array().unwrap();
-    assert_eq!(s3.len(), 1, "no timed row: {s3:?}");
-    assert_eq!(s3[0]["basis"], "none");
-    assert_eq!(s3[0]["valid"], false);
-    let rejected = section(&manifest, "mock", "ezsdr.radio.mock.rejected").as_array().unwrap();
-    assert_eq!(rejected.iter().filter(|row| row["reason"] == "MR-18: the cold change was refused").count(), 1, "{rejected:?}");
-    let applied = section(&manifest, "mock", "ezsdr.radio.mock.applied").as_array().unwrap();
-    assert!(applied.iter().any(|row| row["key"] == "radio.rx.c0.frequency_hz" && row["at"]["ticks"] == T0 + 75_000_000), "{applied:?}");
+    let assembly = rig::assemble(&profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let run = ezsdr_kernel::coordinator::start_spec_run(&control, &profile, assembly).expect("the control Spec starts");
+    assert!(!matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, .. } }), "{:?}", run.state());
+    let _ = run.finish();
 }

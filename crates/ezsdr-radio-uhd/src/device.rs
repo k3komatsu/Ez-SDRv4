@@ -351,8 +351,8 @@ pub enum FakeFault {
     /// From this device time on, every `ref_locked` fails, not lost, while the time reads
     /// succeed (Review T, NB-T1).
     RefLockedFails(Duration),
-    /// The first `rx_open` is refused, once: uhd-control's enable from no stream fails at its
-    /// open, before any rate comparison (UR-25).
+    /// The first `rx_open` is refused, once: an owner's open fails before any rate comparison
+    /// (UR-25).
     RxOpenFails,
     /// The `nth` `tx_open` (0-based) is refused, once (UR-22 reopen failure).
     TxOpenFails(usize),

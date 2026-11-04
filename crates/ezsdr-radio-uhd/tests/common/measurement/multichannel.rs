@@ -923,30 +923,6 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
 /// The rate of the stream a lead or gap measurement keeps running on the other direction (stage 3c-3a).
 pub const COMPANION_RATE_HZ: u64 = 10_000_000;
 
-/// Starts a repeating transmit stream at `COMPANION_RATE_HZ` on a Session.
-pub fn start_companion_tx(run: &mut RunHandle, bytes: &[u8]) -> Result<(), String> {
-    enable_tx(run)?;
-    let entry =
-        run.submit(common::set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(COMPANION_RATE_HZ as f64).ok_or("invalid companion rate")?), None).map_err(|error| error.to_string())?;
-    if !common::admitted(&entry) {
-        return Err(format!("the companion transmit rate was not admitted: {:?}", entry.outcome));
-    }
-    common::past_tx_origin(run);
-    start_repeat(run, bytes)
-}
-
-/// Sets the Session's receive stream to `COMPANION_RATE_HZ` and lets it settle.
-pub fn start_companion_rx(run: &mut RunHandle) -> Result<(), String> {
-    common::past_t0(run, common::ms(1));
-    let entry =
-        run.submit(common::set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(COMPANION_RATE_HZ as f64).ok_or("invalid companion rate")?), None).map_err(|error| error.to_string())?;
-    if !common::admitted(&entry) {
-        return Err(format!("the companion receive rate was not admitted: {:?}", entry.outcome));
-    }
-    common::wait(run, common::ms(100));
-    Ok(())
-}
-
 /// The condition row of a lead measured with a stream of `companion` running: the subject's stream at `rate_hz` and the companion's at `COMPANION_RATE_HZ`.
 pub fn companion_condition(id: &str, subject: Direction, rate_hz: u64, companion: Direction) -> Condition {
     Condition {

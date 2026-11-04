@@ -42,7 +42,7 @@ pub(crate) struct Segment {
     /// `(n · channels + c) · 2` is sample `n`'s real part on channel `c`, `+ 1` its
     /// imaginary part, each already clipped to the contract's full scale.
     pub samples: Arc<[f32]>,
-    /// The first sample not radiated, once a stop or a cold change cut the burst.
+    /// The first sample not radiated, once a stop cut the burst.
     pub end: Option<i64>,
 }
 
@@ -58,8 +58,6 @@ pub(crate) struct ChannelModel {
     pub gain_db: Timeline,
     pub frequency_hz: Timeline,
     pub phase: Timeline,
-    pub phase_fixed: Timeline,
-    pub timed_phase: f64,
     pub phase_behavior: String,
     pub path_delay_samples: i64,
 }
@@ -115,8 +113,6 @@ pub(crate) struct RxChannelModel {
     pub gain_db: Timeline,
     pub frequency_hz: Timeline,
     pub phase: Timeline,
-    pub phase_fixed: Timeline,
-    pub timed_phase: f64,
     pub phase_behavior: String,
     pub path_delay_samples: i64,
 }
@@ -147,4 +143,41 @@ pub(crate) fn decode_waveform(bytes: &[u8]) -> Result<(Arc<[f32]>, u64), &'stati
 pub(crate) fn lo_phase(rng: &mut ezsdr_sim::SimRng) -> f64 {
     const SCALE: f64 = 1.0 / (1u64 << 53) as f64;
     2.0 * std::f64::consts::PI * ((rng.next_u64() >> 11) as f64 * SCALE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mr_33_a_timeline_keeps_the_value_in_force_at_each_instant() {
+        // The per-channel value history a delayed sample reads (MR-33): the stage that brings Run-time
+        // changes back needs it, so it stays although no Run-time change reaches it now.
+        let mut timeline = Timeline::new(1.0);
+        timeline.set(100, 2.0);
+        timeline.set(200, 3.0);
+        for (tick, expected) in [(i64::MIN, 1.0), (99, 1.0), (100, 2.0), (199, 2.0), (200, 3.0), (i64::MAX, 3.0)] {
+            assert_eq!(timeline.at(RootInstant::tick(tick)), expected, "tick {tick}");
+        }
+    }
+
+    #[test]
+    fn mr_32_a_radiated_sample_takes_the_values_in_force_at_its_own_instant() {
+        // The transmit side reads gain, frequency and phase at the instant of the sample it radiates (its sample
+        // clock's, `path_delay_samples` before the antenna instant), not at the antenna instant (MR-32, MR-33).
+        let (mut gain_db, mut frequency_hz, mut phase) = (Timeline::new(0.0), Timeline::new(100.0), Timeline::new(0.0));
+        gain_db.set(3_000, 20.0);
+        frequency_hz.set(3_000, 200.0);
+        phase.set(3_000, std::f64::consts::FRAC_PI_2);
+        let ratio = Rational::new(1_000, 1).unwrap();
+        let segment = Segment { origin: 0, ratio, start: 0, len: 4, repeat: false, channels: 1, channel_numbers: vec![0], samples: [1.0f32, 0.0].repeat(4).into(), end: None };
+        let model = ChannelModel { gain_db, frequency_hz, phase, phase_behavior: "deterministic".to_owned(), path_delay_samples: 2 };
+        let shared = TxShared::new(TxPlan { segments: BTreeMap::from([((0, None, 0, 0, 0), segment)]), channel_models: vec![model] });
+        // Antenna instant 4 900 (sample 4): the radiated sample is 2, at tick 2 000, before the change at 3 000.
+        let before = shared.radiated(0, RootInstant::tick(4_900)).unwrap();
+        assert_eq!((before.re, before.im, before.frequency_hz), (1.0, 0.0, 100.0), "the sample's own instant precedes the change");
+        // Antenna instant 5 100 (sample 5): the radiated sample is 3, at tick 3 000, which the change takes at or after.
+        let after = shared.radiated(0, RootInstant::tick(5_100)).unwrap();
+        assert!(after.re.abs() < 1e-9 && (after.im - 10.0).abs() < 1e-9 && after.frequency_hz == 200.0, "{after:?}");
+    }
 }

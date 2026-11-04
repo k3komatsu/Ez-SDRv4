@@ -1,8 +1,7 @@
 //! uhd-tx: owns the transmit streamer. It transmits held bursts in target order,
 //! keeps at most the in-flight window handed to the device ahead of its time, decides
-//! a preempting burst against the first sample it has not handed over, performs the
-//! transmit side of a `cold` change, and reads the asynchronous reports (UR-21…UR-23,
-//! UR-25, UR-28).
+//! a preempting burst against the first sample it has not handed over, ends its clock at
+//! its cut, and reads the asynchronous reports (UR-21…UR-23, UR-25, UR-28).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
@@ -19,7 +18,7 @@ use ezsdr_radio::payloads::{TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, 
 use serde_json::json;
 
 use super::control::Planned;
-use super::core::{Clock, Core, Holder, Streams, lock, stream_key};
+use super::core::{Clock, Core, Streams, lock, stream_key};
 use crate::device::{Dir, Iq, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::DEVICE_LEAD_NS;
@@ -69,13 +68,6 @@ struct Open {
     held: Held,
     next: i64,
     first: bool,
-}
-
-/// The current clock's cut and the segment after it, which becomes current there (UR-25).
-struct Switch {
-    /// The root tick of the current clock's cut.
-    cut: i64,
-    to: Option<Planned>,
 }
 
 struct PendingReport {
@@ -190,12 +182,6 @@ impl TxChain {
         self.recovery = Recovery::Halted;
     }
 
-    fn next_segment_adopted(&mut self) {
-        if self.recovery == Recovery::Halted {
-            self.recovery = Recovery::Clean;
-        }
-    }
-
     fn provider_stop(&mut self) {
         self.recovery = Recovery::Clean;
     }
@@ -214,20 +200,20 @@ pub(crate) struct Tx {
     /// The device's host clock (plan 30 §4.3): the idle wait and the shutdown's ACK window.
     host: HostClock,
     clock: Option<Clock>,
-    /// The channel set the last successful switch took, for the bursts' channel count (RM-29).
+    /// The channel set of the stream's clock, for the bursts' channel count (RM-29).
     /// The streamer's set is the stream's record (UR-13), not this.
     channels: Channels,
     /// The generation of the streamer `unacked`'s correlations were taken against (UR-36,
-    /// UR-28): the record's generation as this owner last read it, so that a streamer another
-    /// thread opened — uhd-control's enable from no stream — is told from this one's.
+    /// UR-28): the record's generation as this owner last read it, so that a streamer opened
+    /// since is told from this one's.
     streamer: u64,
     held: BTreeMap<i64, Held>,
-    later: Vec<Held>,
     open: Option<Open>,
     tracker: Option<BurstTracker>,
-    switch: Option<Switch>,
+    /// The root tick of the current clock's cut, from the plan (UR-25).
+    cut: Option<i64>,
     /// The transmit plan as last read, the version it was read at, and the index in it of the
-    /// current segment, or of the next one to begin while there is no clock.
+    /// current segment.
     plan: Vec<Planned>,
     version: Option<u64>,
     at: usize,
@@ -260,9 +246,8 @@ impl Tx {
             channels,
             streamer,
             held: BTreeMap::new(),
-            later: Vec::new(),
             open: None,
-            switch: None,
+            cut: None,
             plan: Vec::new(),
             version: None,
             at: 0,
@@ -299,11 +284,9 @@ impl Tx {
 
     /// One turn of the run loop (UR-23, UR-25): the plan, read again when uhd-control has
     /// changed it, and the report read's ownership are one section of the instance's line
-    /// state — so a turn cannot pass between them, and the enable can never find the plan read
-    /// without the read in flight too —; then the report read, then one step. A turn
-    /// uhd-control's enable from no stream owns the streamer for makes no device call at all —
-    /// `reports` and `step` included — and nothing of the owner's state moves. False when the
-    /// turn had nothing to do, which the run loop's idle wait follows.
+    /// state; then the report read, then one step. A turn another holder owns the streamer for
+    /// makes no device call at all — `reports` and `step` included — and nothing of the owner's
+    /// state moves. False when the turn had nothing to do, which the run loop's idle wait follows.
     pub(super) fn pass(&mut self) -> bool {
         // An uncertain EOB invalidates this report queue. Replace its streamer before
         // consuming anything that could have been queued by the failed generation.
@@ -316,18 +299,14 @@ impl Tx {
         if !streams.begin_read(key) {
             return false;
         }
-        if !self.plan_section(&mut streams, key, None) {
+        if !self.plan_section(&mut streams, key) {
             streams.end_read(key);
             return false;
         }
         drop(streams);
         self.reports(Wall::ZERO);
         lock(&core.streams).end_read(key);
-        let worked = self.step();
-        if !worked {
-            core.release_unneeded(Dir::Tx, self.k);
-        }
-        worked
+        self.step()
     }
 
     fn command(&mut self, cmd: TxCmd) {
@@ -337,8 +316,8 @@ impl Tx {
                 if self.clock.is_some_and(|c| c.domain == held.domain) {
                     self.held.insert(held.k, held);
                 } else {
-                    // Booked on the clock a pending change starts (UR-25).
-                    self.later.push(held);
+                    // Booked on a clock that ended at its origin before this thread took the burst (UR-25).
+                    self.cancel_unstarted(&held);
                 }
             }
             TxCmd::Stop => self.stop_now("UR-26: cancelled by Stop", ezsdr_radio::CancelReason::Stop),
@@ -346,63 +325,27 @@ impl Tx {
         }
     }
 
-    /// Reads the transmit plan it shares with uhd-control again, when it has changed (UR-25),
-    /// pruning first the items before the command that began the segment `passed` (#63).
-    /// False when uhd-control's enable from no stream owns the streamer this turn: the plan is
-    /// read again at the next, and the version, the switch and the phase stand.
-    pub(super) fn read(&mut self, passed: Option<Option<u64>>) -> bool {
-        let core = self.core.clone();
-        let key = stream_key(Dir::Tx, self.k);
-        let mut streams = lock(&core.streams);
-        if streams.holder(key) != Holder::Free {
-            return false;
-        }
-        self.plan_section(&mut streams, key, passed)
-    }
-
-    /// The plan inside the caller's section of the instance's line state (UR-25, #63): read
-    /// again when uhd-control has changed it, pruning first the items before `passed`. False
-    /// only when the section may not read at all, which the caller has already checked.
-    fn plan_section(&mut self, streams: &mut Streams, key: StreamKey, passed: Option<Option<u64>>) -> bool {
-        match passed {
-            Some(by) => streams.prune(key, by),
-            None if self.version == Some(streams.version) => return true,
-            None => {}
+    /// The plan, read again when uhd-control has changed it (UR-25), inside the caller's section of
+    /// the instance's line state.
+    fn plan_section(&mut self, streams: &mut Streams, key: StreamKey) -> bool {
+        if self.version == Some(streams.version) {
+            return true;
         }
         self.version = Some(streams.version);
         self.plan = streams.planned(key);
         self.retarget();
-        let segment = self.clock.and_then(|_| self.plan.get(self.at)).map(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by));
-        streams.plan_read(key, self.clock.is_some(), self.switch.is_some(), segment);
         true
     }
 
-    /// UR-25: the plan's cut of the current clock, and the segment after it; with no clock,
-    /// the next segment, which begins at once.
+    /// UR-25: the plan's cut of the current clock.
     fn retarget(&mut self) {
-        self.switch = match self.clock {
-            Some(clock) => self.plan.get(self.at).and_then(|current| current.segment.cut).map(|cut| Switch { cut: clock.instant(cut), to: self.plan.get(self.at + 1).cloned() }),
-            None => self.plan.get(self.at).cloned().map(|to| Switch { cut: i64::MIN, to: Some(to) }),
-        };
+        self.cut = self.clock.and_then(|clock| self.plan.get(self.at).and_then(|current| current.segment.cut).map(|cut| clock.instant(cut)));
     }
 
-    /// UR-25: at a switch, the bursts booked on the new clock are held; those on a clock still
-    /// to come stay booked, and those on one the switch passed, or that ends at its origin,
-    /// are cancelled.
-    fn adopt_later(&mut self) {
-        let domain = self.clock.map(|c| c.domain);
-        let next = self.at + usize::from(self.clock.is_some());
-        for held in std::mem::take(&mut self.later) {
-            if Some(held.domain) == domain {
-                self.held.insert(held.k, held);
-            } else if self.plan.iter().skip(next).any(|p| p.clock.is_some_and(|c| c.domain == held.domain) && p.segment.cut != Some(0)) {
-                self.later.push(held);
-            } else {
-                self.forget(&held);
-                let reason = "UR-25: its transmit clock was never started";
-                self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::ColdChange);
-            }
-        }
+    /// UR-25: a burst booked on a clock that ended at its origin is cancelled.
+    fn cancel_unstarted(&self, held: &Held) {
+        self.forget(held);
+        self.report_cancelled_burst("UR-25: its transmit clock was never started", ezsdr_radio::CancelReason::ColdChange);
     }
 
     fn forget(&self, held: &Held) {
@@ -470,24 +413,14 @@ impl Tx {
             self.chain.lose();
             return false;
         }
-        let Some(clock) = self.clock else {
-            if self.switch.is_some() {
-                self.do_switch();
-                return true;
-            }
-            return false;
-        };
+        let Some(clock) = self.clock else { return false };
         let now = self.core.now();
         let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);
         let window_cut = clock.at_or_after(now.saturating_add(window));
-        let cut_k = self.switch.as_ref().map(|s| clock.at_or_after(s.cut));
-        if self.open.is_none() {
-            if let Some(cut) = self.switch.as_ref().map(|s| s.cut) {
-                if now >= cut {
-                    self.do_switch();
-                    return true;
-                }
-            }
+        let cut_k = self.cut.map(|cut| clock.at_or_after(cut));
+        if self.open.is_none() && self.cut.is_some_and(|cut| now >= cut) {
+            self.end_clock();
+            return true;
         }
         if let Some(next) = self.open.as_ref().map(|o| o.next) {
             if clock.instant(next) < now {
@@ -859,7 +792,7 @@ impl Tx {
                 }
                 return false;
             }
-            let Some(claim) = streams.claim_owner(key, None) else { return false };
+            let Some(claim) = streams.claim_owner(key) else { return false };
             (claim, streams.stream(key).configured)
         };
         core.probe("tx_reopen_claimed", None);
@@ -894,8 +827,6 @@ impl Tx {
                 self.forget(&held);
                 self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ColdChange);
             }
-            self.retarget();
-            self.adopt_later();
         }
         if let Err(error) = &result {
             if !core.is_lost() && lock(&core.streams).stop.is_none() {
@@ -905,8 +836,8 @@ impl Tx {
         true
     }
 
-    /// RM-25: a non-terminal reopen refusal ends this segment. The initial segment has no
-    /// command to mark refused, so the owner skips it and retargets any later planned segment.
+    /// RM-25: a non-terminal reopen refusal ends the stream's clock: the open burst is cancelled and
+    /// the stream has no clock after it.
     fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) {
         if let Some(open) = self.open.take() {
             self.forget(&open.held);
@@ -915,26 +846,13 @@ impl Tx {
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
-        let before = streams.planned(key);
-        let active = streams.finished(key);
-        let failed = active
-            .or_else(|| self.plan.get(self.at).map(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by)))
-            .or_else(|| before.get(self.at).map(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by)));
-        let index = failed.and_then(|segment| before.iter().position(|planned| (planned.segment.origin, planned.segment.config, planned.segment.by) == segment));
-        let later: Vec<u64> = index.map(|index| before.iter().skip(index + 1).filter_map(|planned| planned.segment.by).collect()).unwrap_or_default();
-        if let Some(segment) = active {
-            streams.complete(key, segment);
-        }
-        if let Some(by) = failed.and_then(|(_, _, by)| by) {
-            streams.refuse(&self.core, key, by);
-        }
+        streams.finished(key);
         self.plan = streams.planned(key);
-        self.at = later.iter().find_map(|by| self.plan.iter().position(|planned| planned.segment.by == Some(*by))).unwrap_or(self.plan.len());
+        self.at = self.plan.len();
         self.version = Some(streams.version);
         self.clock = None;
         self.tracker = None;
-        self.switch = None;
-        streams.plan_read(key, false, self.plan.get(self.at).is_some(), None);
+        self.cut = None;
     }
 
     /// Always true: abandoning a burst is work, which `send`'s callers return.
@@ -1105,96 +1023,32 @@ impl Tx {
     /// Ends the open burst and cancels every held one (UR-23, UR-26).
     fn stop_now(&mut self, reason: &str, cancel_reason: ezsdr_radio::CancelReason) {
         self.end_open(true);
-        let held: Vec<Held> = std::mem::take(&mut self.held).into_values().chain(std::mem::take(&mut self.later)).collect();
-        for held in held {
+        for held in std::mem::take(&mut self.held).into_values() {
             self.forget(&held);
             self.report_cancelled_burst(reason, cancel_reason);
         }
     }
 
-    /// The transmit side of a `cold` change, at the old clock's cut (UR-25): the open burst
-    /// ends, the old clock's held bursts are cancelled, and the next segment becomes current —
-    /// its streamer reopened when its channel count changed and the direction configured,
-    /// unless uhd-control did both for an enable from no stream. A configuration the device
-    /// refuses halts the stream (RM-25).
-    fn do_switch(&mut self) {
-        let Some(switch) = self.switch.take() else { return };
+    /// The clock ends at its cut (UR-25): the open burst ends, the clock's held bursts are
+    /// cancelled, and the stream has no clock after it.
+    fn end_clock(&mut self) {
+        self.cut = None;
         self.end_open(true);
         self.read_reports_before_close();
         for (_, held) in std::mem::take(&mut self.held) {
-            self.forget(&held);
-            let reason = "cancelled by a cold change";
-            self.report_cancelled_burst(reason, ezsdr_radio::CancelReason::ColdChange);
+            self.cancel_unstarted(&held);
         }
-        let passed = self.clock.take().map(|_| self.plan.get(self.at).and_then(|planned| planned.segment.by));
-        if passed.is_some() {
+        if self.clock.take().is_some() {
             self.at += 1;
         }
-        {
-            let mut streams = lock(&self.core.streams);
-            let stream = stream_key(Dir::Tx, self.k);
-            if let Some(active) = streams.finished(stream) {
-                streams.complete(stream, active);
-            }
-        }
+        lock(&self.core.streams).finished(stream_key(Dir::Tx, self.k));
         self.tracker = None;
-        let mut interrupted = false;
-        let mut switched = false;
-        if let Some(to) = switch.to.filter(|_| !self.core.is_lost()) {
-            if to.segment.cut.is_some_and(|cut| to.segment.instant(cut).is_ok_and(|end| end <= to.segment.origin)) {
-                self.at += 1;
-                self.read(Some(passed.flatten()));
-                self.adopt_later();
-                return;
-            }
-            // UR-37: a refused switch makes no device call, and starts no clock; the record
-            // decides what an accepted one opens and configures (UR-13, UR-36).
-            let configured = if to.refused { Ok(true) } else { self.core.owner_configure(Dir::Tx, self.k, &to) };
-            self.sync_streamer();
-            match configured {
-                // UR-29: another thread found the device lost while the configuration ran;
-                // the clock is not adopted and no segment begins.
-                Ok(true) if self.core.is_lost() => self.at += 1,
-                // UR-25: a refused enable from no stream starts no clock, as the refusal below
-                // does; uhd-control reported it.
-                Ok(true) if to.refused => self.at += 1,
-                Ok(true) => {
-                    self.channels = to.set();
-                    self.clock = to.clock;
-                    self.tracker = to.clock.map(|clock| BurstTracker::new(clock.domain));
-                    self.chain.next_segment_adopted();
-                    switched = true;
-                }
-                Ok(false) => interrupted = true,
-                Err((error, claim)) => {
-                    // RM-25: the refusal halts the stream, booked by uhd-tx itself, while the
-                    // claim still holds the stream in this one section (UR-25).
-                    self.at += 1;
-                    let mut streams = lock(&self.core.streams);
-                    self.core.probe("refused_booking", Some(&streams));
-                    if let Some(by) = to.segment.by {
-                        streams.refuse(&self.core, stream_key(Dir::Tx, self.k), by);
-                    }
-                    streams.give_back(claim);
-                    drop(streams);
-                    self.core.device_failed(None, "update_parameter", &error);
-                }
-            }
-            if switched {
-                self.core.timing(json!({ "what": "tx_switch", "cut": switch.cut, "origin": to.segment.origin, "at": self.core.now() }));
-            }
-        }
-        if !interrupted {
-            self.adopt_later();
-        }
-        // #63: the segment switched from has ended.
-        self.read(Some(passed.flatten()));
     }
 
     /// UR-28, UR-36: a report queue belongs to the streamer of its generation. The record's
-    /// generation moved whenever any thread opened one — this owner's own reopen or uhd-control's
-    /// enable from no stream — and with it the correlations of the bursts in flight against the
-    /// replaced queue, which are dropped here before any report is correlated with them.
+    /// generation moved whenever the owner reopened it, and with it the correlations of the bursts
+    /// in flight against the replaced queue, which are dropped here before any report is
+    /// correlated with them.
     fn sync_streamer(&mut self) {
         let streamer = lock(&self.core.streams).stream(stream_key(Dir::Tx, self.k)).generation;
         if streamer != self.streamer {
@@ -1211,8 +1065,8 @@ impl Tx {
             return;
         }
         let stream = stream_key(Dir::Tx, self.k);
-        // UR-25: a holder other than Free (a from-none enable, say) keeps the stream; the
-        // close then makes its reports unread, rather than reading them behind the holder.
+        // UR-25: a holder other than Free keeps the stream; the close then makes its reports
+        // unread, rather than reading them behind the holder.
         if !lock(&self.core.streams).begin_read(stream) {
             return;
         }
@@ -1346,17 +1200,17 @@ mod tests {
 
     use ezsdr_kernel::event::{Action, ActionId, EventCollector, EventKind};
     use ezsdr_kernel::hash::ContentHash;
-    use ezsdr_kernel::module_api::{ActionReceiver, Dispatched, StopMode, UpdateClass};
-    use ezsdr_kernel::spec::{Scalar, Value};
+    use ezsdr_kernel::module_api::{ActionReceiver, Dispatched, StopMode};
+
     use ezsdr_kernel::stream::{BurstOpen, LatePolicy};
     use ezsdr_kernel::time::{AbsoluteDeadline, TimePoint};
 
     use super::super::control::Control;
     use super::super::mode::DescriptionExt;
-    use super::super::test_support::{HoldApply, ReportFeed, TxSpy};
+    use super::super::test_support::{ReportFeed, TxSpy};
     use super::{Held, Recovery, TX_CHANNELS_MAX, Tail, Tx, TxChain, TxCmd};
     use crate::device::{Device, Dir, FakeConfig, FakeDevice, FakeFault, Iq, Settings, TxCode, TxReport};
-    use crate::provider::core::{Clock, Core, Holder, Phase, lock, stream_key};
+    use crate::provider::core::{Clock, Core, Holder, lock, stream_key};
     use crate::provider::test_support::device_at;
     use ezsdr_radio::timeline::Channels;
 
@@ -1428,15 +1282,6 @@ mod tests {
         chain.reopen_failed();
         assert_eq!(chain.recovery(), Recovery::Halted);
         assert!(chain.next().is_none() && chain.tail().is_none());
-        chain.next_segment_adopted();
-        assert_eq!(chain.recovery(), Recovery::Clean);
-
-        chain.reopen_failed();
-        chain.next_segment_adopted();
-        assert_eq!(chain.recovery(), Recovery::Clean);
-        chain.mark_reopen_needed();
-        chain.next_segment_adopted();
-        assert_eq!(chain.recovery(), Recovery::ReopenNeeded, "segment adoption does not erase pending reopen work");
         chain.provider_stop();
         assert_eq!(chain.recovery(), Recovery::Clean);
         chain.open_device_burst(100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
@@ -1446,177 +1291,6 @@ mod tests {
         assert!(chain.next().is_none() && chain.tail().is_none());
     }
 
-    #[test]
-    fn ur_34_a_transmit_stop_during_release_wait_cancels_later_bursts() {
-        // A4/A6: a Stop booked after the owner enters its wait interrupts that turn, lets the
-        // owner process the Stop, and cancels a burst held for the move's new clock.
-        let spy = Arc::new(LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
-        let selector = BTreeMap::from([
-            (ezsdr_kernel::spec::Ident::parse("rx").unwrap(), Value::List(Vec::new())),
-            (ezsdr_kernel::spec::Ident::parse("tx").unwrap(), Value::List(vec![Scalar::from("0:A:ubx:0"), Scalar::from("0:B:ubx:0")])),
-        ]);
-        let layout = ezsdr_radio::channels::from_selector(&selector).unwrap();
-        let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
-        let (core, _time, events) = crate::provider::test_support::rig_on_description_links(spy.clone(), vec![Vec::new()], BTreeMap::new(), description);
-        spy.watch(&core);
-        let (from, to) = (stream_key(Dir::Tx, 0), stream_key(Dir::Tx, 1));
-        let ratio = ezsdr_kernel::time::Rational::new(200, 1).unwrap();
-        let line = |channels| {
-            ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream {
-                direction: ezsdr_kernel::stream::Direction::Tx,
-                origin: 0,
-                config: ezsdr_radio::timeline::Config { channels, ratio },
-                lead: 0,
-                call: 0,
-                release_window: 0,
-                allowance: 0,
-            })
-        };
-        spy.tx_open(0, &[0]).unwrap();
-        spy.tx_open(1, &[1]).unwrap();
-        let move_clock = {
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(from, line(Channels::first(1)));
-            streams.lines.insert(to, line(Channels::first(2).without(0)));
-            streams.stream_mut(from).set = crate::provider::core::DeviceSet::Open(Channels::first(1));
-            streams.stream_mut(to).set = crate::provider::core::DeviceSet::Open(Channels::first(2).without(0));
-            streams.seq = 1;
-            streams.lines.book_move(from, to, 0, Some(10_000), 0, 1, 0).unwrap();
-            streams.changed(&core, from);
-            streams.changed(&core, to);
-            streams.stream(to).clocks[1].0
-        };
-        let (to_tx, cmds) = std::sync::mpsc::channel();
-        let old_clock = lock(&core.streams).stream(to).clocks[0].0;
-        let mut tx = Tx::new(core.clone(), 1, cmds, Some(old_clock), Channels::first(2).without(0));
-        assert!(tx.read(None), "the owner reads the plan");
-        tx.later.push(held(&move_clock, 0, 1, LatePolicy::SendAsapAndFlag));
-        lock(&core.held).insert((move_clock.domain, 0));
-        let mark = spy.order().len();
-        let (entered, reached) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_release", move |_| {
-            let _ = entered.send(());
-        });
-        let (done, finished) = std::sync::mpsc::channel();
-        let (stages, stage_rx) = std::sync::mpsc::channel();
-        let owner = core
-            .device
-            .host()
-            .spawn("tx-wait-stop", move || {
-                tx.do_switch();
-                let _ = stages.send("switch returned");
-                tx.command(tx.cmds.recv().unwrap());
-                let _ = stages.send("Stop processed");
-                let _ = done.send(tx);
-            })
-            .unwrap();
-        assert!(reached.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the transmitter reached its release wait");
-        {
-            let mut streams = lock(&core.streams);
-            let seq = streams.next_seq();
-            assert!(streams.book(
-                &core,
-                to,
-                ezsdr_radio::timeline::Item {
-                    e: core.now(),
-                    seq,
-                    ready: core.now(),
-                    release: ezsdr_radio::timeline::NO_RELEASE,
-                    delivered: None,
-                    refused: false,
-                    kind: ezsdr_radio::timeline::Kind::Stop,
-                }
-            ));
-        }
-        to_tx.send(TxCmd::Stop).unwrap();
-        let switch_stage = stage_rx.recv_timeout(std::time::Duration::from_secs(10));
-        if switch_stage.is_err() {
-            core.device_lost("test watchdog: release the transmit owner");
-        }
-        let stop_stage = stage_rx.recv_timeout(std::time::Duration::from_secs(10));
-        if stop_stage.is_err() {
-            core.device_lost("test watchdog: release the transmit Stop");
-        }
-        owner.join().unwrap();
-        let tx = finished.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-        assert_eq!(switch_stage.unwrap(), "switch returned");
-        assert_eq!(stop_stage.unwrap(), "Stop processed");
-        assert_eq!(tx.at, 1, "the interrupted wait did not advance past the destination");
-        assert!(tx.clock.is_none(), "the waiting clock was not adopted");
-        assert!(tx.later.is_empty(), "Stop left a future burst held");
-        assert!(!lock(&core.held).contains(&(move_clock.domain, 0)), "Stop retained its burst reservation");
-        let calls = spy.log();
-        let order = spy.order();
-        let report = order[mark..].iter().position(|call| *call == "tx_async").expect("the old report queue was read: {order:?}");
-        let close = order[mark..].iter().position(|call| *call == "tx_close").expect("the old streamer is released: {order:?}");
-        assert!(report < close, "reports were read before close: {order:?}");
-        assert!(!calls.iter().any(|call| call == "tx_open 1 [0, 1]"), "the interrupted destination did not open: {calls:?}");
-        assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"] == "UR-26: cancelled by Stop"), "{:?}", lock(&core.rec).rejected);
-        assert_eq!(lock(&core.streams).holder(to), Holder::Free);
-        assert!(!events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
-    }
-
-    /// A switch at `cut` to the segment of `clock`, `channels` channels configured with
-    /// `settings`, or to no stream (UR-25).
-    fn switch(core: &Core, cut: i64, clock: Option<super::Clock>, channels: usize, settings: Settings) -> super::Switch {
-        switch_on(core, 0, cut, clock, channels, settings)
-    }
-
-    fn layout_settings(core: &Core, k: usize, channels: usize, settings: &Settings) -> BTreeMap<ezsdr_kernel::spec::Key, Value> {
-        let mut base = core.description.defaults();
-        if let Some(rate) = settings.rate {
-            base.insert(crate::provider::core::key(&format!("radio.tx.s{k}.sample_rate_hz")), Value::num(rate).unwrap());
-        }
-        for chan in 0..channels {
-            if let Some(freq) = settings.freq {
-                base.insert(crate::provider::core::key(&format!("radio.tx.c{chan}.frequency_hz")), Value::num(freq).unwrap());
-            }
-            if let Some(gain) = settings.gain {
-                base.insert(crate::provider::core::key(&format!("radio.tx.c{chan}.gain_db")), Value::num(gain).unwrap());
-            }
-            if let Some(antenna) = &settings.antenna {
-                base.insert(crate::provider::core::key(&format!("radio.tx.c{chan}.antenna")), Value::from(antenna.as_str()));
-            }
-        }
-        base
-    }
-
-    fn switch_on(core: &Core, k: usize, cut: i64, clock: Option<super::Clock>, channels: usize, settings: Settings) -> super::Switch {
-        let to = clock.map(|clock| super::Planned {
-            segment: ezsdr_radio::timeline::Segment {
-                origin: clock.origin,
-                cut: None,
-                config: ezsdr_radio::timeline::Config { channels: ezsdr_radio::timeline::Channels::first(channels as u32), ratio: ezsdr_kernel::time::Rational::new(clock.n as u64, 1).unwrap() },
-                by: Some(1),
-            },
-            settings: Some(Arc::new(super::super::control::ColdConfig::new(layout_settings(core, k, channels, &settings)))),
-            k,
-            refused: false,
-            clock: Some(clock),
-        });
-        if let Some(to) = &to {
-            let stream = stream_key(Dir::Tx, to.k);
-            let mut streams = lock(&core.streams);
-            if !streams.planned(stream).iter().any(|planned| planned.segment == to.segment) {
-                let mut line = ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream {
-                    direction: ezsdr_kernel::stream::Direction::Tx,
-                    origin: to.segment.origin,
-                    config: to.segment.config,
-                    lead: 0,
-                    call: 0,
-                    release_window: 0,
-                    allowance: 0,
-                });
-                line.plan = vec![to.segment];
-                streams.lines.insert(stream, line);
-            }
-            if let (Some(by), Some(settings)) = (to.segment.by, to.settings.clone()) {
-                streams.stream_mut(stream).configs.insert(by, settings);
-            }
-        }
-        super::Switch { cut, to }
-    }
-
     struct NoActions;
     impl ActionReceiver for NoActions {
         fn recv(&self) -> Option<Dispatched> {
@@ -1624,110 +1298,9 @@ mod tests {
         }
     }
 
-    /// uhd-control with no stream of either direction: what the S series drives beside the
-    /// owner for an enable from no stream (UR-13).
-    fn control_of(core: &Arc<Core>) -> super::super::control::Control {
-        let (to_tx, _cmds) = std::sync::mpsc::channel();
-        super::super::control::Control::new(
-            core.clone(),
-            Arc::new(NoActions),
-            vec![to_tx],
-            core.description.defaults(),
-            false,
-            super::super::control::Start { t0: 0, rx: vec![None; core.description.stream_count(Dir::Rx)], tx: vec![None; core.description.stream_count(Dir::Tx)] },
-        )
-    }
-
-    /// uhd-control books a transmit-channel membership change at `ms` from no stream
-    /// (UR-13): the owner is idle, as uhd-control finds it between two segments.
-    fn tx_channels_from_none(control: &mut super::super::control::Control, core: &Core, id: u64, ms: i64, channels: &[u32]) {
-        let at = core.ticks(ms * 1_000_000);
-        for channel in 0..2 {
-            let key = crate::provider::core::key(&format!("radio.tx.c{channel}.stream"));
-            let value = Value::from(if channels.contains(&channel) { 0 } else { -1 });
-            if control.config_at(at).get(&key) == Some(&value) {
-                continue;
-            }
-            lock(&core.streams).search(stream_key(Dir::Tx, 0), false);
-            control.book(Dispatched::new(
-                ActionId(id * 2 + u64::from(channel)),
-                Action::UpdateParameter { target: super::super::test_support::target_of(&core.id), key, value, class: UpdateClass::Cold, at: Some(AbsoluteDeadline::new(core.at(at))) },
-                Some(core.id.clone()),
-            ));
-        }
-    }
-
-    /// The transmit plan as its owner reads it.
-    fn plan_of(core: &Core, dir: Dir) -> Vec<super::super::control::Planned> {
-        lock(&core.streams).planned(stream_key(dir, 0))
-    }
-
-    #[test]
-    fn ur_13_a_transmit_switch_is_compared_with_the_stored_outcome() {
-        // UR-13 (Sol 3): a transmit segment uhd-control did not configure is opened at its cut
-        // by uhd-tx, and that open compares the rate set again, which returns the outcome the
-        // direction's first comparison stored: a refusal refuses the segment and nothing is
-        // configured. The state is set up here directly: uhd-tx meets it only inside its own
-        // switch, which no test can hold open.
-        let (core, device, _, events) = super::super::test_support::rig();
-        // The first comparison refuses (a rate read that fails); every later open sees it.
-        assert!(core.check_rates(Dir::Tx, 99).is_err());
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings::default()));
-        tx.do_switch();
-        assert!(device.calls().iter().all(|call| !call.starts_with("apply")), "{:?}", device.calls());
-        let refused: Vec<String> = events
-            .drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
-            .into_iter()
-            .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED)
-            .filter_map(|event| event.payload["reason"].as_str().map(str::to_owned))
-            .collect();
-        assert_eq!(refused.len(), 1, "{refused:?}");
-        assert!(refused[0].starts_with("UR-13:"), "{refused:?}");
-    }
-
-    #[test]
-    fn ur_13_a_transmit_from_none_segment_the_owner_never_started_is_opened_again() {
-        // UR-13 (S2): uhd-control opens and configures B = {0,1} from no stream, its owner never
-        // having begun it, and a later enable from no stream opens C = {0}. The owner opens each
-        // set itself before it adopts the segment: no record of an earlier open stands for the
-        // set a segment runs.
-        let (core, device, time, _) = super::super::test_support::rig();
-        let mut control = control_of(&core);
-        // c1 is already assigned in the layout, but the stream is not armed; c0's membership
-        // change makes the from-none control open cover the complete B set.
-        control.config.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(0));
-        for (id, at, channels) in [(2, 100, &[0, 1][..]), (3, 200, &[][..]), (4, 300, &[0][..])] {
-            tx_channels_from_none(&mut control, &core, id, at, channels);
-        }
-        let control_opens: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("tx_open")).collect();
-        assert_eq!(control_opens, ["tx_open 0 [0, 1]", "tx_open 0 [0]"], "{control_opens:?}");
-        let planned = plan_of(&core, Dir::Tx);
-        let b = planned.iter().find(|planned| planned.segment.config.channels == Channels::first(2)).expect("B's segment");
-        let c = planned.iter().find(|planned| planned.segment.config.channels == Channels::first(1)).expect("C's segment");
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.read(None);
-        assert_eq!(lock(&core.streams).phase(stream_key(Dir::Tx, 0)), Phase::Pending, "a switch waits for the owner to make it");
-        assert!(tx.step(), "B's switch");
-        assert_eq!(tx.clock, b.clock, "B is adopted after the owner's own open");
-        assert_eq!(lock(&core.streams).active(stream_key(Dir::Tx, 0)), Some((b.segment.origin, b.segment.config, b.segment.by)), "B is the active segment");
-        let cut = b.clock.expect("B's clock").instant(b.segment.cut.expect("the empty change cuts B"));
-        time.advance_to(core.at(cut)).unwrap();
-        tx.read(None);
-        assert!(tx.step(), "the zero-duration intermediate membership change is skipped");
-        assert_eq!(lock(&core.streams).phase(stream_key(Dir::Tx, 0)), Phase::Pending, "the skipped change leaves the next switch waiting");
-        assert!(tx.step(), "C's switch");
-        assert_eq!(tx.clock, c.clock, "C is adopted after the owner's own open");
-        {
-            let streams = lock(&core.streams);
-            assert_eq!(streams.active(stream_key(Dir::Tx, 0)), Some((c.segment.origin, c.segment.config, c.segment.by)), "C is the active segment");
-            assert!(streams.stream(stream_key(Dir::Tx, 0)).completed.contains(&(b.segment.origin, b.segment.config, b.segment.by)), "B is recorded as finished");
-        }
-        let opens: Vec<String> = device.calls().into_iter().filter(|call| call.starts_with("tx_open")).collect();
-        assert_eq!(opens, ["tx_open 0 [0, 1]", "tx_open 0 [0]", "tx_open 0 [0, 1]", "tx_open 0 [0]"], "{opens:?}");
+    /// Transmit stream 0's clock, registered at `arm` (RM-25).
+    fn tx_clock(core: &Core) -> Clock {
+        lock(&core.streams).stream(stream_key(Dir::Tx, 0)).clocks[0]
     }
 
     #[test]
@@ -1751,7 +1324,7 @@ mod tests {
         let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(1));
         tx.chain.mark_reopen_needed();
         let key = stream_key(Dir::Tx, 0);
-        let claim = lock(&core.streams).claim_from_none(key).expect("test holds the stream for from-none");
+        let claim = lock(&core.streams).claim_owner(key).expect("test holds the stream");
         let before = device.calls();
         assert!(!tx.pass(), "a held stream claim defers the reopen for an idle turn");
         assert!(tx.chain.needs_reopen(), "a deferred reopen remains pending");
@@ -1826,7 +1399,7 @@ mod tests {
                 assert!(claim_reached.unwrap().recv_timeout(Wall::from_secs(10)).is_ok(), "recovery did not reach the post-claim gate");
             }
             let key = stream_key(Dir::Tx, 0);
-            assert_eq!(lock(&core.streams).holder(key), Holder::Owner { seq: None }, "the owner holds its claim at the gate");
+            assert_eq!(lock(&core.streams).holder(key), Holder::Owner, "the owner holds its claim at the gate");
 
             if stop {
                 let mut streams = lock(&core.streams);
@@ -2027,7 +1600,10 @@ mod tests {
         for fault in [FakeFault::TxOpenFails(1), FakeFault::RatesMismatch(0)] {
             let device = Arc::new(FakeDevice::new(FakeConfig { faults: vec![fault.clone()], ..FakeConfig::default() }));
             let (core, _time, mut tx, clock) = recovery_rig(device.clone());
-            assert!(tx.read(None), "the initial segment is active before recovery ({fault:?})");
+            {
+                let mut streams = lock(&core.streams);
+                assert!(tx.plan_section(&mut streams, stream_key(Dir::Tx, 0)), "the initial segment is active before recovery ({fault:?})");
+            }
             tx.chain.mark_reopen_needed();
             let target = clock.at_or_after(core.now() + core.ticks(60_000_000));
             tx.held.insert(target, held(&clock, target, 3, LatePolicy::DropAndFlag));
@@ -2036,7 +1612,6 @@ mod tests {
             assert!(tx.pass(), "the failed reopen is handled ({fault:?})");
             assert!(!tx.chain.needs_reopen(), "recovery is no longer pending ({fault:?})");
             assert!(tx.clock.is_none(), "the initial segment was halted ({fault:?})");
-            assert_eq!(lock(&core.streams).phase(stream_key(Dir::Tx, 0)), Phase::Idle, "a halted segment stays active ({fault:?})");
             assert!(tx.held.is_empty(), "the held burst was cancelled ({fault:?})");
             assert!(!lock(&core.held).contains(&(clock.domain, target)), "the held reservation was released ({fault:?})");
             let at = clock.instant(target);
@@ -2046,57 +1621,6 @@ mod tests {
             let rejected = lock(&core.rec).rejected.clone();
             assert!(rejected.iter().any(|row| row["reason"] == "UR-22: cancelled because the TX streamer could not be reopened"), "the cancellation was recorded ({fault:?}): {rejected:?}");
         }
-    }
-
-    #[test]
-    fn ur_22_halted_tx_chain_resets_only_when_the_next_segment_is_adopted() {
-        let make_halted = || {
-            let device = Arc::new(FakeDevice::new(FakeConfig::default()));
-            let (core, _, tx, old) = recovery_rig(device.clone());
-            let mut tx = tx;
-            tx.chain.advance_front(old.domain, 80);
-            tx.chain.reopen_failed();
-            (core, device, tx, old)
-        };
-
-        let (core, device, mut tx, old) = make_halted();
-        let next = core.register(Dir::Tx, 100, 30_000_000).unwrap();
-        tx.chain.advance_front(old.domain, 10_000_000);
-        let old_target = old.at_or_after(core.now() + core.ticks(60_000_000));
-        tx.held.insert(old_target, held(&old, old_target, 1, LatePolicy::DropAndFlag));
-        lock(&core.held).insert((old.domain, old_target));
-        let new_target = next.at_or_after(next.origin + core.ticks(30_000_000));
-        tx.later.push(held(&next, new_target, 1, LatePolicy::DropAndFlag));
-        lock(&core.held).insert((next.domain, new_target));
-        tx.switch = Some(switch(&core, 20_000_000, Some(next), 1, Settings::default()));
-        tx.do_switch();
-        assert_eq!(tx.chain.recovery(), Recovery::Clean, "successful segment adoption clears Halted");
-        assert_eq!(tx.clock, Some(next));
-        assert_eq!(tx.chain.front(), Some((old.domain, 10_000_000)), "cold switching leaves the stored old-domain front alone");
-        assert!(!lock(&core.held).contains(&(old.domain, old_target)), "the old-segment reservation is settled");
-        assert!(lock(&core.held).contains(&(next.domain, new_target)), "the adopted segment's reservation is retained");
-        assert!(tx.pass(), "the adopted segment does not dispatch its burst");
-        let calls = device.calls();
-        assert!(calls.iter().all(|call| !call.contains(&format!("at={} sob=true", old.instant(old_target)))), "no old-segment payload is sent: {calls:?}");
-        assert!(calls.iter().any(|call| call.contains(&format!("at={} sob=true", next.instant(new_target)))), "the new segment dispatches its burst: {calls:?}");
-        assert_eq!(device.transmitted(next.instant(new_target), 1), [Some([0.25, 0.0])]);
-
-        let (core, _, mut refused, _) = make_halted();
-        let next = core.register(Dir::Tx, 100, 30_000_000).unwrap();
-        let mut refused_switch = switch(&core, 20_000_000, Some(next), 1, Settings::default());
-        refused_switch.to.as_mut().unwrap().refused = true;
-        refused.switch = Some(refused_switch);
-        refused.do_switch();
-        assert_eq!(refused.chain.recovery(), Recovery::Halted, "a refused switch does not clear Halted");
-        assert!(refused.clock.is_none());
-
-        let (core, _, mut interrupted, _) = make_halted();
-        let next = core.register(Dir::Tx, 100, 30_000_000).unwrap();
-        interrupted.switch = Some(switch(&core, 20_000_000, Some(next), 1, Settings::default()));
-        let claim = lock(&core.streams).claim_from_none(stream_key(Dir::Tx, 0)).expect("the switch is interrupted by an external owner");
-        interrupted.do_switch();
-        assert_eq!(interrupted.chain.recovery(), Recovery::Halted, "an interrupted switch does not clear Halted");
-        lock(&core.streams).give_back(claim);
     }
 
     #[test]
@@ -2165,184 +1689,6 @@ mod tests {
             let payload = calls.iter().enumerate().skip(flush + 1).find(|(_, call)| call.contains(&target_send)).map(|(index, _)| index).expect("later burst payload");
             assert!(reopened < flush && flush < payload, "reopen/T3/payload order (failed close={fail_stop_close}): {calls:?}");
         }
-    }
-
-    #[test]
-    fn ur_25_a_refused_enable_with_a_later_cold_has_no_tx_clock() {
-        // UR-25: a later Cold keeps the refused transmit segment alive with positive duration,
-        // so the owner must not adopt its clock before switching to the next segment.
-        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Stream};
-        let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(0, &[0]).unwrap();
-        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
-        let key = stream_key(Dir::Tx, 0);
-        {
-            let mut streams = lock(&core.streams);
-            streams.stream_mut(key).clocks = vec![(c0, false)];
-            let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
-            streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-            assert!(streams.book(&core, key, Item { e: core.ticks(100_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: true, kind: Kind::Cold(config(100)) }));
-        }
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(1));
-        tx.at = 1;
-        tx.read(None);
-        {
-            let mut streams = lock(&core.streams);
-            streams.stream_mut(key).configs.insert(2, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-            assert!(streams.book(&core, key, Item { e: core.ticks(200_000_000), seq: 2, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
-        }
-        tx.read(None);
-        let refused = tx.plan.iter().find(|planned| planned.segment.by == Some(1)).expect("the refused segment is still planned");
-        let cut = refused.segment.cut.expect("the later Cold gives it a cut");
-        assert!(refused.segment.instant(cut).unwrap() > refused.segment.origin, "the refused segment has positive duration");
-        assert!(tx.plan.iter().any(|planned| planned.segment.by == Some(2)), "the later Cold remains planned");
-        assert!(tx.step(), "the refused enable's switch");
-        assert!(tx.clock.is_none(), "a refused enable starts no clock");
-        assert!(tx.step(), "the second change's switch");
-        let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 2, "{calls:?}");
-        assert!(tx.clock.is_some(), "the second change starts its clock");
-    }
-
-    #[test]
-    fn ur_13_a_refused_comparison_is_repeated_at_the_next_switch() {
-        // UR-13 (Sol re-review 1): a switch whose rate comparison is refused does not record its
-        // set as open. The next switch to the same set opens the streamer again, and its
-        // comparison returns the outcome stored for the direction: refused again, with no clock
-        // and no configuration applied.
-        let (core, device, _, _) = super::super::test_support::rig();
-        assert!(core.check_rates(Dir::Tx, 99).is_err());
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        for switch_no in 0..2 {
-            let clock = core.register(Dir::Tx, 200, 0).unwrap();
-            tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings::default()));
-            tx.do_switch();
-            assert!(tx.clock.is_none(), "switch {switch_no} starts no clock");
-        }
-        let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 2, "{calls:?}");
-        assert!(calls.iter().all(|call| !call.starts_with("apply")), "{calls:?}");
-    }
-
-    #[test]
-    fn ur_25_a_refused_transmit_switch_makes_no_device_call() {
-        // UR-25 (S18 for transmit, the 1a rule): a refused switch makes no device call, so the
-        // record of the set the streamer holds stands, and the switch back to that set opens
-        // nothing.
-        let (core, device, _, _) = super::super::test_support::rig();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        for (channels, refused) in [(1, false), (2, true), (1, false)] {
-            let clock = core.register(Dir::Tx, 200, 0).unwrap();
-            tx.switch = Some(switch(&core, 0, Some(clock), channels, Settings::default()));
-            if refused {
-                tx.switch.as_mut().unwrap().to.as_mut().unwrap().refused = true;
-            }
-            let before = device.calls().len();
-            tx.do_switch();
-            if refused {
-                assert_eq!(device.calls().len(), before, "{:?}", device.calls());
-            }
-        }
-        let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "{calls:?}");
-    }
-
-    #[test]
-    fn ur_13_a_failed_configure_by_the_owner_is_configured_again_without_reopen() {
-        // UR-13 (S8): a configure of the transmit owner that fails leaves the streamer open; the
-        // next switch to the same set configures it without a second open.
-        let inner = Arc::new(FakeDevice::new(FakeConfig::default()));
-        let device: Arc<dyn crate::device::Device> = Arc::new(super::super::test_support::ApplyFails::new(inner.clone(), Dir::Tx, None));
-        let (core, _, _) = super::super::test_support::rig_on(device, vec![], 2_000);
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        for _ in 0..2 {
-            let clock = core.register(Dir::Tx, 200, 0).unwrap();
-            tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings { rate: Some(2e6), ..Settings::default() }));
-            tx.do_switch();
-        }
-        let calls = inner.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "{calls:?}");
-        // The first switch's configure is the refusal: only the second one reaches the device.
-        assert_eq!(calls.iter().filter(|call| call.starts_with("apply")).count(), 1, "{calls:?}");
-    }
-
-    #[test]
-    fn ur_25_a_refused_transmit_clock_is_not_adopted() {
-        // UR-25 (S14): a refused transmit change to {0} registers its clock, but the owner does
-        // not adopt it: no open, no configure, no clock. The same set, changed again without the
-        // refusal, is opened and adopted.
-        let (core, device, _, _) = super::super::test_support::rig();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let refused = core.register(Dir::Tx, 200, 0).unwrap();
-        tx.switch = Some(switch(&core, 0, Some(refused), 1, Settings::default()));
-        tx.switch.as_mut().unwrap().to.as_mut().unwrap().refused = true;
-        tx.do_switch();
-        assert!(tx.clock.is_none(), "a refused clock is not adopted");
-        assert!(device.calls().is_empty(), "{:?}", device.calls());
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings { rate: Some(2e6), ..Settings::default() }));
-        tx.do_switch();
-        let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "{calls:?}");
-        assert!(tx.clock.is_some(), "the accepted change starts its clock");
-    }
-
-    #[test]
-    fn ur_25_a_refused_last_transmit_change_ends_idle() {
-        // UR-25 (Sol's plan review, P6): a refused change with nothing after it completes the
-        // segment it switched from, starts no clock, and leaves the owner idle.
-        use ezsdr_radio::timeline::{Channels, Config, Line, Segment, Stream};
-        let (core, device, _, _) = super::super::test_support::rig();
-        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
-        let key = stream_key(Dir::Tx, 0);
-        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let c1 = core.register(Dir::Tx, 200, 0).unwrap();
-        let e = core.ticks(1_000_000_000);
-        {
-            let mut streams = lock(&core.streams);
-            streams.stream_mut(key).clocks = vec![(c0, false), (c1, false)];
-            let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            let mut line = Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 });
-            line.plan = vec![Segment { origin: 0, cut: Some(c0.at_or_after(e)), config: config(200), by: None }, Segment { origin: e, cut: None, config: config(100), by: Some(1) }];
-            streams.lines.insert(key, line);
-        }
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
-        tx.read(None);
-        let switch = tx.switch.as_mut().expect("the change's switch");
-        assert_eq!(switch.cut, e, "the first segment's cut is the next segment's origin");
-        switch.to.as_mut().expect("the change's target").refused = true;
-        tx.do_switch();
-        let streams = lock(&core.streams);
-        assert!(tx.clock.is_none(), "a refused change starts no clock");
-        assert!(tx.switch.is_none(), "nothing follows");
-        assert_eq!(streams.phase(key), Phase::Idle, "no clock and no switch");
-        assert!(streams.active(key).is_none());
-        assert!(streams.stream(key).completed.contains(&(0, config(200), None)), "the segment switched from is recorded");
-        assert!(device.calls().iter().all(|call| !call.starts_with("tx_open")), "a refused change makes no device call: {:?}", device.calls());
-    }
-
-    #[test]
-    fn ur_13_a_switch_to_the_verified_set_opens_nothing() {
-        // UR-13 (Sol re-review 3): a switch to the set the last successful switch opened and
-        // compared does not open the streamer again.
-        let (core, device, _, _) = super::super::test_support::rig();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        for _ in 0..2 {
-            let clock = core.register(Dir::Tx, 200, 0).unwrap();
-            tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings::default()));
-            tx.do_switch();
-        }
-        let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "{calls:?}");
     }
 
     #[test]
@@ -2488,213 +1834,31 @@ mod tests {
 
     #[test]
     fn ur_25_uhd_tx_reads_the_plan_again_when_it_changes() {
-        // UR-25: a transmit change booked after uhd-tx read the plan reaches it at its next
-        // read: the switch at the plan's cut, to the clock the booking registered.
-        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Stream};
+        // UR-25: an end booked after uhd-tx read the plan reaches it at its next read: the cut
+        // of the clock that has not begun, at its origin.
+        use ezsdr_radio::timeline::{Channels, Config, Line, Stream};
         let (core, device, _, _) = super::super::test_support::rig();
         device.tx_open(0, &[0]).unwrap();
-        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
+        let origin = core.ticks(1_000_000_000);
+        let c0 = core.register(Dir::Tx, 200, origin).unwrap();
+        let config = Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() };
         {
             let mut streams = lock(&core.streams);
-            streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![(c0, false)];
+            streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![c0];
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams
-                .lines
-                .insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
+            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin, config, lead, call: 0, release_window: 0, allowance: 0 }));
         }
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
-        tx.read(None);
-        assert!(tx.switch.is_none());
-        {
-            let streams = lock(&core.streams);
-            assert_eq!(streams.phase(stream_key(Dir::Tx, 0)), Phase::Active { segment: Some((0, config(200), None)), delivered: None }, "the current clock's segment");
-        }
-        let e = core.ticks(1_000_000_000);
-        {
+        let read = |tx: &mut Tx| {
             let mut streams = lock(&core.streams);
-            streams.stream_mut(stream_key(Dir::Tx, 0)).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-            assert!(streams.book(&core, stream_key(Dir::Tx, 0), Item { e, seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
-        }
-        let c1 = lock(&core.streams).stream(stream_key(Dir::Tx, 0)).clocks[1].0;
-        tx.read(None);
-        let switch = tx.switch.as_ref().expect("a switch");
-        assert_eq!(switch.cut, e);
-        assert_eq!(switch.to.as_ref().and_then(|to| to.clock), Some(c1));
-        {
-            let streams = lock(&core.streams);
-            assert!(!streams.is_idle(stream_key(Dir::Tx, 0)), "a pending switch keeps the current segment active");
-            assert_eq!(streams.active(stream_key(Dir::Tx, 0)), Some((0, config(200), None)));
-        }
-    }
-
-    #[test]
-    fn ur_25_a_transmit_read_sets_idle_pending_or_active() {
-        // UR-25: a read with no clock and nothing to switch to leaves the owner idle; one
-        // with a clock is active at the plan's current segment (none when the plan has none);
-        // one with no clock but a switch leaves it pending the switch.
-        let (core, _device, _, _) = super::super::test_support::rig();
-        let key = stream_key(Dir::Tx, 0);
-        let config = ezsdr_radio::timeline::Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() };
-
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.read(None);
-        assert_eq!(lock(&core.streams).phase(key), Phase::Idle, "nothing to begin");
-
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        tx.read(None);
-        assert_eq!(lock(&core.streams).phase(key), Phase::Active { segment: None, delivered: None }, "a clock with no planned segment");
-
-        {
-            let mut streams = lock(&core.streams);
-            let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams.lines.insert(
-                key,
-                ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config, lead, call: 0, release_window: 0, allowance: 0 }),
-            );
-        }
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.read(None);
-        assert!(tx.switch.is_some(), "the line's first segment is the switch");
-        assert_eq!(lock(&core.streams).phase(key), Phase::Pending, "a change waits for its switch");
-
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        tx.read(None);
-        let streams = lock(&core.streams);
-        assert_eq!(streams.phase(key), Phase::Active { segment: Some((0, config, None)), delivered: None });
-        assert_eq!(streams.first_undelivered(key), None, "a transmit stream has no floor");
-        assert!(!streams.is_idle(key));
-    }
-
-    #[test]
-    fn ur_23_a_refused_transmit_change_ends_its_clock_at_its_origin() {
-        // UR-23, VH-2: when the owner books a transmit change as refused, the clock its booking
-        // registered ends at its origin at once, with no later booking needed.
-        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Stream};
-        let (core, device, _, _) = super::super::test_support::rig();
-        device.tx_open(0, &[0]).unwrap();
-        let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
-        let mut streams = lock(&core.streams);
-        let key = stream_key(Dir::Tx, 0);
-        streams.stream_mut(key).clocks = vec![(c0, false)];
-        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-        streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
-        streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-        assert!(streams.book(&core, key, Item { e: core.ticks(1_000_000_000), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) }));
-        let c1 = streams.stream(key).clocks[1].0;
-        assert!(streams.refuse(&core, key, 1));
-        drop(streams);
-        let ended = core.clocks.sample_clock_records().into_iter().find(|r| r.domain == c1.domain).and_then(|r| r.ended_at.map(|t| t.ticks_in(r.root).unwrap()));
-        assert_eq!(ended, Some(c1.origin));
-    }
-
-    #[test]
-    fn ur_25_a_burst_on_a_later_clock_survives_an_earlier_switch() {
-        // UR-25 (KC-21a): at a switch, a burst booked on a clock the plan starts later stays
-        // booked, and is held once its clock is current; a refused switch, which uhd-tx books
-        // itself, cancels only its own clock's bursts.
-        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Stream};
-        for refused in [false, true] {
-            let faults = if refused { vec![crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 }] } else { Vec::new() };
-            let (core, device, _, _) = super::super::test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
-            device.tx_open(0, &[0]).unwrap();
-            let s = |n: i64| core.ticks(n * 1_000_000_000);
-            let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-            let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
-            {
-                let mut streams = lock(&core.streams);
-                let key = stream_key(Dir::Tx, 0);
-                streams.stream_mut(key).clocks = vec![(c0, false)];
-                let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-                streams.lines.insert(key, Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
-                for (seq, e, n) in [(1, s(1), 100), (2, s(2), 200), (3, s(3), 100)] {
-                    streams.stream_mut(key).configs.insert(seq, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-                    assert!(streams.book(&core, key, Item { e, seq, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(n)) }));
-                }
-            }
-            let (c1, c2) = {
-                let streams = lock(&core.streams);
-                let key = stream_key(Dir::Tx, 0);
-                (streams.stream(key).clocks[1].0, streams.stream(key).clocks[2].0)
-            };
-            let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
-            tx.read(None);
-            for clock in [c1, c2] {
-                lock(&core.held).insert((clock.domain, 100));
-                tx.command(TxCmd::Burst(held(&clock, 100, 10, LatePolicy::SendAsapAndFlag)));
-            }
-            tx.do_switch();
-            let case = format!("refused {refused}");
-            {
-                let streams = lock(&core.streams);
-                if refused {
-                    assert_eq!(streams.phase(stream_key(Dir::Tx, 0)), Phase::Pending, "{case}: the refused change waits for the next one");
-                } else {
-                    let adopted = streams.planned(stream_key(Dir::Tx, 0))[1].segment;
-                    assert_eq!(
-                        streams.phase(stream_key(Dir::Tx, 0)),
-                        Phase::Active { segment: Some((adopted.origin, adopted.config, adopted.by)), delivered: None },
-                        "{case}: the adopted change is the active segment"
-                    );
-                }
-            }
-            assert_eq!(tx.clock, (!refused).then_some(c1), "{case}");
-            assert_eq!(tx.later.iter().map(|h| h.domain).collect::<Vec<_>>(), [c2.domain], "{case}");
-            assert_eq!(tx.held.len(), usize::from(!refused), "{case}");
-            assert_eq!(lock(&core.rec).rejected.iter().filter(|r| r["kind"] == "tx_burst").count(), usize::from(refused), "{case}");
-            let booked = lock(&core.streams).line(stream_key(Dir::Tx, 0)).unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
-            assert_eq!(booked, if refused { vec![1] } else { Vec::new() }, "{case}");
-            tx.held.clear();
-            tx.do_switch();
-            assert_eq!(tx.clock, Some(c2), "{case}");
-            assert!(tx.later.is_empty(), "{case}");
-            assert_eq!(tx.held.len(), 1, "{case}");
-            // #63: switching from the second change's clock prunes the first change.
-            tx.held.clear();
-            tx.do_switch();
-            {
-                let streams = lock(&core.streams);
-                let planned = streams.planned(stream_key(Dir::Tx, 0));
-                let last = planned[3].segment;
-                let second = planned[2].segment;
-                assert_eq!(
-                    streams.phase(stream_key(Dir::Tx, 0)),
-                    Phase::Active { segment: Some((last.origin, last.config, last.by)), delivered: None },
-                    "{case}: the third change is active, not idle"
-                );
-                assert!(streams.stream(stream_key(Dir::Tx, 0)).completed.contains(&(second.origin, second.config, second.by)), "{case}: the segment switched from is recorded");
-            }
-            let items: Vec<u64> = lock(&core.streams).line(stream_key(Dir::Tx, 0)).unwrap().items.iter().map(|item| item.seq).collect();
-            assert_eq!(items, [2, 3], "{case}");
-        }
-    }
-
-    #[test]
-    fn ur_21_first_dispatch_cannot_move_past_a_cold_switch() {
-        let (core, device, time, _) = super::super::test_support::rig();
-        device.tx_open(0, &[0]).unwrap();
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        lock(&core.held).insert((clock.domain, 17_000));
-        tx.command(TxCmd::Burst(held(&clock, 17_000, 10_000, LatePolicy::SendAsapAndFlag)));
-        tx.switch = Some(switch(&core, core.ticks(20_000_000), None, 0, Settings::default()));
-        time.advance_to(core.at(core.ticks(19_000_000))).unwrap();
-        assert!(tx.step());
-        assert!(tx.open.is_none());
-        assert!(!tx.step());
-        time.advance_to(core.at(core.ticks(20_000_000))).unwrap();
-        assert!(tx.step());
-        assert!(lock(&core.held).is_empty());
-        assert!(!device.calls().iter().any(|c| c.starts_with("tx_send ")));
+            assert!(tx.plan_section(&mut streams, stream_key(Dir::Tx, 0)));
+        };
+        read(&mut tx);
+        assert!(tx.cut.is_none());
+        lock(&core.streams).end(&core, core.ticks(500_000_000), false, false);
+        read(&mut tx);
+        assert_eq!(tx.cut, Some(origin), "the clock that has not begun ends at its origin");
     }
 
     #[test]
@@ -2813,7 +1977,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, cmds) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             if case == "booked together" {
                 book_burst(&mut control, &core, 1, clock, 4_000, &a_wave, true, LatePolicy::DropAndFlag);
@@ -2872,7 +2036,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 9_999, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -2914,7 +2078,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 5_500, &a_wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -2986,72 +2150,6 @@ mod tests {
     }
 
     #[test]
-    fn ur_25_cold_change_does_not_inherit_old_tx_front() {
-        let t0 = 2_000_000_000;
-        let a_samples = vec![[0.25, 0.0]; 10_000];
-        let b_samples = vec![[0.75, -0.25]; 2_000];
-        let (a_wave, a_bytes) = waveform_input("old_clock", &a_samples);
-        let (b_wave, b_bytes) = waveform_input("new_clock", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
-        let device = Arc::new(FakeDevice::new(config));
-        let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
-        let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
-        let frozen = crate::provider::test_support::Frozen::of(&device);
-        device_at(&core, &time, &device, core.ticks(t0));
-        device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
-        let (mut control, cmds) = booking_control_at(&core, core.ticks(t0));
-        let old = plan_of(&core, Dir::Tx)[0].clock.unwrap();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(1));
-        book_burst(&mut control, &core, 1, old, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
-        drain_tx(&mut tx);
-        while tx.step() {}
-        assert_eq!(tx.open.as_ref().unwrap().next, 9_500, "the old clock's first unhanded sample");
-        device_at(&core, &time, &device, core.ticks(t0 + 8_000_000));
-        assert!(tx.step(), "the finite old-clock burst's last buffer was not handed");
-        device_at(&core, &time, &device, core.ticks(t0 + 10_000_000));
-        assert!(tx.step(), "the finite old-clock burst did not end");
-        assert_eq!(tx.chain.front(), Some((old.domain, 12_002)));
-
-        control.config.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
-        control.book(Dispatched::new(
-            ActionId(3),
-            Action::UpdateParameter {
-                target: super::super::test_support::target_of(&core.id),
-                key: crate::provider::core::key("radio.tx.s0.sample_rate_hz"),
-                value: Value::num(2_000_000.0).unwrap(),
-                class: UpdateClass::Cold,
-                at: Some(AbsoluteDeadline::new(core.at(core.ticks(t0 + 15_000_000)))),
-            },
-            Some(core.id.clone()),
-        ));
-        assert_eq!(control.config_at(core.ticks(t0 + 15_000_000))[&crate::provider::core::key("radio.tx.s0.sample_rate_hz")], Value::num(2_000_000.0).unwrap());
-        assert_eq!(plan_of(&core, Dir::Tx).len(), 2, "the cold clock was not booked: {:?}", lock(&core.rec).rejected);
-        assert!(tx.read(None));
-        assert!(tx.switch.is_some(), "the owner did not read the cut");
-        let switch = tx.switch.as_ref().unwrap().cut;
-        device_at(&core, &time, &device, switch);
-        drop(frozen);
-        assert!(tx.step(), "the transmit owner did not switch clocks");
-        let _frozen_after_open = crate::provider::test_support::Frozen::of(&device);
-        let new = tx.clock.expect("the new transmit clock");
-        assert_ne!(new.domain, old.domain);
-        let target = 6_000;
-        let old_front = tx.chain.front().unwrap().1;
-        let target_root = core.clocks.convert(TimePoint::new(new.domain, target), core.root).unwrap().floor().ticks_in(core.root).unwrap();
-        let old_front_root = core.clocks.convert(TimePoint::new(old.domain, old_front), core.root).unwrap().floor().ticks_in(core.root).unwrap();
-        assert!(target_root > old_front_root, "the new target is later in root time; SampleClock ticks are not compared");
-        book_burst(&mut control, &core, 4, new, target, &b_wave, false, LatePolicy::DropAndFlag);
-        drain_tx(&mut tx);
-        let now = new.instant(target) - core.ticks(2_000_000);
-        assert!(now >= switch, "the new-clock dispatch must not move device time backwards");
-        device_at(&core, &time, &device, now);
-        assert!(tx.step(), "the new-clock burst did not hand over");
-        assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR));
-        assert!(device.calls().iter().any(|call| call.contains(&format!("at={}", new.instant(target))) && call.contains("sob=true")), "the old clock's front was ignored: {:?}", device.calls());
-    }
-
-    #[test]
     fn ur_21_a_target_after_a_completed_burst_is_on_time() {
         let a_samples = vec![[0.25, 0.0]; 2_000];
         let b_samples = vec![[0.75, -0.25]; 1_000];
@@ -3066,7 +2164,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.unwrap();
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3238,7 +2336,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.unwrap();
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 5_000, &wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3263,7 +2361,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.unwrap();
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 3_000, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3294,7 +2392,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.unwrap();
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3328,7 +2426,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.unwrap();
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3369,7 +2467,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3424,7 +2522,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, cmds) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.unwrap();
+            let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
@@ -3467,7 +2565,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, cmds) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             book_burst(&mut control, &core, 1, clock, 2_500, &a_wave, true, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
@@ -3519,7 +2617,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 10_000, &b_wave, false, LatePolicy::DropAndFlag);
         book_burst(&mut control, &core, 2, clock, 9_999, &a_wave, false, LatePolicy::DropAndFlag);
@@ -3566,7 +2664,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_000, &wave, true, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3599,7 +2697,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3640,7 +2738,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, cmds) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
@@ -3681,7 +2779,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
         let (mut control, cmds) = booking_control(&core);
-        let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+        let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
@@ -3754,7 +2852,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, handed) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let clock = tx_clock(&core);
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             std::mem::forget(_to_tx);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -3938,19 +3036,18 @@ mod tests {
     }
 
     #[test]
-    fn ur_29_eob_loss_during_switch_stops_device_calls() {
+    fn ur_29_eob_loss_at_the_cut_stops_device_calls() {
         let (core, device, _, _) = super::super::test_support::rig();
         device.tx_open(0, &[0]).unwrap();
         let old = core.register(Dir::Tx, 200, 0).unwrap();
         core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
-        let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(1));
         tx.chain.open_device_burst(100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
-        tx.switch = Some(switch(&core, 20_000_000, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
-        *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError { lost: true, message: "controlled EOB loss during switch".to_owned() });
+        tx.cut = Some(20_000_000);
+        *device.eob_error.lock().unwrap() = Some(crate::device::DeviceError { lost: true, message: "controlled EOB loss at the cut".to_owned() });
         let before = device.calls().len();
-        tx.do_switch();
+        tx.end_clock();
         tx.reports(std::time::Duration::ZERO);
         assert!(core.is_lost());
         assert_eq!(&device.calls()[before..], &["mark_lost"]);
@@ -3983,9 +3080,9 @@ mod tests {
         assert_eq!(old.at_or_after(cut), cut / old.n);
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(1));
-        tx.switch = Some(switch(&core, cut, None, 0, Settings::default()));
+        tx.cut = Some(cut);
         assert!(!tx.step());
-        assert!(tx.switch.is_some());
+        assert!(tx.cut.is_some());
     }
 
     #[test]
@@ -4153,230 +3250,67 @@ mod tests {
         assert!(!tx.late_reported.contains(&target), "the previous generation's deduplication entry remains");
     }
 
-    #[test]
-    fn ur_28_a_from_none_open_replaces_the_report_queue() {
-        // UR-28, UR-36 (S3): uhd-control's enable from no stream opens the transmit streamer
-        // again, which replaces its report queue, so the correlations of the burst still
-        // awaiting its acknowledgement are dropped: the next burst's own reports name it.
-        let (core, device, time, events) = super::super::test_support::rig();
-        let mut control = control_of(&core);
-        tx_channels_from_none(&mut control, &core, 2, 100, &[0]);
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.read(None);
-        assert!(tx.step(), "the enable's switch");
-        let first = tx.clock.expect("the enable starts a clock");
-        tx.remember_burst(TimePoint::new(first.domain, 100));
-        // The disable ends the segment's clock; the owner is idle then, and the next enable's
-        // open replaces the streamer the first burst's acknowledgement was awaited on.
-        tx_channels_from_none(&mut control, &core, 3, 200, &[]);
-        let cut = plan_of(&core, Dir::Tx)[0].segment.cut.expect("the empty change cuts the segment");
-        time.advance_to(core.at(first.instant(cut))).unwrap();
-        tx.read(None);
-        assert!(tx.step(), "the disable's switch");
-        assert!(tx.clock.is_none(), "the disable leaves no clock");
-        tx_channels_from_none(&mut control, &core, 4, 300, &[0]);
-        tx.read(None);
-        assert!(tx.step(), "the next enable's switch");
-        let second = tx.clock.expect("the next enable starts its clock");
-        assert_ne!(first.domain, second.domain, "each segment has its own clock");
-        assert!(tx.unacked.is_empty(), "the replaced streamer's correlations stand: {:?}", device.calls());
-        // The new burst's own reports name it, on its own clock.
-        let target = TimePoint::new(second.domain, 100);
-        tx.remember_burst(target);
-        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(second.instant(100) + 200), channel: 0 });
-        let errors: Vec<_> =
-            events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
-        assert_eq!(errors.len(), 1, "the report named no burst of the new streamer: {errors:?}");
-        assert_eq!(errors[0].payload["target"], serde_json::to_value(target).unwrap());
-        assert_eq!(errors[0].payload["late_by_ns"], 1000);
-        // Its acknowledgement retires its own correlation, and a report after it names nothing.
-        tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: None, channel: 0 });
-        assert!(tx.unacked.is_empty(), "the acknowledgement retired nothing: {:?}", device.calls());
-        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: None, channel: 0 });
-        let errors: Vec<_> =
-            events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
-        assert!(errors.is_empty(), "a report with no pending burst named one: {errors:?}");
-    }
-
-    /// The rig on a `ReportFeed`, and its transmit owner after a burst: the enable from no stream
-    /// at 100 ms has sent one burst, awaiting its acknowledgement, and the disable at 200 ms has
-    /// ended the clock. uhd-control's next enable from no stream (300 ms) then opens the streamer
-    /// again, before the owner has read that enable (UR-28, UR-36).
-    fn replaced_queue() -> (Arc<Core>, Arc<ReportFeed>, Arc<EventCollector>, Tx, Clock) {
-        let device = Arc::new(FakeDevice::new(FakeConfig::default()));
-        let feed = Arc::new(ReportFeed::new(device));
-        let (core, time, events) = super::super::test_support::rig_on(feed.clone(), Vec::new(), 2_000);
-        let mut control = control_of(&core);
-        tx_channels_from_none(&mut control, &core, 2, 100, &[0]);
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.read(None);
-        assert!(tx.step(), "the enable's switch");
-        let first = tx.clock.expect("the enable starts a clock");
-        tx.remember_burst(TimePoint::new(first.domain, 100));
-        tx_channels_from_none(&mut control, &core, 3, 200, &[]);
-        let cut = plan_of(&core, Dir::Tx)[0].segment.cut.expect("the empty change cuts the segment");
-        time.advance_to(core.at(first.instant(cut))).unwrap();
-        tx.read(None);
-        assert!(tx.step(), "the disable's switch");
-        assert!(tx.clock.is_none(), "the disable leaves no clock");
-        tx_channels_from_none(&mut control, &core, 4, 300, &[0]);
-        (core, feed, events, tx, first)
-    }
-
     /// The TIME_ERROR events the rig has emitted since the last call.
     fn time_errors(events: &EventCollector) -> Vec<ezsdr_kernel::event::Event> {
         events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect()
     }
 
     #[test]
-    fn ur_28_a_poll_after_a_from_none_open_names_no_burst_of_the_replaced_queue() {
-        // UR-28, UR-36 (S3, poll): the report of the replacing streamer, read by the owner's
-        // poll before it adopts the enable, names no burst: the replaced queue's burst is
-        // dropped with its correlations, not consumed.
-        let (_core, feed, events, mut tx, _) = replaced_queue();
-        feed.give(TxReport { code: TxCode::TimeError, tick: None, channel: 0 });
-        tx.reports(super::Wall::ZERO);
-        assert!(tx.unacked.is_empty(), "the replaced queue's correlation stands");
-        assert!(time_errors(&events).is_empty(), "the poll consumed the replaced burst");
-    }
-
-    #[test]
-    fn ur_28_a_shutdown_after_a_from_none_open_names_no_burst_of_the_replaced_queue() {
-        // UR-28, UR-36 (S3, shutdown): the shutdown's read of the acknowledgement window is
-        // correlated against the replacing streamer, as the owner's poll is.
-        let (_core, feed, events, mut tx, _) = replaced_queue();
-        feed.give(TxReport { code: TxCode::TimeError, tick: None, channel: 0 });
-        tx.shutdown();
-        assert!(time_errors(&events).is_empty(), "the shutdown consumed the replaced burst");
-    }
-
-    #[test]
     fn ur_28_a_streamer_the_record_holds_keeps_its_correlations() {
         // UR-28, UR-36: the correlations of the bursts in flight belong to the streamer of their
-        // generation. The owner's own open for another set replaces the queue and drops them; a
-        // switch the record holds, which opens nothing, keeps them.
+        // generation. An open of the stream — the owner's reopen — replaces the queue and drops
+        // them; while the record holds the same streamer, they stand.
         let (core, device, _, _) = super::super::test_support::rig();
         device.tx_open(0, &[0]).unwrap();
-        lock(&core.streams).record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
-        let old = core.register(Dir::Tx, 200, 0).unwrap();
-        core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
-        let new = core.register(Dir::Tx, 100, 30_000_000).unwrap();
+        let key = stream_key(Dir::Tx, 0);
+        lock(&core.streams).record_open(key, Some(Channels::first(1)));
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(1));
-        tx.remember_burst(TimePoint::new(old.domain, 100));
-        // Another set: only the owner can open it, and its reopen replaces the report queue.
-        tx.switch = Some(switch(&core, 20_000_000, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
-        tx.do_switch();
-        assert!(tx.unacked.is_empty());
-        tx.remember_burst(TimePoint::new(new.domain, 100));
-        tx.clock = None;
-        // The same switch again: the record holds the set and the segment's configuration, so
-        // the streamer is not opened again and the burst's correlation stands.
-        tx.switch = Some(switch(&core, i64::MIN, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
-        tx.do_switch();
-        assert_eq!(tx.unacked.len(), 1, "{:?}", device.calls());
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        tx.remember_burst(TimePoint::new(clock.domain, 100));
+        lock(&core.streams).record_open(key, Some(Channels::first(1)));
+        tx.sync_streamer();
+        assert!(tx.unacked.is_empty(), "a new streamer's queue starts empty");
+        tx.remember_burst(TimePoint::new(clock.domain, 100));
+        tx.sync_streamer();
+        assert_eq!(tx.unacked.len(), 1, "the record holds the same streamer: {:?}", device.calls());
     }
 
     #[test]
     fn ur_28_delayed_time_error_uses_its_original_clock() {
-        for next_n in [Some(100), Some(200), None] {
-            let (core, device, _, events) = super::super::test_support::rig();
-            device.tx_open(0, &[0, 1]).unwrap();
-            lock(&core.streams).record_open(stream_key(Dir::Tx, 0), Some(Channels::first(2)));
-            let old = core.register(Dir::Tx, 200, 0).unwrap();
-            let target = TimePoint::new(old.domain, 10_000);
-            core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
-            let new = next_n.map(|n| core.register(Dir::Tx, n, 30_000_000).unwrap());
-            let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(2));
-            tx.remember_burst(target);
-            tx.switch = Some(switch(&core, 20_000_000, new, if new.is_some() { 2 } else { 0 }, Settings { rate: Some(if next_n == Some(100) { 2e6 } else { 1e6 }), ..Settings::default() }));
-            tx.do_switch();
-            tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(old.instant(target.ticks_in(old.domain).unwrap()) + 200_000), channel: 0 });
-            // This channel's report has no tick; it is still the same Kernel burst, so it is deduplicated.
-            tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: None, channel: 1 });
-            let next_target = new.map(|clock| TimePoint::new(clock.domain, 20_000));
-            if let Some(target) = next_target {
-                tx.remember_burst(target);
-            }
-            if let (Some(clock), Some(target)) = (new, next_target) {
-                // The report tick is the radio's current time and lies in B's time range, but
-                // A and B are both pending, so neither target may be claimed.
-                tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(target.ticks_in(clock.domain).unwrap()) + 400), channel: 0 });
-            }
-            let errors: Vec<_> = events
-                .drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0))
-                .into_iter()
-                .filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR)
-                .collect();
-            assert_eq!(errors.len(), 1, "only the uniquely attributable old burst reports: {errors:?}");
-            assert_eq!(errors[0].payload["late_by_ns"], 1_000_000);
-            assert_eq!(errors[0].payload["target"], serde_json::to_value(target).unwrap());
-            assert_eq!(tx.unacked.len(), usize::from(next_target.is_some()) + 1, "TimeErrors leave correlations pending");
-            assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 2 + usize::from(next_target.is_some()), "ambiguous reports remain visible in the raw log");
-        }
-    }
-
-    #[test]
-    fn ur_25_a_refusal_leaves_the_receive_stream_alone() {
-        // RM-25 (design 33 D15): a transmit configuration uhd-tx's device refuses halts the
-        // transmit stream alone: the receive stream's items, plan and clocks are untouched.
-        use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, NO_RELEASE, Stream};
-        for refused in [false, true] {
-            let faults = if refused { vec![crate::device::FakeFault::WrongRate { claimed: 2e6, applied: 2e6 - 1_000.0, nth: 0 }] } else { Vec::new() };
-            let (core, device, _, _) = super::super::test_support::rig_with(FakeConfig { faults, ..FakeConfig::default() }, Vec::new());
-            device.tx_open(0, &[0]).unwrap();
-            let s = |n: i64| core.ticks(n * 1_000_000_000);
-            let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-            let config = |n: u64| Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(n, 1).unwrap() };
-            let (tx_key, rx_key) = (stream_key(Dir::Tx, 0), stream_key(Dir::Rx, 0));
-            {
-                let mut streams = lock(&core.streams);
-                streams.stream_mut(tx_key).clocks = vec![(c0, false)];
-                // The transmit change, and the same shapes on the receive stream's line, so
-                // that a refusal booked on the wrong one would show.
-                for key in [tx_key, rx_key] {
-                    let direction = key.0;
-                    let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, direction));
-                    streams.lines.insert(key, Line::new(Stream { direction, origin: 0, config: config(200), lead, call: 0, release_window: 0, allowance: 0 }));
-                    streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-                    let item = Item { e: s(1), seq: 1, ready: 0, release: NO_RELEASE, delivered: None, refused: false, kind: Kind::Cold(config(100)) };
-                    assert!(streams.book(&core, key, item), "{key:?}");
-                }
-            }
-            let snapshot = || {
-                let streams = lock(&core.streams);
-                let items: Vec<(i64, u64, bool)> = streams.line(rx_key).unwrap().items.iter().map(|item| (item.e, item.seq, item.refused)).collect();
-                let planned: Vec<(i64, Option<i64>)> = streams.planned(rx_key).into_iter().map(|planned| (planned.segment.origin, planned.segment.cut)).collect();
-                (items, planned)
-            };
-            let before = snapshot();
-            let (_to_tx, cmds) = std::sync::mpsc::channel();
-            let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
-            tx.read(None);
-            tx.do_switch();
-            let case = format!("refused {refused}");
-            let booked = lock(&core.streams).line(tx_key).unwrap().items.iter().filter(|item| item.refused).map(|item| item.seq).collect::<Vec<_>>();
-            assert_eq!(booked, if refused { vec![1] } else { Vec::new() }, "{case}");
-            assert_eq!(tx.clock.is_some(), !refused, "{case}");
-            assert_eq!(snapshot(), before, "{case}: the transmit refusal changed the receive stream");
-        }
+        let (core, device, _, events) = super::super::test_support::rig();
+        device.tx_open(0, &[0, 1]).unwrap();
+        lock(&core.streams).record_open(stream_key(Dir::Tx, 0), Some(Channels::first(2)));
+        let old = core.register(Dir::Tx, 200, 0).unwrap();
+        let target = TimePoint::new(old.domain, 10_000);
+        core.clocks.end(old.domain, core.at(20_000_000)).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(old), Channels::first(2));
+        tx.remember_burst(target);
+        tx.cut = Some(20_000_000);
+        tx.end_clock();
+        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(old.instant(target.ticks_in(old.domain).unwrap()) + 200_000), channel: 0 });
+        // This channel's report has no tick; it is still the same Kernel burst, so it is deduplicated.
+        tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: None, channel: 1 });
+        let errors: Vec<_> =
+            events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(errors.len(), 1, "only the uniquely attributable old burst reports: {errors:?}");
+        assert_eq!(errors[0].payload["late_by_ns"], 1_000_000);
+        assert_eq!(errors[0].payload["target"], serde_json::to_value(target).unwrap());
+        assert_eq!(tx.unacked.len(), 1, "TimeErrors leave correlations pending");
+        assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "TimeError").count(), 2, "ambiguous reports remain visible in the raw log");
     }
 
     #[test]
     fn ur_25_the_line_lock_is_free_inside_every_transmit_device_call() {
         // UR-25 (design 33 D15): uhd-tx holds no line lock across its device calls — a
         // continuation's held sample, its own payload, the end of burst that closes the
-        // device burst, a switched streamer's reopen, its configuration and the
-        // asynchronous report read — and the spy proves the sequence passed each one.
+        // device burst and the asynchronous report read — and the spy proves the sequence passed each one.
         let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let (core, time, _) = crate::provider::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
         spy.watch(&core);
         spy.tx_open(0, &[0]).unwrap();
         let c0 = core.register(Dir::Tx, 200, 0).unwrap();
-        let c1 = core.register(Dir::Tx, 100, 1_000_000).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
         // A burst continuing the device burst of the one before: its held sample goes first,
@@ -4385,17 +3319,13 @@ mod tests {
         tx.command(TxCmd::Burst(held(&c0, 20_020, 10, LatePolicy::DropAndFlag)));
         time.advance_to(core.at(3_600_000)).unwrap();
         assert!(tx.step());
-        // A switch to two channels at another clock: ends the open device burst (with its held
-        // sample), reopens the streamer and configures the direction. The reports are read
-        // after it, so that the held sample's end of burst is the switch's.
+        // The clock's end at its cut: ends the open device burst (with its held sample). The
+        // reports are read after it, so that the held sample's end of burst is the cut's.
         tx.command(TxCmd::Burst(held(&c0, 20_100, 10, LatePolicy::DropAndFlag)));
-        tx.switch = Some(switch(&core, 20_000_000, Some(c1), 2, Settings { rate: Some(2e6), ..Settings::default() }));
-        tx.do_switch();
+        tx.cut = Some(20_000_000);
+        tx.end_clock();
         tx.reports(std::time::Duration::ZERO);
-        // The test's own `tx_open` is one of the two: the switch reopens the streamer for
-        // its two channels, and configures both.
-        assert_eq!(spy.seen("tx_open"), 2, "the streamer's open and its reopen");
-        assert_eq!(spy.seen("apply"), 2, "the switch configured two channels");
+        assert_eq!(spy.seen("tx_open"), 1, "the test's own open");
         assert!(spy.seen("tx_send") >= 3, "the tail, the payload and the end of burst: {}", spy.seen("tx_send"));
         assert!(spy.seen("tx_async") > 0, "the spy never saw tx_async");
     }
@@ -4452,292 +3382,11 @@ mod tests {
         (core, spy)
     }
 
-    /// How many `cold` changes the transmit line holds (RM-25): an enable that books nothing
-    /// leaves none, whatever the plan shows once an end has taken effect.
-    fn tx_colds(core: &Core) -> usize {
-        lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| matches!(item.kind, ezsdr_radio::timeline::Kind::Cold(_))).count())
-    }
-
-    /// The manual-clock rig a test that reads the device's own settings runs on.
-    fn manual_rig() -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>) {
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
-        let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
-        (core, device, time)
-    }
-
-    #[test]
-    fn ur_24_a_transmit_release_without_a_live_channel_reaches_the_pending_segment() {
-        // UR-24 (S1, transmit): a gain due before the enable's segment is given to the device as
-        // its own timed command on that segment's channel, and the owner's switch configures
-        // nothing; the device holds the gain from its instant.
-        let (core, device, time) = manual_rig();
-        let frozen = crate::provider::test_support::Frozen::of(&device);
-        device_at(&core, &time, &device, 0);
-        let mut control = control_of(&core);
-        let ms = |n: i64| core.ticks(n * 1_000_000);
-        drop(frozen);
-        tx_channels_from_none(&mut control, &core, 2, 100, &[0]);
-        let _frozen_after_open = crate::provider::test_support::Frozen::of(&device);
-        let origin = plan_of(&core, Dir::Tx)[0].segment.origin;
-        let (to_tx, cmds) = std::sync::mpsc::channel();
-        std::mem::forget(to_tx);
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        assert!(tx.read(None), "the owner reads the plan");
-        let switched = device.calls().len();
-        assert!(tx.step(), "the owner begins the enable's segment");
-        assert!(!device.calls()[switched..].iter().any(|call| call.starts_with("apply") || call.starts_with("tx_open")), "the owner configured a segment the enable did: {:?}", device.calls());
-        let gain = crate::provider::core::key("radio.tx.c0.gain_db");
-        let mark = device.calls().len();
-        control.book(Dispatched::new(
-            ActionId(3),
-            Action::UpdateParameter {
-                target: super::super::test_support::target_of(&core.id),
-                key: gain.clone(),
-                value: Value::num(3.0).unwrap(),
-                class: UpdateClass::HardwareTimed,
-                at: Some(AbsoluteDeadline::new(core.at(ms(50)))),
-            },
-            Some(core.id.clone()),
-        ));
-        time.advance_to(core.at(ms(47))).unwrap();
-        control.release();
-        let timed: Vec<String> = device.calls()[mark..].iter().filter(|call| call.starts_with("apply tx 0") && !call.ends_with("at=-")).cloned().collect();
-        assert_eq!(timed.len(), 1, "{:?}", device.calls());
-        assert!(timed[0].contains("gain=3") && timed[0].contains(&format!("at={} effective={}", ms(50), ms(50))), "{timed:?}");
-        device_at(&core, &time, &device, origin + core.ticks(1_000_000));
-        assert_eq!(device.read_back(Dir::Tx, 0).gain, Some(3.0));
-    }
-
     /// The transmit record, as the ownership tests read it.
     fn tx_record(core: &Core) -> (bool, bool, Option<u64>) {
         let streams = lock(&core.streams);
         let k = stream_key(Dir::Tx, 0);
         (streams.holder(k) != Holder::Free, streams.reading(k), streams.stream(k).configured)
-    }
-
-    #[test]
-    fn ur_25_a_transmit_owner_waiting_behind_a_from_none_open_starts_nothing() {
-        // UR-25 (S9, transmit): while uhd-control's enable from no stream owns the streamer,
-        // uhd-tx reads no plan, moves no cursor and begins no switch; the first turn after the
-        // booking opens B's set again: the record holds C's.
-        let (core, spy) = spy_rig();
-        let mut control = control_of(&core);
-        control.config.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(0));
-        tx_channels_from_none(&mut control, &core, 2, 100, &[0, 1]);
-        tx_channels_from_none(&mut control, &core, 3, 200, &[]);
-        let gate = spy.stop_before("tx_open");
-        let host = core.device.host();
-        let core_ = core.clone();
-        let (done, finished) = std::sync::mpsc::channel();
-        let control_thread = host
-            .spawn("control", move || {
-                let mut control = control;
-                tx_channels_from_none(&mut control, &core_, 4, 300, &[0]);
-                let _ = done.send(());
-            })
-            .expect("a participant thread");
-        gate.wait();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let mark = spy.log().len();
-        let idle = || lock(&core.streams).is_idle(stream_key(Dir::Tx, 0));
-        let before = idle();
-        assert!(!tx.read(None), "uhd-tx read the plan while uhd-control owns the streamer");
-        assert_eq!((tx.at, tx.switch.is_some(), idle()), (0, false, before), "the owner's cursor, switch or idle mark moved");
-        assert!(!tx.step(), "uhd-tx began a switch while uhd-control owns the streamer");
-        assert_eq!(spy.log().len(), mark, "uhd-tx called the device: {:?}", spy.log());
-        gate.release();
-        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the enable did not book");
-        control_thread.join().expect("the control thread");
-        let mark = spy.log().len();
-        assert!(tx.read(None));
-        assert!(tx.step(), "B's switch");
-        let opens: Vec<String> = spy.log()[mark..].iter().filter(|call| call.starts_with("tx_open")).cloned().collect();
-        assert_eq!(opens.first().map(String::as_str), Some("tx_open 0 [0, 1]"), "the record's set is not C's: {opens:?}");
-        assert!(tx.clock.is_some(), "the owner adopted no clock");
-    }
-
-    #[test]
-    fn ur_25_a_transmit_poll_during_a_control_open_starts_no_streamer_call() {
-        // UR-25, UR-22 (S22): a turn of the run loop while uhd-control's enable from no
-        // stream owns the streamer — the plan, the report read and the step alike — makes no
-        // device call and takes no report read.
-        let (core, spy) = spy_rig();
-        let control = control_of(&core);
-        let gate = spy.stop_before("tx_open");
-        let host = core.device.host();
-        let core_ = core.clone();
-        let (done, finished) = std::sync::mpsc::channel();
-        let control_thread = host
-            .spawn("control", move || {
-                let mut control = control;
-                tx_channels_from_none(&mut control, &core_, 2, 100, &[0]);
-                let _ = done.send(());
-            })
-            .expect("a participant thread");
-        gate.wait();
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Tx, 0)), Holder::FromNone, "the streamer is not uhd-control's");
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let mark = spy.log().len();
-        assert!(!tx.read(None));
-        assert!(lock(&core.streams).is_idle(stream_key(Dir::Tx, 0)), "the poll moved the stream's phase");
-        tx.pass();
-        assert_eq!(spy.seen("tx_async"), 0, "the poll read reports during a control open");
-        assert_eq!(spy.log().len(), mark, "the poll called the device: {:?}", spy.log());
-        assert!(!tx_record(&core).1, "the poll took a report read");
-        gate.release();
-        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the enable did not book");
-        control_thread.join().expect("the control thread");
-        assert_eq!(spy.seen("tx_open"), 1, "the enable's open: {:?}", spy.log());
-        assert!(spy.seen("apply") >= 1, "the enable configured nothing: {:?}", spy.log());
-        assert!(!tx_record(&core).0, "the stream stayed uhd-control's");
-    }
-
-    #[test]
-    fn ur_25_a_from_none_enable_waits_for_a_transmit_report_read() {
-        // UR-25 (S23): a report read in flight is uhd-tx's until it ends. An enable from no
-        // stream that finds it set waits — without a device call — and never falls back to a
-        // change the owner books.
-        let (core, spy) = spy_rig();
-        let (to_tx, cmds) = std::sync::mpsc::channel();
-        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let gate = spy.stop_before("tx_async");
-        let host = core.device.host();
-        let tx_thread = host.spawn("tx", move || tx.run()).expect("a participant thread");
-        gate.wait();
-        assert!(tx_record(&core).1, "the report read is not owned");
-        let (entered, entered_rx) = std::sync::mpsc::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let released = std::sync::Mutex::new(Some(released));
-        crate::provider::test_support::probe(&core, "reading_wait", move |_| {
-            if let Some(wait) = released.lock().unwrap().take() {
-                let _ = entered.send(());
-                let _ = wait.recv();
-            }
-        });
-        let control = control_of(&core);
-        let core_ = core.clone();
-        let (done, finished) = std::sync::mpsc::channel();
-        let control_thread = host
-            .spawn("control", move || {
-                let mut control = control;
-                tx_channels_from_none(&mut control, &core_, 2, 100, &[0]);
-                let _ = done.send(());
-            })
-            .expect("a participant thread");
-        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable entered the wait");
-        assert_eq!(spy.seen("tx_open"), 0, "the enable opened the streamer while a report read is in flight: {:?}", spy.log());
-        assert!(tx_record(&core).0, "the enable did not take the streamer");
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Tx, 0)), Holder::FromNone, "the enable's claim is not held");
-        assert!(tx_record(&core).1, "the read is in flight at the wait");
-        release.send(()).unwrap();
-        gate.release();
-        // The read is over; the enable goes on while the owner keeps polling, before any
-        // stop of its own, so that only the run loop's own read can end the wait (UR-25).
-        assert!(finished.recv_timeout(std::time::Duration::from_secs(30)).is_ok(), "the enable did not book after the read");
-        control_thread.join().expect("the control thread");
-        let _ = to_tx.send(TxCmd::Shutdown);
-        tx_thread.join().expect("the transmit thread");
-        assert_eq!(spy.seen("tx_open"), 1, "the enable's open: {:?}", spy.log());
-        assert!(spy.seen("apply") >= 1, "the enable configured nothing: {:?}", spy.log());
-        let (busy, reading, configured) = tx_record(&core);
-        assert!(!busy && !reading, "the ownership did not go back");
-        let planned = plan_of(&core, Dir::Tx);
-        assert_eq!(configured, planned[0].segment.by, "the enable fell back to a change the owner books");
-    }
-
-    #[test]
-    fn ur_25_a_from_none_enable_ends_its_wait_at_the_provider_stop() {
-        // UR-25, UR-26 (S27's stop): the Provider's stop, read from its mark, ends an enable's
-        // wait for a report read: no device call, and the streamer goes back.
-        let (core, spy) = spy_rig();
-        let (to_tx, cmds) = std::sync::mpsc::channel();
-        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let gate = spy.stop_before("tx_async");
-        let host = core.device.host();
-        let tx_thread = host.spawn("tx", move || tx.run()).expect("a participant thread");
-        gate.wait();
-        let (entered, entered_rx) = std::sync::mpsc::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let released = std::sync::Mutex::new(released);
-        crate::provider::test_support::probe(&core, "wait_reading", move |_| {
-            let _ = entered.send(());
-            let _ = released.lock().unwrap().recv();
-        });
-        let control = control_of(&core);
-        let core_ = core.clone();
-        let (done, finished) = std::sync::mpsc::channel();
-        let control_thread = host
-            .spawn("control", move || {
-                let mut control = control;
-                tx_channels_from_none(&mut control, &core_, 2, 100, &[0]);
-                let _ = done.send(());
-            })
-            .expect("a participant thread");
-        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable entered the wait");
-        {
-            // As `Provider::stop` books it before its joins.
-            let mut streams = lock(&core.streams);
-            let at = core.now();
-            streams.stop = Some((at, ezsdr_kernel::module_api::StopMode::Orderly));
-            streams.end(&core, at, false, false);
-        }
-        release.send(()).unwrap();
-        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the stop did not end the wait");
-        control_thread.join().expect("the control thread");
-        assert_eq!((spy.seen("tx_open"), spy.seen("apply")), (0, 0), "a stopped enable called the device: {:?}", spy.log());
-        assert_eq!(tx_colds(&core), 0, "a stopped enable booked a change");
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Tx, 0)), Holder::Free, "the stopped enable gave its claim back");
-        assert!(tx_record(&core).1, "the read is still uhd-tx's after the control ends");
-        gate.release();
-        let _ = to_tx.send(TxCmd::Shutdown);
-        tx_thread.join().expect("the transmit thread");
-        assert!(!tx_record(&core).1, "the read ended with the transmit thread");
-    }
-
-    #[test]
-    fn ur_29_a_lost_device_ends_a_from_none_enable_s_wait_for_a_report_read() {
-        // UR-29, UR-25: a device loss recorded while an enable from no stream waits for a
-        // report read ends the wait: no device call, and the streamer goes back. The read is
-        // held open until after the control thread has ended, so only the loss can end it.
-        let (core, spy) = spy_rig();
-        let (to_tx, cmds) = std::sync::mpsc::channel();
-        let tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let gate = spy.stop_before("tx_async");
-        let host = core.device.host();
-        let tx_thread = host.spawn("tx", move || tx.run()).expect("a participant thread");
-        gate.wait();
-        let (entered, entered_rx) = std::sync::mpsc::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let released = std::sync::Mutex::new(released);
-        crate::provider::test_support::probe(&core, "wait_reading", move |_| {
-            let _ = entered.send(());
-            let _ = released.lock().unwrap().recv();
-        });
-        let control = control_of(&core);
-        let core_ = core.clone();
-        let (done, finished) = std::sync::mpsc::channel();
-        let control_thread = host
-            .spawn("control", move || {
-                let mut control = control;
-                tx_channels_from_none(&mut control, &core_, 2, 100, &[0]);
-                let _ = done.send(());
-            })
-            .expect("a participant thread");
-        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable entered the wait");
-        core.device_lost("test");
-        release.send(()).unwrap();
-        assert!(finished.recv_timeout(std::time::Duration::from_secs(10)).is_ok(), "the loss did not end the wait");
-        control_thread.join().expect("the control thread");
-        assert_eq!((spy.seen("tx_open"), spy.seen("apply")), (0, 0), "a lost enable called the device: {:?}", spy.log());
-        assert_eq!(tx_colds(&core), 0, "a lost enable booked a change");
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Tx, 0)), Holder::Free, "the lost enable gave its claim back");
-        assert!(tx_record(&core).1, "the read is still uhd-tx's after the control ends");
-        gate.release();
-        let _ = to_tx.send(TxCmd::Shutdown);
-        tx_thread.join().expect("the transmit thread");
-        assert!(!tx_record(&core).1, "the read ended with the transmit thread");
     }
 
     /// A layout with two transmit streams and no receive channel (RM-29).
@@ -4785,209 +3434,13 @@ mod tests {
     }
 
     #[test]
-    fn ur_25_a_transmit_report_read_of_a_later_stream_does_not_hold_the_earlier_owner() {
-        // UR-25 (T4): an enable from no stream of stream 1 waits on stream 1's report read
-        // alone; stream 0's owner keeps making device calls meanwhile.
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
-        device.tx_open(0, &[0]).unwrap();
-        device.tx_open(1, &[1]).unwrap();
-        let (core, _, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), two_tx_description());
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to0, cmds0) = std::sync::mpsc::channel();
-        let mut s0 = Tx::new(core.clone(), 0, cmds0, Some(clock), Channels::first(1));
-        let at = clock.at_or_after(core.now() + core.ticks(1_000_000));
-        s0.command(TxCmd::Burst(held(&clock, at, 1_000, LatePolicy::SendAsapAndFlag)));
-        assert!(lock(&core.streams).begin_read(stream_key(Dir::Tx, 1)));
-        // Ends stream 1's read even when an assert below fails (T4).
-        struct Reading<'a>(&'a Arc<Core>);
-        impl Drop for Reading<'_> {
-            fn drop(&mut self) {
-                lock(&self.0.streams).end_read(stream_key(Dir::Tx, 1));
-            }
-        }
-        let reading = Reading(&core);
-        let (to_tx, _cmds1) = std::sync::mpsc::channel();
-        let mut control = Control::new(
-            core.clone(),
-            Arc::new(NoActions),
-            vec![to_tx.clone(), to_tx],
-            core.description.defaults(),
-            false,
-            super::super::control::Start { t0: 0, rx: vec![None], tx: vec![None, None] },
-        );
-        let (entered, arrived) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "wait_reading", move |_| {
-            let _ = entered.send(());
-        });
-        let worker = core.clone();
-        let inside = core.clone();
-        let control_thread = worker
-            .device
-            .host()
-            .spawn("test-control", move || {
-                control.book(Dispatched::new(
-                    ActionId(2),
-                    Action::UpdateParameter {
-                        target: super::super::test_support::target_of(&inside.id),
-                        key: crate::provider::core::key("radio.tx.c1.stream"),
-                        value: Value::from(1),
-                        class: UpdateClass::Cold,
-                        at: None,
-                    },
-                    Some(inside.id.clone()),
-                ));
-            })
-            .expect("a participant thread");
-        arrived.recv_timeout(std::time::Duration::from_secs(10)).expect("the enable waits for stream 1's read");
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = done.clone();
-        super::super::test_support::probe(&core, "reading_done", move |_| {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-        device.host().sleep(std::time::Duration::from_millis(20));
-        assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "the enable waits for stream 1: {:?}", device.calls());
-        assert!(s0.pass(), "stream 0's owner works");
-        assert!(device.calls().iter().any(|call| call.starts_with("tx_send 0")), "stream 0's owner made its device call: {:?}", device.calls());
-        assert!(lock(&core.streams).reading(stream_key(Dir::Tx, 1)), "stream 1's read is still in flight");
-        drop(reading);
-        control_thread.join().expect("the control thread");
-        assert!(done.load(std::sync::atomic::Ordering::SeqCst), "the enable goes on once the read ends");
-    }
-
-    #[test]
-    fn ur_29_a_loss_after_a_configure_adopts_no_transmit_clock() {
-        // UR-29 (L2): the device is found lost while the switch's configuration is in
-        // flight; the owner adopts no clock and sends nothing.
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
-        let holder = Arc::new(HoldApply::new(inner.clone(), Dir::Tx, Some(0)));
-        let (core, _time, _events) = super::super::test_support::rig_on(holder.clone(), Vec::new(), 2_000);
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let clock = core.register(Dir::Tx, 200, 1_000).unwrap();
-        tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings::default()));
-        let (reached, release) = holder.arm();
-        let worker = core.clone();
-        let switching = std::thread::spawn(move || {
-            tx.do_switch();
-            tx.clock
-        });
-        reached.recv_timeout(std::time::Duration::from_secs(10)).expect("the switch's configure");
-        worker.device_lost("test: lost during the configure");
-        release.send(()).unwrap();
-        assert!(switching.join().unwrap().is_none(), "the lost configure adopts no clock");
-        assert_eq!(
-            inner.calls().iter().filter(|call| call.starts_with("tx_send")).map(String::as_str).collect::<Vec<_>>(),
-            ["tx_send 0 n=2 at=- sob=true eob=true"],
-            "only the open-time flush was sent: {:?}",
-            inner.calls()
-        );
-    }
-
-    #[test]
-    fn ur_29_a_lost_transmit_owner_configure_releases_stream_lock_before_reporting() {
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
-        let device: Arc<dyn crate::device::Device> = Arc::new(super::super::test_support::ApplyFails::lost(inner.clone(), Dir::Tx, Some(0)));
-        let (core, _time, _events) = super::super::test_support::rig_on(device, Vec::new(), 2_000);
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings { rate: Some(2e6), ..Settings::default() }));
-
-        tx.do_switch();
-        assert!(core.is_lost());
-        assert_eq!(lock(&core.streams).holder(stream_key(Dir::Tx, 0)), Holder::Free);
-        assert!(tx.clock.is_none(), "a lost configure did not adopt its clock");
-        assert_eq!(
-            inner.calls().iter().filter(|call| call.starts_with("tx_send")).map(String::as_str).collect::<Vec<_>>(),
-            ["tx_send 0 n=2 at=- sob=true eob=true"],
-            "the lost owner sent only its open-time flush: {:?}",
-            inner.calls()
-        );
-    }
-
-    #[test]
-    fn ur_26_a_transmit_switch_at_a_stop_keeps_its_clock_and_sends_nothing() {
-        // UR-26 (S16b): on stream 1, the owner does not re-read `Provider::stop` after its
-        // switch's configuration; it takes the clock, and the plan ends that segment at its
-        // origin, so nothing is sent.
-        let inner = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
-        let holder = Arc::new(HoldApply::new(inner.clone(), Dir::Tx, Some(0)));
-        let (core, _, _) = super::super::test_support::rig_on_description(holder.clone(), Vec::new(), BTreeMap::new(), two_tx_description());
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 1, cmds, None, Channels::first(1));
-        let key = stream_key(Dir::Tx, 1);
-        let config = ezsdr_radio::timeline::Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() };
-        let clock = {
-            let mut streams = lock(&core.streams);
-            streams.lines.insert(
-                key,
-                ezsdr_radio::timeline::Line::new(ezsdr_radio::timeline::Stream {
-                    direction: ezsdr_kernel::stream::Direction::Tx,
-                    origin: 0,
-                    config: ezsdr_radio::timeline::Config { channels: Channels::first(0), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() },
-                    lead: 0,
-                    call: 2_000,
-                    release_window: 0,
-                    allowance: 0,
-                }),
-            );
-            streams.stream_mut(key).configs.insert(1, Arc::new(super::super::control::ColdConfig::new(BTreeMap::new())));
-            assert!(streams.book(
-                &core,
-                key,
-                ezsdr_radio::timeline::Item {
-                    e: 2_000,
-                    seq: 1,
-                    ready: 0,
-                    release: ezsdr_radio::timeline::NO_RELEASE,
-                    delivered: None,
-                    refused: false,
-                    kind: ezsdr_radio::timeline::Kind::Cold(config)
-                }
-            ));
-            streams.planned(key)[0].clock.expect("the booked segment's clock")
-        };
-        tx.switch = Some(switch_on(&core, 1, 0, Some(clock), 1, Settings::default()));
-        let (reached, release) = holder.arm();
-        let worker = core.clone();
-        let switching = std::thread::spawn(move || {
-            tx.do_switch();
-            tx
-        });
-        reached.recv_timeout(std::time::Duration::from_secs(10)).expect("the switch's configure");
-        {
-            let mut streams = lock(&worker.streams);
-            streams.stop = Some((500, StopMode::Orderly));
-            streams.end(&worker, 500, false, false);
-        }
-        release.send(()).unwrap();
-        let mut tx = switching.join().expect("the switch's thread");
-        let clock = tx.clock.expect("the owner takes the clock");
-        let record = worker.clocks.sample_clock_records().into_iter().find(|record| record.domain == clock.domain).expect("the clock's record");
-        assert_eq!(record.ended_at.and_then(|at| at.ticks_in(record.root).ok()), Some(clock.origin), "the segment ends at its origin: {record:?}");
-        // A burst on the clock whose segment ended at its origin, 2 ms of that clock past the
-        // origin so that its lateness policy is not what keeps it back: only the ended
-        // segment can. The owner's ordinary turn after the switch has nothing to send on it.
-        let k = 2_001;
-        tx.command(TxCmd::Burst(held(&clock, k, 1_000, LatePolicy::DropAndFlag)));
-        assert!(!tx.pass(), "the ended segment leaves nothing to send");
-        assert!(lock(&worker.rec).rejected.is_empty(), "the switch is no refusal: {:?}", lock(&worker.rec).rejected);
-        assert_eq!(
-            inner.calls().iter().filter(|call| call.starts_with("tx_send 1")).map(String::as_str).collect::<Vec<_>>(),
-            ["tx_send 1 n=2 at=- sob=true eob=true"],
-            "the ended segment sent only its open-time flush: {:?}",
-            inner.calls()
-        );
-    }
-
-    #[test]
     fn ur_25_a_detached_control_does_not_hold_the_shutdown_s_read() {
         // UR-25, UR-16: a uhd-control the join bound left detached may never clear its mark;
         // the shutdown's ACK window still reads the reports.
         let (core, spy) = spy_rig();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let claim = lock(&core.streams).claim_from_none(stream_key(Dir::Tx, 0)).expect("the stream is free");
+        let claim = lock(&core.streams).claim_owner(stream_key(Dir::Tx, 0)).expect("the stream is free");
         std::mem::forget(claim);
         tx.shutdown();
         assert!(spy.seen("tx_async") >= 1, "the shutdown's read waited for a detached control");
@@ -4995,203 +3448,60 @@ mod tests {
     }
 
     #[test]
-    fn ur_25_a_refused_transmit_owner_books_and_gives_back_in_one_line_section() {
-        // UR-25 (S2, transmit): uhd-tx books its refusal while the claim still holds the
-        // streamer, in the section that holds the line.
-        use ezsdr_radio::timeline::{Config, Item, Kind, NO_RELEASE};
-        let inner = Arc::new(FakeDevice::new(FakeConfig::default()));
-        let device: Arc<dyn Device> = Arc::new(super::super::test_support::ApplyFails::new(inner.clone(), Dir::Tx, None));
-        let (core, _, _) = crate::provider::test_support::rig_on(device, Vec::new(), 2_000);
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        tx.switch = Some(switch(&core, 0, Some(clock), 1, Settings { rate: Some(2e6), ..Settings::default() }));
-        {
-            let mut streams = lock(&core.streams);
-            let stream = stream_key(Dir::Tx, 0);
-            let mut line = streams.line(stream).expect("the switch's line").clone();
-            line.items.push(Item {
-                e: 0,
-                seq: 1,
-                ready: 0,
-                release: NO_RELEASE,
-                delivered: None,
-                refused: false,
-                kind: Kind::Cold(Config { channels: Channels::first(1), ratio: ezsdr_kernel::time::Rational::new(200, 1).unwrap() }),
-            });
-            streams.lines.insert(stream, line);
-        }
-
-        let (entered, reached) = std::sync::mpsc::channel();
-        let (resume, wait) = std::sync::mpsc::channel();
-        let wait = std::sync::Mutex::new(Some(wait));
-        let (seen, holders) = std::sync::mpsc::channel();
-        super::super::test_support::probe(&core, "refused_booking", move |streams| {
-            if let Some(wait) = wait.lock().unwrap().take() {
-                let streams = streams.expect("the caller's section");
-                let _ = seen.send(streams.holder(stream_key(Dir::Tx, 0)));
-                let _ = entered.send(());
-                let _ = wait.recv();
-            }
-        });
-        let switching = std::thread::spawn(move || {
-            tx.do_switch();
-            tx
-        });
-        reached.recv_timeout(std::time::Duration::from_secs(10)).expect("the owner reached its refusal book");
-        assert_eq!(holders.recv().unwrap(), Holder::Owner { seq: Some(1) }, "the claim still holds the stream");
-        assert!(core.streams.try_lock().is_err(), "the refusal is booked under the line lock");
-        let _ = resume.send(());
-        let tx = switching.join().expect("the transmit owner");
-        let streams = lock(&core.streams);
-        assert_eq!(streams.holder(stream_key(Dir::Tx, 0)), Holder::Free);
-        assert!(!streams.reading(stream_key(Dir::Tx, 0)));
-        assert!(streams.line(stream_key(Dir::Tx, 0)).unwrap().items.iter().any(|item| item.seq == 1 && item.refused), "the refusal is booked");
-        drop(streams);
-        assert!(tx.clock.is_none(), "a refused switch adopts no clock");
-    }
-
-    #[test]
-    fn ur_25_a_shutdown_read_and_a_returning_from_none_resolve_with_the_control_first() {
-        // UR-25 (S6): the from-none enable is inside a device call when the shutdown's report
-        // read starts; the read takes no holder check, so both overlap. The claim comes back
-        // while the read is still in flight, and the read ends after it.
-        let (core, spy) = spy_rig();
-        let stream = stream_key(Dir::Tx, 0);
-        let apply = spy.stop_before("apply");
-        let control_core = core.clone();
-        let control_thread = std::thread::spawn(move || {
-            let mut control = control_of(&control_core);
-            tx_channels_from_none(&mut control, &control_core, 2, 100, &[0]);
-        });
-        apply.wait();
-        assert_eq!(lock(&core.streams).holder(stream), Holder::FromNone, "the enable holds the stream through its device call");
-
-        let read = spy.stop_before("tx_async");
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let shutdown_thread = std::thread::spawn(move || tx.shutdown());
-        read.wait();
-        assert_eq!(lock(&core.streams).holder(stream), Holder::FromNone);
-        assert!(lock(&core.streams).reading(stream), "the shutdown's read is in flight");
-
-        apply.release();
-        control_thread.join().expect("the control thread");
-        assert_eq!(lock(&core.streams).holder(stream), Holder::Free, "the enable gave its claim back");
-        assert!(lock(&core.streams).reading(stream), "the read outlives the control's claim");
-        assert_eq!(spy.seen("tx_open"), 1, "the enable opened the streamer: {:?}", spy.log());
-        assert!(spy.seen("apply") >= 1, "{:?}", spy.log());
-
-        read.release();
-        shutdown_thread.join().expect("the shutdown thread");
-        assert!(!lock(&core.streams).reading(stream), "the read ended");
-        assert_eq!(lock(&core.streams).holder(stream), Holder::Free);
-    }
-
-    #[test]
-    fn ur_25_a_shutdown_read_and_a_returning_from_none_resolve_with_the_read_first() {
-        // UR-25 (S6): the read ends first; the enable's claim stays `FromNone` until its own
-        // booking section, and then goes back.
-        let (core, spy) = spy_rig();
-        let stream = stream_key(Dir::Tx, 0);
-        let apply = spy.stop_before("apply");
-        let control_core = core.clone();
-        let control_thread = std::thread::spawn(move || {
-            let mut control = control_of(&control_core);
-            tx_channels_from_none(&mut control, &control_core, 2, 100, &[0]);
-        });
-        apply.wait();
-        assert_eq!(lock(&core.streams).holder(stream), Holder::FromNone);
-
-        let read = spy.stop_before("tx_async");
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, None, Channels::first(0));
-        let shutdown_thread = std::thread::spawn(move || tx.shutdown());
-        read.wait();
-        assert!(lock(&core.streams).reading(stream), "the shutdown's read is in flight");
-
-        read.release();
-        shutdown_thread.join().expect("the shutdown thread");
-        assert!(!lock(&core.streams).reading(stream), "the read ended");
-        assert_eq!(lock(&core.streams).holder(stream), Holder::FromNone, "the control's claim remains");
-
-        apply.release();
-        control_thread.join().expect("the control thread");
-        assert_eq!(lock(&core.streams).holder(stream), Holder::Free);
-        assert!(!lock(&core.streams).reading(stream));
-    }
-
-    #[test]
-    fn ur_26_stop_cancels_current_and_future_bursts_record_only() {
+    fn ur_26_stop_cancels_the_held_burst_record_only() {
         let (core, device, _, events) = super::super::test_support::rig();
         let current = core.register(Dir::Tx, 200, 0).unwrap();
-        let future = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
         tx.held.insert(20, held(&current, 20, 1, LatePolicy::DropAndFlag));
-        tx.later.push(held(&future, 30, 1, LatePolicy::DropAndFlag));
-        lock(&core.held).extend([(current.domain, 20), (future.domain, 30)]);
+        lock(&core.held).extend([(current.domain, 20)]);
 
         tx.stop_now("UR-26: cancelled by Stop", ezsdr_radio::CancelReason::Stop);
 
-        assert!(tx.held.is_empty() && tx.later.is_empty());
+        assert!(tx.held.is_empty());
         assert!(!lock(&core.held).contains(&(current.domain, 20)));
-        assert!(!lock(&core.held).contains(&(future.domain, 30)));
         let rejected = lock(&core.rec).rejected.clone();
-        assert_eq!(rejected.len(), 2, "{rejected:?}");
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
         assert!(rejected.iter().all(|row| row["reason"] == "UR-26: cancelled by Stop"), "{rejected:?}");
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
         assert!(!events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
     }
 
     #[test]
-    fn ur_23_a_cold_switch_cancels_a_current_burst_and_releases_its_reservation() {
+    fn ur_23_a_clock_ending_at_its_cut_cancels_a_held_burst_and_releases_its_reservation() {
         let (core, device, _, events) = super::super::test_support::rig();
         let current = core.register(Dir::Tx, 200, 0).unwrap();
-        let next = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
         tx.held.insert(20, held(&current, 20, 1, LatePolicy::DropAndFlag));
         lock(&core.held).insert((current.domain, 20));
-        let mut switching = switch(&core, core.ticks(50_000_000), Some(next), 1, Settings::default());
-        switching.to.as_mut().unwrap().refused = true;
-        tx.switch = Some(switching);
+        tx.cut = Some(core.ticks(50_000_000));
 
-        tx.do_switch();
+        tx.end_clock();
 
         assert!(tx.held.is_empty());
         assert!(!lock(&core.held).contains(&(current.domain, 20)));
         let rejected = lock(&core.rec).rejected.clone();
         assert_eq!(rejected.len(), 1, "{rejected:?}");
-        assert_eq!(rejected[0]["reason"], "cancelled by a cold change");
+        assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock was never started");
         assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
     }
 
     #[test]
-    fn ur_25_a_skipped_future_clock_cancellation_releases_its_reservation() {
+    fn ur_25_a_burst_on_a_clock_that_never_started_is_cancelled_and_releases_its_reservation() {
         let (core, device, _, events) = super::super::test_support::rig();
         let current = core.register(Dir::Tx, 200, 0).unwrap();
-        let skipped = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
+        let ended = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
-        tx.later.push(held(&skipped, 30, 1, LatePolicy::DropAndFlag));
-        lock(&core.held).insert((skipped.domain, 30));
-        let mut switching = switch(&core, core.ticks(50_000_000), Some(skipped), 1, Settings::default());
-        switching.to.as_mut().unwrap().segment.cut = Some(0);
-        {
-            let stream = stream_key(Dir::Tx, 0);
-            let mut streams = lock(&core.streams);
-            let mut line = streams.lines.line(stream).unwrap().clone();
-            line.plan[0].cut = Some(0);
-            streams.lines.insert(stream, line);
-        }
-        tx.switch = Some(switching);
+        lock(&core.held).insert((ended.domain, 30));
 
-        tx.do_switch();
+        // A burst booked on another clock than the owner's reaches the owner: the clock the booking saw ended at its origin.
+        tx.command(TxCmd::Burst(held(&ended, 30, 1, LatePolicy::DropAndFlag)));
 
-        assert!(tx.later.is_empty());
-        assert!(!lock(&core.held).contains(&(skipped.domain, 30)));
+        assert!(tx.held.is_empty());
+        assert!(!lock(&core.held).contains(&(ended.domain, 30)));
         let rejected = lock(&core.rec).rejected.clone();
         assert_eq!(rejected.len(), 1, "{rejected:?}");
         assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock was never started");
@@ -5252,208 +3562,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock() {
-        // A2/A10 (design note 37): two transmit moves at one instant leave a segment holding
-        // both channels whose cut is its origin. The owner skips it without a device call —
-        // opening it would hold the reciprocal move's channel — and reads on to its own new
-        // segment. On the controlled clock both moves are booked at `e`.
-        let (core, device, time) = manual_rig();
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
-        device_at(&core, &time, &device, 0);
-        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
-        let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
-        let mut values = core.description.defaults();
-        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
-        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(1));
-        let (to_tx, _keep) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(
-            core.clone(),
-            Arc::new(NoActions),
-            vec![to_tx],
-            values,
-            false,
-            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), Some((c1, Channels::first(2).without(0)))] },
-        );
-        let ms = |n: i64| core.ticks(n * 1_000_000);
-        for (id, name, value) in [(1, "radio.tx.c0.stream", 1), (2, "radio.tx.c1.stream", 0)] {
-            control.book(Dispatched::new(
-                ActionId(id),
-                Action::UpdateParameter {
-                    target: super::super::test_support::target_of(&core.id),
-                    key: crate::provider::core::key(name),
-                    value: Value::from(value),
-                    class: UpdateClass::Cold,
-                    at: Some(AbsoluteDeadline::new(core.at(ms(100)))),
-                },
-                Some(core.id.clone()),
-            ));
-        }
-        // Both owners, each with its old streamer open and recorded, read the plan.
-        device.tx_open(0, &[0]).unwrap();
-        device.tx_open(1, &[1]).unwrap();
-        {
-            let mut streams = lock(&core.streams);
-            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
-            streams.record_open(stream_key(Dir::Tx, 1), Some(Channels::first(2).without(0)));
-        }
-        let (_, cmds0) = std::sync::mpsc::channel();
-        let (_, cmds1) = std::sync::mpsc::channel();
-        let mut tx0 = Tx::new(core.clone(), 0, cmds0, Some(c0), Channels::first(1));
-        let mut tx1 = Tx::new(core.clone(), 1, cmds1, Some(c1), Channels::first(2).without(0));
-        assert!(tx0.read(None) && tx1.read(None), "the owners read the plan");
-        // Stream 1 is the one whose plan holds the zero-length union segment.
-        let union = tx1.switch.as_ref().and_then(|switch| switch.to.as_ref()).expect("the zero-length segment");
-        assert_eq!(union.segment.config.channels, Channels::first(2), "the scene's intermediate segment is not the union: {:?}", union.segment.config.channels);
-        let cut = union.segment.cut.expect("the intermediate segment is cut");
-        assert_eq!(union.segment.instant(cut).unwrap(), union.segment.origin, "the scene's intermediate segment holds samples");
-        // The zero-length segment's owner skips it at its cut without a device call and reads
-        // on; then both owners' destination switches run at once, each waiting for the other's
-        // release.
-        device_at(&core, &time, &device, ms(200));
-        let mark = device.calls().len();
-        assert!(tx1.step(), "stream 1's skip of the zero-length segment");
-        assert_eq!(
-            tx1.switch.as_ref().and_then(|switch| switch.to.as_ref()).map(|to| to.segment.config.channels),
-            Some(Channels::first(2).without(1)),
-            "stream 1's owner did not read on to its destination"
-        );
-        assert!(device.calls()[mark..].iter().all(|call| !call.starts_with("tx_open") && !call.starts_with("apply")), "the zero-length segment made a device call: {:?}", device.calls());
-        drop(_frozen);
-        let (done0, reached0) = std::sync::mpsc::channel();
-        let (done1, reached1) = std::sync::mpsc::channel();
-        let owners = [
-            std::thread::spawn(move || {
-                let _ = tx0.step();
-                let _ = done0.send((tx0.clock, tx0.channels));
-            }),
-            std::thread::spawn(move || {
-                let _ = tx1.step();
-                let _ = done1.send((tx1.clock, tx1.channels));
-            }),
-        ];
-        let (clock0, channels0) = reached0.recv_timeout(Wall::from_secs(10)).expect("stream 0's owner did not reach its destination");
-        let (clock1, channels1) = reached1.recv_timeout(Wall::from_secs(10)).expect("stream 1's owner did not reach its destination");
-        for owner in owners {
-            owner.join().expect("the owner's thread");
-        }
-        let calls = device.calls();
-        assert!(calls[mark..].iter().all(|call| !call.starts_with("tx_open 0 [0, 1]") && !call.starts_with("tx_open 1 [0, 1]")), "an owner opened the zero-length segment: {calls:?}");
-        assert!(clock0.is_some() && channels0 == Channels::first(2).without(0), "stream 0's owner did not adopt its destination's clock: {clock0:?}, {channels0:?} {calls:?}");
-        assert!(clock1.is_some() && channels1 == Channels::first(2).without(1), "stream 1's owner did not adopt its destination's clock: {clock1:?}, {channels1:?} {calls:?}");
-        assert_eq!(calls.iter().filter(|call| call.as_str() == "tx_open 0 [1]").count(), 1, "stream 0's destination streamer: {calls:?}");
-        assert_eq!(calls.iter().filter(|call| call.as_str() == "tx_open 1 [0]").count(), 1, "stream 1's destination streamer: {calls:?}");
-        // The zero-length segment holds both channels but no samples, so it is no segment the
-        // reciprocal destination waits for (A2).
-        for (k, set) in [(0, Channels::first(2).without(0)), (1, Channels::first(2).without(1))] {
-            let destination = lock(&core.streams).planned(stream_key(Dir::Tx, k)).into_iter().map(|planned| planned.segment.origin).max().expect("a destination segment");
-            assert!(!lock(&core.streams).needed_before(stream_key(Dir::Tx, k), set, destination), "stream {k}'s zero-length segment holds the reciprocal destination back (A2)");
-        }
-        for k in 0..2 {
-            let done = lock(&core.streams).stream(stream_key(Dir::Tx, k)).completed.clone();
-            assert!(done.iter().any(|(origin, _, by)| *origin == 0 && by.is_none()), "stream {k}'s old segment is not completed by its owner: {done:?}");
-        }
-    }
-
-    #[test]
-    fn ur_25_a_same_size_membership_swap_sends_the_new_segment_on_its_own_channel() {
-        // M1 (design note 37): `{0}` becomes `{1}` without changing the count, while the rate
-        // also changes. The new segment must reopen on channel 1 and recompute window/4 from
-        // its 2 Ms/s clock; loopback distinguishes its samples from the old channel's ramp.
-        let (core, device, time) = manual_rig();
-        let frozen = crate::provider::test_support::Frozen::of(&device);
-        device_at(&core, &time, &device, 0);
-        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
-        let mut values = core.description.defaults();
-        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
-        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(-1));
-        let (to_tx, _keep) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(
-            core.clone(),
-            Arc::new(NoActions),
-            vec![to_tx],
-            values,
-            false,
-            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), None] },
-        );
-        let ms = |n: i64| core.ticks(n * 1_000_000);
-        for (id, name, value) in [(1, "radio.tx.c0.stream", -1), (2, "radio.tx.c1.stream", 0)] {
-            control.book(Dispatched::new(
-                ActionId(id),
-                Action::UpdateParameter {
-                    target: super::super::test_support::target_of(&core.id),
-                    key: crate::provider::core::key(name),
-                    value: Value::from(value),
-                    class: UpdateClass::Cold,
-                    at: Some(AbsoluteDeadline::new(core.at(ms(100)))),
-                },
-                Some(core.id.clone()),
-            ));
-        }
-        control.book(Dispatched::new(
-            ActionId(3),
-            Action::UpdateParameter {
-                target: super::super::test_support::target_of(&core.id),
-                key: crate::provider::core::key("radio.tx.s0.sample_rate_hz"),
-                value: Value::num(2e6).unwrap(),
-                class: UpdateClass::Cold,
-                at: Some(AbsoluteDeadline::new(core.at(ms(200)))),
-            },
-            Some(core.id.clone()),
-        ));
-        let plan = lock(&core.streams).planned(stream_key(Dir::Tx, 0));
-        let destination = plan.last().expect("the new segment").clone();
-        assert_eq!(destination.segment.config.channels, Channels::first(2).without(0), "{:?}", plan.iter().map(|planned| planned.segment.config.channels).collect::<Vec<_>>());
-        let destination_clock = destination.clock.expect("the destination's clock is registered at booking");
-        assert_eq!(destination_clock.n, 100, "the rate switch is on the new 2 Ms/s sample grid");
-        // The streamer the arm opened and the owner: the switch at the cut opens the new set.
-        device.tx_open(0, &[0]).unwrap();
-        lock(&core.streams).record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
-        let (_to_owner, cmds) = std::sync::mpsc::channel();
-        std::mem::forget(_to_owner);
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));
-        assert!(tx.read(None), "the owner reads the plan");
-        device_at(&core, &time, &device, ms(100));
-        drop(frozen);
-        assert!(tx.step(), "the owner switches the channel membership");
-        let _frozen_after_open = crate::provider::test_support::Frozen::of(&device);
-        assert!(tx.clock.is_some_and(|clock| clock.n == 200) && tx.channels == Channels::first(2).without(0), "the membership segment: {:?}", device.calls());
-        device_at(&core, &time, &device, ms(200));
-        assert!(tx.step(), "the owner switches to the new sample rate");
-        assert!(tx.clock.is_some_and(|clock| clock.domain == destination_clock.domain), "the owner did not adopt the destination's clock: {:?}", device.calls());
-        let calls = device.calls();
-        assert_eq!(calls.iter().filter(|call| call.as_str() == "tx_open 0 [1]").count(), 1, "the streamer is not reopened for the new set: {calls:?}");
-        assert!(calls.iter().any(|call| call.starts_with("apply tx 1 ") && call.ends_with("at=-")), "the new set's channel is not configured: {calls:?}");
-        // The destination's burst, booked before the cut on its clock, and the loopback that
-        // tells device channel 1 from channel 0.
-        let wave: Vec<[f32; 2]> = (0..5_001).map(|i| [0.01 + i as f32 / 100_000.0, 0.375]).collect();
-        let new_k = ms(5) / destination_clock.n;
-        lock(&core.held).insert((destination_clock.domain, new_k));
-        tx.command(TxCmd::Burst(one_shot(&destination_clock, new_k, 1, wave.clone())));
-        let burst_at = destination_clock.instant(new_k);
-        device.apply(Dir::Rx, 1, &Settings { rate: Some(2e6), ..Settings::default() }, None).unwrap();
-        device.rx_open(1, &[1]).unwrap();
-        device.rx_start(1, burst_at).unwrap();
-        device_at(&core, &time, &device, destination_clock.origin + ms(3));
-        assert!(tx.step(), "the destination's burst is dispatched: {:?}", device.calls());
-        assert_eq!(*sends(&device).last().unwrap(), (5_000, true, false), "window/4 is recomputed from the new rate");
-        assert_eq!(tx.contract, Some(ezsdr_kernel::contract::DataContractId::parse("ezsdr.stream.cf32").unwrap()), "TX blocks retain the cf32 contract");
-        assert!(tx.step(), "the finite burst's final sample is held for EOB");
-        assert!(tx.chain.tail().is_some());
-        device_at(&core, &time, &device, destination_clock.origin + ms(6));
-        assert!(tx.step(), "the held sample closes on the new sample clock");
-        assert_eq!(sends(&device), [(2, true, true), (5_000, true, false), (2, false, true)]);
-        assert_eq!(device.unended_bursts(), 0, "{:?}", device.calls());
-        device_at(&core, &time, &device, destination_clock.origin + ms(8));
-        let got = match device.rx_recv(1, wave.len(), Wall::from_millis(100), false) {
-            crate::device::RxRecv::Samples { samples, .. } => samples,
-            other => panic!("the loopback of the new segment's burst: {other:?}"),
-        };
-        assert_eq!(got[0], wave, "the new segment's payload and held EOB sample are not on device channel 1: {:?}", device.calls());
-        assert_eq!(device.transmitted(burst_at, wave.len()), vec![None; wave.len()], "the old channel sent the new segment's samples: {:?}", device.calls());
-        tx.command(TxCmd::Stop);
-    }
-
     /// A one-shot burst of `samples` on each of `channels` buffers, booked at sample `k` of
     /// `clock`.
     fn one_shot(clock: &super::Clock, k: i64, channels: usize, samples: Vec<[f32; 2]>) -> Held {
@@ -5468,252 +3576,6 @@ mod tests {
             policy: LatePolicy::DropAndFlag,
             target: TimePoint::new(clock.domain, k),
         }
-    }
-
-    #[test]
-    fn ur_34_a_transmit_move_ends_the_old_burst_and_sends_the_new_burst_on_its_stream() {
-        // A7/S5 (design note 37): a move cuts the source's one-shot burst at the move's
-        // instant — the last sample before it is played and the end-of-burst precedes the
-        // release of the old streamer — and a burst booked on the destination's clock before
-        // the cut is played by the destination's own owner after its switch.
-        let (core, device, time) = manual_rig();
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
-        device_at(&core, &time, &device, 0);
-        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
-        let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
-        let mut values = core.description.defaults();
-        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
-        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(1));
-        let (to_tx, _keep) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(
-            core.clone(),
-            Arc::new(NoActions),
-            vec![to_tx],
-            values,
-            false,
-            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), Some((c1, Channels::first(2).without(0)))] },
-        );
-        let ms = |n: i64| core.ticks(n * 1_000_000);
-        control.book(Dispatched::new(
-            ActionId(1),
-            Action::UpdateParameter {
-                target: super::super::test_support::target_of(&core.id),
-                key: crate::provider::core::key("radio.tx.c0.stream"),
-                value: Value::from(1),
-                class: UpdateClass::Cold,
-                at: Some(AbsoluteDeadline::new(core.at(ms(30)))),
-            },
-            Some(core.id.clone()),
-        ));
-        let s0 = lock(&core.streams).planned(stream_key(Dir::Tx, 0));
-        assert_eq!(s0.len(), 1, "s0 has no channel after the move: {:?}", s0.iter().map(|p| p.segment.origin).collect::<Vec<_>>());
-        assert_eq!(s0[0].segment.instant(s0[0].segment.cut.expect("s0 is cut")).unwrap(), ms(30));
-        let destination = lock(&core.streams).planned(stream_key(Dir::Tx, 1)).into_iter().find(|planned| planned.segment.config.channels == Channels::first(2)).expect("s1's destination segment");
-        let destination_clock = destination.clock.expect("the destination's clock is registered at booking");
-        device.tx_open(0, &[0]).unwrap();
-        device.tx_open(1, &[1]).unwrap();
-        {
-            let mut streams = lock(&core.streams);
-            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
-            streams.record_open(stream_key(Dir::Tx, 1), Some(Channels::first(2).without(0)));
-        }
-        let (_, cmds0) = std::sync::mpsc::channel();
-        let (_, cmds1) = std::sync::mpsc::channel();
-        let mut tx0 = Tx::new(core.clone(), 0, cmds0, Some(c0), Channels::first(1));
-        let mut tx1 = Tx::new(core.clone(), 1, cmds1, Some(c1), Channels::first(2).without(0));
-        assert!(tx0.read(None) && tx1.read(None), "the owners read the plan");
-        // The old one-shot: 10 000 samples from 20 ms, so its end is the move's instant.
-        let old_wave: Vec<[f32; 2]> = (0..10_000).map(|i| [i as f32 / 10_000.0, -0.125]).collect();
-        lock(&core.held).insert((c0.domain, 20_000));
-        tx0.command(TxCmd::Burst(one_shot(&c0, 20_000, 1, old_wave.clone())));
-        // The destination's burst, booked before the cut: 1 000 samples 5 ms into its clock.
-        let new_wave: Vec<[f32; 2]> = (0..1_000).map(|i| [0.75 - i as f32 / 4_000.0, 0.25]).collect();
-        let new_k = ms(5) / 200;
-        lock(&core.held).insert((destination_clock.domain, new_k));
-        tx1.command(TxCmd::Burst(one_shot(&destination_clock, new_k, 2, new_wave.clone())));
-        for k in 17..=29 {
-            device_at(&core, &time, &device, ms(k));
-            let _ = tx0.step();
-        }
-        assert!(device.transmitted(c0.instant(20_100), 1)[0].is_some(), "the old burst did not play: {:?}", device.calls());
-        // At the cut the source's burst ends and the destination's switch waits for its
-        // streamer release, so the two owners' turns run at once — each as a participant of
-        // the device's clock, registered before the test gives the clock back (M1): a delayed
-        // test thread then moves neither turn, and the clock stands at its poll's deadline.
-        device_at(&core, &time, &device, ms(30));
-        let (done, reached) = std::sync::mpsc::channel();
-        let (release_destination, destination_release) = std::sync::mpsc::channel();
-        let destination = device
-            .host()
-            .spawn("tx-destination", move || {
-                let _ = tx1.step();
-                let _ = done.send(tx1);
-                let _ = destination_release.recv();
-            })
-            .expect("a participant thread");
-        let (source_done, source_reached) = std::sync::mpsc::channel();
-        let source = device
-            .host()
-            .spawn("tx-source", move || {
-                let _ = tx0.step();
-                let _ = tx0.pass();
-                let _ = source_done.send(tx0.clock.is_none());
-            })
-            .expect("a participant thread");
-        drop(_frozen);
-        let mut tx1 = reached.recv_timeout(Wall::from_secs(10)).expect("the destination's turn");
-        assert!(tx1.clock.is_some(), "the destination adopted no clock: {:?}", device.calls());
-        assert_eq!(source_reached.recv_timeout(Wall::from_secs(10)), Ok(true), "the source's owner kept its clock: {:?}", device.calls());
-        // The destination is the last turn to finish — it waits for the source's release — and
-        // past its result it stays a participant until the test holds the clock again (M1). The
-        // source must end: a participant busy on the source's result would stop the clock, and
-        // the destination's poll for the release would never end.
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
-        let _ = release_destination.send(());
-        destination.join().expect("the destination's thread");
-        source.join().expect("the source's thread");
-        // The destination's own segment begins 50 ms after the cut; its prebooked burst, 5 ms
-        // into that clock, is due 50 ms later still. Every instant now goes forward from where
-        // the switch left it.
-        let mut k = device.time_now().unwrap() + 1;
-        while k <= ms(92) {
-            device_at(&core, &time, &device, k);
-            let _ = tx1.step();
-            k += ms(1);
-        }
-        let calls = device.calls();
-        let close = calls.iter().position(|call| call == "tx_close 0").unwrap_or_else(|| panic!("the source's release: {calls:?}"));
-        let end = calls.iter().rposition(|call| call.starts_with("tx_send 0 ") && call.ends_with("eob=true")).expect("the old burst's end");
-        assert!(end < close, "the old burst's end precedes the source's close: {calls:?}");
-        let last = device.transmitted(ms(30) - 200, 1)[0].expect("the last sample before the cut");
-        assert_eq!(last, old_wave[9_999], "the cut cut the old waveform: {calls:?}");
-        let new_at = destination_clock.instant(new_k + 100);
-        assert_eq!(device.transmitted(new_at, 1)[0], Some(new_wave[100]), "the destination's burst plays its own samples: {calls:?}");
-        assert!(calls.iter().any(|call| call == "tx_open 1 [0, 1]"), "the destination opens both channels: {calls:?}");
-        assert_eq!(device.unended_bursts(), 0, "{calls:?}");
-        assert!(calls.iter().all(|call| !call.contains("Attempting to reconnect")), "{calls:?}");
-        let ended = core.clocks.sample_clock_records().into_iter().find(|record| record.domain == c0.domain).and_then(|record| record.ended_at).expect("the source's clock ends at the cut");
-        assert_eq!(ended.ticks_in(core.root).unwrap(), ms(30), "the source's clock does not end at the move: {ended:?}");
-    }
-
-    #[test]
-    fn ur_34_a_transmit_move_carries_a_prebooked_burst_across_the_repeat_cut() {
-        // A7 (design note 37): an old repeating burst crosses its waveform wrap and is cut at
-        // the move's instant, while a burst already booked on the destination's clock waits
-        // through the move and its own owner plays it after the switch.
-        let (core, device, time) = manual_rig();
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
-        device_at(&core, &time, &device, 0);
-        let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
-        let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
-        let mut values = core.description.defaults();
-        values.insert(crate::provider::core::key("radio.tx.c0.stream"), Value::from(0));
-        values.insert(crate::provider::core::key("radio.tx.c1.stream"), Value::from(1));
-        let (to_tx, _keep) = std::sync::mpsc::channel();
-        let mut control = super::super::control::Control::new(
-            core.clone(),
-            Arc::new(NoActions),
-            vec![to_tx],
-            values,
-            false,
-            super::super::control::Start { t0: 0, rx: vec![None, None], tx: vec![Some((c0, Channels::first(1))), Some((c1, Channels::first(2).without(0)))] },
-        );
-        let ms = |n: i64| core.ticks(n * 1_000_000);
-        // The cut is two and a half waveforms past the repeat's start: the wrap has happened
-        // and the cut falls inside the third.
-        control.book(Dispatched::new(
-            ActionId(1),
-            Action::UpdateParameter {
-                target: super::super::test_support::target_of(&core.id),
-                key: crate::provider::core::key("radio.tx.c0.stream"),
-                value: Value::from(1),
-                class: UpdateClass::Cold,
-                at: Some(AbsoluteDeadline::new(core.at(ms(22) + core.ticks(500_000)))),
-            },
-            Some(core.id.clone()),
-        ));
-        let destination = lock(&core.streams).planned(stream_key(Dir::Tx, 1)).into_iter().find(|planned| planned.segment.config.channels == Channels::first(2)).expect("s1's destination segment");
-        let destination_clock = destination.clock.expect("the destination's clock is registered at booking");
-        device.tx_open(0, &[0]).unwrap();
-        device.tx_open(1, &[1]).unwrap();
-        {
-            let mut streams = lock(&core.streams);
-            streams.record_open(stream_key(Dir::Tx, 0), Some(Channels::first(1)));
-            streams.record_open(stream_key(Dir::Tx, 1), Some(Channels::first(2).without(0)));
-        }
-        let (_, cmds0) = std::sync::mpsc::channel();
-        let (_, cmds1) = std::sync::mpsc::channel();
-        let mut tx0 = Tx::new(core.clone(), 0, cmds0, Some(c0), Channels::first(1));
-        let mut tx1 = Tx::new(core.clone(), 1, cmds1, Some(c1), Channels::first(2).without(0));
-        assert!(tx0.read(None) && tx1.read(None), "the owners read the plan");
-        let old_wave: Vec<[f32; 2]> = (0..1_000).map(|i| [i as f32 / 1_000.0, -0.5]).collect();
-        let mut old = one_shot(&c0, 20_000, 1, old_wave.clone());
-        old.repeat = true;
-        lock(&core.held).insert((c0.domain, 20_000));
-        tx0.command(TxCmd::Burst(old));
-        let new_wave: Vec<[f32; 2]> = (0..1_000).map(|i| [0.5 + i as f32 / 4_000.0, 0.125]).collect();
-        let new_k = ms(5) / 200;
-        lock(&core.held).insert((destination_clock.domain, new_k));
-        tx1.command(TxCmd::Burst(one_shot(&destination_clock, new_k, 2, new_wave.clone())));
-        for k in 17..=21 {
-            device_at(&core, &time, &device, ms(k));
-            let _ = tx0.step();
-        }
-        // The repeat crossed its wrap: the second waveform's 100th sample is its own.
-        assert_eq!(device.transmitted(c0.instant(21_100), 1)[0], Some(old_wave[100]), "the repeat did not cross its wrap: {:?}", device.calls());
-        device_at(&core, &time, &device, ms(22) + core.ticks(500_000));
-        // The two owners' turns run at once as participants of the device's clock, registered
-        // before the test gives the clock back (M1), as in the one-shot move above.
-        let (done, reached) = std::sync::mpsc::channel();
-        let (release_destination, destination_release) = std::sync::mpsc::channel();
-        let destination = device
-            .host()
-            .spawn("tx-destination", move || {
-                let _ = tx1.step();
-                let _ = done.send(tx1);
-                let _ = destination_release.recv();
-            })
-            .expect("a participant thread");
-        let (source_done, source_reached) = std::sync::mpsc::channel();
-        let source = device
-            .host()
-            .spawn("tx-source", move || {
-                let _ = tx0.step();
-                let _ = tx0.pass();
-                let _ = source_done.send(tx0.clock.is_none());
-            })
-            .expect("a participant thread");
-        drop(_frozen);
-        let mut tx1 = reached.recv_timeout(Wall::from_secs(10)).expect("the destination's turn");
-        assert!(tx1.clock.is_some(), "the destination adopted no clock: {:?}", device.calls());
-        assert_eq!(source_reached.recv_timeout(Wall::from_secs(10)), Ok(true), "the source's owner kept its clock: {:?}", device.calls());
-        // As in the one-shot move above, the destination — the last turn to finish — stays a
-        // participant past its result until the test holds the clock again (M1), so the clock
-        // does not run between the turns and the test's own instants.
-        let _frozen = crate::provider::test_support::Frozen::of(&device);
-        let _ = release_destination.send(());
-        destination.join().expect("the destination's thread");
-        source.join().expect("the source's thread");
-        // Each instant goes forward from where the switch left it, to the destination's tenth
-        // millisecond.
-        let until = destination_clock.origin + ms(10);
-        let mut k = device.time_now().unwrap() + 1;
-        while k <= until {
-            device_at(&core, &time, &device, k);
-            let _ = tx1.step();
-            k += ms(1);
-        }
-        let calls = device.calls();
-        let close = calls.iter().position(|call| call == "tx_close 0").unwrap_or_else(|| panic!("the source's release: {calls:?}"));
-        let end = calls.iter().rposition(|call| call.starts_with("tx_send 0 ") && call.ends_with("eob=true")).expect("the repeat's end");
-        assert!(end < close, "the repeat's end precedes the source's close: {calls:?}");
-        let last_at = ms(22) + core.ticks(500_000) - 200;
-        assert_eq!(device.transmitted(last_at, 1)[0], Some(old_wave[499]), "the repeat reaches its last sample before the cut: {calls:?}");
-        let new_at = destination_clock.instant(new_k + 100);
-        assert_eq!(device.transmitted(new_at, 1)[0], Some(new_wave[100]), "the burst reserved on the new clock is played by the destination: {calls:?}");
-        let ended = core.clocks.sample_clock_records().into_iter().find(|record| record.domain == c0.domain).and_then(|record| record.ended_at).expect("the source's clock ends at the cut");
-        assert_eq!(ended.ticks_in(core.root).unwrap(), ms(22) + core.ticks(500_000), "the repeat is not cut at the booked instant: {ended:?}");
-        assert_eq!(device.unended_bursts(), 0, "{calls:?}");
     }
 
     #[test]
@@ -6203,7 +4065,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, cmds) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             book_burst(&mut control, &core, 1, clock, 40_000, &a_wave, true, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
@@ -6273,7 +4135,7 @@ mod tests {
             device.tx_open(0, &[0]).unwrap();
             device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
             let (mut control, cmds) = booking_control(&core);
-            let clock = plan_of(&core, Dir::Tx)[0].clock.expect("the transmit clock");
+            let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
             book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
@@ -6329,22 +4191,18 @@ mod tests {
     fn ur_26_shutdown_after_loss_cancels_held_bursts_record_only() {
         let (core, device, _, events) = super::super::test_support::rig();
         let current = core.register(Dir::Tx, 200, 0).unwrap();
-        let future = core.register(Dir::Tx, 200, core.ticks(100_000_000)).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(current), Channels::first(1));
         tx.held.insert(20, held(&current, 20, 1, LatePolicy::DropAndFlag));
-        tx.later.push(held(&future, 30, 1, LatePolicy::DropAndFlag));
-        lock(&core.held).extend([(current.domain, 20), (future.domain, 30)]);
+        lock(&core.held).extend([(current.domain, 20)]);
         core.device_lost("fake loss before the burst start");
 
         tx.shutdown();
 
         assert!(tx.held.is_empty());
-        assert!(tx.later.is_empty());
         assert!(!lock(&core.held).contains(&(current.domain, 20)));
-        assert!(!lock(&core.held).contains(&(future.domain, 30)));
         let rejected = lock(&core.rec).rejected.clone();
-        assert_eq!(rejected.len(), 2, "{rejected:?}");
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
         assert!(rejected.iter().all(|row| row["reason"] == "UR-26: cancelled by Provider::stop"), "{rejected:?}");
         let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
         assert!(events.iter().any(|event| event.kind.as_str() == ezsdr_kernel::event::EventKind::DEVICE_LOST));
@@ -6600,7 +4458,7 @@ mod tests {
     }
 
     #[test]
-    fn ur_23_txs_switch_and_stop_do_not_send_past_a_high_rate_frontier() {
+    fn ur_23_txs_cut_and_stop_do_not_send_past_a_high_rate_frontier() {
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(1, Vec::new(), BTreeMap::new());
         let start = 500_000;
         device_at(&core, &time, &device, clock.instant(start - 400_000));
@@ -6608,8 +4466,8 @@ mod tests {
         let expected = repeat.samples[0].clone();
         txp_give(&mut tx, &core, repeat);
         assert!(tx.step());
-        tx.switch = Some(switch(&core, clock.instant(start + 30_000), None, 0, Settings::default()));
-        assert!(tx.step(), "the next send ends exactly at the cold cut");
+        tx.cut = Some(clock.instant(start + 30_000));
+        assert!(tx.step(), "the next send ends exactly at the cut");
         assert_eq!(*sends(&device).last().unwrap(), (10_000, false, false));
         assert_eq!(tx.open.as_ref().unwrap().next, start + 30_000);
         assert!(tx.step(), "the device burst is closed at the cut");
@@ -6955,12 +4813,12 @@ mod tests {
     }
 
     #[test]
-    fn ur_23_m14_a_cold_cut_is_not_waited_past_or_crossed() {
+    fn ur_23_m14_a_cut_is_not_waited_past_or_crossed() {
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
         txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         let cut = clock.instant(10_200);
-        tx.switch = Some(switch(&core, cut, None, 0, Settings::default()));
+        tx.cut = Some(cut);
         let calls = device.calls().len();
         assert!(!tx.step(), "2 200 samples to the cut, 2 000 of room: wait");
         assert_eq!(device.calls().len(), calls);
@@ -6972,47 +4830,8 @@ mod tests {
         assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "a two-zero end-of-burst only");
         assert_eq!(device.transmitted(cut, 2), vec![Some([0.0, 0.0]), Some([0.0, 0.0])], "nothing of the burst at or past the cut");
         device_at(&core, &time, &device, cut);
-        assert!(tx.step(), "the switch");
+        assert!(tx.step(), "the clock ends");
         assert!(tx.clock.is_none() && tx.at == 1);
-    }
-
-    #[test]
-    fn ur_23_m14e_a_waiting_owner_switches_to_the_new_clock_at_the_cut() {
-        let (core, device, time, _events, clock, mut tx, frozen) = txp_rig(None, 2_000);
-        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
-        txp_drain(&mut tx);
-        let cut = clock.instant(10_500);
-        // The same cut, now to a second clock with two channels at 2 MS/s.
-        let new = core.register(Dir::Tx, 100, cut).unwrap();
-        tx.switch = Some(switch(&core, cut, Some(new), 2, Settings { rate: Some(2e6), ..Settings::default() }));
-        let calls = device.calls().len();
-        assert!(!tx.step(), "2 500 samples to the cut, 2 000 of room: wait");
-        assert_eq!(device.calls().len(), calls);
-        device_at(&core, &time, &device, txp_ticks(500));
-        assert!(tx.step());
-        assert_eq!(*sends(&device).last().unwrap(), (2_500, false, false));
-        assert_eq!(tx.open.as_ref().unwrap().next, 10_500, "the exclusive cut");
-        assert!(tx.step(), "at the cut the device burst ends");
-        assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "a two-zero end-of-burst only");
-        assert_eq!(device.transmitted(clock.instant(10_500), 2), vec![Some([0.0, 0.0]), Some([0.0, 0.0])], "nothing of the burst at or past the cut");
-        device_at(&core, &time, &device, cut);
-        // The switch configures the device on its clock: it runs as a participant, and the clock is held again before it ends.
-        let ((mut tx, switched), _frozen) = crate::provider::test_support::released(frozen, &device.host(), move || {
-            let switched = tx.step();
-            (tx, switched)
-        });
-        assert!(switched, "the switch");
-        assert_eq!(tx.clock, Some(new), "the new clock is adopted after the wait and the cut");
-        assert_eq!(tx.channels, Channels::first(2));
-        assert_eq!(tx.at, 1);
-        // And on the new clock a two-channel burst starts with a timed start-of-burst of the expected size.
-        let mut burst = txp_burst(&new, 5_000, 3_000, false, LatePolicy::DropAndFlag);
-        burst.samples = Arc::new(vec![burst.samples[0].clone(), burst.samples[0].clone()]);
-        txp_give(&mut tx, &core, burst);
-        let sent = sends(&device).len();
-        assert!(tx.step());
-        assert_eq!(sends(&device)[sent..], [(2_999, true, false)], "the burst's full remaining payload is within window/4");
-        assert!(device.calls().last().unwrap().contains(&format!("at={}", new.instant(5_000))), "{:?}", device.calls().last());
     }
 
     // The priority of the transmit owner (UR-23) and the idle wait, on `Tx::run` threads over a `TxSpy`.

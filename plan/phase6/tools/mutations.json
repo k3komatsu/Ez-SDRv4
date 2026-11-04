@@ -517,7 +517,7 @@
   "file": "python/ezsdr/session.py",
   "old": "    if len(domains) != 1:",
   "new": "    if False:",
-  "python": "test_easy_api.EasyApi.test_ea_17_a_capture_across_a_rate_change_is_refused"
+  "python": "test_easy_api.EasyApi.test_ea_17_a_capture_across_a_restart_is_refused"
  },
  {
   "id": "P13",

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::event::{EventKind, Severity};
 use ezsdr_kernel::id::ClockDomainId;
-use ezsdr_kernel::module_api::{CompileRule, ModuleRegistry, UpdateClass, Version};
+use ezsdr_kernel::module_api::{CompileRule, ModuleRegistry, Version};
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{CoercionPolicy, Ident, Key, Namespace, Value, ValueKind};
 use ezsdr_kernel::stream::LatePolicy;
@@ -104,8 +104,6 @@ fn rm_01_register_twice_is_refused() {
 
 #[test]
 fn rm_04_the_key_table_is_exactly_the_declared_one() {
-    let cold = Some(UpdateClass::Cold);
-    let timed = Some(UpdateClass::HardwareTimed);
     let none = None;
     let reject = CoercionPolicy::Reject;
     let warn = CoercionPolicy::Warn;
@@ -113,6 +111,7 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
     let int = ValueKind::Int;
     let str_ = ValueKind::Str;
     let bool_ = ValueKind::Bool;
+    // Note 47 stage 2: no radio key has an update class (RM-27).
     let expected = [
         ("radio.full_duplex", bool_, false, reject, none),
         ("radio.hardware_time", bool_, false, reject, none),
@@ -130,24 +129,24 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
         ("radio.perf.wire_bytes_per_sample", int, false, reject, none),
-        ("radio.rx.c.frequency_hz", num, true, reject, timed),
-        ("radio.rx.c.gain_db", num, true, warn, timed),
-        ("radio.rx.c.antenna", str_, false, reject, cold),
-        ("radio.rx.c.stream", int, false, reject, cold),
+        ("radio.rx.c.frequency_hz", num, true, reject, none),
+        ("radio.rx.c.gain_db", num, true, warn, none),
+        ("radio.rx.c.antenna", str_, false, reject, none),
+        ("radio.rx.c.stream", int, false, reject, none),
         ("radio.rx.c.frequency_step_hz", num, false, reject, none),
         ("radio.rx.c.gain_step_db", num, false, reject, none),
         ("radio.rx.c.phase_behavior_on_retune", str_, false, reject, none),
         ("radio.rx.c.path_delay_samples", int, false, reject, none),
-        ("radio.rx.s.sample_rate_hz", num, true, reject, cold),
-        ("radio.tx.c.frequency_hz", num, true, reject, timed),
-        ("radio.tx.c.gain_db", num, true, warn, timed),
-        ("radio.tx.c.antenna", str_, false, reject, cold),
-        ("radio.tx.c.stream", int, false, reject, cold),
+        ("radio.rx.s.sample_rate_hz", num, true, reject, none),
+        ("radio.tx.c.frequency_hz", num, true, reject, none),
+        ("radio.tx.c.gain_db", num, true, warn, none),
+        ("radio.tx.c.antenna", str_, false, reject, none),
+        ("radio.tx.c.stream", int, false, reject, none),
         ("radio.tx.c.frequency_step_hz", num, false, reject, none),
         ("radio.tx.c.gain_step_db", num, false, reject, none),
         ("radio.tx.c.phase_behavior_on_retune", str_, false, reject, none),
         ("radio.tx.c.path_delay_samples", int, false, reject, none),
-        ("radio.tx.s.sample_rate_hz", num, true, reject, cold),
+        ("radio.tx.s.sample_rate_hz", num, true, reject, none),
     ];
     let declarations = ezsdr_radio::vocabulary().keys;
     assert_eq!(declarations.len(), expected.len());

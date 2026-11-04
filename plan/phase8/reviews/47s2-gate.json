@@ -1,0 +1,337 @@
+{
+  "verdict": "PASS",
+  "reasons": [],
+  "started": "2026-11-04T15:10:08+00:00",
+  "finished": "2026-11-04T15:24:17+00:00",
+  "renames": "plan/phase8/reviews/47s2-renames.txt",
+  "identity": {
+    "before": {
+      "head": "45a42945abe68d241f8904bb6e22cf7cbc4c2bb1",
+      "status": [
+        " M AGENTS.md",
+        " M KNOWN_LIMITATIONS.md",
+        " M crates/ezsdr-acceptance/tests/parity.rs",
+        " M crates/ezsdr-acceptance/tests/uhd.rs",
+        " M crates/ezsdr-acceptance/tests/v58.rs",
+        " M crates/ezsdr-mock-radio/src/channel.rs",
+        " M crates/ezsdr-mock-radio/src/lib.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_channel.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_layout.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_radio.rs",
+        " M crates/ezsdr-mock-radio/tests/timeline.rs",
+        " M crates/ezsdr-radio-uhd/src/device.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/control.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/control/differential.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/core.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/mod.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/test_support.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+        "M  crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/mod.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M crates/ezsdr-radio-uhd/tests/hardware.rs",
+        " M crates/ezsdr-radio/src/channels.rs",
+        " M crates/ezsdr-radio/src/lib.rs",
+        " M crates/ezsdr-radio/src/timeline.rs",
+        " M crates/ezsdr-radio/tests/channels.rs",
+        " M crates/ezsdr-radio/tests/generator/mod.rs",
+        " M crates/ezsdr-radio/tests/radio_model.rs",
+        " M crates/ezsdr-radio/tests/timeline.rs",
+        " M crates/ezsdr-server/tests/protocol.rs",
+        " M crates/ezsdr-sim/src/lib.rs",
+        " M crates/ezsdr-sim/tests/sim_vocabulary.rs",
+        " M design/01-time-model.md",
+        " M design/03-spec-and-binding.md",
+        " M design/04-run-and-session.md",
+        " M design/05-module-api.md",
+        " M design/07-radio-model.md",
+        " M design/08-simulation.md",
+        " M design/09-mock-radio.md",
+        " M design/11-simulation-channel.md",
+        " M design/16-easy-api.md",
+        " M design/18-uhd-radio.md",
+        " M plan/maintenance/tools/gate.py",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase3/tools/mutations.json",
+        " M plan/phase6/tools/mutations.json",
+        " M plan/phase7/tools/mutations.json",
+        " M plan/phase8/47-no-change-while-streaming.md",
+        " M python/examples/bench_loopback.py",
+        " M python/ezsdr/session.py",
+        " M python/tests/test_easy_api.py",
+        " M schemas/sim/fault_entry.v1.json",
+        "?? plan/phase8/reviews/47s2-renames.txt"
+      ],
+      "untracked": [
+        "plan/phase8/reviews/47s2-renames.txt"
+      ],
+      "sha256": "c271a254cef4c5c040073641c1c1d00101ea192cf8516613b73b4bbab32d744c"
+    },
+    "after": {
+      "head": "45a42945abe68d241f8904bb6e22cf7cbc4c2bb1",
+      "status": [
+        " M AGENTS.md",
+        " M KNOWN_LIMITATIONS.md",
+        " M crates/ezsdr-acceptance/tests/parity.rs",
+        " M crates/ezsdr-acceptance/tests/uhd.rs",
+        " M crates/ezsdr-acceptance/tests/v58.rs",
+        " M crates/ezsdr-mock-radio/src/channel.rs",
+        " M crates/ezsdr-mock-radio/src/lib.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_channel.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_layout.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_radio.rs",
+        " M crates/ezsdr-mock-radio/tests/timeline.rs",
+        " M crates/ezsdr-radio-uhd/src/device.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/control.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/control/differential.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/core.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/mod.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/rx.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/rx/differential.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/test_support.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+        "M  crates/ezsdr-radio-uhd/tests/common/measurement/h4.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/mod.rs",
+        " M crates/ezsdr-radio-uhd/tests/common/probe_device.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M crates/ezsdr-radio-uhd/tests/hardware.rs",
+        " M crates/ezsdr-radio/src/channels.rs",
+        " M crates/ezsdr-radio/src/lib.rs",
+        " M crates/ezsdr-radio/src/timeline.rs",
+        " M crates/ezsdr-radio/tests/channels.rs",
+        " M crates/ezsdr-radio/tests/generator/mod.rs",
+        " M crates/ezsdr-radio/tests/radio_model.rs",
+        " M crates/ezsdr-radio/tests/timeline.rs",
+        " M crates/ezsdr-server/tests/protocol.rs",
+        " M crates/ezsdr-sim/src/lib.rs",
+        " M crates/ezsdr-sim/tests/sim_vocabulary.rs",
+        " M design/01-time-model.md",
+        " M design/03-spec-and-binding.md",
+        " M design/04-run-and-session.md",
+        " M design/05-module-api.md",
+        " M design/07-radio-model.md",
+        " M design/08-simulation.md",
+        " M design/09-mock-radio.md",
+        " M design/11-simulation-channel.md",
+        " M design/16-easy-api.md",
+        " M design/18-uhd-radio.md",
+        " M plan/maintenance/tools/gate.py",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase3/tools/mutations.json",
+        " M plan/phase6/tools/mutations.json",
+        " M plan/phase7/tools/mutations.json",
+        " M plan/phase8/47-no-change-while-streaming.md",
+        " M python/examples/bench_loopback.py",
+        " M python/ezsdr/session.py",
+        " M python/tests/test_easy_api.py",
+        " M schemas/sim/fault_entry.v1.json",
+        "?? plan/phase8/reviews/47s2-renames.txt"
+      ],
+      "untracked": [
+        "plan/phase8/reviews/47s2-renames.txt"
+      ],
+      "sha256": "c271a254cef4c5c040073641c1c1d00101ea192cf8516613b73b4bbab32d744c"
+    }
+  },
+  "toolchain": {
+    "docker_image": "sha256:4ad5558bf9906e3b874d0a3e3638ba9c09be57201a9ca8116bc8eb790eb06452",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "python314": "Python 3.14.4",
+    "python39": "Python 3.9.25",
+    "remote": "sim02"
+  },
+  "steps": [
+    {
+      "name": "fmt",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo fmt --all --check",
+      "exit": 0,
+      "seconds": 1.4,
+      "counts": {
+        "diffs": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/fmt.log",
+      "ok": true
+    },
+    {
+      "name": "test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test --workspace --no-fail-fast",
+      "exit": 0,
+      "seconds": 97.3,
+      "counts": {
+        "passed": 1698,
+        "failed": 0,
+        "results": 68,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/test.log",
+      "ok": true
+    },
+    {
+      "name": "clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 1.5,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/clippy.log",
+      "ok": true
+    },
+    {
+      "name": "rules",
+      "command": "python3 plan/maintenance/tools/rules.py --base HEAD --renames plan/phase8/reviews/47s2-renames.txt",
+      "exit": 0,
+      "seconds": 1.4,
+      "counts": {
+        "problems": 0,
+        "base": "HEAD"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/rules.log",
+      "ok": true
+    },
+    {
+      "name": "rules-self-test",
+      "command": "python3 plan/maintenance/tools/rules.py --self-test",
+      "exit": 0,
+      "seconds": 0.0,
+      "counts": {
+        "ok": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/rules-self-test.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy -p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 0.8,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/uhd-clippy.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --lib --test uhd_api",
+      "exit": 0,
+      "seconds": 6.9,
+      "counts": {
+        "passed": 326,
+        "failed": 0,
+        "results": 2,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/uhd-test.log",
+      "ok": true
+    },
+    {
+      "name": "hw-build",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --test hardware --no-run",
+      "exit": 0,
+      "seconds": 1.3,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/hw-build.log",
+      "ok": true
+    },
+    {
+      "name": "py314",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- sh -c 'cargo build -p ezsdr-server && python3 -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 6.6,
+      "counts": {
+        "ran": 78,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/py314.log",
+      "ok": true
+    },
+    {
+      "name": "py39",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 --image python:3.9-slim -- sh -c 'pip -q install --user numpy && EZSDR_SERVER=/cargo-target/debug/ezsdr-server PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 8.7,
+      "counts": {
+        "ran": 78,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/py39.log",
+      "ok": true
+    },
+    {
+      "name": "mutation",
+      "command": "REMOTE_SSH='ssh -o BatchMode=yes' python3 plan/maintenance/tools/remote/remote_mutate.py all sim02:8,sim03:8",
+      "exit": 1,
+      "seconds": 721.5,
+      "counts": {
+        "passed": 1671,
+        "total": 1672
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-s2b/mutation.log",
+      "ok": true
+    }
+  ],
+  "mutation": {
+    "lists": {
+      "maintenance": {
+        "passed": 1316,
+        "total": 1316
+      },
+      "phase3": {
+        "passed": 74,
+        "total": 74
+      },
+      "phase4": {
+        "passed": 38,
+        "total": 38
+      },
+      "phase5": {
+        "passed": 29,
+        "total": 29
+      },
+      "phase6": {
+        "passed": 63,
+        "total": 63
+      },
+      "phase7": {
+        "passed": 151,
+        "total": 152
+      }
+    },
+    "not_killed": [
+      "phase7/G09"
+    ],
+    "known": [
+      "phase7/G09"
+    ],
+    "unexpected": [],
+    "baseline_failed": [],
+    "broken": {},
+    "missing": [],
+    "missing_ids": [],
+    "notes": [],
+    "remote_exit": 1,
+    "hosts": "sim02:8,sim03:8",
+    "images": {
+      "sim02": "sha256:90ae6efa898d4b3b6cd6b0eeb656adaa00a313c19b7d9da7997b71d95b468dde",
+      "sim03": "sha256:91cf5d09ba427a41098a7bd20cdd8ee08e6b434cbed5e19125732ad62fe04f0e"
+    }
+  }
+}

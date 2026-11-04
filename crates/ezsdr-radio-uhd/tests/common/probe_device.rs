@@ -132,10 +132,6 @@ impl ProbeDevice {
         self.dropped_rows.load(Ordering::Acquire)
     }
 
-    pub fn matching_timed_apply(&self, e: i64) -> Option<Json> {
-        self.rows.lock().unwrap().iter().rev().find(|row| row["call"] == "apply_timed" && row["e"].as_i64() == Some(e)).cloned()
-    }
-
     pub fn count(&self, call: &str) -> usize {
         self.rows.lock().unwrap().iter().filter(|row| row["call"] == call).count()
     }
@@ -289,14 +285,14 @@ impl ProbeDevice {
         result.map(|tick| (tick, host_before_ns, host_after_ns))
     }
 
-    fn record_timed_apply(&self, dir: Dir, chan: usize, settings: &Settings, at: i64, host_entry_ns: u64, result: &Result<Applied, DeviceError>) {
+    fn record_timed_apply(&self, dir: Dir, chan: usize, settings: &Settings, at: i64, result: &Result<Applied, DeviceError>) {
         let result = match result {
             Ok(applied) => json!({ "rate": applied.rate, "freq": applied.freq, "gain": applied.gain, "antenna": applied.antenna }),
             Err(error) => json!({ "error": error.message, "lost": error.lost }),
         };
         self.record(json!({
             "call": "apply_timed", "direction": if dir == Dir::Rx { "rx" } else { "tx" }, "channel": chan,
-            "e": at, "host_entry_ns": host_entry_ns, "host_return_ns": self.host_ns(),
+            "e": at, "host_return_ns": self.host_ns(),
             "settings": { "rate": settings.rate, "freq": settings.freq, "gain": settings.gain, "antenna": settings.antenna },
             "gain_only": settings.gain.is_some() && settings.rate.is_none() && settings.freq.is_none() && settings.antenna.is_none(),
             "result": result,
@@ -358,7 +354,6 @@ impl Device for ProbeDevice {
         self.inner.ref_locked()
     }
     fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        let host_entry_ns = self.host_ns();
         if at.is_some() {
             let count = self.timed_applies.fetch_add(1, Ordering::AcqRel) + 1;
             let hook = self.before_timed_apply.lock().unwrap().take();
@@ -375,7 +370,7 @@ impl Device for ProbeDevice {
                     *failing = None;
                     self.control_log.lock().unwrap().push("apply_timed_failed");
                     let error = DeviceError::failed("probe: scripted timed apply failure");
-                    self.record_timed_apply(dir, chan, settings, at, host_entry_ns, &Err(error.clone()));
+                    self.record_timed_apply(dir, chan, settings, at, &Err(error.clone()));
                     return Err(error);
                 }
             }
@@ -398,7 +393,7 @@ impl Device for ProbeDevice {
         self.control_log.lock().unwrap().push(if at.is_some() { "apply_timed" } else { "apply" });
         let result = self.inner.apply(dir, chan, settings, at);
         if let Some(at) = at {
-            self.record_timed_apply(dir, chan, settings, at, host_entry_ns, &result);
+            self.record_timed_apply(dir, chan, settings, at, &result);
         }
         result
     }

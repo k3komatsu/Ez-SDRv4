@@ -462,6 +462,24 @@ pub fn rx0(profile: &Json) -> InitialRequests {
     BTreeMap::from([(Ident::parse("radio").unwrap(), requests)])
 }
 
+/// As [`rx0`], and transmit channel c0 in stream 0 too (a Session that transmits).
+pub fn rx0_tx0(profile: &Json) -> InitialRequests {
+    let mut initial = rx0(profile);
+    initial.get_mut(&Ident::parse("radio").unwrap()).unwrap().insert(Key::parse("radio.tx.c0.stream").unwrap(), Scalar::from(0));
+    initial
+}
+
+/// `initial` with these further initial values of the `radio` instance (RM-30).
+pub fn with_initial(mut initial: InitialRequests, extra: &[(&str, Scalar)]) -> InitialRequests {
+    initial.get_mut(&Ident::parse("radio").unwrap()).unwrap().extend(extra.iter().map(|(key, value)| (Key::parse(key).unwrap(), value.clone())));
+    initial
+}
+
+/// The initial request of a transmit-only Session: transmit channel c0 in stream 0 and no receive stream.
+pub fn tx_only(_profile: &Json) -> InitialRequests {
+    BTreeMap::from([(Ident::parse("radio").unwrap(), BTreeMap::from([(Key::parse("radio.tx.c0.stream").unwrap(), Scalar::from(0))]))])
+}
+
 pub fn session(profile: &Json, device: Arc<dyn Device>) -> RunHandle {
     session_with(profile, device, &rx0(profile))
 }
@@ -487,8 +505,8 @@ pub fn past_t0(run: &mut RunHandle, extra: i64) {
     run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + extra)).unwrap();
 }
 
-/// Advances past the origin of the transmit clock a change from 0 channels registered,
-/// the start lead after it (RM-25; spec 22, VH-4), so that a burst sent then is on time.
+/// Advances past the origin of the transmit clock the Session's transmit channel registered
+/// (RM-25; spec 22, VH-4), so that a burst sent then is on time.
 pub fn past_tx_origin(run: &mut RunHandle) {
     let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.path() == "usrp/tx/s0" && r.ended_at.is_none()).expect("a transmit clock");
     let _ = run.advance_to(TimePoint::new(clock.origin.domain(), clock.origin.ticks_in(clock.root).unwrap() + ms(1)));
@@ -833,16 +851,16 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
     (heard, looped)
 }
 
-/// B7's shape from Rust: a Session that enables transmit, repeats a waveform, captures
-/// it ahead of the Run's time (EA-17), and is refused a retune outside the RF envelope
-/// (§58 #16).
+/// B7's shape from Rust: a Session that asks for transmit at connect, repeats a waveform,
+/// captures it ahead of the Run's time (EA-17), and is refused a retune during the Run (a
+/// radio value has no update class, §58 #16).
 pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manifest {
     let dir = TempDir::new();
     let hz = bench_hz(&*device);
     let envelope = bench_envelope(&*device);
-    let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
+    let profile = bench_profile(&*device, &dir, json!({}), envelope, true);
+    let mut run = session_with(&profile, device, &rx0_tx0(&profile));
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.c0.stream", Value::from(0)), None).unwrap()));
     past_tx_origin(&mut run);
     let wave = pn(1_000);
     let (bytes, _) = waveform_of(&wave);
@@ -852,7 +870,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let refused = run.submit(set("radio.tx.c0.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();
-    assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope")), "{refused:?}");
+    assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class")), "{refused:?}");
     if !exact {
         println!("B7 refused: {:?}", refused.outcome);
     }
@@ -916,51 +934,28 @@ pub fn ma1_phase(manifest: &Manifest, wave: &[(f32, f32)]) -> Result<f64, String
     tone::phase_verdict(&phase)
 }
 
-/// One run of the MA-1 probe: the receive and the transmit frequency are changed to the bench frequency plus 300 kHz (the LO
-/// is rewritten), then one 1 ms burst is sent and captured, and its phase against the known waveform is returned (`ma1_phase`).
-/// `timed_after_start` false: a Session sets both before T0, where the receive one is applied untimed (UR-24, D9a) and the
-/// transmit one by the enable's configuration. True: a Spec Run sets both again at one instant, 100 ms in, while the
-/// receive stream runs (the receive one timed, as D9a's covering rule gives it; the transmit one between bursts, away from
-/// F3′), and its burst begins 10 ms after it. The two measure one thing, the burst's phase, by two harnesses, because a Session
-/// action has no `at` of its own.
-pub fn ma1_run(device: Arc<dyn Device>, timed_after_start: bool, wave: &[(f32, f32)], bytes: &[u8]) -> Result<f64, String> {
+/// One run of the MA-1 probe: a Session asks at connect for the receive and the transmit frequency at the bench frequency plus
+/// 300 kHz, where the receive one is applied untimed (UR-24, D9a) and the transmit one by the enable's configuration; then one
+/// 1 ms burst is sent and captured, and its phase against the known waveform is returned (`ma1_phase`). A Run-time retune no
+/// longer exists (note 47 stage 2), so the timed way of the old probe is gone.
+pub fn ma1_run(device: Arc<dyn Device>, wave: &[(f32, f32)], bytes: &[u8]) -> Result<f64, String> {
     let dir = TempDir::new();
     let hz = bench_hz(&*device);
     let f_new = hz + 300e3;
     assert!(SAFE_TX_HZ.contains(&f_new), "bench.md RF safety: {f_new} Hz is outside SAFE_TX_HZ (the probe is for slot A's OBX or UBX at 1 GHz)");
     let envelope = bench_envelope(&*device);
-    let manifest = if timed_after_start {
-        let (_, waveform) = waveform_of(wave);
-        let mut spec = with_burst(with_tx(receive_spec(1, 1e6, hz, None), 1e6), &waveform, false, "send_asap_and_flag", 110_000);
-        let at = |offset: i64| json!({ "clock": "radio", "offset_ticks": offset });
-        let update = |direction: &str| {
-            json!({ "at": at(100_000), "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(),
-            "key": format!("radio.{direction}.c0.frequency_hz"), "value": f_new } })
-        };
-        spec["schedule"].as_array_mut().expect("the burst's schedule").extend([
-            update("rx"),
-            update("tx"),
-            json!({ "at": at(105_000), "action": {
-            "kind": "update_parameter", "target": serde_json::to_value(output("rec")).unwrap(), "key": "sink.capture_samples", "value": 10_000 } }),
-        ]);
-        let inputs = BTreeMap::from([(waveform.hash.clone(), bytes.to_vec())]);
-        captured(spec_run(&spec, &bench_profile(&*device, &dir, json!({}), envelope, false), device, inputs))
-    } else {
-        let mut run = session(&bench_profile(&*device, &dir, json!({}), envelope, true), device);
-        for direction in ["rx", "tx"] {
-            let entry = run.submit(set(&format!("radio.{direction}.c0.frequency_hz"), Value::num(f_new).unwrap()), None).unwrap();
-            assert!(admitted(&entry), "{entry:?}");
-        }
-        past_t0(&mut run, ms(1));
-        assert!(admitted(&run.submit(set("radio.tx.c0.stream", Value::from(0)), None).unwrap()));
-        past_tx_origin(&mut run);
-        // Both instants are read before either is submitted, so that a slow submit does not move the burst in the capture.
-        let (at, capture_at) = (tx_at(&run, ms(30)), after_ticks(&run, ms(25)));
-        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(bytes)).unwrap()));
-        assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", Value::from(10_000))]), None).unwrap()));
-        let horizon = after_ticks(&run, ms(3_000));
-        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-        run.finish()
-    };
+    let profile = bench_profile(&*device, &dir, json!({}), envelope, true);
+    let f_new = Scalar::try_from(f_new).unwrap();
+    let initial = with_initial(rx0_tx0(&profile), &[("radio.rx.c0.frequency_hz", f_new.clone()), ("radio.tx.c0.frequency_hz", f_new)]);
+    let mut run = session_with(&profile, device, &initial);
+    past_t0(&mut run, ms(1));
+    past_tx_origin(&mut run);
+    // Both instants are read before either is submitted, so that a slow submit does not move the burst in the capture.
+    let (at, capture_at) = (tx_at(&run, ms(30)), after_ticks(&run, ms(25)));
+    assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(bytes)).unwrap()));
+    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", Value::from(10_000))]), None).unwrap()));
+    let horizon = after_ticks(&run, ms(3_000));
+    let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
+    let manifest = run.finish();
     ma1_phase(&manifest, wave)
 }

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use ezsdr_kernel::binding::satisfies;
 use ezsdr_kernel::contract::{DataContractId, Port, PortDirection};
 use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
-use ezsdr_kernel::module_api::{CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource, UpdateClass, Version};
+use ezsdr_kernel::module_api::{CoerceReport, ModuleError, ProfileRef, RejectedRequest, Requested, Resource, Version};
 use ezsdr_kernel::spec::{CapabilityValue, Coercion, Constraint, Ident, Key, Namespace, Scalar, Value};
 
 use crate::device::{Grid, coerce_antenna, coerce_numeric, num, rejected};
@@ -516,13 +516,6 @@ impl Description {
         channels
     }
 
-    /// RM-30: the stream `configuration` puts channel `number` of one direction in, or −1
-    /// when it is in none — the membership [`Description::stream_channels`] reads, read
-    /// backwards, so the two cannot drift apart.
-    pub fn stream_of(&self, configuration: &BTreeMap<Key, Value>, rx: bool, number: u32) -> i64 {
-        stream_of(configuration, Direction::of(rx), number)
-    }
-
     /// RM-30's, RM-31's and RM-32's coercion; pure (MA-11).
     pub fn coerce(&self, device: &ResourceId, request: &Requested) -> Result<CoerceReport, ModuleError> {
         if request.resource != *device {
@@ -792,19 +785,6 @@ pub fn is_configuration(key: &Key) -> bool {
         Some(Concrete::Stream { .. }) => true,
         None => false,
     }
-}
-
-/// RM-27's update class of the layout configuration key `key`, read from the one
-/// `KeyDecl` table ([`crate::radio_keys`]) through the declaration the concrete spelling
-/// stands for; `None` when `key` is no layout key or its declaration states no class. A
-/// Provider refuses an update of such a key, and one whose stated class differs.
-pub fn update_class(key: &Key) -> Option<UpdateClass> {
-    let (direction, word, leaf) = match crate::concrete(key)? {
-        Concrete::Channel { rx, leaf, .. } => (Direction::of(rx).name(), keys::CHANNEL, leaf),
-        Concrete::Stream { rx, .. } => (Direction::of(rx).name(), keys::STREAM, keys::STREAM_LEAF),
-    };
-    let declaration = Key::parse(&format!("radio.{direction}.{word}.{leaf}")).expect("a declared radio key");
-    crate::radio_keys().into_iter().find(|decl| decl.key == declaration)?.update_class
 }
 
 fn channel_setting(direction: Direction, number: u32, leaf: &str) -> Key {

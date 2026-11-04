@@ -183,9 +183,9 @@ fn hw_b8_leads() {
         let dir = TempDir::new();
         let device = usrp();
         let envelope = bench_envelope(&*device);
-        let mut run = session(&bench_profile(&*device, &dir, serde_json::json!({}), envelope, true), device);
+        let profile = bench_profile(&*device, &dir, serde_json::json!({}), envelope, true);
+        let mut run = session_with(&profile, device, &rx0_tx0(&profile));
         past_t0(&mut run, ms(1));
-        assert!(admitted(&run.submit(set("radio.tx.c0.stream", ezsdr_kernel::spec::Value::from(0)), None).unwrap()));
         past_tx_origin(&mut run);
         let (bytes, _) = waveform_of(&pn(100));
         let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
@@ -224,9 +224,7 @@ fn hw_b9_unplug_transmit_only() {
     // with nothing sent (bench.md B9's second case): only uhd-clock's and the idle time
     // reads touch the device (UR-29's 500 ms read).
     let dir = TempDir::new();
-    let mut run = tx_session(usrp(), &dir);
-    let off = run.submit(set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None).unwrap();
-    println!("B9 transmit only: radio.rx.c0.stream -1: {:?}", off.outcome);
+    let mut run = tx_only_session(usrp(), &dir);
     println!("B9: unplug the cable now (transmit-only Session; up to 300 s); started at UTC {:.3}", utc_now());
     let ended = until_not_running(&mut run, 300);
     let manifest = run.finish();
@@ -693,80 +691,27 @@ fn hw_b8_raw_in_flight_window() {
     measurement::push_raw_observation("hw_b8_raw_in_flight_window", 7, serde_json::json!({ "windows": observations }));
 }
 
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_cold_change_capture() {
-    // UR-25 on the bench: a capture spanning a `cold` receive rate change. Before the fix of
-    // design-notes §11 F1 uhd-rx handed the device a timed stop for e1 a restart lead early,
-    // and the X300 stopped at once (hw_b8_raw_rx_timed_stop): 50 ms lost before e1. Now the
-    // old clock's samples should reach e1 and the new clock's start at e2, on time.
-    cold_change_capture(1e6, 2e6, None);
-}
-
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_cold_change_capture_low_rate() {
-    // Review N, B1 and B2 on the bench: a low rate the grid holds, 200 MHz / 512, with the
-    // default block and with the largest (65 536 samples, 168 ms).
-    cold_change_capture(390_625.0, 400_000.0, None);
-    cold_change_capture(390_625.0, 2e6, Some(65_536));
-}
-
-/// A Session receiving at `from`; a capture across a `cold` change to `to`; prints the
-/// Manifest's view and asserts the old clock's samples reach e₁, the new clock's begin at
-/// e₂ and no `LATE_COMMAND`.
-fn cold_change_capture(from: f64, to: f64, block_len: Option<u32>) {
-    let dir = TempDir::new();
-    let device = usrp();
-    let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
-    let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device);
-    past_t0(&mut run, ms(100));
-    if from != 1e6 {
-        assert!(admitted(&run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
-        wait(&mut run, ms(300));
-    }
-    let at = after_ticks(&run, ms(20));
-    let n = (from * 0.12) as i64 + (to * 0.1) as i64;
-    assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(n))]), None).unwrap()));
-    wait(&mut run, ms(60));
-    let booked = run.now();
-    let entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
-    println!("B8 cold {from} → {to} S/s, block_len {block_len:?}: capture asked at {at:?}; rate change submitted at {booked:?}: {:?}", entry.outcome);
-    let horizon = after_ticks(&run, ms(3_000));
-    let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-    wait(&mut run, ms(300));
-    let manifest = run.finish();
-    println!("B8 cold: termination {:?}", manifest.termination.reason);
-    println!("B8 cold: sample clocks {:?}", manifest.clocks.sample_clocks);
-    println!("B8 cold: timing {}", section(&manifest, "timing"));
-    println!("B8 cold: applied {}", section(&manifest, "applied"));
-    println!("B8 cold: stats {}", section(&manifest, "stats"));
-    let artifact = capture_of(&manifest, "rec");
-    println!("B8 cold: artifact {} continuity {:?}", artifact.id, artifact.continuity);
-    let late = events_of(&manifest, "radio.LATE_COMMAND");
-    for event in &manifest.events.delivered {
-        if !event.kind.to_string().starts_with("ezsdr.") {
-            println!("B8 cold: event {} from {:?} at {:?}: {}", event.kind, event.source, event.time, event.payload);
-        }
-    }
-    let clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/rx/s0")).collect();
-    let (old, new) = (clocks[clocks.len() - 2], clocks[clocks.len() - 1]);
-    let e1_k = (old.ended_at.unwrap().ticks_in(old.root).unwrap() - old.origin.ticks_in(old.root).unwrap()) / old.root_ticks_per_tick.num() as i64;
-    assert_eq!(artifact.continuity.len(), 2, "{:?}", artifact.continuity);
-    assert_eq!(artifact.continuity[0].end.ticks_in(artifact.continuity[0].domain).unwrap(), e1_k, "the old clock's samples end at e₁");
-    assert_eq!(artifact.continuity[1].domain, new.domain);
-    assert_eq!(artifact.continuity[1].first.ticks_in(artifact.continuity[1].domain).unwrap(), 0, "the new clock's samples begin at e₂");
-    assert!(artifact.continuity.iter().all(|m| m.gaps.is_empty()));
-    assert!(late.is_empty(), "{late:?}");
-}
+// Parked (note 47 stage 2): `hw_b8_cold_change_capture`, `hw_b8_cold_change_capture_low_rate` and
+// `hw_b8_cold_change_timing_at_the_extremes` measured a receive rate change during a Run, which no longer exists.
+// Stage 3's `start_rx` start-lead measurement takes their place.
 
 // ---------------------------------------------------------------- B8 through the Module
 
+/// A Session that asked for transmit c0 only at connect: no receive stream is ever in the Run.
+fn tx_only_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
+    let envelope = bench_envelope(&*device);
+    let profile = bench_profile(&*device, dir, serde_json::json!({}), envelope, true);
+    let mut run = session_with(&profile, device, &tx_only(&profile));
+    past_t0(&mut run, ms(1));
+    past_tx_origin(&mut run);
+    run
+}
+
 fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
     let envelope = bench_envelope(&*device);
-    let mut run = session(&bench_profile(&*device, dir, serde_json::json!({}), envelope, true), device);
+    let profile = bench_profile(&*device, dir, serde_json::json!({}), envelope, true);
+    let mut run = session_with(&profile, device, &rx0_tx0(&profile));
     past_t0(&mut run, ms(1));
-    assert!(admitted(&run.submit(set("radio.tx.c0.stream", ezsdr_kernel::spec::Value::from(0)), None).unwrap()));
     past_tx_origin(&mut run);
     run
 }
@@ -912,42 +857,39 @@ fn hw_b8_raw_timed_retune() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_ma1_phase_after_a_pre_start_tune() {
-    // MA-1 (UR-24's Ceiling, KL-32): the receive frequency a Session sets before T0 is applied untimed, so the loopback's phase
-    // has no timed tune's guarantee; set again with `at` while the stream runs, it should. `EZSDR_MA1_SESSIONS` Sessions (5 by default)
-    // per way, each with its own device open; the two ways' spreads are the observation. A loopback measures the two LOs'
-    // relative phase only, so this says nothing of which one varies, and N Sessions are an observation, not a proof of a guarantee.
-    // No value is made. RF as bench.md says: slot A, 0 dB (the envelope), amplitude at most 0.5 (`transmit_samples`), the
-    // frequency inside SAFE_TX_HZ, into the 30 dB loopback (the attenuator is confirmed by run-record.sh, which names slot A for a preflight test).
+    // MA-1 (UR-24's Ceiling, KL-32): the receive frequency a Session asks for at connect is applied untimed, so the loopback's phase
+    // has no timed tune's guarantee. `EZSDR_MA1_SESSIONS` Sessions (5 by default), each with its own device open; the spread of their
+    // phases is the observation. The old probe's second way, a timed tune while the stream runs, has no Run-time form any more
+    // (note 47 stage 2). A loopback measures the two LOs' relative phase only, so this says nothing of which one varies, and N
+    // Sessions are an observation, not a proof of a guarantee. No value is made. RF as bench.md says: slot A, 0 dB (the envelope),
+    // amplitude at most 0.5 (`transmit_samples`), the frequency inside SAFE_TX_HZ, into the 30 dB loopback (the attenuator is
+    // confirmed by run-record.sh, which names slot A for a preflight test).
     let sessions: usize = std::env::var("EZSDR_MA1_SESSIONS").ok().map_or(5, |text| text.parse().expect("EZSDR_MA1_SESSIONS is a count"));
     assert!((2..=50).contains(&sessions), "2 to 50 Sessions");
     let wave = transmit_samples(1_000);
     let (bytes, _) = waveform_of(&wave);
-    let mut ways = Vec::new();
-    for (name, timed_after_start) in [("set_before_t0", false), ("set_again_with_at_while_streaming", true)] {
-        let mut phases = Vec::new();
-        let mut inconclusive = Vec::new();
-        for session in 0..sessions {
-            match ma1_run(usrp(), timed_after_start, &wave, &bytes) {
-                Ok(phase) => {
-                    println!("MA-1 {name}, Session {session}: phase {phase:.1}°");
-                    phases.push(phase);
-                }
-                Err(reason) => {
-                    println!("MA-1 {name}, Session {session}: INCONCLUSIVE: {reason}");
-                    inconclusive.push(reason);
-                }
+    let mut phases = Vec::new();
+    let mut inconclusive = Vec::new();
+    for session in 0..sessions {
+        match ma1_run(usrp(), &wave, &bytes) {
+            Ok(phase) => {
+                println!("MA-1 Session {session}: phase {phase:.1}°");
+                phases.push(phase);
+            }
+            Err(reason) => {
+                println!("MA-1 Session {session}: INCONCLUSIVE: {reason}");
+                inconclusive.push(reason);
             }
         }
-        let spread = common::tone::circular_spread_deg(&phases);
-        println!("MA-1 {name}: {} phases {phases:.1?}, largest difference {spread:?}°, {} INCONCLUSIVE", phases.len(), inconclusive.len());
-        ways.push(serde_json::json!({ "way": name, "phases_deg": phases, "spread_deg": spread, "inconclusive": inconclusive }));
     }
+    let spread = common::tone::circular_spread_deg(&phases);
+    println!("MA-1: {} phases {phases:.1?}, largest difference {spread:?}°, {} INCONCLUSIVE", phases.len(), inconclusive.len());
     // Printed only: this probe is not one of the record's raw probes, so nothing collects an observation.
     println!(
         "MA-1 result: {}",
         serde_json::json!({
-            "ways": ways, "sessions_per_way": sessions,
-            "note": "a loopback measures the two LOs' relative phase; N Sessions are an observation, not a proof of a guarantee; a way with fewer than two readings has no spread; no value is made",
+            "phases_deg": phases, "spread_deg": spread, "inconclusive": inconclusive, "sessions": sessions,
+            "note": "a loopback measures the two LOs' relative phase; N Sessions are an observation, not a proof of a guarantee; fewer than two readings have no spread; no value is made",
         })
     );
 }
@@ -1456,9 +1398,7 @@ fn hw_b9_transmit_only_session() {
     // EZSDR_B9_SECONDS sets the duration (60 by default). A smoke: it sends nothing.
     let seconds: i64 = std::env::var("EZSDR_B9_SECONDS").map_or(60, |text| text.parse().expect("EZSDR_B9_SECONDS names whole seconds"));
     let dir = TempDir::new();
-    let mut run = tx_session(usrp(), &dir);
-    let off = run.submit(set("radio.rx.c0.stream", ezsdr_kernel::spec::Value::from(-1)), None).unwrap();
-    println!("B9 transmit only: radio.rx.c0.stream -1: {:?}", off.outcome);
+    let mut run = tx_only_session(usrp(), &dir);
     wait(&mut run, ms(seconds * 1_000));
     let manifest = run.finish();
     let lost = events_of(&manifest, ezsdr_kernel::event::EventKind::DEVICE_LOST);
@@ -1606,55 +1546,6 @@ fn hw_b8_raw_empty_eob_gap() {
         }
     }
     measurement::push_raw_observation("hw_b8_raw_empty_eob_gap", 40, serde_json::json!({ "gaps": observations }));
-}
-
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_cold_change_timing_at_the_extremes() {
-    // Review O, O-B2 on the bench, at the rates' extremes (the owner: "100kspsでも200Mspsでも
-    // 大丈夫？" — 390 625 S/s is the X300's lowest): a receive `cold` change, booked at four
-    // phases of the receive call in progress, must put the new segment's origin past that
-    // call and the start lead (the old stream's longer of block and packet, 3 ms and 50 ms;
-    // RM-25's ready instant) and begin it before its origin, with no LATE_COMMAND. No capture
-    // (200 Msps is 1.6 GB/s of cf32): the Manifest's timing.
-    for (from, to, block_len) in [(200e6, 100e6, None), (390_625.0, 400_000.0, Some(100u32)), (390_625.0, 2e6, Some(65_536))] {
-        for phase in 0..4i64 {
-            let dir = TempDir::new();
-            let device = usrp();
-            let spp = |d: &dyn Device| d.rx_packet_samples(0);
-            let selector = block_len.map_or(serde_json::json!({}), |n| serde_json::json!({ "block_len": n }));
-            let mut run = session(&bench_profile(&*device, &dir, selector, serde_json::json!({}), true), device.clone());
-            past_t0(&mut run, ms(100));
-            assert!(admitted(&run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(from).unwrap()), None).unwrap()));
-            wait(&mut run, ms(300 + phase * 37));
-            let packet = spp(&*device);
-            let entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(to).unwrap()), None).unwrap();
-            wait(&mut run, ms(500));
-            let manifest = run.finish();
-            let timing = section(&manifest, "timing").as_array().unwrap().clone();
-            let change = timing.iter().rfind(|r| r["what"] == "cold_change").cloned().unwrap();
-            let segment = timing.iter().rfind(|r| r["what"] == "rx_segment").cloned().unwrap();
-            let (booked, e, origin) = (change["booked_at"].as_i64().unwrap(), change["e"].as_i64().unwrap(), segment["origin"].as_i64().unwrap());
-            let stop = timing.iter().find(|r| r["what"] == "rx_stop_untimed" && r["cut"].as_i64().is_some_and(|cut| cut >= e)).cloned();
-            let n_old = (200e6 / from) as i64;
-            let block = block_len.unwrap_or(2_000).max(packet as u32) as i64;
-            let floor = e + block * n_old + ms(3) + ms(50);
-            let late = events_of(&manifest, "radio.LATE_COMMAND");
-            println!(
-                "B8 cold {from} → {to} S/s, block_len {block_len:?}, packet {packet}, phase {phase}: {:?}; origin − booking {:.3} ms (floor {:.3} ms); untimed stop {:?} ms after the cut; begun {:.3} ms before the origin; LATE_COMMAND {}; stats {}",
-                entry.outcome,
-                (origin - booked) as f64 / TICKS_PER_MS as f64,
-                (floor - booked) as f64 / TICKS_PER_MS as f64,
-                stop.map(|s| (s["at"].as_i64().unwrap() - e) as f64 / TICKS_PER_MS as f64),
-                (origin - segment["at"].as_i64().unwrap()) as f64 / TICKS_PER_MS as f64,
-                late.len(),
-                section(&manifest, "stats")
-            );
-            assert!(origin >= floor, "the origin not past the call in progress and the lead");
-            assert!(segment["at"].as_i64().unwrap() < origin, "begun after its origin");
-            assert!(late.is_empty(), "{late:?}");
-        }
-    }
 }
 
 #[test]
@@ -2128,9 +2019,14 @@ fn hw_txp_b0_send_sizes() {
         let inner = usrp();
         let probe = Arc::new(probe_device::ProbeDevice::new(inner));
         let dir = TempDir::new();
-        let mut run = tx_session(probe.clone(), &dir);
-        assert!(admitted(&run.submit(set("radio.tx.c0.gain_db", ezsdr_kernel::spec::Value::num(0.0).unwrap()), None).unwrap()), "gain 0 dB");
-        assert!(admitted(&run.submit(set("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(rate).unwrap()), None).unwrap()));
+        // Gain 0 dB and the rate are asked at connect (note 47 stage 2).
+        let profile = bench_profile(&*probe, &dir, serde_json::json!({}), bench_envelope(&*probe), true);
+        let initial = with_initial(
+            rx0_tx0(&profile),
+            &[("radio.tx.c0.gain_db", ezsdr_kernel::spec::Scalar::try_from(0.0).unwrap()), ("radio.tx.s0.sample_rate_hz", ezsdr_kernel::spec::Scalar::try_from(rate).unwrap())],
+        );
+        let mut run = session_with(&profile, probe.clone(), &initial);
+        past_t0(&mut run, ms(1));
         past_tx_origin(&mut run);
         let wave: Vec<_> = pn(31_000).into_iter().map(|(re, im)| (re * 0.7, im * 0.7)).collect();
         assert!(wave.iter().all(|(re, im)| f64::from(*re).hypot(f64::from(*im)) <= 0.5), "bench RF safety");
@@ -2296,14 +2192,21 @@ fn session_event_rows(manifest: &ezsdr_kernel::manifest::Manifest, kind: &str) -
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_56_stop_between_starts() {
+    // #56: a Stop of the receive stream that lands between a start's request e1 and its first segment e2. The stream is asked for
+    // at 2 MS/s at connect; a first Stop, then `start_rx` (e1 is its request, e2 the origin of the segment it opens), then a second
+    // Stop about 10 ms later (note 47 stage 2: the old probe changed the rate at Run time and stopped between that change's two starts).
     let mut trials = Vec::new();
     for trial in 0..3 {
         let inner = usrp();
         let probe = Arc::new(probe_device::ProbeDevice::new(inner));
         let dir = TempDir::new();
-        let mut run = session(&bench_profile(&*probe, &dir, serde_json::json!({}), serde_json::json!({}), true), probe.clone());
+        let profile = bench_profile(&*probe, &dir, serde_json::json!({}), serde_json::json!({}), true);
+        let initial = with_initial(rx0(&profile), &[("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Scalar::try_from(2e6).unwrap())]);
+        let mut run = session_with(&profile, probe.clone(), &initial);
         past_t0(&mut run, ms(100));
-        let change_entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(2e6).unwrap()), None).unwrap();
+        let first_stop = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
+        wait(&mut run, ms(20));
+        let start_entry = run.submit(verb("start_rx", resource("radio/rx/s0"), None, &[]), None).unwrap();
         wait(&mut run, ms(10));
         let stop_host_before_ns = probe.host_ns();
         let stop_entry = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
@@ -2323,15 +2226,13 @@ fn hw_56_stop_between_starts() {
         });
         let manifest = run.finish();
         let timing = section(&manifest, "timing").as_array().cloned().unwrap_or_default();
-        let cold = timing.iter().find(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.s0.sample_rate_hz").cloned();
-        let e1 = cold.as_ref().and_then(|row| row["e"].as_i64());
+        let e1 = start_entry.time.ticks_in(start_entry.time.domain()).ok();
         let recovery_tick = recovery_entry.time.ticks_in(recovery_entry.time.domain()).ok();
-        let cold_segment = timing
+        let start_segment = timing
             .iter()
-            .skip_while(|row| row["what"] != "cold_change")
-            .find(|row| row["what"] == "rx_segment" && e1.zip(recovery_tick).is_some_and(|(e, recovery)| row["origin"].as_i64().is_some_and(|origin| origin > e && origin < recovery)))
+            .find(|row| row["what"] == "rx_segment" && e1.zip(recovery_tick).is_some_and(|(e, recovery)| row["origin"].as_i64().is_some_and(|origin| origin >= e && origin < recovery)))
             .cloned();
-        let e2 = cold_segment.as_ref().and_then(|row| row["origin"].as_i64());
+        let e2 = start_segment.as_ref().and_then(|row| row["origin"].as_i64());
         let stop_tick = stop_entry.time.ticks_in(stop_entry.time.domain()).ok();
         let nominal_placement = match (e1, e2, stop_tick) {
             (Some(e1), Some(e2), Some(stop)) if stop > e1 && stop < e2 => "between_e1_e2",
@@ -2341,23 +2242,16 @@ fn hw_56_stop_between_starts() {
         };
         let device_rows = probe.rows();
         let rx_calls: Vec<_> = device_rows.iter().filter(|row| matches!(row["call"].as_str(), Some("rx_start" | "rx_stop" | "rx_recv" | "device_drain"))).cloned().collect();
-        let e2_rx_start = rx_calls.iter().find(|row| row["call"] == "rx_start" && row["at"].as_i64() == e2).cloned();
+        let restart = rx_calls.iter().find(|row| row["call"] == "rx_start" && row["at"].as_i64() == e2).cloned();
         let stop_rx_call = rx_calls.iter().find(|row| row["call"] == "rx_stop" && row["host_before_ns"].as_u64().is_some_and(|time| time >= stop_host_before_ns)).cloned();
-        let device_order = match (&stop_rx_call, &e2_rx_start) {
-            (Some(stop), Some(start)) => {
-                let stop_before = stop["host_before_ns"].as_u64();
-                let stop_after = stop["host_after_ns"].as_u64();
-                let start_before = start["host_before_ns"].as_u64();
-                let start_after = start["host_after_ns"].as_u64();
-                match (stop_before, stop_after, start_before, start_after) {
-                    (Some(_), Some(se), Some(rb), Some(_)) if se <= rb => "rx_stop_before_e2_rx_start",
-                    (Some(sb), Some(_), Some(_), Some(re)) if re <= sb => "e2_rx_start_before_rx_stop",
-                    (Some(_), Some(_), Some(_), Some(_)) => "host_call_intervals_overlap",
-                    _ => "host_call_times_missing",
-                }
-            }
+        let device_order = match (&stop_rx_call, &restart) {
+            (Some(stop), Some(start)) => match (stop["host_after_ns"].as_u64(), start["host_before_ns"].as_u64()) {
+                (Some(stopped), Some(started)) if stopped <= started => "rx_stop_before_restart_rx_start",
+                (Some(_), Some(_)) => "host_call_intervals_overlap",
+                _ => "host_call_times_missing",
+            },
             (None, Some(_)) => "rx_stop_after_stop_submit_not_observed",
-            (Some(_), None) => "e2_rx_start_not_observed",
+            (Some(_), None) => "restart_rx_start_not_observed",
             (None, None) => "neither_call_observed",
         };
         let capture = manifest
@@ -2368,19 +2262,19 @@ fn hw_56_stop_between_starts() {
             .map(|artifact| serde_json::json!({ "continuity": artifact.continuity, "uri": artifact.uri }));
         let cleanup = restore_raw_probe(&*probe);
         trials.push(serde_json::json!({
-            "trial": trial, "cold_submit": serde_json::to_value(&change_entry).unwrap(),
+            "trial": trial, "first_stop": serde_json::to_value(&first_stop).unwrap(), "start_rx": serde_json::to_value(&start_entry).unwrap(),
+            "e1_tick": e1, "e2_tick": e2, "stop_placement_nominal": nominal_placement,
             "stop_submit": serde_json::to_value(&stop_entry).unwrap(),
             "stop_host_before_ns": stop_host_before_ns, "stop_host_after_ns": stop_host_after_ns,
             "recovery_start_rx": serde_json::to_value(&recovery_entry).unwrap(),
             "recovery_device_start_and_sample": recovery_device_start_and_sample,
             "recovery_capture": capture_entry.as_ref().map(|entry| serde_json::to_value(entry).unwrap()),
-            "e1_tick": e1, "e2_tick": e2, "stop_placement_nominal": nominal_placement,
             "device_call_order": {
                 "first_rx_stop_after_stop_submit": stop_rx_call,
-                "e2_rx_start": e2_rx_start,
+                "restart_rx_start": restart,
                 "ordering": device_order,
             },
-            "timing": timing.iter().filter(|row| matches!(row["what"].as_str(), Some("cold_change" | "rx_stop_untimed" | "rx_segment" | "stop"))).cloned().collect::<Vec<_>>(),
+            "timing": timing.iter().filter(|row| matches!(row["what"].as_str(), Some("rx_stop_untimed" | "rx_segment" | "stop"))).cloned().collect::<Vec<_>>(),
             "device_rx_calls": rx_calls, "device_level_drain": device_drain,
             "capture_written": capture.is_some(), "capture": capture, "async": section(&manifest, "async"), "rejected": section(&manifest, "rejected"),
             "command_rejected_events": session_event_rows(&manifest, "radio.COMMAND_REJECTED"),
@@ -2530,14 +2424,17 @@ fn hw_ur17_receive_call_duration() {
     let probe = Arc::new(probe_device::ProbeDevice::new(inner));
     let dir = TempDir::new();
     let selector = serde_json::json!({ "block_len": 65_536 });
-    let mut run = session(&bench_profile(&*probe, &dir, selector, serde_json::json!({}), true), probe.clone());
+    // 50 MS/s is asked at connect; the cut is a Stop while the reader is paused, and `start_rx` makes the pending segment (note 47 stage 2).
+    let profile = bench_profile(&*probe, &dir, selector, serde_json::json!({}), true);
+    let initial = with_initial(rx0(&profile), &[("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Scalar::try_from(50e6).unwrap())]);
+    let mut run = session_with(&profile, probe.clone(), &initial);
     past_t0(&mut run, ms(100));
-    let _ = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(50e6).unwrap()), None).unwrap();
     wait(&mut run, ms(300));
     probe.pause_reader();
     let before_count = probe.count("rx_recv");
     let pause_host_ns = probe.host_ns();
-    let cut_entry = run.submit(set("radio.rx.s0.sample_rate_hz", ezsdr_kernel::spec::Value::num(10e6).unwrap()), None).unwrap();
+    let cut_entry = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
+    let restart_entry = run.submit(verb("start_rx", resource("radio/rx/s0"), None, &[]), None).unwrap();
     std::thread::sleep(Wall::from_millis(300));
     let resume_host_ns = probe.host_ns();
     probe.resume_reader();
@@ -2546,11 +2443,11 @@ fn hw_ur17_receive_call_duration() {
     let device_rows = probe.rows();
     let rx_rows: Vec<_> = device_rows.iter().filter(|row| row["call"] == "rx_recv").cloned().collect();
     let cut_observation = serde_json::json!({
-        "rate_change_to_50msps_warmup_rx_calls": before_count,
+        "warmup_rx_calls_at_50msps": before_count,
         "paused_host_ns": pause_host_ns, "resume_host_ns": resume_host_ns,
-        "cold_change_submit": serde_json::to_value(&cut_entry).unwrap(),
+        "stop_submit": serde_json::to_value(&cut_entry).unwrap(), "start_rx_submit": serde_json::to_value(&restart_entry).unwrap(),
         "timing": section(&manifest, "timing").as_array().unwrap().iter()
-            .filter(|row| matches!(row["what"].as_str(), Some("cold_change" | "rx_segment" | "rx_stop_untimed"))).cloned().collect::<Vec<_>>(),
+            .filter(|row| matches!(row["what"].as_str(), Some("rx_segment" | "rx_stop_untimed"))).cloned().collect::<Vec<_>>(),
         "rx_calls_before": rx_rows.iter().take(before_count).rev().take(5).cloned().collect::<Vec<_>>(),
         "rx_calls_after": rx_rows.iter().skip(before_count).take(20).cloned().collect::<Vec<_>>(),
         "overflow_events": session_event_rows(&manifest, "radio.RX_OVERFLOW"),
@@ -2571,11 +2468,11 @@ fn hw_ur17_receive_call_duration() {
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_h4_dispatch() {
+fn hw_h4_load() {
     let guard = measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"));
     if guard.channels(Dir::Rx) == 0 || guard.channels(Dir::Tx) == 0 {
         measurement::push_raw_observation(
-            "hw_h4_dispatch",
+            "hw_h4_load",
             1,
             serde_json::json!({
                 "status": "skipped_no_rx_tx_pair", "rx_channels": guard.channels(Dir::Rx), "tx_channels": guard.channels(Dir::Tx),
@@ -2585,11 +2482,11 @@ fn hw_h4_dispatch() {
     }
     let device: Arc<dyn Device> = guard.clone();
     let probe = Arc::new(common::probe_device::ProbeDevice::new(device));
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::measure_h4_dispatch(probe, measurement::H4_DISPATCH_UPDATES)));
-    let open_streamers = guard.latch_if_streamers_open("hw_h4_dispatch");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::measure_h4_load(probe, measurement::H4_WINDOW_MS)));
+    let open_streamers = guard.latch_if_streamers_open("hw_h4_load");
     let group = match outcome {
         Ok(Ok(group)) => group,
-        Ok(Err(error)) => panic!("H4 dispatch probe failed: {error}"),
+        Ok(Err(error)) => panic!("H4 load probe failed: {error}"),
         Err(payload) => std::panic::resume_unwind(payload),
     };
     let condition = group.conditions.into_iter().next().expect("H4 measurement describes its stream condition");
@@ -2597,7 +2494,7 @@ fn hw_h4_dispatch() {
     let mut result = Json::Object(row.result.into_iter().collect());
     result["measurement_condition"] = serde_json::to_value(condition).expect("H4 condition serializes");
     result["open_streamers_after_run"] = serde_json::to_value(open_streamers).expect("streamer status serializes");
-    measurement::push_raw_observation("hw_h4_dispatch", row.trials, result);
+    measurement::push_raw_observation("hw_h4_load", row.trials, result);
 }
 
 #[test]
@@ -2651,8 +2548,8 @@ fn hw_measurements_record() {
     };
     measurement::run_raw_probes(&mut groups, &raw_probes, measurement::raw_probes_applicable(metadata.selector.as_ref()));
     // H4 uses the selected profile's channel 0, not the raw probes' slot-A 1 GHz assumption.
-    groups.probe("hw_h4_dispatch", hw_h4_dispatch);
-    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned()).chain(std::iter::once("hw_h4_dispatch".to_owned())).collect();
+    groups.probe("hw_h4_load", hw_h4_load);
+    let expected: std::collections::BTreeSet<_> = raw_probes.iter().map(|(name, _)| (*name).to_owned()).chain(std::iter::once("hw_h4_load".to_owned())).collect();
     assert_eq!(groups.probes(), &expected, "every raw probe either ran or failed");
 
     // The groups run on a device opened again, unless a probe latched the record: then none is opened and every group is not run.
@@ -2687,24 +2584,19 @@ fn hw_measurements_record() {
                     outcome
                 }
             };
-            let reopen_keys = ["radio.perf.rx_bytes_per_s", "radio.timing.rx_start_lead_ns", "radio.timing.tx_start_lead_ns"].into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let reopen_keys = ["radio.perf.rx_bytes_per_s"].into_iter().map(str::to_owned).collect::<Vec<_>>();
             let reopened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lease.reopen(guard, || ezsdr_radio_uhd::open(&args()).expect("the USRP reopens"))));
             match reopened {
                 Ok(Ok(reopened_guard)) => {
                     let mut reopened_lease = measurement::DeviceLease::new(reopened_guard.clone());
                     let reopened_plan = plan.reopened_plan();
-                    for (name, measure, key, mode) in [
-                        ("reopened_rx_throughput", measurement::measure_reopened_rx_throughput as measurement::ProviderMeasure, "radio.perf.rx_bytes_per_s", measurement::ReopenedMerge::Minimum),
-                        ("reopened_rx_start_lead", measurement::measure_rx_start_lead, "radio.timing.rx_start_lead_ns", measurement::ReopenedMerge::Maximum),
-                        ("reopened_tx_start_lead", measurement::measure_tx_start_lead, "radio.timing.tx_start_lead_ns", measurement::ReopenedMerge::Maximum),
-                    ] {
-                        let keys = [key.to_owned()];
-                        groups.run_reopened(name, &keys, mode, || match measurement::record_latch_reason() {
-                            Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
-                            None => measure(reopened_lease.device(), &reopened_plan),
-                        });
-                        reopened_guard.latch_if_streamers_open(name);
-                    }
+                    let name = "reopened_rx_throughput";
+                    let keys = ["radio.perf.rx_bytes_per_s".to_owned()];
+                    groups.run_reopened(name, &keys, measurement::ReopenedMerge::Minimum, || match measurement::record_latch_reason() {
+                        Some(reason) => Err(format!("not run: the device handle is latched ({reason}); nothing is sent to it")),
+                        None => measurement::measure_reopened_rx_throughput(reopened_lease.device(), &reopened_plan),
+                    });
+                    reopened_guard.latch_if_streamers_open(name);
                     if measurement::record_latch_reason().is_none() && groups.failed().is_empty() {
                         reopened_lease.mark_clean();
                     }

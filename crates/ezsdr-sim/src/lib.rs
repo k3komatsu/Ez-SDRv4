@@ -35,8 +35,6 @@ pub enum FaultKind {
     RxSequenceError,
     /// Lose the device (SE-3).
     DeviceLost,
-    /// Refuse a `cold` change the device does not apply (SE-4, RM-25).
-    ColdChangeRefused,
 }
 
 /// One fault scheduled relative to the Run's start instant (SE-3).

@@ -137,6 +137,9 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
   - RS-19 の floor は Kernel の `SteppedProvider.with_arm_origin_after` と J32 がすでに守っている．J33 は J32 にまとめる．
   - H4 の制御の dispatch の代わりの測定は，時刻つきの gain の release を測っている．test の Vocabulary の key は正直な代わりにならないので，H4 のその観測は退け，送信の余裕と負荷の測定だけを残して範囲を書き直す．Run の中の rate の変更を前提にした測定の campaign も，この間は止めて段階 3・4 で設計し直す．
   - `KNOWN_LIMITATIONS.md` の該当の項（時刻つきの retune，組）を同じ変更で直す．
+- **2a と 2b をまとめる（orchestrator 2026-11-04）**：受信の key だけ class を外すと，Kernel を通る試験が 271 本落ちた（`reviews/47s2-*`）．受信の machinery の多くは送信と共有で，2a で送信の key に付け替えた試験は 2b でまた消える．そこで **受信・送信の radio の key の class を一度に外し**，Run の中の値の変更の machinery を両方向まとめて消す．試験は，守る振る舞いが残るもの（Stop と `start_rx`，burst，続き，repeat，F8，loss，Provider::stop，T3，Run の始めの値と refusal）を初めの値の形に書き直し，Run の中の変更そのものを守るものは消す．送信の拒否の後の再試行（S10）は段階 4 で設計する．作業は (a) class を外して落ちる試験を一本ずつ裁く，(b) 届かなくなった本体とその中の試験を消す，(c) 行・spec・KNOWN_LIMITATIONS，の順．(a) の後に確かめ直しのレビュー，(c) の後に Sol のコードレビュー，gate は最後に一回．
+  **済**（2026-11-05，2a と 2b をまとめて一度に）：radio の key はすべて class なし（RM-27），Python の setter と `.stream` は Run の中で `Error`，Provider は直に届いた class なしの更新を拒む（MR-18，UR-26）．Mock・UHD・共通の時間表から変更の道を消した（本体 約 2 700 行，テスト 約 320 本）．VH の生成器は Stop・StartRx・Fault・Loss の class だけ．`cold_change_refused` の fault は取り下げ（予定に書くと拒まれる）．消した試験の引用は `reviews/47s2-renames.txt`，gate は `--renames` を渡す．レビュー：Opus の確かめ直しで，(c1) が殺せないとして消した行のうち 4 行は生きた試験が殺し，15 行は守りが外れていた（試験を足して戻した．再開が connect の値を保つ試験も）．Sol のコードレビューで P2 1 件（loss か `Provider::stop` が送信の clock の origin より前で切ると clock が終わらない → 予約の時点で終わらせる道を戻した），P3 1 件（spec の古い記述）．記録 `reviews/47s2-*`．
+  **段階 3・4 に残したこと**：`ready`（設定の完了の時刻）の筋書き（`fake.rs`@45a4294:2783），rx.rs の `start_rx` の拒否が `"update_parameter"` を名乗る誤り（`core.rs` の clock の end の失敗と RM-25 の book の誤りも同じ名前），§58 の 16 の Run の中の envelope の拒否，受信・送信の開始の lead の測定の群，`tx_start_lead_ns`（今は何も決めない），`CancelReason::ColdChange` の名前，Mock の `applied` の節（常に空），Vision §15・§27・§58 の 16 の文（段階 3・4 の後に直す），H4 の root tick の換算（P1148，実機の道具），UHD の owner の「同じ設定なら設定しない」比べ（`Owner::Nothing`・`configured` の印．今は届かないが段階 3 の値を変えた再開で要る），loss の後に控えた複数の fault の記録の順（Mock と照合の模型で違う．生成器の Loss は loss 以外の fault を一つまで）．
 
 実機（報告 E4 §6 の 3 の 3 番目）は段階 3 と 4 の rate の受け入れの条件として，その段階の中か直後に置く（Sol 12）．確かめること：新しい rate，旧 burst の末尾，時刻，最初の sample，read-back，streamer を作り直さないこと．
 
@@ -175,3 +178,5 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 | 2026-11-04 | 段階 1 を済とした（§4） |
 | 2026-11-04 | 段階 1b を済とした（§4） |
 | 2026-11-04 | 段階 2 以降の組み替えの案（消す段階を先に，§4） |
+| 2026-11-04 | 段階 2 の 2a と 2b をまとめた（§4） |
+| 2026-11-05 | 段階 2 を済とした（§4） |

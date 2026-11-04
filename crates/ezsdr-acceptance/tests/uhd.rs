@@ -181,14 +181,21 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
 }
 
 #[test]
-fn uhd_59_a_session_retune_outside_the_rf_envelope_is_rejected() {
+fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_runtime_change_has_no_class() {
+    // Note 47 stage 2: the envelope is checked on the initial values; a change during the Run is refused as a key with no update class (RM-27).
+    let (_, refused) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", num(2.4e9))], envelope(), 10);
+    assert!(
+        matches!(refused.state(), ezsdr_kernel::run::RunState::CleanedUp { termination: ezsdr_kernel::run::Termination::Failed { reason, .. } } if reason.contains("radio.rf_envelope")),
+        "{:?}",
+        refused.state()
+    );
+    let _ = refused.finish();
     let temp = rig::TempDir::new("uhd-59-rf");
     let mut run = uhd_session(&temp);
-    admitted(&mut run, set("radio.tx.c0.stream", Value::from(0)), None);
     let entry = run.submit(set("radio.tx.c0.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap();
-    let Outcome::Rejected { violations } = &entry.outcome else { panic!("outside the band was admitted") };
-    assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope" && v.key.as_ref().is_some_and(|k| k.as_str() == "radio.tx.c0.frequency_hz")));
-    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.c0.frequency_hz").unwrap()], Value::num(1.0e9).unwrap());
+    let Outcome::Rejected { violations } = &entry.outcome else { panic!("a runtime radio value change was admitted") };
+    assert!(violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class" && violation.reason.contains("declares no update class")), "{violations:?}");
+    assert!(run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("radio.tx.c0.frequency_hz").unwrap()) != Some(&Value::num(2.4e9).unwrap()));
     let manifest = run.finish();
     assert!(manifest.action_log.iter().any(|logged| logged.seq == entry.seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");
 }

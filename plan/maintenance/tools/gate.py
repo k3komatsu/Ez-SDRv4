@@ -3,7 +3,7 @@
 and a verdict in <dir>/gate.json.
 
 Usage (from the checkout's root or any directory inside it):
-    python3 plan/maintenance/tools/gate.py --out <dir> [--base <commit>] [--mutation all|<list>[,<list>...]]
+    python3 plan/maintenance/tools/gate.py --out <dir> [--base <commit>] [--renames <file>] [--mutation all|<list>[,<list>...]]
         [--ids ID,ID,...] [--hosts sim02:8,sim03:8] [--only step,step] [--remote sim02|local]
     python3 plan/maintenance/tools/gate.py --self-test
 
@@ -23,7 +23,8 @@ gate (exit 0). An exception ends the run as FAIL. <dir>/gate.json is removed whe
 and is written atomically: RUNNING first, then the verdict. It also records the Cargo target volume
 (one per checkout) and the mutation image id on each remote host. Writes every path with $HOME as ~.
 --remote (default sim02) runs every build and test step on that host through remote/rdev.py, so the
-local PC carries no build load (owner, 2026-11-01); rules and rules-self-test stay local (they need
+local PC carries no build load (owner, 2026-11-01); `--renames <file>` is passed to the rules step as rules.py's
+`--renames` (a test whose citation a recorded decision drops) and recorded in gate.json; rules and rules-self-test stay local (they need
 git and are light); --remote local runs everything here as before. Standard library only.
 """
 import argparse
@@ -309,7 +310,7 @@ def local_commands_for(name, ctx):
         "fmt": [(["cargo", "fmt", "--all", "--check"], {})],
         "test": [(["cargo", "test", "--workspace", "--no-fail-fast"], {})],
         "clippy": [(["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], {})],
-        "rules": [(["python3", "plan/maintenance/tools/rules.py", "--base", ctx.base], {})],
+        "rules": [(["python3", "plan/maintenance/tools/rules.py", "--base", ctx.base, *(["--renames", ctx.renames] if getattr(ctx, "renames", None) else [])], {})],
         "rules-self-test": [(["python3", "plan/maintenance/tools/rules.py", "--self-test"], {})],
         "uhd-clippy": [(uhd + ["cargo", "clippy", *feature, "--all-targets", "--", "-D", "warnings"], {})],
         "uhd-test": [(uhd + ["cargo", "test", *feature, "--lib", "--test", "uhd_api"], {})],
@@ -422,7 +423,7 @@ def execute(out, record, failures, plan):
     known = parse_known(open(os.path.join(ROOT, KNOWN_FILE), encoding="utf-8").read())
     rows = [(name, r["id"]) for name in plan.lists for r in json.load(open(f"plan/{name}/tools/mutations.json", encoding="utf-8"))
             if not plan.ids or r["id"] in plan.ids]
-    ctx = SimpleNamespace(base=plan.base, server=server, lists=plan.mutation, hosts=plan.hosts, ids=plan.ids, volume=cargo_target_volume(ROOT), remote=plan.remote)
+    ctx = SimpleNamespace(base=plan.base, renames=plan.renames, server=server, lists=plan.mutation, hosts=plan.hosts, ids=plan.ids, volume=cargo_target_volume(ROOT), remote=plan.remote)
     before = identity()
     record["identity"] = {"before": before}
     record["toolchain"] = toolchain(ctx.volume) if plan.remote == "local" else remote_toolchain(plan.remote)
@@ -456,6 +457,7 @@ def main(argv):
     parser = argparse.ArgumentParser(description="One gate command; see the module docstring.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--base", default="HEAD")
+    parser.add_argument("--renames")
     parser.add_argument("--mutation")
     parser.add_argument("--ids")
     parser.add_argument("--hosts", default="sim02:8,sim03:8")
@@ -488,8 +490,8 @@ def main(argv):
         return die(f"unknown mutation list; lists are all,{','.join(available)}")
     ids = args.ids.split(",") if args.ids else []
     selected = [s for s in STEPS if (only is None or s in only) and (s != "mutation" or args.mutation)]
-    plan = SimpleNamespace(base=args.base, mutation=args.mutation, lists=lists, hosts=args.hosts, ids=ids, selected=selected, remote=args.remote)
-    record = {"verdict": "RUNNING", "reasons": [], "started": now(), "finished": None, "identity": None, "toolchain": None, "steps": [], "mutation": None}
+    plan = SimpleNamespace(base=args.base, renames=args.renames, mutation=args.mutation, lists=lists, hosts=args.hosts, ids=ids, selected=selected, remote=args.remote)
+    record = {"verdict": "RUNNING", "reasons": [], "started": now(), "finished": None, "renames": args.renames, "identity": None, "toolchain": None, "steps": [], "mutation": None}
     return run_guarded(out, record, coverage_gaps(only, args.mutation, ids, available), lambda failures: execute(out, record, failures, plan))
 
 
@@ -520,6 +522,8 @@ def self_test():
     remote = SimpleNamespace(remote="sim03", base="HEAD", server="/s", lists="all", hosts="h", ids=[], volume="v")
     assert remote_commands_for("test", remote)[0][0][:5] == ["python3", "plan/maintenance/tools/remote/rdev.py", "--host", "sim03", "--"], "self-test: --remote runs tests through rdev"
     assert commands_for("rules", remote)[0][0][0] == "python3" and "rdev.py" not in " ".join(commands_for("rules", remote)[0][0]), "self-test: rules stay local"
+    renamed = SimpleNamespace(**{**vars(remote), "renames": "r.txt"})
+    assert commands_for("rules", renamed)[0][0][-2:] == ["--renames", "r.txt"] and "--renames" not in commands_for("rules", remote)[0][0], "self-test: --renames reaches the rules step only when given"
     assert all("rdev.py" in " ".join(commands_for(n, remote)[0][0]) for n in ("fmt", "clippy", "uhd-clippy", "uhd-test", "hw-build", "py314", "py39")), "self-test: every build step is remote"
     assert commands_for("test", SimpleNamespace(**{**vars(remote), "remote": "local"}))[0][0][0] == "cargo", "self-test: --remote local runs here"
 

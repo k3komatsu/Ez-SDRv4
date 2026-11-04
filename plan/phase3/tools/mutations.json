@@ -296,38 +296,18 @@
   "old": ".find(|(tick, _)| t.is_at_or_after(*tick))",
   "new": ".find(|(_tick, _)| true)",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_33_gain"
- },
- {
-  "id": "M31",
-  "name": "MR-34 rx retune keeps phase",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "model.phase.set(tick, phase);",
-   "new": "let _ = (tick, phase);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
- },
- {
-  "id": "M32",
-  "name": "MR-34 tx retune keeps phase",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "model.phase.set(tick, phase.unwrap_or(0.0));",
-   "new": "let _ = (tick, phase);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
+  "test_bin": "lib",
+  "filter": "mr_33_a_timeline_keeps_the_value_in_force_at_each_instant"
  },
  {
   "id": "M33",
   "name": "MR-34 no random phase",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                        let draw = if timed { behavior == \"random_unless_timed_tune\" } else { behavior != \"deterministic\" };",
-   "new": "                        let draw = false;",
+   "old": "if behavior != \"deterministic\" { channel::lo_phase(&mut lo) } else { 0.0 }",
+   "new": "0.0",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
+   "filter": "mr_32_the_transmit_path_delay_shifts_a_loopback"
  },
  {
   "id": "M34",
@@ -451,26 +431,6 @@
   "filter": "mr_32_a_loopback"
  },
  {
-  "id": "M46",
-  "name": "MR-34 timed constant equals the untimed phase",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "                let rx_timed = phases(Direction::Rx, rx_max as usize, true);\n                let tx_timed = phases(Direction::Tx, tx_max as usize, true);",
-    "new": "                let rx_timed = rx_phase.clone();\n                let tx_timed = tx_phase.clone();",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant"
- },
- {
-  "id": "M47",
-  "name": "MR-33 rx gain ignored",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {\n                    model.gain_db.set(tick, value);\n                }",
-    "new": "                if let Some(model) = self.channel.as_mut().and_then(|mode| mode.rx_channels.get_mut(number as usize)) {\n                    model.gain_db.set(tick, 0.0);\n                }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_33_gain"
- },
- {
   "id": "M48",
   "name": "MR-33 tx gain ignored",
   "file": "crates/ezsdr-mock-radio/src/channel.rs",
@@ -501,16 +461,6 @@
   "filter": "mr_32_a_loopback"
  },
  {
-  "id": "M51",
-  "name": "MR-32 cold change does not cut radiation",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                self.cut_segments(k, cut);",
-  "new": "                if reason != \"MR-18: cancelled by a cold change\" { self.cut_segments(k, cut); }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_a_cold"
- },
- {
   "name": "MR-25 a held burst starting before the cut is withdrawn",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": ".filter(|start| *start < cut) else { break };",
@@ -526,8 +476,8 @@
   "old": "let stamp = RootInstant::of_sample(segment.origin, segment.ratio, j);",
   "new": "let stamp = at;",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "",
+  "test_bin": "lib",
+  "filter": "mr_32_a_radiated_sample_takes_the_values_in_force_at_its_own_instant",
   "id": "M53"
  },
  {
@@ -536,8 +486,8 @@
   "old": "            .rev()\n            .find(|(tick, _)| t.is_at_or_after(*tick))",
   "new": "            .find(|(tick, _)| t.is_at_or_after(*tick))",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "",
+  "test_bin": "lib",
+  "filter": "mr_33_a_timeline_keeps_the_value_in_force_at_each_instant",
   "id": "M54"
  },
  {
@@ -547,7 +497,7 @@
     "new": "let re = amplitude * (fr * cos - fi * sin);\n                    let im = amplitude * (fi * cos + fr * sin);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-    "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant",
+    "filter": "mr_32_the_transmit_path_delay_shifts_a_loopback",
   "id": "M55"
  },
  {
@@ -587,7 +537,7 @@
     "new": "                let mut lo = SimRng::new(seed, &format!(\"{}/lo\", f.id));",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-    "filter": "mr_34_a_random_phase_is_redrawn_by_every_tune",
+    "filter": "mr_32_the_transmit_path_delay_shifts_a_loopback",
   "id": "M59"
  },
  {
@@ -621,26 +571,6 @@
   "id": "M62"
  },
  {
-  "name": "MR-34 rx timed tune takes the tx constants",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" if timed => model.timed_phase,\n                            \"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
-   "new": "if let Some(model) = mode.rx_channels.get_mut(number as usize) {\n                        let phase = match model.phase_behavior.as_str() {\n                            \"random_unless_timed_tune\" if timed => 0.0,\n                            \"random_unless_timed_tune\" | \"random\" => channel::lo_phase(&mut mode.lo_retune),\n                            _ => 0.0,\n                        };",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-   "filter": "mr_34_a_timed_tune_replaces_the_random_phase_with_its_constant",
-  "id": "M63"
- },
- {
-  "name": "MR-33 tx frequency timeline not updated",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "                if let Some(model) = plan.channel_models.get_mut(number as usize) {\n                    model.frequency_hz.set(tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
-   "new": "                if let Some(model) = plan.channel_models.get_mut(number as usize) {\n                    let _ = (&model.frequency_hz, tick, value);\n                    model.phase.set(tick, phase.unwrap_or(0.0));\n                    model.phase_fixed.set(tick, if model.phase_behavior != \"random\" { 1.0 } else { 0.0 });\n                }",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-   "filter": "mr_33_a_receiver_hears_only_its_own_frequency",
-  "id": "M64"
- },
- {
   "name": "MR-25 stop cut one tick later",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
   "old": "if let Some(at_stop) = time::k_at_or_after(origin, ratio, now) {",
@@ -651,16 +581,6 @@
   "id": "M65"
  },
  {
-  "name": "MR-35 rx frequency timeline ignored by the gate",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "mode.medium.field(&mode.fragment, logical as u16, model.frequency_hz.at(stamp), antenna)",
-   "new": "mode.medium.field(&mode.fragment, logical as u16, model.frequency_hz.at(RootInstant::tick(i64::MIN)), antenna)",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-   "filter": "mr_33_a_receiver_hears_only_its_own_frequency",
-  "id": "M66"
- },
- {
   "id": "M67",
   "name": "MR-14 strict publication -> inclusive (end to end)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
@@ -669,36 +589,6 @@
   "crate": "ezsdr-acceptance",
   "test_bin": "v58",
   "filter": "v58_08_a_session"
- },
- {
-  "id": "M68",
-  "name": "MR-32 a stop ends the segments of every clock",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-   "old": "            if *stream == k && *g == generation {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
-   "new": "            if *stream == k && *g == generation || true {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_a_stop_after_a_cold_change"
- },
- {
-  "id": "M69",
-  "name": "MR-32 a stop withdraws the segments of every clock",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "        plan.segments.retain(|(_, _, stream, g, start), _| *stream != k || *g != generation || *start < k_cut);",
-    "new": "        plan.segments.retain(|(_, _, _stream, _g, start), _| *start < k_cut);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_a_stop_after_a_cold_change"
- },
- {
-  "id": "M70",
-  "name": "MR-32 a cold change keeps the segment generation",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        self.tx[k].cur.map_or(0, |index| index as u32 + 1)\n",
-  "new": "        self.tx[k].cur.map_or(0, |_| 1)\n",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_32_a_stop_after_a_cold_change"
  },
  {
   "id": "M71",
@@ -714,11 +604,11 @@
   "id": "M72",
   "name": "MR-16 a burst at the open burst's next sample is admitted",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start < open.next) {",
+  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
+  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| start < open.next) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before"
+  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
  },
  {
   "id": "M73",
@@ -794,31 +684,31 @@
   "id": "M80",
   "name": "MR-16 the open-burst refusal is judged on the target before MR-17 moves it",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| at.time_point.ticks_in(tx_domain).is_ok_and(|at_tx| at_tx <= open.next)) {",
+  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
+  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| at.time_point.ticks_in(tx_domain).is_ok_and(|at_tx| at_tx <= open.next)) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before"
+  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
  },
  {
   "id": "M81",
   "name": "MR-16 a burst one sample after the open burst's next sample is refused",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start <= open.next.saturating_add(1)) {",
+  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
+  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next.saturating_add(1)) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before"
+  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
  },
  {
   "id": "M82",
   "name": "MR-16 the open-burst refusal at the next sample only in channel mode",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if current && self.tx[k].open.as_ref().is_some_and(|open| start < open.next || (start == open.next && self.channel.is_some())) {",
+  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
+  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| start < open.next || (start == open.next && self.channel.is_some())) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before"
+  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
  },
  {
   "id": "M83",
@@ -829,5 +719,25 @@
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_15_a_transmit_block"
+ },
+ {
+  "id": "M68",
+  "name": "MR-32 a stop ends the segments of every clock",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "            if *stream == k && *g == generation {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
+  "new": "            if *stream == k && *g == generation || true {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_25_a_stream_stop_leaves_another_transmit_stream_radiating"
+ },
+ {
+  "id": "M69",
+  "name": "MR-32 a stop withdraws the segments of every clock",
+  "file": "crates/ezsdr-mock-radio/src/lib.rs",
+  "old": "        plan.segments.retain(|(_, _, stream, g, start), _| *stream != k || *g != generation || *start < k_cut);",
+  "new": "        plan.segments.retain(|(_, _, _stream, _g, start), _| *start < k_cut);",
+  "crate": "ezsdr-mock-radio",
+  "test_bin": "mock_layout",
+  "filter": "mr_25_a_stream_stop_leaves_another_transmit_stream_radiating"
  }
 ]

@@ -28,12 +28,12 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Evidence:** UR-29 (`design/18-uhd-radio.md`); `plan/phase7/bench-results.md:1380, 1486–1497, 1520, 1535, 1584, 1616`.
 - **Status:** Ceiling (UHD's static teardown, UR-29). Which UHD errors mean a lost device is INFERRED (UR-29).
 
-### KL-3 After a retune: settling time and LO phase
-- **Symptom:** a timed receive retune moves the tone 31–52 µs after its instant and has settled by about 60 µs. After an untimed tune the loop phase is random (spread 142°–180° over six retunes). A timed tune returned it to within 0.1° in Phase 7 and within 0.9° in BP5, but spread 99°–156° in three shake-out runs on 2026-10-27 (0.8° in the fourth), for a reason not known.
-- **When:** OBX and UBX boards (`random_unless_timed_tune`); a CBX is `random`. A `cold` change tunes its stream's channels untimed when the new segment begins (UR-12), so phase coherence is lost there too (MockRadio models this, MR-34; on the USRP INFERRED).
-- **Workaround:** drop about 60 µs after a timed retune; retune with `at` when phase matters and measure the phase after each retune; do not rely on phase across a `cold` change or on a CBX.
+### KL-3 LO phase after a tune is random on OBX, UBX and CBX
+- **Symptom:** after a tune the loop phase is random (spread 142°–180° over six untimed retunes on the bench); a timed tune returned it to within 0.1° in Phase 7 and within 0.9° in BP5, but spread 99°–156° in three shake-out runs on 2026-10-27 (0.8° in the fourth), for a reason not known. A receive tune settles within about 60 µs.
+- **When:** OBX and UBX boards (`random_unless_timed_tune`); a CBX is `random`. A receive frequency is set at connect and cannot be retuned during a Run, so every tune is untimed: at connect, and again when a `start_rx` begins a new receive segment (UR-12; MockRadio models this, MR-34; on the USRP INFERRED). A timed tune has no form today.
+- **Workaround:** measure the phase after each Session start and do not rely on phase across a `start_rx` or on a CBX; calibrate in your own signal processing.
 - **Evidence:** UR-9, UR-12 (`design/18-uhd-radio.md`); MR-34 (`design/09-mock-radio.md`); `plan/phase7/bench-results.md:437, 513–514`; `plan/phase8/bench-results.md:54, 101, 129`.
-- **Status:** Device behaviour (settling and the untimed phase, OBX). Timed-tune repeatability is awaiting bench (Phase 8 stage 4).
+- **Status:** Device behaviour (settling and the untimed phase, OBX). The timed retune of the earlier entry is gone in note 47 stage 2 (2026-11-04): a radio value cannot change during a Run (KL-35); timed-tune repeatability is awaiting bench if stage 3 returns it.
 
 ### KL-4 Host and UHD setup
 - **Symptom:** receive overflows or link drops at high rates; `uhd_find_devices` finds nothing just after the link comes up; UHD refuses the device (`Major compat number mismatch`); an OBX shows as an unknown board; the server refuses the USRP binding (`EA-7: ezsdr.radio.uhd: this server was built without UHD; …`).
@@ -59,12 +59,12 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 
 ## UHD Module: receive
 
-### KL-7 A `cold` change interrupts the stream
-- **Symptom:** changing a stream's sample rate, or a channel's antenna or stream membership, ends the stream's SampleClock at the change's instant; a new SampleClock starts later and nothing is delivered in between (not a gap: a new clock). On receive the pause is about 53 ms plus one receive call at the old rate (53.0 ms measured; about 55 ms at 1 MS/s with the default 2 000-sample block, derived; 220.8 ms measured at 390.625 kS/s with 65 536-sample blocks). After a change the device refuses, the next change or `start_rx` begins its segment when it would have had the refused change run (RM-25): the pause is that change's own, once for each transition, so a refused change followed by another costs the pause of both. On transmit, bursts booked on the old clock at or after the cut are cancelled (`radio.COMMAND_REJECTED`, "cancelled by a cold change"), and the new clock starts at least 50 ms later, so bursts aimed earlier are late.
-- **When:** every `cold` change, on MockRadio's `x3xx` profile and on the USRP alike; also a receive restart after `stop()` and the first transmit enable from no channel.
-- **Workaround:** make `cold` changes outside capture windows; set rates and channel sets in the BindingProfile or Spec before the Run; capture each configuration separately (KL-21).
-- **Evidence:** RM-21, RM-25 (`design/07-radio-model.md`); UR-23, UR-25 (`design/18-uhd-radio.md`); MR-3 (`design/09-mock-radio.md`); `plan/phase7/bench-results.md:915–926, 1020`.
-- **Status:** Ceiling (the pause is one receive call at the old rate, plus 3 ms, plus the 50 ms start lead). The start leads are INFERRED (shake-out candidate 1 ms; Phase 8 stage 4); the receive start lead is at least the release window, 3 ms (RM-6).
+### KL-7 A receive restart interrupts the stream
+- **Symptom:** after `stop()`, `start()` begins a new SampleClock later and nothing is delivered in between (not a gap: a new clock). The pause is about 53 ms plus one receive call at the old rate (53.0 ms measured; about 55 ms at 1 MS/s with the default 2 000-sample block, derived; 220.8 ms measured at 390.625 kS/s with 65 536-sample blocks). After a restart the device refuses, the next `start_rx` begins its segment when it would have had the refused one run (RM-25): the pause is that start's own, once for each transition.
+- **When:** every receive restart, on MockRadio's `x3xx` profile and on the USRP alike. Changing a stream's rate, a channel's antenna or its stream membership during a Run no longer exists (KL-35).
+- **Workaround:** restart outside capture windows; set rates and channel sets at connect or in the Spec; capture each configuration in its own Session (KL-21).
+- **Evidence:** RM-21, RM-25 (`design/07-radio-model.md`); UR-17, UR-25 (`design/18-uhd-radio.md`); MR-3 (`design/09-mock-radio.md`); `plan/phase7/bench-results.md:915–926, 1020`.
+- **Status:** Ceiling (the pause is one receive call at the old rate, plus 3 ms, plus the 50 ms start lead). The start leads are INFERRED (shake-out candidate 1 ms; Phase 8 stage 4); the receive start lead is at least the release window, 3 ms (RM-6). The `cold` change, the transmit cancellation by a change and the first transmit enable of the earlier entry are gone in note 47 stage 2 (2026-11-04).
 
 ### KL-8 After a receive overflow, sample times are rounded
 - **Symptom:** after `radio.RX_OVERFLOW { cause: overrun }`, blocks arrive with timestamps off the stream's sample lattice; the Module rounds each to the nearest sample and counts it in `stats.rx_off_lattice` (2 174–2 179 blocks in a 10 MS/s test).
@@ -77,29 +77,29 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Symptom:** the Run records `rejected` with `call: "rx_drain"`; a timed DDC value was not shown consumed by the normal drain or its one bounded flush and may still override a later receive configuration. L1 keeps the reported value in `left` on its stream chain until qualifying samples consume it. If the channel moves to another stream, that `left` stays on the old chain and can continue to block restoration. A failed `rx_restore` means the device's RX frequency may also differ from the value in force at `Provider::stop`.
 - **When:** a handed timed receive frequency is not consumed by sample evidence before the drain deadline, the one bounded immediate-start/read/stop flush also fails to show consumption, or the device refuses the RX stop; restoration can independently fail. A moved channel may be physically consumed by its new stream while its software `left` remains on the old chain.
 - **Workaround:** keep the channel on the same RX chain until a post-acceptance sample at or after the command instant consumes `left`; do not assume close/open clears the device's DDC. After a move, return the channel to the old chain for sample evidence or recover/power-cycle the device before trusting a later capture.
-- **Evidence:** UR-24, UR-26 (`design/18-uhd-radio.md`); design note 39 §6.7 (`plan/phase8/39-dsp-timed-commands.md`); design note 44 §§3.4, 3.7 (`plan/phase8/44-device-chain-state.md`); FakeDevice P4 A/C (`ur_24_d9_p4_a_and_c_keep_a_pre_stop_ddc_entry_until_restart_samples`); L1 chain-reuse, restore, and move tests (`ur_24_a_left_and_latest_survive_close_open_and_chain_reuse`, `ur_24_provider_stop_skips_restore_for_left_on_this_chain`, `ur_24_a_left_stays_on_the_old_chain_after_channel_move`); hardware P4 A/C on UBX and OBX (`plan/phase8/bench-results.md`, 2026-10-29).
-- **Status:** L1 reports a remaining entry once and tracks it as per-chain `left` across streamer close/open; qualifying samples on that chain reconcile it. It does not reset the device DDC, move `left` between chains, or recover automatically. P4 A/C confirms that a DDC entry can survive a stop and streamer reopen, so a leftover remains a ceiling until sample evidence or device recovery.
+- **Evidence:** UR-24, UR-26 (`design/18-uhd-radio.md`); design note 39 §6.7 (`plan/phase8/39-dsp-timed-commands.md`); design note 44 §§3.4, 3.7 (`plan/phase8/44-device-chain-state.md`); FakeDevice P4 A/C (`ur_24_d9_p4_a_and_c_keep_a_pre_stop_ddc_entry_until_restart_samples`); L1 chain-reuse, restore, and move tests (ur_24_a_left_and_latest_survive_close_open_and_chain_reuse, ur_24_provider_stop_skips_restore_for_left_on_this_chain, ur_24_a_left_stays_on_the_old_chain_after_channel_move); hardware P4 A/C on UBX and OBX (`plan/phase8/bench-results.md`, 2026-10-29).
+- **Status:** Gone in note 47 stage 2 (2026-11-04): no timed receive frequency is handed to the device, so no DDC value is left behind and no `rx_drain` or `rx_restore` runs (UR-24 is withdrawn). The entry stays for its number.
 
-### KL-32 A receive frequency set before the stream runs gives no phase guarantee (MA-1)
-- **Symptom:** the loop phase after a receive frequency change is random from one Session to the next, where a timed tune would have given the same phase each time. MockRadio shows it too since stage MA1 (MR-34): a receive frequency that applies before a segment covers it, or while the stream is stopped, is an untimed tune there, with a fresh random phase.
-- **When:** OBX and UBX (`random_unless_timed_tune`), for a receive frequency set (`radio.rx.c<n>.frequency_hz`) before T0, or while the channel's stream is stopped or waits for a later segment: the Module applies it untimed, because no sample passes the DDC at that instant (KL-9, UR-24). A frequency set with `at` while the stream runs is a timed tune and keeps the guarantee.
-- **Workaround:** if the phase matters, in a Spec Run, schedule the frequency again (`update_parameter` with an `at`) after the receive stream has begun to flow, at an instant at least the release window (3 ms) after the segment's origin, and measure the phase after it (a Session's `set` carries no time).
-- **Evidence:** UR-24 (`design/18-uhd-radio.md`); `plan/phase8/42-d9-production-fix.md`; `plan/phase8/reviews/d9a-opus.md` §5; bench 2026-10-28 (`plan/phase8/bench-results.md`): over 5 Sessions on X300 #1 with OBX, the loopback phase spread 164.5° when both frequencies were set before T0 and 2.3° when set again with `at` while streaming (the relative phase of the two LOs; the receive LO's share is not separated).
-- **Status:** Ceiling (owner, 2026-10-28). MockRadio's MR-34 follows the same rule since stage MA1, conservatively: a frequency due less than the release window (3 ms) after the origin of the segment that covers it is untimed on the Mock, though the UHD Module may give it to the device timed. Observed on the bench 2026-10-28 (Evidence).
+### KL-32 A receive frequency gives no phase guarantee (MA-1)
+- **Symptom:** the loop phase after a receive frequency is random from one Session to the next, where a timed tune would have given the same phase each time. MockRadio shows it too (MR-34): every tune there is untimed, with a fresh random phase.
+- **When:** OBX and UBX (`random_unless_timed_tune`), for every receive frequency: it is set at connect (before T0) and cannot change during a Run (KL-35), so the Module applies it untimed, because no sample passes the DDC then (UR-12).
+- **Workaround:** if the phase matters, measure it after each Session start and correct it in your signal processing; a timed retune returns with stage 3 of note 47, if it does.
+- **Evidence:** UR-12 (`design/18-uhd-radio.md`); `plan/phase8/42-d9-production-fix.md`; `plan/phase8/reviews/d9a-opus.md` §5; bench 2026-10-28 (`plan/phase8/bench-results.md`): over 5 Sessions on X300 #1 with OBX, the loopback phase spread 164.5° when both frequencies were set before T0 and 2.3° when set again with `at` while streaming (the relative phase of the two LOs; the receive LO's share is not separated); that second case is gone in note 47 stage 2 (2026-11-04).
+- **Status:** Ceiling (owner, 2026-10-28).
 
 ### KL-33 A receive frequency set while the channel does not receive can be lost after a refused change
 - **Symptom:** a timed receive frequency (`radio.rx.c<n>.frequency_hz` with `at`) never reaches the device: the samples after its instant keep the old frequency, while the configuration of record shows the new one.
 - **When:** the frequency's instant falls where no receive segment of the channel runs, and a `cold` change or start before it is then refused so that the next segment begins earlier than planned, before the frequency's instant (RM-25 then removed the refused segment and advanced later origins). It needs the refusal to be booked after the frequency's release, so it is rare (INFERRED).
 - **Workaround:** set the frequency again with `at` after the receive stream has begun.
 - **Evidence:** design note 43 (`plan/phase8/43-refusal-keeps-origins.md`); the code path was verified by review (`plan/phase8/reviews/ma1-opus.md` §4).
-- **Status:** Fixed in stage 43a (2026-10-28): a refused receive segment no longer advances later origins (RM-25), and the receive start lead must be at least the release window (RM-6), so a value deferred at its release is carried by the configure of the segment it was for. The cost is the longer pause after a refused change (KL-7).
+- **Status:** Gone in note 47 stage 2 (2026-11-04): no `cold` change or timed receive frequency exists during a Run (RM-21), so none can be refused or lost. The entry stays for its number.
 
 ### KL-34 A delayed RX frequency can hold later timed commands (L1)
 - **Symptom:** a timed RX frequency remains held until its covering stream has begun; commands behind it in the instance's release order, including another stream's RX update or a TX update, are delayed too. When the head is finally handed after `e`, UHD applies the past-due timed command on arrival, and its physical LO phase is not guaranteed.
 - **When:** the RX owner has not published the covering segment as running when the release window opens, or an earlier held command blocks the ordered release. A held value may wait until the segment begins or the plan changes or ends.
 - **Workaround:** arrange for the RX owner to begin its segment before the release window for the timed frequency, and avoid depending on a later command reaching the device while an earlier RX frequency is held. Schedule a fresh timed tune after the stream is running if phase matters; a Session `set` has no time.
-- **Evidence:** UR-24 (`design/18-uhd-radio.md`); design note 44 §3.8 (`plan/phase8/44-device-chain-state.md`); `ur_24_a_blocked_rx_head_holds_later_rx_and_tx_updates`, `ur_24_a_held_frequency_is_handed_after_its_instant`, `ur_24_a_release_waits_until_begin_publishes_eligibility`.
-- **Status:** Ceiling adopted for L1. Logical `at: e` and release ordering are tested; the physical LO phase of a past-due timed tune is INFERRED and awaits hardware confirmation.
+- **Evidence:** UR-24 (`design/18-uhd-radio.md`); design note 44 §3.8 (`plan/phase8/44-device-chain-state.md`); ur_24_a_blocked_rx_head_holds_later_rx_and_tx_updates, ur_24_a_held_frequency_is_handed_after_its_instant, ur_24_a_release_waits_until_begin_publishes_eligibility.
+- **Status:** Gone in note 47 stage 2 (2026-11-04): no timed receive frequency is held or released (UR-24 is withdrawn). The entry stays for its number.
 
 ## UHD Module: transmit
 
@@ -108,21 +108,21 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **When:** a timed `radio.tx.c<n>.frequency_hz` update whose instant falls after a burst's first send (an instant inside the first, time-stamped send is applied on time) (at most 2 000 samples by default and at most 2.5 ms): anywhere in a `repeat`, which is one device burst until it ends, and in bursts joined back to back into one device burst (KL-13).
 - **Workaround:** none; every payload-bearing send is timed since D9b-1a, so a timed retune can take effect inside a burst.
 - **Evidence:** UR-22, UR-23 (`design/18-uhd-radio.md`); design note 42 §1 F3′ (`plan/phase8/42-d9-production-fix.md`); `plan/phase8/bench-results.md:140–141` (a DUC value applies only with time-stamped samples).
-- **Status:** Fixed in stage D9b-1a: every payload-bearing TX send, including continuations, carries its first sample's time, so a timed DUC value inside the burst is taken at its instant. Pinned by `ur_24_a_transmit_frequency_inside_a_burst_is_taken_at_its_time` and FakeDevice probe P6 (`ur_33_d9_raw_probes_match_the_x3xx_tx_model`).
+- **Status:** Gone in note 47 stage 2 (2026-11-04): no transmit frequency is updated during a Run (RM-21), so none is half applied inside a burst. The entry stays for its number.
 
 ### KL-11 Transmit retunes between bursts: leftovers (D9 S2)
 - **Symptom:** the first burst after a transmit channel re-joins its stream carries an older retune's DSP part instead of the latest one's.
 - **When:** a timed transmit retune whose instant falls between bursts, after which, before any burst on that channel, the channel leaves its stream (`radio.tx.c<n>.stream`), is retuned while out, and re-joins.
 - **Workaround:** let a burst run on the channel before it leaves, or retune only after it re-joins.
 - **Evidence:** design note 42 §1–§2 (`plan/phase8/42-d9-production-fix.md`); `plan/phase8/bench-results.md:141` (a queued timed value overrides a later untimed one).
-- **Status:** Ceiling (owner, 2026-10-27), pinned by `ur_25_a_transmit_channel_that_leaves_and_returns_keeps_its_old_timed_value` (stage D9a). The pile-up of many timed transmit retunes with no burst is a defect tracked as issue #71.
+- **Status:** Gone in note 47 stage 2 (2026-11-04): no transmit retune is issued between bursts and a channel cannot leave or re-join a stream during a Run (RM-21). The entry stays for its number.
 
 ### KL-12 The first timed transmit retune after opening can apply early (D9 F7)
 - **Symptom:** a timed transmit retune takes effect early instead of at its instant: as soon as it is handed to the device, or at the start of the burst it falls in (about 19 ms early in the bench probes); a later one may then be early too.
 - **When:** before the first burst after the device is opened (every Run or Session opens it and sets its time to zero), if the previous process's last transmit packet carried a timestamp later than the instant; visible only when the instant falls in the first ~3 ms of a burst.
 - **Workaround:** none when the open-time flush is acknowledged. If `tx_flush` is rejected for a missing acknowledgement, the stale-header reset is not confirmed.
 - **Evidence:** UR-7, UR-24 (`design/18-uhd-radio.md`); design note 42 §1–§2 (`plan/phase8/42-d9-production-fix.md`); `plan/phase8/bench-results.md:140` (P2: a DUC value given before the burst moved at the burst's start, about 19 ms early); bench 2026-10-28, probe P5 on X300 #2 with UBX: with a stale timed header the new value applied about 19 ms before its instant, without one it applied 25 µs after.
-- **Status:** Fixed in stage D9b-1a when the open-time two-zero SOB/EOB flush is acknowledged; the opener waits for each channel's BurstAck before timed TX DSP issuance. A missing ack is recorded and the stream continues without a confirmed reset. The flush clears the stale header but does not drain timed DUC values already queued; those can still override later configuration (KL-11, issue #71, deferred to D9b-1b).
+- **Status:** Gone in note 47 stage 2 (2026-11-04): no timed transmit retune is issued (RM-21); the open-time flush (UR-22) stays. The entry stays for its number.
 
 ### KL-13 Burst timing on the USRP
 - **Symptom:** a burst meant to start exactly where another ends is late (per its LatePolicy it is moved a sample or two later, or dropped); a burst that preempts a running burst or repeat with too little lead is late; after `Stop` the transmitter keeps sending for 10–12 ms; an underflow ends the burst and the rest is not sent; on a loaded host a burst can end with `TX_UNDERFLOW`.
@@ -161,10 +161,10 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 
 ### KL-16 MockRadio is not yet the USRP's exact twin
 - **Symptom:** an experiment that passes on MockRadio's `x3xx` profile can behave differently on the USRP.
-- **When:** command leads between 2 and about 5 ms (MockRadio accepts 2 ms; on the USRP a burst needs about 3 ms from submission); loopback timing (MockRadio's transmit-to-receive delay is 45 samples at every rate; the X300's was 35, 44, 44 and 36 samples at 400 k, 500 k, 1 M and 2 MS/s); LO phase (MockRadio's phase after a timed retune is one constant per channel whatever the frequency; the X300's differs per frequency, −137.3° at 1 GHz and 30.6° at 1000.1234 MHz in one test); repeats (MockRadio refuses an odd length or more than 2^28 samples, RFNoC Replay's limits; the USRP streams repeats from host memory and takes them); refusals at a change's instant (the USRP refuses a `cold` change whose rate or antenna reads back differently; MockRadio only for an injected `cold_change_refused` fault).
+- **When:** command leads between 2 and about 5 ms (MockRadio accepts 2 ms; on the USRP a burst needs about 3 ms from submission); loopback timing (MockRadio's transmit-to-receive delay is 45 samples at every rate; the X300's was 35, 44, 44 and 36 samples at 400 k, 500 k, 1 M and 2 MS/s); LO phase (MockRadio's phase after a timed retune is one constant per channel whatever the frequency; the X300's differs per frequency, −137.3° at 1 GHz and 30.6° at 1000.1234 MHz in one test); repeats (MockRadio refuses an odd length or more than 2^28 samples, RFNoC Replay's limits; the USRP streams repeats from host memory and takes them); refusals at a start (the USRP refuses a `start_rx` whose rate or antenna reads back differently; MockRadio never).
 - **Workaround:** use leads of 5 ms or more; calibrate delay and phase on the device; keep repeats of even length and at most 2^28 samples.
 - **Evidence:** MR-3, MR-18, MR-34 (`design/09-mock-radio.md`); RM-23 (`design/07-radio-model.md`); UR-9, UR-12 (`design/18-uhd-radio.md`); `plan/phase8/bench-results.md:49, 51`; `plan/phase7/bench-results.md:460–497, 616`.
-- **Status:** the lead and the path delay are to be levelled in Phase 8 stage 4; the phase constant and the refusal scope are Ceilings (MR-34, MR-18). The `x3xx` profile's command queue depth (16) is looser than the hardware's: the bench on 2026-10-28 measured 7 on X300 #1 and 8 on X300 #2 (timed receive frequency `apply` calls before back-pressure), so MockRadio accepts queued timed commands the USRP blocks on; Phase 8 stage 4 sets the profile from the record.
+- **Status:** the lead and the path delay are to be levelled in Phase 8 stage 4; the phase constant and the refusal scope are Ceilings (MR-34, MR-18). The `x3xx` profile's command queue depth (16) is looser than the hardware's (the bench on 2026-10-28 measured 7 on X300 #1 and 8 on X300 #2), but no timed command is issued today, so it governs nothing until stage 3 or 4 returns one (note 47 stage 2).
 
 ### KL-17 SimulationChannel is a simple propagation model
 - **Symptom:** the simulated medium differs from RF in ways some experiments notice.
@@ -196,9 +196,9 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 
 ## Python client and Sessions
 
-### KL-21 `capture()` refuses a capture with a gap or a rate change
+### KL-21 `capture()` refuses a capture with a gap or a restart
 - **Symptom:** `capture(n)` raises `ezsdr.Error` ("… has a gap or an invalid stretch …", "… spans 2 SampleClocks …" or "… does not have one channel count …"), though the capture was written and is in the Manifest.
-- **When:** the capture holds an overflow or link-drop gap, an invalid channel stretch, a rate change or a channel-count change.
+- **When:** the capture holds an overflow or link-drop gap, an invalid channel stretch, a `stop()` and `start()` (a new SampleClock) or a channel-count change.
 - **Workaround:** call `request(n, at)`, wait for the `sink.CAPTURE_WRITTEN` event whose `action` is one of the request's dispatched ids (`wait_for`), then `read(artifact)` and split the bytes by the artifact's `continuity`.
 - **Evidence:** EA-17 (`design/16-easy-api.md`); `python/ezsdr/session.py` (`samples`).
 - **Status:** Ceiling (one array would hide the gap).
@@ -211,18 +211,25 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Status:** Ceiling.
 
 ### KL-23 The getters show what was admitted, not what the device did
-- **Symptom:** after a runtime refusal (`radio.COMMAND_REJECTED`, `radio.COMMAND_QUEUE_FULL`), `sdr.rx_channels[n].frequency`, `sdr.rx.sample_rate`, the other getters and `sdr.effective` still hold the refused value, and later admission checks judge that value.
-- **When:** a Provider refuses an update after the Kernel admitted it.
-- **Workaround:** watch `events()` for those kinds; the Manifest's `applied` section records what the device applied; issue the update again.
+- **Symptom:** after a device refusal at a restart (`radio.COMMAND_REJECTED`), `sdr.rx_channels[n].frequency`, `sdr.rx.sample_rate`, the other getters and `sdr.effective` still hold the value asked for at connect, and later admission checks judge that value.
+- **When:** the device refuses the configuration a `start_rx` applies (UR-12), after the Kernel admitted the value at connect.
+- **Workaround:** watch `events()` for `radio.COMMAND_REJECTED`; the Manifest's `applied` section records what the device applied; `start()` again or connect with another value.
 - **Evidence:** KC-27 (`design/06-kernel-coordinator.md`); EA-16 (`design/16-easy-api.md`).
 - **Status:** Ceiling (feedback of applied values is later work).
 
 ### KL-24 Simulation only: child Runs and native components
 - **Symptom:** on the USRP, `run(spec, …)` raises `ezsdr.Rejected` ("KC-37a: a device-paced Session runs no child Run …"), so `python/examples/sweep.py` cannot run there. Where native components exist (a Rust embedding that supplies them; the `ezsdr-server` binary ships none), a Spec with an `ezsdr.exec.native` Island fails at `prepare` on the USRP (`Unsupported`, "NX-4: … runs the Simulation class only"), and in simulation an Action addressed to a component (`UpdateParameter`, `SetTimer`, `Stop`) is admitted and then fails the Run ("NX-7: …").
 - **When:** a device-paced Session or Run; a Session `set` or a schedule entry whose target is a component.
-- **Workaround:** on hardware, sweep inside one Session (`set`, `capture`) or open one Session per step, and make reactive decisions in your client; give components their settings in the Spec.
+- **Workaround:** on hardware, open one Session per step, with the step's values at connect (KL-35), and make reactive decisions in your client; give components their settings in the Spec.
 - **Evidence:** KC-37a (`design/06-kernel-coordinator.md`); EA-14 (`design/16-easy-api.md`); NX-4, NX-7 and decision N4 (`design/14-native-executor.md`).
 - **Status:** Ceiling until later phases (child Runs on hardware; Phase 10's execution engines).
+
+### KL-35 A radio value cannot change during a Run
+- **Symptom:** `sdr.rx_channels[n].frequency = …`, `gain`, `antenna`, `stream` and `sdr.rx.sample_rate` raise `ezsdr.Error` ("EA-16: … cannot change during a Run; ask for it at connect …"); a raw `sdr.set` of a radio key is `Rejected` with the check `ezsdr.update_class`; a Spec `schedule` entry that updates one fails `validate`.
+- **When:** every Run and Session, on MockRadio and on the USRP: a frequency, gain, antenna, sample rate or a channel's stream membership is fixed once the Run starts.
+- **Workaround:** set it at connect: `connect(rx=ezsdr.Stream([0], sample_rate=…, frequency={0: …}, gain={0: …}))`, or in the Spec's `requires`; for a sweep open one Session per step (KL-24).
+- **Evidence:** RM-21, RM-27 (`design/07-radio-model.md`); RS-52 (`design/04-run-and-session.md`); SB-16 (`design/03-spec-and-binding.md`); EA-16 (`design/16-easy-api.md`); `plan/phase8/47-no-change-while-streaming.md`.
+- **Status:** Ceiling until note 47's stages 3 and 4 re-add a change of a stopped receive stream and of an idle transmit stream (owner, 2026-11-04). The in-Run envelope refusal (Vision §58's sixteenth test) is tested as this refusal until then.
 
 ## Specs, BindingProfiles and records
 
@@ -255,9 +262,9 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Status:** Ceiling (a build hash is later work).
 
 ### KL-29 Edge cases in event and command records
-- **Symptom:** (a) a Manifest's delivered events are ordered by path (hot-path events such as `RX_OVERFLOW` first), then by emission, not by time; (b) an `RX_OVERFLOW` dropped because the event ring was full is counted in `EVENTS_DROPPED` but does not mark the capture; (c) a timed update due just before the Run's end that the Module had not yet handed to the device is recorded as cancelled at the end.
-- **When:** (a) always; (b) more hot-path events at once than the ring holds; (c) an update due a few ms before `Provider::stop` or a device loss, when the Module's own release was delayed.
-- **Workaround:** (a) sort by each event's `time`; (b) take gaps from the capture's ContinuityMap; (c) keep timed updates clear of the Run's end.
+- **Symptom:** (a) a Manifest's delivered events are ordered by path (hot-path events such as `RX_OVERFLOW` first), then by emission, not by time; (b) an `RX_OVERFLOW` dropped because the event ring was full is counted in `EVENTS_DROPPED` but does not mark the capture; (c) gone in note 47 stage 2: no timed update exists.
+- **When:** (a) always; (b) more hot-path events at once than the ring holds; (c) none.
+- **Workaround:** (a) sort by each event's `time`; (b) take gaps from the capture's ContinuityMap; (c) none.
 - **Evidence:** RM-16, RM-24 (`design/07-radio-model.md`); UR-26 (`design/18-uhd-radio.md`).
 - **Status:** Ceiling.
 
