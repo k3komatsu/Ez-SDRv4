@@ -1,6 +1,6 @@
 # 設計メモ 46：受信中・送信中にできることの帳簿
 
-Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．**owner の決定は §8**（F4a と F4b は (d)，よって F5 もなくなる．F1 は (e)．F4b は受信だけ (e) に改めた．F3 は F1 の結果なくなる．F6 は (a)．F2 と F9 は再開の parameter だけ）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
+Status: 第 3 版（2026-11-04，orchestrator Opus．F4 を F4a と F4b に分けた）．**owner の決定は §8**（F4a と F4b は (d)，よって F5 もなくなる．F1 は (e)．F4b は受信だけ (e) に改めた．F3 は F1 の結果なくなる．F6 は (a)．F2 と F9 は再開の parameter だけ．F7 は (b) と周期の境目での差し替え）．Sol の事実確認（19 件，すべて取り入れた．§7）を入れた．**このメモは推奨を書かない**：owner が機能ごとに利点と欠点を数えて結論を出す（owner 2026-11-04「受信しながら送信しながらできることを制限しても良い．ただし，それには私が明確にメリットデメリットを勘定して結論を出します」）．
 
 | 項目 | 内容 |
 |---|---|
@@ -223,6 +223,7 @@ v3 との比べ（orchestrator が `v3/` を読んだ，master の worktree）�
 | 2026-11-04 | F6 | (a) 受信の Stop と `start_rx`，送信の Stop をすべて残す | (b)(c) では機能的に厳しい（owner）．`start_rx` は F1・F4b の変更の唯一の入口で，送信の Stop は repeat を途中で止める唯一の方法 | F1 (e) で，流れている受信に渡した時刻つきの値と Stop の競合（D9b-2 の大部分）がなくなる見込み（INFERRED：Stop の時に未消費の時刻つきの値がほかの道から残らないかは未確認）．残る：cut，新しい segment と SampleClock，開始の前の設定と refusal，start lead，#67 |
 | 2026-11-04 | F2（送信の rate と antenna を含む） | ①：送信の周波数・gain・rate・antenna は，送信の stream に流れている burst も予約済みの burst もない時に予約された burst にだけ parameter として付けられる（受信の `start_rx` と同じ形）．開始は前の burst の終わりから送信の start lead 以上後．その burst の booking で新しい送信の clock を登録し，origin はその開始．antenna は将来のための予約で，`coerce` が board ごとに確かめる（X310 では今は同じ値だけ） | 周波数ホッピングや gain の変更はそれほどしない．sample の単位で要るならデジタル信号処理ですべき（owner） | burst と結びつかない時刻つきの値，device burst の途中の値（#71・#72 の場合）がなくなる見込み（INFERRED）．退けた案②（周波数と gain は新しい device burst を始める burst なら付けられる）：前もって並べた予約ができる代わりに規則が二つ．**条件**：開いたままの送信の streamer で rate を変えることを実機で一度確かめる |
 | 2026-11-04 | F9 | 時刻つきの gain も，受信は `start_rx`，送信は F2 ① の burst の parameter としてだけ変える | F2 の理由と同じ（owner：gain の変更もそれほどしない） | 流れている間の時刻つきの値が受信・送信ともなくなる．uhd-control の流れている間の release はなくなる（再開の parameter の時刻つきの値の渡し方は設計で決める） |
+| 2026-11-04 | F7 | (b)：流れている burst や予約済みの burst と時刻が重なる予約を拒む．隙間のある後の burst と，有限の burst のちょうど次の sample から続く burst は受け付ける（一つの device burst として続ける）．**加えて repeat 専用の命令**「次の周期の始めで差し替える」（Easy API の形は設計で決める）：利用者は時刻を指定せず，Provider が受け取った時の「今 + in-flight window + device lead」以後で最初の，流れている repeat の周期の境目（origin + k·N）を選び，そこで終えて新しい波形を隙間なく続ける．選んだ時刻は action log と記録に残す．新しい波形の長さは制限しない．**規則：同じ長さなら周期はロックしたまま**（境目は sample の単位で一致し続ける） | v3 の repeat の方針：何周目かは分からないが，周期の中ではロックしている．同じ長さの別の信号に差し替えても，sample の単位で周期を一致させて送りたい．ちょうど続く burst を受け付けたい（owner） | 一般の割り込みとその動く境目（Phase 7 K の N-P1-2 の競合）がなくなる．差し替えの境目は渡し済みの範囲（UR-23：渡すのは「今 + in-flight window」より前だけ）の外から選ぶので，予約の時に一度決めればよい（INFERRED：コードが UR-23 どおりかは未確認）．続きの device burst と最後の sample の取り置きは残る．退けた案：利用者が周期の境目の `at` を指定する形（境目の確かめと受信・送信の格子の一致が要る）．v3 との比べ：v3 は送信が repeat だけで，流れている間の波形の差し替えは send の間で行い，時刻と位置の約束はなかった（`v3/source/controller/cyclictx.d:188-217`，`v3/source/device/package.d:80-125`） |
 
 ## Changes
 
