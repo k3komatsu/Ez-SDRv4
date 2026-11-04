@@ -147,8 +147,9 @@ impl Server {
                 let handled = match request {
                     Request::Submit { action } => {
                         let waveform = (!body.is_empty()).then_some(body.as_slice());
+                        let from = count(&live.run);
                         match live.run.submit(action, waveform) {
-                            Ok(entry) => Handled::ok(Response::Submitted { entry, now: live.run.now(), events: count(&live.run) }),
+                            Ok(entry) => submitted(live, entry, from),
                             Err(error) => run_error(error),
                         }
                     }
@@ -405,6 +406,46 @@ fn count(run: &RunHandle) -> usize {
     run.events(0).len()
 }
 
+/// EA-11 (note 47 O2): the reply to an admitted or rejected submit. A Provider's booking decision on a
+/// dispatched Action exists when the Kernel's submit returns (it waits for the Provider on a device-paced
+/// Run and steps it on a stepped one), so the `radio.COMMAND_REJECTED` events from `from` on that name one of
+/// the entry's dispatched ids are the Provider's refusals of it. A Run that is no longer Running after a
+/// dispatch may have returned from that wait early, so absence of a refusal is no success: the reply is `Ended`.
+fn submitted(live: &Live, entry: ezsdr_kernel::session::LogEntry, from: usize) -> Handled {
+    let dispatched = match &entry.outcome {
+        ezsdr_kernel::session::Outcome::Admitted { dispatched, .. } => dispatched.clone(),
+        ezsdr_kernel::session::Outcome::Rejected { .. } => Vec::new(),
+    };
+    if let Some(ended) = ended_after_dispatch(!dispatched.is_empty(), live.run.state()) {
+        return ended;
+    }
+    let refused = refused(live.run.events(from), &dispatched);
+    Handled::ok(Response::Submitted { entry, refused, now: live.run.now(), events: count(&live.run) })
+}
+
+/// EA-11: the error that stands in for a submit's reply when it dispatched an Action and the Run is no longer Running.
+fn ended_after_dispatch(dispatched: bool, state: RunState) -> Option<Handled> {
+    if !dispatched {
+        return None;
+    }
+    match state {
+        RunState::Running {} => None,
+        RunState::CleanedUp { termination } => Some(run_error(RunHandleError::Ended { termination })),
+        _ => Some(fail(ErrorKind::Ended, "the Run is ending")),
+    }
+}
+
+/// The `radio.COMMAND_REJECTED` events among `events` whose payload names one of `dispatched` (RM-22).
+fn refused(events: Vec<ezsdr_kernel::event::Event>, dispatched: &[ezsdr_kernel::event::ActionId]) -> Vec<ezsdr_kernel::event::Event> {
+    events
+        .into_iter()
+        .filter(|event| {
+            event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED
+                && serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(event.payload.clone()).is_ok_and(|payload| payload.action.is_some_and(|action| dispatched.contains(&action)))
+        })
+        .collect()
+}
+
 fn run_error(error: RunHandleError) -> Handled {
     match error {
         RunHandleError::Ended { termination } => {
@@ -487,4 +528,55 @@ pub fn without_feeds(profile: &serde_json::Value) -> serde_json::Value {
         }
     }
     child
+}
+
+#[cfg(test)]
+mod tests {
+    use ezsdr_kernel::event::{ActionId, Event, EventKind, EventSource, Severity};
+    use ezsdr_kernel::id::{ClockDomainId, ResourceId};
+    use ezsdr_kernel::time::TimePoint;
+
+    fn event(kind: &str, payload: serde_json::Value) -> Event {
+        Event {
+            source: EventSource::Node { node: ResourceId::parse("radio").unwrap() },
+            time: TimePoint::new(ClockDomainId::local(1), 0),
+            severity: Severity::Error,
+            kind: EventKind::parse(kind).unwrap(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn ea_11_a_submit_that_dispatched_to_a_run_that_is_no_longer_running_is_ended_not_submitted() {
+        use super::{Reply, ended_after_dispatch};
+        use ezsdr_kernel::run::{CleanupMode, RunState, StopCause, Termination};
+        let termination = Termination::Stopped { cause: StopCause::Client {} };
+        // The wait for the Provider may have returned early, so absence of a refusal is no success.
+        let cleaned = ended_after_dispatch(true, RunState::CleanedUp { termination: termination.clone() }).expect("a Run that ended");
+        let Reply::Error(error) = cleaned.reply else { panic!("an error reply") };
+        assert_eq!((error.kind, error.termination), (super::ErrorKind::Ended, Some(termination.clone())));
+        let stopping = ended_after_dispatch(true, RunState::Stopping { mode: CleanupMode::Orderly }).expect("a Run that is ending");
+        let Reply::Error(error) = stopping.reply else { panic!("an error reply") };
+        assert_eq!((error.kind, error.termination), (super::ErrorKind::Ended, None));
+        // Running, or an Action that reached no Provider (a Session Stop or Abort ends the Run itself): the reply stands.
+        assert!(ended_after_dispatch(true, RunState::Running {}).is_none());
+        assert!(ended_after_dispatch(false, RunState::CleanedUp { termination }).is_none());
+    }
+
+    #[test]
+    fn ea_11_the_refused_list_holds_only_this_actions_refusals() {
+        // A refusal of another Action, one with no id, and an event of another kind that names the same id are not this Action's.
+        let rejected = |action: Option<u64>| {
+            let mut payload = serde_json::json!({ "kind": "update_parameter", "reason": "r" });
+            if let Some(id) = action {
+                payload["action"] = id.into();
+            }
+            event(ezsdr_radio::kinds::COMMAND_REJECTED, payload)
+        };
+        let events = vec![rejected(Some(5)), rejected(Some(6)), rejected(None), event(ezsdr_radio::kinds::LATE_COMMAND, serde_json::json!({ "action": 5 })), rejected(Some(7))];
+        let mine = super::refused(events, &[ActionId(5), ActionId(7)]);
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].payload["action"], 5);
+        assert_eq!(mine[1].payload["action"], 7);
+    }
 }

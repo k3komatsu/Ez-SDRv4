@@ -181,8 +181,9 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
 }
 
 #[test]
-fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_runtime_change_has_no_class() {
-    // Note 47 stage 2: the envelope is checked on the initial values; a change during the Run is refused as a key with no update class (RM-27).
+fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_transmit_runtime_change_has_no_class() {
+    // Note 47 stage 3: the envelope is checked on the initial values; a transmit change during the Run is refused as a key with no update class
+    // until stage 4 (RM-27). The receive form is the next test.
     let (_, refused) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", num(2.4e9))], envelope(), 10);
     assert!(
         matches!(refused.state(), ezsdr_kernel::run::RunState::CleanedUp { termination: ezsdr_kernel::run::Termination::Failed { reason, .. } } if reason.contains("radio.rf_envelope")),
@@ -198,6 +199,25 @@ fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_runtime_ch
     assert!(run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("radio.tx.c0.frequency_hz").unwrap()) != Some(&Value::num(2.4e9).unwrap()));
     let manifest = run.finish();
     assert!(manifest.action_log.iter().any(|logged| logged.seq == entry.seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");
+}
+
+#[test]
+fn uhd_59_a_receive_antenna_outside_the_rf_envelope_is_refused_on_a_stopped_stream_without_a_device_call() {
+    // §58 #16 on the UHD Module, receive form: on a stopped stream an antenna outside the envelope is refused at admission, logged, and never
+    // dispatched, so the device is not touched (RM-19, RM-21); one inside it is staged.
+    let mut envelope = envelope();
+    envelope["radio.rf_envelope"]["antenna_ports"] = json!(["RX2"]);
+    let (device, mut run) = session_on(&[("radio.rx.c0.stream", Scalar::Int(0))], envelope, 10);
+    admitted(&mut run, SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None);
+    let calls = device.calls().len();
+    let entry = run.submit(set("radio.rx.c0.antenna", Value::from("TX/RX")), None).unwrap();
+    let Outcome::Rejected { violations } = &entry.outcome else { panic!("an antenna outside the envelope was admitted: {:?}", entry.outcome) };
+    assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope"), "{violations:?}");
+    admitted(&mut run, set("radio.rx.c0.antenna", Value::from("RX2")), None);
+    assert!(!device.calls()[calls..].iter().any(|call| call.starts_with("apply")), "{:?}", device.calls());
+    let manifest = run.finish();
+    assert!(manifest.action_log.iter().any(|logged| logged.seq == entry.seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");
+    assert!(!manifest.events.delivered.iter().any(|e| e.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED), "nothing was dispatched, so the Provider refused nothing");
 }
 
 #[test]

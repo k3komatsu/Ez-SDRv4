@@ -22,13 +22,14 @@ use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, Data
 use ezsdr_kernel::time::{ManualTimeAuthority, Rational, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Segment, Stream, plan};
-use generator::{Fault, Op, Sequence, Terms};
+use generator::{Fault, Leaf, Op, Sequence, Terms};
 
 use super::super::control::ColdConfig;
 use super::super::core::{Core, booked_stream, lock};
 use super::{Rx, RxCmd, Turn};
 use crate::device::{Applied, Device, DeviceError, Dir, FakeConfig, FakeDevice, FakeFault, Iq, RxRecv, Settings, TxReport};
 use crate::profile::DELIVERY_ALLOWANCE_NS;
+use ezsdr_radio::staging::Staging;
 
 use super::super::generator;
 
@@ -73,7 +74,7 @@ fn extra(seed: u64, sequence: &Sequence) -> Extra {
         _ => None,
     };
     // A configure is made by a `start_rx` only (a Run's settings change only at its start), at the stream's 1 MS/s.
-    let rate = sequence.ops().any(|(_, op)| matches!(op, Op::StartRx)).then_some(1_000_000);
+    let rate = sequence.ops().any(|(_, op)| matches!(op, Op::StartRx { .. })).then_some(1_000_000);
     let block = if draw(seed, 5, 3) == 0 { 65_536 } else { 2_000 };
     let lag = MS * draw(seed, 6, 3) as i64;
     // Past every origin and cut the sequence's commands plan, by two receive calls at the
@@ -166,6 +167,9 @@ struct Observed {
     /// uhd-rx pruned the timeline's items (#63).
     pruned: bool,
     violations: Vec<String>,
+    /// How many `Set`s the line refused (RM-21), and the values each start's configure applied, by the origin it started.
+    set_refused: usize,
+    start_values: Vec<(i64, Option<(f64, f64)>)>,
 }
 
 /// The timeline's account of what uhd-rx does with a sequence's plans, compared with what it
@@ -352,6 +356,33 @@ fn compare(sequence: &Sequence, extra: &Extra, observed: &Observed) -> (Vec<Stri
     if !observed.lost && abort_at.is_none() && observed.streaming != open {
         problems.push(format!("the device streams at the end: {}, the plan's last segment open: {open}", observed.streaming));
     }
+    // RM-21: each `Set` the line took while streaming was refused, as the generator's oracle (written apart) says; and each segment a start began was
+    // configured with the values that start took at its booking, whatever came after (a refused configure has no start to compare).
+    let ops_booked = |index: usize| {
+        let entry = sequence.schedule(&terms).into_iter().find(|entry| entry.event == generator::Event::Op(index)).expect("every op is scheduled");
+        loss.is_none_or(|loss| entry.receipt + extra.lag < loss) && stop.is_none_or(|(at, _)| entry.receipt <= at)
+    };
+    let staged = sequence.staged(&terms, ops_booked);
+    if staged.refused.len() != observed.set_refused {
+        problems.push(format!("{} values refused, the oracle's {}", observed.set_refused, staged.refused.len()));
+    }
+    let defaults = super::super::test_support::default_description(extra.block as u32).defaults();
+    let number = |name: &str| match defaults[&super::super::core::key(name)] {
+        ezsdr_kernel::spec::Value::Scalar(ezsdr_kernel::spec::Scalar::Num(value)) => value.get(),
+        ref other => panic!("{other:?}"),
+    };
+    let initial = (number("radio.rx.c0.frequency_hz"), number("radio.rx.c0.gain_db"));
+    if observed.refused.is_empty() && observed.refusable == 0 {
+        for (origin, applied) in &observed.start_values {
+            let by = segments.iter().rev().find(|s| s.origin == *origin).and_then(|s| s.by);
+            let (Some(by), Some(applied)) = (by, applied) else { continue };
+            let Some((_, snapshot)) = staged.starts.iter().find(|(index, _)| (sequence.faults.len() + index) as u64 == by) else { continue };
+            let expected = (snapshot.0.map_or(initial.0, |v| Leaf::Frequency.value(v)), snapshot.1.map_or(initial.1, |v| Leaf::Gain.value(v)));
+            if *applied != expected {
+                problems.push(format!("the start at {origin} (command {by}) was configured with {applied:?}, its snapshot is {expected:?}"));
+            }
+        }
+    }
     // RM-25, UR-12: the first configuration at the refused rate is refused, once.
     let refusals = usize::from(observed.refusable > 0);
     if observed.refused.len() != refusals || observed.rejected != refusals {
@@ -424,6 +455,8 @@ impl DataLink for Headers {
 enum Ev {
     /// uhd-control books a command received `lag` earlier.
     Book(Item),
+    /// uhd-control books a receive value (RM-21): the stream's line decides whether it is staged.
+    Set(Leaf, u8, i64),
     /// The device is lost.
     Loss,
     /// `Provider::stop`: the stream's end booked (UR-26).
@@ -470,6 +503,13 @@ struct World {
     calls: Vec<(i64, String)>,
     straddled: bool,
     violations: Vec<String>,
+    /// The receive values of record, as uhd-control's `Staging` holds them (RM-21).
+    staging: Staging,
+    /// How many `Set`s the line refused as streaming.
+    set_refused: usize,
+    /// The `(frequency, gain)` of the last configure of channel 0 before a start, and what each start was configured with, by origin.
+    last_apply: Option<(f64, f64)>,
+    start_values: Vec<(i64, Option<(f64, f64)>)>,
 }
 
 impl World {
@@ -512,10 +552,26 @@ impl World {
                 let mut streams = lock(&core.streams);
                 let stream = booked_stream(Dir::Rx);
                 if item.kind == Kind::Start {
-                    streams.stream_mut(stream).configs.insert(item.seq, Arc::new(ColdConfig::new(BTreeMap::new())));
+                    // RM-21: the generator's items hold no start the stream refuses as streaming, so the shared decision accepts each one booked. After a
+                    // loss the line is over and the oracle takes no command: nothing is decided.
+                    let streaming = streams.line(stream).is_some_and(Line::streaming);
+                    let snapshot = if self.lost { self.staging.snapshot() } else { self.staging.start(0, streaming).expect("a start the oracle accepted") };
+                    streams.stream_mut(stream).configs.insert(item.seq, Arc::new(ColdConfig::new(snapshot)));
                 }
-                assert!(streams.book(&core, stream, item), "booked");
+                assert!(streams.book(&core, stream, item, None), "booked");
                 self.booked += 1;
+            }
+            Ev::Set(leaf, v, ready) if !self.lost && self.stopped.is_none_or(|at| ready <= at) => {
+                let streams = lock(&core.streams);
+                let line = streams.line(booked_stream(Dir::Rx)).expect("the receive timeline");
+                let name = match leaf {
+                    Leaf::Frequency => "radio.rx.c0.frequency_hz",
+                    Leaf::Gain => "radio.rx.c0.gain_db",
+                };
+                let value = ezsdr_kernel::spec::Value::num(leaf.value(v)).unwrap();
+                if self.staging.set(&super::super::core::key(name), value, false, |_| line.streaming()).is_err() {
+                    self.set_refused += 1;
+                }
             }
             Ev::Loss => self.lost = true,
             Ev::Stop(mode) if self.stopped.is_none() => {
@@ -537,7 +593,7 @@ impl World {
             Ev::Shutdown(mode) => {
                 let _ = self.to_rx.send(RxCmd::Shutdown(mode));
             }
-            Ev::Book(_) | Ev::Stop(_) => {}
+            Ev::Book(_) | Ev::Set(..) | Ev::Stop(_) => {}
         }
     }
 
@@ -601,6 +657,7 @@ impl Device for Scripted {
         let applied = self.inner.apply(dir, chan, s, at)?;
         if dir == Dir::Rx && chan == 0 && at.is_none() && s.rate.is_some() {
             let mut world = lock(&self.world);
+            world.last_apply = s.freq.zip(s.gain);
             world.rate = applied.rate;
             if s.rate != Some(applied.rate) {
                 world.call(format!("apply_refused {}", s.rate.unwrap_or_default()));
@@ -625,6 +682,8 @@ impl Device for Scripted {
             return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
         }
         world.call(format!("rx_start {at}"));
+        let applied = world.last_apply.take();
+        world.start_values.push((at, applied));
         let now = world.now;
         let core = world.core.clone().expect("the rig's core");
         let planned = lock(&core.streams).line(booked_stream(Dir::Rx)).and_then(|line| line.plan.iter().find(|segment| segment.origin == at).copied());
@@ -813,6 +872,15 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         calls: Vec::new(),
         straddled: false,
         violations: Vec::new(),
+        staging: {
+            // The Run's configuration: receive channel 0 in stream 0.
+            let mut config = super::super::test_support::default_description(extra.block as u32).defaults();
+            config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
+            Staging::new(config)
+        },
+        set_refused: 0,
+        last_apply: None,
+        start_values: Vec::new(),
     }));
     let device = Arc::new(Scripted { inner, world: world.clone() });
     let (core, time, events) = super::super::test_support::rig_on(device.clone(), vec![link.clone()], extra.block as u32);
@@ -831,11 +899,22 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         if let Some(loss) = loss {
             w.at(loss.e, Ev::Loss);
         }
-        let mut booked: Vec<Item> = items.iter().filter(|item| !matches!(item.kind, Kind::End { .. })).copied().collect();
-        booked.sort_by_key(|item| (item.ready, item.seq));
+        // The commands and the values, in their arrival order, each booked `lag` after its receipt.
         let lag = w.lag;
-        for item in booked {
-            w.at(item.ready + lag, Ev::Book(item));
+        let ops: Vec<&Op> = sequence.ops().map(|(_, op)| op).collect();
+        let mut arrivals = sequence.schedule(&terms);
+        arrivals.sort_by_key(|entry| (entry.receipt, entry.seq));
+        for entry in arrivals {
+            let generator::Event::Op(index) = entry.event else { continue };
+            match ops[index] {
+                Op::Set { leaf, v } => w.at(entry.receipt + lag, Ev::Set(*leaf, *v, entry.receipt)),
+                // RM-21: a start the stream refused as streaming (the oracle's) is no item and books nothing.
+                Op::StartRx { .. } if !items.iter().any(|item| item.seq == entry.seq) => {}
+                _ => {
+                    let item = items.iter().find(|item| item.seq == entry.seq).copied().expect("a command's item");
+                    w.at(item.ready + lag, Ev::Book(item));
+                }
+            }
         }
         if let Some((at, mode)) = extra.stop {
             w.at(at, Ev::Stop(mode));
@@ -913,5 +992,7 @@ fn run(sequence: &Sequence, extra: &Extra) -> Observed {
         pruned: lock(&core.streams).line(booked_stream(Dir::Rx)).is_some_and(|line| line.items.len() < w.booked),
         calls: w.calls.clone(),
         violations,
+        set_refused: w.set_refused,
+        start_values: w.start_values.clone(),
     }
 }

@@ -1237,3 +1237,189 @@ fn mr_34_two_streams_restarted_at_one_origin_draw_in_stream_order() {
     assert_near(heard(&b0, &r0, origin + 100_000), rotated(0.5, tx_phase - first));
     assert_near(heard(&b1, &r1, origin + 100_000), rotated(0.5, tx_phase - second));
 }
+
+// ---------------------------------------------------------------- note 47 stage 3: receive values on a stopped stream
+
+fn num(value: f64) -> Constraint {
+    eq(Scalar::try_from(value).unwrap())
+}
+
+fn set_value(key: &str, value: f64) -> Action {
+    Action::UpdateParameter { target: tgt("mock"), key: crate::key(key), value: Value::num(value).unwrap(), class: ezsdr_kernel::module_api::UpdateClass::Cold, at: None }
+}
+
+#[test]
+fn mr_18_a_value_set_on_a_stopped_receive_stream_is_heard_by_its_next_segment_only() {
+    // S1 on the channel model (CH-4: a receiver hears only its own frequency): the transmitter radiates at 2 GHz from the Run's start; the
+    // receive channel is tuned to 1 GHz, hears nothing, is stopped, retuned to 2 GHz by a staged value and started: the old segment's samples are
+    // silent, the new one's are the radiated pattern, and the old segment's `values` row keeps 1 GHz (MR-33, MR-18).
+    let constraints = [
+        ("radio.rx.c0.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.frequency_hz", num(2.0e9)),
+        ("radio.rx.c0.frequency_hz", num(1.0e9)),
+        ("radio.rx.c1.frequency_hz", num(1.0e9)),
+    ];
+    let env = [(
+        "sim.channel",
+        serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}]}),
+    )];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.25); 1_000]);
+    let mut harness = built_with_inputs(
+        Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] },
+        BTreeMap::from([(waveform.hash.clone(), bytes)]),
+    );
+    harness.arm_start(0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    let mut repeating = burst_with_waveform("mock/tx/s0", tx, 0, waveform);
+    if let Action::TxBurst { repeat, .. } = &mut repeating {
+        *repeat = true;
+    }
+    harness.push(repeating);
+    harness.step(0).unwrap();
+    harness.step(3_000_000).unwrap();
+    harness.push(stop("mock/rx/s0"));
+    harness.push(set_value("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.push(start_rx("mock/rx/s0", None));
+    harness.step(4_000_000).unwrap();
+    harness.step(8_000_000).unwrap();
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    let clocks = harness.clocks_of("mock/rx/s0");
+    assert_eq!(clocks.len(), 2);
+    let blocks = harness.blocks("rx0");
+    let origin = |clock: &SampleClockRecord| clock.origin.ticks_in(ROOT).unwrap();
+    assert_eq!(heard(&blocks, &clocks[0], origin(&clocks[0]) + 1_000_000), (0.0, 0.0), "the old segment is tuned to 1 GHz");
+    let second = origin(&clocks[1]);
+    assert_eq!(heard_channel(&blocks, &clocks[1], second + 100_000, 0), (0.5, 0.25), "the new segment is tuned to 2 GHz from its first sample");
+    assert_eq!(heard_channel(&blocks, &clocks[1], second + 100_000, 1), (0.0, 0.0), "another channel keeps its value");
+    let rows: Vec<_> = harness.section("segments").into_iter().filter(|row| row["direction"] == "rx").collect();
+    assert_eq!((rows[0]["values"]["c0"]["frequency_hz"].as_f64(), rows[1]["values"]["c0"]["frequency_hz"].as_f64()), (Some(1.0e9), Some(2.0e9)));
+    assert_eq!(rows[1]["values"]["c1"]["frequency_hz"].as_f64(), Some(1.0e9));
+}
+
+#[test]
+fn mr_18_a_refused_value_is_not_heard_by_the_next_segment() {
+    // S2 on the channel model: the value sent while the stream streams is refused, so after a Stop and a start the segment still hears nothing.
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.frequency_hz", num(2.0e9)), ("radio.rx.c0.frequency_hz", num(1.0e9))];
+    let env = [("sim.channel", serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0}]}))];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.25); 1_000]);
+    let mut harness = built_with_inputs(
+        Layout { profile: "ideal", id: "mock", rx: count(1), tx: count(1), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] },
+        BTreeMap::from([(waveform.hash.clone(), bytes)]),
+    );
+    harness.arm_start(0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    let mut repeating = burst_with_waveform("mock/tx/s0", tx, 0, waveform);
+    if let Action::TxBurst { repeat, .. } = &mut repeating {
+        *repeat = true;
+    }
+    harness.push(repeating);
+    harness.step(0).unwrap();
+    harness.push(set_value("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.step(3_000_000).unwrap();
+    assert_eq!(harness.rejected().len(), 1);
+    harness.push(stop("mock/rx/s0"));
+    harness.push(start_rx("mock/rx/s0", None));
+    harness.step(4_000_000).unwrap();
+    harness.step(8_000_000).unwrap();
+    let clocks = harness.clocks_of("mock/rx/s0");
+    let blocks = harness.blocks("rx0");
+    let second = clocks[1].origin.ticks_in(ROOT).unwrap();
+    assert_eq!(heard(&blocks, &clocks[1], second + 100_000), (0.0, 0.0), "the refused value was not kept");
+}
+
+#[test]
+fn mr_34_a_start_draws_one_phase_per_random_channel_whatever_the_values_and_a_cancelled_start_draws_nothing() {
+    // Q4: each segment a `start_rx` begins draws one fresh phase per `random` channel in channel order, whether the values changed or not
+    // (starts A: unchanged, B: changed); a start cancelled by a `Stop` before its origin draws nothing, so the next start takes the next draws.
+    let constraints = [("radio.rx.c1.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let env = [
+        ("sim.seed", serde_json::json!(7)),
+        (
+            "sim.channel",
+            serde_json::json!({"couplings":[{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":0,"gain_db":0.0,"delay_ns":0},{"tx":"radio","tx_channel":0,"rx":"radio","rx_channel":1,"gain_db":0.0,"delay_ns":0}]}),
+        ),
+    ];
+    let (waveform, bytes) = waveform_values(&vec![(0.5, 0.0); 400_000]);
+    let mut harness = built_with_inputs(
+        Layout { profile: "x3xx", id: "mock", rx: elements(&["0:A:cbx:0", "0:B:cbx:0"]), tx: elements(&["0:A:cbx:0"]), selector: &[], constraints: &constraints, env: &env, ports: &["rx0"] },
+        BTreeMap::from([(waveform.hash.clone(), bytes)]),
+    );
+    harness.arm_start(T0).unwrap();
+    let tx = harness.clocks_of("mock/tx/s0")[0].domain;
+    harness.push(burst_with_waveform("mock/tx/s0", tx, 2_000_000, waveform));
+    harness.step(0).unwrap();
+    harness.step(T0 + 2_100_001).unwrap();
+    let mut lo = ezsdr_sim::SimRng::new(7, "mock/lo");
+    let (_, _, tx_phase) = (phase(&mut lo), phase(&mut lo), phase(&mut lo));
+    let mut retune = ezsdr_sim::SimRng::new(7, "mock/lo/retune");
+    let draws: Vec<f64> = (0..8).map(|_| phase(&mut retune)).collect();
+    // A: same values.
+    harness.push(stop("mock/rx/s0"));
+    harness.step(T0 + 6_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", None));
+    harness.step(T0 + 7_000_000).unwrap();
+    harness.step(T0 + 80_000_000).unwrap();
+    // B: a changed value.
+    harness.push(stop("mock/rx/s0"));
+    harness.push(set_value("radio.rx.c0.gain_db", 3.0));
+    harness.step(T0 + 90_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", None));
+    harness.step(T0 + 91_000_000).unwrap();
+    harness.step(T0 + 200_000_000).unwrap();
+    // D: a start booked ahead, cut by a `Stop` that takes effect at its origin (a start booked ahead is streaming, so nothing can be sent before
+    // then, RM-21), so D has no sample; then E.
+    harness.push(stop("mock/rx/s0"));
+    harness.step(T0 + 210_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", Some(T0 + 250_000_000)));
+    harness.step(T0 + 211_000_000).unwrap();
+    harness.push(stop("mock/rx/s0"));
+    harness.step(T0 + 250_000_000).unwrap();
+    harness.push(start_rx("mock/rx/s0", None));
+    harness.step(T0 + 251_000_000).unwrap();
+    harness.step(T0 + 340_000_000).unwrap();
+    let clocks = harness.clocks_of("mock/rx/s0");
+    assert_eq!(clocks.len(), 4, "connect, A, B and E (D never began)");
+    let blocks = harness.blocks("rx0");
+    for (segment, expected) in [(1, (0, 1)), (2, (2, 3)), (3, (4, 5))] {
+        let origin = clocks[segment].origin.ticks_in(ROOT).unwrap();
+        // The staged gain stays the configuration of record for every later start (RM-21).
+        let amplitude = if segment >= 2 { 10f64.powf(3.0 / 20.0) } else { 1.0 };
+        let c0 = heard_channel(&blocks, &clocks[segment], origin + 100_000, 0);
+        let c1 = heard_channel(&blocks, &clocks[segment], origin + 100_000, 1);
+        assert_near(c0, rotated(0.5 * amplitude, tx_phase - draws[expected.0]));
+        assert_near(c1, rotated(0.5, tx_phase - draws[expected.1]));
+    }
+}
+
+#[test]
+fn mr_18_a_peer_stream_is_undisturbed_by_a_stopped_stream_s_value() {
+    // S5: `Stop` of stream 0 makes its channel's value acceptable and leaves stream 1 streaming, whose channel's value is refused; stream 1's
+    // blocks are those of a control run without the stop and the values (RM-21: another stream's state does not matter).
+    let run = |disturbed: bool| {
+        let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1)))];
+        let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(1), selector: &[], constraints: &constraints, env: &[], ports: &["rx0", "rx1"] });
+        harness.arm_start(0).unwrap();
+        harness.step(1_000_000).unwrap();
+        if disturbed {
+            harness.push(stop("mock/rx/s0"));
+            harness.push(set_value("radio.rx.c0.frequency_hz", 2.0e9));
+            harness.push(set_value("radio.rx.c1.frequency_hz", 2.0e9));
+            harness.push(start_rx("mock/rx/s0", None));
+        }
+        harness.step(5_000_000).unwrap();
+        harness.step(9_000_000).unwrap();
+        let rejected = harness.rejected();
+        let headers: Vec<_> =
+            harness.headers("rx1").iter().map(|header| (header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap(), header.len, header.flags, header.lost)).collect();
+        (rejected, headers, harness.clocks_of("mock/rx/s1").len(), harness.clocks_of("mock/rx/s0").len())
+    };
+    let (control_rejected, control_headers, control_s1, control_s0) = run(false);
+    let (rejected, headers, s1, s0) = run(true);
+    assert!(control_rejected.is_empty());
+    assert_eq!(rejected.len(), 1, "only stream 1's channel is refused: {rejected:?}");
+    assert!(rejected[0].contains("stream 1"), "{rejected:?}");
+    assert_eq!((headers, s1), (control_headers, control_s1), "stream 1 is undisturbed");
+    assert_eq!((control_s0, s0), (1, 2), "stream 0 restarted");
+}

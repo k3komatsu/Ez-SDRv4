@@ -1992,7 +1992,7 @@ fn mr_25_a_stop_cuts_at_its_instant() {
 fn mr_29_start_rx_is_the_one_command() {
     // MR-29, RM-12: after a `Stop` of `mock/rx`, `start_rx` on `mock/tx`, on `mock` or with a
     // param is refused; on `mock/rx` it starts the stream again on a new clock, at its instant
-    // on `ideal`, and a second one on a running stream changes nothing (RM-21, RM-25).
+    // on `ideal`, and a second one on a streaming stream is refused and changes nothing (RM-21, RM-25).
     let mut h = Harness::new("ideal", &[], &[], &[], Some((BackPressure::DropOldest, 64)));
     h.arm_start(0).unwrap();
     h.actions.push(Action::Stop { target: Some(tgt("mock/rx/s0")) });
@@ -2016,6 +2016,9 @@ fn mr_29_start_rx_is_the_one_command() {
     h.step(3_000_000).unwrap();
     h.actions.push(start("mock/rx/s0", BTreeMap::new()));
     h.step(4_000_000).unwrap();
+    let rejected = rejected_rows(&h);
+    assert_eq!(rejected.len(), 4, "the second start is refused: {rejected:?}");
+    assert!(rejected[3].0 == "command" && rejected[3].1.starts_with("MR-29: RM-21:") && rejected[3].1.contains("streaming"), "{rejected:?}");
     h.step(10_000_000).unwrap();
     let clocks: Vec<_> = h.clocks.sample_clock_records().into_iter().map(|record| (record.origin.ticks_in(ROOT).unwrap(), record.ended_at.map(|end| end.ticks_in(ROOT).unwrap()))).collect();
     assert_eq!(clocks, [(0, Some(1_000_000)), (3_000_000, None)]);
@@ -2250,16 +2253,16 @@ fn mr_29_other_actions_are_command_rejected() {
     harness.arm_start(0).unwrap();
     harness.actions.push(Action::SetTimer { target: tgt("mock"), at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(ROOT, 1)), token: 3 });
     harness.actions.push(Action::Command { target: tgt("mock"), verb: Ident::parse("start_repeat").unwrap(), params: BTreeMap::new(), at: None });
-    // MR-18: a radio key has no update class, so the Kernel refuses its Run-time update before dispatch; the Provider's own
+    // MR-18: a transmit key has no update class, so the Kernel refuses its Run-time update before dispatch; the Provider's own
     // guard refuses one that reaches it directly, as this harness does.
-    harness.actions.push(update_action("radio.rx.c0.frequency_hz", Value::num(2.0e9).unwrap(), UpdateClass::Cold, None));
+    harness.actions.push(update_action("radio.tx.c0.frequency_hz", Value::num(2.0e9).unwrap(), UpdateClass::Cold, None));
     harness.step(1).unwrap();
     let rejected = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 3);
     assert_eq!(rejected[0]["kind"], "set_timer");
     assert_eq!(rejected[1]["kind"], "command");
     assert_eq!(rejected[2]["kind"], "update_parameter");
-    assert_eq!(rejected[2]["reason"], "MR-18: target or configuration key is not updateable");
+    assert_eq!(rejected[2]["reason"], "MR-18: RM-21: only a receive channel's frequency, gain or antenna is staged");
     let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
     assert_eq!(rejected_events.len(), 3);
@@ -2357,4 +2360,202 @@ fn mr_20_x3xx_loss_cuts_transmit_at_its_instant() {
     let records: Vec<ezsdr_kernel::stream::BurstRecord> = serde_json::from_value(harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].clone()).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!((records[0].samples, records[0].end), (3_000, BurstEnd::Stop));
+}
+
+// ---------------------------------------------------------------- note 47 stage 3: receive values on a stopped stream (RM-21, MR-18)
+
+/// A started `ideal` Mock with receive channels 0 and 1 in stream 0, a link, and the channel model absent.
+fn staging_harness() -> Harness {
+    let mut harness = Harness::new("ideal", &[("radio.rx.c1.stream", eq(Scalar::from(0)))], &[], &[], Some((BackPressure::DropOldest, 256)));
+    harness.arm_start(0).unwrap();
+    harness.step(1_000_000).unwrap();
+    harness
+}
+
+fn set_rx(name: &str, value: f64) -> Action {
+    update_action(name, Value::num(value).unwrap(), UpdateClass::Cold, None)
+}
+
+fn rx_stop() -> Action {
+    Action::Stop { target: Some(tgt("mock/rx/s0")) }
+}
+
+/// The `values` of each receive segment row of stream 0, as `(frequency_hz, gain_db)` of channel `channel`.
+fn segment_values(harness: &Harness, channel: u32) -> Vec<(f64, f64)> {
+    let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()];
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["direction"] == "rx" && row["stream"] == 0)
+        .map(|row| {
+            let values = &row["values"][format!("c{channel}")];
+            (values["frequency_hz"].as_f64().unwrap(), values["gain_db"].as_f64().unwrap())
+        })
+        .collect()
+}
+
+fn refusals(harness: &Harness) -> Vec<ezsdr_kernel::event::Event> {
+    harness.events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect()
+}
+
+#[test]
+fn mr_18_a_value_for_a_streaming_receive_stream_is_refused_and_not_used() {
+    let mut harness = staging_harness();
+    let first = segment_values(&harness, 0)[0];
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.step(2_000_000).unwrap();
+    let refused = refusals(&harness);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].payload["action"], 1, "the refusal names the Action by its id");
+    assert_eq!(refused[0].payload["kind"], "update_parameter");
+    let reason = refused[0].payload["reason"].as_str().unwrap();
+    assert!(reason.starts_with("MR-18: RM-21:") && reason.contains("streaming") && reason.contains("stream 0"), "{reason}");
+    assert_eq!(rejected_rows(&harness).len(), 1);
+    // The refused value is not kept: after a Stop and a start the stream still has what it began with.
+    harness.actions.push(rx_stop());
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(3_000_000).unwrap();
+    harness.step(4_000_000).unwrap();
+    assert_eq!(segment_values(&harness, 0), [first, first]);
+}
+
+#[test]
+fn mr_18_a_value_set_on_a_stopped_receive_stream_is_used_by_its_next_segment_and_by_no_earlier_one() {
+    let mut harness = staging_harness();
+    let first = segment_values(&harness, 0)[0];
+    let first_c1 = segment_values(&harness, 1)[0];
+    harness.actions.push(rx_stop());
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.actions.push(set_rx("radio.rx.c0.gain_db", 7.0));
+    harness.actions.push(update_action("radio.rx.c0.antenna", Value::from("TX/RX"), UpdateClass::Cold, None));
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(3_000_000).unwrap();
+    harness.step(4_000_000).unwrap();
+    assert!(refusals(&harness).is_empty(), "a stopped stream stages a value");
+    assert_eq!(segment_values(&harness, 0), [first, (2.0e9, 7.0)]);
+    assert_eq!(segment_values(&harness, 1), [first_c1, first_c1], "another channel keeps its value");
+    let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()];
+    assert_eq!(rows[1]["values"]["c0"]["antenna"], "TX/RX");
+    assert_ne!(rows[0]["values"]["c0"]["antenna"], "TX/RX");
+}
+
+#[test]
+fn mr_18_a_second_value_replaces_the_first_and_a_second_stop_leaves_the_staged_value() {
+    let mut harness = staging_harness();
+    let first = segment_values(&harness, 0)[0];
+    harness.actions.push(rx_stop());
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 3.0e9));
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(3_000_000).unwrap();
+    harness.step(4_000_000).unwrap();
+    // `Stop`, a value, `Stop`, `start_rx`: the second Stop does not clear the staged value.
+    harness.actions.push(rx_stop());
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 4.0e9));
+    harness.actions.push(rx_stop());
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(5_000_000).unwrap();
+    harness.step(6_000_000).unwrap();
+    // `Stop`, `start_rx` with nothing staged: the previous values stay the configuration of record.
+    harness.actions.push(rx_stop());
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(7_000_000).unwrap();
+    harness.step(8_000_000).unwrap();
+    assert!(refusals(&harness).is_empty());
+    assert_eq!(segment_values(&harness, 0).iter().map(|(frequency, _)| *frequency).collect::<Vec<_>>(), [first.0, 3.0e9, 4.0e9, 4.0e9]);
+}
+
+#[test]
+fn mr_18_a_value_after_a_booked_start_is_refused_even_before_its_instant() {
+    let mut harness = staging_harness();
+    let first = segment_values(&harness, 0)[0];
+    harness.actions.push(rx_stop());
+    harness.actions.push(start_rx("mock/rx/s0", Some(10_000_000)));
+    harness.step(2_000_000).unwrap();
+    // The start is booked and takes effect at 10 ms: the stream already counts as streaming, so the value is refused, not lost silently.
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.step(3_000_000).unwrap();
+    assert_eq!(refusals(&harness).len(), 1);
+    harness.step(12_000_000).unwrap();
+    assert_eq!(segment_values(&harness, 0), [first, first]);
+}
+
+#[test]
+fn mr_18_a_stop_after_a_booked_future_start_does_not_make_the_stream_stopped() {
+    // The line replayed in the order the commands take effect: the start at 100 ms still begins its segment, so a value after the second
+    // `Stop` is refused (an arrival-order flag would accept it while the start runs on the old value).
+    let mut harness = staging_harness();
+    let first = segment_values(&harness, 0)[0];
+    harness.actions.push(rx_stop());
+    harness.actions.push(start_rx("mock/rx/s0", Some(100_000_000)));
+    harness.actions.push(rx_stop());
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.step(2_000_000).unwrap();
+    assert_eq!(refusals(&harness).len(), 1, "the value is refused");
+    harness.step(150_000_000).unwrap();
+    assert_eq!(segment_values(&harness, 0), [first, first], "the start at 100 ms began with the old value");
+    // A later `Stop` and a value are accepted.
+    harness.actions.push(rx_stop());
+    harness.actions.push(set_rx("radio.rx.c0.frequency_hz", 2.0e9));
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(160_000_000).unwrap();
+    harness.step(170_000_000).unwrap();
+    assert!(refusals(&harness).is_empty());
+    assert_eq!(segment_values(&harness, 0).last().unwrap().0, 2.0e9);
+}
+
+#[test]
+fn mr_21_a_start_of_a_streaming_stream_is_refused_with_its_id_and_changes_nothing() {
+    // RM-21: the Run begins streaming, so a `start_rx` before any `Stop` is refused: `COMMAND_REJECTED` of kind `command` naming the Action, the
+    // stream's clocks and values unchanged.
+    let mut harness = staging_harness();
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(2_000_000).unwrap();
+    let refused = refusals(&harness);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(1)));
+    let reason = refused[0].payload["reason"].as_str().unwrap();
+    assert!(reason.starts_with("MR-29: RM-21:") && reason.contains("streaming") && reason.contains("Stop"), "{reason}");
+    assert_eq!(harness.clocks.sample_clock_records().iter().filter(|record| record.stream == rid("mock/rx/s0")).count(), 1, "no second clock");
+    assert_eq!(segment_values(&harness, 0).len(), 1);
+}
+
+#[test]
+fn mr_21_a_start_booked_ahead_is_never_revised_to_an_earlier_origin() {
+    // Stop, `start_rx` at 50 ms, then `start_rx` at 20 ms: the second is refused (the stream counts as streaming from the first's booking), so the
+    // origin stays 50 ms and the stream delivers from it (an earlier start could not be told from a later one by the line, which keeps the first).
+    let mut harness = staging_harness();
+    let ms = |n: i64| n * 1_000_000;
+    harness.actions.push(rx_stop());
+    harness.actions.push(start_rx("mock/rx/s0", Some(ms(50))));
+    harness.step(ms(2)).unwrap();
+    harness.actions.push(start_rx("mock/rx/s0", Some(ms(20))));
+    harness.step(ms(3)).unwrap();
+    let refused = refusals(&harness);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(3)));
+    harness.step(ms(100)).unwrap();
+    let origins: Vec<i64> = harness.clocks.sample_clock_records().iter().filter(|record| record.stream == rid("mock/rx/s0")).map(|record| record.origin.ticks_in(ROOT).unwrap()).collect();
+    assert_eq!(origins, [0, ms(50)], "the first start's origin stands");
+    assert!(received(&harness).iter().any(|header| header.first_sample_time.domain() != harness.clocks.sample_clock_records()[0].domain), "the stream delivers from the 50 ms start");
+}
+
+#[test]
+fn mr_18_a_staged_value_with_an_instant_a_channel_in_no_stream_and_another_stream_s_state() {
+    let mut harness = staging_harness();
+    harness.actions.push(rx_stop());
+    // An update that carries an instant is refused even on a stopped stream.
+    harness.actions.push(update_action("radio.rx.c0.frequency_hz", Value::num(2.0e9).unwrap(), UpdateClass::Cold, Some(TimePoint::new(ROOT, 5_000_000))));
+    // A channel in no stream (the harness puts only c0 and c1 in stream 0; c2 is in none).
+    harness.actions.push(set_rx("radio.rx.c2.frequency_hz", 2.0e9));
+    harness.step(2_000_000).unwrap();
+    let refused = refusals(&harness);
+    assert_eq!(refused.len(), 2);
+    assert!(refused[0].payload["reason"].as_str().unwrap().contains("instant"), "{}", refused[0].payload["reason"]);
+    assert!(refused[1].payload["reason"].as_str().unwrap().contains("in no stream"), "{}", refused[1].payload["reason"]);
+    harness.actions.push(start_rx("mock/rx/s0", None));
+    harness.step(3_000_000).unwrap();
+    harness.step(4_000_000).unwrap();
+    let first = segment_values(&harness, 0)[0];
+    assert_eq!(segment_values(&harness, 0), [first, first], "neither refused value was used");
 }

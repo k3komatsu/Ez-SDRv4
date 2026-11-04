@@ -243,6 +243,9 @@ pub enum Response {
     Submitted {
         /// The entry.
         entry: LogEntry,
+        /// The `radio.COMMAND_REJECTED` events that name one of the entry's dispatched Actions by id and
+        /// exist when the submit returns: the Provider refused what the Kernel admitted (EA-11, note 47 O2).
+        refused: Vec<Event>,
         /// The Run's instant after the submission.
         now: TimePoint,
         /// The number of events delivered so far.

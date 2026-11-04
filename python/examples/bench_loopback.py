@@ -31,7 +31,11 @@ with ezsdr.connect(rx={0: ezsdr.Stream([0], sample_rate=19.5e6)}, tx={0: [0]}) a
     t = sdr.sleep(0.1)
     z = sdr.rx.capture(N, at=t)
     print(f"sample rate {sdr.rx.sample_rate} S/s (19.5 MS/s asked at connect, coerced)")
-    # A radio value has no update class: a retune during the Run is refused (RM-27).
+    # A receive retune is a Stop, then a start with the new frequency (RM-21): the new segment begins tuned to it.
+    sdr.rx.stop()
+    sdr.rx.start(frequency={0: 2.45e9})
+    print(f"receive retuned to {sdr.rx_channels[0].frequency} Hz on its next start")
+    # A transmit value has no update class yet: a retune during the Run is refused (RM-27).
     try:
         sdr.set("radio", "radio.tx.c0.frequency_hz", 2.4e9)
         print("the transmit retune was admitted: check radio.tx.c0.frequency_hz's update class")

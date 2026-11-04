@@ -23,6 +23,7 @@ use ezsdr_kernel::plan::{Fragment, PrepareReport};
 use ezsdr_kernel::spec::{Ident, Namespace, Scalar, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, PublishOutcome, SampleBlock};
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
+use ezsdr_radio::staging::Staging;
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey};
 use ezsdr_radio::{Addressed, channels, x3xx};
 use ezsdr_sim::channel::{Medium, RootInstant};
@@ -66,6 +67,8 @@ pub struct MockRadio {
     source_root: Option<ResourceId>,
     profile: Profile,
     config: BTreeMap<ezsdr_kernel::spec::Key, Value>,
+    /// RM-21, MR-18: the receive values a stopped stream accepted, on top of the Run's configuration.
+    staging: Staging,
     prepare_called: bool,
     prepared: bool,
     armed: bool,
@@ -169,11 +172,13 @@ struct RxStream {
     rng: Option<SimRng>,
     /// The last segment whose untimed tunes were taken, by its origin and arrival order (MR-34).
     tuned: Option<(i64, Option<u64>)>,
+    /// The configuration each `start_rx` took at its booking, by arrival order: what the segment it begins starts with (RM-21, MR-33).
+    snapshots: BTreeMap<u64, BTreeMap<ezsdr_kernel::spec::Key, Value>>,
 }
 
 impl RxStream {
     fn new(node: ResourceId, path: String, port: String) -> RxStream {
-        RxStream { node, path, port, overflow: None, clock: None, from: i64::MIN, running: None, links: Vec::new(), pool: None, rng: None, tuned: None }
+        RxStream { node, path, port, overflow: None, clock: None, from: i64::MIN, running: None, links: Vec::new(), pool: None, rng: None, tuned: None, snapshots: BTreeMap::new() }
     }
 }
 
@@ -400,6 +405,7 @@ impl MockRadio {
             instance,
             source_root: None,
             profile,
+            staging: Staging::new(defaults.clone()),
             config: defaults,
             prepare_called: false,
             prepared: false,
@@ -971,6 +977,25 @@ impl MockRadio {
             return;
         }
         let channels: Vec<u32> = segment.config.channels.iter().collect();
+        // A `start_rx` that restarts the stream at the origin of its first segment (a `Stop` at T0 cut that one with no sample) is the segment that
+        // runs: its snapshot, not the Run's configuration, is what the row of that origin states (RM-25, MR-27).
+        if let Some(seq) = segment.by {
+            let values = self.rx_values(k, Some(seq), segment.config.channels);
+            if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
+                if let Some(row) = rows.iter_mut().find(|row| row["direction"] == "rx" && row["stream"].as_u64() == Some(k as u64) && row["origin"]["ticks"].as_i64() == Some(segment.origin)) {
+                    row["values"] = values;
+                }
+            }
+        }
+        // MR-33: the snapshot's frequency and gain are the channel's from this origin on.
+        if let (Some(snapshot), Some(mode)) = (segment.by.and_then(|seq| self.rx[k].snapshots.get(&seq)), self.channel.as_mut()) {
+            for number in &channels {
+                if let Some(model) = mode.rx_channels.get_mut(*number as usize) {
+                    model.frequency_hz.set(tick, num_config(snapshot, &ezsdr_radio::keys::channel("rx", *number, "frequency_hz")));
+                    model.gain_db.set(tick, num_config(snapshot, &ezsdr_radio::keys::channel("rx", *number, "gain_db")));
+                }
+            }
+        }
         self.untimed_tune(&channels, tick);
     }
 
@@ -1020,6 +1045,22 @@ impl MockRadio {
         if fixed { ("deterministic".to_owned(), true) } else { ("none".to_owned(), false) }
     }
 
+    /// MR-27, MR-33: the frequency, gain and antenna the receive segment begun by `sequence` starts with, per channel:
+    /// its `start_rx`'s snapshot, or the Run's configuration for the stream's first segment.
+    fn rx_values(&self, k: usize, sequence: Option<u64>, channels: timeline::Channels) -> serde_json::Value {
+        let snapshot = sequence.and_then(|seq| self.rx[k].snapshots.get(&seq)).unwrap_or(&self.config);
+        let mut values = serde_json::Map::new();
+        for number in channels.iter() {
+            let mut channel = serde_json::Map::new();
+            for leaf in ["frequency_hz", "gain_db", "antenna"] {
+                let key = ezsdr_kernel::spec::Key::parse(&ezsdr_radio::keys::channel("rx", number, leaf)).expect("a declared radio key");
+                channel.insert(leaf.to_owned(), snapshot.get(&key).map_or(serde_json::Value::Null, |value| serde_json::to_value(value).expect("a value is JSON")));
+            }
+            values.insert(format!("c{number}"), serde_json::Value::Object(channel));
+        }
+        serde_json::Value::Object(values)
+    }
+
     fn end_layout_segment(&mut self, direction: Direction, k: usize, origin: i64, sequence: Option<u64>, at: i64) {
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
             if let Some(row) = rows.iter_mut().find(|row| {
@@ -1035,10 +1076,11 @@ impl MockRadio {
 
     /// MR-27: records the logical channel order and D13 phase basis of a layout segment.
     fn record_layout_segment(&mut self, direction: Direction, k: usize, origin: i64, sequence: Option<u64>, channels: timeline::Channels) {
+        let values = (direction == Direction::Rx).then(|| self.rx_values(k, sequence, channels));
         let channel_numbers: Vec<u32> = channels.iter().collect();
         let phase_behavior: Vec<&str> = channel_numbers.iter().map(|number| self.profile.channel_model_terms(direction, *number as usize).0).collect();
         let (basis, valid) = self.layout_phase_basis(direction, &channel_numbers);
-        let row = serde_json::json!({
+        let mut row = serde_json::json!({
             "direction": if direction == Direction::Rx { "rx" } else { "tx" },
             "stream": k,
             "sequence": sequence,
@@ -1048,6 +1090,9 @@ impl MockRadio {
             "coherence": [{ "at": TimePoint::new(self.root.expect("prepared root"), origin), "basis": basis, "valid": valid }],
             "ended_at": serde_json::Value::Null,
         });
+        if let Some(values) = values {
+            row["values"] = values;
+        }
         if let Some(serde_json::Value::Array(rows)) = self.instance.sections.get_mut(&section("segments")) {
             rows.push(row);
         }
@@ -1417,7 +1462,7 @@ impl MockRadio {
                     Ok(())
                 }
             },
-            Action::UpdateParameter { .. } => self.handle_update(id, now),
+            Action::UpdateParameter { key, value, at, .. } => self.handle_update(id, node, key, value, at.is_some(), now),
             // RM-16, MR-25: a `Stop` of the device or of a stream cancels no update; on
             // receive it is a cut at its instant, on transmit it ends the bursts. A `Stop`
             // of the device stops every stream of the instance; one of a stream node names
@@ -1454,9 +1499,19 @@ impl MockRadio {
                     Ok(requested) => requested,
                     Err(error) => return self.reject_action_at(Some(id), "command", &format!("MR-29: start_rx's instant cannot be converted: {error}"), now),
                 };
+                // RM-21: a stream that is streaming (a booked start not yet begun counts) takes no start; the line is unchanged.
+                let line = self.lines.line(Self::rx_key(k));
+                let snapshot = match self.staging.start(k as u32, line.is_some_and(Line::streaming)) {
+                    Ok(snapshot) => snapshot,
+                    Err(refusal) => return self.reject_action_at(Some(id), "command", &format!("MR-29: {}", refusal.reason()), now),
+                };
+                let e = timeline::command_instant(line, requested, now);
                 let seq = self.arrival();
-                let e = timeline::command_instant(self.lines.line(Self::rx_key(k)), requested, now);
-                self.book_rx(k, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start })?;
+                // RM-25: a booking the line cannot represent (an instant that overflows) is a refusal with the Action's id, never a failed Run.
+                if let Err(error) = self.book_rx(k, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start }) {
+                    return self.reject_action_at(Some(id), "command", &error.message, now);
+                }
+                self.rx[k].snapshots.insert(seq, snapshot);
                 Ok(())
             }
             other => {
@@ -1705,10 +1760,19 @@ impl MockRadio {
         Ok(progressed)
     }
 
-    /// MR-18: a radio key has no update class, so a Run-time update of one is refused (the Kernel
-    /// refuses it first; this is the Provider's own guard for a harness that calls it directly).
-    fn handle_update(&mut self, id: ActionId, now: i64) -> Result<(), ModuleError> {
-        self.reject_action_at(Some(id), "update_parameter", "MR-18: target or configuration key is not updateable", now)
+    /// MR-18, RM-21: a receive channel's frequency, gain or antenna is staged for the next `start_rx` of its
+    /// stream when the stream is not streaming, and refused with the cause otherwise (the Kernel refuses a
+    /// classless key first; the refusal of one here is the Provider's own guard for a harness that calls it directly).
+    fn handle_update(&mut self, id: ActionId, node: Option<&ResourceId>, key: ezsdr_kernel::spec::Key, value: Value, has_at: bool, now: i64) -> Result<(), ModuleError> {
+        // RM-12, D14: the node names the instance or one of its streams; what changes is what `key` says.
+        if matches!(self.addressed(node), Addressed::Other) {
+            return self.reject_action_at(Some(id), "update_parameter", "MR-18: the target is not this device or its streams", now);
+        }
+        let lines = &self.lines;
+        match self.staging.set(&key, value, has_at, |k| lines.line(Self::rx_key(k as usize)).is_some_and(Line::streaming)) {
+            Ok(()) => Ok(()),
+            Err(refusal) => self.reject_action_at(Some(id), "update_parameter", &format!("MR-18: {}", refusal.reason()), now),
+        }
     }
 
     /// The step's ordered loop up to `u` (RM-25, MR-20): every stream's receive segment
@@ -2024,6 +2088,7 @@ impl Provider for MockRadio {
         self.faults = faults;
         self.next_order = self.faults.len() as u64;
         self.config = config.clone();
+        self.staging = Staging::new(config.clone());
         self.prepared = true;
         Ok(PrepareReport { effective: config, coercions: report.coercions, warnings: Vec::new() })
     }

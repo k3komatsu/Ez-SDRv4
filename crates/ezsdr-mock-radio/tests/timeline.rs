@@ -19,7 +19,7 @@ use ezsdr_kernel::stream::{BackPressure, BlockFlags, BlockHeader, BlockRef, Data
 use ezsdr_kernel::time::{ClockDomain, ClockRegistry, Duration, EpochRef, ManualTimeAuthority, Rational, RelativeBudget, TimePoint};
 use ezsdr_mock_radio::MockRadio;
 use ezsdr_radio::timeline::{Channels, Config, Item, Kind, Line, Lines, Segment, Stream, StreamKey};
-use generator::{Class, Entry, Event, Fault, Op, Sequence, Terms};
+use generator::{Class, Entry, Event, Fault, Leaf, Op, Sequence, Staged, Terms};
 
 #[path = "../../ezsdr-radio/tests/generator/mod.rs"]
 mod generator;
@@ -40,8 +40,19 @@ fn divergent(profile: &str, class: Class) -> &'static [&'static str] {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum LayoutOp {
-    Stop { device: bool, stream: Option<u32> },
-    StartRx { stream: u32 },
+    Stop {
+        device: bool,
+        stream: Option<u32>,
+    },
+    StartRx {
+        stream: u32,
+        at: Option<i64>,
+    },
+    /// A receive value of stream 0's channel 0 (RM-21).
+    Set {
+        leaf: Leaf,
+        v: u8,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -49,6 +60,8 @@ struct LayoutSequence {
     class: Class,
     rounds: Vec<(i64, Vec<LayoutOp>)>,
     faults: Vec<(i64, Fault)>,
+    /// The generator's op index of each layout op, in order: a generated `Stop` or `start_rx` expands over both streams.
+    source: Vec<usize>,
 }
 
 impl LayoutSequence {
@@ -64,9 +77,12 @@ fn direction_index(direction: Direction) -> usize {
 /// Expands the generator's `Stop` and `start_rx` over both receive streams of the layout.
 fn layout_sequence(sequence: &Sequence) -> LayoutSequence {
     let mut rounds = Vec::new();
+    let mut source = Vec::new();
+    let mut index = 0;
     for (at, ops) in &sequence.rounds {
         let mut layout_ops = Vec::new();
         for op in ops {
+            let before = layout_ops.len();
             match *op {
                 Op::Stop { device: true } => layout_ops.push(LayoutOp::Stop { device: true, stream: None }),
                 Op::Stop { device: false } => {
@@ -74,16 +90,19 @@ fn layout_sequence(sequence: &Sequence) -> LayoutSequence {
                         layout_ops.push(LayoutOp::Stop { device: false, stream: Some(stream) });
                     }
                 }
-                Op::StartRx => {
+                Op::StartRx { at } => {
                     for stream in 0..2 {
-                        layout_ops.push(LayoutOp::StartRx { stream });
+                        layout_ops.push(LayoutOp::StartRx { stream, at });
                     }
                 }
+                Op::Set { leaf, v } => layout_ops.push(LayoutOp::Set { leaf, v }),
             }
+            source.extend(std::iter::repeat_n(index, layout_ops.len() - before));
+            index += 1;
         }
         rounds.push((*at, layout_ops));
     }
-    LayoutSequence { class: sequence.class, rounds, faults: sequence.faults.clone() }
+    LayoutSequence { class: sequence.class, rounds, faults: sequence.faults.clone(), source }
 }
 
 fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
@@ -97,10 +116,14 @@ fn layout_schedule(profile: &str, sequence: &LayoutSequence) -> Vec<Entry> {
             Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
         })
         .collect();
-    // A `Stop` and a `start_rx` take effect at their receipt.
-    for (index, (round, _)) in sequence.ops().enumerate() {
+    // A `Stop` takes effect at its receipt, a `start_rx` at its `at` or its receipt.
+    for (index, (round, op)) in sequence.ops().enumerate() {
         let receipt = terms.t0 + terms.ticks(round);
-        entries.push(Entry { e: receipt, seq: (sequence.faults.len() + index) as u64, receipt, event: Event::Op(index) });
+        let e = match op {
+            LayoutOp::StartRx { at: Some(ns), .. } => receipt + terms.ticks(*ns),
+            _ => receipt,
+        };
+        entries.push(Entry { e, seq: (sequence.faults.len() + index) as u64, receipt, event: Event::Op(index) });
     }
     entries.sort_by_key(|entry| (entry.e, entry.seq));
     entries
@@ -118,6 +141,10 @@ struct Record {
     rejected: usize,
     faults: Vec<(String, bool, u64)>,
     error: Option<String>,
+    /// Receive stream 0's segments, each its origin and the `(frequency, gain)` of channel 0 it began with (RM-21).
+    starts: Vec<(i64, (f64, f64))>,
+    /// The Run's own `(frequency, gain)` of channel 0, read from the Mock's first receive row; not compared.
+    initial: (f64, f64),
 }
 
 impl Record {
@@ -139,6 +166,7 @@ impl Record {
         from("tx_clocks", &self.tx_clocks, &observed.tx_clocks);
         from("blocks", &self.blocks, &observed.blocks);
         from("faults", &self.faults, &observed.faults);
+        from("starts", &self.starts, &observed.starts);
         eprintln!("rejected {} {}, error {:?} {:?}", self.rejected, observed.rejected, self.error, observed.error);
     }
 
@@ -149,6 +177,7 @@ impl Record {
             ("blocks", self.blocks == other.blocks),
             ("rejected", self.rejected == other.rejected),
             ("faults", self.faults == other.faults),
+            ("starts", self.starts == other.starts),
             ("error", self.error == other.error),
         ]
         .into_iter()
@@ -196,9 +225,10 @@ fn rm_26_the_timeline_against_mockradio() {
     let mut failed = Vec::new();
     for seed in 0..1_000 {
         let profile = if seed % 2 == 0 { "ideal" } else { "x3xx" };
-        let sequence = layout_sequence(&generator::sequence(seed));
-        let expected = expect(profile, &sequence);
+        let generated = generator::sequence(seed);
+        let sequence = layout_sequence(&generated);
         let observed = run(profile, &sequence);
+        let expected = expect(profile, &sequence, &generated, observed.initial);
         let diverged = observed.diverged(&expected);
         if shown == Some(seed) {
             eprintln!("seed {seed}, {profile}: {sequence:?}");
@@ -255,17 +285,24 @@ fn book_operation(lines: &mut Lines, entry: &Entry, op: LayoutOp) {
         }
         LayoutOp::Stop { device: false, stream: Some(stream) } => book(lines, line_key(Direction::Rx, stream), entry, Kind::Stop),
         LayoutOp::Stop { device: false, stream: None } => unreachable!(),
-        LayoutOp::StartRx { stream } => book(lines, line_key(Direction::Rx, stream), entry, Kind::Start),
+        LayoutOp::StartRx { stream, .. } => book(lines, line_key(Direction::Rx, stream), entry, Kind::Start),
+        // A value changes no line: staging is not the timeline (RM-21).
+        LayoutOp::Set { .. } => {}
     }
 }
 
 /// The timeline's account of each layout stream, with applied rows, refusals, blocks and faults.
-fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
+fn expect(profile: &str, sequence: &LayoutSequence, generated: &Sequence, initial: (f64, f64)) -> Record {
     let schedule = layout_schedule(profile, sequence);
     let mut lines = initial_lines(profile);
     let mut record = Record::default();
     let mut fault_rows = Vec::new();
     let loss_at = schedule.iter().find(|entry| matches!(entry.event, Event::Fault(index) if sequence.faults[index].1 == Fault::Loss)).map(|entry| entry.e);
+
+    // RM-21 as the generator's oracle reads it: a `Set` or a `start_rx` while streaming is refused, a start takes the values staged before it.
+    let rx_terms = terms(profile, Direction::Rx, Channels::first(0));
+    let receipts = generated.schedule(&rx_terms);
+    let staged: Staged = generated.staged(&rx_terms, |index| receipts.iter().find(|e| e.event == Event::Op(index)).is_some_and(|e| loss_at.is_none_or(|loss| e.receipt < loss)));
 
     // Actions received before a loss have already booked their lines, even when their later
     // effective instant is cancelled by that loss. Actions received at or after it do not.
@@ -273,6 +310,12 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
     for (index, (_, op)) in sequence.ops().enumerate() {
         let entry = op_entries[index];
         if loss_at.is_some_and(|loss| entry.receipt >= loss) {
+            continue;
+        }
+        // A generated `start_rx` the oracle refuses is refused by stream 0, the stream holding channel 0, and books no line. Stream 1 holds no channel,
+        // so it never streams: it accepts the start and carries nothing out (RM-21, UR-26), and its line takes the item as before.
+        if matches!(op, LayoutOp::StartRx { stream: 0, .. }) && staged.refused_starts.contains(&sequence.source[index]) {
+            record.rejected += 1;
             continue;
         }
         book_operation(&mut lines, &entry, *op);
@@ -302,7 +345,8 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
                 }
             }
             Event::Op(_) => {
-                if loss_at.is_some_and(|loss| entry.e >= loss) {
+                // An Action received at or after a loss is refused; one received before it booked, whenever it takes effect.
+                if loss_at.is_some_and(|loss| entry.receipt >= loss) {
                     record.rejected += 1;
                     continue;
                 }
@@ -310,6 +354,8 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
         }
     }
 
+    record.rejected += staged.refused.len();
+    let snapshots: BTreeMap<usize, generator::Snapshot> = staged.starts.iter().copied().collect();
     let gap = if profile == "ideal" { 0 } else { 50 * MS };
     let mut injected = BTreeMap::new();
     for stream in 0..2 {
@@ -329,6 +375,12 @@ fn expect(profile: &str, sequence: &LayoutSequence) -> Record {
                 record.blocks.extend(blocks);
             }
         }
+    }
+    // Stream 0's segments a start began, with the values that start took: the Run's own (`initial`, which layer 1 reads from the Mock's own first row)
+    // for a leaf the oracle holds none for.
+    for segment in &lines.line(line_key(Direction::Rx, 0)).unwrap().plan {
+        let snapshot = segment.by.map_or((None, None), |by| snapshots.get(&sequence.source[(by as usize) - sequence.faults.len()]).copied().unwrap_or((None, None)));
+        record.starts.push((segment.origin, (snapshot.0.map_or(initial.0, |v| Leaf::Frequency.value(v)), snapshot.1.map_or(initial.1, |v| Leaf::Gain.value(v)))));
     }
     for stream in 0..2 {
         let segments: Vec<_> = lines.line(line_key(Direction::Tx, stream)).unwrap().plan.iter().filter(|segment| !segment.config.channels.is_empty()).copied().collect();
@@ -531,7 +583,22 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
                 LayoutOp::Stop { device: true, .. } => Action::Stop { target: Some(tgt("mock")) },
                 LayoutOp::Stop { device: false, stream: Some(stream) } => Action::Stop { target: Some(tgt(&format!("mock/rx/s{stream}"))) },
                 LayoutOp::Stop { device: false, stream: None } => unreachable!(),
-                LayoutOp::StartRx { stream } => Action::Command { target: tgt(&format!("mock/rx/s{stream}")), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None },
+                LayoutOp::StartRx { stream, at } => Action::Command {
+                    target: tgt(&format!("mock/rx/s{stream}")),
+                    verb: Ident::parse("start_rx").unwrap(),
+                    params: BTreeMap::new(),
+                    at: at.map(|ns| ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(ROOT, T0 + round + ns))),
+                },
+                LayoutOp::Set { leaf, v } => Action::UpdateParameter {
+                    target: tgt("mock"),
+                    key: key(match leaf {
+                        Leaf::Frequency => "radio.rx.c0.frequency_hz",
+                        Leaf::Gain => "radio.rx.c0.gain_db",
+                    }),
+                    value: Value::num(leaf.value(v)).unwrap(),
+                    class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                    at: None,
+                },
             });
         }
         step(&mut mock, T0 + round);
@@ -557,6 +624,9 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
         }));
         tx_clocks.extend(clocks_of("tx", stream));
     }
+    let rx_clocks_of_stream_0: Vec<i64> = records.iter().filter(|r| r.stream == rid("mock/rx/s0")).map(|r| r.origin.ticks_in(ROOT).unwrap()).collect();
+    let values_of = |row: &serde_json::Value| (row["values"]["c0"]["frequency_hz"].as_f64().unwrap(), row["values"]["c0"]["gain_db"].as_f64().unwrap());
+    let segment_rows: Vec<_> = rows("segments").into_iter().filter(|row| row["direction"] == "rx" && row["stream"] == 0).collect();
     Record {
         rx_clocks,
         tx_clocks,
@@ -564,5 +634,15 @@ fn run(profile: &str, sequence: &LayoutSequence) -> Record {
         rejected: rows("rejected").len(),
         faults: rows("faults").iter().map(|r| (r["fault"].as_str().unwrap().to_owned(), r["applied"].as_bool().unwrap(), r["lost"].as_u64().unwrap())).collect(),
         error,
+        // A first segment a `Stop` cut with no sample has a row and no clock: only a segment with a clock is compared.
+        // (Two rows at one origin are one clock's: the later one is the segment that ran.)
+        starts: segment_rows
+            .iter()
+            .map(|row| (row["origin"]["ticks"].as_i64().unwrap(), values_of(row)))
+            .filter(|(origin, _)| rx_clocks_of_stream_0.contains(origin))
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .collect(),
+        initial: segment_rows.first().map_or((f64::NAN, f64::NAN), values_of),
     }
 }

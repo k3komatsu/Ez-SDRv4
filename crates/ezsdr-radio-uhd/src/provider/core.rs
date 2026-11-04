@@ -520,7 +520,7 @@ impl Streams {
     /// Books a command or fault on `stream`'s timeline; the end of a receive stream with the
     /// first sample uhd-rx has not delivered of the segment it cuts (RM-16). False when the
     /// stream has no line, or when its plan cannot be represented, which refuses it.
-    pub fn book(&mut self, core: &Core, stream: StreamKey, mut item: Item) -> bool {
+    pub fn book(&mut self, core: &Core, stream: StreamKey, mut item: Item, id: Option<ActionId>) -> bool {
         let delivered = self.first_undelivered(stream);
         let Some(line) = self.lines.line(stream) else { return false };
         if stream.0 == Direction::Rx && matches!(item.kind, Kind::End { .. }) {
@@ -528,10 +528,11 @@ impl Streams {
             item.delivered = item.delivered.or(delivered.filter(|(origin, config, _)| cuts(*origin, *config)).map(|(_, _, k)| k));
         }
         if let Err(error) = self.lines.book(stream, item) {
-            core.command_rejected(None, "update_parameter", &format!("RM-25: {error}"));
+            // The Action being booked names the refusal: a `start_rx` is a command, a Stop or an end a stop.
+            core.command_rejected(id, if item.kind == Kind::Start { "command" } else { "stop" }, &format!("RM-25: {error}"));
             return false;
         }
-        self.changed(core, stream);
+        self.changed(core, stream, id);
         true
     }
 
@@ -544,11 +545,12 @@ impl Streams {
         }
         match self.lines.refuse(stream, seq) {
             Ok(refused) => {
-                self.changed(core, stream);
+                self.changed(core, stream, None);
                 refused
             }
             Err(error) => {
-                core.command_rejected(None, "update_parameter", &format!("RM-25: {error}"));
+                // Only a `start_rx` is refused at its instant (RM-25).
+                core.command_rejected(None, "command", &format!("RM-25: {error}"));
                 false
             }
         }
@@ -564,7 +566,7 @@ impl Streams {
         let seq = if lost { 0 } else { self.next_seq() };
         for dir in [Dir::Rx, Dir::Tx] {
             for k in 0..self.count(dir) {
-                self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } });
+                self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } }, None);
             }
         }
     }
@@ -664,14 +666,16 @@ impl Streams {
 
     /// A plan changed: uhd-tx reads its own again (UR-25), and a transmit clock whose segment
     /// the plan now cuts ends at the cut (RM-25, VH-2).
-    pub fn changed(&mut self, core: &Core, stream: StreamKey) {
+    pub fn changed(&mut self, core: &Core, stream: StreamKey, id: Option<ActionId>) {
         self.version += 1;
         // A loss or `Provider::stop` at or before the clock's origin cuts its segment there; a
-        // clock the registry already ended is not ended again.
+        // clock the registry already ended is not ended again. Only a transmit stream holds a
+        // clock here and a transmit line is booked only with Stop and end, so the failure is
+        // always a `stop`'s.
         let cut = self.stream(stream).clocks.first().copied().zip(self.lines.line(stream).and_then(|line| line.plan.first()).and_then(|segment| segment.cut));
         if let Some((clock, cut)) = cut.filter(|(clock, _)| !core.clocks.get(clock.domain).is_ok_and(|domain| domain.ended_at.is_some())) {
             if let Err(error) = core.clocks.end(clock.domain, core.at(clock.instant(cut))) {
-                core.command_rejected(None, "update_parameter", &format!("UR-25: {error}"));
+                core.command_rejected(id, "stop", &format!("UR-25: {error}"));
             }
         }
     }
@@ -2024,7 +2028,7 @@ mod tests {
             assert_eq!(lock(&core.streams).planned(stream_key(Dir::Tx, 0))[0].segment.cut, ended.map(|_| 0), "S {stop}");
             assert_eq!(tx_clock_end(&core, clock), ended, "S {stop}");
             let mut streams = lock(&core.streams);
-            streams.changed(&core, stream_key(Dir::Tx, 0));
+            streams.changed(&core, stream_key(Dir::Tx, 0), None);
             assert!(lock(&core.rec).rejected.is_empty(), "S {stop}: {:?}", lock(&core.rec).rejected);
         }
         // A loss: the same end through the thread that finds it, which bypasses the owner's work.

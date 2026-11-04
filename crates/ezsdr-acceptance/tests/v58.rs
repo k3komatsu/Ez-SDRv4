@@ -515,8 +515,9 @@ fn v58_15_repeat_wraps_without_a_gap() {
 }
 
 #[test]
-fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_runtime_change_has_no_class() {
-    // Note 47 stage 2: the envelope is checked on the initial values; a change during the Run is refused as a key with no update class (RM-27).
+fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_transmit_runtime_change_has_no_class() {
+    // Note 47 stage 3: the envelope is checked on the initial values; a transmit change during the Run is refused as a key with no update class
+    // until stage 4 (RM-27). The receive forms are the two tests below.
     let temp = rig::TempDir::new("v58-16-rf");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }] } }));
     let connect = |frequency: f64| {
@@ -545,6 +546,61 @@ fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_runtime_ch
     for seq in refused_seqs {
         assert!(manifest.action_log.iter().any(|logged| logged.seq == seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection of action {seq} is logged");
     }
+}
+
+#[test]
+fn v58_16_a_receive_antenna_outside_the_rf_envelope_is_refused_on_a_stopped_stream() {
+    // Note 47 stage 3, §58 #16 in its envelope form: on a stopped receive stream a value outside the RF envelope is refused at admission,
+    // logged, and never dispatched (RM-19, RM-21); a value inside it, or one a Provider's `coerce` refuses, is judged by those.
+    let temp = rig::TempDir::new("v58-16-rx-antenna");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 1.0e8, "hi_hz": 6.0e9 }], "antenna_ports": ["RX2"] } }));
+    let mut run = session_run(&temp, &profile);
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    let stop = run.submit(SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
+    assert!(matches!(stop.outcome, Outcome::Admitted { .. }));
+    let set = |run: &mut ezsdr_kernel::coordinator::RunHandle, key: &str, value: Value| {
+        run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse(key).unwrap(), value }, None).unwrap()
+    };
+    let outside = set(&mut run, "radio.rx.c0.antenna", Value::from("TX/RX"));
+    let Outcome::Rejected { violations } = &outside.outcome else { panic!("an antenna outside the envelope was admitted: {:?}", outside.outcome) };
+    assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope" && v.key.as_ref().is_some_and(|k| k.as_str() == "radio.rx.c0.antenna")), "{violations:?}");
+    // A frequency above the board's range is refused by the Provider's coerce at admission, whatever the stream state.
+    let beyond = set(&mut run, "radio.rx.c0.frequency_hz", Value::num(7.0e9).unwrap());
+    assert!(matches!(beyond.outcome, Outcome::Rejected { .. }), "{:?}", beyond.outcome);
+    let inside = set(&mut run, "radio.rx.c0.antenna", Value::from("RX2"));
+    assert!(matches!(inside.outcome, Outcome::Admitted { .. }), "{:?}", inside.outcome);
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.rx.c0.antenna").unwrap()], Value::from("RX2"), "the refused value was never admitted");
+    let seqs = [outside.seq, beyond.seq];
+    let manifest = end_session(run, clock, T0 + 5_000_000);
+    for seq in seqs {
+        let logged = manifest.action_log.iter().find(|logged| logged.seq == seq).expect("the refusal is logged");
+        assert!(matches!(logged.outcome, Outcome::Rejected { .. }), "action {seq}");
+    }
+    let rejected = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count();
+    assert_eq!(rejected, 0, "nothing was dispatched to the Provider, so it refused nothing");
+}
+
+#[test]
+fn v58_16_an_allowed_value_for_a_streaming_stream_is_refused_by_the_provider_and_matched_by_action_id() {
+    // The Kernel admits an allowed value; the Provider refuses it because the stream is streaming, naming the Action by its id (RM-21, RM-22).
+    let temp = rig::TempDir::new("v58-16-streaming");
+    let profile =
+        rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 1.0e8, "hi_hz": 6.0e9 }], "antenna_ports": ["RX2", "TX/RX"] } }));
+    let mut run = session_run(&temp, &profile);
+    let clock = root(&run);
+    run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
+    let entry = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.rx.c0.antenna").unwrap(), value: Value::from("TX/RX") }, None).unwrap();
+    let Outcome::Admitted { dispatched, .. } = &entry.outcome else { panic!("an allowed value was rejected by the Kernel: {:?}", entry.outcome) };
+    let id = serde_json::to_value(dispatched[0]).unwrap();
+    // KC-27: the admitted configuration holds the value the Provider refused.
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.rx.c0.antenna").unwrap()], Value::from("TX/RX"));
+    let manifest = end_session(run, clock, T0 + 5_000_000);
+    let refused: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].payload["action"], id, "matched by the Action's id");
+    assert_eq!(refused[0].payload["kind"], "update_parameter");
+    assert!(refused[0].payload["reason"].as_str().unwrap().contains("streaming"), "{}", refused[0].payload["reason"]);
 }
 
 #[test]
@@ -1025,19 +1081,19 @@ fn v58_03_a_run_reproduces_from_its_own_manifest() {
 
 #[test]
 fn mr_34_a_scheduled_radio_value_update_is_refused_at_validate() {
-    // Note 47 stage 2: a radio value has no update class (RM-27), so a Spec's `schedule` cannot change one (RS-52, SB-16).
+    // A radio key with no update class (a rate: RM-27) cannot be scheduled in a Spec (RS-52, SB-16).
     let temp = rig::TempDir::new("mr-34-scheduled-refused");
     let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
     let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
     spec["schedule"].as_array_mut().unwrap().push(json!({
         "at": { "clock": "radio", "offset_ticks": 5_000 },
-        "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": "radio.rx.c0.frequency_hz", "value": 1.0e9 }
+        "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": "radio.rx.s0.sample_rate_hz", "value": 1.0e6 }
     }));
     let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
     let assembly = rig::assemble(&profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
     let run = ezsdr_kernel::coordinator::start_spec_run(&spec, &profile, assembly).expect("a refused Spec is a failed Run");
     assert!(
-        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, reason } } if reason.contains("radio.rx.c0.frequency_hz")),
+        matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, reason } } if reason.contains("radio.rx.s0.sample_rate_hz")),
         "the schedule's radio value update is the reason: {:?}",
         run.state()
     );
@@ -1052,4 +1108,27 @@ fn mr_34_a_scheduled_radio_value_update_is_refused_at_validate() {
     let run = ezsdr_kernel::coordinator::start_spec_run(&control, &profile, assembly).expect("the control Spec starts");
     assert!(!matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, .. } }), "{:?}", run.state());
     let _ = run.finish();
+}
+
+#[test]
+fn mr_18_a_scheduled_receive_value_is_refused_by_the_provider_for_its_instant() {
+    // A receive value is `cold` (RM-27), so a Spec's schedule of one passes validate; its Action carries an instant, which a staged value
+    // never has (RM-21), so the Provider refuses it at run time, naming the cause. Values change through Session actions only.
+    let temp = rig::TempDir::new("mr-18-scheduled-receive");
+    let (bytes, waveform) = experiments::waveform_of(&vec![(0.5, 0.0); 1_000]);
+    let mut spec = experiments::transmit(1.0e6, &waveform, true, "send_asap_and_flag", 1_000, Some(20_000));
+    spec["schedule"].as_array_mut().unwrap().push(json!({
+        "at": { "clock": "radio", "offset_ticks": 5_000 },
+        "action": { "kind": "update_parameter", "target": { "kind": "resource", "resource": "radio", "path": "" }, "key": "radio.rx.c0.frequency_hz", "value": 1.0e9 }
+    }));
+    let profile = rig::spec_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({}));
+    let assembly = rig::assemble(&profile, BTreeMap::from([(waveform.hash.clone(), bytes)]));
+    let run = ezsdr_kernel::coordinator::start_spec_run(&spec, &profile, assembly).expect("a Spec starts");
+    assert!(!matches!(run.state(), RunState::CleanedUp { termination: Termination::Failed { stage: Stage::Validate, .. } }), "validate passes: {:?}", run.state());
+    let clock = root(&run);
+    let manifest = finish_at(run, clock, T0 + 60_000_000);
+    let refused: Vec<_> = manifest.events.delivered.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].payload["kind"], "update_parameter");
+    assert!(refused[0].payload["reason"].as_str().unwrap().contains("instant"), "{}", refused[0].payload["reason"]);
 }

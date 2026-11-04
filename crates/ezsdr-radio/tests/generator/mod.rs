@@ -16,6 +16,8 @@ pub enum Class {
     Stop,
     /// `start_rx`.
     StartRx,
+    /// A receive value (frequency or gain) set on stream 0's channel 0, accepted on a stopped stream and refused on a streaming one (RM-21).
+    Value,
     /// Overruns and sequence errors.
     Fault,
     /// A device loss.
@@ -23,7 +25,7 @@ pub enum Class {
 }
 
 /// Every class, in order.
-pub const CLASSES: [Class; 4] = [Class::Stop, Class::StartRx, Class::Fault, Class::Loss];
+pub const CLASSES: [Class; 5] = [Class::Stop, Class::StartRx, Class::Value, Class::Fault, Class::Loss];
 
 /// One Action of a round.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -33,8 +35,52 @@ pub enum Op {
         /// The device rather than its receive stream.
         device: bool,
     },
-    /// `start_rx` at the current instant.
-    StartRx,
+    /// `start_rx`, at the round's instant or, with `Some(ns)`, `ns` nanoseconds after it: its effective instant then differs from its arrival order
+    /// (a `Stop` after it does not cancel it).
+    StartRx {
+        /// The `at` offset after the round's instant, a multiple of 100 ns.
+        at: Option<i64>,
+    },
+    /// An `UpdateParameter` of receive channel 0's `leaf`, with value `v` (RM-21).
+    Set {
+        /// Which key.
+        leaf: Leaf,
+        /// The value's number.
+        v: u8,
+    },
+}
+
+/// The receive channel keys the generator sets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Leaf {
+    /// `radio.rx.c0.frequency_hz`: `1e9 + 1e6 * v` Hz.
+    Frequency,
+    /// `radio.rx.c0.gain_db`: `v` dB.
+    Gain,
+}
+
+impl Leaf {
+    /// The value `v` stands for.
+    pub fn value(self, v: u8) -> f64 {
+        match self {
+            Leaf::Frequency => 1.0e9 + 1.0e6 * f64::from(v),
+            Leaf::Gain => f64::from(v),
+        }
+    }
+}
+
+/// What a start took, as the oracle computes it: the last accepted value of each leaf, none while a leaf is at the Run's own value.
+pub type Snapshot = (Option<u8>, Option<u8>);
+
+/// The oracle's account of a sequence's values (RM-21), written apart from `Staging` and `Line::streaming`.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Staged {
+    /// The op indices of the refused `Set`s.
+    pub refused: Vec<usize>,
+    /// The op indices of the refused `start_rx`s: the stream was streaming (RM-21).
+    pub refused_starts: Vec<usize>,
+    /// The op index of each booked `start_rx` and the values it took.
+    pub starts: Vec<(usize, Snapshot)>,
 }
 
 /// One scheduled fault (`sim.faults`).
@@ -117,17 +163,24 @@ impl Sequence {
                 Entry { e, seq: index as u64, receipt: e, event: Event::Fault(index) }
             })
             .collect();
-        for (index, (round, _)) in self.ops().enumerate() {
+        for (index, (round, op)) in self.ops().enumerate() {
             let receipt = terms.t0 + terms.ticks(round);
-            entries.push(Entry { e: receipt, seq: (self.faults.len() + index) as u64, receipt, event: Event::Op(index) });
+            // A `Stop` takes effect at its receipt and a `start_rx` at its `at`, or its receipt (RM-12, RM-25).
+            let e = match op {
+                Op::StartRx { at: Some(ns) } => receipt + terms.ticks(*ns),
+                _ => receipt,
+            };
+            entries.push(Entry { e, seq: (self.faults.len() + index) as u64, receipt, event: Event::Op(index) });
         }
         entries.sort_by_key(|entry| (entry.e, entry.seq));
         entries
     }
 
-    /// The timeline's items for `terms.stream`: each ready at its receipt.
+    /// The timeline's items for `terms.stream`: each ready at its receipt. A `start_rx` the stream refused as streaming (the oracle's
+    /// `Staged::refused_starts`) is no item: the line is unchanged by it.
     pub fn items(&self, terms: &Terms) -> Vec<Item> {
         let receive = terms.stream.direction == Direction::Rx;
+        let refused = if receive { self.staged(terms, |_| true).refused_starts } else { Vec::new() };
         let ops: Vec<&Op> = self.ops().map(|(_, op)| op).collect();
         let mut items = Vec::new();
         for entry in self.schedule(terms) {
@@ -136,13 +189,51 @@ impl Sequence {
                 Event::Fault(_) => continue,
                 Event::Op(index) => match *ops[index] {
                     Op::Stop { .. } if receive => Kind::Stop,
-                    Op::StartRx if receive => Kind::Start,
+                    Op::StartRx { .. } if receive && !refused.contains(&index) => Kind::Start,
                     _ => continue,
                 },
             };
             items.push(Item { e: entry.e, seq: entry.seq, ready: entry.receipt, delivered: None, refused: false, kind });
         }
         items
+    }
+}
+
+impl Sequence {
+    /// RM-21's staging as the oracle reads it, in arrival order: a `Set` is refused when the stream is streaming, which is the final state of the
+    /// commands booked before it replayed in the order they take effect (a `Stop` turns it off, a `start_rx` on, each at its effective
+    /// instant, ties by arrival); an accepted one replaces the leaf's value; a `start_rx` is refused on the same condition and otherwise takes
+    /// the values at its booking, and a refused one is no command. `booked(index)` says whether the Provider took op `index` (none after a loss).
+    pub fn staged(&self, terms: &Terms, booked: impl Fn(usize) -> bool) -> Staged {
+        let schedule = self.schedule(terms);
+        let effective = |index: usize| schedule.iter().find(|entry| entry.event == Event::Op(index)).map(|entry| (entry.e, entry.seq)).expect("every op is scheduled");
+        let ops: Vec<&Op> = self.ops().map(|(_, op)| op).collect();
+        let mut out = Staged::default();
+        let mut current: Snapshot = (None, None);
+        for (index, op) in ops.iter().enumerate() {
+            if !booked(index) {
+                continue;
+            }
+            // Streaming: the commands booked so far, in the order they take effect, ending on.
+            let mut earlier: Vec<usize> = (0..index).filter(|i| booked(*i) && !out.refused_starts.contains(i) && matches!(ops[*i], Op::Stop { .. } | Op::StartRx { .. })).collect();
+            earlier.sort_by_key(|i| effective(*i));
+            let mut on = true;
+            for i in earlier {
+                match ops[i] {
+                    Op::Stop { .. } => on = false,
+                    _ => on = true,
+                }
+            }
+            match op {
+                Op::Set { .. } if on => out.refused.push(index),
+                Op::Set { leaf: Leaf::Frequency, v } => current.0 = Some(*v),
+                Op::Set { leaf: Leaf::Gain, v } => current.1 = Some(*v),
+                Op::StartRx { .. } if on => out.refused_starts.push(index),
+                Op::StartRx { .. } => out.starts.push((index, current)),
+                Op::Stop { .. } => {}
+            }
+        }
+        out
     }
 }
 
@@ -173,10 +264,17 @@ pub fn sequence(seed: u64) -> Sequence {
     let shared: Vec<i64> = (0..4).map(|_| rng.instant()).collect();
     let op = |rng: &mut Rng, kind: Class| match kind {
         Class::Stop => Op::Stop { device: rng.below(4) == 0 },
-        _ => Op::StartRx,
+        Class::Value => Op::Set { leaf: if rng.below(2) == 0 { Leaf::Frequency } else { Leaf::Gain }, v: rng.below(8) as u8 },
+        _ => Op::StartRx {
+            at: match rng.below(3) {
+                0 => None,
+                1 => Some(100 * rng.below(100_000) as i64),
+                _ => Some(1_000_000 * (1 + rng.below(120)) as i64),
+            },
+        },
     };
     // The Action kinds the class may hold; faults are drawn apart.
-    let kinds: Vec<Class> = [Class::Stop, Class::StartRx].into_iter().filter(|kind| *kind <= class).collect();
+    let kinds: Vec<Class> = [Class::Stop, Class::StartRx, Class::Value].into_iter().filter(|kind| *kind <= class).collect();
     let mut instant = 0;
     let mut rounds: Vec<(i64, Vec<Op>)> = Vec::new();
     for _ in 0..2 + rng.below(4) {

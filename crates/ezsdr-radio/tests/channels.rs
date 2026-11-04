@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::id::{MemoryDomainId, ResourceId};
-use ezsdr_kernel::module_api::{CoerceReport, ModuleRegistry, RejectedRequest, Requested};
+use ezsdr_kernel::module_api::{CoerceReport, ModuleRegistry, RejectedRequest, Requested, UpdateClass};
 use ezsdr_kernel::policy::EventKindRegistry;
 use ezsdr_kernel::spec::{CapabilityValue, CoercionPolicy, Constraint, Ident, Key, Namespace, Scalar, Value, ValueKind};
 use ezsdr_radio::channels::{self, Description, Layout};
@@ -136,9 +136,9 @@ fn rm_27_the_layout_builder_keys_are_declared() {
 
     // Every declaration of RM-27's table, both directions.
     let rows = [
-        ("frequency_hz", ValueKind::Num, true, CoercionPolicy::Reject, None),
-        ("gain_db", ValueKind::Num, true, CoercionPolicy::Warn, None),
-        ("antenna", ValueKind::Str, false, CoercionPolicy::Reject, None),
+        ("frequency_hz", ValueKind::Num, true, CoercionPolicy::Reject, Some(UpdateClass::Cold)),
+        ("gain_db", ValueKind::Num, true, CoercionPolicy::Warn, Some(UpdateClass::Cold)),
+        ("antenna", ValueKind::Str, false, CoercionPolicy::Reject, Some(UpdateClass::Cold)),
         ("stream", ValueKind::Int, false, CoercionPolicy::Reject, None),
         ("frequency_step_hz", ValueKind::Num, false, CoercionPolicy::Reject, None),
         ("gain_step_db", ValueKind::Num, false, CoercionPolicy::Reject, None),
@@ -154,7 +154,8 @@ fn rm_27_the_layout_builder_keys_are_declared() {
             assert_eq!(declaration.kind, kind, "{direction} {leaf}");
             assert_eq!(declaration.coercible, coercible, "{direction} {leaf}");
             assert_eq!(declaration.coercion_default, coercion_default, "{direction} {leaf}");
-            assert_eq!(declaration.update_class, update_class, "{direction} {leaf}");
+            // Note 47 stage 3: only a receive channel's frequency, gain and antenna are `cold`.
+            assert_eq!(declaration.update_class, if direction == "rx" { update_class } else { None }, "{direction} {leaf}");
         }
         let declaration = find(&format!("radio.{direction}.s.sample_rate_hz"));
         assert_eq!(declaration.indexed, Some(2), "{direction} sample rate");

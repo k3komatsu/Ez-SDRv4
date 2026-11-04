@@ -435,16 +435,6 @@
   "filter": "rm_26_the_timeline_cases"
  },
  {
-  "id": "J04",
-  "name": "VH-6 (spec 22, H04): start_rx acts on a stream that is on",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "                Kind::Start if receive && (!self.on || self.halted) => {",
-  "new": "                Kind::Start if receive => {",
-  "crate": "ezsdr-radio",
-  "test_bin": "timeline",
-  "filter": "rm_26_the_timeline_cases"
- },
- {
   "id": "J05",
   "name": "VH-3 (spec 22, H05): a cut is not floored at its segment's origin",
   "file": "crates/ezsdr-radio/src/timeline.rs",
@@ -4445,7 +4435,7 @@
   "new": "self.on = true; self.halted = self.halted || item.refused;",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
-  "filter": "rm_25_a_refusal_does_not_move_a_later_origin"
+  "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
  },
  {
   "id": "P93",
@@ -5663,8 +5653,8 @@
    "id": "P357",
    "name": "uhd-control releases the line lock between start_rx's instant and its booking (UR-25, #63)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "        streams.book(&self.core, stream, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start });",
-   "new": "        drop(streams);\n        streams = lock(&self.core.streams);\n        streams.book(&self.core, stream, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start });",
+   "old": "        streams.book(&self.core, stream, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start }, Some(id));",
+   "new": "        drop(streams);\n        streams = lock(&self.core.streams);\n        streams.book(&self.core, stream, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start }, Some(id));",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_25_a_start_rx_takes_the_line_lock_once_for_its_instant_and_its_booking"
@@ -5863,8 +5853,8 @@
   "id": "P446",
   "name": "`start_rx` books stream 0 whatever stream it names (UR-26, RM-29)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                let mut streams = lock(&self.core.streams);\n                let stream = stream_key(Dir::Rx, k);\n                let (seq, now) = (streams.next_seq(), self.core.now());",
-   "new": "                let mut streams = lock(&self.core.streams);\n                let stream = stream_key(Dir::Rx, 0);\n                let (seq, now) = (streams.next_seq(), self.core.now());",
+  "old": "                let stream = stream_key(Dir::Rx, k);\n                // RM-21: a stream that is streaming (a booked start not yet begun counts) takes no start; the line is unchanged.\n                let snapshot = match",
+   "new": "                let stream = stream_key(Dir::Rx, 0);\n                // RM-21: a stream that is streaming (a booked start not yet begun counts) takes no start; the line is unchanged.\n                let snapshot = match",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_a_stop_of_a_later_stream_stops_that_stream_alone"
@@ -5935,9 +5925,9 @@
   "file": "crates/ezsdr-radio/src/timeline.rs",
   "old": "self.on = true; self.halted = item.refused;",
   "new": "self.on = true; self.halted = true;",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_25_a_refused_segment_is_booked_by_uhd_rx"
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
  },
  {
   "id": "P461",
@@ -5991,10 +5981,10 @@
  },
  {
   "id": "P469",
-  "name": "`start_rx` of a channel-less stream is refused (UR-26, R21)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                let Addressed::Stream { direction: Direction::Rx, k } = addressed else {\n                    return self.core.command_rejected(Some(id), \"command\", \"UR-26: not supported by this Provider\");\n                };\n                let requested = match self.ceil_root(at) {",
-   "new": "                let Addressed::Stream { direction: Direction::Rx, k } = addressed else {\n                    return self.core.command_rejected(Some(id), \"command\", \"UR-26: not supported by this Provider\");\n                };\n                if self.core.description.stream_channels(&self.config, true, k as u32).is_empty() {\n                    return self.core.command_rejected(Some(id), \"command\", \"UR-26: no receive channel is configured\");\n                }\n                let requested = match self.ceil_root(at) {",
+  "name": "a channel-less linked stream counts as streaming, so uhd-control refuses its `start_rx` (UR-26, R21; the shared rule is N47S3-41)",
+  "file": "crates/ezsdr-radio/src/timeline.rs",
+  "old": "state.on && !self.stream.config.channels.is_empty()",
+   "new": "state.on",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_a_start_rx_of_a_channel_less_linked_stream_starts_nothing"
@@ -6163,7 +6153,7 @@
    "id": "P503",
    "name": "a transmitted Stop is not booked on its line (UR-25, RM-34)",
    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-   "old": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop });",
+   "old": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, Some(id));",
    "new": "                for k in tx {\n                    let stream = stream_key(Dir::Tx, k);\n                    let mut streams = lock(&self.core.streams);\n                    let now = self.core.now();\n                    let seq = streams.next_seq();\n                    let _ = (stream, seq, now);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -6215,8 +6205,8 @@
   "id": "P521",
    "name": "RX reports a lost owner configuration while holding the stream lock (UR-29, UR-25)",
    "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-  "old": "        drop(streams);\n        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        self.core.device_failed(None, \"update_parameter\", &error);",
-  "new": "        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        self.core.device_failed(None, \"update_parameter\", &error);",
+  "old": "drop(streams);\n        if !refused { self.from = next.segment.origin.saturating_add(1); }\n        self.core.device_failed(next.settings.as_ref().and_then(|settings| settings.action()), \"command\", &error);",
+  "new": "if !refused { self.from = next.segment.origin.saturating_add(1); }\n        self.core.device_failed(next.settings.as_ref().and_then(|settings| settings.action()), \"command\", &error);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_29_a_lost_receive_owner_configure_releases_stream_lock_before_reporting"
@@ -10729,16 +10719,6 @@
    "filter": "rm_26_the_timeline_against_uhd_rx"
   },
   {
-   "id": "P1059",
-   "name": "a halted stream's start_rx does not cut the refused segment first (RM-25, design 43)",
-   "file": "crates/ezsdr-radio/src/timeline.rs",
-   "old": "                    self.cut(stream, item, false)?;\n                    self.on = true;\n                    self.halted = item.refused;",
-   "new": "                    self.on = true;\n                    self.halted = item.refused;",
-   "crate": "ezsdr-radio",
-   "test_bin": "timeline",
-   "filter": "rm_25_a_start_after_a_refusal_begins_from_the_refused_segment_s_cut"
-  },
-  {
    "id": "P1063",
    "name": "a prune does not carry the refused segment's mark into the state (RM-25, design 43)",
    "file": "crates/ezsdr-radio/src/timeline.rs",
@@ -12865,30 +12845,30 @@
     },
     {
       "id": "P1387",
-      "name": "channel frequency is a classless key",
+      "name": "a receive channel's frequency_hz is classless",
       "file": "crates/ezsdr-radio/src/lib.rs",
-      "old": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"frequency_hz\"), Num, true, Reject, None));",
-      "new": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"frequency_hz\"), Num, true, Reject, Some(UpdateClass::HardwareTimed)));",
+      "old": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"frequency_hz\"), Num, true, Reject, cold));",
+      "new": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"frequency_hz\"), Num, true, Reject, None));",
       "crate": "ezsdr-radio",
       "test_bin": "radio_model",
       "filter": "rm_04_the_key_table_is_exactly_the_declared_one"
     },
     {
       "id": "P1388",
-      "name": "channel gain is a classless key",
+      "name": "a receive channel's gain_db is classless",
       "file": "crates/ezsdr-radio/src/lib.rs",
-      "old": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"gain_db\"), Num, true, Warn, None));",
-      "new": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"gain_db\"), Num, true, Warn, Some(UpdateClass::HardwareTimed)));",
+      "old": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"gain_db\"), Num, true, Warn, cold));",
+      "new": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"gain_db\"), Num, true, Warn, None));",
       "crate": "ezsdr-radio",
       "test_bin": "radio_model",
       "filter": "rm_04_the_key_table_is_exactly_the_declared_one"
     },
     {
       "id": "P1389",
-      "name": "channel antenna is a classless key",
+      "name": "a receive channel's antenna is classless",
       "file": "crates/ezsdr-radio/src/lib.rs",
-      "old": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"antenna\"), Str, false, Reject, None));",
-      "new": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"antenna\"), Str, false, Reject, Some(UpdateClass::Cold)));",
+      "old": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"antenna\"), Str, false, Reject, cold));",
+      "new": "declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, \"antenna\"), Str, false, Reject, None));",
       "crate": "ezsdr-radio",
       "test_bin": "radio_model",
       "filter": "rm_04_the_key_table_is_exactly_the_declared_one"
@@ -12915,20 +12895,20 @@
     },
     {
       "id": "P1392",
-      "name": "the UHD Provider accepts a Run-time update of a radio key instead of refusing it",
+      "name": "the UHD Provider does not report a refused receive value (RM-21, UR-26)",
       "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-      "old": "self.core.command_rejected(Some(id), \"update_parameter\", &format!(\"UR-26: {key} is not updated at runtime by this Provider\"));",
-      "new": "let _ = key;",
+      "old": "if let Err(refusal) = staged { self.core.command_rejected(Some(id), \"update_parameter\", &format!(\"UR-26: {}\", refusal.reason())); }",
+      "new": "let _ = staged;",
       "crate": "ezsdr-radio-uhd",
-      "test_bin": "fake",
-      "filter": "ur_26_an_unnumbered_key_is_refused_at_runtime"
+      "test_bin": "lib",
+      "filter": "ur_26_a_value_for_a_streaming_stream_is_refused_without_a_device_call"
     },
     {
       "id": "P1393",
-      "name": "a radio value setter submits SetParameter instead of refusing during a Run",
+      "name": "a transmit value setter submits SetParameter instead of refusing during a Run",
       "file": "python/ezsdr/session.py",
-      "old": "        # A radio value has no update class: it is asked for at connect and cannot change during the Run (RM-27, EA-16).\n        raise Error(",
-      "new": "        self._session.set(self._radio, self._key(suffix), value)\n        return\n        raise Error(",
+      "old": "        else:\n            # A transmit value has no update class until note 47's stage 4: it is asked for at connect (RM-27, EA-16).\n            raise Error(",
+      "new": "        else:\n            self._session.set(self._radio, self._key(suffix), value)\n            return\n            raise Error(",
       "python": "test_easy_api.EasyApi.test_v3_parameters_through_attributes"
     },
     {
@@ -13065,20 +13045,20 @@
     },
     {
       "id": "P1394",
-      "name": "MockRadio accepts a classless update that reaches it directly instead of refusing it (MR-18)",
+      "name": "MockRadio does not report a receive value it refused (MR-18)",
       "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "self.reject_action_at(Some(id), \"update_parameter\", \"MR-18: target or configuration key is not updateable\", now)",
-      "new": "{ let _ = (id, now); Ok(()) }",
+      "old": "Err(refusal) => self.reject_action_at(Some(id), \"update_parameter\", &format!(\"MR-18: {}\", refusal.reason()), now),",
+      "new": "Err(refusal) => { let _ = (refusal, id, now); Ok(()) }",
       "crate": "ezsdr-mock-radio",
       "test_bin": "mock_radio",
       "filter": "mr_29_other_actions_are_command_rejected"
     },
     {
       "id": "P1395",
-      "name": "a start_rx segment is configured with the profile defaults instead of the values the Run started with (UR-36, note 47)",
+      "name": "a start_rx segment is configured with the profile defaults instead of the values its booking snapshotted (UR-36, RM-21)",
       "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-      "old": "ColdConfig::new(self.config.clone())",
-      "new": "ColdConfig::new(self.core.description.defaults())",
+      "old": "ColdConfig::of(snapshot, id)",
+      "new": "ColdConfig::of(self.core.description.defaults(), id)",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "ur_36_every_restart_is_configured_with_the_connect_values"
@@ -13132,5 +13112,411 @@
       "crate": "ezsdr-mock-radio",
       "test_bin": "mock_layout",
       "filter": "mr_34_a_restart_redraws_each_random_channel_in_channel_order"
+    },
+    {
+      "id": "N47S3-01",
+      "name": "a transmit key is cold",
+      "file": "crates/ezsdr-radio/src/lib.rs",
+      "old": "let cold = (direction == \"rx\").then_some(UpdateClass::Cold);",
+      "new": "let cold = Some(UpdateClass::Cold);",
+      "crate": "ezsdr-radio",
+      "test_bin": "radio_model",
+      "filter": "rm_04_the_key_table_is_exactly_the_declared_one"
+    },
+    {
+      "id": "N47S3-02",
+      "name": "a receive rate is cold (the bench has not confirmed it)",
+      "file": "crates/ezsdr-radio/src/lib.rs",
+      "old": "declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, None));",
+      "new": "declarations.push(indexed_key_decl(&declaration(keys::STREAM, keys::STREAM_LEAF), Num, true, Reject, Some(UpdateClass::Cold)));",
+      "crate": "ezsdr-radio",
+      "test_bin": "radio_model",
+      "filter": "rm_04_the_key_table_is_exactly_the_declared_one"
+    },
+    {
+      "id": "N47S3-03",
+      "name": "Staging stages a value for a streaming stream and refuses one for a stopped stream",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "if streaming(stream) {",
+      "new": "if !streaming(stream) {",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_a_value_for_a_streaming_stream_is_refused_and_a_stopped_one_stages_it"
+    },
+    {
+      "id": "N47S3-04",
+      "name": "Staging asks about stream 0 whatever the channel's stream",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "if streaming(stream) {",
+      "new": "if streaming(0) {",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_a_value_for_a_streaming_stream_is_refused_and_a_stopped_one_stages_it"
+    },
+    {
+      "id": "N47S3-05",
+      "name": "Staging stages a value that carries an instant",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "if has_at {",
+      "new": "if false {",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_a_channel_in_no_stream_an_instant_or_another_key_is_refused"
+    },
+    {
+      "id": "N47S3-06",
+      "name": "Staging stages a value for a channel in no stream",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "Some(ezsdr_kernel::spec::Scalar::Int(stream)) if *stream >= 0 => *stream as u32,",
+      "new": "Some(ezsdr_kernel::spec::Scalar::Int(stream)) if *stream >= -1 => (*stream).max(0) as u32,",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_a_channel_in_no_stream_an_instant_or_another_key_is_refused"
+    },
+    {
+      "id": "N47S3-07",
+      "name": "Staging stages a transmit key",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "Some(Concrete::Channel { rx: true, number, leaf: \"frequency_hz\" | \"gain_db\" | \"antenna\" })",
+      "new": "Some(Concrete::Channel { rx: _, number, leaf: \"frequency_hz\" | \"gain_db\" | \"antenna\" })",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_a_channel_in_no_stream_an_instant_or_another_key_is_refused"
+    },
+    {
+      "id": "N47S3-08",
+      "name": "Staging keeps no accepted value",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "self.values.insert(key.clone(), value);",
+      "new": "let _ = value;",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_the_last_staged_value_wins"
+    },
+    {
+      "id": "N47S3-09",
+      "name": "the line is replayed in arrival order to decide streaming",
+      "file": "crates/ezsdr-radio/src/timeline.rs",
+      "old": "state.replay(&self.stream, &sorted(&self.items)).expect(\"the plan made these cuts already\");\n        state.on",
+      "new": "state.replay(&self.stream, &self.items).expect(\"the plan made these cuts already\");\n        state.on",
+      "crate": "ezsdr-radio",
+      "test_bin": "timeline",
+      "filter": "rm_21_streaming_is_the_final_state_of_the_replayed_line"
+    },
+    {
+      "id": "N47S3-10",
+      "name": "lead_left reports a configure that left exactly the declared lead",
+      "file": "crates/ezsdr-radio/src/timeline.rs",
+      "old": "(completion < origin && left < min_lead).then_some(left)",
+      "new": "(completion < origin && left <= min_lead).then_some(left)",
+      "crate": "ezsdr-radio",
+      "test_bin": "timeline",
+      "filter": "rm_25_lead_left_reports_a_configure_that_left_less_than_the_declared_lead"
+    },
+    {
+      "id": "N47S3-11",
+      "name": "lead_left reports a configure that ended after the origin",
+      "file": "crates/ezsdr-radio/src/timeline.rs",
+      "old": "(completion < origin && left < min_lead).then_some(left)",
+      "new": "(left < min_lead).then_some(left)",
+      "crate": "ezsdr-radio",
+      "test_bin": "timeline",
+      "filter": "rm_25_lead_left_reports_a_configure_that_left_less_than_the_declared_lead"
+    },
+    {
+      "id": "N47S3-12",
+      "name": "the owner compares the configure's end with the whole start lead",
+      "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+      "old": "let min_lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
+      "new": "let min_lead = self.core.ticks(self.core.description.timing.rx_start_lead_ns);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_25_a_configure_that_leaves_the_declared_lead_whole_reports_nothing"
+    },
+    {
+      "id": "N47S3-13",
+      "name": "the owner never reports a short lead",
+      "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+      "old": "if let Some(left) = ezsdr_radio::timeline::lead_left(origin, completion, min_lead) {",
+      "new": "if let Some(left) = None::<i64> {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_25_a_configure_that_leaves_less_than_the_declared_lead_reports_it_and_starts_at_the_origin"
+    },
+    {
+      "id": "N47S3-14",
+      "name": "the short-lead report names the booking-time origin as the configure's end",
+      "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+      "old": "requested: self.core.at(origin),",
+      "new": "requested: self.core.at(completion),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_25_a_configure_that_leaves_less_than_the_declared_lead_reports_it_and_starts_at_the_origin"
+    },
+    {
+      "id": "N47S3-15",
+      "name": "uhd-control decides streaming from nothing",
+      "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+      "old": "streams.line(stream_key(Dir::Rx, k as usize)).is_some_and(Line::streaming)",
+      "new": "false",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_26_a_value_for_a_streaming_stream_is_refused_without_a_device_call"
+    },
+    {
+      "id": "N47S3-16",
+      "name": "uhd-control ignores the instant of a staged value",
+      "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+      "old": "self.staging.set(&key, value, at.is_some(), |k|",
+      "new": "self.staging.set(&key, value, false, |k|",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_26_a_staged_value_with_an_instant_or_another_target_is_refused_and_the_instance_and_its_streams_are_accepted"
+    },
+    {
+      "id": "N47S3-17",
+      "name": "the Mock decides streaming from nothing",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "lines.line(Self::rx_key(k as usize)).is_some_and(Line::streaming)",
+      "new": "false",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_radio",
+      "filter": "mr_18_a_value_for_a_streaming_receive_stream_is_refused_and_not_used"
+    },
+    {
+      "id": "N47S3-18",
+      "name": "the Mock's start takes the Run's configuration, not the staged values",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "self.rx[k].snapshots.insert(seq, snapshot);",
+      "new": "self.rx[k].snapshots.insert(seq, self.config.clone());",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_radio",
+      "filter": "mr_18_a_value_set_on_a_stopped_receive_stream_is_used_by_its_next_segment_and_by_no_earlier_one"
+    },
+    {
+      "id": "N47S3-20",
+      "name": "a booking error is labelled as an update",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "if item.kind == Kind::Start { \"command\" } else { \"stop\" }",
+      "new": "\"update_parameter\"",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_25_a_booking_the_timeline_cannot_represent_is_refused_with_the_kind_of_its_action"
+    },
+    {
+      "id": "N47S3-21",
+      "name": "a failed receive stop is labelled as an update",
+      "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+      "old": "Err(error) => self.core.device_failed(None, \"stop\", &error),",
+      "new": "Err(error) => self.core.device_failed(None, \"update_parameter\", &error),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_24_nonloss_rx_stop_failure_leaves_the_chain_uncertain"
+    },
+    {
+      "id": "N47S3-22",
+      "name": "a refused start drops the start's Action id",
+      "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
+      "old": "self.core.device_failed(next.settings.as_ref().and_then(|settings| settings.action()), \"command\", &error);",
+      "new": "self.core.device_failed(None, \"command\", &error);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_25_a_refused_start_is_labelled_as_a_command_with_the_start_s_id"
+    },
+    {
+      "id": "N47S3-23",
+      "name": "the owner configures a begun start once however often it asks (always configure)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "if state.configured.is_some() && state.configured == by {",
+      "new": "if false && state.configured == by {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_36_owner_configure_is_once_per_command_and_again_for_the_next"
+    },
+    {
+      "id": "N47S3-24",
+      "name": "the submit reply returns every Provider refusal of the window, whoever's",
+      "file": "crates/ezsdr-server/src/lib.rs",
+      "old": "payload.action.is_some_and(|action| dispatched.contains(&action))",
+      "new": "payload.action.is_some_and(|_| true)",
+      "crate": "ezsdr-server",
+      "test_bin": "lib",
+      "filter": "ea_11_the_refused_list_holds_only_this_actions_refusals"
+    },
+    {
+      "id": "N47S3-26",
+      "name": "a submit that dispatched to an ended Run is answered with its entry",
+      "file": "crates/ezsdr-server/src/lib.rs",
+      "old": "RunState::CleanedUp { termination } => Some(run_error(RunHandleError::Ended { termination })),",
+      "new": "RunState::CleanedUp { .. } => None,",
+      "crate": "ezsdr-server",
+      "test_bin": "lib",
+      "filter": "ea_11_a_submit_that_dispatched_to_a_run_that_is_no_longer_running_is_ended_not_submitted"
+    },
+    {
+      "id": "N47S3-27",
+      "name": "a submit that dispatched nothing is answered Ended on an ended Run",
+      "file": "crates/ezsdr-server/src/lib.rs",
+      "old": "if !dispatched {\n        return None;\n    }",
+      "new": "if false {\n        return None;\n    }",
+      "crate": "ezsdr-server",
+      "test_bin": "lib",
+      "filter": "ea_11_a_submit_that_dispatched_to_a_run_that_is_no_longer_running_is_ended_not_submitted"
+    },
+    {
+      "id": "N47S3-28",
+      "name": "a device-paced submit does not wait for the Provider to finish",
+      "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+      "old": "super::paced::wait_finished(&run.shared, &targets);",
+      "new": "let _ = &targets;",
+      "crate": "ezsdr-kernel",
+      "test_bin": "device_paced",
+      "filter": "kg_21a_submit_cannot_complete_before_the_booking_gate_opens"
+    },
+    {
+      "id": "N47S3-29",
+      "name": "the Easy API ignores a Provider's refusal of an admitted Action",
+      "file": "python/ezsdr/session.py",
+      "old": "    if refused:\n        raise Rejected(entry, refused[0])",
+      "new": "    if False:\n        raise Rejected(entry, refused[0])",
+      "python": "test_easy_api.StartValues.test_ea_16_a_provider_refusal_raises_rejected_with_its_event_and_the_entry_is_the_admitted_one"
+    },
+    {
+      "id": "N47S3-30",
+      "name": "start sends the values in dict order",
+      "file": "python/ezsdr/session.py",
+      "old": "for number in sorted(numbered))",
+      "new": "for number in numbered)",
+      "python": "test_easy_api.StartValues.test_ea_16_start_takes_values_keyed_by_channel_number_or_name_and_sends_them_in_order"
+    },
+    {
+      "id": "N47S3-31",
+      "name": "start does not check that a channel is in its stream",
+      "file": "python/ezsdr/session.py",
+      "old": "                if number not in members:",
+      "new": "                if False:",
+      "python": "test_easy_api.StartValues.test_ea_16_start_checks_everything_before_sending"
+    },
+    {
+      "id": "N47S3-32",
+      "name": "start sends a rate",
+      "file": "python/ezsdr/session.py",
+      "old": "        if sample_rate is not None:\n            raise Error(",
+      "new": "        if False:\n            raise Error(",
+      "python": "test_easy_api.StartValues.test_ea_16_start_checks_everything_before_sending"
+    },
+    {
+      "id": "N47S3-33",
+      "name": "a receive channel's setter still raises",
+      "file": "python/ezsdr/session.py",
+      "old": "if self._direction == \"rx\" and name in _RX_VALUES and isinstance(self, _Channel):",
+      "new": "if False:",
+      "python": "test_easy_api.EasyApi.test_ea_16_the_channel_setters_send_one_update_on_a_stopped_stream"
+    },
+    {
+      "id": "N47S3-34",
+      "name": "the shared start decision never refuses a start (RM-21)",
+      "file": "crates/ezsdr-radio/src/staging.rs",
+      "old": "if streaming { Err(Refusal::StartWhileStreaming(stream)) }",
+      "new": "if false { Err(Refusal::StartWhileStreaming(stream)) }",
+      "crate": "ezsdr-radio",
+      "test_bin": "staging",
+      "filter": "rm_21_a_start_of_a_streaming_stream_is_refused_and_a_stopped_one_takes_the_snapshot"
+    },
+    {
+      "id": "N47S3-35",
+      "name": "MockRadio books a start on a streaming stream (a booked start is revised to the earlier origin)",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "self.staging.start(k as u32, line.is_some_and(Line::streaming))",
+      "new": "self.staging.start(k as u32, false)",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_radio",
+      "filter": "mr_21_a_start_booked_ahead_is_never_revised_to_an_earlier_origin"
+    },
+    {
+      "id": "N47S3-36",
+      "name": "uhd-control books a start on a streaming stream (unit)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+      "old": "self.staging.start(k as u32, streams.line(stream).is_some_and(Line::streaming))",
+      "new": "self.staging.start(k as u32, false)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_26_a_start_of_a_streaming_stream_is_refused_with_the_start_s_id_and_leaves_the_line_unchanged"
+    },
+    {
+      "id": "N47S3-37",
+      "name": "uhd-control books a start on a streaming stream (Sol's sequence on the fake device: the earlier start replaces the queued one)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+      "old": "self.staging.start(k as u32, streams.line(stream).is_some_and(Line::streaming))",
+      "new": "self.staging.start(k as u32, false)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "ur_26_a_start_booked_ahead_is_not_revised_by_an_earlier_one_and_still_delivers"
+    },
+    {
+      "id": "N47S3-38",
+      "name": "a booking the line cannot represent names no Action (unit)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "core.command_rejected(id, if item.kind == Kind::Start { \"command\" } else { \"stop\" }, &format!(\"RM-25: {error}\"));",
+      "new": "core.command_rejected(None, if item.kind == Kind::Start { \"command\" } else { \"stop\" }, &format!(\"RM-25: {error}\"));",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_25_a_booking_the_line_cannot_represent_is_refused_with_the_start_s_id"
+    },
+    {
+      "id": "N47S3-39",
+      "name": "a booking the line cannot represent names no Action (the submit reply lists no refusal)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "core.command_rejected(id, if item.kind == Kind::Start { \"command\" } else { \"stop\" }, &format!(\"RM-25: {error}\"));",
+      "new": "core.command_rejected(None, if item.kind == Kind::Start { \"command\" } else { \"stop\" }, &format!(\"RM-25: {error}\"));",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_11_a_start_the_line_cannot_represent_is_refused_in_the_submit_reply_with_its_id"
+    },
+    {
+      "id": "N47S3-40",
+      "name": "start accepts a negative channel number, which indexes another channel from the end",
+      "file": "python/ezsdr/session.py",
+      "old": " or (isinstance(key, int) and key < 0):",
+      "new": ":",
+      "python": "test_easy_api.StartValues.test_ea_16_start_checks_everything_before_sending"
+    },
+    {
+      "id": "N47S3-41",
+      "name": "a stream that holds no channel counts as streaming, so its start is refused",
+      "file": "crates/ezsdr-radio/src/timeline.rs",
+      "old": "state.on && !self.stream.config.channels.is_empty()",
+      "new": "state.on",
+      "crate": "ezsdr-radio",
+      "test_bin": "timeline",
+      "filter": "rm_21_streaming_is_the_final_state_of_the_replayed_line"
+    },
+    {
+      "id": "N47S3-42",
+      "name": "MockRadio: a start the line cannot represent fails the Run instead of being refused",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "return self.reject_action_at(Some(id), \"command\", &error.message, now);",
+      "new": "return Err(error);",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_11_a_start_the_line_cannot_represent_is_refused_in_the_submit_reply_with_its_id"
+    },
+    {
+      "id": "N47S3-43",
+      "name": "MockRadio: a start the line cannot represent is refused without the Action's id",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "return self.reject_action_at(Some(id), \"command\", &error.message, now);",
+      "new": "return self.reject_action_at(None, \"command\", &error.message, now);",
+      "crate": "ezsdr-server",
+      "test_bin": "protocol",
+      "filter": "ea_11_a_start_the_line_cannot_represent_is_refused_in_the_submit_reply_with_its_id"
+    },
+    {
+      "id": "N47S3-44",
+      "name": "start lets a float or None channel key reach the channel lookup",
+      "file": "python/ezsdr/session.py",
+      "old": " or not isinstance(key, (int, str))",
+      "new": "",
+      "python": "test_easy_api.StartValues.test_ea_16_start_checks_everything_before_sending"
     }
   ]

@@ -251,6 +251,7 @@ struct ThreadedCtx {
     stopping: AtomicBool,
     action_delay: Option<std::time::Duration>,
     never_finishing: bool,
+    hold_after_take: Option<Arc<(Mutex<bool>, Condvar)>>,
 }
 
 impl ThreadedCtx {
@@ -278,6 +279,12 @@ impl ThreadedCtx {
             self.record(format!("after_stop:{variant}"));
         }
         self.record(format!("took:{variant}"));
+        if let Some(gate) = &self.hold_after_take {
+            let mut open = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+            while !*open {
+                open = gate.1.wait(open).unwrap_or_else(|e| e.into_inner());
+            }
+        }
         if let Some(delay) = self.action_delay {
             std::thread::sleep(delay);
         }
@@ -311,6 +318,7 @@ pub struct ThreadedProvider {
     arm_delay: Option<std::time::Duration>,
     stop_tail: u32,
     never_finishing: bool,
+    hold_after_take: Option<Arc<(Mutex<bool>, Condvar)>>,
     deaf: bool,
     drain_after_stop: Option<std::time::Duration>,
     ctx: Option<Arc<ThreadedCtx>>,
@@ -335,6 +343,7 @@ impl ThreadedProvider {
             arm_delay: None,
             stop_tail: 0,
             never_finishing: false,
+            hold_after_take: None,
             deaf: false,
             drain_after_stop: None,
             ctx: None,
@@ -395,6 +404,13 @@ impl ThreadedProvider {
     /// Stops calling `recv()` after it has taken one Action.
     pub fn never_finishing(mut self) -> Self {
         self.never_finishing = true;
+        self
+    }
+
+    /// Holds each Action it has taken (after `took:`) until `gate` holds true, and calls `recv()` again only then: the booking of an
+    /// Action is complete, and acknowledged, no earlier than the gate opens (MA-14b, KC-21a).
+    pub fn hold_after_take(mut self, gate: Arc<(Mutex<bool>, Condvar)>) -> Self {
+        self.hold_after_take = Some(gate);
         self
     }
 
@@ -467,6 +483,7 @@ impl Provider for ThreadedProvider {
             stopping: AtomicBool::new(false),
             action_delay: self.action_delay,
             never_finishing: self.never_finishing,
+            hold_after_take: self.hold_after_take.clone(),
         }));
         self.inner.prepare(f, ctx)
     }

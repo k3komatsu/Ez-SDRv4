@@ -2399,11 +2399,19 @@
             "op": {
               "const": "submitted",
               "type": "string"
+            },
+            "refused": {
+              "description": "The `radio.COMMAND_REJECTED` events that name one of the entry's dispatched Actions by id and\nexist when the submit returns: the Provider refused what the Kernel admitted (EA-11, note 47 O2).",
+              "items": {
+                "$ref": "#/$defs/Event"
+              },
+              "type": "array"
             }
           },
           "required": [
             "op",
             "entry",
+            "refused",
             "now",
             "events"
           ],

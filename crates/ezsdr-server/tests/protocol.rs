@@ -663,8 +663,8 @@ fn ea_10_a_named_selector_connects_as_the_unnamed_one_and_the_record_holds_numbe
         let mut server = greeted(&temp.0);
         let initial = init_of("radio", vec![StreamInit { gain: BTreeMap::from([("1".to_owned(), 7.0)]), sample_rate: Some(2.0e6), ..numbered(0, &[0, 1]) }], vec![numbered(0, &[0])]);
         let connected = connect_profile(&mut server, profile_of(&temp.0), initial).expect("connects");
-        // A radio value has no update class: refused, and still logged by its numbered key.
-        let entry = submit(&mut server, set("radio.rx.c1.gain_db", Value::num(9.0).unwrap()), Vec::new());
+        // A transmit value has no update class: refused, and still logged by its numbered key.
+        let entry = submit(&mut server, set("radio.tx.c0.gain_db", Value::num(9.0).unwrap()), Vec::new());
         assert!(matches!(entry.outcome, Outcome::Rejected { .. }));
         submit(&mut server, repeat(), Vec::new());
         let (manifest, _) = finish(&mut server);
@@ -680,7 +680,7 @@ fn ea_10_a_named_selector_connects_as_the_unnamed_one_and_the_record_holds_numbe
         assert!(!text.contains("loop-rx") && !text.contains("side") && !text.contains("loop-tx") && !text.contains('#'), "{name} holds a name: {text}");
     }
     let radio_keys = named.action_log.iter().map(|entry| format!("{:?}", entry.action)).collect::<String>();
-    assert!(radio_keys.contains("radio.rx.c1.gain_db"), "the log's key is the numbered one: {radio_keys}");
+    assert!(radio_keys.contains("radio.tx.c0.gain_db"), "the log's key is the numbered one: {radio_keys}");
     assert!(section(&named, "binding").to_string().contains("0:A:ubx:0#loop-rx"), "the recorded profile carries the names");
     assert!(!section(&plain, "binding").to_string().contains('#'));
     assert_ne!(section(&plain, "binding"), section(&named, "binding"));
@@ -1809,4 +1809,130 @@ fn kc_23_an_output_target_cannot_address_a_provider() {
         if violations.iter().any(|v| v.reason.starts_with("KC-23: output radio"))),
         "radio is not an output: {entry:?}"
     );
+}
+
+// ---------------------------------------------------------------- note 47 stage 3, O2: a Provider's refusal reaches the submit reply (EA-11)
+
+/// The reply of a submit: the entry and the Provider's refusals.
+fn submitted(server: &mut Server, action: SessionAction) -> (ezsdr_kernel::session::LogEntry, Vec<ezsdr_kernel::event::Event>) {
+    match ok(server.handle(Request::Submit { action }, Vec::new())) {
+        Response::Submitted { entry, refused, .. } => (entry, refused),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn dispatched_of(entry: &ezsdr_kernel::session::LogEntry) -> Vec<ezsdr_kernel::event::ActionId> {
+    match &entry.outcome {
+        Outcome::Admitted { dispatched, .. } => dispatched.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn start_rx(at: Option<TimePoint>) -> SessionAction {
+    SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_rx").unwrap(), target: resource("radio", "rx/s0"), at, params: BTreeMap::new() }
+}
+
+fn rx_stop() -> SessionAction {
+    SessionAction::Stop { target: Some(resource("radio", "rx/s0")) }
+}
+
+#[test]
+fn ea_11_a_provider_refusal_is_in_the_submit_reply_on_a_stepped_run() {
+    // The Kernel admits a value for a streaming stream; the Mock refuses it as the Action is booked, and the reply carries its event, matched by the Action's id.
+    let temp = TempDir::new("refused-stepped");
+    let (mut server, _) = connected(&temp.0);
+    let (entry, refused) = submitted(&mut server, set("radio.rx.c0.frequency_hz", Value::num(1.1e9).unwrap()));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].kind.as_str(), ezsdr_radio::kinds::COMMAND_REJECTED);
+    assert_eq!(serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap().action, Some(dispatched_of(&entry)[0]));
+    // Another Action's refusal is not in this one's reply: the next submit is accepted (a Stop) and its list is empty; a second refused value has only its own event.
+    let (stop, none) = submitted(&mut server, rx_stop());
+    assert!(matches!(stop.outcome, Outcome::Admitted { .. }));
+    assert!(none.is_empty(), "{none:?}");
+    let (accepted, none) = submitted(&mut server, set("radio.rx.c0.frequency_hz", Value::num(1.2e9).unwrap()));
+    assert!(matches!(accepted.outcome, Outcome::Admitted { .. }) && none.is_empty(), "a stopped stream stages the value: {none:?}");
+    let (_, again) = submitted(&mut server, start_rx(None));
+    assert!(again.is_empty());
+    let (second, refused) = submitted(&mut server, set("radio.rx.c0.frequency_hz", Value::num(1.3e9).unwrap()));
+    assert_eq!(refused.len(), 1, "the stream streams again: {refused:?}");
+    assert_eq!(serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap().action, Some(dispatched_of(&second)[0]));
+    finish(&mut server);
+}
+
+#[test]
+fn ea_11_a_kernel_rejection_and_a_capture_have_an_empty_refused_list() {
+    let temp = TempDir::new("refused-empty");
+    let (mut server, _) = connected_with(&temp.0, loopback());
+    let (rejected, none) = submitted(&mut server, set("radio.rx.s0.sample_rate_hz", Value::num(1.0e12).unwrap()));
+    assert!(matches!(rejected.outcome, Outcome::Rejected { .. }) && none.is_empty());
+    let (_, none) = submitted(&mut server, capture(100));
+    assert!(none.is_empty(), "a Sink's request is not a Provider refusal: {none:?}");
+    finish(&mut server);
+}
+
+#[test]
+fn ea_11_a_provider_refusal_is_in_the_submit_reply_on_a_device_paced_run() {
+    // The same on a device-paced Run: submit waits for uhd-control to book the Action (KC-21a), so its refusal exists when the reply is built.
+    let temp = TempDir::new("refused-paced");
+    let (mut server, _) = fake_session(&temp.0);
+    let (entry, refused) = submitted(&mut server, set("radio.rx.c0.frequency_hz", Value::num(1.0e9).unwrap()));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap().action, Some(dispatched_of(&entry)[0]));
+    let (_, none) = submitted(&mut server, rx_stop());
+    assert!(none.is_empty(), "{none:?}");
+    finish(&mut server);
+}
+
+#[test]
+fn ea_11_a_start_of_a_streaming_stream_is_refused_in_the_submit_reply_on_both_kinds_of_run() {
+    // RM-21: the Run begins streaming, so a `start_rx` before a `Stop` is refused by the Provider, and the reply names it by the Action's id; after a
+    // `Stop` the same start is accepted (empty list), and a second one while that start is booked is refused again.
+    for name in ["stepped", "device-paced"] {
+        let temp = TempDir::new(&format!("start-refused-{name}"));
+        let mut server = if name == "stepped" { connected(&temp.0).0 } else { fake_session(&temp.0).0 };
+        let (entry, refused) = submitted(&mut server, start_rx(None));
+        assert_eq!(refused.len(), 1, "{name}: {refused:?}");
+        let payload = serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap();
+        assert_eq!((payload.action, payload.kind.as_str()), (Some(dispatched_of(&entry)[0]), "command"), "{name}");
+        assert!(payload.reason.contains("streaming") && payload.reason.contains("Stop"), "{name}: {}", payload.reason);
+        let (_, none) = submitted(&mut server, rx_stop());
+        assert!(none.is_empty(), "{name}: {none:?}");
+        let (_, none) = submitted(&mut server, start_rx(None));
+        assert!(none.is_empty(), "{name}: {none:?}");
+        let (second, refused) = submitted(&mut server, start_rx(None));
+        assert_eq!(refused.len(), 1, "{name}: {refused:?}");
+        assert_eq!(serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap().action, Some(dispatched_of(&second)[0]), "{name}");
+        finish(&mut server);
+    }
+}
+
+#[test]
+fn ea_11_a_start_the_line_cannot_represent_is_refused_in_the_submit_reply_with_its_id() {
+    // RM-25: an `at` whose lattice instant overflows is refused at the Provider's booking; the refusal carries the Action's id, so the reply lists it
+    // (without the id the Python call would return as a success).
+    let temp = TempDir::new("start-overflow");
+    let (mut server, _) = fake_session(&temp.0);
+    let (now, _, _) = status(&mut server);
+    let (_, none) = submitted(&mut server, rx_stop());
+    assert!(none.is_empty(), "{none:?}");
+    let (entry, refused) = submitted(&mut server, start_rx(Some(TimePoint::new(now.domain(), i64::MAX))));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    let payload = serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap();
+    assert_eq!((payload.action, payload.kind.as_str()), (Some(dispatched_of(&entry)[0]), "command"));
+    assert!(payload.reason.starts_with("RM-25:"), "{}", payload.reason);
+    finish(&mut server);
+
+    // The same on a stepped Run (MockRadio): a refusal with the id, not a failed Run; the Run continues.
+    let temp = TempDir::new("start-overflow-stepped");
+    let (mut server, now) = connected(&temp.0);
+    let (_, none) = submitted(&mut server, rx_stop());
+    assert!(none.is_empty(), "{none:?}");
+    let (entry, refused) = submitted(&mut server, start_rx(Some(TimePoint::new(now.domain(), i64::MAX))));
+    assert_eq!(refused.len(), 1, "stepped: {refused:?}");
+    let payload = serde_json::from_value::<ezsdr_radio::payloads::CommandRejectedPayload>(refused[0].payload.clone()).unwrap();
+    assert_eq!((payload.action, payload.kind.as_str()), (Some(dispatched_of(&entry)[0]), "command"), "stepped");
+    assert!(payload.reason.starts_with("RM-25:"), "stepped: {}", payload.reason);
+    let (_, none) = submitted(&mut server, start_rx(None));
+    assert!(none.is_empty(), "the Run continues and takes a later start: {none:?}");
+    finish(&mut server);
 }

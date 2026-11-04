@@ -290,7 +290,7 @@ impl Rx {
                     lock(&self.core.rec).applied.push(json!({ "key": "rx_stop", "at": self.core.at(cut), "issued": self.core.at(now) }));
                     self.last_stop = Some(self.core.now() + self.core.ticks(DEVICE_LEAD_NS)).or(self.last_stop);
                 }
-                Err(error) => self.core.device_failed(None, "update_parameter", &error),
+                Err(error) => self.core.device_failed(None, "stop", &error),
             }
         }
         if self.core.is_lost() && !matches!(chain.device(), RxDevice::Lost) {
@@ -368,6 +368,20 @@ impl Rx {
             self.finish();
             return true;
         }
+        // RM-25, UR-25: the start's configure has run inside the start lead. When it left less than the declared
+        // command lead before the planned origin the start still goes out at the origin, and that is reported.
+        let completion = self.core.now();
+        let min_lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);
+        if let Some(left) = ezsdr_radio::timeline::lead_left(origin, completion, min_lead) {
+            let payload = serde_json::to_value(ezsdr_radio::payloads::StartLeadShortPayload {
+                requested: self.core.at(origin),
+                configured: self.core.at(completion),
+                lead_left_ns: self.core.ns(left),
+                min_lead_ns: self.core.description.timing.min_timed_command_lead_ns,
+            })
+            .expect("a payload");
+            self.core.emit(&self.core.stream_node(Dir::Rx, self.k), kinds::START_LEAD_SHORT, Severity::Warning, payload);
+        }
         if let Err(error) = chain.begin_result(segment, origin, self.core.device.rx_start(self.k, origin)) {
             drop(chain);
             self.refuse_segment(&next, None, error);
@@ -390,7 +404,7 @@ impl Rx {
             Err(error) => {
                 let stop = self.core.device.rx_stop(self.k, None);
                 if let Err(stop_error) = chain.stop_result(stop) {
-                    self.core.device_failed(None, "update_parameter", &stop_error);
+                    self.core.device_failed(None, "stop", &stop_error);
                 }
                 chain.finish();
                 drop(chain);
@@ -401,6 +415,7 @@ impl Rx {
         true
     }
 
+    /// The refusal names the `start_rx` Action whose configuration the device refused, as kind `command` (RM-22).
     fn refuse_segment(&mut self, next: &Planned, claim: Option<super::core::Claim>, error: crate::device::DeviceError) {
         let key = stream_key(Dir::Rx, self.k);
         let mut streams = lock(&self.core.streams);
@@ -413,7 +428,7 @@ impl Rx {
         if !refused {
             self.from = next.segment.origin.saturating_add(1);
         }
-        self.core.device_failed(None, "update_parameter", &error);
+        self.core.device_failed(next.settings.as_ref().and_then(|settings| settings.action()), "command", &error);
     }
 
     /// How many samples to ask `rx_recv` for: while a cut is pending, no more than up to
@@ -813,7 +828,7 @@ mod tests {
         let key = stream_key(Dir::Rx, 0);
         let mut streams = lock(&core.streams);
         streams.stream_mut(key).configs.insert(seq, Arc::new(ColdConfig::new(BTreeMap::new())));
-        assert!(streams.book(core, key, Item { e, seq, ready: 0, delivered: None, refused: false, kind }));
+        assert!(streams.book(core, key, Item { e, seq, ready: 0, delivered: None, refused: false, kind }, None));
     }
 
     #[test]
@@ -975,7 +990,7 @@ mod tests {
     #[test]
     fn ur_24_nonloss_rx_stop_failure_leaves_the_chain_uncertain() {
         let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
-        let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
+        let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let frozen = super::super::test_support::Frozen::on(spy.host());
         spy.set_time(core.now());
@@ -999,6 +1014,10 @@ mod tests {
         assert_eq!(spy.seen("rx_start_now"), 0, "a failed stop starts no recovery");
         assert_eq!(spy.seen("rx_recv"), 0);
         assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Uncertain, "a refused stop leaves the device fact uncertain");
+        // The refusal is labelled as a stop (RM-22), not as an update.
+        let refused: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].payload["kind"], "stop");
     }
 
     #[test]
@@ -2085,15 +2104,17 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(20), 2, Kind::Stop);
         book(&core, ms(40), 3, Kind::Start);
-        book(&core, ms(60), 4, Kind::Start);
         assert!(rx.begin(), "the partly applied configure is reported");
         assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_none());
+        // The halted stream is stopped and started again.
+        book(&core, ms(100), 4, Kind::Stop);
+        book(&core, ms(110), 5, Kind::Start);
         assert!(rx.begin());
         let calls = inner.calls();
         assert_eq!(calls.iter().filter(|call| call.starts_with("rx_open")).count(), 1, "{calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 0")).count(), 2, "the next segment configures the first channel again: {calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("apply rx 1")).count(), 1, "and the channel the device refused: {calls:?}");
-        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_some_and(|by| by == 4), "{calls:?}");
+        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configured.is_some_and(|by| by == 5), "{calls:?}");
     }
 
     #[test]
@@ -2109,8 +2130,10 @@ mod tests {
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(20), 2, Kind::Stop);
         book(&core, ms(40), 3, Kind::Start);
-        book(&core, ms(60), 4, Kind::Start);
         assert!(rx.begin(), "the failed configure is reported");
+        // The halted stream is stopped and started again.
+        book(&core, ms(100), 4, Kind::Stop);
+        book(&core, ms(110), 5, Kind::Start);
         assert!(rx.begin());
         let calls = device.calls();
         assert_eq!(calls.iter().filter(|call| call.starts_with("rx_open")).count(), 1, "the initial open is reused: {calls:?}");
@@ -2120,18 +2143,16 @@ mod tests {
     #[test]
     fn ur_25_a_refused_segment_is_booked_by_uhd_rx() {
         // RM-25: when the device refuses a segment's configuration, uhd-rx books the `start_rx` as
-        // refused itself, which halts the stream, and reads the plan made so at once: a `start_rx`
-        // that was a no-op resumes the stream. The refused segment (origin 68 ms) runs for planning
-        // until that `start_rx` cuts it, with no sample, at its origin, so the new one begins after
-        // the call in progress there (2 ms at 1 MS/s), the allowance (3 ms) and the release window
-        // (3 ms), and lead (50 ms): 126 ms.
+        // refused itself, which halts the stream, and reads the plan made so at once. The refused
+        // segment (origin 68 ms) runs for planning until the owner's Stop cuts it (90 ms), so the
+        // `start_rx` after it begins after the call in progress there (2 ms at 1 MS/s), the allowance
+        // (3 ms) and the release window (3 ms), and lead (50 ms): 148 ms.
         let refuse = crate::device::FakeFault::WrongRate { claimed: 1e6, applied: 1e6 - 1_000.0, nth: 0 };
         let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(10), 1, Kind::Stop);
         book(&core, ms(15), 2, Kind::Start);
-        book(&core, ms(20), 3, Kind::Start);
         assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(68), Some(2))]);
         rx.poll();
         rx.receive(samples(0, 10_000));
@@ -2142,15 +2163,18 @@ mod tests {
         }
         assert!(rx.begin());
         assert!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().any(|item| item.seq == 2 && item.refused));
+        // The owner learns of the refusal, stops the halted stream and starts it again.
+        book(&core, ms(90), 3, Kind::Stop);
+        book(&core, ms(95), 4, Kind::Start);
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, ["rx_start 0 0".to_owned(), format!("rx_start 0 {}", ms(126))]);
+        assert_eq!(starts, ["rx_start 0 0".to_owned(), format!("rx_start 0 {}", ms(148))]);
         let stream = rx.stream.as_ref().expect("the resumed segment");
-        assert_eq!(stream.clock.origin, ms(126), "the resumed segment begins from the refused one's cut");
+        assert_eq!(stream.clock.origin, ms(148), "the resumed segment begins from the refused one's cut");
         assert_eq!(stream.config.ratio.num(), 200);
         let streams = lock(&core.streams);
-        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(126), stream.config, 0)));
-        assert_eq!(streams.planned(stream_key(Dir::Rx, 0)).last().map(|planned| planned.segment.by), Some(Some(3)), "the command that began the resumed segment is the second Start's");
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(148), stream.config, 0)));
+        assert_eq!(streams.planned(stream_key(Dir::Rx, 0)).last().map(|planned| planned.segment.by), Some(Some(4)), "the command that began the resumed segment is the second Start's");
     }
 
     #[test]
@@ -2436,5 +2460,178 @@ mod tests {
         let mark = device.calls().len();
         assert!(matches!(core.owner_configure(Dir::Rx, 0, &next), Ok(false)));
         assert!(device.calls()[mark..].is_empty(), "{:?}", &device.calls()[mark..]);
+    }
+
+    // ------------------------------------------------------------ note 47 stage 3: the configure and the start lead (RM-25, UR-25)
+
+    /// uhd-rx with the manual clock held, one segment planned at `origin` begun by the command 1, and the owner's configure taking until
+    /// `completion` (the probe moves the Core's clock and the device's together, as a slow `apply` does). Returns what `begin` left.
+    fn begin_with_configure_ending_at(origin_ms: i64, completion_ns: i64) -> (Arc<Core>, Arc<crate::device::FakeDevice>, Vec<ezsdr_kernel::event::Event>, i64) {
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link()]);
+        let _frozen = super::super::test_support::Frozen::of(&device);
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, _clock) = rx_unopened(&core, 1);
+        let origin = core.ticks(origin_ms * 1_000_000);
+        plan(&core, &[(origin, None, Some(1))]);
+        let completion = core.ticks(completion_ns);
+        let (probe_core, probe_device) = (core.clone(), device.clone());
+        super::super::test_support::probe(&core, "apply", move |_| super::super::test_support::device_at(&probe_core, &time, &probe_device, completion));
+        assert!(rx.begin());
+        let emitted = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        (core, device, emitted, origin)
+    }
+
+    fn short_lead_events(events: &[ezsdr_kernel::event::Event]) -> Vec<&ezsdr_kernel::event::Event> {
+        events.iter().filter(|event| event.kind.as_str() == kinds::START_LEAD_SHORT).collect()
+    }
+
+    #[test]
+    fn ur_25_a_configure_that_leaves_less_than_the_declared_lead_reports_it_and_starts_at_the_origin() {
+        // The declared command lead is 5 ms (2 ms device lead and 3 ms delivery allowance). The origin is 100 ms; the configure ends 4.5 ms before it.
+        let (core, device, events, origin) = begin_with_configure_ending_at(100, 95_500_000);
+        let short = short_lead_events(&events);
+        assert_eq!(short.len(), 1, "{events:?}");
+        let payload: ezsdr_radio::payloads::StartLeadShortPayload = serde_json::from_value(short[0].payload.clone()).unwrap();
+        assert_eq!(payload.requested, core.at(origin));
+        assert_eq!(payload.configured, core.at(core.ticks(95_500_000)));
+        assert_eq!((payload.lead_left_ns, payload.min_lead_ns), (4_500_000, 5_000_000));
+        assert_eq!(short[0].source, ezsdr_kernel::event::EventSource::Node { node: core.stream_node(Dir::Rx, 0) });
+        assert_eq!(short[0].severity, Severity::Warning);
+        // The start stays at the planned origin; nothing is late.
+        assert!(device.calls().iter().any(|call| *call == format!("rx_start 0 {origin}")), "{:?}", device.calls());
+        assert!(events.iter().all(|event| event.kind.as_str() != kinds::LATE_COMMAND));
+        assert_eq!(lock(&core.streams).first_undelivered(stream_key(Dir::Rx, 0)), Some((origin, Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() }, 0)));
+    }
+
+    #[test]
+    fn ur_25_a_configure_that_leaves_the_declared_lead_whole_reports_nothing() {
+        // Exactly the declared 5 ms before the origin, 25 ms before it (inside the 50 ms start lead), and the lattice-rounded origin itself.
+        for completion in [95_000_000, 75_000_000, 0] {
+            let (core, device, events, origin) = begin_with_configure_ending_at(100, completion);
+            assert!(short_lead_events(&events).is_empty(), "completion {completion}: {events:?}");
+            assert!(device.calls().iter().any(|call| *call == format!("rx_start 0 {origin}")));
+            drop(core);
+        }
+    }
+
+    /// What the fake device produces after a configure that ended at `completion_ns` for a segment planned at 100 ms: `begin`, then the clock at the
+    /// origin, one receive turn (the fake's `LateCommand` is the owner's input, not injected), then the clock past the restart and a second turn that
+    /// delivers its first block. Returns the events, the first block's header and the restart instant `rx_restart` recorded.
+    fn begin_and_recover_from_a_missed_start(completion_ns: i64, faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Vec<ezsdr_kernel::event::Event>, ezsdr_kernel::stream::BlockHeader, i64, i64) {
+        let link = link();
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, faults, ..crate::device::FakeConfig::default() };
+        let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link.clone()]);
+        let _frozen = super::super::test_support::Frozen::of(&device);
+        super::super::test_support::device_at(&core, &time, &device, 0);
+        let (mut rx, _clock) = rx_unopened(&core, 1);
+        let origin = core.ticks(100_000_000);
+        plan(&core, &[(origin, None, Some(1))]);
+        let completion = core.ticks(completion_ns);
+        let (probe_core, probe_device, probe_time) = (core.clone(), device.clone(), time.clone());
+        super::super::test_support::probe(&core, "apply", move |_| super::super::test_support::device_at(&probe_core, &probe_time, &probe_device, completion));
+        assert!(rx.begin());
+        // The device's time reaches the origin (5 ms past it or the configure's end, so a missing late report fails the restart lookup below instead of
+        // hanging the turn), and the fake reports the timed command late.
+        super::super::test_support::device_at(&core, &time, &device, origin.max(completion) + core.ticks(5_000_000));
+        rx.turn();
+        let restart = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").expect("the owner restarted the missed start")["at"].as_i64().unwrap();
+        super::super::test_support::device_at(&core, &time, &device, restart + core.ticks(5_000_000));
+        rx.turn();
+        let header = link.receive().expect("the restarted stream's first block").0.header().clone();
+        let emitted = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+        (core, emitted, header, origin, restart)
+    }
+
+    #[test]
+    fn ur_25_a_configure_that_ends_after_the_origin_is_a_missed_start_reported_once() {
+        // The configure ends 20 ms past the origin: no pre-start report (the device's own late report owns it), and the missed start restarts once;
+        // the first block carries GAP_BEFORE with the samples between the origin and the restart, and the origin is unchanged.
+        let (core, emitted, header, origin, restart) = begin_and_recover_from_a_missed_start(120_000_000, Vec::new());
+        assert!(short_lead_events(&emitted).is_empty(), "a configure past the origin never reports a short lead: {emitted:?}");
+        let late: Vec<_> = emitted.iter().filter(|event| event.kind.as_str() == kinds::LATE_COMMAND).collect();
+        assert_eq!(late.len(), 1, "{emitted:?}");
+        let payload: LateCommandPayload = serde_json::from_value(late[0].payload.clone()).unwrap();
+        assert_eq!((payload.requested, payload.applied), (core.at(origin), core.at(restart)));
+        assert!(restart >= core.ticks(120_000_000), "the restart waits the start lead after now");
+        assert_eq!((header.flags, header.lost), (BlockFlags::GAP_BEFORE, Some(((restart - origin) / 200) as u64)));
+    }
+
+    #[test]
+    fn ur_25_a_short_lead_and_a_missed_start_are_each_reported_once() {
+        // The configure ends 4.5 ms before the origin (a short lead), and the fake reports that timed start late anyway (`LateStart`): one
+        // START_LEAD_SHORT, then one LATE_COMMAND, the restart emitting no second short lead, and the first block carries the gap to the restart.
+        let (core, emitted, header, origin, restart) = begin_and_recover_from_a_missed_start(95_500_000, vec![crate::device::FakeFault::LateStart]);
+        let order: Vec<&str> = emitted.iter().map(|event| event.kind.as_str()).filter(|kind| *kind == kinds::START_LEAD_SHORT || *kind == kinds::LATE_COMMAND).collect();
+        assert_eq!(order, [kinds::START_LEAD_SHORT, kinds::LATE_COMMAND], "{emitted:?}");
+        assert_eq!(emitted.iter().find(|event| event.kind.as_str() == kinds::LATE_COMMAND).map(|event| event.payload["requested"].clone()), Some(serde_json::to_value(core.at(origin)).unwrap()));
+        assert_eq!((header.flags, header.lost), (BlockFlags::GAP_BEFORE, Some(((restart - origin) / 200) as u64)));
+    }
+
+    #[test]
+    fn ur_25_a_refused_start_is_labelled_as_a_command_with_the_start_s_id() {
+        // The start's refusal names the `start_rx` Action by its id with kind `command`; a failed `rx_stop` is kind `stop`.
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { faults: vec![crate::device::FakeFault::RxApplyFails], ..crate::device::FakeConfig::default() }));
+        let dynamic: Arc<dyn Device> = device.clone();
+        let (core, _time, events) = super::super::test_support::rig_on(dynamic, vec![link()], 2_000);
+        let (mut rx, _) = rx_unopened(&core, 1);
+        plan(&core, &[(core.ticks(50_000_000), None, Some(1))]);
+        lock(&core.streams).stream_mut(stream_key(Dir::Rx, 0)).configs.insert(1, Arc::new(ColdConfig::of(core.description.defaults(), ezsdr_kernel::event::ActionId(41))));
+        rx.begin();
+        let refused: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(41)));
+    }
+
+    #[test]
+    fn ur_25_a_booking_the_timeline_cannot_represent_is_refused_with_the_kind_of_its_action() {
+        // RM-25: a start whose origin overflows the tick range is refused at its booking, and the refusal is of kind `command`, the booked Action's.
+        let (core, _device, _time, events) = super::super::test_support::rig_with_links(vec![link()]);
+        let (_rx, _) = rx_unopened(&core, 1);
+        let key = stream_key(Dir::Rx, 0);
+        let mut streams = lock(&core.streams);
+        assert!(streams.book(&core, key, Item { e: 0, seq: 1, ready: 0, delivered: None, refused: false, kind: Kind::Stop }, None));
+        assert!(!streams.book(&core, key, Item { e: i64::MAX, seq: 2, ready: 0, delivered: None, refused: false, kind: Kind::Start }, Some(ezsdr_kernel::event::ActionId(2))));
+        drop(streams);
+        let refused: Vec<_> = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(2)), "the booked Action's kind and id");
+        assert!(refused[0].payload["reason"].as_str().unwrap().starts_with("RM-25:"));
+    }
+
+    #[test]
+    fn ur_36_owner_configure_is_once_per_command_and_again_for_the_next() {
+        // UR-36: the configure is keyed on the command that began the segment, not on the values or the stream: the same command configures
+        // once however often the owner asks, the next command configures again with its own snapshot, and a command with the same values as
+        // the one before still configures (the device may have been retuned by a refusal's partial apply).
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
+        let dynamic: Arc<dyn Device> = device.clone();
+        let (core, _time, _events) = super::super::test_support::rig_on(dynamic, vec![link()], 2_000);
+        let (_rx, _) = rx_unopened(&core, 1);
+        plan(&core, &[(core.ticks(50_000_000), None, Some(1)), (core.ticks(150_000_000), None, Some(2)), (core.ticks(250_000_000), None, Some(3))]);
+        let snapshot = |frequency: f64| {
+            let mut config = core.description.defaults();
+            config.insert(super::super::core::key("radio.rx.c0.frequency_hz"), ezsdr_kernel::spec::Value::num(frequency).unwrap());
+            Arc::new(ColdConfig::new(config))
+        };
+        {
+            let mut streams = lock(&core.streams);
+            let stream = stream_key(Dir::Rx, 0);
+            streams.stream_mut(stream).configs.insert(1, snapshot(2.0e9));
+            streams.stream_mut(stream).configs.insert(2, snapshot(3.0e9));
+            streams.stream_mut(stream).configs.insert(3, snapshot(3.0e9));
+        }
+        let planned = lock(&core.streams).planned(stream_key(Dir::Rx, 0));
+        let applies = || device.calls().iter().filter(|call| call.starts_with("apply rx 0")).cloned().collect::<Vec<_>>();
+        assert!(core.owner_configure(Dir::Rx, 0, &planned[0]).unwrap());
+        assert_eq!(applies().len(), 1);
+        assert!(applies()[0].contains("freq=2000000000"), "{:?}", applies());
+        assert!(core.owner_configure(Dir::Rx, 0, &planned[0]).unwrap(), "the second call finds the segment configured");
+        assert_eq!(applies().len(), 1, "one configure per command: {:?}", device.calls());
+        assert!(core.owner_configure(Dir::Rx, 0, &planned[1]).unwrap());
+        assert_eq!(applies().len(), 2);
+        assert!(applies()[1].contains("freq=3000000000"), "the new command's own snapshot: {:?}", applies());
+        assert!(core.owner_configure(Dir::Rx, 0, &planned[2]).unwrap());
+        assert_eq!(applies().len(), 3, "a command with the same values configures again: {:?}", device.calls());
     }
 }

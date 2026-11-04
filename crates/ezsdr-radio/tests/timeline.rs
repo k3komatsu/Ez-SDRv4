@@ -175,11 +175,16 @@ fn rm_26_the_timeline_cases() {
     // The transmit side: a Stop ends bursts, not the clock.
     case("a transmit Stop ends no clock", &tx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop)], &[(0, None)]);
 
-    // VH-2, RM-25: a refused `start_rx` starts nothing and halts the stream until the next one.
+    // VH-2, RM-25: a refused `start_rx` starts nothing and halts the stream until a Stop and the next start (a Provider refuses a start on a halted stream).
     case(
-        "a refused start_rx starts nothing; the next start_rx does",
+        "a refused start_rx starts nothing; a Stop and the next start_rx do",
         &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(3_000 * MS, 2, 3_000 * MS, Kind::Start)],
+        &[
+            item(1_000 * MS, 0, 1_000 * MS, Kind::Stop),
+            refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)),
+            item(3_000 * MS, 2, 3_000 * MS, Kind::Stop),
+            item(3_000 * MS, 3, 3_000 * MS, Kind::Start),
+        ],
         &[(0, Some(1_000 * MS)), (3_050 * MS, None)],
     );
     case("a start_rx on a running stream does nothing", &rx, &[item(1_500 * MS, 0, 1_500 * MS, Kind::Start)], &[(0, None)]);
@@ -477,6 +482,8 @@ fn rm_25_a_refused_receive_segment_is_not_in_the_plan() {
     for items in [
         vec![item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))],
         vec![item(500 * MS, 0, 500 * MS, Kind::Stop), refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(2_000 * MS, 2, 2_000 * MS, Kind::Start)],
+        // The refused segment is cut by a later Stop (its cut falls after its origin) and the next start follows.
+        vec![item(500 * MS, 0, 500 * MS, Kind::Stop), refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(3_000 * MS, 2, 3_000 * MS, Kind::Stop), item(4_000 * MS, 3, 4_000 * MS, Kind::Start)],
     ] {
         let booked = {
             let mut line = Line::new(rx);
@@ -523,21 +530,40 @@ fn rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it() {
         assert_eq!(segments(&rx, items), expected, "{name}");
         line
     };
-    // The next start cuts the refused virtual segment at its own instant (cut 2 000 ms): the
-    // segment after it begins a lead later.
-    let line = case("Stop, S1 refused, S2", &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(2_000 * MS, 2, 2_000 * MS, Kind::Start)], &[(0, Some(500 * MS)), (2_050 * MS, None)]);
+    // A Stop cuts the refused virtual segment at its own instant (cut 2 000 ms), and the start after
+    // it begins a lead later.
+    let line = case(
+        "Stop, S1 refused, Stop, S2",
+        &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(2_000 * MS, 2, 2_000 * MS, Kind::Stop), item(2_000 * MS, 3, 2_000 * MS, Kind::Start)],
+        &[(0, Some(500 * MS)), (2_050 * MS, None)],
+    );
     assert!(line.halted(1_999 * MS) && !line.halted(2_000 * MS), "halted until S2 takes effect");
-    case("S2 inside S1's lead", &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(1_010 * MS, 2, 1_010 * MS, Kind::Start)], &[(0, Some(500 * MS)), (1_100 * MS, None)]);
+    case(
+        "S2 inside S1's lead",
+        &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(1_010 * MS, 2, 1_010 * MS, Kind::Stop), item(1_010 * MS, 3, 1_010 * MS, Kind::Start)],
+        &[(0, Some(500 * MS)), (1_100 * MS, None)],
+    );
     case(
         "two refusals",
-        &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), refused(item(2_000 * MS, 2, 2_000 * MS, Kind::Start)), item(3_000 * MS, 3, 3_000 * MS, Kind::Start)],
+        &[
+            stop,
+            refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)),
+            item(2_000 * MS, 2, 2_000 * MS, Kind::Stop),
+            refused(item(2_000 * MS, 3, 2_000 * MS, Kind::Start)),
+            item(3_000 * MS, 4, 3_000 * MS, Kind::Stop),
+            item(3_000 * MS, 5, 3_000 * MS, Kind::Start),
+        ],
         &[(0, Some(500 * MS)), (3_050 * MS, None)],
     );
-    case("S2 at S1's instant", &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(1_000 * MS, 2, 1_000 * MS, Kind::Start)], &[(0, Some(500 * MS)), (1_100 * MS, None)]);
+    case(
+        "S2 at S1's instant",
+        &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(1_000 * MS, 2, 1_000 * MS, Kind::Stop), item(1_000 * MS, 3, 1_000 * MS, Kind::Start)],
+        &[(0, Some(500 * MS)), (1_100 * MS, None)],
+    );
 }
 
-/// RM-25 (design 43), `start_rx` after a refusal: the refused segment is cut where the `start_rx`
-/// is, and the new one begins a lead (and, with a receive call, the call) after that cut.
+/// RM-25 (design 43), a Stop and `start_rx` after a refusal: the refused segment is cut where the
+/// Stop is, and the new one begins a lead (and, with a receive call, the call) after that cut.
 #[test]
 fn rm_25_a_start_after_a_refusal_begins_from_the_refused_segment_s_cut() {
     let rx = stream(Direction::Rx, 1);
@@ -551,19 +577,16 @@ fn rm_25_a_start_after_a_refusal_begins_from_the_refused_segment_s_cut() {
         assert_eq!(planned(&line), expected);
     };
     let refused_start = refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start));
-    case(&rx, &[stop, refused_start, item(1_500 * MS, 2, 1_500 * MS, Kind::Start)], &[(0, Some(500 * MS)), (1_550 * MS, None)]);
-    // A start before the refused segment's origin cuts it with no sample, at that origin.
-    case(&rx, &[stop, refused_start, item(1_010 * MS, 2, 1_010 * MS, Kind::Start)], &[(0, Some(500 * MS)), (1_100 * MS, None)]);
-    // A refused start_rx is cut by the next one.
-    case(
-        &rx,
-        &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start)), item(2_500 * MS, 2, 2_500 * MS, Kind::Start)],
-        &[(0, Some(1_000 * MS)), (2_550 * MS, None)],
-    );
+    let after = |first: &[Item], e: i64| [first, &[item(e, 2, e, Kind::Stop), item(e, 3, e, Kind::Start)]].concat();
+    case(&rx, &after(&[stop, refused_start], 1_500 * MS), &[(0, Some(500 * MS)), (1_550 * MS, None)]);
+    // A Stop before the refused segment's origin cuts it with no sample, at that origin.
+    case(&rx, &after(&[stop, refused_start], 1_010 * MS), &[(0, Some(500 * MS)), (1_100 * MS, None)]);
+    // A refused start_rx is cut by the next Stop.
+    case(&rx, &after(&[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))], 2_500 * MS), &[(0, Some(1_000 * MS)), (2_550 * MS, None)]);
     // With a receive call of 2 000 samples (2 ms) and 3 ms: the refused segment is cut at 1 500, and
     // the call it had in progress is 2 ms and the allowance 3: the new segment begins at 1 555 ms.
     let call = Stream { call: 2_000, allowance: 3 * MS, ..rx };
-    case(&call, &[stop, refused_start, item(1_500 * MS, 2, 1_500 * MS, Kind::Start)], &[(0, Some(500 * MS)), (1_555 * MS, None)]);
+    case(&call, &after(&[stop, refused_start], 1_500 * MS), &[(0, Some(500 * MS)), (1_555 * MS, None)]);
 }
 
 /// RM-25 (design 43): a booking at `b` adds no coverage before `b` plus its stream's start lead,
@@ -656,4 +679,170 @@ fn rm_25_a_pruned_line_with_a_refused_segment_plans_as_one_that_keeps_every_item
             assert_eq!(planned(&pruned), planned(&full), "prune {prune_at}, step {step}");
         }
     }
+}
+
+// ---------------------------------------------------------------- note 47 stage 3
+
+#[test]
+fn rm_21_streaming_is_the_final_state_of_the_replayed_line() {
+    // RM-21: a receive stream is streaming when its line, replayed in the order its commands take effect, ends on: a booked `start_rx` makes
+    // it so at its effective instant, and a `Stop` booked later that takes effect before that instant does not cancel it.
+    let stream = rx_stream(&[0], 1_000_000);
+    let line_of = |items: &[Item]| {
+        let mut line = Line::new(stream);
+        for item in items {
+            line.book(*item).unwrap();
+        }
+        line
+    };
+    let stop = |e, seq| item(e, seq, e, Kind::Stop);
+    let start = |e, seq, ready| item(e, seq, ready, Kind::Start);
+    assert!(Line::new(stream).streaming(), "the Run starts streaming");
+    assert!(!line_of(&[stop(100 * MS, 1)]).streaming());
+    assert!(line_of(&[stop(100 * MS, 1), start(100 * MS, 2, 100 * MS)]).streaming());
+    // A `Stop` booked after a start that takes effect later does not cancel it.
+    assert!(line_of(&[stop(100 * MS, 1), start(1_100 * MS, 2, 100 * MS), stop(200 * MS, 3)]).streaming());
+    // A `Stop` that takes effect after the start does.
+    assert!(!line_of(&[stop(100 * MS, 1), start(1_100 * MS, 2, 100 * MS), stop(1_200 * MS, 3)]).streaming());
+    // A start the device refused leaves the stream streaming (RM-25's halt).
+    assert!(line_of(&[stop(100 * MS, 1), refused(start(100 * MS, 2, 100 * MS))]).streaming());
+    // A stream that holds no channel streams nothing: a start of it is accepted and carried out by no one.
+    assert!(!Line::new(rx_stream(&[], 1_000_000)).streaming());
+    // A pruned line answers as one that keeps every item.
+    let items = [stop(100 * MS, 1), start(1_100 * MS, 2, 100 * MS), stop(200 * MS, 3)];
+    let mut pruned = line_of(&items);
+    pruned.prune(150 * MS);
+    assert_eq!(pruned.streaming(), line_of(&items).streaming());
+}
+
+#[test]
+fn rm_25_lead_left_reports_a_configure_that_left_less_than_the_declared_lead() {
+    use ezsdr_radio::timeline::lead_left;
+    let min_lead = 5 * MS;
+    let origin = 100 * MS;
+    // The boundary: exactly the declared lead is whole.
+    assert_eq!(lead_left(origin, origin - min_lead, min_lead), None);
+    assert_eq!(lead_left(origin, origin - min_lead + 1, min_lead), Some(min_lead - 1));
+    assert_eq!(lead_left(origin, origin - 1, min_lead), Some(1));
+    // At or after the origin the start is already missed, and the device's own late report owns it.
+    assert_eq!(lead_left(origin, origin, min_lead), None);
+    assert_eq!(lead_left(origin, origin + 7 * MS, min_lead), None);
+    assert_eq!(lead_left(origin, 0, min_lead), None);
+    // A configure that ended 25 ms before the origin leaves the declared 5 ms lead whole, whatever the 50 ms start lead: the threshold is
+    // the declared command lead, not the start lead.
+    assert_eq!(lead_left(origin, origin - 25 * MS, min_lead), None);
+}
+
+/// The terms the generated sequences' oracle is read with: the instants only (`Terms::ticks`).
+fn oracle_terms() -> Terms {
+    Terms { t0: 2_000 * MS, root_hz: 1_000_000_000, stream: Stream { origin: 2_000 * MS, call: 2_000, allowance: 3 * MS, ..stream(Direction::Rx, 1) } }
+}
+
+#[test]
+fn rm_26_every_class_generates_its_operations() {
+    // No class generates empty sequences, and the value class generates both outcomes of a `Set` and the orders that tell the oracle's rule from an
+    // arrival-order flag (RM-21).
+    use generator::{Class, Op};
+    let terms = oracle_terms();
+    let mut counts: std::collections::BTreeMap<Class, usize> = std::collections::BTreeMap::new();
+    let (mut accepted, mut refused, mut snapshots, mut overwritten, mut later_stop, mut future_start_then_stop) = (0, 0, 0, 0, 0, 0);
+    let (mut starts_refused, mut earlier_after_booked_ahead) = (0, 0);
+    for seed in 0..1_000 {
+        let sequence = generator::sequence(seed);
+        assert!(sequence.ops().count() > 0 || !sequence.faults.is_empty(), "seed {seed}: an empty sequence");
+        *counts.entry(sequence.class).or_default() += 1;
+        let staged = sequence.staged(&terms, |_| true);
+        let ops: Vec<&Op> = sequence.ops().map(|(_, op)| op).collect();
+        let sets = ops.iter().filter(|op| matches!(op, Op::Set { .. })).count();
+        refused += staged.refused.len();
+        starts_refused += staged.refused_starts.len();
+        accepted += sets - staged.refused.len();
+        snapshots += staged.starts.iter().filter(|(_, snapshot)| *snapshot != (None, None)).count();
+        let accepted_frequencies = ops.iter().enumerate().filter(|(i, op)| matches!(op, Op::Set { leaf: generator::Leaf::Frequency, .. }) && !staged.refused.contains(i)).count();
+        overwritten += usize::from(accepted_frequencies >= 2 && staged.starts.iter().any(|(_, snapshot)| snapshot.0.is_some()));
+        // A `Set` accepted after a second `Stop` that follows a `Stop`.
+        later_stop +=
+            usize::from(ops.iter().enumerate().any(|(i, op)| matches!(op, Op::Set { .. }) && !staged.refused.contains(&i) && ops[..i].iter().filter(|o| matches!(o, Op::Stop { .. })).count() >= 2));
+        // The orders an arrival-order flag gets wrong: a `Stop` booked after a `start_rx` that takes effect later.
+        let schedule = sequence.schedule(&terms);
+        let effective = |index: usize| schedule.iter().find(|entry| entry.event == generator::Event::Op(index)).map(|entry| (entry.e, entry.seq)).unwrap();
+        // A refused `start_rx` that would have taken effect before a start accepted earlier and not begun yet: the line would have kept the first.
+        earlier_after_booked_ahead += usize::from(staged.refused_starts.iter().any(|b| staged.starts.iter().any(|(a, _)| a < b && effective(*a).0 > effective(*b).0)));
+        future_start_then_stop +=
+            usize::from((0..ops.len()).any(|a| matches!(ops[a], Op::StartRx { .. }) && (a + 1..ops.len()).any(|b| matches!(ops[b], Op::Stop { .. }) && effective(b) < effective(a))));
+    }
+    for class in CLASSES {
+        assert!(counts.get(&class).copied().unwrap_or(0) >= 100, "{class:?}: {counts:?}");
+    }
+    assert!(accepted >= 100 && refused >= 100, "accepted {accepted}, refused {refused}");
+    assert!(snapshots >= 50, "starts that take a value other than the Run's: {snapshots}");
+    assert!(starts_refused >= 100, "start_rx commands the stream refuses as streaming: {starts_refused}");
+    assert!(earlier_after_booked_ahead >= 20, "a refused start that would have begun before an accepted, not yet begun one: {earlier_after_booked_ahead}");
+    assert!(overwritten >= 20 && later_stop >= 20, "two values before one start: {overwritten}, a value after a second Stop: {later_stop}");
+    assert!(future_start_then_stop >= 50, "a `Stop` takes effect before an earlier-booked start: {future_start_then_stop}");
+}
+
+#[test]
+fn rm_26_the_staging_oracle_agrees_with_staging() {
+    // The oracle (generator, written apart) and the pure types (`Staging` over `Line::streaming`) decide each `Set` of 1 000 sequences alike and
+    // give each start the same values.
+    use ezsdr_kernel::spec::{Key, Value};
+    use ezsdr_radio::staging::Staging;
+    use generator::{Leaf, Op};
+    let terms = oracle_terms();
+    let key = |name: &str| Key::parse(name).unwrap();
+    let mut disagreements = Vec::new();
+    for seed in 0..1_000 {
+        let sequence = generator::sequence(seed);
+        let oracle = sequence.staged(&terms, |_| true);
+        let schedule = sequence.schedule(&terms);
+        let ops: Vec<&Op> = sequence.ops().map(|(_, op)| op).collect();
+        let config =
+            [(key("radio.rx.c0.stream"), Value::from(0)), (key("radio.rx.c0.frequency_hz"), Value::num(1.0e9).unwrap()), (key("radio.rx.c0.gain_db"), Value::num(0.0).unwrap())].into_iter().collect();
+        let mut staging = Staging::new(config);
+        let mut line = Line::new(terms.stream);
+        let (mut refused, mut starts, mut refused_starts) = (Vec::new(), Vec::new(), Vec::new());
+        for (index, op) in ops.iter().enumerate() {
+            let entry = schedule.iter().find(|entry| entry.event == generator::Event::Op(index)).unwrap();
+            match op {
+                Op::Stop { .. } => {
+                    line.book(item(entry.e, entry.seq, entry.receipt, Kind::Stop)).unwrap();
+                }
+                Op::StartRx { .. } => {
+                    // RM-21: the shared decision refuses a start on a stream that is streaming, and the line is not changed by it.
+                    let Ok(snapshot) = staging.start(0, line.streaming()) else {
+                        refused_starts.push(index);
+                        continue;
+                    };
+                    line.book(item(entry.e, entry.seq, entry.receipt, Kind::Start)).unwrap();
+                    let value = |name: &str, initial: f64, leaf: Leaf| -> Option<u8> {
+                        let held = match snapshot[&key(name)] {
+                            Value::Scalar(ezsdr_kernel::spec::Scalar::Num(value)) => value.get(),
+                            ref other => panic!("{other:?}"),
+                        };
+                        (held != initial).then(|| (0..8u8).find(|v| leaf.value(*v) == held).expect("a generated value"))
+                    };
+                    // `v = 0` of a gain is the Run's own value, which the oracle calls "the value 0": compare through the number.
+                    starts.push((index, (value("radio.rx.c0.frequency_hz", 1.0e9, Leaf::Frequency), value("radio.rx.c0.gain_db", 0.0, Leaf::Gain))));
+                    continue;
+                }
+                Op::Set { leaf, v } => {
+                    let name = match leaf {
+                        Leaf::Frequency => "radio.rx.c0.frequency_hz",
+                        Leaf::Gain => "radio.rx.c0.gain_db",
+                    };
+                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, |_| line.streaming()).is_err() {
+                        refused.push(index);
+                    }
+                }
+            }
+        }
+        // The Run's own frequency is 1 GHz, the value 0 of `Leaf::Frequency`, and its gain 0 dB, the value 0 of `Leaf::Gain`: both read as `None`.
+        let normal = |snapshot: generator::Snapshot| (snapshot.0.filter(|v| *v != 0), snapshot.1.filter(|v| *v != 0));
+        let oracle_starts: Vec<_> = oracle.starts.iter().map(|(index, snapshot)| (*index, normal(*snapshot))).collect();
+        if oracle.refused != refused || oracle.refused_starts != refused_starts || oracle_starts != starts {
+            disagreements.push(format!("seed {seed}: oracle {oracle:?}, staging refused {refused:?} refused starts {refused_starts:?} starts {starts:?}"));
+        }
+    }
+    assert!(disagreements.is_empty(), "{} sequences differ, the first: {:#?}", disagreements.len(), &disagreements[..disagreements.len().min(5)]);
 }

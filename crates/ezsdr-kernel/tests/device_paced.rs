@@ -916,6 +916,44 @@ fn kg_04_no_action_is_dispatched_after_the_freeze() {
 }
 
 #[test]
+fn kg_21a_submit_cannot_complete_before_the_booking_gate_opens() {
+    // KC-21a, MA-14b: a submit returns once the Provider has finished with the Action it was dispatched, which the Provider acknowledges at its next
+    // `recv`. With the Provider holding the Action after taking it, the submit does not return; once the gate opens it does, the Provider's decision made.
+    let probe = Probe::new();
+    let hold = Arc::new((Mutex::new(false), Condvar::new()));
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).hold_after_take(hold.clone()));
+    let mut run = session(assembly, &profile_one());
+    let (done, returned) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let entry = run.submit(gain(2.0), None).unwrap();
+        done.send(()).unwrap();
+        (run, entry)
+    });
+    assert!(probe.wait_for("radio:took:UpdateParameter", Wall::from_secs(5)), "{:?}", probe.lines());
+    assert!(returned.recv_timeout(Wall::from_millis(150)).is_err(), "the submit returned while the Provider held the Action: {:?}", probe.lines());
+    *hold.0.lock().unwrap() = true;
+    hold.1.notify_all();
+    let (run, entry) = worker.join().unwrap();
+    assert!(admitted(&entry), "{entry:?}");
+    assert!(probe.lines().iter().any(|line| line == "radio:finished:UpdateParameter"), "{:?}", probe.lines());
+    let _ = manifest_of(run);
+}
+
+#[test]
+fn kg_21a_a_run_that_ends_while_submit_waits_is_no_longer_running_when_it_returns() {
+    // The wait returns early when the Run ends (paced.rs): the reply is then no evidence that the Provider accepted the Action, and a caller (the
+    // server's `Ended` rule, EA-11) must find the Run no longer Running. The Provider takes the Action and holds it; the device is lost meanwhile.
+    let probe = Probe::new();
+    let assembly = provider(paced().assembly, "radio", ThreadedProvider::new("radio", "radio", &probe).never_finishing().losing_device(Wall::from_millis(100)));
+    let mut run = session(assembly, &profile_one());
+    let entry = run.submit(gain(1.0), None).unwrap();
+    assert!(admitted(&entry), "the Action is logged admitted: {entry:?}");
+    assert!(probe.lines().iter().any(|line| line == "radio:took:UpdateParameter"));
+    assert!(!matches!(run.state(), RunState::Running {}), "{:?}", run.state());
+    let _ = manifest_of(run);
+}
+
+#[test]
 fn kg_04_a_simulation_session_does_not_wait() {
     // A stepped Provider receives its Actions in KC-21's round, after `submit`
     // dispatched them: a KC-21a wait before that round would time out and fail the Run.

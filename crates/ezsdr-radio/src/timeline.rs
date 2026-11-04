@@ -255,6 +255,17 @@ impl Line {
         state.halted
     }
 
+    /// RM-21: the stream is streaming: the line, replayed over every item booked so far in the
+    /// order they take effect, ends on. A booked `start_rx` turns it on at its effective instant,
+    /// and a later-booked `Stop` that takes effect before that instant does not cancel it; a start
+    /// the device refuses leaves it on (RM-25's halt). A stream that holds no channel streams
+    /// nothing, so it is never streaming and takes a start as accepted and carried out by no one.
+    pub fn streaming(&self) -> bool {
+        let mut state = self.start.clone();
+        state.replay(&self.stream, &sorted(&self.items)).expect("the plan made these cuts already");
+        state.on && !self.stream.config.channels.is_empty()
+    }
+
     fn replan(&self, items: &[Item]) -> Result<Vec<Segment>, TimeError> {
         let mut state = self.start.clone();
         state.replay(&self.stream, &sorted(items))?;
@@ -367,6 +378,16 @@ pub fn start_lead_ns(timing: &crate::TimingEnvelope, direction: Direction) -> i6
     }
 }
 
+/// RM-25, RM-6: the time a receive start's configure left before the planned `origin`, when that
+/// is less than the declared command lead `min_lead` (`min_timed_command_lead_ns`): the stream
+/// command can then no longer be issued with the device's own lead. A configure that ended at or
+/// after the origin has missed the start, which the device's own late report names, so it is not
+/// reported here. All in root ticks.
+pub fn lead_left(origin: i64, completion: i64, min_lead: i64) -> Option<i64> {
+    let left = origin.saturating_sub(completion);
+    (completion < origin && left < min_lead).then_some(left)
+}
+
 /// RM-25: the first lattice instant of `ratio` at or after `t`, a whole multiple of its
 /// numerator in lowest terms.
 pub fn lattice(t: i64, ratio: Rational) -> Result<i64, TimeError> {
@@ -444,9 +465,7 @@ impl State {
                     self.on = false;
                     self.cut(stream, item, false)?;
                 }
-                Kind::Start if receive && (!self.on || self.halted) => {
-                    // RM-25: the segment a refusal left running ends here, before this one begins.
-                    self.cut(stream, item, false)?;
+                Kind::Start if receive && !self.on => {
                     self.on = true;
                     self.halted = item.refused;
                     if !self.config.channels.is_empty() {

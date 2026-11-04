@@ -5,15 +5,15 @@ use std::sync::Arc;
 use ezsdr_kernel::binding::{AdmissionCheckRegistry, CheckStage, Violation};
 use ezsdr_kernel::event::{EventKind, Severity};
 use ezsdr_kernel::id::ClockDomainId;
-use ezsdr_kernel::module_api::{CompileRule, ModuleRegistry, Version};
+use ezsdr_kernel::module_api::{CompileRule, ModuleRegistry, UpdateClass, Version};
 use ezsdr_kernel::policy::{EventKindRegistry, Reaction};
 use ezsdr_kernel::spec::{CoercionPolicy, Ident, Key, Namespace, Value, ValueKind};
 use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::RfEnvelopeCheck;
 use ezsdr_radio::payloads::{
-    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload, TimeErrorCause, TimeErrorOutcome,
-    TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
+    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload, StartLeadShortPayload,
+    TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value as JsonValue, json};
@@ -83,7 +83,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
     assert!(violations[0].key.is_none());
     assert!(violations[0].requested.is_none());
 
-    assert_eq!(kinds.kinds().len(), 9);
+    assert_eq!(kinds.kinds().len(), 10);
     for declaration in &descriptor.event_kinds {
         assert_eq!(kinds.get(&declaration.kind), Some(declaration));
     }
@@ -98,20 +98,21 @@ fn rm_01_register_twice_is_refused() {
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
     assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 34);
-    assert_eq!(kinds.kinds().len(), 9);
+    assert_eq!(kinds.kinds().len(), 10);
     assert_eq!(checks.run(&envelope_section(json!({"allowed_bands": "not a list"})), &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate,).len(), 1,);
 }
 
 #[test]
 fn rm_04_the_key_table_is_exactly_the_declared_one() {
     let none = None;
+    let cold = Some(UpdateClass::Cold);
     let reject = CoercionPolicy::Reject;
     let warn = CoercionPolicy::Warn;
     let num = ValueKind::Num;
     let int = ValueKind::Int;
     let str_ = ValueKind::Str;
     let bool_ = ValueKind::Bool;
-    // Note 47 stage 2: no radio key has an update class (RM-27).
+    // Note 47 stage 3: a receive channel's frequency, gain and antenna are `cold`; every other key is classless (RM-27).
     let expected = [
         ("radio.full_duplex", bool_, false, reject, none),
         ("radio.hardware_time", bool_, false, reject, none),
@@ -129,9 +130,9 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
         ("radio.perf.wire_bytes_per_sample", int, false, reject, none),
-        ("radio.rx.c.frequency_hz", num, true, reject, none),
-        ("radio.rx.c.gain_db", num, true, warn, none),
-        ("radio.rx.c.antenna", str_, false, reject, none),
+        ("radio.rx.c.frequency_hz", num, true, reject, cold),
+        ("radio.rx.c.gain_db", num, true, warn, cold),
+        ("radio.rx.c.antenna", str_, false, reject, cold),
         ("radio.rx.c.stream", int, false, reject, none),
         ("radio.rx.c.frequency_step_hz", num, false, reject, none),
         ("radio.rx.c.gain_step_db", num, false, reject, none),
@@ -171,6 +172,7 @@ fn rm_10_the_kinds_are_registered_under_radio_with_their_defaults() {
         ("radio.CLOCK_LOST", Severity::Fatal, Reaction::Abort),
         ("radio.COMMAND_QUEUE_FULL", Severity::Error, Reaction::Abort),
         ("radio.COMMAND_REJECTED", Severity::Error, Reaction::MarkArtifact),
+        ("radio.START_LEAD_SHORT", Severity::Warning, Reaction::Continue),
     ];
     let declarations = ezsdr_radio::vocabulary().event_kinds;
     assert_eq!(declarations.len(), expected.len());
@@ -364,6 +366,15 @@ fn rm_22_payloads_round_trip() {
             "key": null,
             "requested": target_json,
             "applied": {"domain": {"node": 0, "local": 2}, "ticks": 124}
+        }),
+    );
+    assert_payload_round_trip(
+        StartLeadShortPayload { requested: target, configured: TimePoint::new(ClockDomainId::local(2), 100), lead_left_ns: 4_000_000, min_lead_ns: 5_000_000 },
+        json!({
+            "requested": target_json,
+            "configured": {"domain": {"node": 0, "local": 2}, "ticks": 100},
+            "lead_left_ns": 4_000_000,
+            "min_lead_ns": 5_000_000
         }),
     );
     assert_payload_round_trip(CommandQueueFullPayload { key: Key::parse("radio.tx.c0.frequency_hz").unwrap(), depth: 8 }, json!({"key": "radio.tx.c0.frequency_hz", "depth": 8}));

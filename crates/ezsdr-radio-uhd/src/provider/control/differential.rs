@@ -15,12 +15,12 @@ use ezsdr_kernel::spec::{Ident, Value};
 use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, Direction, DropCarry, PublishOutcome};
 use ezsdr_kernel::time::Rational;
 use ezsdr_radio::timeline::{Channels, Config, Stream, plan};
-use generator::{Class, Fault, Op, Sequence, Terms};
+use generator::{Class, Fault, Leaf, Op, Sequence, Terms};
 
 use ezsdr_kernel::id::ClockDomainId;
 
 use super::super::core::{booked_stream, key, lock};
-use super::Control;
+use super::{ColdConfig, Control};
 use crate::device::{Device, Dir, FakeConfig};
 use crate::profile::DELIVERY_ALLOWANCE_NS;
 
@@ -34,17 +34,18 @@ const HORIZON: i64 = T0 + 200_000_000;
 const MS: i64 = 200_000;
 
 /// What the booking leaves, as far as layer 2 sees it: the SampleClocks as `(origin,
-/// ended)` and how many Actions were refused.
+/// ended)`, how many Actions were refused, and the `(frequency, gain)` of channel 0 each receive segment's start took (RM-21).
 #[derive(PartialEq, Debug, Default)]
 struct Record {
     rx_clocks: Vec<(i64, Option<i64>)>,
     tx_clocks: Vec<(i64, Option<i64>)>,
     rejected: usize,
+    starts: Vec<(i64, (f64, f64))>,
 }
 
 impl Record {
     fn diverged(&self, other: &Record) -> Vec<&'static str> {
-        [("rx_clocks", self.rx_clocks == other.rx_clocks), ("tx_clocks", self.tx_clocks == other.tx_clocks), ("rejected", self.rejected == other.rejected)]
+        [("rx_clocks", self.rx_clocks == other.rx_clocks), ("tx_clocks", self.tx_clocks == other.tx_clocks), ("rejected", self.rejected == other.rejected), ("starts", self.starts == other.starts)]
             .into_iter()
             .filter(|(_, same)| !same)
             .map(|(field, _)| field)
@@ -100,10 +101,36 @@ fn loss_of(sequence: &Sequence) -> Option<i64> {
     sequence.faults.iter().filter(|(_, fault)| *fault == Fault::Loss).map(|(ns, _)| T0 + ns / 5).min()
 }
 
-/// The timeline's account of a sequence; nothing is refused, and after a loss nothing more is booked.
+/// The timeline's account of a sequence; after a loss nothing more is booked, and a `Set` or a `start_rx` while streaming is refused (the generator's
+/// oracle, RM-21).
 fn expect(sequence: &Sequence) -> Record {
+    let rx = terms(Direction::Rx);
     let clocks = |terms: &Terms| plan(&terms.stream, &sequence.items(terms)).unwrap().iter().map(|s| (s.origin, s.cut.map(|k| s.instant(k).unwrap()))).collect();
-    Record { rx_clocks: clocks(&terms(Direction::Rx)), tx_clocks: clocks(&terms(Direction::Tx)), rejected: 0 }
+    let loss = loss_of(sequence);
+    let receipts = sequence.schedule(&rx);
+    let booked = |index: usize| receipts.iter().find(|entry| entry.event == generator::Event::Op(index)).is_some_and(|entry| loss.is_none_or(|loss| entry.receipt < loss));
+    let staged = sequence.staged(&rx, booked);
+    let snapshots: BTreeMap<u64, generator::Snapshot> = staged.starts.iter().map(|(index, snapshot)| ((sequence.faults.len() + index) as u64, *snapshot)).collect();
+    let initial = initial_values();
+    let starts = plan(&rx.stream, &sequence.items(&rx))
+        .unwrap()
+        .iter()
+        .map(|segment| {
+            let snapshot = segment.by.and_then(|by| snapshots.get(&by).copied()).unwrap_or((None, None));
+            (segment.origin, (snapshot.0.map_or(initial.0, |v| Leaf::Frequency.value(v)), snapshot.1.map_or(initial.1, |v| Leaf::Gain.value(v))))
+        })
+        .collect();
+    Record { rx_clocks: clocks(&rx), tx_clocks: clocks(&terms(Direction::Tx)), rejected: staged.refused.len() + staged.refused_starts.len(), starts }
+}
+
+/// The Run's own `(frequency, gain)` of receive channel 0.
+fn initial_values() -> (f64, f64) {
+    let defaults = super::super::test_support::default_description(2_000).defaults();
+    let number = |name: &str| match defaults[&key(name)] {
+        Value::Scalar(ezsdr_kernel::spec::Scalar::Num(value)) => value.get(),
+        ref other => panic!("{other:?}"),
+    };
+    (number("radio.rx.c0.frequency_hz"), number("radio.rx.c0.gain_db"))
 }
 
 struct NoActions;
@@ -162,7 +189,7 @@ fn run(sequence: &Sequence) -> Record {
         if loss.is_some_and(|loss| loss <= now) {
             core.device_lost("VH-8: the sequence's loss");
         }
-        while let Some((_, ops)) = rounds.next_if(|(round, _)| T0 + ticks(*round) <= now) {
+        while let Some((round, ops)) = rounds.next_if(|(round, _)| T0 + ticks(*round) <= now) {
             for op in ops {
                 if !core.is_lost() {
                     // The node each Action is resolved to (KC-23); its target only names it.
@@ -171,7 +198,24 @@ fn run(sequence: &Sequence) -> Record {
                             let node = if device { core.id.clone() } else { core.rx_id.clone() };
                             (Action::Stop { target: Some(target_of(&node)) }, node)
                         }
-                        Op::StartRx => (Action::Command { target: target_of(&core.rx_id), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at: None }, core.rx_id.clone()),
+                        Op::StartRx { at } => {
+                            let at = at.map(|ns| ezsdr_kernel::time::AbsoluteDeadline::new(core.at(T0 + ticks(*round) + ticks(ns))));
+                            (Action::Command { target: target_of(&core.rx_id), verb: Ident::parse("start_rx").unwrap(), params: BTreeMap::new(), at }, core.rx_id.clone())
+                        }
+                        Op::Set { leaf, v } => {
+                            let name = match leaf {
+                                Leaf::Frequency => "radio.rx.c0.frequency_hz",
+                                Leaf::Gain => "radio.rx.c0.gain_db",
+                            };
+                            let action = Action::UpdateParameter {
+                                target: target_of(&core.id),
+                                key: key(name),
+                                value: Value::num(leaf.value(v)).unwrap(),
+                                class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                                at: None,
+                            };
+                            (action, core.id.clone())
+                        }
                     };
                     control.book(ezsdr_kernel::module_api::Dispatched::new(ezsdr_kernel::event::ActionId(1), action, Some(node)));
                 }
@@ -207,5 +251,25 @@ fn run(sequence: &Sequence) -> Record {
     let records = core.clocks.sample_clock_records();
     let clocks_of = |stream| records.iter().filter(|r| r.stream == stream).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.ended_at.map(|t| t.ticks_in(r.root).unwrap()))).collect();
     let rejected = lock(&core.rec).rejected.len();
-    Record { rx_clocks: clocks_of(core.rx_id.clone()), tx_clocks: clocks_of(core.tx_id.clone()), rejected }
+    // Each receive segment's start took a copy of the staged values at its booking (RM-21): `configs`, by the command's arrival order.
+    let streams = lock(&core.streams);
+    let initial = initial_values();
+    let held = |config: &ColdConfig, name: &str, default: f64| match config.base.get(&key(name)) {
+        Some(Value::Scalar(ezsdr_kernel::spec::Scalar::Num(value))) => value.get(),
+        _ => default,
+    };
+    let starts = streams
+        .line(booked_stream(Dir::Rx))
+        .map(|line| {
+            line.plan
+                .iter()
+                .map(|segment| match segment.by.and_then(|by| streams.stream(booked_stream(Dir::Rx)).configs.get(&by)) {
+                    Some(config) => (segment.origin, (held(config, "radio.rx.c0.frequency_hz", initial.0), held(config, "radio.rx.c0.gain_db", initial.1))),
+                    None => (segment.origin, initial),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    drop(streams);
+    Record { rx_clocks: clocks_of(core.rx_id.clone()), tx_clocks: clocks_of(core.tx_id.clone()), rejected, starts }
 }

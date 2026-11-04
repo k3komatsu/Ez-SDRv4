@@ -27,7 +27,9 @@ REQUEST_REJECTED = "sink.REQUEST_REJECTED"
 
 
 class Rejected(Error):
-    """The Kernel rejected a call, and logged it (Vision §3); ``entry`` is the log entry."""
+    """A call was rejected and logged (Vision §3); ``entry`` is the log entry. The Kernel rejected
+    it (``violations``), or admitted it and the Provider refused it: ``event`` is then that
+    ``radio.COMMAND_REJECTED`` event, matched by the Action's id (EA-11, EA-16)."""
 
     def __init__(self, entry: dict, event: Optional[dict] = None):
         outcome = entry.get("outcome", {}) if entry else {}
@@ -109,9 +111,13 @@ def _count(value: Any, rate: Fraction, most: int) -> int:
     return count
 
 
-def _admitted(entry: dict) -> dict:
+def _admitted(entry: dict, refused: Sequence[dict] = ()) -> dict:
+    """``entry``, or ``Rejected`` when the Kernel rejected it or its Provider refused one of its Actions as the
+    submit returned (``refused``, EA-11): admitted by the Kernel is not yet accepted by the radio (KC-27)."""
     if entry["outcome"]["kind"] != "admitted":
         raise Rejected(entry)
+    if refused:
+        raise Rejected(entry, refused[0])
     return entry
 
 
@@ -185,6 +191,17 @@ _PARAMS = {
     "stream": "stream",
 }
 
+# What a receive channel's frequency, gain and antenna accept (RM-21, EA-16): the type check is the client's, before sending.
+_RX_VALUES = {"frequency": "frequency_hz", "gain": "gain_db", "antenna": "antenna"}
+
+BENCH_RATE = "a receive rate cannot change during a Run until a held-open streamer is confirmed on the bench (note 47)"
+
+
+def _value(name: str, value: Any) -> Any:
+    """``value`` as the receive value ``name`` takes: a finite number for a frequency or a gain, a string for an
+    antenna (EA-16); anything else raises ``Error`` before a request is sent."""
+    return _text(value, name) if name == "antenna" else _finite(value, name)
+
 
 def _param(name: str) -> property:
     suffix = _PARAMS[name]
@@ -193,14 +210,28 @@ def _param(name: str) -> property:
         return _effective(self._session, self._radio, self._key(suffix))
 
     def set_(self: Any, value: Any) -> None:
-        # A radio value has no update class: it is asked for at connect and cannot change during the Run (RM-27, EA-16).
-        raise Error(
-            f"EA-16: {self._key(suffix)} cannot change during a Run; ask for it at connect: "
-            f"connect({self._direction}=ezsdr.Stream(...)) or connect({self._direction}=[ezsdr.Stream(...)]), "
-            f"and read the new value back from the connected Session"
-        )
+        if self._direction == "rx" and name in _RX_VALUES and isinstance(self, _Channel):
+            # RM-21: one UpdateParameter; the Provider takes it only on a stopped stream and refuses it otherwise.
+            self._session.set(self._radio, self._key(suffix), _value(name, value))
+        elif name == "sample_rate" and self._direction == "rx":
+            raise Error(f"EA-16: {self._key(suffix)}: {BENCH_RATE}; ask for it at connect: connect({self._direction}=ezsdr.Stream(..., sample_rate=...))")
+        elif self._direction == "rx" and name == "stream":
+            raise Error(f"EA-16: {self._key(suffix)} cannot change during a Run; ask for it at connect: connect(rx=ezsdr.Stream(...))")
+        else:
+            # A transmit value has no update class until note 47's stage 4: it is asked for at connect (RM-27, EA-16).
+            raise Error(
+                f"EA-16: {self._key(suffix)} cannot change during a Run yet; ask for it at connect: "
+                f"connect({self._direction}=ezsdr.Stream(...)) or connect({self._direction}=[ezsdr.Stream(...)]), "
+                f"and read the new value back from the connected Session"
+            )
 
-    return property(get, set_, doc="The effective value, as the Session asked for it at connect; it cannot be set during the Run.")
+    return property(
+        get,
+        set_,
+        doc="The effective value: what the Kernel admitted, which is not always what the radio uses (KC-27). "
+        "A receive channel's frequency, gain and antenna can be set on a stopped stream; the setter raises "
+        "``Rejected`` when the Provider refuses it (a streaming stream). The rest is set at connect.",
+    )
 
 
 def _effective(session: "Session", radio: str, key: str) -> Any:
@@ -284,15 +315,34 @@ class Rx(_Stream):
     def __init__(self, session: "Session", radio: str, number: int = 0):
         super().__init__(session, radio, "rx", number)
 
-    def start(self, at: Optional[dict] = None) -> dict:
-        """Submits ``radio.start_rx`` on this radio's receive stream with ``at``, a
-        ``TimePoint`` as ``capture`` takes — without one, the Session's current instant, so
-        that the start takes effect when the radio receives it — and raises ``Rejected`` if
-        the entry is rejected; returns the entry. A receive stream ``stop()`` ended runs again
-        from then, on a new SampleClock that begins the radio's start lead later with the
-        configuration then in force; on a running stream it changes nothing. Calls act in
-        the order made: ``stop()`` then ``start()`` restarts the stream, ``start()`` then
-        ``stop()`` leaves it stopped (RM-12, RM-21; EA-16)."""
+    def start(
+        self,
+        at: Optional[dict] = None,
+        *,
+        frequency: Optional[Mapping[Any, Any]] = None,
+        gain: Optional[Mapping[Any, Any]] = None,
+        antenna: Optional[Mapping[Any, Any]] = None,
+        sample_rate: Any = None,
+    ) -> dict:
+        """Starts this receive stream with ``at``, a ``TimePoint`` as ``capture`` takes — without one, the
+        Session's current instant, so that the start takes effect when the radio receives it — and returns
+        the ``start_rx`` entry. ``frequency``, ``gain`` and ``antenna`` are dicts keyed by logical channel
+        (a number, or a name its profile's selector gives): each value is sent as one ``UpdateParameter``
+        (all frequencies, then all gains, then all antennas, each by ascending channel number) before
+        ``start_rx``, so that the new segment begins with them (RM-21). Everything is checked before the first
+        request: a channel outside this stream, a value of the wrong type, ``sample_rate`` (which waits for
+        the bench) raise ``Error`` with nothing sent. Then each request stops the call at its first
+        ``Rejected`` (a Kernel rejection or a Provider refusal, which a streaming stream gives): nothing
+        more is sent, and the values already accepted stay staged for the next start; there is no rollback.
+        A receive stream ``stop()`` ended runs again from then, on a new SampleClock that begins the radio's
+        start lead later; a start on a streaming stream (one that has not been stopped, or whose start is booked) is
+        ``Rejected``, and so are values for it. Calls act in
+        the order made (RM-12, RM-21; EA-16)."""
+        if sample_rate is not None:
+            raise Error(f"EA-16: {self._key('sample_rate_hz')}: {BENCH_RATE}")
+        values = self._start_values({"frequency": frequency, "gain": gain, "antenna": antenna})
+        for key, value in values:
+            self._session.set(self._radio, key, value)
         action = {
             "kind": "vocabulary",
             "ns": "radio",
@@ -301,7 +351,34 @@ class Rx(_Stream):
             "at": at if at is not None else self._session._aligned or self._session.now,
             "params": {},
         }
-        return _admitted(self._session.submit(action))
+        return _admitted(*self._session._submit(action))
+
+    def _start_values(self, given: Mapping[str, Optional[Mapping[Any, Any]]]) -> List[Tuple[str, Any]]:
+        """The ``(key, value)`` pairs to send, in sending order, each checked (EA-16)."""
+        channels = self._session.radio(self._radio).rx_channels
+        members = set(self.channels)
+        pairs: List[Tuple[str, Any]] = []
+        for name, leaf in _RX_VALUES.items():
+            chosen = given[name]
+            if chosen is None:
+                continue
+            if not isinstance(chosen, Mapping):
+                raise Error(f"EA-16: {name} is a dict keyed by channel, not {type(chosen).__name__}")
+            numbered: Dict[int, Any] = {}
+            for key, value in chosen.items():
+                if isinstance(key, bool) or not isinstance(key, (int, str)) or (isinstance(key, int) and key < 0):
+                    raise Error(f"EA-16: a channel is a number or a name, not {key!r}")
+                try:
+                    number = channels[key]._number
+                except (KeyError, IndexError) as error:
+                    raise Error(f"EA-16: {self._direction} has no channel {key!r}") from error
+                if number not in members:
+                    raise Error(f"EA-16: receive channel {number} is not in stream s{self._number}, whose channels are {sorted(members)}")
+                if number in numbered:
+                    raise Error(f"EA-16: channel {number} is given twice in {name}")
+                numbered[number] = _value(name, value)
+            pairs.extend((f"radio.rx.c{number}.{leaf}", numbered[number]) for number in sorted(numbered))
+        return pairs
 
     def next_at(self, start: dict, period: int, ahead: Any = 0.05) -> dict:
         """The first instant ``start`` plus a whole number of ``period`` receive samples that
@@ -354,7 +431,7 @@ class Rx(_Stream):
             "at": at if at is not None else self._session._aligned,
             "params": {"sink.capture_samples": int(n)},
         }
-        entry = _admitted(self._session.submit(action))
+        entry = _admitted(*self._session._submit(action))
         return CaptureRequest(recorder, int(n), start, entry)
 
     def result(self, handle: CaptureRequest, timeout: Optional[float] = None) -> np.ndarray:
@@ -407,7 +484,7 @@ class Tx(_Stream):
             "at": at if at is not None else self._session._aligned,
             "params": {},
         }
-        return _admitted(self._session.submit(action, data))
+        return _admitted(*self._session._submit(action, data))
 
 
 class _Streams(list):
@@ -618,18 +695,24 @@ class Session:
     # -- actions
 
     def submit(self, action: dict, waveform: Optional[bytes] = None) -> dict:
-        """Submits any ``SessionAction`` document and returns its log entry, admitted or rejected."""
-        return self._call({"op": "submit", "action": action}, waveform or b"")[0]["entry"]
+        """Submits any ``SessionAction`` document and returns its log entry, admitted or rejected. It does not
+        raise for a refusal by the Provider; the Easy API's calls do (``Rejected``, EA-16)."""
+        return self._submit(action, waveform)[0]
+
+    def _submit(self, action: dict, waveform: Optional[bytes] = None) -> Tuple[dict, List[dict]]:
+        """The log entry and the ``radio.COMMAND_REJECTED`` events the Provider answered the submit with (EA-11)."""
+        result = self._call({"op": "submit", "action": action}, waveform or b"")[0]
+        return result["entry"], result.get("refused", [])
 
     def set(self, target: Any, key: str, value: Any) -> dict:
         """``SetParameter`` of ``target``, a ``Target`` or a resource string; raises
         ``Rejected`` if the Kernel rejects it."""
-        return _admitted(self.submit({"kind": "set_parameter", "target": _target(target), "key": key, "value": value}))
+        return _admitted(*self._submit({"kind": "set_parameter", "target": _target(target), "key": key, "value": value}))
 
     def stop(self, target: Any = None) -> dict:
         """``Stop``: of ``target``, a ``Target`` or a resource string, or of the Session
         itself when it is ``None``."""
-        return _admitted(self.submit({"kind": "stop", "target": None if target is None else _target(target)}))
+        return _admitted(*self._submit({"kind": "stop", "target": None if target is None else _target(target)}))
 
     # -- radios
 

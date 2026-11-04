@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub mod channels;
 pub mod device;
 pub mod measurement;
+pub mod staging;
 pub mod timeline;
 pub mod x3xx;
 
@@ -109,6 +110,8 @@ pub mod kinds {
     pub const COMMAND_QUEUE_FULL: &str = "radio.COMMAND_QUEUE_FULL";
     /// Provider could not carry out an admitted Action (RM-10).
     pub const COMMAND_REJECTED: &str = "radio.COMMAND_REJECTED";
+    /// A receive start's configure left less than the declared command lead before the planned origin (RM-10, RM-25).
+    pub const START_LEAD_SHORT: &str = "radio.START_LEAD_SHORT";
 }
 
 /// Why a Provider cancelled an accepted held transmit burst (RM-16).
@@ -180,11 +183,14 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
     ];
     for direction in ["rx", "tx"] {
-        // Note 47 stage 2: no radio value changes during a Run in either direction (RM-27 `—`).
+        // Note 47 stage 3: a receive channel's frequency, gain and antenna change on a stopped
+        // stream (RM-21, RM-27 `cold`); every transmit key and every rate stays classless until
+        // stage 4 and the bench.
         let declaration = |word: &str, leaf: &str| format!("radio.{direction}.{word}.{leaf}");
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_hz"), Num, true, Reject, None));
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_db"), Num, true, Warn, None));
-        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "antenna"), Str, false, Reject, None));
+        let cold = (direction == "rx").then_some(UpdateClass::Cold);
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_hz"), Num, true, Reject, cold));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_db"), Num, true, Warn, cold));
+        declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "antenna"), Str, false, Reject, cold));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "stream"), Int, false, Reject, None));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_step_hz"), Num, false, Reject, None));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_step_db"), Num, false, Reject, None));
@@ -208,6 +214,7 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
         (CLOCK_LOST, Severity::Fatal, Reaction::Abort),
         (COMMAND_QUEUE_FULL, Severity::Error, Reaction::Abort),
         (COMMAND_REJECTED, Severity::Error, Reaction::MarkArtifact),
+        (START_LEAD_SHORT, Severity::Warning, Reaction::Continue),
     ]
     .into_iter()
     .map(|(name, severity, default)| EventKindDecl { kind: EventKind::parse(name).expect("a declared radio event kind is valid"), severity, default })
@@ -775,6 +782,20 @@ pub mod payloads {
         pub applied: TimePoint,
     }
 
+    /// A receive start whose configure left less than the declared command lead before the planned origin (RM-22, RM-25).
+    #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct StartLeadShortPayload {
+        /// The planned origin of the segment, which the start keeps (RM-22).
+        pub requested: TimePoint,
+        /// The instant the start's configure ended (RM-22).
+        pub configured: TimePoint,
+        /// The time left between the end of the configure and the origin, in nanoseconds (RM-22).
+        pub lead_left_ns: i64,
+        /// The declared command lead the start fell short of, in nanoseconds (RM-6, RM-22).
+        pub min_lead_ns: i64,
+    }
+
     /// Timed-command queue exhaustion data (RM-22).
     #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
@@ -800,10 +821,11 @@ pub mod payloads {
     }
 }
 
-/// Generates the twelve committed Radio Model schemas (RM-20, RM-22, RM-24, RM-35).
+/// Generates the thirteen committed Radio Model schemas (RM-20, RM-22, RM-24, RM-35).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     use payloads::{
-        AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload, TimeErrorPayload, TxUnderflowPayload,
+        AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload, StartLeadShortPayload, TimeErrorPayload,
+        TxUnderflowPayload,
     };
 
     fn of<T: JsonSchema>() -> serde_json::Value {
@@ -817,6 +839,7 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
         ("rx_overflow_hot_payload", of::<RxOverflowHotPayload>()),
         ("time_error_payload", of::<TimeErrorPayload>()),
         ("late_command_payload", of::<LateCommandPayload>()),
+        ("start_lead_short_payload", of::<StartLeadShortPayload>()),
         ("command_queue_full_payload", of::<CommandQueueFullPayload>()),
         ("command_rejected_payload", of::<CommandRejectedPayload>()),
         ("tx_underflow_payload", of::<TxUnderflowPayload>()),

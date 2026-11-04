@@ -18,6 +18,7 @@ use ezsdr_kernel::stream::{BurstOpen, Direction, LateOutcome};
 use ezsdr_kernel::time::{AbsoluteDeadline, Duration, Rational, TimeError, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::{ClockLostPayload, ClockReference, TimeErrorCause, TimeErrorOutcome, TimeErrorPayload};
+use ezsdr_radio::staging::Staging;
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, Segment, StreamKey};
 use serde_json::json;
 
@@ -35,15 +36,27 @@ const POLL: Wall = Wall::from_millis(1);
 const CHECK: Wall = Wall::from_millis(500);
 
 /// The configuration a segment begins with, shared with its owner: the one in effect at the
-/// segment's origin (UR-12, UR-17), its rate and channel set the segment's. A Run's settings
-/// change only at its start (note 47), so this is the configuration `start_rx` snapshots.
+/// segment's origin (UR-12, UR-17), its rate and channel set the segment's. It is the
+/// configuration `start_rx` snapshots at its booking (RM-21, UR-26).
 pub(crate) struct ColdConfig {
     base: BTreeMap<Key, Value>,
+    /// The `start_rx` Action that took this snapshot, which a refusal of its configuration names.
+    action: Option<ActionId>,
 }
 
 impl ColdConfig {
+    #[cfg(test)]
     pub(crate) fn new(base: BTreeMap<Key, Value>) -> Self {
-        Self { base }
+        Self { base, action: None }
+    }
+
+    /// The snapshot of the `start_rx` `id`.
+    pub(crate) fn of(base: BTreeMap<Key, Value>, id: ActionId) -> Self {
+        Self { base, action: Some(id) }
+    }
+
+    pub(crate) fn action(&self) -> Option<ActionId> {
+        self.action
     }
 
     /// Configures the direction for `segment` (UR-12), each of its channels' own settings;
@@ -105,9 +118,9 @@ pub(crate) struct Control {
     pub actions: Arc<dyn ActionReceiver>,
     /// One sender per transmit stream (RM-29).
     pub to_tx: Vec<Sender<TxCmd>>,
-    /// The configuration at the Run's start, which a `start_rx` segment begins with (note 47: the
-    /// Run's settings change only at its start).
-    pub config: BTreeMap<Key, Value>,
+    /// The receive values of record: the Run's configuration and the values a stopped stream accepted,
+    /// which a `start_rx` snapshots at its booking (RM-21, UR-26).
+    pub staging: Staging,
     pub reference_monitored: bool,
     clock_lost: bool,
     /// When the device reads began failing without a lost-device error (Review S, S-B1);
@@ -187,7 +200,7 @@ impl Control {
                 streams.lines.insert(stream_key(Dir::Tx, k), line.clone());
             }
         }
-        Control { core, actions, to_tx, config, reference_monitored, clock_lost: false, failing_since: None, host }
+        Control { core, actions, to_tx, staging: Staging::new(config), reference_monitored, clock_lost: false, failing_since: None, host }
     }
 
     pub fn run(mut self) {
@@ -228,14 +241,20 @@ impl Control {
             Action::TxBurst { waveform, repeat, at, requested_at, late_policy, metadata, .. } => {
                 self.book_burst(id, addressed, waveform, repeat, at, requested_at, late_policy, metadata.is_empty());
             }
-            // Note 47: a radio key has no update class, so the Kernel refuses a Run-time update of one
-            // before dispatch; this is the Provider's own guard for a harness that calls it directly.
-            Action::UpdateParameter { key, .. } => {
+            // RM-21, UR-26: a receive channel's frequency, gain or antenna is staged for the next `start_rx`
+            // of its stream when the stream is not streaming, with no device call, and refused with the
+            // cause otherwise. The Kernel refuses a classless key first; its refusal here is the Provider's
+            // own guard for a harness that calls it directly.
+            Action::UpdateParameter { key, value, at, .. } => {
                 // RM-12: the node selects what the update may reach: the instance and its streams.
                 if matches!(addressed, Addressed::Other) {
-                    self.core.command_rejected(Some(id), "update_parameter", "UR-26: the target is not this device");
-                } else {
-                    self.core.command_rejected(Some(id), "update_parameter", &format!("UR-26: {key} is not updated at runtime by this Provider"));
+                    return self.core.command_rejected(Some(id), "update_parameter", "UR-26: the target is not this device");
+                }
+                let streams = lock(&self.core.streams);
+                let staged = self.staging.set(&key, value, at.is_some(), |k| streams.line(stream_key(Dir::Rx, k as usize)).is_some_and(Line::streaming));
+                drop(streams);
+                if let Err(refusal) = staged {
+                    self.core.command_rejected(Some(id), "update_parameter", &format!("UR-26: {}", refusal.reason()));
                 }
             }
             // RM-16, UR-26: a `Stop` cancels no update; on receive it cuts at its booking, on
@@ -258,7 +277,7 @@ impl Control {
                     let mut streams = lock(&self.core.streams);
                     let now = self.core.now();
                     let seq = streams.next_seq();
-                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop });
+                    streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, Some(id));
                     drop(streams);
                     if let Some(to_tx) = self.to_tx.get(k) {
                         let _ = to_tx.send(TxCmd::Stop);
@@ -270,7 +289,7 @@ impl Control {
                     for k in rx {
                         let stream = stream_key(Dir::Rx, k);
                         let seq = streams.next_seq();
-                        streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop });
+                        streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, Some(id));
                     }
                 }
             }
@@ -291,10 +310,18 @@ impl Control {
                 // start, so that nothing pruned meanwhile takes effect after them (#63).
                 let mut streams = lock(&self.core.streams);
                 let stream = stream_key(Dir::Rx, k);
+                // RM-21: a stream that is streaming (a booked start not yet begun counts) takes no start; the line is unchanged.
+                let snapshot = match self.staging.start(k as u32, streams.line(stream).is_some_and(Line::streaming)) {
+                    Ok(snapshot) => snapshot,
+                    Err(refusal) => {
+                        drop(streams);
+                        return self.core.command_rejected(Some(id), "command", &format!("UR-26: {}", refusal.reason()));
+                    }
+                };
                 let (seq, now) = (streams.next_seq(), self.core.now());
                 let e = timeline::command_instant(streams.line(stream), requested, now);
-                streams.stream_mut(stream).configs.insert(seq, Arc::new(ColdConfig::new(self.config.clone())));
-                streams.book(&self.core, stream, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start });
+                streams.stream_mut(stream).configs.insert(seq, Arc::new(ColdConfig::of(snapshot, id)));
+                streams.book(&self.core, stream, Item { e, seq, ready: now, delivered: None, refused: false, kind: Kind::Start }, Some(id));
             }
             Action::Command { .. } => self.core.command_rejected(Some(id), "command", "UR-26: not supported by this Provider"),
             Action::Emit { .. } => self.core.command_rejected(Some(id), "emit", "UR-26: not supported by this Provider"),
@@ -950,9 +977,11 @@ mod tests {
         let instant = core.ticks(300_000_000);
         let at = Some(AbsoluteDeadline::new(core.at(instant)));
         let node = core.stream_node(Dir::Rx, 0);
+        // A start of a streaming stream is refused (RM-21), so the stream is stopped first.
+        control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&node)) }, Some(node.clone())));
         crate::provider::test_support::record_locks();
         control.book(Dispatched::new(
-            ActionId(1),
+            ActionId(2),
             Action::Command { target: super::super::test_support::target_of(&node), verb: ezsdr_kernel::spec::Ident::parse(ezsdr_radio::START_RX).unwrap(), params: BTreeMap::new(), at },
             Some(node),
         ));
@@ -1121,5 +1150,261 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(lock(&core.rec).rejected.len(), 2, "both Actions were booked");
         assert!(receiver.early.lock().unwrap().is_empty(), "a recv came before the previous Action was booked: {:?}", receiver.early.lock().unwrap());
+    }
+
+    // ------------------------------------------------------------ note 47 stage 3: staging and the snapshot (RM-21, UR-26)
+
+    /// A receive-only rig with its events: uhd-control booking on the manual clock held at 0.
+    fn staging_rig() -> (Arc<Core>, Control, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>, crate::provider::test_support::Frozen) {
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let (core, device, time, events) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
+        let frozen = hold(&core, &time, &device);
+        let (control, _owner) = control(&core, &[Dir::Rx]);
+        (core, control, device, events, frozen)
+    }
+
+    fn book_value(control: &mut Control, core: &Core, id: u64, name: &str, value: Value, at: Option<i64>) {
+        let action = Action::UpdateParameter {
+            target: crate::provider::test_support::target_of(&core.id),
+            key: key(name),
+            value,
+            class: ezsdr_kernel::module_api::UpdateClass::Cold,
+            at: at.map(|ticks| AbsoluteDeadline::new(core.at(ticks))),
+        };
+        control.book(Dispatched::new(ActionId(id), action, Some(core.id.clone())));
+    }
+
+    fn book_stop(control: &mut Control, core: &Core, id: u64) {
+        control.book(Dispatched::new(ActionId(id), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.rx_id)) }, Some(core.rx_id.clone())));
+    }
+
+    fn book_start(control: &mut Control, core: &Core, id: u64, at: Option<i64>) {
+        let action = Action::Command {
+            target: crate::provider::test_support::target_of(&core.rx_id),
+            verb: ezsdr_kernel::spec::Ident::parse("start_rx").unwrap(),
+            params: BTreeMap::new(),
+            at: at.map(|ticks| AbsoluteDeadline::new(core.at(ticks))),
+        };
+        control.book(Dispatched::new(ActionId(id), action, Some(core.rx_id.clone())));
+    }
+
+    fn frequency(value: f64) -> Value {
+        Value::num(value).unwrap()
+    }
+
+    /// The frequency of each `start_rx` snapshot of receive stream 0, by the command's arrival order.
+    fn snapshots(core: &Core) -> Vec<f64> {
+        let streams = lock(&core.streams);
+        let stream = stream_key(Dir::Rx, 0);
+        let seqs: Vec<u64> = streams.line(stream).unwrap().items.iter().filter(|item| item.kind == Kind::Start).map(|item| item.seq).collect();
+        let name = key("radio.rx.c0.frequency_hz");
+        seqs.iter()
+            .map(|seq| match streams.stream(stream).configs[seq].base.get(&name) {
+                Some(Value::Scalar(Scalar::Num(value))) => value.get(),
+                other => panic!("no frequency in the snapshot: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ur_26_a_value_for_a_streaming_stream_is_refused_without_a_device_call() {
+        let (core, mut control, device, events, _frozen) = staging_rig();
+        let calls = device.calls().len();
+        book_value(&mut control, &core, 7, "radio.rx.c0.frequency_hz", frequency(2.4e9), None);
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].payload["action"], 7, "the refusal names the Action");
+        assert_eq!(refused[0].payload["kind"], "update_parameter");
+        let reason = refused[0].payload["reason"].as_str().unwrap();
+        assert!(reason.starts_with("UR-26: RM-21:") && reason.contains("streaming"), "{reason}");
+        assert_eq!(device.calls().len(), calls, "no device call");
+        assert!(lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configs.is_empty());
+        // After a `Stop` and a start the snapshot still holds the value the Run began with.
+        let begun = core.description.defaults()[&key("radio.rx.c0.frequency_hz")].clone();
+        book_stop(&mut control, &core, 8);
+        book_start(&mut control, &core, 9, None);
+        assert_eq!(snapshots(&core).len(), 1);
+        assert_eq!(
+            snapshots(&core)[0],
+            match begun {
+                Value::Scalar(Scalar::Num(value)) => value.get(),
+                other => panic!("{other:?}"),
+            }
+        );
+    }
+
+    #[test]
+    fn ur_26_the_last_value_before_a_start_is_the_one_it_snapshots_and_a_second_stop_leaves_it() {
+        let (core, mut control, _device, events, _frozen) = staging_rig();
+        book_stop(&mut control, &core, 1);
+        book_value(&mut control, &core, 2, "radio.rx.c0.frequency_hz", frequency(2.0e9), None);
+        book_value(&mut control, &core, 3, "radio.rx.c0.frequency_hz", frequency(3.0e9), None);
+        book_start(&mut control, &core, 4, None);
+        // `Stop`, a value, `Stop`, `start_rx`: the second Stop clears nothing.
+        book_stop(&mut control, &core, 5);
+        book_value(&mut control, &core, 6, "radio.rx.c0.frequency_hz", frequency(4.0e9), None);
+        book_stop(&mut control, &core, 7);
+        book_start(&mut control, &core, 8, None);
+        // `Stop`, `start_rx` with nothing staged: the previous value is the configuration of record.
+        book_stop(&mut control, &core, 9);
+        book_start(&mut control, &core, 10, None);
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty());
+        // Each snapshot is its own copy: the first is not changed by the later values.
+        assert_eq!(snapshots(&core), [3.0e9, 4.0e9, 4.0e9]);
+    }
+
+    #[test]
+    fn ur_26_a_value_after_a_booked_start_is_refused_even_before_its_instant() {
+        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book_stop(&mut control, &core, 1);
+        book_start(&mut control, &core, 2, Some(ms(50)));
+        book_value(&mut control, &core, 3, "radio.rx.c0.frequency_hz", frequency(2.4e9), None);
+        assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 1, "the start is booked, so the value would be lost silently");
+        assert_ne!(snapshots(&core)[0], 2.4e9);
+    }
+
+    #[test]
+    fn ur_26_a_stop_after_a_booked_future_start_does_not_make_the_stream_stopped() {
+        // The line replayed in the order the commands take effect: the start at +1 s still begins its segment with its snapshot, so the value after
+        // the second `Stop` is refused; an arrival-order flag would accept it while every sample came at the old value.
+        let (core, mut control, device, events, _frozen) = staging_rig();
+        let begun = snapshots_default(&core);
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book_stop(&mut control, &core, 1);
+        book_start(&mut control, &core, 2, Some(ms(1_000)));
+        book_stop(&mut control, &core, 3);
+        let calls = device.calls().len();
+        book_value(&mut control, &core, 4, "radio.rx.c0.frequency_hz", frequency(2.4e9), None);
+        assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 1);
+        assert_eq!(device.calls().len(), calls);
+        assert_eq!(snapshots(&core), [begun]);
+        // The plan: the start still begins its segment at +1 s.
+        let plan = plan_of(&core, Dir::Rx);
+        assert!(
+            plan.iter().any(|planned| planned.segment.by == Some(2) && planned.segment.origin >= ms(1_000)),
+            "{:?}",
+            plan.iter().map(|planned| (planned.segment.origin, planned.segment.by)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ur_26_a_start_of_a_streaming_stream_is_refused_with_the_start_s_id_and_leaves_the_line_unchanged() {
+        // RM-21: the Run begins streaming, so a first `start_rx` is refused, naming the Action with kind `command`; after a `Stop` a start booked ahead
+        // (+1 s) counts as streaming too, so a second one at +200 ms is refused and the line keeps the first (never revised to an earlier origin).
+        let (core, mut control, _device, events, _frozen) = staging_rig();
+        let ms = |n: i64| core.ticks(n * 1_000_000);
+        book_start(&mut control, &core, 5, None);
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(5)));
+        let reason = refused[0].payload["reason"].as_str().unwrap();
+        assert!(reason.starts_with("UR-26: RM-21:") && reason.contains("streaming") && reason.contains("Stop"), "{reason}");
+        assert!(snapshots(&core).is_empty() && lock(&core.streams).stream(stream_key(Dir::Rx, 0)).configs.is_empty(), "a refused start leaves no snapshot");
+        book_stop(&mut control, &core, 6);
+        book_start(&mut control, &core, 7, Some(ms(1_000)));
+        book_start(&mut control, &core, 8, Some(ms(200)));
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].payload["action"], 8);
+        let starts: Vec<u64> = lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().filter(|item| item.kind == Kind::Start).map(|item| item.seq).collect();
+        assert_eq!(starts.len(), 1, "the line holds the first start alone");
+        let plan = plan_of(&core, Dir::Rx);
+        assert_eq!(plan.iter().filter_map(|planned| planned.segment.by).collect::<Vec<_>>(), starts, "only the first start is in the plan");
+        assert!(plan.iter().any(|planned| planned.segment.by == Some(starts[0]) && planned.segment.origin >= ms(1_000)));
+        assert_eq!(snapshots(&core).len(), 1);
+    }
+
+    #[test]
+    fn ur_25_a_booking_the_line_cannot_represent_is_refused_with_the_start_s_id() {
+        // RM-25: a start whose origin overflows the tick range is refused at its booking and the refusal names the Action, so the submit reply (EA-11)
+        // can match it; the line keeps no item for it.
+        let (core, mut control, _device, events, _frozen) = staging_rig();
+        book_stop(&mut control, &core, 1);
+        book_start(&mut control, &core, 2, Some(i64::MAX));
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("command"), &serde_json::json!(2)));
+        assert!(refused[0].payload["reason"].as_str().unwrap().starts_with("RM-25:"));
+        assert_eq!(lock(&core.streams).line(stream_key(Dir::Rx, 0)).unwrap().items.iter().filter(|item| item.kind == Kind::Start).count(), 0);
+    }
+
+    fn snapshots_default(core: &Core) -> f64 {
+        match core.description.defaults()[&key("radio.rx.c0.frequency_hz")] {
+            Value::Scalar(Scalar::Num(value)) => value.get(),
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ur_26_a_staged_value_with_an_instant_or_another_target_is_refused_and_the_instance_and_its_streams_are_accepted() {
+        let (core, mut control, _device, events, _frozen) = staging_rig();
+        book_stop(&mut control, &core, 1);
+        book_value(&mut control, &core, 2, "radio.rx.c0.frequency_hz", frequency(2.0e9), Some(core.ticks(5_000_000)));
+        let other = ResourceId::parse("elsewhere").unwrap();
+        control.book(Dispatched::new(
+            ActionId(3),
+            Action::UpdateParameter {
+                target: crate::provider::test_support::target_of(&other),
+                key: key("radio.rx.c0.frequency_hz"),
+                value: frequency(2.0e9),
+                class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                at: None,
+            },
+            Some(other),
+        ));
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 2);
+        assert!(refused[0].payload["reason"].as_str().unwrap().contains("instant"));
+        assert_eq!(refused[1].payload["reason"], "UR-26: the target is not this device");
+        // The instance's node and a stream's node both accept (RM-12: the key decides what changes).
+        for (id, node) in [(4, core.id.clone()), (5, core.rx_id.clone())] {
+            control.book(Dispatched::new(
+                ActionId(id),
+                Action::UpdateParameter {
+                    target: crate::provider::test_support::target_of(&node),
+                    key: key("radio.rx.c0.frequency_hz"),
+                    value: frequency(2.0e9 + id as f64),
+                    class: ezsdr_kernel::module_api::UpdateClass::Cold,
+                    at: None,
+                },
+                Some(node),
+            ));
+        }
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty());
+        book_start(&mut control, &core, 6, None);
+        assert_eq!(snapshots(&core), [2.0e9 + 5.0], "the later value, the refused ones kept nothing");
+    }
+
+    #[test]
+    fn ur_26_a_peer_stream_s_state_does_not_matter_and_an_instance_stop_stops_both() {
+        // S5 on the layout (two receive streams, c0 in stream 0 and c1 in stream 1): after a `Stop` of stream 0 only c0's value is accepted, and
+        // stream 1's line takes nothing; a `Stop` of the instance makes c1's value acceptable as well.
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
+        let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>], vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
+        let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), layout_description());
+        let _frozen = hold(&core, &time, &device);
+        let mut config = core.description.defaults();
+        config.insert(key("radio.rx.c0.stream"), Value::from(0));
+        config.insert(key("radio.rx.c1.stream"), Value::from(1));
+        let start = Start { t0: 0, rx: vec![Some((Channels::first(0).with(0), 200)), Some((Channels::first(0).with(1), 200))], tx: vec![None; core.description.stream_count(Dir::Tx)] };
+        let (to_tx, _tx) = channel();
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
+        let calls = device.calls().len();
+        control.book(Dispatched::new(
+            ActionId(1),
+            Action::Stop { target: Some(crate::provider::test_support::target_of(&ResourceId::parse("usrp/rx/s0").unwrap())) },
+            Some(ResourceId::parse("usrp/rx/s0").unwrap()),
+        ));
+        book_value(&mut control, &core, 2, "radio.rx.c0.frequency_hz", frequency(2.0e9), None);
+        book_value(&mut control, &core, 3, "radio.rx.c1.frequency_hz", frequency(2.0e9), None);
+        let refused = events_of(&events, kinds::COMMAND_REJECTED);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].payload["action"], 3, "stream 1 is streaming");
+        assert_eq!(lock(&core.streams).line(stream_key(Dir::Rx, 1)).unwrap().items.len(), 0, "stream 1's line took nothing");
+        assert_eq!(device.calls().len(), calls, "no device call for either value");
+        control.book(Dispatched::new(ActionId(4), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.id)) }, Some(core.id.clone())));
+        book_value(&mut control, &core, 5, "radio.rx.c1.frequency_hz", frequency(2.0e9), None);
+        assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "the instance's Stop stopped stream 1 too");
     }
 }

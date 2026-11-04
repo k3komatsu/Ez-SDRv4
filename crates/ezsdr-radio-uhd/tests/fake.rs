@@ -2484,7 +2484,7 @@ fn ur_26_an_unnumbered_key_is_refused_at_runtime() {
     direct.update("radio.rx.antenna", Value::from("TX/RX"), Cold, None);
     direct.until("the unknown-key refusal", |direct| !direct.of("radio.COMMAND_REJECTED").is_empty());
     let rejected = direct.of("radio.COMMAND_REJECTED");
-    assert_eq!(rejection_reason(&rejected), "UR-26: radio.rx.antenna is not updated at runtime by this Provider");
+    assert_eq!(rejection_reason(&rejected), "UR-26: RM-21: only a receive channel's frequency, gain or antenna is staged");
     assert!(!direct.device.calls()[mark..].iter().any(|call| call.starts_with("apply")), "{:?}", direct.device.calls());
     let _ = direct.finish();
 }
@@ -5821,6 +5821,9 @@ fn ur_25_a_successful_start_clears_a_later_stream_s_halt() {
     let (mut direct, link0) = refused_second_start_of_stream_1();
     assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 1, "{:?}", direct.device.calls());
     let starts = calls(&direct.device, "rx_start 1").len();
+    // RM-21: the halted stream is still streaming, so a start needs a `Stop` first.
+    direct.stop_at("usrp/rx/s1");
+    direct.settle(Wall::from_millis(60));
     direct.start_rx_at("usrp/rx/s1", None);
     direct.settle(Wall::from_millis(300));
     let log = direct.device.calls();
@@ -5831,7 +5834,10 @@ fn ur_25_a_successful_start_clears_a_later_stream_s_halt() {
     assert_eq!(s1.len(), 2, "{records:?}");
     assert!(s1.iter().any(|record| record.ended_at.is_some()) && s1.iter().any(|record| record.ended_at.is_none()), "{records:?}");
     assert!(link0.receive().is_some(), "stream 0 delivers throughout");
-    let _ = direct.finish();
+    // RM-25: the refusal is booked on stream 1's own line, so its segment is left out of stream 1's plan (the first and the third segments remain).
+    let instance = direct.finish();
+    let plan = plan_row(&section_of(&instance, "timing"));
+    assert_eq!(plan_stream(&plan, "rx", 1).len(), 2, "{plan}");
 }
 
 fn bench_link(latency_ms: u64) -> FakeConfig {
@@ -7875,4 +7881,151 @@ fn ur_23_g3_a_latched_guard_refuses_the_priority_call() {
     let error = guard.raise_thread_priority().unwrap_err();
     assert!(error.message.starts_with("latched ("), "{error:?}");
     assert!(device.raisers().is_empty());
+}
+
+// ---------------------------------------------------------------- note 47 stage 3: receive values on a stopped stream (RM-21, UR-26)
+
+fn receive_applies(direct: &Direct) -> Vec<String> {
+    receive_applies_of(&direct.device)
+}
+
+#[test]
+fn ur_26_a_value_set_on_a_stopped_stream_reaches_the_device_before_the_next_start() {
+    // S1: the staged value is applied once, by the owner, between the old segment's `rx_stop` and the new `rx_start`; nothing is applied when it is booked.
+    let (port, _link) = attached_reading("rx0");
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![port], json!({}));
+    direct.settle(Wall::from_millis(30));
+    assert_eq!(receive_applies(&direct).len(), 1, "the first segment is configured by `prepare`: {:?}", direct.device.calls());
+    assert!(receive_applies(&direct)[0].contains("freq=1000000000"), "{:?}", receive_applies(&direct));
+    direct.stop_at("usrp/rx/s0");
+    direct.until("the receive stop", |direct| !calls(&direct.device, "rx_stop 0").is_empty());
+    direct.update("radio.rx.c0.frequency_hz", Value::num(2.4e9).unwrap(), ezsdr_kernel::module_api::UpdateClass::Cold, None);
+    direct.settle(Wall::from_millis(30));
+    assert_eq!(receive_applies(&direct).len(), 1, "a staged value is not applied when it is booked: {:?}", direct.device.calls());
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.until("the second start", |direct| calls(&direct.device, "rx_start 0").len() == 2);
+    assert!(direct.of("radio.COMMAND_REJECTED").is_empty());
+    let log = direct.device.calls();
+    let applies = receive_applies(&direct);
+    assert_eq!(applies.len(), 2, "{log:?}");
+    assert!(applies[1].contains("freq=2400000000"), "{applies:?}");
+    let stop = log.iter().position(|call| call.starts_with("rx_stop 0")).unwrap();
+    let apply = log.iter().rposition(|call| call.starts_with("apply rx 0")).unwrap();
+    let start = log.iter().rposition(|call| call.starts_with("rx_start 0")).unwrap();
+    assert!(stop < apply && apply < start, "rx_stop, apply, rx_start in that order: {log:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_value_for_a_streaming_stream_is_refused_and_the_next_start_uses_the_old_one() {
+    // S2: one `COMMAND_REJECTED` naming the Action, no device call for it, and the later start applies what the stream had.
+    let (port, _link) = attached_reading("rx0");
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![port], json!({}));
+    direct.settle(Wall::from_millis(30));
+    let before = direct.device.calls().len();
+    direct.update("radio.rx.c0.frequency_hz", Value::num(2.4e9).unwrap(), ezsdr_kernel::module_api::UpdateClass::Cold, None);
+    direct.until("the refusal", |direct| !direct.of("radio.COMMAND_REJECTED").is_empty());
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].payload["action"], 1);
+    assert!(rejection_reason(&rejected).starts_with("UR-26: RM-21:") && rejection_reason(&rejected).contains("streaming"), "{rejected:?}");
+    assert!(!direct.device.calls()[before..].iter().any(|call| call.starts_with("apply")), "{:?}", direct.device.calls());
+    direct.stop_at("usrp/rx/s0");
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.until("the second start", |direct| calls(&direct.device, "rx_start 0").len() == 2);
+    assert!(receive_applies(&direct)[1].contains("freq=1000000000"), "the refused value was not used: {:?}", receive_applies(&direct));
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_stopped_stream_s_value_leaves_a_running_peer_undisturbed() {
+    // S5: stream 0 stopped (its value accepted, its start applies it), stream 1 streaming (its value refused): stream 1 gets no stop, no apply, no restart.
+    let (r0, _l0) = attached_reading("rx0");
+    let (r1, _l1) = attached_reading("rx1");
+    let mut direct = Direct::build(FakeConfig::default(), &rx_two(), vec![r0, r1], layout_selector());
+    direct.settle(Wall::from_millis(30));
+    direct.stop_at("usrp/rx/s0");
+    direct.update("radio.rx.c0.frequency_hz", Value::num(2.4e9).unwrap(), ezsdr_kernel::module_api::UpdateClass::Cold, None);
+    direct.update("radio.rx.c1.frequency_hz", Value::num(2.4e9).unwrap(), ezsdr_kernel::module_api::UpdateClass::Cold, None);
+    direct.start_rx_at("usrp/rx/s0", None);
+    direct.until("stream 0's restart", |direct| calls(&direct.device, "rx_start 0").len() == 2);
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0].payload["action"], 3, "stream 1's value, the third Action");
+    let log = direct.device.calls();
+    assert_eq!(calls(&direct.device, "apply rx 1").len(), 1, "stream 1 was configured by `prepare` alone: {log:?}");
+    assert_eq!(calls(&direct.device, "rx_stop 1").len(), 0, "{log:?}");
+    assert_eq!(calls(&direct.device, "rx_start 1").len(), 1, "{log:?}");
+    assert!(calls(&direct.device, "apply rx 0")[1].contains("freq=2400000000"), "{log:?}");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_25_a_refused_start_is_fixed_by_a_stop_a_new_value_and_a_start() {
+    // S6 and the label of the start's refusal: the device refuses the second start of stream 1; the refusal is `COMMAND_REJECTED` of kind `command`
+    // naming the `start_rx` Action (the second Action). The stream still counts as streaming, so a corrected value is refused until a `Stop`; then
+    // the value is staged and the next start applies it.
+    let (mut direct, _link0) = refused_second_start_of_stream_1();
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!((rejected[0].payload["kind"].as_str(), &rejected[0].payload["action"]), (Some("command"), &serde_json::json!(2)), "{rejected:?}");
+    direct.update("radio.rx.c1.frequency_hz", Value::num(2.4e9).unwrap(), ezsdr_kernel::module_api::UpdateClass::Cold, None);
+    direct.until("the value's refusal", |direct| direct.of("radio.COMMAND_REJECTED").len() == 2);
+    assert!(rejection_reason(&direct.of("radio.COMMAND_REJECTED")[1..]).contains("streaming"));
+    direct.stop_at("usrp/rx/s1");
+    direct.update("radio.rx.c1.frequency_hz", Value::num(2.4e9).unwrap(), ezsdr_kernel::module_api::UpdateClass::Cold, None);
+    direct.start_rx_at("usrp/rx/s1", None);
+    direct.until("the corrected start", |direct| calls(&direct.device, "rx_start 1").len() == 2);
+    assert_eq!(direct.of("radio.COMMAND_REJECTED").len(), 2, "the corrected value was staged");
+    assert!(calls(&direct.device, "apply rx 1").last().unwrap().contains("freq=2400000000"), "{:?}", direct.device.calls());
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_start_booked_ahead_is_not_revised_by_an_earlier_one_and_still_delivers() {
+    // RM-21, UR-26 (Sol's sequence): stop, `start_rx` at +150 ms (uhd-rx queues it), then `start_rx` at +60 ms before that origin. The second is
+    // refused as the stream already counts as streaming, so the first is neither replaced nor skipped: one restart at its origin, and samples on the new clock.
+    let (port, link) = attached_reading("rx0");
+    let mut direct = Direct::build(FakeConfig::default(), &[], vec![port], json!({}));
+    direct.settle(Wall::from_millis(30));
+    direct.stop_at("usrp/rx/s0");
+    direct.until("the receive stop", |direct| !calls(&direct.device, "rx_stop 0").is_empty());
+    let now = direct.now();
+    direct.start_rx_at("usrp/rx/s0", Some(now + ms(150)));
+    direct.until("the first start is queued", |direct| calls(&direct.device, "rx_start 0").len() == 2);
+    direct.start_rx_at("usrp/rx/s0", Some(now + ms(60)));
+    direct.until("the refusal", |direct| !direct.of("radio.COMMAND_REJECTED").is_empty());
+    let rejected = direct.of("radio.COMMAND_REJECTED");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!((rejected[0].payload["kind"].as_str(), &rejected[0].payload["action"]), (Some("command"), &serde_json::json!(3)), "the second start, the third Action");
+    assert!(rejection_reason(&rejected).contains("streaming"), "{rejected:?}");
+    direct.settle(Wall::from_millis(400));
+    assert_eq!(calls(&direct.device, "rx_start 0").len(), 2, "one restart: {:?}", direct.device.calls());
+    let rx: Vec<_> = direct.clocks.sample_clock_records().into_iter().filter(|record| record.stream.path() == "usrp/rx/s0").collect();
+    assert_eq!(rx.len(), 2, "{rx:?}");
+    assert!(rx[1].ended_at.is_none() && rx[1].origin.ticks_in(rx[1].root).unwrap() >= now + ms(150), "the new clock begins at the first start's origin: {rx:?}");
+    let headers: Vec<_> = std::iter::from_fn(|| link.receive()).map(|(block, _)| block.header().clone()).collect();
+    assert!(headers.iter().any(|header| header.first_sample_time.domain() == rx[1].domain), "samples arrive on the new clock");
+    let _ = direct.finish();
+}
+
+#[test]
+fn ur_26_a_scheduled_receive_value_is_refused_by_the_provider_for_its_instant() {
+    // A Spec's schedule of a receive value passes validate (`cold`) and carries an instant, which a staged value never has (RM-21): refused at run time.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let mut spec = receive_spec(1, 1e6, 1e9, Some(2_000));
+    spec["schedule"] = json!([{
+        "at": { "clock": "radio", "offset_ticks": 1_000 },
+        "action": { "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(), "key": "radio.rx.c0.frequency_hz", "value": 2.4e9 }
+    }]);
+    let manifest = captured(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::new()));
+    let refused = events_of(&manifest, "radio.COMMAND_REJECTED");
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].payload["reason"].as_str().unwrap().contains("instant"), "{refused:?}");
+    assert_eq!(receive_applies_of(&device).len(), 1, "the value was not applied: {:?}", device.calls());
+}
+
+fn receive_applies_of(device: &FakeDevice) -> Vec<String> {
+    calls(device, "apply rx")
 }

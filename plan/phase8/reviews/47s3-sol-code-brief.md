@@ -1,0 +1,16 @@
+# Sol code review: note 47 stage 3 (receive values change again, on a stopped stream)
+
+You are the independent reviewer (read-only). Repository `~/local_work/Ez-SDRv4`, HEAD `d8f23af`; the change is the **uncommitted working tree** (`git diff HEAD` plus untracked files, e.g. `crates/ezsdr-radio/src/staging.rs`). Read `AGENTS.md` §2, §9 (review, maintainability, counterexamples). Do not edit, format, commit or run mutation tools; if you build, from a copy outside the tree with `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`.
+
+- Design: `plan/phase8/47-no-change-while-streaming.md` (§2.1 items 2 and 4, §2.2–§2.5, §3, §4 stage 3).
+- In `~/.cache/ezsdr-fixes/2026-11-04-n46/`: `brief-s3.md`, `brief-s3-impl.md`; your plan review `sol-s3-plan-final.md` and its dispositions `dispositions-s3-plan.md`; rulings `rulings-s3-plan.md`, `rulings-s3-plan2.md` (ruling 7: the origin is fixed at booking; `START_LEAD_SHORT` when the configure leaves less than `min_timed_command_lead_ns`); the re-check `opus-s3-plan2-recheck.md` and `dispositions-s3-plan2.md` (D2: streaming = the line's final state after replay); the final plan `test-plan-s3.md` rev 3, whose §10 lists the implementer's deviations.
+
+First write your own failure scenarios from the step's purpose and the code; then review:
+1. **Correctness end to end**: a receive value is used by the next segment exactly when its stream is not streaming (after replay), refused otherwise with the action id; staging across `Stop`, loss, `Provider::stop`, refused and cancelled starts, two streams; the snapshot at booking; MockRadio applies at the segment's origin; the UHD owner's configure-once; `START_LEAD_SHORT` per ruling 7 (and nothing silent when the configure eats the lead); labels.
+2. **The implementer's open question** (plan §10, deviation 2): uhd-control's differential layer 3 strips `at` from starts because "a later booking can revise a start to an earlier origin than one uhd-rx already queued (`rx_start .. not ahead of its origin`)". Is this reachable through surviving Actions on the real Provider? Give the minimal sequence and outcome; decide defect (fix now) or Ceiling.
+3. **O2**: `Submitted.refused` gathers exactly the Provider refusals of the submitted Action that exist when submit returns, for the device-paced Run and the stepped MockRadio Session; the Ended rule; Python `Rejected` and `rx.start` stopping at the first refusal.
+4. **Tests' power**: each plan sequence has its test observing what the plan says; rows `N47S3-*` and the retargeted P521, P1387–P1389, P1392–P1395 break what they claim; deviations 1 (receive start-lead bench group not restored), 3 (server twin of the interrupted-wait test not built), 4 (generator `Set` only on stream 0 c0), 5 (no parity test, no control loss test) — which leave a real gap?
+5. **Specs and limits** 07, 09, 16, 18, KNOWN_LIMITATIONS; accepted-spec format; the schema for `START_LEAD_SHORT` and the reply.
+6. **Maintainability** (AGENTS §9): one decision for "streaming" (no second record), `Staging` used by both Providers without copies, leftovers.
+
+Report in your final message: verdict (PASS / NEEDS CHANGES), findings P1/P2/P3 with path:line, a minimal operation sequence and the observable wrong outcome for each P1/P2, a suggested fix. At most 120 lines.
