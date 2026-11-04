@@ -123,6 +123,21 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 5. **重なりの拒否と repeat の差し替え**（両 Provider，parity，Python．`python/tests/test_easy_api.py:623-630` の「repeat を二度呼ぶ」試験も新しい規則に）．
 6. **使われなくなった共有の仕組みの整理**（`timed_instant`，`covering`，queue と release の能力，schema）．
 
+**段階 2 以降の組み替え（orchestrator 2026-11-04．Sol が確かめて推した：`reviews/47s2-sol-restage.md`）**：段階 2 の試験計画で，組の変更をきっかけに使っていた残す道のテストが約 113 本，殺し役を失う mutation の行が 63 行あると分かった（`reviews/47s2-*`）．その多くは，段階 3・4 で消える仕組み（流れている stream や空の stream への `cold` の変更が開く from none，時刻つきの release，restore，instance の floor）を守っている．消える仕組みのためにテストを作り直すのは無駄なので，**消す段階を先に，足す段階を後に**並べ替える：
+- **段階 2（新）：Run の中の radio の値の変更をいったんすべてやめる**．radio の key から update class を外す（RM-27 の class をすべて `—`）．Kernel の admission が Run の中の `SetParameter`／`UpdateParameter` と Spec の `schedule` の radio の更新を拒む（RS-52，SB-16）ので，Provider の中の変更の道（move，from none，release，時刻つきの release と受け渡し，restore，live `cold`，instance の floor，`hardware_timed` の queue）は届かなくなり，テストごと消す．受信は 2a，送信は 2b に分けてよい（どちらも tree は緑）．残すもの：初期の組と値（`connect`・Spec の `requires`），Stop と `start_rx`，burst，ちょうど続く burst，repeat，送信の recovery（F8），loss，Provider::stop，T3．§58 の 16（Run の中の envelope の外の値の拒否）は，この間は class のない key の拒否として試し，段階 3 で envelope の拒否に戻す．RS-19 の floor（J33）は Kernel の試験の Provider で origin が未来の clock を作って守る．
+- **段階 3：受信の値を止めた stream に戻す**（`cold` の class を戻し，staging と `start_rx` の snapshot）．
+- **段階 4：送信の値を空の stream に戻す**（設定を伴う burst，clock の規則，拒否の後の再試行）．
+- 段階 5・6 は変えない．この間，Run の中で値を変える機能はなくなる（利用者はまだいない）．
+- **Sol の確認で足したこと**：
+  - 届かなくなるのは Provider の更新の入口だけ．`start_rx` の設定の実行，segment の refusal，Stop と cut，recovery，clock の操作は残る．
+  - **消しても残す部品**：`RxChain` の segment の識別と寿命，cut と Stop，uncertain／lost，最初の sample の遷移，owner の設定の snapshot と refusal の halt（claim の返却，他の stream に波及しない），`Core::configure` と read-back の refusal（rate と antenna，rate の集合の比較），受信の開始の lead の規則（`timeline.rs` の cut・旧 rate の受信の呼び出し・余裕・lead・lattice）と開始の逃しの再試行，clock の登録と終わりの順，claim と read の排他，generation と report の対応，T3，F8，MockRadio の channel の値の履歴（遅れた sample は過去の値で計算する）．
+  - **設定の完了の `ready` 時刻**は今は消える `cold` の道の中にある．実装は一時なくなってよいが，要件と試験の筋書きは段階 3 に残す（設定の時間が開始の lead を黙って食わないため）．
+  - 2a（受信）と 2b（送信）は別々に緑にできる．方向に共通の仕組み（`book_cold`，from none，時刻つきの queue と floor，move の入れ物，profile の項）は，最後の呼び出し元が消える 2b で消す．
+  - §58 の 16 は，この間は class のない key の拒否（拒まれ，log に残り，dispatch されない）として試す．envelope の検査は Run の始めの値で試し続け，Run の中の envelope の拒否は段階 3・4 で戻す（一時の穴として記録する）．
+  - RS-19 の floor は Kernel の `SteppedProvider.with_arm_origin_after` と J32 がすでに守っている．J33 は J32 にまとめる．
+  - H4 の制御の dispatch の代わりの測定は，時刻つきの gain の release を測っている．test の Vocabulary の key は正直な代わりにならないので，H4 のその観測は退け，送信の余裕と負荷の測定だけを残して範囲を書き直す．Run の中の rate の変更を前提にした測定の campaign も，この間は止めて段階 3・4 で設計し直す．
+  - `KNOWN_LIMITATIONS.md` の該当の項（時刻つきの retune，組）を同じ変更で直す．
+
 実機（報告 E4 §6 の 3 の 3 番目）は段階 3 と 4 の rate の受け入れの条件として，その段階の中か直後に置く（Sol 12）．確かめること：新しい rate，旧 burst の末尾，時刻，最初の sample，read-back，streamer を作り直さないこと．
 
 ## 5. 消える範囲（Sol の洗い出し）
@@ -159,3 +174,4 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 | 2026-11-04 | 第 3 版：Sol の再レビューの 5 件（connect の初期の要求の契約と Kernel の Session の入口，組の map の意味，複合の呼び出しの止め方，読み返す値は admitted，送信の設定の拒否の後の再試行の道〈段階 4 で決める〉）を入れた．O2 の前提（submit が返る時に booking の判断が済んでいる）は，装置の時間の Run と MockRadio の Session の両方でコードで確かめられた（VERIFIED） |
 | 2026-11-04 | 段階 1 を済とした（§4） |
 | 2026-11-04 | 段階 1b を済とした（§4） |
+| 2026-11-04 | 段階 2 以降の組み替えの案（消す段階を先に，§4） |
