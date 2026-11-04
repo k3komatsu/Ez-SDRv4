@@ -114,6 +114,7 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 ## 6. owner に決めてもらうこと（一つずつ）
 
 - **O1 channel の組をどこで決めるか**（Sol 11）：今の Session は，`connect` の後で `sdr.tx_channels[0].stream = 0` として送信の channel を stream に入れる（既定の layout では送信の channel はどの stream にもない，RM-30）．F4a (d) でこれができなくなるので，`connect` の時に決める入口が要る．
+  **決定（owner 2026-11-04）：(a) と (b) の両方．** (a) `connect` に初期の設定を渡せるようにする（例 `ezsdr.connect(tx={0: [0]}, rx={0: [0, 1]})`）．Session の暗黙の Spec の初期の設定の要求になる（channel の組は intent なので Spec の側．BindingProfile には書かない）．周波数や rate の初期値も同じ道で渡せる．(b) 既定の layout で送信の channel 0 も stream 0 に入れる（RM-30．受信の channel 0 と対称）．確かめること：RM-31（duplex の board の受信の antenna）と既定の antenna が合うか．合わなければ既定の antenna も合わせる．退けた案：BindingProfile に書く（intent と binding の分け方に反する），(b) だけ（二つ以上の channel の Session が組めない）．
 - **O2 Provider の拒否を Easy API でどう見せるか**（Sol 6）：Kernel の admission を通った後の Provider の拒否（流れている stream への change，重なる予約）を，例外にするか．
 - **O3 Easy API の値の渡し方**（Q5）：channel ごとの dict でよいか．
 
