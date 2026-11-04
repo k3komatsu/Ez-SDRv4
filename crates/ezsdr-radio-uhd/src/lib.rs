@@ -5,8 +5,6 @@
 #![warn(missing_docs)]
 
 mod authority;
-#[cfg(test)]
-mod brain;
 pub mod device;
 pub mod host;
 pub mod profile;

@@ -1,0 +1,278 @@
+{
+  "verdict": "PASS",
+  "reasons": [],
+  "started": "2026-11-04T00:19:55+00:00",
+  "finished": "2026-11-04T00:44:15+00:00",
+  "identity": {
+    "before": {
+      "head": "2fb77c396d15b524f2a74c19fdad0766e1a88a47",
+      "status": [
+        "D  crates/ezsdr-radio-uhd/src/brain/bounds_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/cases.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/conformance.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/device_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/dst.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/force.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/mod.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/model_device.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/observed.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/shared.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/newrt.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/today.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/stop_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/thread_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/toy.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/world.rs",
+        " M crates/ezsdr-radio-uhd/src/host.rs",
+        " M crates/ezsdr-radio-uhd/src/lib.rs",
+        " M handoff.md",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase8/45-experiment.md",
+        " M plan/phase8/45-report-e4.md",
+        " M plan/phase8/45-uhd-decision-core.md"
+      ],
+      "untracked": [],
+      "sha256": "33ac284c85caab005c5ffa0d85d5d7366e02d0d6cd14bf32fdeae5ec1a04a2cb"
+    },
+    "after": {
+      "head": "2fb77c396d15b524f2a74c19fdad0766e1a88a47",
+      "status": [
+        "D  crates/ezsdr-radio-uhd/src/brain/bounds_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/cases.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/cell.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/conformance.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/core.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/device_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/dst.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/force.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/mod.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/model.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/model_device.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/observed.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/oracle.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/rules.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/shared.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/mod.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/newrt.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/runs.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/speed/today.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/stop_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/thread_tests.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/threads.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/toy.rs",
+        "D  crates/ezsdr-radio-uhd/src/brain/world.rs",
+        " M crates/ezsdr-radio-uhd/src/host.rs",
+        " M crates/ezsdr-radio-uhd/src/lib.rs",
+        " M handoff.md",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase8/45-experiment.md",
+        " M plan/phase8/45-report-e4.md",
+        " M plan/phase8/45-uhd-decision-core.md"
+      ],
+      "untracked": [],
+      "sha256": "33ac284c85caab005c5ffa0d85d5d7366e02d0d6cd14bf32fdeae5ec1a04a2cb"
+    }
+  },
+  "toolchain": {
+    "docker_image": "sha256:4ad5558bf9906e3b874d0a3e3638ba9c09be57201a9ca8116bc8eb790eb06452",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "python314": "Python 3.14.4",
+    "python39": "Python 3.9.25",
+    "remote": "sim02"
+  },
+  "steps": [
+    {
+      "name": "fmt",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo fmt --all --check",
+      "exit": 0,
+      "seconds": 1.8,
+      "counts": {
+        "diffs": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/fmt.log",
+      "ok": true
+    },
+    {
+      "name": "test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test --workspace --no-fail-fast",
+      "exit": 0,
+      "seconds": 130.1,
+      "counts": {
+        "passed": 2170,
+        "failed": 0,
+        "results": 68,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/test.log",
+      "ok": true
+    },
+    {
+      "name": "clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 3.7,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/clippy.log",
+      "ok": true
+    },
+    {
+      "name": "rules",
+      "command": "python3 plan/maintenance/tools/rules.py --base HEAD",
+      "exit": 0,
+      "seconds": 2.0,
+      "counts": {
+        "problems": 0,
+        "base": "HEAD"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/rules.log",
+      "ok": true
+    },
+    {
+      "name": "rules-self-test",
+      "command": "python3 plan/maintenance/tools/rules.py --self-test",
+      "exit": 0,
+      "seconds": 0.0,
+      "counts": {
+        "ok": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/rules-self-test.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy -p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 3.8,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/uhd-clippy.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --lib --test uhd_api",
+      "exit": 0,
+      "seconds": 18.5,
+      "counts": {
+        "passed": 593,
+        "failed": 0,
+        "results": 2,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/uhd-test.log",
+      "ok": true
+    },
+    {
+      "name": "hw-build",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --test hardware --no-run",
+      "exit": 0,
+      "seconds": 1.6,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/hw-build.log",
+      "ok": true
+    },
+    {
+      "name": "py314",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- sh -c 'cargo build -p ezsdr-server && python3 -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 7.1,
+      "counts": {
+        "ran": 57,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/py314.log",
+      "ok": true
+    },
+    {
+      "name": "py39",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 --image python:3.9-slim -- sh -c 'pip -q install --user numpy && EZSDR_SERVER=/cargo-target/debug/ezsdr-server PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 8.7,
+      "counts": {
+        "ran": 57,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/py39.log",
+      "ok": true
+    },
+    {
+      "name": "mutation",
+      "command": "REMOTE_SSH='ssh -o BatchMode=yes' python3 plan/maintenance/tools/remote/remote_mutate.py all sim02:8,sim03:8",
+      "exit": 1,
+      "seconds": 1281.7,
+      "counts": {
+        "passed": 2009,
+        "total": 2010
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-04-n46/gate-brain-rm/mutation.log",
+      "ok": true
+    }
+  ],
+  "mutation": {
+    "lists": {
+      "maintenance": {
+        "passed": 1633,
+        "total": 1633
+      },
+      "phase3": {
+        "passed": 83,
+        "total": 83
+      },
+      "phase4": {
+        "passed": 38,
+        "total": 38
+      },
+      "phase5": {
+        "passed": 29,
+        "total": 29
+      },
+      "phase6": {
+        "passed": 63,
+        "total": 63
+      },
+      "phase7": {
+        "passed": 163,
+        "total": 164
+      }
+    },
+    "not_killed": [
+      "phase7/G09"
+    ],
+    "known": [
+      "phase7/G09"
+    ],
+    "unexpected": [],
+    "baseline_failed": [],
+    "broken": {},
+    "missing": [],
+    "missing_ids": [],
+    "notes": [],
+    "remote_exit": 1,
+    "hosts": "sim02:8,sim03:8",
+    "images": {
+      "sim02": "sha256:90ae6efa898d4b3b6cd6b0eeb656adaa00a313c19b7d9da7997b71d95b468dde",
+      "sim03": "sha256:91cf5d09ba427a41098a7bd20cdd8ee08e6b434cbed5e19125732ad62fe04f0e"
+    }
+  }
+}
