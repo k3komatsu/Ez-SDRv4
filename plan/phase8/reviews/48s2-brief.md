@@ -598,3 +598,102 @@ Change nothing else. Record this in §11 ("fix round 1"). Run the end checks in 
 ### Report (at most 8 lines)
 
 For each item: the change, the assertions, and the probes. Then the suites and `rules.py`.
+
+---
+
+## `brief-impl-b1.md`
+
+## Brief: design note 48 S2 — implement sub-step S2b-i (A2's key, payload and schema; B3 the receive restart's release window)
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`, HEAD `1c592f7` (α, β and S2a-ii committed), clean tree. Nobody else edits the tree. The `opencode run` client's PID belongs to you; it is not another agent.
+
+Read:
+- `AGENTS.md`: Safety core, §6, §7, and §9 with Maintainability.
+- From `~/.cache/ezsdr-fixes/2026-11-05-n48s2/`: `brief.md`, your `test-plan.md` (rev 2), and `rulings-plan.md` (R1–R10 and Round 2, S1–S12).
+
+### Task
+
+1. The test plan is `test-plan.md` (rev 5: §9 α, §10 β, §11 S2a-ii). Keep it as `test-plan.v5.md`, then record S2b-i in a new §12 (rev 6).
+2. **Implement S2b-i only**, as rev 3 §6 and its maps assign:
+   - **A2 rest:** the profile key `radio.timing.command_queue_depth` and `radio.COMMAND_QUEUE_FULL` (event kind, payload, its registration and schema), their profile values (x3xx 16, ideal), RM-6/10/11/20/35, MR-3, UR-9/34 rows, `design/07` counts (:378, :384), the measurement fixtures that carry the key (rev 3 found four), and `tests/measurement.rs` :76–82 and :155 retargeted to `radio.tx.repeat_max_samples` (S5).
+   - **B3:** the release window leaves the receive restart's ready term (`timeline.rs` ~533–540) and `TimingEnvelope.release_window_ns` leaves the key, type, profile values, RM-6's check and the schema; RM-20/25/35, MR-3, UR-3 (`design/18:63`), UR-9/25/34, the measurement comparison and fixtures follow. The remaining origin is `ceil_to_grid(max(effective, cut + lead, max(item.ready, cut + ceil(call × old_ratio) + allowance) + lead))` (Sol). Write N9 in the shared timeline test with values whose ceil and floor differ (S9). Retarget `rm_25_a_receive_successor_adds_release_window_before_call_and_lead` to pin exactly the remaining terms. MockRadio and UHD keep agreeing on the origin (differential). **The profile start lead is not lowered** (50 ms stays).
+   - **G6:** N7a and N7c (N7b dropped, S5): an envelope or profile document that still carries either removed key is refused by `deny_unknown_fields` and the schema; a measurement record carrying a removed `Key` is refused by the comparison, not ignored.
+   - Regenerate the schemas so `schema_freeze` and `rm_20_schema_freeze` are green; no version bump and no `SCHEMA_CHANGELOG` entry. `KNOWN_LIMITATIONS.md:67` ("plus 3 ms") and any entry the release window or the queue depth appears in are updated.
+   - Rows per rev 3 plus the mechanical sweep. Do not start S2b-ii (A3, A6, A7, B5, B7). Do the whole of S2b-i, keeping the tree green; never end your turn with a command still running in the background.
+   - Follow the plan.
+   - Extend it (§12, the S2b-i implementation record) for every state or failure path the implementation adds.
+   - **Every planned test of S2a-i is written. None is a "gap" to report.** If a planned test cannot be written as planned, say why with evidence, and give what replaces it.
+
+### Rules
+
+**Mutation rows**
+- Make text edits only, in `plan/maintenance/tools/mutations.json` and `plan/*/tools/mutations.json`. Never re-serialize the file.
+- Use Rust token anchors. Each row matches exactly once and names its killing test.
+- The mechanical sweep (S3): after the code change, a script lists every row that is `NOT FOUND`. Save its output as `sweep-b1.txt`. Delete only the listed rows whose behaviour is gone. Each row on retained code is decided as rev 3 says.
+- Confirm each new or retargeted row in a throwaway copy outside the repository:
+  - copy: `rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3`;
+  - build with `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`;
+  - run `find <copy> -type f -exec touch {} +` before building;
+  - use one copy at a time;
+  - a compile failure is not a kill;
+  - logs go in `probes-b1/`.
+- Never run `mutate.py`, `remote_mutate.py` or `gate.py`. Never apply a mutant to the tree.
+- Existing rows whose `old` lies in a function you change: re-run them in the copy too.
+
+**Runs and state**
+- Run single tests with `timeout 300`. Your tool stops a command at 120 s, so run longer commands with a longer timeout, in the foreground. Leave no process running.
+- Test temp files go on `/tmp`.
+- Make no git state changes, no version bumps, and no `SCHEMA_CHANGELOG` entry. Regenerate any changed schema, so `schema_freeze` and `rm_20_schema_freeze` are green.
+- Write what happened, never what was not done.
+
+**End checks**
+- `cargo fmt --all`.
+- clippy `-D warnings` for the workspace, and for `-p ezsdr-radio-uhd --features uhd --all-targets`, both via `python3 plan/maintenance/tools/remote/rdev.py -- <cmd>`.
+- The remote workspace tests, after your last edit.
+- The Python 3.14 suite (handoff §5).
+- `git ls-files -m -o --exclude-standard | xargs chmod go+r`.
+- `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base HEAD` must give 0. If you rename or drop tests, list each with its reason in `plan/phase8/reviews/48s2b1-renames.txt`, in the format of `48s1-renames.txt`, and pass `--renames`.
+
+### Self-review (one round)
+
+Run it in the foreground with `timeout 2400`. Use free DeepSeek first:
+
+`opencode2 run --standalone -m opencode/deepseek-v4.1-flash-free#max --agent plan --auto "<checklist>"`
+
+Use Go (`opencode-go/deepseek-v4.1-flash#max`) only if free refuses.
+
+Checklist:
+1. Every S2b-i test in rev 3 is written, observes what the plan says, and its row breaks it.
+2. Scope against rev 3: missing and extra (nothing of S2b-ii).
+3. Every "no caller / unreachable" claim behind a deletion: grep the callers.
+4. Every `design/` text this sub-step makes false is amended in this sub-step.
+5. Maintainability: no leftovers of the deleted paths. No retained behaviour lost its only test.
+
+Fix every finding, or reject it with a reason.
+
+### Report (at most 15 lines)
+
+- Rev 3: per ruling, what changed.
+- S2a-i: what was deleted and what was kept.
+- Tests: added, moved and deleted, with counts.
+- Rows: deleted, retargeted and added, with probe outcomes and the sweep.
+- Suites and `rules.py`.
+- Self-review findings and their disposition.
+- Deviations, and open questions with your recommendation.
+
+---
+
+## `brief-sol-code-b1.md`
+
+You are the independent reviewer (Sol), read-only, in ~/local_work/Ez-SDRv4 (HEAD 1c592f7; the sub-step's changes are uncommitted: `git diff HEAD`, `git status`). Do not edit, format, build in the tree or commit; never run mutate.py or remote_mutate.py. To run a test, use a throwaway copy (`rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3 ~/local_work/Ez-SDRv4/ /tmp/sol-s2a/`, `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`, `timeout 300`).
+
+AGENTS.md §9 step 7: review the code of sub-step S2b-i of design note 48 S2 — A2's rest (the profile key `radio.timing.command_queue_depth`, the event `radio.COMMAND_QUEUE_FULL` with payload, registration and schema; profile values; RM/MR/UR rows; fixtures) and B3 (the release window leaves the receive restart's ready term and `TimingEnvelope.release_window_ns` leaves key, type, profile values, RM-6's check and schema). α, β and S2a-ii are committed at HEAD. Inputs in ~/.cache/ezsdr-fixes/2026-11-05-n48s2/: brief.md, rulings-plan.md (R1–R10, S1–S12, T1–T3), test-plan.md (§12 is the S2b-i record), sweep-b1.txt, probes-b1/, and the end of impl-b1.log (the implementer's report: five deviations and three open questions). You reviewed rev 1 of this plan (sol-plan.log) and gave the remaining origin formula there.
+
+First write your own failure scenarios for this change, then check:
+1. B3: the receive restart origin in UHD (`timeline.rs` and uhd-rx) and MockRadio is now exactly your formula; nothing else in the ready term moved (old-rate call time, delivery allowance, start lead, grid rounding, configure-complete warning, missed start, START_LEAD_SHORT); the profile start lead stayed 50 ms. Deviation 1: the implementer says a `Stream` has one config for life, so N9 cannot use a different old and new rate and the old-ratio ceil/floor mutant is equivalent. Is that true for the production path (note 47 stage 3 allows a rate change on a stopped receive stream: does the restart's `old_ratio` differ from the new grid there)? If a rate change is reachable, N9 must cover it. Deviation 2 (N5 on `plan()` only, agreement via `rm_26`) and deviation 4 (a fake configure delay 8 → 5 ms) — do they weaken what the tests pin?
+2. `check_start_lead` was removed: what did it check, is anything it protected still reachable (a profile whose start lead is shorter than what it needs), and is the removal within B3's ruling?
+3. G6: an envelope/profile document with either removed key, and a measurement record with a removed `Key`, are refused (N7a, N7c), never silently ignored; the schemas regenerated; no version bump or SCHEMA_CHANGELOG entry.
+4. Rows: ten deleted, two added, J06 and P626 retargeted; no row on retained code dropped; the 13 "FILTER NO TEST" lines in sweep-b1.txt are harmless.
+5. design/ text (06, 07, 09, 18) and KNOWN_LIMITATIONS: every sentence S2b-i makes false is amended (KL-16's lead row; KL-34's "Gone" entry kept as history?); nothing of S2b-ii done early.
+6. Maintainability per AGENTS §9.
+For each major finding give a minimal sequence and the observable wrong outcome. Output: scenario list (short), findings P1/P2/P3 with path:line, verdict CODE OK / CODE NEEDS CHANGES. At most 120 lines.

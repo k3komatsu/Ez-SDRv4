@@ -29,12 +29,12 @@ fn set_config(numbers: &[u32], rate: u64) -> Config {
 
 /// A stream at 1 MS/s from 0 with a 50 ms lead and no receive call (Appendix C's terms).
 fn stream(direction: Direction, channels: u16) -> Stream {
-    Stream { direction, origin: 0, config: config(channels, 1_000_000), lead: 50 * MS, call: 0, release_window: 0, allowance: 0 }
+    Stream { direction, origin: 0, config: config(channels, 1_000_000), lead: 50 * MS, call: 0, allowance: 0 }
 }
 
 /// A receive stream of `numbers` at `rate`, from 0, with a 50 ms lead and no call.
 fn rx_stream(numbers: &[u32], rate: u64) -> Stream {
-    Stream { direction: Direction::Rx, origin: 0, config: set_config(numbers, rate), lead: 50 * MS, call: 0, release_window: 0, allowance: 0 }
+    Stream { direction: Direction::Rx, origin: 0, config: set_config(numbers, rate), lead: 50 * MS, call: 0, allowance: 0 }
 }
 
 fn item(e: i64, seq: u64, ready: i64, kind: Kind) -> Item {
@@ -62,23 +62,15 @@ fn planned(line: &Line) -> Vec<(i64, Option<i64>)> {
 fn rm_26_each_stream_takes_its_own_directions_start_lead() {
     // RM-4, RM-25: the TimingEnvelope has one start lead per direction, and a stream's new
     // segment uses its own (design 33 D5).
-    let timing = ezsdr_radio::TimingEnvelope {
-        min_timed_command_lead_ns: 0,
-        startup_latency_ns: 0,
-        command_queue_depth: 0,
-        release_window_ns: 0,
-        overflow_restart_gap_ns: 0,
-        rx_start_lead_ns: 50 * MS,
-        tx_start_lead_ns: 20 * MS,
-        tx_in_flight_ns: 0,
-    };
+    let timing =
+        ezsdr_radio::TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 50 * MS, tx_start_lead_ns: 20 * MS, tx_in_flight_ns: 0 };
     assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Rx), 50 * MS);
     assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Tx), 20 * MS);
 
     // A `start_rx` after a `Stop` starts its direction's lead after that cut, at 1 MS/s; a
     // transmit clock has no restart (its settings change only at the Run's start).
     let direction = Direction::Rx;
-    let stream = Stream { direction, origin: 0, config: config(1, 1_000_000), lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction), call: 0, release_window: 0, allowance: 0 };
+    let stream = Stream { direction, origin: 0, config: config(1, 1_000_000), lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction), call: 0, allowance: 0 };
     assert_eq!(segments(&stream, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(1_000 * MS, 1, 1_000 * MS, Kind::Start)]), [(0, Some(1_000 * MS)), (1_050 * MS, None)]);
 }
 
@@ -93,12 +85,22 @@ fn rm_15_later_bound_combines_the_current_and_handed_front() {
 }
 
 #[test]
-fn rm_25_a_receive_successor_adds_release_window_before_call_and_lead() {
+fn rm_25_a_receive_successor_adds_one_call_and_allowance_before_lead() {
     let cut = 10 * MS;
-    for (lead, expected) in [(3 * MS, cut + 29 * MS), (50 * MS, cut + 76 * MS)] {
-        let stream = Stream { lead, call: 20_000, release_window: 3 * MS, allowance: 3 * MS, ..rx_stream(&[0], 1_000_000) };
+    for (lead, expected) in [(3 * MS, cut + 26 * MS), (50 * MS, cut + 73 * MS)] {
+        let stream = Stream { lead, call: 20_000, allowance: 3 * MS, ..rx_stream(&[0], 1_000_000) };
         assert_eq!(segments(&stream, &[item(cut, 1, cut, Kind::Stop), item(cut, 2, cut, Kind::Start)]), [(0, Some(cut)), (expected, None)], "lead {lead}");
     }
+}
+
+#[test]
+fn rm_25_a_receive_origin_with_a_fractional_call_rounds_once_to_the_grid() {
+    // Three MS/s: one sample is 1000/3 ns, so the call term is ceil(1000/3) = 334 ns, and the
+    // lattice step is 1000 ns. The origin is ceil(16 000 334 / 1000) * 1000 = 16 001 000; a
+    // dropped call term, a dropped allowance, a dropped lead and a floor each give another value.
+    let cut = 10 * MS;
+    let stream = Stream { lead: 3 * MS, call: 1, allowance: 3 * MS, ..rx_stream(&[0], 3_000_000) };
+    assert_eq!(segments(&stream, &[item(cut, 1, cut, Kind::Stop), item(cut, 2, cut, Kind::Start)]), [(0, Some(cut)), (16_001_000, None)]);
 }
 
 #[test]

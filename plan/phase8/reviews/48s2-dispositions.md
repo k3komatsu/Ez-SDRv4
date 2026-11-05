@@ -63,3 +63,20 @@ Sol: CODE OK, no findings. Self-review (Go DeepSeek; free refused): four adopted
 - Sol: CODE NEEDS CHANGES. P2: the reader-exclusion test killed N-09/N-10 only through the `is_held` precondition. P2: the failed-reopen branch never delivered a later burst. P3: bench.md described the renamed `tune_auto` row like the others. All fixed: a test-only `ClockMutex::queued()` checkpoint with behavioural assertions on both open paths; a later burst through `command`, released reservation, no clock, one UR-25 row and one COMMAND_REJECTED; bench.md T6.
 - Opus re-check: FIXES OK. N-09 and N-10 die at the behavioural assertion (3/3 each); 40/40 under CPU load; COMMAND_REJECTED is RM-25's observable. P3 for S2b: the shared reason text "its transmit clock was never started" does not fit a clock ended by a failed reopen.
 - Gate 1: FAIL, P1309 survived. `tx_chain_recovery_transitions` called `provider_stop` after `reopen_failed`, already `Clean` once `Halted` was folded. The orchestrator made the test call it from `ReopenNeeded`; P1309 killed. Gate 2: PASS.
+
+## S2b-i code
+
+- Implementer's deviations, all accepted on Sol's evidence:
+  1. N9 uses one rate. A stopped stream's rate cannot change today: rate updates are classless and staging takes frequency, gain and antenna only.
+  2. N5 is on `plan()`, with Provider agreement through `rm_26`.
+  3. `invalid-comparisons.json`'s repeat worst value is 15.
+  4. A fake configure delay went from 8 to 5 ms; the test still asserts LATE, SHORT, OK and the measured result.
+  5. The timing rows are in S2b-i's Changes table.
+- `check_start_lead` (only `rx_start_lead_ns >= release_window_ns`) is removed within B3.
+- KL-34 stays as its "Gone" history.
+- Self-review (Go DeepSeek; free refused): adopted the P626 anchor and stale text in design/06, 07 and 18. It rejected the N9 old-ratio argument.
+- Sol: no runtime defect; two P3 documentation fixes, both done by the orchestrator:
+  - UR-9 now says which timing paths remain: the receive-command FIFO, which a STOP bypasses and clears, and transmit timestamps in data packets.
+  - The KNOWN_LIMITATIONS lead row marks the earlier restart observations as pre-B3 and asks for re-measurement before the profile lead is lowered.
+- Gate PASS (the first launch failed in chmod over the deleted schema file, before any step ran).
+- Open for the bench: re-measure the receive restart lead (`hw_b8_raw_restart_lead`) after B3.

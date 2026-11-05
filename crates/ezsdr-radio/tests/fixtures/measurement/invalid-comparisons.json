@@ -21,12 +21,10 @@
   "values": [
     { "status": "measured", "key": "radio.full_duplex", "worst": false, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.hardware_time", "worst": true, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.tx.repeat_max_samples", "worst": 4294967295, "trials": 1, "condition": "baseline", "test": "fixture" },
+    { "status": "measured", "key": "radio.tx.repeat_max_samples", "worst": 15, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.tx.repeat_align_samples", "worst": 3, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.min_timed_command_lead_ns", "worst": 1000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.startup_latency_ns", "worst": 2000000001, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.timing.command_queue_depth", "worst": 15, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.timing.release_window_ns", "worst": 2000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.overflow_restart_gap_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.rx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.tx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },

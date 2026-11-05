@@ -19,7 +19,7 @@ Vision §12: "Mock is a peer *because* it implements the same contract **and the
 The values of MR-3 come from these sources, each marked in the table:
 
 - **VERIFIED** (audit Appendix B, UHD documentation): X310 master clock 200 MHz with integer decimation; two RX and two TX channels per motherboard; `OVERRUN_RESTART_DELAY = 0.05 s`; `set_time_unknown_pps` takes up to two seconds; about 2 000 `sc16` samples per 10 GbE packet; UBX-160 daughterboards tune 10 MHz–6 GHz with gain 0–31.5 dB in 0.5 dB steps; random inter-frontend phase after an untimed retune.
-- **INFERRED** (engineering judgement where UHD states no number; Y13 takes the stricter value): the 2 ms minimum timed-command lead, the command-queue depth of 16, the 1.0 GB/s per-direction transport of one 10 GbE link (its 1.25 GB/s line rate less framing, rounded down), Replay's 2-sample alignment and 256 Mi-sample maximum. Phase 8 measures each (Vision §59); versions follow AGENTS.md §6.
+- **INFERRED** (engineering judgement where UHD states no number; Y13 takes the stricter value): the 2 ms minimum timed-command lead, the 1.0 GB/s per-direction transport of one 10 GbE link (its 1.25 GB/s line rate less framing, rounded down), Replay's 2-sample alignment and 256 Mi-sample maximum. Phase 8 measures each (Vision §59); versions follow AGENTS.md §6.
 
 ## 3. Rules
 
@@ -50,7 +50,6 @@ The values of MR-3 come from these sources, each marked in the table:
   | Value | `x3xx` 0.1.0 | Source |
   |---|---|---|
   | `min_timed_command_lead_ns` | 2 000 000 | INFERRED; Phase 8 measures it |
-  | `release_window_ns` | 3 000 000 | INFERRED: the UHD Module's release window (§3, UR-24), which the Mock models (RM-25) |
   | `radio.timing.tx_in_flight_ns` | 10 000 000 | INFERRED: the UHD Module's profile window (§3, UR-23) |
   | `radio.tx.repeat_max_samples`, `radio.tx.repeat_align_samples` | 268 435 456, 2 | INFERRED: Replay's size and its 2-sample alignment, which the Mock's emulation keeps |
   | `rx_packet_samples`, one receive call the profile emulates (the UHD Module's, RM-25's ready instant) | 1 996, the longer of it and `radio.rx.block_len` | VERIFIED (the X300's packet at MTU 9000, UHD's `max_num_samps`) |
@@ -70,8 +69,7 @@ The values of MR-3 come from these sources, each marked in the table:
   | `radio.d.c<n>.phase_behavior_on_retune` | `deterministic` |
   | `radio.tx.repeat_max_samples`, `radio.tx.repeat_align_samples` | 4 294 967 295 (the largest `BurstOpen.waveform_len`, a `u32`), 1 |
   | `radio.rx.block_len` | 2 000 |
-  | `min_timed_command_lead_ns`, `startup_latency_ns`, `overflow_restart_gap_ns`, `radio.timing.rx_start_lead_ns`, `radio.timing.tx_start_lead_ns`, `radio.timing.tx_in_flight_ns`, `release_window_ns` | 0 |
-  | `command_queue_depth` | 4 294 967 295 |
+  | `min_timed_command_lead_ns`, `startup_latency_ns`, `overflow_restart_gap_ns`, `radio.timing.rx_start_lead_ns`, `radio.timing.tx_start_lead_ns`, `radio.timing.tx_in_flight_ns` | 0 |
   | `rx_bytes_per_s`, `tx_bytes_per_s` | 2^62 |
   | `wire_bytes_per_sample` | 8 |
   | `radio.d.c<n>.path_delay_samples` | 0 |
@@ -432,3 +430,4 @@ A transmit port and `TX_UNDERFLOW` (Phase 10); `ALIGNMENT` injection, with the U
 | 2026-11-05 | MR-18, MR-27, MR-29, MR-33, MR-34 | note 47 stage 3: a receive channel's frequency, gain and antenna are staged on a stopped stream and a `start_rx` takes them at its booking, and a `start_rx` of a streaming stream is refused; a segment begins with them (`segments.values`, the channel timelines from its origin); a start draws once per channel whatever the values; the Mock never reports a short start lead | [note 47](../plan/phase8/47-no-change-while-streaming.md) stage 3 |
 | 2026-11-05 | MR-17, MR-25 | note 48 S1: the Mock's reservation frontier after a finite burst shorter than four samples that starts a device burst is at least its padded device end plus one sample, as the UHD Module's is (UR-22; the Mock admits the bookings the Module admits there); a Stop or a cut counts payload only, and keeps a short burst's padded floor. | [note 48](../plan/phase8/48-simplification-inventory.md) S1 |
 | 2026-11-05 | MR-17, MR-25 | note 48 S1, fix round 2 (D4): a first send counts as handed only when four samples, or the whole burst if shorter, fit the window; a repeat's first send is four samples. | [note 48](../plan/phase8/48-simplification-inventory.md) S1 |
+| 2026-11-06 | MR-3 | note 48 S2b-i: `release_window_ns` and `command_queue_depth` leave the Mock's profile values (the `x3xx` and `ideal` tables); the Mock's RX line has no release window (RM-25) | [note 48](../plan/phase8/48-simplification-inventory.md) S2b-i |

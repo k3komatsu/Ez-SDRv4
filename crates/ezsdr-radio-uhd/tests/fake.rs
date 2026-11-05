@@ -154,8 +154,6 @@ fn ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
     let timing = &section(&manifest, "envelope")["timing"];
     assert_eq!(timing["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(timing["startup_latency_ns"], 2_000_000_000i64);
-    assert_eq!(timing["command_queue_depth"], 16);
-    assert_eq!(timing["release_window_ns"], 3_000_000);
     assert_eq!(timing["overflow_restart_gap_ns"], 50_000_000);
     assert_eq!(timing["rx_start_lead_ns"], 50_000_000);
     assert_eq!(timing["tx_start_lead_ns"], 50_000_000);
@@ -504,9 +502,6 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     let one = |v: Scalar| ezsdr_kernel::spec::CapabilityValue::One { value: v };
     assert_eq!(capability("radio.timing.min_timed_command_lead_ns"), one(Scalar::from(5_000_000)));
     assert_eq!(capability("radio.timing.startup_latency_ns"), one(Scalar::from(2_000_000_000)));
-    assert_eq!(capability("radio.timing.command_queue_depth"), one(Scalar::from(16)));
-    // Design 38 D1: the release window is the profile's value, x3xx's 3 ms.
-    assert_eq!(capability("radio.timing.release_window_ns"), one(Scalar::from(3_000_000)));
     assert_eq!(capability("radio.timing.overflow_restart_gap_ns"), one(Scalar::from(50_000_000)));
     assert_eq!(capability("radio.timing.rx_start_lead_ns"), one(Scalar::from(50_000_000)));
     assert_eq!(capability("radio.timing.tx_start_lead_ns"), one(Scalar::from(50_000_000)));
@@ -520,8 +515,6 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(envelope["profile"]["name"], "x3xx");
     assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], 5_000_000);
     assert_eq!(envelope["timing"]["startup_latency_ns"], 2_000_000_000i64);
-    assert_eq!(envelope["timing"]["command_queue_depth"], 16);
-    assert_eq!(envelope["timing"]["release_window_ns"], 3_000_000);
     assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], 50_000_000);
     assert_eq!(envelope["timing"]["rx_start_lead_ns"], 50_000_000);
     assert_eq!(envelope["timing"]["tx_start_lead_ns"], 50_000_000);
@@ -530,49 +523,11 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(section_of(instance, "device")["fake"], true);
 }
 
-/// RM-6: the published `radio.timing.rx_start_lead_ns` is at least `release_window_ns`, on the
-/// profile's own values and on the measurement path (`with_measurement_timing`); a lead below the
-/// window is refused there, as `Description::new` refuses it.
-#[test]
-fn rm_6_a_measurement_timing_keeps_the_start_lead_at_or_above_the_window() {
-    let published = |radio: &UhdRadio| {
-        let int = |name: &str| match &radio.instance().tree.capabilities[&Key::parse(name).unwrap()] {
-            ezsdr_kernel::spec::CapabilityValue::One { value: Scalar::Int(value) } => *value,
-            other => panic!("{name}: {other:?}"),
-        };
-        (int("radio.timing.rx_start_lead_ns"), int("radio.timing.release_window_ns"))
-    };
-    let (lead, window) = published(&provider());
-    assert!(lead >= window, "{lead} {window}");
-    let base = ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms());
-    let at_window = provider().with_measurement_timing(ezsdr_radio::TimingEnvelope { rx_start_lead_ns: base.release_window_ns, ..base });
-    assert_eq!(published(&at_window), (3_000_000, 3_000_000), "equality is allowed");
-    let candidate = ezsdr_radio::TimingEnvelope { release_window_ns: 13_000_003, rx_start_lead_ns: 19_000_005, ..base };
-    let (lead, window) = published(&provider().with_measurement_timing(candidate));
-    assert!(lead >= window, "{lead} {window}");
-}
-
-#[test]
-#[should_panic(expected = "RM-6")]
-fn rm_6_a_measurement_timing_with_a_start_lead_below_the_window_is_refused() {
-    let base = ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms());
-    provider().with_measurement_timing(ezsdr_radio::TimingEnvelope { rx_start_lead_ns: 1_000_000, ..base });
-}
-
-#[test]
-#[should_panic(expected = "RM-6")]
-fn rm_6_a_measurement_timing_with_a_start_lead_one_nanosecond_below_the_window_is_refused() {
-    let base = ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms());
-    provider().with_measurement_timing(ezsdr_radio::TimingEnvelope { rx_start_lead_ns: base.release_window_ns - 1, ..base });
-}
-
 #[test]
 fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
     let candidate = ezsdr_radio::TimingEnvelope {
         min_timed_command_lead_ns: 11_000_001,
         startup_latency_ns: 12_000_002,
-        command_queue_depth: 7,
-        release_window_ns: 13_000_003,
         overflow_restart_gap_ns: 17_000_004,
         rx_start_lead_ns: 19_000_005,
         tx_start_lead_ns: 23_000_006,
@@ -587,8 +542,6 @@ fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
     for (field, value) in [
         ("min_timed_command_lead_ns", candidate.min_timed_command_lead_ns),
         ("startup_latency_ns", candidate.startup_latency_ns),
-        ("command_queue_depth", candidate.command_queue_depth),
-        ("release_window_ns", candidate.release_window_ns),
         ("overflow_restart_gap_ns", candidate.overflow_restart_gap_ns),
         ("rx_start_lead_ns", candidate.rx_start_lead_ns),
         ("tx_start_lead_ns", candidate.tx_start_lead_ns),
@@ -6078,7 +6031,7 @@ fn ur_25_a_receive_cut_counts_its_own_stream_s_packet_size() {
     let rx = plan["rx"].as_array().unwrap();
     assert_eq!(rx.len(), 2, "{plan}");
     let gap = rx[1]["origin"].as_i64().unwrap() - rx[0]["end"].as_i64().unwrap();
-    assert!((12_000_000..12_000_400).contains(&gap), "4000 samples at 200 ticks + 3 ms release window + 3 ms allowance + 50 ms lead, rounded to the lattice: {gap} in {plan}");
+    assert!((11_400_000..11_400_400).contains(&gap), "4000 samples at 200 ticks + 3 ms allowance + 50 ms lead, rounded to the lattice: {gap} in {plan}");
 }
 
 #[test]

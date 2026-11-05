@@ -64,7 +64,7 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **When:** every receive restart, on MockRadio's `x3xx` profile and on the USRP alike. Changing a stream's rate or its stream membership during a Run does not exist, and a channel's frequency, gain or antenna change only on a stopped stream, at the next start (KL-35); a restart's pause covers its configure (RM-25).
 - **Workaround:** restart outside capture windows; set rates and channel sets at connect or in the Spec; capture each configuration in its own Session (KL-21).
 - **Evidence:** RM-21, RM-25 (`design/07-radio-model.md`); UR-17, UR-25 (`design/18-uhd-radio.md`); MR-3 (`design/09-mock-radio.md`); `plan/phase7/bench-results.md:915–926, 1020`.
-- **Status:** Ceiling (the pause is one receive call at the old rate, plus 3 ms, plus the 50 ms start lead). The start leads are INFERRED (shake-out candidate 1 ms; Phase 8 stage 4); the receive start lead is at least the release window, 3 ms (RM-6). The `cold` change, the transmit cancellation by a change and the first transmit enable of the earlier entry are gone in note 47 stage 2 (2026-11-04).
+- **Status:** Ceiling (the pause is one receive call at the old rate, plus the 3 ms delivery allowance, plus the 50 ms start lead). The start leads are INFERRED (shake-out candidate 1 ms; Phase 8 stage 4). The `cold` change, the transmit cancellation by a change and the first transmit enable of the earlier entry are gone in note 47 stage 2 (2026-11-04).
 
 ### KL-8 After a receive overflow, sample times are rounded
 - **Symptom:** after `radio.RX_OVERFLOW { cause: overrun }`, blocks arrive with timestamps off the stream's sample lattice; the Module rounds each to the nearest sample and counts it in `stats.rx_off_lattice` (2 174–2 179 blocks in a 10 MS/s test).
@@ -150,10 +150,8 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 | Value | Profile | Seen on the bench so far |
 |---|---|---|
 | `min_timed_command_lead_ns` | 5 ms (USRP), 2 ms (MockRadio) | through the Module a burst 3 ms after submission is played and one 2 ms after is dropped as late; the raw device needs only 0.3–0.5 ms |
-| `rx_start_lead_ns`, `tx_start_lead_ns` | 50 ms each | the device restarts on time 1 ms ahead; shake-out candidate 1 ms (the receive lead must be at least the 3 ms release window, RM-6, so stage 4 measures receive candidates from 3 ms) |
+| `rx_start_lead_ns`, `tx_start_lead_ns` | 50 ms each | before note 48 B3 (the receive restart lost its release-window term, 2026-11-06): the device restarted on time 1 ms ahead, shake-out candidate 1 ms, receive candidates on time from 3 ms. These do not show the margin left after B3; measure again before lowering the profile lead |
 | `tx_in_flight_ns` | 10 ms | no underflow from 0.5 ms at 2 MS/s; shake-out candidate 3 ms |
-| `release_window_ns` | 3 ms | enough in one 1 MS/s probe (`plan/phase8/42-d9-production-fix.md:17`) |
-| `command_queue_depth` | 16 | the X300 queued 7 timed OBX tunes and the 8th call blocked until the queue drained, so more than about 7 timed updates due within 3 ms can stall the control thread (INFERRED) |
 | `overflow_restart_gap_ns` | 50 ms | unmeasured (UHD's restart came at most ~67–75 ms after the reader returned) |
 | `startup_latency_ns` | 2 s | settled: every Run's T0 is at least 2 s after it is armed |
 
@@ -164,7 +162,7 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **When:** command leads between 2 and about 5 ms (MockRadio accepts 2 ms; on the USRP a burst needs about 3 ms from submission); loopback timing (MockRadio's transmit-to-receive delay is 45 samples at every rate; the X300's was 35, 44, 44 and 36 samples at 400 k, 500 k, 1 M and 2 MS/s); LO phase (MockRadio's phase after a timed retune is one constant per channel whatever the frequency; the X300's differs per frequency, −137.3° at 1 GHz and 30.6° at 1000.1234 MHz in one test); repeats (MockRadio refuses an odd length or more than 2^28 samples, RFNoC Replay's limits; the USRP streams repeats from host memory and takes them); refusals at a start (the USRP refuses a `start_rx` whose rate or antenna reads back differently; MockRadio never).
 - **Workaround:** use leads of 5 ms or more; calibrate delay and phase on the device; keep repeats of even length and at most 2^28 samples.
 - **Evidence:** MR-3, MR-18, MR-34 (`design/09-mock-radio.md`); RM-23 (`design/07-radio-model.md`); UR-9, UR-12 (`design/18-uhd-radio.md`); `plan/phase8/bench-results.md:49, 51`; `plan/phase7/bench-results.md:460–497, 616`.
-- **Status:** the lead and the path delay are to be levelled in Phase 8 stage 4; the phase constant and the refusal scope are Ceilings (MR-34, MR-18). The `x3xx` profile's command queue depth (16) is looser than the hardware's (the bench on 2026-10-28 measured 7 on X300 #1 and 8 on X300 #2), but no timed command is issued today, so it governs nothing until stage 4 returns one (note 47). MockRadio's receive configure takes no time, so it never reports `radio.START_LEAD_SHORT`, which the USRP's owner emits when a start's configure leaves less than the declared command lead before its origin (RM-25).
+- **Status:** the lead and the path delay are to be levelled in Phase 8 stage 4; the phase constant and the refusal scope are Ceilings (MR-34, MR-18). MockRadio's receive configure takes no time, so it never reports `radio.START_LEAD_SHORT`, which the USRP's owner emits when a start's configure leaves less than the declared command lead before its origin (RM-25).
 
 ### KL-17 SimulationChannel is a simple propagation model
 - **Symptom:** the simulated medium differs from RF in ways some experiments notice.

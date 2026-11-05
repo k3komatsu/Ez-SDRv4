@@ -346,31 +346,16 @@ fn check_layout(layout: &Layout) -> Result<(), String> {
 impl Description {
     /// The description `layout` describes (RM-29). `terms` are the Provider's own values
     /// on `x3xx`; `ideal` has none.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the layout's timing breaks RM-6 (a programming error: the values are code's).
     pub fn new(layout: &Layout, block_len: u32, terms: &ProviderTerms) -> Description {
         let timing = match layout {
             Layout::X3xx { .. } => x3xx::timing(terms),
-            Layout::Ideal { .. } => TimingEnvelope {
-                min_timed_command_lead_ns: 0,
-                startup_latency_ns: 0,
-                command_queue_depth: i64::from(u32::MAX),
-                release_window_ns: 0,
-                overflow_restart_gap_ns: 0,
-                rx_start_lead_ns: 0,
-                tx_start_lead_ns: 0,
-                tx_in_flight_ns: 0,
-            },
+            Layout::Ideal { .. } => TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 0, tx_start_lead_ns: 0, tx_in_flight_ns: 0 },
         };
         Description::build(layout, block_len, terms, timing)
     }
 
-    /// RM-6: the description of `layout` with `timing`, which must keep the receive start lead
-    /// at least the release window.
+    /// The description of `layout` with `timing`.
     fn build(layout: &Layout, block_len: u32, terms: &ProviderTerms, timing: TimingEnvelope) -> Description {
-        timing.check_start_lead().unwrap_or_else(|error| panic!("{error}"));
         match layout {
             Layout::X3xx { master_clock_hz, link_gbps, rx, tx, .. } => Description {
                 profile: x3xx::profile_ref(),
@@ -467,8 +452,6 @@ impl Description {
             (keys::RX_BLOCK_LEN, Scalar::Int(i64::from(self.block_len))),
             (keys::MIN_TIMED_COMMAND_LEAD_NS, Scalar::Int(self.timing.min_timed_command_lead_ns)),
             (keys::STARTUP_LATENCY_NS, Scalar::Int(self.timing.startup_latency_ns)),
-            (keys::COMMAND_QUEUE_DEPTH, Scalar::Int(self.timing.command_queue_depth)),
-            (keys::RELEASE_WINDOW_NS, Scalar::Int(self.timing.release_window_ns)),
             (keys::OVERFLOW_RESTART_GAP_NS, Scalar::Int(self.timing.overflow_restart_gap_ns)),
             (keys::RX_START_LEAD_NS, Scalar::Int(self.timing.rx_start_lead_ns)),
             (keys::TX_START_LEAD_NS, Scalar::Int(self.timing.tx_start_lead_ns)),
@@ -875,59 +858,5 @@ fn text(scalar: &Scalar) -> Option<&str> {
     match scalar {
         Scalar::Str(value) => Some(value),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn layouts() -> Vec<Layout> {
-        let selector = |image: &str, rx: &[&str]| {
-            let list = |values: &[&str]| Value::List(values.iter().map(|value| Scalar::from(*value)).collect());
-            BTreeMap::from([(ident("image"), list(&[image])), (ident("rx"), list(rx)), (ident("tx"), list(&["0:A:ubx:0"]))])
-        };
-        vec![from_selector(&selector("xg", &["0:A:ubx:0"])).unwrap(), from_selector(&selector("hg", &["0:A:ubx:0", "0:B:basic_rx:0"])).unwrap(), Layout::Ideal { rx: 1, tx: 1 }]
-    }
-
-    fn terms() -> ProviderTerms {
-        ProviderTerms { min_timed_command_lead_ns: 2_000_000, repeat_max_samples: 268_435_456, repeat_align_samples: 2 }
-    }
-
-    /// RM-6 at the building boundary `new` delegates to: the lead is at least the window.
-    #[test]
-    fn rm_6_building_a_description_checks_the_start_lead() {
-        for layout in layouts() {
-            let base = Description::new(&layout, 2_000, &terms()).timing;
-            let window = base.release_window_ns;
-            for lead in [window, window + 1, window + 50_000_000] {
-                let timing = TimingEnvelope { rx_start_lead_ns: lead, ..base };
-                assert_eq!(Description::build(&layout, 2_000, &terms(), timing).timing, timing);
-            }
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "RM-6")]
-    fn rm_6_building_a_description_refuses_a_lead_below_the_window_x3xx() {
-        let layout = &layouts()[0];
-        let base = Description::new(layout, 2_000, &terms()).timing;
-        Description::build(layout, 2_000, &terms(), TimingEnvelope { rx_start_lead_ns: 1_000_000, release_window_ns: 3_000_000, ..base });
-    }
-
-    #[test]
-    #[should_panic(expected = "RM-6")]
-    fn rm_6_building_a_description_refuses_a_lead_one_nanosecond_below_the_window_x3xx() {
-        let layout = &layouts()[0];
-        let base = Description::new(layout, 2_000, &terms()).timing;
-        Description::build(layout, 2_000, &terms(), TimingEnvelope { rx_start_lead_ns: base.release_window_ns - 1, ..base });
-    }
-
-    #[test]
-    #[should_panic(expected = "RM-6")]
-    fn rm_6_building_a_description_refuses_a_lead_one_nanosecond_below_the_window_ideal() {
-        let layout = Layout::Ideal { rx: 1, tx: 1 };
-        let base = Description::new(&layout, 2_000, &terms()).timing;
-        Description::build(&layout, 2_000, &terms(), TimingEnvelope { rx_start_lead_ns: -1, ..base });
     }
 }

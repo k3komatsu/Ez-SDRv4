@@ -219,7 +219,6 @@ fn unmeasured_reason(key: &str) -> &'static str {
         return "Not measured in this record; Phase 8 stage 3c-2a measures raw Device sample-rate read-back.";
     }
     match key {
-        "radio.timing.command_queue_depth" => "Not measured in this record; the queue-depth measurement was removed by note 48 S2a-i-α, and the key leaves in note 48 S2b-i.",
         "radio.timing.min_timed_command_lead_ns" | "radio.timing.tx_in_flight_ns" | "radio.perf.rx_bytes_per_s" | "radio.full_duplex" | "radio.hardware_time" => {
             "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run."
         }
@@ -313,7 +312,6 @@ pub enum EvidenceKind {
     ProviderTimeError(ProviderTimeError),
     LateCommand,
     CommandRejected,
-    CommandQueueFull,
     AsyncTimeError,
     OtherAsync,
     Underflow,
@@ -444,7 +442,6 @@ pub fn classify_trial(trial: &TrialEvidence) -> TrialClass {
             EvidenceKind::ProviderTimeError(ProviderTimeError::Drop | ProviderTimeError::SendAsap | ProviderTimeError::Refused | ProviderTimeError::PlanViolation)
                 | EvidenceKind::LateCommand
                 | EvidenceKind::CommandRejected
-                | EvidenceKind::CommandQueueFull
         )
     });
     let device = trial.evidence.iter().any(|evidence| {
@@ -635,7 +632,6 @@ impl Default for MeasurementPlan {
         MeasurementPlan {
             timed_command_leads_ns: vec![500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
             in_flight_windows_ns: vec![250_000, 500_000, 1_000_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
-            // RM-6: a receive start lead below the release window (3 ms) cannot be a description.
             rx_start_leads_ns: vec![3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
             rx_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
             tx_throughput_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
@@ -1905,7 +1901,6 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
         "rx_start_lead_ns" => timing.rx_start_lead_ns = value,
         _ => return Err(format!("unsupported candidate timing field `{field}`")),
     }
-    timing.check_start_lead()?;
     Ok(timing)
 }
 
@@ -3429,7 +3424,6 @@ pub fn extract_trial_evidence(
                 let kind = match name {
                     "radio.LATE_COMMAND" => EvidenceKind::LateCommand,
                     "radio.COMMAND_REJECTED" => EvidenceKind::CommandRejected,
-                    "radio.COMMAND_QUEUE_FULL" => EvidenceKind::CommandQueueFull,
                     "radio.RX_OVERFLOW" => EvidenceKind::RxOverflow,
                     "radio.TX_UNDERFLOW" => EvidenceKind::Underflow,
                     _ => continue,
@@ -3830,7 +3824,7 @@ mod tests {
             trial.evidence.push(EvidenceKind::ProviderTimeError(error));
             assert_eq!(classify_trial(&trial), TrialClass::ProviderFailure, "{error:?}");
         }
-        for error in [EvidenceKind::LateCommand, EvidenceKind::CommandRejected, EvidenceKind::CommandQueueFull] {
+        for error in [EvidenceKind::LateCommand, EvidenceKind::CommandRejected] {
             let mut trial = complete(10);
             trial.evidence.push(error);
             assert_eq!(classify_trial(&trial), TrialClass::ProviderFailure, "{error:?}");
@@ -4241,7 +4235,7 @@ mod tests {
         // lead from the configure record, warning or not.
         let mut plan = MeasurementPlan::rehearsal();
         plan.rx_start_leads_ns = vec![3_000_000, 5_000_000, 10_000_000];
-        let device = super::super::fake_real(ezsdr_radio_uhd::FakeConfig { apply_delay: Wall::from_millis(8), ..ezsdr_radio_uhd::FakeConfig::default() });
+        let device = super::super::fake_real(ezsdr_radio_uhd::FakeConfig { apply_delay: Wall::from_millis(5), ..ezsdr_radio_uhd::FakeConfig::default() });
         let group = measure_rx_start_lead(device, &plan).unwrap();
         let row = group.observations.iter().find(|row| row.name == "provider_rx_start_lead").expect("the group's observation");
         let stages = row.result["candidates"].as_array().expect("the candidate stages");
@@ -4403,7 +4397,6 @@ mod tests {
                 })
                 .expect("the comparable key has an unmeasured reason")
         };
-        let queue_reason = reason("radio.timing.command_queue_depth");
         let gain_reason = reason("radio.rx.c0.gain_db");
         let antenna_reason = reason("radio.rx.c0.antenna");
         let sample_rate_reason = reason("radio.rx.s0.sample_rate_hz");
@@ -4412,14 +4405,12 @@ mod tests {
         let tx_start_reason = reason("radio.timing.tx_start_lead_ns");
         let overflow_reason = reason("radio.timing.overflow_restart_gap_ns");
         let tx_throughput_reason = reason("radio.perf.tx_bytes_per_s");
-        assert!(queue_reason.contains("S2a-i-α") && queue_reason.contains("S2b-i"), "{queue_reason}");
         assert!(gain_reason.contains("3c-2a") && gain_reason.contains("coercion read-back"), "{gain_reason}");
         assert!(antenna_reason.contains("3c-2a") && antenna_reason.contains("coercion read-back"), "{antenna_reason}");
         assert!(sample_rate_reason.contains("3c-2a") && sample_rate_reason.contains("sample-rate read-back"), "{sample_rate_reason}");
         assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
         assert!(tx_start_reason.contains("note 47") && overflow_reason.contains("3c-1") && tx_throughput_reason.contains("3c-1"));
-        assert_ne!(queue_reason, lead_reason);
         assert_ne!(lead_reason, startup_reason);
         let no_pass = BTreeMap::from([("tx-1msps".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure] }])]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &no_pass, 1).unwrap();
@@ -4567,15 +4558,11 @@ mod tests {
         assert_eq!(MeasurementPlan::default().overflow_trials, 5);
         let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
         assert_eq!((defaults.step_trials, defaults.overflow_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 5, 60, 20));
-        // RM-6 holds the receive candidates to the release window.
         assert_eq!(defaults.rx_start_leads_ns, [3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]);
         assert_eq!(MeasurementPlan::rehearsal().rx_start_leads_ns, [3_000_000, 5_000_000]);
         for plan in [MeasurementPlan::default(), MeasurementPlan::rehearsal()] {
-            assert!(plan.rx_start_leads_ns.iter().all(|lead| *lead >= default_timing().release_window_ns as u64), "{:?}", plan.rx_start_leads_ns);
             assert!(plan.rx_start_leads_ns.iter().all(|lead| candidate_timing("rx_start_lead_ns", *lead).is_ok()));
         }
-        assert!(candidate_timing("rx_start_lead_ns", 1_000_000).unwrap_err().contains("RM-6"), "below the window");
-        assert!(candidate_timing("rx_start_lead_ns", default_timing().release_window_ns as u64).is_ok(), "equal to the window");
         assert_eq!(defaults.overflow_rates_hz, [1_000_000, 10_000_000, 25_000_000, 50_000_000]);
         assert_eq!(defaults.overflow_stall_ms.len(), defaults.overflow_rates_hz.len());
         assert_eq!(defaults.tx_throughput_rates_hz, defaults.rx_rates_hz);

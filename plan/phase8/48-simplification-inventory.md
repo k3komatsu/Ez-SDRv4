@@ -88,7 +88,7 @@ note 46 と 47 で，次のことを決めた．
    - trait と FakeDevice の境を変えるので risky．
    - 試験計画に，残す試験・移す assertion・消す試験と mutation 行の対応表を入れる．
    - 試験の削除が大きい（`device.rs` の試験，differential の時刻つきの部分，測定の群）．
-   - 試験計画（`reviews/48s2-test-plan.md`，Sol と Opus の再確認を経た第 3 版）で S2a-i-α（queue の測定の群）・S2a-i-β（`apply`・`rx_stop` の `at`，FakeDevice の queue と DSP の FIFO）・S2a-ii（A4，A5′）・S2b-i（A2 の残り，B3）・S2b-ii（A3，A6，A7，B5 は `ClockEnded`，B7）に分けた．**α・β・S2a-ii は済**（2026-11-05〜06）．
+   - 試験計画（`reviews/48s2-test-plan.md`，Sol と Opus の再確認を経た第 3 版）で S2a-i-α（queue の測定の群）・S2a-i-β（`apply`・`rx_stop` の `at`，FakeDevice の queue と DSP の FIFO）・S2a-ii（A4，A5′）・S2b-i（A2 の残り，B3）・S2b-ii（A3，A6，A7，B5 は `ClockEnded`，B7）に分けた．**α・β・S2a-ii・S2b-i は済**（2026-11-05〜06）．
 3. **次の実機**（handoff (7) ③′）．
    - 200 MS/s の Module の負荷，延ばした (c)・(d)・(e)・(f)，#1 の送信の rate，#78 の確認．
    - 再開の先頭の rate ごとの数，B3 の後の受信の start lead の候補．

@@ -153,7 +153,6 @@ impl Control {
         // segment after a cut, the receive call in progress there and the delivery
         // allowance (UR-25). The call term is each receive stream's own packet size.
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
-        let release_window = core.ticks(core.description.timing.release_window_ns);
         let line = |key: StreamKey, origin: i64, channels: Channels, n: i64, call: i64| {
             Line::new(timeline::Stream {
                 direction: key.0,
@@ -161,7 +160,6 @@ impl Control {
                 config: Config { channels, ratio: Rational::new(n.max(1) as u64, 1).expect("a positive ratio") },
                 lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, key.0)),
                 call,
-                release_window: if key.0 == Direction::Rx { release_window } else { 0 },
                 allowance,
             })
         };

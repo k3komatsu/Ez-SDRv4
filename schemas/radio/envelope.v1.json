@@ -50,11 +50,6 @@
       "additionalProperties": false,
       "description": "Timing values recorded in a radio Provider's Manifest (RM-20).",
       "properties": {
-        "command_queue_depth": {
-          "description": "Timed-command queue capacity (RM-20).",
-          "format": "int64",
-          "type": "integer"
-        },
         "min_timed_command_lead_ns": {
           "description": "Minimum lead for a timed command (RM-20).",
           "format": "int64",
@@ -62,11 +57,6 @@
         },
         "overflow_restart_gap_ns": {
           "description": "Receive restart gap after overrun (RM-20).",
-          "format": "int64",
-          "type": "integer"
-        },
-        "release_window_ns": {
-          "description": "How far ahead of its instant a timed command is handed to the device (RM-20).",
           "format": "int64",
           "type": "integer"
         },
@@ -94,8 +84,6 @@
       "required": [
         "min_timed_command_lead_ns",
         "startup_latency_ns",
-        "command_queue_depth",
-        "release_window_ns",
         "overflow_restart_gap_ns",
         "rx_start_lead_ns",
         "tx_start_lead_ns",

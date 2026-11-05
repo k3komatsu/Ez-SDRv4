@@ -1885,7 +1885,7 @@ mod tests {
             let mut streams = lock(&core.streams);
             streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![c0];
             let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, ezsdr_kernel::stream::Direction::Tx));
-            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin, config, lead, call: 0, release_window: 0, allowance: 0 }));
+            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(Stream { direction: ezsdr_kernel::stream::Direction::Tx, origin, config, lead, call: 0, allowance: 0 }));
         }
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(c0), Channels::first(1));

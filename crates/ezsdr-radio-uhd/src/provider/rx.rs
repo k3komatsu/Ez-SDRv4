@@ -775,7 +775,6 @@ mod tests {
                 config,
                 lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
                 call: core.block_len as i64,
-                release_window: core.ticks(core.description.timing.release_window_ns),
                 allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
             }),
         );
@@ -867,7 +866,7 @@ mod tests {
             ..Default::default()
         }));
         let mut description = super::super::test_support::default_description(20_000);
-        description.timing.rx_start_lead_ns = description.timing.release_window_ns;
+        description.timing.rx_start_lead_ns = 3_000_000;
         let (core, time, _) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), description);
         spy.watch(&core);
         spy.report_rx_packet_max(20_000);
@@ -886,10 +885,9 @@ mod tests {
         spy.rx_start(0, now).unwrap();
         rx.stream.as_mut().unwrap().expected = expected;
         core.rx_chain[0].lock().request_cut(cut);
-        let release = core.ticks(core.description.timing.release_window_ns);
         let allowance = core.ticks(DELIVERY_ALLOWANCE_NS);
         let lead = core.ticks(core.description.timing.rx_start_lead_ns);
-        let successor = cut + release + call * clock.n + allowance + lead;
+        let successor = cut + call * clock.n + allowance + lead;
         plan(&core, &[(0, Some(cut_index), None), (successor, None, Some(1))]);
 
         let gate = spy.stop_after("rx_recv");
@@ -1158,7 +1156,6 @@ mod tests {
                 config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
                 lead: 0,
                 call: 2_000,
-                release_window: 0,
                 allowance: 0,
             }),
         );
@@ -1468,7 +1465,6 @@ mod tests {
                 config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
                 lead: 0,
                 call: 2_000,
-                release_window: 0,
                 allowance: 0,
             }),
         );
@@ -1527,7 +1523,6 @@ mod tests {
                 config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
                 lead: 0,
                 call: 2_000,
-                release_window: 0,
                 allowance: 0,
             }),
         );
@@ -1563,7 +1558,7 @@ mod tests {
         let handle = core.clocks.declare_sample_clock(node, core.root, config.ratio).unwrap();
         {
             let mut streams = lock(&core.streams);
-            streams.lines.insert(key, Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: t0, config, lead: 0, call: 2_000, release_window: 0, allowance: 0 }));
+            streams.lines.insert(key, Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: t0, config, lead: 0, call: 2_000, allowance: 0 }));
         }
         core.device.rx_open(0, &[0]).unwrap();
         lock(&core.streams).record_open(key, Some(Channels::first(1)));
@@ -1702,7 +1697,7 @@ mod tests {
         let config = Config { channels: Channels::first(0).with(1), ratio: Rational::new(200, 1).unwrap() };
         {
             let mut streams = lock(&core.streams);
-            let mut line = Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: 0, config, lead: 0, call: 0, release_window: 0, allowance: 0 });
+            let mut line = Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: 0, config, lead: 0, call: 0, allowance: 0 });
             line.plan = vec![Segment { origin: 0, cut: Some(5_000), config, by: None }, Segment { origin: clock.instant(5_000), cut: None, config, by: Some(1) }];
             streams.lines.insert(stream_key(Dir::Rx, 1), line);
             streams.stream_mut(stream_key(Dir::Rx, 1)).configs.insert(1, Arc::new(ColdConfig::new(BTreeMap::new())));
@@ -2138,17 +2133,16 @@ mod tests {
     #[test]
     fn ur_25_a_refused_segment_is_booked_by_uhd_rx() {
         // RM-25: when the device refuses a segment's configuration, uhd-rx books the `start_rx` as
-        // refused itself, which halts the stream, and reads the plan made so at once. The refused
-        // segment (origin 68 ms) runs for planning until the owner's Stop cuts it (90 ms), so the
-        // `start_rx` after it begins after the call in progress there (2 ms at 1 MS/s), the allowance
-        // (3 ms) and the release window (3 ms), and lead (50 ms): 148 ms.
+        // refused itself, which halts the stream, and reads the plan made so at once. The `start_rx`
+        // after the owner's Stop at 10 ms begins after the call in progress there (2 ms at 1 MS/s),
+        // the allowance (3 ms) and lead (50 ms): 65 ms.
         let refuse = crate::device::FakeFault::WrongRate { claimed: 1e6, applied: 1e6 - 1_000.0, nth: 0 };
         let (core, device, _, _) = super::super::test_support::rig_with(crate::device::FakeConfig { faults: vec![refuse], ..Default::default() }, vec![link()]);
         let (mut rx, _) = rx(&core, 1);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         book(&core, ms(10), 1, Kind::Stop);
         book(&core, ms(15), 2, Kind::Start);
-        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(68), Some(2))]);
+        assert_eq!(lock(&core.streams).planned(stream_key(Dir::Rx, 0)).iter().map(|p| (p.segment.origin, p.segment.by)).collect::<Vec<_>>(), [(0, None), (ms(65), Some(2))]);
         rx.poll();
         rx.receive(samples(0, 10_000));
         assert!(rx.stream.is_none());
@@ -2163,12 +2157,12 @@ mod tests {
         book(&core, ms(95), 4, Kind::Start);
         assert!(rx.begin());
         let starts: Vec<_> = device.calls().into_iter().filter(|c| c.starts_with("rx_start ")).collect();
-        assert_eq!(starts, ["rx_start 0 0".to_owned(), format!("rx_start 0 {}", ms(148))]);
+        assert_eq!(starts, ["rx_start 0 0".to_owned(), format!("rx_start 0 {}", ms(145))]);
         let stream = rx.stream.as_ref().expect("the resumed segment");
-        assert_eq!(stream.clock.origin, ms(148), "the resumed segment begins from the refused one's cut");
+        assert_eq!(stream.clock.origin, ms(145), "the resumed segment begins from the refused one's cut");
         assert_eq!(stream.config.ratio.num(), 200);
         let streams = lock(&core.streams);
-        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(148), stream.config, 0)));
+        assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((ms(145), stream.config, 0)));
         assert_eq!(streams.planned(stream_key(Dir::Rx, 0)).last().map(|planned| planned.segment.by), Some(Some(4)), "the command that began the resumed segment is the second Start's");
     }
 
@@ -2264,7 +2258,6 @@ mod tests {
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
             lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Tx)),
             call: core.block_len as i64,
-            release_window: 0,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         })
     }

@@ -296,15 +296,11 @@ pub fn rule(key: &str) -> Option<Rule> {
 
     match key {
         keys::FULL_DUPLEX | keys::HARDWARE_TIME => return Some(TrueImplies),
-        keys::TX_REPEAT_MAX_SAMPLES | keys::COMMAND_QUEUE_DEPTH | keys::RX_BYTES_PER_S | keys::TX_BYTES_PER_S => return Some(UpperBound),
+        keys::TX_REPEAT_MAX_SAMPLES | keys::RX_BYTES_PER_S | keys::TX_BYTES_PER_S => return Some(UpperBound),
         keys::TX_REPEAT_ALIGN_SAMPLES => return Some(Multiple),
-        keys::MIN_TIMED_COMMAND_LEAD_NS
-        | keys::STARTUP_LATENCY_NS
-        | keys::OVERFLOW_RESTART_GAP_NS
-        | keys::RX_START_LEAD_NS
-        | keys::TX_START_LEAD_NS
-        | keys::TX_IN_FLIGHT_NS
-        | keys::RELEASE_WINDOW_NS => return Some(LowerBound),
+        keys::MIN_TIMED_COMMAND_LEAD_NS | keys::STARTUP_LATENCY_NS | keys::OVERFLOW_RESTART_GAP_NS | keys::RX_START_LEAD_NS | keys::TX_START_LEAD_NS | keys::TX_IN_FLIGHT_NS => {
+            return Some(LowerBound);
+        }
         keys::WIRE_BYTES_PER_SAMPLE => return Some(Equal),
         keys::RX_BLOCK_LEN => return Some(NotCompared),
         _ => {}
@@ -364,8 +360,6 @@ fn profile_value(description: &channels::Description, key: &Key) -> Option<Worst
         keys::RX_BLOCK_LEN => Worst::Number(description.block_len as f64),
         keys::MIN_TIMED_COMMAND_LEAD_NS => Worst::Number(description.timing.min_timed_command_lead_ns as f64),
         keys::STARTUP_LATENCY_NS => Worst::Number(description.timing.startup_latency_ns as f64),
-        keys::COMMAND_QUEUE_DEPTH => Worst::Number(description.timing.command_queue_depth as f64),
-        keys::RELEASE_WINDOW_NS => Worst::Number(description.timing.release_window_ns as f64),
         keys::OVERFLOW_RESTART_GAP_NS => Worst::Number(description.timing.overflow_restart_gap_ns as f64),
         keys::RX_START_LEAD_NS => Worst::Number(description.timing.rx_start_lead_ns as f64),
         keys::TX_START_LEAD_NS => Worst::Number(description.timing.tx_start_lead_ns as f64),

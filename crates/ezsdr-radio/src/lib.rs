@@ -51,10 +51,6 @@ pub mod keys {
     pub const MIN_TIMED_COMMAND_LEAD_NS: &str = "radio.timing.min_timed_command_lead_ns";
     /// Startup latency in nanoseconds (RM-4).
     pub const STARTUP_LATENCY_NS: &str = "radio.timing.startup_latency_ns";
-    /// Device timed-command queue depth (RM-4).
-    pub const COMMAND_QUEUE_DEPTH: &str = "radio.timing.command_queue_depth";
-    /// How far ahead of its instant a timed command is handed to the device (RM-4, RM-21).
-    pub const RELEASE_WINDOW_NS: &str = "radio.timing.release_window_ns";
     /// Receive restart gap after overrun in nanoseconds (RM-4).
     pub const OVERFLOW_RESTART_GAP_NS: &str = "radio.timing.overflow_restart_gap_ns";
     /// Lead from a receive stream's previous cut, and from the instant its Provider is ready
@@ -106,8 +102,6 @@ pub mod kinds {
     pub const ALIGNMENT_ERROR: &str = "radio.ALIGNMENT_ERROR";
     /// Device lost its reference clock (RM-10).
     pub const CLOCK_LOST: &str = "radio.CLOCK_LOST";
-    /// Timed-command queue is full (RM-10).
-    pub const COMMAND_QUEUE_FULL: &str = "radio.COMMAND_QUEUE_FULL";
     /// Provider could not carry out an admitted Action (RM-10).
     pub const COMMAND_REJECTED: &str = "radio.COMMAND_REJECTED";
     /// A receive start's configure left less than the declared command lead before the planned origin (RM-10, RM-25).
@@ -172,8 +166,6 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::RX_BLOCK_LEN, Int, false, Reject, None),
         key_decl(keys::MIN_TIMED_COMMAND_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::STARTUP_LATENCY_NS, Int, false, Reject, None),
-        key_decl(keys::COMMAND_QUEUE_DEPTH, Int, false, Reject, None),
-        key_decl(keys::RELEASE_WINDOW_NS, Int, false, Reject, None),
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
         key_decl(keys::RX_START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::TX_START_LEAD_NS, Int, false, Reject, None),
@@ -212,7 +204,6 @@ fn radio_event_kinds() -> Vec<EventKindDecl> {
         (LATE_COMMAND, Severity::Warning, Reaction::MarkArtifact),
         (ALIGNMENT_ERROR, Severity::Error, Reaction::MarkArtifact),
         (CLOCK_LOST, Severity::Fatal, Reaction::Abort),
-        (COMMAND_QUEUE_FULL, Severity::Error, Reaction::Abort),
         (COMMAND_REJECTED, Severity::Error, Reaction::MarkArtifact),
         (START_LEAD_SHORT, Severity::Warning, Reaction::Continue),
     ]
@@ -539,10 +530,6 @@ pub struct TimingEnvelope {
     pub min_timed_command_lead_ns: i64,
     /// Time from arm to stream start (RM-20).
     pub startup_latency_ns: i64,
-    /// Timed-command queue capacity (RM-20).
-    pub command_queue_depth: i64,
-    /// How far ahead of its instant a timed command is handed to the device (RM-20).
-    pub release_window_ns: i64,
     /// Receive restart gap after overrun (RM-20).
     pub overflow_restart_gap_ns: i64,
     /// From a receive stream's previous cut, and from the instant its Provider is ready for
@@ -552,18 +539,6 @@ pub struct TimingEnvelope {
     pub tx_start_lead_ns: i64,
     /// Maximum time ahead of the device that transmit samples may be handed over (RM-20).
     pub tx_in_flight_ns: i64,
-}
-
-impl TimingEnvelope {
-    /// RM-6: the receive start lead is at least the release window, so that a booking made once
-    /// a timed command is released cannot begin a segment before the command's instant. The one
-    /// place the rule is read; the places that build a description call it.
-    pub fn check_start_lead(&self) -> Result<(), String> {
-        if self.rx_start_lead_ns < self.release_window_ns {
-            return Err(format!("RM-6: radio.timing.rx_start_lead_ns {} is below radio.timing.release_window_ns {}", self.rx_start_lead_ns, self.release_window_ns));
-        }
-        Ok(())
-    }
 }
 
 /// Throughput values recorded in a radio Provider's Manifest (RM-20).
@@ -796,16 +771,6 @@ pub mod payloads {
         pub min_lead_ns: i64,
     }
 
-    /// Timed-command queue exhaustion data (RM-22).
-    #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct CommandQueueFullPayload {
-        /// The key of the timed command (RM-22).
-        pub key: Key,
-        /// Queue depth at refusal (RM-22).
-        pub depth: i64,
-    }
-
     /// Data for an admitted Action the Provider could not perform (RM-22).
     #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
@@ -821,11 +786,10 @@ pub mod payloads {
     }
 }
 
-/// Generates the thirteen committed Radio Model schemas (RM-20, RM-22, RM-24, RM-35).
+/// Generates the twelve committed Radio Model schemas (RM-20, RM-22, RM-24, RM-35).
 pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
     use payloads::{
-        AlignmentErrorPayload, ClockLostPayload, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload, StartLeadShortPayload, TimeErrorPayload,
-        TxUnderflowPayload,
+        AlignmentErrorPayload, ClockLostPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowHotPayload, RxOverflowPayload, StartLeadShortPayload, TimeErrorPayload, TxUnderflowPayload,
     };
 
     fn of<T: JsonSchema>() -> serde_json::Value {
@@ -840,7 +804,6 @@ pub fn document_schemas() -> BTreeMap<&'static str, serde_json::Value> {
         ("time_error_payload", of::<TimeErrorPayload>()),
         ("late_command_payload", of::<LateCommandPayload>()),
         ("start_lead_short_payload", of::<StartLeadShortPayload>()),
-        ("command_queue_full_payload", of::<CommandQueueFullPayload>()),
         ("command_rejected_payload", of::<CommandRejectedPayload>()),
         ("tx_underflow_payload", of::<TxUnderflowPayload>()),
         ("alignment_error_payload", of::<AlignmentErrorPayload>()),

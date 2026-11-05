@@ -527,17 +527,11 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.tx.repeat_align_samples")], one(Scalar::from(if x3xx { 2 } else { 1 })));
         assert_eq!(capabilities[&key("radio.rx.block_len")], one(Scalar::from(2_000)));
         let envelope = &radio.instance().sections[&Namespace::parse("ezsdr.radio.mock.envelope").unwrap()];
-        let (lead, startup, depth, gap, bytes_per_s, wire, in_flight) =
-            if x3xx { (2_000_000, 2_000_000_000, 16, 50_000_000, 100_000_000, 4, 10_000_000) } else { (0, 0, i64::from(u32::MAX), 0, 1_i64 << 62, 8, 0) };
-        // The release window is the profile's: x3xx emulates the UHD Module's, ideal none
-        // (design 38 D1).
-        let window = if x3xx { 3_000_000 } else { 0 };
+        let (lead, startup, gap, bytes_per_s, wire, in_flight) = if x3xx { (2_000_000, 2_000_000_000, 50_000_000, 100_000_000, 4, 10_000_000) } else { (0, 0, 0, 1_i64 << 62, 8, 0) };
         // Each direction's own start lead (RM-25; design 33 D5).
         let start_lead = if x3xx { 50_000_000 } else { 0 };
         assert_eq!(capabilities[&key("radio.timing.min_timed_command_lead_ns")], one(Scalar::from(lead)));
         assert_eq!(capabilities[&key("radio.timing.startup_latency_ns")], one(Scalar::from(startup)));
-        assert_eq!(capabilities[&key("radio.timing.command_queue_depth")], one(Scalar::from(depth)));
-        assert_eq!(capabilities[&key("radio.timing.release_window_ns")], one(Scalar::from(window)));
         assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Scalar::from(gap)));
         assert!(!capabilities.contains_key(&key("radio.timing.stop_tail_ns")) && !capabilities.contains_key(&key("radio.timing.restart_lead_ns")));
         assert_eq!(capabilities[&key("radio.timing.rx_start_lead_ns")], one(Scalar::from(start_lead)));
@@ -558,13 +552,9 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.rx.c0.path_delay_samples")], one(Scalar::from(rx_delay)));
         assert_eq!(envelope["timing"]["min_timed_command_lead_ns"], lead);
         assert_eq!(envelope["timing"]["startup_latency_ns"], startup);
-        assert_eq!(envelope["timing"]["command_queue_depth"], depth);
-        assert_eq!(envelope["timing"]["release_window_ns"], window);
         assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], gap);
         assert!(envelope["timing"].get("stop_tail_ns").is_none() && envelope["timing"].get("restart_lead_ns").is_none());
         assert_eq!(envelope["timing"]["rx_start_lead_ns"], start_lead);
-        // RM-6: the published receive start lead is at least the release window.
-        assert!(envelope["timing"]["rx_start_lead_ns"].as_i64() >= envelope["timing"]["release_window_ns"].as_i64(), "{name}");
         assert_eq!(envelope["timing"]["tx_start_lead_ns"], start_lead);
         assert_eq!(envelope["timing"]["tx_in_flight_ns"], in_flight);
         assert_eq!(envelope["performance"]["rx_bytes_per_s"], bytes_per_s);

@@ -93,7 +93,7 @@ fn terms(block: i64) -> Terms {
     let ticks = |ns: i64| (ns + 4) / 5;
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
     let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
-    let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, release_window: ticks(description.timing.release_window_ns), allowance: ticks(DELIVERY_ALLOWANCE_NS) };
+    let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, stream }
 }
 
@@ -140,6 +140,19 @@ fn rm_26_the_timeline_against_uhd_rx() {
     }
     eprintln!("layer 3: 1000 sequences; cases {seen:?}");
     assert!(failed.is_empty(), "{} sequences differ (EZSDR_TIMELINE_SEED=<seed> shows one), the first: {:#?}", failed.len(), &failed[..failed.len().min(20)]);
+}
+
+/// The successor origin of a Stop and a Start at one cut: one receive call at the old rate, the
+/// allowance and the lead after the cut. Both Providers book the origin through this `plan`
+/// (`rm_26` compares each Provider's observed origins with it), so the formula is pinned here.
+#[test]
+fn n5_the_receive_successor_origin_is_old_rate_call_plus_allowance_plus_lead() {
+    let block = 2_000;
+    let stream = terms(block).stream;
+    let cut = T0 + 10 * MS;
+    let item = |seq, kind| Item { e: cut, seq, ready: cut, delivered: None, refused: false, kind };
+    let segments = plan(&stream, &[item(1, Kind::Stop), item(2, Kind::Start)]).unwrap();
+    assert_eq!(segments[1].origin, cut + block * 200 + stream.allowance + stream.lead);
 }
 
 /// What uhd-rx left: the receive clocks as `(origin, ended)`, its blocks by clock, the

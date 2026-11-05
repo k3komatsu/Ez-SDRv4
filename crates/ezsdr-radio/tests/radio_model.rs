@@ -12,8 +12,8 @@ use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 use ezsdr_radio::RfEnvelopeCheck;
 use ezsdr_radio::payloads::{
-    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandQueueFullPayload, CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload, StartLeadShortPayload,
-    TimeErrorCause, TimeErrorOutcome, TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
+    AlignmentErrorPayload, ClockLostPayload, ClockReference, CommandRejectedPayload, LateCommandPayload, RxOverflowCause, RxOverflowPayload, StartLeadShortPayload, TimeErrorCause, TimeErrorOutcome,
+    TimeErrorPayload, TxUnderflowCause, TxUnderflowPayload,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value as JsonValue, json};
@@ -83,7 +83,7 @@ fn rm_01_register_adds_the_descriptor_the_check_and_the_kinds() {
     assert!(violations[0].key.is_none());
     assert!(violations[0].requested.is_none());
 
-    assert_eq!(kinds.kinds().len(), 10);
+    assert_eq!(kinds.kinds().len(), 9);
     for declaration in &descriptor.event_kinds {
         assert_eq!(kinds.get(&declaration.kind), Some(declaration));
     }
@@ -97,8 +97,8 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 34);
-    assert_eq!(kinds.kinds().len(), 10);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 32);
+    assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(checks.run(&envelope_section(json!({"allowed_bands": "not a list"})), &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate,).len(), 1,);
 }
 
@@ -121,8 +121,6 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.rx.block_len", int, false, reject, none),
         ("radio.timing.min_timed_command_lead_ns", int, false, reject, none),
         ("radio.timing.startup_latency_ns", int, false, reject, none),
-        ("radio.timing.command_queue_depth", int, false, reject, none),
-        ("radio.timing.release_window_ns", int, false, reject, none),
         ("radio.timing.overflow_restart_gap_ns", int, false, reject, none),
         ("radio.timing.rx_start_lead_ns", int, false, reject, none),
         ("radio.timing.tx_start_lead_ns", int, false, reject, none),
@@ -170,7 +168,6 @@ fn rm_10_the_kinds_are_registered_under_radio_with_their_defaults() {
         ("radio.LATE_COMMAND", Severity::Warning, Reaction::MarkArtifact),
         ("radio.ALIGNMENT_ERROR", Severity::Error, Reaction::MarkArtifact),
         ("radio.CLOCK_LOST", Severity::Fatal, Reaction::Abort),
-        ("radio.COMMAND_QUEUE_FULL", Severity::Error, Reaction::Abort),
         ("radio.COMMAND_REJECTED", Severity::Error, Reaction::MarkArtifact),
         ("radio.START_LEAD_SHORT", Severity::Warning, Reaction::Continue),
     ];
@@ -299,6 +296,29 @@ fn rm_19_the_proposed_value_is_judged() {
 }
 
 #[test]
+fn rm_20_a_timing_document_with_a_removed_key_is_refused() {
+    let timing = json!({
+        "min_timed_command_lead_ns": 5_000_000,
+        "startup_latency_ns": 2_000_000_000i64,
+        "overflow_restart_gap_ns": 50_000_000,
+        "rx_start_lead_ns": 50_000_000,
+        "tx_start_lead_ns": 50_000_000,
+        "tx_in_flight_ns": 10_000_000
+    });
+    serde_json::from_value::<ezsdr_radio::TimingEnvelope>(timing.clone()).expect("the six remaining members");
+    for removed in ["command_queue_depth", "release_window_ns"] {
+        let mut document = timing.clone();
+        document[removed] = json!(16);
+        assert!(serde_json::from_value::<ezsdr_radio::TimingEnvelope>(document).is_err(), "{removed} is refused");
+    }
+    let schema = &ezsdr_radio::document_schemas()["envelope"]["$defs"]["TimingEnvelope"];
+    assert_eq!(schema["additionalProperties"], json!(false));
+    for removed in ["command_queue_depth", "release_window_ns"] {
+        assert!(schema["properties"].get(removed).is_none(), "{removed} is not in the schema");
+    }
+}
+
+#[test]
 fn rm_20_schema_freeze() {
     let dir = schemas_dir();
     let update = std::env::var("EZSDR_UPDATE_SCHEMAS").is_ok();
@@ -377,7 +397,6 @@ fn rm_22_payloads_round_trip() {
             "min_lead_ns": 5_000_000
         }),
     );
-    assert_payload_round_trip(CommandQueueFullPayload { key: Key::parse("radio.tx.c0.frequency_hz").unwrap(), depth: 8 }, json!({"key": "radio.tx.c0.frequency_hz", "depth": 8}));
     assert_payload_round_trip(
         CommandRejectedPayload { action: Some(ezsdr_kernel::event::ActionId(7)), kind: "tx_burst".to_owned(), reason: "bad waveform".to_owned() },
         json!({"action": 7, "kind": "tx_burst", "reason": "bad waveform"}),

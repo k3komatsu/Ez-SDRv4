@@ -25,8 +25,6 @@
     { "status": "measured", "key": "radio.tx.repeat_align_samples", "worst": 1, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.min_timed_command_lead_ns", "worst": 3000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.startup_latency_ns", "worst": 1000000000, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.timing.command_queue_depth", "worst": 20, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.timing.release_window_ns", "worst": 2000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.overflow_restart_gap_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.rx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.tx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },

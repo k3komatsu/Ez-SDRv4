@@ -448,8 +448,8 @@
   "id": "J06",
   "name": "VH-4 (spec 22, H06): the ready instant drops the receive call in progress",
   "file": "crates/ezsdr-radio/src/timeline.rs",
-   "old": "ready = ready.max(cut + i128::from(stream.release_window) + ceil_div(call, den) + i128::from(stream.allowance));",
-   "new": "ready = ready.max(cut + i128::from(stream.release_window) + i128::from(stream.allowance));",
+   "old": "ready = ready.max(cut + ceil_div(call, den) + i128::from(stream.allowance));",
+   "new": "ready = ready.max(cut + i128::from(stream.allowance));",
   "crate": "ezsdr-radio",
   "test_bin": "timeline",
   "filter": "rm_26_the_timeline_cases"
@@ -4297,17 +4297,7 @@
   "test_bin": "channels",
   "filter": "rm_28_the_layout_analysis_cases"
  },
- {
-  "id": "P68",
-  "name": "RM-29: the ideal description's command queue is empty",
-  "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "                command_queue_depth: i64::from(u32::MAX),",
-  "new": "                command_queue_depth: 0,",
-  "crate": "ezsdr-radio",
-  "test_bin": "channels",
-  "filter": "rm_29_the_ideal_layout_builds_its_tree_and_defaults"
- },
- {
+{
   "id": "P69",
   "name": "RM-28: an HG image's default link is 10 GbE",
   "file": "crates/ezsdr-radio/src/channels.rs",
@@ -6921,8 +6911,8 @@
   "id": "P626",
   "name": "the ideal layout publishes no TX in-flight window (RM-29)",
   "file": "crates/ezsdr-radio/src/channels.rs",
-  "old": "                tx_in_flight_ns: 0,",
-  "new": "                tx_in_flight_ns: 10_000_000,",
+  "old": "tx_in_flight_ns: 0 }",
+  "new": "tx_in_flight_ns: 10_000_000 }",
   "crate": "ezsdr-radio",
   "test_bin": "channels",
   "filter": "rm_29_the_ideal_layout_builds_its_tree_and_defaults"
@@ -7873,17 +7863,7 @@
    "test_bin": "fake",
    "filter": "candidate_summaries_use_successful_suffix_prefix_trial_counts_and_condition_intersection"
   },
-  {
-   "id": "P732",
-   "name": "queue depth uses the generic unmeasured reason",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"Not measured in this record; the queue-depth measurement was removed by note 48 S2a-i-α, and the key leaves in note 48 S2b-i.\"",
-   "new": "\"Not measured in this record; command queue depth awaits independent calibration.\"",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
-  },
-  {
+{
    "id": "P733",
    "name": "metadata validation rejects the H4 load",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -10102,57 +10082,7 @@
    "test_bin": "timeline",
    "filter": "rm_26_the_timeline_cases"
   },
-  {
-   "id": "P1070",
-   "name": "the start-lead check accepts a lead equal to the window (RM-6, design 43)",
-   "file": "crates/ezsdr-radio/src/lib.rs",
-   "old": "        if self.rx_start_lead_ns < self.release_window_ns {",
-   "new": "        if self.rx_start_lead_ns <= self.release_window_ns {",
-   "crate": "ezsdr-radio",
-   "test_bin": "channels",
-   "filter": "rm_6_the_start_lead_check_cases"
-  },
-  {
-   "id": "P1071",
-   "name": "the start-lead check refuses a lead above the window (RM-6, design 43)",
-   "file": "crates/ezsdr-radio/src/lib.rs",
-   "old": "        if self.rx_start_lead_ns < self.release_window_ns {",
-   "new": "        if self.rx_start_lead_ns > self.release_window_ns {",
-   "crate": "ezsdr-radio",
-   "test_bin": "channels",
-   "filter": "rm_6_the_start_lead_check_cases"
-  },
-  {
-   "id": "P1072",
-   "name": "building a Description does not check the start lead (RM-6, design 43)",
-   "file": "crates/ezsdr-radio/src/channels.rs",
-   "old": "        timing.check_start_lead().unwrap_or_else(|error| panic!(\"{error}\"));\n",
-   "new": "",
-   "crate": "ezsdr-radio",
-   "test_bin": "lib",
-   "filter": "rm_6_building_a_description_refuses_a_lead_below_the_window_x3xx"
-  },
-  {
-   "id": "P1073",
-   "name": "a measurement timing is not checked against RM-6 (design 43)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
-   "old": "        timing.check_start_lead().unwrap_or_else(|error| panic!(\"{error}\"));\n",
-   "new": "",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "rm_6_a_measurement_timing_with_a_start_lead_below_the_window_is_refused"
-  },
-  {
-   "id": "P1074",
-   "name": "a candidate timing is not checked against RM-6 (design 43)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "    timing.check_start_lead()?;\n",
-   "new": "",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
+{
    "id": "P1100",
    "name": "uhd-tx never asks for a real-time priority (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -11065,27 +10995,7 @@
        "test_bin": "lib",
        "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
       },
-      {
-       "id": "P1218",
-       "name": "receive successors include the release window before the call and allowance (D9b-2)",
-       "file": "crates/ezsdr-radio/src/timeline.rs",
-       "old": "ready.max(cut + i128::from(stream.release_window) + ceil_div(call, den) + i128::from(stream.allowance))",
-       "new": "ready.max(cut + ceil_div(call, den) + i128::from(stream.allowance))",
-       "crate": "ezsdr-radio",
-       "test_bin": "timeline",
-       "filter": "rm_25_a_receive_successor_adds_release_window_before_call_and_lead"
-      },
-      {
-       "id": "P1219",
-       "name": "the UHD RX line receives the profile release window (D9b-2)",
-       "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-       "old": "release_window: if key.0 == Direction::Rx { release_window } else { 0 },",
-       "new": "release_window: 0,",
-       "crate": "ezsdr-radio-uhd",
-       "test_bin": "lib",
-       "filter": "rm_26_the_timeline_against_uhd_control"
-      },
-      {
+{
         "id": "P1224",
         "name": "the raw P4 C case actually closes and reopens the RX streamer (D9b-2)",
         "file": "crates/ezsdr-radio-uhd/tests/common/d9.rs",
@@ -12163,17 +12073,7 @@
       "test_bin": "timeline",
       "filter": "rm_26_the_timeline_against_mockradio"
     },
-    {
-      "id": "P1220",
-      "name": "MockRadio's RX line receives the profile release window (D9b-2)",
-      "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "release_window: if direction == Direction::Rx { ticks(self.profile.timing().release_window_ns)? } else { 0 },",
-      "new": "release_window: 0,",
-      "crate": "ezsdr-mock-radio",
-      "test_bin": "timeline",
-      "filter": "rm_26_the_timeline_against_mockradio"
-    },
-    {
+{
       "id": "T40",
       "name": "MR-29: a past `at` restarts at the `at`, and the segment is booked ready then",
       "file": "crates/ezsdr-radio/src/timeline.rs",
@@ -13470,5 +13370,25 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+  },
+  {
+    "id": "N-01",
+    "name": "a receive successor drops the allowance after the call in progress (RM-25, VH-4)",
+    "file": "crates/ezsdr-radio/src/timeline.rs",
+    "old": "ready.max(cut + ceil_div(call, den) + i128::from(stream.allowance))",
+    "new": "ready.max(cut + ceil_div(call, den))",
+    "crate": "ezsdr-radio",
+    "test_bin": "timeline",
+    "filter": "rm_25_a_receive_successor_adds_one_call_and_allowance_before_lead"
+  },
+  {
+    "id": "N-06",
+    "name": "TimingEnvelope accepts unknown keys, so a removed key is silently ignored (RM-20)",
+    "file": "crates/ezsdr-radio/src/lib.rs",
+    "old": "#[serde(deny_unknown_fields)]\npub struct TimingEnvelope {",
+    "new": "pub struct TimingEnvelope {",
+    "crate": "ezsdr-radio",
+    "test_bin": "radio_model",
+    "filter": "rm_20_a_timing_document_with_a_removed_key_is_refused"
   }
 ]

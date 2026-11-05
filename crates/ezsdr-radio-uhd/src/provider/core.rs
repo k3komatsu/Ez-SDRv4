@@ -1863,7 +1863,7 @@ mod tests {
     }
 
     fn line(direction: Direction) -> Line {
-        Line::new(timeline::Stream { direction, origin: 0, config: cfg(1), lead: 0, call: 2_000, release_window: 0, allowance: 0 })
+        Line::new(timeline::Stream { direction, origin: 0, config: cfg(1), lead: 0, call: 2_000, allowance: 0 })
     }
 
     fn two_by_two_with_device() -> (Arc<Core>, Arc<crate::device::FakeDevice>) {
@@ -2065,7 +2065,7 @@ mod tests {
         {
             let mut streams = lock(&core.streams);
             streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![clock];
-            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(timeline::Stream { direction: Direction::Tx, origin, config: cfg(1), lead: 0, call: 2_000, release_window: 0, allowance: 0 }));
+            streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(timeline::Stream { direction: Direction::Tx, origin, config: cfg(1), lead: 0, call: 2_000, allowance: 0 }));
         }
         (core, clock)
     }

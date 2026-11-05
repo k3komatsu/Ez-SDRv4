@@ -94,9 +94,6 @@ pub struct Stream {
     /// One receive call, in samples: the longer of `block_len` and the device's packet; 0
     /// for a Provider whose ready instant is the receipt alone (VH-4).
     pub call: i64,
-    /// The receive release window, in root ticks; 0 for transmit streams and Providers whose
-    /// description has no release window (RM-6, VH-4).
-    pub release_window: i64,
     /// The delivery allowance after that call, in root ticks.
     pub allowance: i64,
 }
@@ -518,9 +515,9 @@ impl State {
 
     /// RM-25's start rule: the first lattice instant at or after the item's effective
     /// instant, the previous cut plus the lead, and the ready instant plus the lead. Only a
-    /// receive `start_rx` begins a segment. After a cut, it is ready no earlier than that cut
-    /// plus the release window, one receive call at the old rate and the allowance, the call
-    /// the Provider has in progress there (VH-4).
+    /// receive `start_rx` begins a segment. After a cut, it is ready no earlier than one
+    /// receive call at the old rate and the allowance after that cut, the call the Provider
+    /// has in progress there (VH-4).
     fn begin(&self, stream: &Stream, item: &Item, config: Config) -> Result<Segment, TimeError> {
         let lead = i128::from(stream.lead);
         let mut earliest = i128::from(item.e);
@@ -530,7 +527,7 @@ impl State {
             earliest = earliest.max(cut + lead);
             let (num, den) = parts(old.ratio);
             let call = i128::from(stream.call).checked_mul(num).ok_or(TimeError::Overflow)?;
-            ready = ready.max(cut + i128::from(stream.release_window) + ceil_div(call, den) + i128::from(stream.allowance));
+            ready = ready.max(cut + ceil_div(call, den) + i128::from(stream.allowance));
         }
         earliest = earliest.max(ready + lead);
         let (num, _) = parts(config.ratio);

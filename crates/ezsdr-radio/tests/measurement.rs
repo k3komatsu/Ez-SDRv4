@@ -73,12 +73,12 @@ fn rm_35_each_value_rule_accepts_equal_or_stricter_claims_and_rejects_looser_one
     set_worst(&mut record, key, Worst::Number(1_999_999_999.0));
     assert_clear(&record, &description);
 
-    let key = "radio.timing.command_queue_depth";
-    set_worst(&mut record, key, Worst::Number(16.0));
+    let key = "radio.tx.repeat_max_samples";
+    set_worst(&mut record, key, Worst::Number(268_435_456.0));
     assert_clear(&record, &description);
-    set_worst(&mut record, key, Worst::Number(15.0));
+    set_worst(&mut record, key, Worst::Number(268_435_455.0));
     assert_rejected(&record, &description, key, "exceeds measured");
-    set_worst(&mut record, key, Worst::Number(17.0));
+    set_worst(&mut record, key, Worst::Number(268_435_457.0));
     assert_clear(&record, &description);
 
     let key = "radio.rx.c0.frequency_hz";
@@ -152,7 +152,7 @@ fn rm_35_invalid_comparison_fixture_is_rejected_for_each_rule() {
     for (key, reason) in [
         ("radio.full_duplex", "claims true"),
         ("radio.timing.startup_latency_ns", "below measured"),
-        ("radio.timing.command_queue_depth", "exceeds measured"),
+        ("radio.tx.repeat_max_samples", "exceeds measured"),
         ("radio.rx.c0.frequency_hz", "not a subset"),
         ("radio.rx.c0.antenna", "not a subset"),
         ("radio.rx.s0.sample_rate_hz", "not a subset"),
@@ -161,6 +161,17 @@ fn rm_35_invalid_comparison_fixture_is_rejected_for_each_rule() {
         ("radio.perf.wire_bytes_per_sample", "differs from measured"),
     ] {
         assert!(violations.iter().any(|violation| violation.key == key && violation.reason.contains(reason)), "expected {key} / {reason:?}, got {violations:?}");
+    }
+}
+
+#[test]
+fn rm_35_a_removed_timing_key_is_an_unknown_capability_key() {
+    let mut record = fixture_record();
+    let description = description(&record, mock_terms());
+    for key in ["radio.timing.command_queue_depth", "radio.timing.release_window_ns"] {
+        record.values.push(ValueRecord::Measured { key: Key::parse(key).unwrap(), worst: Worst::Number(1.0), trials: 1, condition: "baseline".to_owned(), test: "fixture".to_owned() });
+        assert_rejected(&record, &description, key, "unknown Radio Model capability key");
+        record.values.pop();
     }
 }
 
@@ -498,8 +509,6 @@ fn rm_35_each_provider_is_compared_with_its_own_description() {
 fn rm_35_rule_labels_match_the_declared_comparison_classes() {
     for (key, expected) in [
         ("radio.timing.min_timed_command_lead_ns", measurement::Rule::LowerBound),
-        ("radio.timing.command_queue_depth", measurement::Rule::UpperBound),
-        ("radio.timing.release_window_ns", measurement::Rule::LowerBound),
         ("radio.timing.overflow_restart_gap_ns", measurement::Rule::LowerBound),
         ("radio.timing.rx_start_lead_ns", measurement::Rule::LowerBound),
         ("radio.timing.tx_start_lead_ns", measurement::Rule::LowerBound),

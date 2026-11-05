@@ -188,13 +188,13 @@ impl Record {
 }
 
 /// A profile's timeline terms; `x3xx` with VH-4's ready term (one receive call of
-/// 2 000 samples, 3 ms).
+/// 2 000 samples and 3 ms of delivery allowance).
 fn terms(profile: &str, direction: Direction, channels: Channels) -> Terms {
-    let (lead, call, allowance, release_window) = if profile == "ideal" { (0, 0, 0, 0) } else { (50 * MS, 2_000, 3 * MS, 3 * MS) };
+    let (lead, call, allowance) = if profile == "ideal" { (0, 0, 0) } else { (50 * MS, 2_000, 3 * MS) };
     // The transmit clock starts at `arm`, at 0 (RM-25); the receive clock at T0.
     let origin = if direction == Direction::Rx { T0 } else { 0 };
     let config = Config { channels, ratio: Rational::new(1_000_000_000, 1_000_000).unwrap() };
-    Terms { t0: T0, root_hz: 1_000_000_000, stream: Stream { direction, origin, config, lead, call, release_window: if direction == Direction::Rx { release_window } else { 0 }, allowance } }
+    Terms { t0: T0, root_hz: 1_000_000_000, stream: Stream { direction, origin, config, lead, call, allowance } }
 }
 
 fn line_key(direction: Direction, stream: u32) -> StreamKey {
