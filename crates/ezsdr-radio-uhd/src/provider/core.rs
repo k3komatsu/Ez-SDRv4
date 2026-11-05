@@ -1087,7 +1087,7 @@ impl Core {
         }));
     }
 
-    /// The open-time two-zero burst clears stale TX header state. One device-clock deadline
+    /// The open-time four-zero burst (UR-22) clears stale TX header state. One device-clock deadline
     /// bounds both report waits and immediate-error/unrelated-report progress.
     #[cfg(test)]
     pub fn tx_flush(&self, stream: usize, channels: &[usize]) -> TxFlushResult {
@@ -1104,14 +1104,14 @@ impl Core {
         let mut acknowledged = BTreeSet::new();
         let mut ack_tick: Option<i64> = None;
         let mut problem = None;
-        let zeros = [Iq::default(); 2];
+        let zeros = [Iq::default(); 4];
         let buffers: Vec<&[Iq]> = channels.iter().map(|_| &zeros[..]).collect();
         let host = self.device.host();
         let until = host.now() + Wall::from_millis(100);
         let send_timeout = until.saturating_sub(host.now());
         match self.device.tx_send(stream, &buffers, None, true, true, send_timeout) {
-            Ok(2) => {}
-            Ok(n) => problem = Some(format!("flush send accepted {n} of 2 samples")),
+            Ok(4) => {}
+            Ok(n) => problem = Some(format!("flush send accepted {n} of 4 samples")),
             Err(error) => {
                 self.device_failed(None, "tx_flush", &error);
                 problem = Some(format!("flush send failed: {}", error.message));
@@ -1144,6 +1144,8 @@ impl Core {
                             (None, tick) => tick,
                             (old, None) => old,
                         };
+                        self.record_tx_async(stream, report);
+                    } else if matches!(report.code, TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {
                         self.record_tx_async(stream, report);
                     } else {
                         self.stash_tx_report(stream, report);
@@ -1702,6 +1704,147 @@ mod tests {
         assert!(result.stopped && lost_core.is_lost());
         assert_eq!(events.drain(lost_core.at(lost_core.now())).iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1);
         assert!(lock(&lost_core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "loss is not a missing ack: {:?}", lock(&lost_core.rec).rejected);
+    }
+
+    #[test]
+    fn ur_22_a_flush_underflows_are_recorded_as_the_flushs() {
+        // UR-28 (T3): an Underflow of an unacknowledged flush channel, read before the flush ends, is the flush's; after its channel's ACK it is a Run report.
+        use crate::device::{FakeConfig, TxCode, TxReport};
+
+        let inner = Arc::new(crate::device::FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
+        let feed = Arc::new(super::super::test_support::ReportFeed::new(inner));
+        let (core, _time, _events) = super::super::test_support::rig_on(feed.clone(), Vec::new(), 2_000);
+        feed.tx_open(0, &[0, 1]).unwrap();
+        let report = |code, channel| TxReport { code, tick: Some(0), channel };
+        feed.give(report(TxCode::Underflow, 0));
+        feed.give(report(TxCode::TimeError, 0));
+        feed.give(report(TxCode::BurstAck, 1));
+        feed.give(report(TxCode::Underflow, 1));
+        feed.give(report(TxCode::BurstAck, 0));
+        let result = core.tx_flush(0, &[0, 1]);
+        assert!(result.acknowledged, "{:?}", lock(&core.rec).device_async);
+        let flush_rows: Vec<_> = lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| (row["code"].as_str().unwrap().to_owned(), row["channel"].as_u64())).collect();
+        assert_eq!(flush_rows, [("Underflow".to_owned(), Some(0)), ("TimeError".to_owned(), Some(0)), ("BurstAck".to_owned(), Some(1)), ("BurstAck".to_owned(), Some(0))]);
+        assert_eq!(core.take_stashed_tx_report(0).map(|report| (report.code, report.channel)), Some((TxCode::Underflow, 1)), "the Underflow after channel 1's ACK is a Run report");
+        assert!(core.take_stashed_tx_report(0).is_none());
+    }
+
+    #[test]
+    fn ur_22_a_recovery_reopen_flush_records_its_underflows_as_its_own() {
+        // UR-28 (T3, recovery): the reopen that replaces an uncertain streamer runs the same flush attribution as the open flush.
+        use crate::device::{FakeConfig, TxCode, TxReport};
+
+        let inner = Arc::new(crate::device::FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
+        let feed = Arc::new(super::super::test_support::ReportFeed::new(inner));
+        let (core, _time, _events) = super::super::test_support::rig_on(feed.clone(), Vec::new(), 2_000);
+        feed.tx_open(0, &[0, 1]).unwrap();
+        let report = |code, channel| TxReport { code, tick: Some(0), channel };
+        feed.give(report(TxCode::Underflow, 0));
+        feed.give(report(TxCode::TimeError, 0));
+        feed.give(report(TxCode::BurstAck, 1));
+        feed.give(report(TxCode::Underflow, 1));
+        feed.give(report(TxCode::BurstAck, 0));
+        let result = core.reopen_tx_streamer(0, Channels::first(2)).unwrap();
+        assert!(result.acknowledged, "{:?}", lock(&core.rec).device_async);
+        let flush_rows: Vec<_> = lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| (row["code"].as_str().unwrap().to_owned(), row["channel"].as_u64())).collect();
+        assert_eq!(flush_rows, [("Underflow".to_owned(), Some(0)), ("TimeError".to_owned(), Some(0)), ("BurstAck".to_owned(), Some(1)), ("BurstAck".to_owned(), Some(0))]);
+        assert_eq!(core.take_stashed_tx_report(0).map(|report| (report.code, report.channel)), Some((TxCode::Underflow, 1)), "the Underflow after channel 1's ACK is a Run report");
+    }
+
+    #[test]
+    fn ur_22_a_flush_is_four_zeros_and_draws_no_underflow() {
+        // UR-22 (F1-4): the flush is one untimed SOB+EOB of four zeros per channel; its ACK is a flush row, and no Underflow is drawn.
+        use crate::device::FakeConfig;
+
+        let inner = Arc::new(crate::device::FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
+        let (core, _time, events) = super::super::test_support::rig_on(inner.clone(), Vec::new(), 2_000);
+        inner.tx_open(0, &[0]).unwrap();
+        let result = core.tx_flush(0, &[0]);
+        assert!(result.acknowledged, "{:?}", lock(&core.rec).device_async);
+        let sends: Vec<_> = inner.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
+        assert_eq!(sends, ["tx_send 0 n=4 at=- sob=true eob=true"], "{:?}", inner.calls());
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TX_UNDERFLOW), "{events:?}");
+        let rec = lock(&core.rec);
+        assert!(rec.device_async.iter().all(|row| row["code"] != "Underflow"), "{:?}", rec.device_async);
+        assert_eq!(rec.device_async.iter().filter(|row| row["tx_flush"] == true && row["code"] == "BurstAck").count(), 1, "{:?}", rec.device_async);
+    }
+
+    #[test]
+    fn ur_22_t3_flush_attribution_is_per_channel_and_code_bounded() {
+        // UR-28 (T3): a duplicate ACK does not complete another channel, and a report of another code is never the flush's.
+        use crate::device::{FakeConfig, TxCode, TxReport};
+
+        let inner = Arc::new(crate::device::FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
+        let feed = Arc::new(super::super::test_support::ReportFeed::new(inner));
+        let (core, _time, _events) = super::super::test_support::rig_on(feed.clone(), Vec::new(), 2_000);
+        feed.tx_open(0, &[0, 1]).unwrap();
+        let report = |code, channel| TxReport { code, tick: Some(0), channel };
+        feed.give(report(TxCode::BurstAck, 0));
+        feed.give(report(TxCode::BurstAck, 0));
+        feed.give(report(TxCode::Other(77), 1));
+        feed.give(report(TxCode::BurstAck, 1));
+        let result = core.tx_flush(0, &[0, 1]);
+        assert!(result.acknowledged, "{:?}", lock(&core.rec).device_async);
+        let flush_rows: Vec<_> = lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| (row["code"].as_str().unwrap().to_owned(), row["channel"].as_u64())).collect();
+        assert_eq!(flush_rows, [("BurstAck".to_owned(), Some(0)), ("BurstAck".to_owned(), Some(1))]);
+        let stashed: Vec<_> = std::iter::from_fn(|| core.take_stashed_tx_report(0)).map(|report| (report.code, report.channel)).collect();
+        assert_eq!(stashed, [(TxCode::BurstAck, 0), (TxCode::Other(77), 1)]);
+    }
+
+    #[test]
+    fn ur_22_t3_flush_reports_after_the_deadline_stay_the_runs() {
+        // UR-28 (T3): an Underflow read after the flush's deadline is not the flush's; it is stashed for the Run.
+        use crate::device::{FakeConfig, FakeFault, TxCode};
+        use crate::provider::test_support::LockSpy;
+        use std::sync::Arc;
+
+        let faults = vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Underflow)];
+        let spy = Arc::new(LockSpy::new(FakeConfig { clock: crate::ClockMode::Real, faults, ..FakeConfig::default() }));
+        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+        spy.watch(&core);
+        let gate = spy.stop_after("tx_async");
+        let (done, finished) = std::sync::mpsc::channel();
+        let opener = core
+            .device
+            .host()
+            .spawn("late-tx-flush-underflow", {
+                let core = core.clone();
+                move || {
+                    let _ = done.send(core.open_tx_device(0, Channels::first(1)));
+                }
+            })
+            .unwrap();
+        gate.wait();
+        std::thread::sleep(Wall::from_millis(120));
+        gate.release();
+        opener.join().unwrap();
+
+        let flush = finished.recv().unwrap().unwrap();
+        assert!(!flush.acknowledged);
+        assert!(core.take_stashed_tx_report(0).is_some_and(|report| report.code == TxCode::Underflow), "the late Underflow remains for the Run");
+        assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true), "a late report is not recorded as the flush's: {:?}", lock(&core.rec).device_async);
+    }
+
+    #[test]
+    fn ur_22_t3_loss_during_flush_records_its_reports() {
+        // UR-28, UR-29 (T3): an Underflow read before a device loss during the flush wait is the flush's; the loss is one DEVICE_LOST and no TX_UNDERFLOW.
+        use crate::device::{FakeConfig, FakeFault, TxCode};
+
+        let config = FakeConfig {
+            clock: crate::ClockMode::Manual,
+            faults: vec![FakeFault::DropBurstAck, FakeFault::TxReport(Wall::ZERO, TxCode::Underflow), FakeFault::TxAsyncFails(Wall::from_millis(50), true)],
+            ..FakeConfig::default()
+        };
+        let (core, device, _time, events) = super::super::test_support::rig_with(config, Vec::new());
+        device.tx_open(0, &[0]).unwrap();
+        let result = core.tx_flush(0, &[0]);
+        assert!(result.stopped && core.is_lost());
+        let flush_rows: Vec<_> = lock(&core.rec).device_async.iter().filter(|row| row["tx_flush"] == true).map(|row| row["code"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(flush_rows, ["Underflow"], "{:?}", lock(&core.rec).device_async);
+        let emitted = events.drain(core.at(core.now()));
+        assert_eq!(emitted.iter().filter(|event| event.kind.as_str() == EventKind::DEVICE_LOST).count(), 1, "{emitted:?}");
+        assert!(emitted.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TX_UNDERFLOW), "{emitted:?}");
     }
 
     #[test]

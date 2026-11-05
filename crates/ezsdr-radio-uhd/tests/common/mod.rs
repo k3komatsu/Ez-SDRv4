@@ -629,7 +629,7 @@ pub fn calls(device: &FakeDevice, prefix: &str) -> Vec<String> {
     device.calls().into_iter().filter(|c| c.starts_with(prefix)).collect()
 }
 
-/// T3's untimed two-zero SOB/EOB send is setup, not experiment traffic.
+/// T3's untimed four-zero SOB/EOB send is setup, not experiment traffic.
 pub fn tx_experiment_sends(device: &FakeDevice, prefix: &str) -> Vec<String> {
     calls(device, prefix).into_iter().filter(|call| !call.contains(" at=- sob=true eob=true")).collect()
 }

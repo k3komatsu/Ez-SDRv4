@@ -365,9 +365,9 @@ fn uhd_59_membership_alone_sends_nothing() {
     let (device, run) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0))], envelope(), 50);
     let calls = device.calls();
     assert!(first(&calls, "apply tx 0") < first(&calls, "tx_open"), "{calls:?}");
-    // The only send is the two-zero burst a streamer's opening makes to clear stale header state (UR-22).
+    // The only send is the four-zero burst a streamer's opening makes to clear stale header state (UR-22).
     let sends: Vec<_> = calls.iter().filter(|call| call.starts_with("tx_send")).collect();
-    assert_eq!(sends, ["tx_send 0 n=2 at=- sob=true eob=true"], "no waveform sample went out: {calls:?}");
+    assert_eq!(sends, ["tx_send 0 n=4 at=- sob=true eob=true"], "no waveform sample went out: {calls:?}");
     let manifest = run.finish();
     assert!(!manifest.events.delivered.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TX_UNDERFLOW), "no underflow: nothing was due");
 }

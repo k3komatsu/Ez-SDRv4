@@ -1558,10 +1558,11 @@ fn hw_b8_raw_empty_eob_gap() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_burst_one_sample_after_a_burst() {
-    // Review O, O-B1 on the bench: a burst at a burst's end + 1 sample, booked before the
-    // first's last buffer went out and after, is played (an empty end-of-burst made it late:
-    // hw_b8_raw_empty_eob_gap).
-    for late_booking in [false, true, false, true] {
+    // Review O, O-B1 on the bench: a burst at a burst's end + 2 samples, booked before the
+    // first's last buffer went out and after, is played (UR-22 R1: the held-tail close is
+    // unchanged, so end + 1 is late; an empty end-of-burst made it late too: hw_b8_raw_empty_eob_gap).
+    // End + 1 is the late trial: one late TIME_ERROR, and no send at that instant.
+    for (late_booking, offset) in [(false, 30_002), (true, 30_002), (false, 30_001), (true, 30_001)] {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
         wait(&mut run, ms(1));
@@ -1575,20 +1576,54 @@ fn hw_b8_burst_one_sample_after_a_burst() {
                 wait(&mut run, ms(1) / 4);
             }
         }
-        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + 30_001);
+        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + offset);
         let (second, _) = waveform_of(&pn(1_000));
         let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
         wait(&mut run, ms(80));
         let manifest = run.finish();
         println!(
-            "B8 burst one sample after a burst, booked late {late_booking}: {:?}; TIME_ERROR {:?}; async {}; bursts {}",
+            "B8 burst at end + {} samples, booked late {late_booking}: {:?}; TIME_ERROR {:?}; async {}; bursts {}",
+            offset - 30_000,
             entry.outcome,
             events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
             section(&manifest, "async"),
             section(&manifest, "bursts")
         );
-        assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty());
+        let late = events_of(&manifest, "radio.TIME_ERROR");
+        if offset == 30_001 {
+            assert_eq!(late.len(), 1, "end + 1 is one late TIME_ERROR: {late:?}");
+            assert_eq!(late[0].payload["cause"], "late");
+        } else {
+            assert!(late.is_empty());
+        }
         assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
+    }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_s1_short_first_sends() {
+    // UR-22 (S1) on the bench, print only: a burst of 1, 2, 3 or 4 samples at 1 MS/s, then a 10 000-sample burst 10 000 samples later. Every async report and the bursts are printed for the design note.
+    let device = usrp();
+    pin_slot_a(&*device);
+    for samples in [1usize, 2, 3, 4] {
+        let dir = TempDir::new();
+        let mut run = tx_session(device.clone(), &dir);
+        let (short, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
+        let (long, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
+        let a = tx_at(&run, ms(40));
+        let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 10_000);
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&short)).unwrap()));
+        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&long)).unwrap()));
+        wait(&mut run, ms(200));
+        let manifest = run.finish();
+        println!(
+            "S1 first send of {samples} samples: TIME_ERROR {:?}; TX_UNDERFLOW {}; async {}; bursts {}",
+            events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
+            events_of(&manifest, "radio.TX_UNDERFLOW").len(),
+            section(&manifest, "async"),
+            section(&manifest, "bursts")
+        );
     }
 }
 
@@ -2880,7 +2915,7 @@ struct OneSample {
 fn one_sample_trial(device: Arc<dyn Device>, samples: usize, late: bool) -> OneSample {
     let dir = TempDir::new();
     let mut run = tx_session(device, &dir);
-    let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 2][..samples]);
+    let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (tone, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));
     let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 5_000);
@@ -2954,8 +2989,8 @@ fn hw_p70_one_sample_burst_then_timed_burst() {
     for late in [false, true] {
         let order = if late { "the second booked after the first was sent" } else { "the second booked with the first" };
         let one = one_sample_trial(device.clone(), 1, late);
-        let control = one_sample_trial(device.clone(), 2, late);
-        for (case, trial) in [("one-sample", &one), ("two-sample control", &control)] {
+        let control = one_sample_trial(device.clone(), 4, late);
+        for (case, trial) in [("one-sample", &one), ("four-sample control", &control)] {
             let (acked, refused) = flush_evidence(&trial.manifest);
             println!(
                 "#70 {case}, {order}: onset {:?} samples from the booked instant; continuity gaps {}; TIME_ERROR {}; TX_UNDERFLOW {}; flushes acknowledged {acked}, refused {refused:?}",
@@ -2980,7 +3015,7 @@ fn hw_p70_one_sample_burst_then_timed_burst() {
             }
             _ => Verdict::Inconclusive("no tone onset in one of the trials: the positive signal is missing".to_owned()),
         };
-        verdict(&format!("#70 (T2): a one-sample burst leaves the next timed burst's onset as a two-sample control's ({order})"), outcome);
+        verdict(&format!("#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's ({order})"), outcome);
     }
 }
 

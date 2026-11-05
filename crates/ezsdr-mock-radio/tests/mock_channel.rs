@@ -547,35 +547,64 @@ fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
     step(&world, &mut [&mut radio], t0);
     let errors: Vec<_> = radio.drain_events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
     assert_eq!(errors.len(), 1, "C at H+1 is late: {errors:?}");
-    assert_eq!((errors[0].payload["outcome"].as_str(), errors[0].payload["late_by_ns"].as_i64()), (Some("drop"), Some(1_000)));
+    assert_eq!((errors[0].payload["outcome"].as_str(), errors[0].payload["late_by_ns"].as_i64()), (Some("drop"), Some(3_000)));
 
-    let mut c = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_002, false);
+    let mut c = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_004, false);
     if let Action::TxBurst { late_policy, .. } = &mut c {
         *late_policy = LatePolicy::DropAndFlag;
     }
     radio.push(c);
     step(&world, &mut [&mut radio], t0);
-    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "C at H+2 is on time");
+    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "C at H+4 is on time");
 
     step(&world, &mut [&mut radio], t0 + 12_006_001);
     let final_records = records(&radio);
     assert_eq!(final_records.len(), 2, "only A and on-time C have records: {final_records:?}");
-    assert_eq!((final_records[1].target, final_records[1].samples), (TimePoint::new(domain, 2_010_002), 1));
+    assert_eq!((final_records[1].target, final_records[1].samples), (TimePoint::new(domain, 2_010_004), 1));
     let received = radio.received(0);
     let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im)).unwrap_or((0.0, 0.0));
     let handed = sample(10_044);
     assert!((f32::hypot(handed.0, handed.1) - 0.5).abs() < 1e-6, "A's payload through its exclusive end is radiated: {handed:?}");
     assert_eq!(sample(10_045), (0.0, 0.0), "the safe restart gap is not payload handed at Stop");
     assert_eq!(sample(10_046), (0.0, 0.0), "late C at H+1 was dropped");
-    let c_sample = sample(10_047);
-    assert!((f32::hypot(c_sample.0, c_sample.1) - 0.5).abs() < 1e-6, "on-time C at H+2 radiates: {c_sample:?}");
-    assert_eq!(sample(10_048), (0.0, 0.0), "radiation ends after C");
+    let c_sample = sample(10_049);
+    assert!((f32::hypot(c_sample.0, c_sample.1) - 0.5).abs() < 1e-6, "on-time C at H+4 radiates: {c_sample:?}");
+    assert_eq!(sample(10_050), (0.0, 0.0), "radiation ends after C");
+}
+
+#[test]
+fn mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over() {
+    let t0 = 2_000_000_000;
+    let world = World::new(loopback(None));
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0); 8]), 2_009_998, false));
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    step(&world, &mut [&mut radio], t0);
+    assert!(records(&radio).is_empty(), "two samples fit the window, four are needed: {:?}", records(&radio));
+    assert!(radio.received(0).iter().all(|(_, re, im)| f32::hypot(*re, *im) < 1e-6), "nothing of the burst is radiated");
+}
+
+#[test]
+fn mr_25_a_repeat_first_send_is_judged_at_four_samples() {
+    // UR-22: a repeat's first send tiles its waveform to four samples, so a repeat of two does not fit the two samples left in the window.
+    let t0 = 2_000_000_000;
+    let world = World::new(loopback(None));
+    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+    radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0); 2]), 2_009_998, true));
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    step(&world, &mut [&mut radio], t0);
+    assert!(records(&radio).is_empty(), "two samples fit the window, four are needed: {:?}", records(&radio));
+    assert!(radio.received(0).iter().all(|(_, re, im)| f32::hypot(*re, *im) < 1e-6), "nothing of the repeat is radiated");
 }
 
 #[test]
 fn mr_17_a_one_sample_burst_uses_the_safe_sample() {
     let t0 = 2_000_000_000;
-    for (target, expect_late, late_by) in [(2_004_001, true, 2_000), (2_004_002, true, 1_000), (2_004_003, false, 0)] {
+    for (target, expect_late, late_by) in [(2_004_003, true, 2_000), (2_004_004, true, 1_000), (2_004_005, false, 0)] {
         let case = format!("B at sample {target}");
         let world = World::new(loopback(None));
         let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();

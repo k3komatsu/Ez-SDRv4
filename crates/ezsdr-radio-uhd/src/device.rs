@@ -678,11 +678,35 @@ struct DucPacket {
 struct Radio {
     cursor: i64,
     active: bool,
+    /// A device burst whose undersized first packet was dropped (UR-33): its packets are dropped to its EOB.
+    dropped: bool,
     reports: VecDeque<TxReport>,
 }
 
+/// The samples per channel a device burst's first packet must carry on an X3x0 (UR-22): fewer are
+/// dropped or underflow at 1 and 2 MS/s (2026-11-05 bench, `plan/phase8/bench-results.md`, minimal UHD reproduction).
+pub const MIN_FIRST_SEND: usize = 4;
+
 impl Radio {
     fn packet(&mut self, packet: &DucPacket, now: i64, channel_count: usize, drop_ack: bool, unended: &mut u64, restarts: &mut u64) -> Option<(i64, i64)> {
+        if self.dropped && !packet.sob {
+            self.dropped = !packet.eob;
+            return None;
+        }
+        self.dropped = false;
+        let undersized = packet.sob && (1..MIN_FIRST_SEND).contains(&packet.n) && !packet.lost_eob;
+        if undersized && packet.radio_time.is_some() {
+            for channel in 0..channel_count {
+                self.reports.push_back(TxReport { code: TxCode::TimeError, tick: packet.radio_time.map(|t| t.max(now)), channel });
+            }
+            self.dropped = !packet.eob;
+            return None;
+        }
+        if undersized {
+            for channel in 0..channel_count {
+                self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(now), channel });
+            }
+        }
         if self.active && packet.n > 0 && now > self.cursor {
             self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(self.cursor), channel: 0 });
             self.active = false;
@@ -721,7 +745,7 @@ impl Radio {
         let start = self.cursor;
         self.cursor = start + packet.n as i64 * packet.ratio;
         if packet.eob && !packet.lost_eob {
-            let tick = Some(self.cursor.saturating_sub(packet.ratio));
+            let tick = Some(self.cursor.saturating_add(1));
             if !drop_ack {
                 for channel in 0..channel_count {
                     self.reports.push_back(TxReport { code: TxCode::BurstAck, tick, channel });
@@ -735,7 +759,7 @@ impl Radio {
 
 impl TxStreamer {
     fn new(channels: Vec<usize>) -> TxStreamer {
-        TxStreamer { channels, duc: Duc { burst: false, has_time: false, time: None, eob_lost: false }, radio: Radio { cursor: i64::MIN, active: false, reports: VecDeque::new() } }
+        TxStreamer { channels, duc: Duc { burst: false, has_time: false, time: None, eob_lost: false }, radio: Radio { cursor: i64::MIN, active: false, dropped: false, reports: VecDeque::new() } }
     }
 }
 
@@ -2798,7 +2822,7 @@ mod tests {
             device.tx_send(0, &[&wave], Some(target), true, true, Duration::from_secs(1)).unwrap();
             let ack = device.tx_async(0, Duration::from_millis(1)).unwrap().expect("the timed packet's EOB is acknowledged");
             assert_eq!(ack.code, TxCode::BurstAck);
-            let start = ack.tick.unwrap() - (wave.len() as i64 - 1) * 200;
+            let start = ack.tick.unwrap() - 1 - wave.len() as i64 * 200;
             assert!(start < target - ms(100), "the lost DUC header made the next timed packet start early: {start} vs {target}");
             assert_eq!(device.transmitted(start, 1), [Some(wave[0])]);
             assert_eq!(device.transmitted(target, 1), [None]);
@@ -2818,7 +2842,7 @@ mod tests {
             device.host().sleep(Duration::from_millis(30));
             assert!(device.time_now().unwrap() > late + 200);
 
-            device.tx_send(0, &[&wave], Some(late), true, false, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.25f32, 0.0]; 4]], Some(late), true, false, Duration::from_secs(1)).unwrap();
             // The dropped continuation still reaches its DUC EOB; the next no-SOB packet gets a fresh timed header.
             device.tx_send(0, &[&wave], Some(late + 200), false, true, Duration::from_secs(1)).unwrap();
             let future = (device.time_now().unwrap() / 200 + 5_000) * 200;
@@ -2865,7 +2889,7 @@ mod tests {
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
             device.tx_open(0, &[0]).unwrap();
-            let first = [[0.1f32, 0.0]; 2];
+            let first = [[0.1f32, 0.0]; 4];
             let rest = [[0.2f32, 0.0]; 2];
             let next = [[0.3f32, 0.0]; 2];
             let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
@@ -2908,12 +2932,12 @@ mod tests {
             let resumed = device.time_now().unwrap();
             let future = (resumed / 200 + 10_000) * 200;
             device.tx_send(0, &[&wave], Some(future), true, true, Duration::from_secs(1)).unwrap();
-            device.set_time(future + wave.len() as i64 * 200);
+            device.set_time(future + wave.len() as i64 * 200 + 1);
 
             let reports: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).collect();
             assert_eq!(reports.iter().map(|report| report.code).collect::<Vec<_>>(), [TxCode::TimeError, TxCode::BurstAck], "{reports:?}");
             assert!(reports[0].tick.is_some_and(|tick| tick >= resumed), "{reports:?}");
-            assert_eq!(reports[1].tick, Some(future + (wave.len() as i64 - 1) * 200));
+            assert_eq!(reports[1].tick, Some(future + wave.len() as i64 * 200 + 1));
             assert_eq!(device.transmitted(dry, rest.len()), vec![None; rest.len()], "the late continuation was radio-dropped");
             assert_eq!(device.transmitted(future, wave.len()), vec![Some(wave[0]); wave.len()], "the new DUC burst plays at its requested time");
         });
@@ -2926,7 +2950,7 @@ mod tests {
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
             device.tx_open(0, &[0]).unwrap();
-            let first = [[0.1f32, 0.0]; 2];
+            let first = [[0.1f32, 0.0]; 4];
             let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
             device.tx_send(0, &[&first], Some(t0), true, false, Duration::from_secs(1)).unwrap();
 
@@ -2980,10 +3004,62 @@ mod tests {
             device.set_time(t0 + 50 * 200);
             assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "the EOB ack waits through the middle of playback");
             device.set_time(t0 + 99 * 200);
-            let ack = device.tx_async(0, Duration::ZERO).unwrap().expect("the last sample's instant acknowledges the first burst");
-            assert_eq!((ack.code, ack.tick), (TxCode::BurstAck, Some(t0 + 99 * 200)));
-            device.set_time(t0 + 100 * 200);
+            assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "the acknowledgement is at the exclusive end + 1 tick, not the last sample");
+            device.set_time(t0 + 100 * 200 + 1);
+            let ack = device.tx_async(0, Duration::ZERO).unwrap().expect("the burst's end + 1 tick acknowledges the first burst");
+            assert_eq!((ack.code, ack.tick), (TxCode::BurstAck, Some(t0 + 100 * 200 + 1)));
             assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().map(|report| report.code), Some(TxCode::TimeError), "the second burst's report follows the first's acknowledgement");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_undersized_timed_first_packet_is_dropped() {
+        // UR-33 (M1): a timed first packet of one to three samples is refused per channel, and its device burst is dropped through its EOB.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            device.tx_send(0, &[&[[0.1f32, 0.0]; 2]], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 2]], Some(t0 + 2 * 200), false, true, Duration::from_secs(1)).unwrap();
+            device.set_time(t0 + 4 * 200 + 1);
+            let codes: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).map(|report| report.code).collect();
+            assert_eq!(codes, [TxCode::TimeError], "no acknowledgement follows a dropped burst");
+            assert_eq!(device.transmitted(t0, 4), vec![None; 4]);
+        });
+    }
+
+    #[test]
+    fn ur_33_an_undersized_untimed_first_packet_underflows_then_acks() {
+        // UR-33 (M1): an untimed undersized first packet reports Underflow, then its device burst still acknowledges.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            device.tx_send(0, &[&[[0.1f32, 0.0]; 2]], None, true, false, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 2]], None, false, true, Duration::from_secs(1)).unwrap();
+            device.set_time(device.time_now().unwrap() + 400 + 1_000);
+            let codes: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).map(|report| report.code).collect();
+            let underflow = codes.iter().position(|code| *code == TxCode::Underflow).expect("the undersized packet underflows");
+            let ack = codes.iter().position(|code| *code == TxCode::BurstAck).expect("the device burst still acknowledges");
+            assert!(underflow < ack, "{codes:?}");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_four_plus_two_split_is_clean() {
+        // UR-33 (M1 control): a first packet of four and a closing packet of two play with no report but their acknowledgement.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
+            device.tx_send(0, &[&[[0.1f32, 0.0]; 4]], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+            device.tx_send(0, &[&[[0.2f32, 0.0]; 2]], Some(t0 + 4 * 200), false, true, Duration::from_secs(1)).unwrap();
+            device.set_time(t0 + 6 * 200 + 1);
+            let reports: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).collect();
+            assert_eq!(reports.iter().map(|report| (report.code, report.tick)).collect::<Vec<_>>(), [(TxCode::BurstAck, Some(t0 + 6 * 200 + 1))]);
+            assert_eq!(device.transmitted(t0, 6), [[0.1f32, 0.0]; 4].iter().chain([[0.2f32, 0.0]; 2].iter()).map(|sample| Some(*sample)).collect::<Vec<_>>());
         });
     }
 

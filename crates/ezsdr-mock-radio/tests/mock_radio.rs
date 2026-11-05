@@ -1033,12 +1033,12 @@ fn mr_16_burst_refusals() {
     let records: Vec<ezsdr_kernel::stream::BurstRecord> =
         x3xx_move.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.bursts").unwrap()].as_array().unwrap().iter().cloned().map(serde_json::from_value).collect::<Result<_, _>>().unwrap();
     assert_eq!(records.len(), 2, "the x3xx front moves B after A instead of refusing it");
-    assert_eq!(records[1].target, TimePoint::new(domain, 2_003_004));
+    assert_eq!(records[1].target, TimePoint::new(domain, 2_003_005));
     assert_eq!(records[1].requested_target, Some(TimePoint::new(domain, 2_000_000)));
     let events = x3xx_move.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let moved = events.iter().find(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).unwrap();
     assert_eq!(moved.payload["outcome"], "send_asap");
-    assert_eq!(moved.payload["late_by_ns"], 3_004_000);
+    assert_eq!(moved.payload["late_by_ns"], 3_005_000);
     assert_eq!(moved.payload["target"], serde_json::to_value(TimePoint::new(domain, 2_000_000)).unwrap());
     assert_eq!(events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count(), 0);
 }

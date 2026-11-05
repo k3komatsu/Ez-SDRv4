@@ -3255,6 +3255,35 @@ fn ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played() {
     assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
 }
 
+#[test]
+fn ur_23_a_burst_at_e_while_the_held_sample_waits_continues_the_device_burst() {
+    // UR-23 (F4-adj): B booked at A's exclusive end `e` before A's held sample goes continues the device burst: one SOB, no gap.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let a_samples = tone(30_000);
+    let (one, a) = waveform_of(&a_samples);
+    let (two, b) = second_waveform(&vec![(-0.25f32, 0.125); 1_000]);
+    let (ha, hb) = (a.hash.clone(), b.hash.clone());
+    let target = serde_json::to_value(resource("radio/tx/s0")).unwrap();
+    let mut spec = with_tx(receive_spec(1, 1e6, 1e9, None), 1e6);
+    spec["schedule"] = json!([
+        { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
+            "waveform": a, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 40_000 }, "action": { "kind": "tx_burst", "target": target,
+            "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } }
+    ]);
+    let mut run = spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(ha, one), (hb, two)]));
+    let t0 = run.start_instant().expect("a Spec Run starts");
+    let root = t0.ticks_in(t0.domain()).unwrap();
+    let _ = run.advance_to(TimePoint::new(t0.domain(), root + ms(100)));
+    let manifest = run.finish();
+    assert!(time_errors(&manifest).is_empty(), "{:?}; sends: {:?}", time_errors(&manifest), calls(&device, "tx_send"));
+    let sends = tx_sends(&device);
+    assert_eq!(sends.iter().filter(|s| s.sob && s.at.is_some()).count(), 1, "a second SOB: {:?}", calls(&device, "tx_send"));
+    assert_eq!(device.unended_bursts(), 0);
+    assert_eq!(bursts(&manifest).len(), 2, "{:?}", bursts(&manifest));
+}
+
 /// A `tx_send` the fake saw, as its calls record it: `n` counts every sample in the send,
 /// including EOB padding.
 #[derive(Debug)]
@@ -3775,8 +3804,9 @@ fn ur_26_the_shutdown_s_last_burst_ack_waits_on_the_device_s_clock() {
         })
         .expect("shutdown sent a timed EOB for the experiment: {sends:?}");
     let burst_acks: Vec<i64> = section(&manifest, "async").as_array().unwrap().iter().filter(|row| row["code"] == "BurstAck" && row["channel"] == 0).filter_map(|row| row["tick"].as_i64()).collect();
+    // The close is padded to two samples (UR-22), so its ACK is one tick past their end.
     assert!(
-        burst_acks.contains(&(close_at + 200),),
+        burst_acks.contains(&(close_at + 2 * 200 + 1)),
         "the experiment EOB's BURST_ACK was lost; the earlier TX-open flush ack does not count: payload={payload_start}, close={close_at}, acks={burst_acks:?}, sends={sends:?}"
     );
 }

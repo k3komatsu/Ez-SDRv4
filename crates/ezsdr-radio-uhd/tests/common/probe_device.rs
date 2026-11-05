@@ -509,7 +509,7 @@ impl Device for ProbeDevice {
         let before = self.host_ns();
         let result = self.inner.tx_send(stream, samples, at, sob, eob, timeout);
         let after = self.host_ns();
-        let tx_flush = at.is_none() && sob && eob && !samples.is_empty() && samples.iter().all(|channel| channel.len() == 2 && channel.iter().all(|sample| *sample == Iq::default()));
+        let tx_flush = at.is_none() && sob && eob && !samples.is_empty() && samples.iter().all(|channel| channel.len() == 4 && channel.iter().all(|sample| *sample == Iq::default()));
         let result_row = match &result {
             Ok(accepted_samples) => json!({ "accepted_samples": accepted_samples }),
             Err(error) => json!({ "error": error.message }),

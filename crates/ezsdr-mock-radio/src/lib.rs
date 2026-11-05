@@ -34,6 +34,8 @@ pub use profile::{BLOCK_LEN, Profile, ProfileKind};
 
 /// The reason a lost device gives for everything it cancels or refuses (MR-20).
 const DEVICE_LOST: &str = "MR-20: device lost";
+/// UR-22 `MIN_FIRST_SEND`: a short finite burst's device burst is padded to this many samples.
+const DEVICE_MIN_FIRST_SEND: i64 = 4;
 
 fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"), version: Version::new(2, 0, 0) }
@@ -286,6 +288,11 @@ fn merge_front(front: Option<i64>, candidate: Option<i64>) -> Option<i64> {
         (Some(old), Some(end)) => Some(old.max(end)),
         (old, end) => old.or(end),
     }
+}
+
+/// MR-17: a finite burst shorter than `DEVICE_MIN_FIRST_SEND` keeps the frontier at its padded device end plus one sample.
+fn short_burst_floor(start: i64, len: i64, repeat: bool) -> Option<i64> {
+    (!repeat && len < DEVICE_MIN_FIRST_SEND).then(|| start.saturating_add(DEVICE_MIN_FIRST_SEND + 1))
 }
 
 #[derive(Clone, Copy)]
@@ -1113,22 +1120,25 @@ impl MockRadio {
             if let Some(at_stop) = time::k_at_or_after(origin, ratio, now) {
                 // MR-25's payload cut and MR-17's later-booking margin stay separate.
                 let handover = matches!(cancel_reason, ezsdr_radio::CancelReason::Stop | ezsdr_radio::CancelReason::ProviderStop);
-                let (until, cut) = if handover {
+                let (until, cut, floor) = if handover {
                     let clocks = self.clocks.as_ref().expect("prepared clocks");
                     let window = time::ns_to_v(clocks, self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns).map_err(|error| ModuleError::rejected(format!("MR-25: {error}")))?;
                     let horizon = now.checked_add(window).ok_or_else(|| ModuleError::rejected("MR-25: hand-over horizon overflow"))?;
-                    let (payload, _) = self.tx_handed_front(k, index, now, self.next_order)?;
+                    let (payload, _, floor) = self.tx_handed_front(k, index, now, self.next_order)?;
                     let previous = self.tx[k].stop_cut.filter(|front| front.domain == domain).map(|front| front.sample);
                     let cut = timeline::later_bound(at_stop, merge_front(payload, previous));
-                    (horizon, cut)
+                    (horizon, cut, floor)
                 } else {
-                    (now, at_stop)
+                    (now, at_stop, None)
                 };
                 self.transmit_until_cut(k, until, cut)?;
                 self.cut_segments(k, cut);
                 if handover {
                     self.tx[k].stop_cut = Some(TxFront { domain, sample: cut });
                     self.remember_tx_front(k, domain, cut.saturating_add(2));
+                    if let Some(floor) = floor {
+                        self.remember_tx_front(k, domain, floor);
+                    }
                 }
             }
         }
@@ -1338,8 +1348,9 @@ impl MockRadio {
         self.lines.line(Self::tx_key(k))?.plan.get(self.tx[k].cur?)?.cut
     }
 
-    /// RM-15: the handed payload end and uniform safe-start front for `index`.
-    fn tx_handed_front(&self, k: usize, index: usize, now: i64, before: u64) -> Result<(Option<i64>, Option<i64>), ModuleError> {
+    /// RM-15: the handed payload end, the uniform safe-start front and the device floor alone (MR-17) for `index`.
+    #[allow(clippy::type_complexity)]
+    fn tx_handed_front(&self, k: usize, index: usize, now: i64, before: u64) -> Result<(Option<i64>, Option<i64>, Option<i64>), ModuleError> {
         let clock = &self.tx[k].clocks[index];
         let root = self.root.expect("prepared root");
         let clocks = self.clocks.as_ref().expect("prepared clocks");
@@ -1348,27 +1359,32 @@ impl MockRadio {
         let window_end = time::k_at_or_after(clock.origin, clock.handle.root_ticks_per_tick(), horizon).ok_or_else(|| ModuleError::rejected("MR-17: hand-over sample overflow"))?;
         let mut payload = None;
         let mut handed = None;
-        let mut include = |order: u64, start: i64, len: i64, repeat: bool| {
+        let mut device_floor = None;
+        // MR-25: a burst not yet started is handed over once its first send's samples fit the window (UR-22 MIN_FIRST_SEND).
+        let mut include = |order: u64, start: i64, len: i64, repeat: bool, first: i64| {
             let end = (!repeat).then_some(start.saturating_add(len));
-            let candidate = handed_end_before(order, before, start, end, window_end);
+            let candidate = handed_end_before(order, before, start, end, window_end).filter(|_| start.saturating_add(first) <= window_end);
             payload = merge_front(payload, candidate);
             handed = merge_front(handed, candidate);
+            if candidate.is_some() {
+                device_floor = merge_front(device_floor, short_burst_floor(start, len, repeat));
+            }
         };
         if self.tx[k].cur == Some(index) {
             if let Some(open) = self.tx[k].open.as_ref() {
-                include(open.order, open.start, open.len, open.repeat);
+                include(open.order, open.start, open.len, open.repeat, 1);
             }
             for held in self.tx[k].held.values() {
-                include(held.order, held.start, held.len, held.repeat);
+                include(held.order, held.start, held.len, held.repeat, if held.repeat { DEVICE_MIN_FIRST_SEND } else { held.len.min(DEVICE_MIN_FIRST_SEND) });
             }
         }
-        let front = if self.profile.timing().tx_in_flight_ns == 0 {
-            None
+        let (front, floor) = if self.profile.timing().tx_in_flight_ns == 0 {
+            (None, None)
         } else {
             let previous = self.tx[k].front.filter(|front| front.domain == clock.domain).map(|front| front.sample);
-            merge_front(previous, handed.map(|sample| sample.saturating_add(2)))
+            (merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor)), device_floor)
         };
-        Ok((payload, front))
+        Ok((payload, front, floor))
     }
 
     fn remember_tx_front(&mut self, k: usize, domain: ClockDomainId, sample: i64) {
@@ -1592,7 +1608,7 @@ impl MockRadio {
         };
         let target = at.time_point.ticks_in(tx_domain).map_err(|error| ModuleError::rejected(format!("MR-17: {error}")))?;
         let ordinary = decided.checked_add(lead).and_then(|earliest| time::k_at_or_after(origin, ratio, earliest)).ok_or_else(|| ModuleError::rejected("MR-17: ordinary start bound overflow"))?;
-        let (_, front) = self.tx_handed_front(k, index, now, self.next_order)?;
+        let (_, front, _) = self.tx_handed_front(k, index, now, self.next_order)?;
         let bound = timeline::later_bound(ordinary, front);
         let mut policy = late_policy
             .decide(clocks, at.time_point, decided_tx, Duration::new(ClockDomainId::HOST_MONOTONIC, self.profile.timing().min_timed_command_lead_ns))

@@ -83,6 +83,7 @@ note 46 と 47 で，次のことを決めた．
    - risky（fake と実機の境，送信の順序と報告）．試験計画を書き，Sol のレビューを受ける．
    - 順番：(a) T3 flush の Underflow の報告を flush に属させる（flush の send からその ACK までの報告は Run の `TX_UNDERFLOW` にしない）．(b) 前の burst の終わり＋1 サンプルの burst を Module が遅れとして捨てる判定を直す．(c) `hw_p70_…` の TIME_ERROR と `L` を調べる（説明がつくまで直すとは言わない）．(d) B1．どれも先に FakeDevice で再現する．
    - B1 の名指しの試験を入れる．次の実機で #78 を確かめるまで #78 は閉じない．#72 は B1 で閉じる．
+   - **済**（2026-11-05，記録 [reviews/48s1-review.md](reviews/48s1-review.md) と `reviews/48s1-*`）．device burst の最初の send は channel ごとに 4 サンプル以上（1〜3 サンプルの burst は 4 まで 0 で詰め，front は開始＋5），T3 flush は 4 つの 0 で，その channel の報告は ACK か期限まで flush のもの，FakeDevice は短い最初の packet と終わり＋1 tick の ACK を模す，ACK の照合は `<`，Mock は詰めた front を Stop の後も持つ，window の空きを待つ最初の send は lead に入ったら late policy で決め直す．B1 は owner が外した（すべての send に時刻を付けたまま）．受付で決める Mock と送り出しで決める Module の食い違い（短い burst の直後 4 サンプル以内の予約）は #79 として段階 5 で直す（owner）．
 2. **S2：時刻つきの設定の道を消す（A1–A7，B3，B5，B7）**．
    - trait と FakeDevice の境を変えるので risky．
    - 試験計画に，残す試験・移す assertion・消す試験と mutation 行の対応表を入れる．
@@ -90,7 +91,7 @@ note 46 と 47 で，次のことを決めた．
 3. **次の実機**（handoff (7) ③′）．
    - 200 MS/s の Module の負荷，延ばした (c)・(d)・(e)・(f)，#1 の送信の rate，#78 の確認．
    - 再開の先頭の rate ごとの数，B3 の後の受信の start lead の候補．
-4. **note 47 の段階 4**（B4 と B6 を含む）**と段階 5**（§3.4）．段階 6 の片付けはこの棚卸しに吸収した．
+4. **note 47 の段階 4**（B4 と B6 を含む）**と段階 5**（§3.4．#79：短い burst は詰めた範囲 `[s, s+5)` を占めるとして，重なる予約を Mock と Module が同じ規則で受付時に拒む）．段階 6 の片付けはこの棚卸しに吸収した．
 
 各段階は今までどおり，brief → 試験計画と Sol（risky なので）→ 実装 → Sol の code レビュー → gate の順に進める．
 

@@ -7053,8 +7053,8 @@
   "id": "P635",
   "name": "a prior held burst contributes to MockRadio's front (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            for held in self.tx[k].held.values() { include(held.order, held.start, held.len, held.repeat); }",
-  "new": "            for held in self.tx[k].held.values().filter(|_| false) { include(held.order, held.start, held.len, held.repeat); }",
+  "old": "for held in self.tx[k].held.values() {",
+  "new": "for held in self.tx[k].held.values().filter(|_| false) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_17_x3xx_tx_preemption_boundaries"
@@ -7193,8 +7193,8 @@
   "id": "P653",
   "name": "a stream's front includes no other stream's held burst (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            for held in self.tx[k].held.values() { include(held.order, held.start, held.len, held.repeat); }",
-  "new": "            for held in self.tx[0].held.values() { include(held.order, held.start, held.len, held.repeat); }",
+  "old": "for held in self.tx[k].held.values() {",
+  "new": "for held in self.tx[0].held.values() {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_17_tx_front_is_per_stream"
@@ -7211,13 +7211,13 @@
  } ,
  {
   "id": "P656",
-  "name": "the held payload tail keeps a continuation in the same device burst (UR-23)",
+  "name": "a short first send that a booking follows is not closed at its end (UR-23, N3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        let device_eob = eob && !ends_at_held && !hold;",
-  "new": "        let device_eob = eob && !ends_at_held;",
+  "old": "let device_eob = eob && (!ends_at_held || device_sob && count < min_first) && !hold;",
+  "new": "let device_eob = eob && !ends_at_held && !hold;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
+  "filter": "ur_23_a_short_first_send_closes_before_a_booking_at_its_end"
   },
   {
    "id": "P657",
@@ -7354,8 +7354,8 @@
     "id": "P672",
     "name": "Mock in-flight frontier keeps two samples after handed payload (MR-17, +1 mutant)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "merge_front(previous, handed.map(|sample| sample.saturating_add(2)))",
-    "new": "merge_front(previous, handed.map(|sample| sample.saturating_add(1)))",
+    "old": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor))",
+    "new": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(1)), device_floor))",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_17_x3xx_tx_preemption_boundaries"
@@ -7364,8 +7364,8 @@
     "id": "P673",
     "name": "Mock in-flight frontier keeps two samples after handed payload (MR-17, +0 mutant)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "merge_front(previous, handed.map(|sample| sample.saturating_add(2)))",
-    "new": "merge_front(previous, handed)",
+    "old": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor))",
+    "new": "merge_front(previous, merge_front(handed, device_floor))",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_17_x3xx_tx_preemption_boundaries"
@@ -7718,8 +7718,8 @@
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
    "old": "    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(DEVICE_LEAD_NS);",
    "new": "    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
-   "old2": "        let outcome = held.policy.decide(&self.core.clocks,\n            TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now),\n            Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS));",
-   "new2": "        let outcome = held.policy.decide(&self.core.clocks,\n            TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now),\n            Duration::new(ClockDomainId::HOST_MONOTONIC, self.core.description.timing.min_timed_command_lead_ns));",
+   "old2": "policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS))",
+   "new2": "policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, self.core.description.timing.min_timed_command_lead_ns))",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "measurement_candidate_admission_lead_does_not_override_the_device_lead"
@@ -10894,18 +10894,18 @@
    "id": "P1108",
    "name": "uhd-tx hands a short buffer at a window edge it cannot fill (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if avail < wanted && !device_sob {",
-   "new": "        if avail < wanted && !device_sob && false {",
+   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+   "new": "if avail < if device_sob { 1 } else { wanted } {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill"
+   "filter": "ur_23_a_first_send_waits_for_four_window_samples"
   },
   {
    "id": "P1109",
    "name": "a buffer waits when the window takes exactly all of it (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if avail < wanted && !device_sob {",
-   "new": "        if avail <= wanted && !device_sob {",
+   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+   "new": "if avail <= if device_sob { wanted.min(min_first) } else { wanted } {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill"
@@ -10944,8 +10944,8 @@
    "id": "P1113",
    "name": "the first timed buffer waits for a whole buffer too (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if avail < wanted && !device_sob {",
-   "new": "        if avail < wanted {",
+   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+   "new": "if avail < wanted {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m5_the_first_timed_buffer_takes_what_fits"
@@ -10964,20 +10964,18 @@
    "id": "P1115",
    "name": "a continuation's first buffer is exempt from the wait (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if avail < wanted && !device_sob {",
-   "new": "        if avail < wanted && !open.first {",
+   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+   "new": "if avail < if device_sob { wanted.min(min_first) } else { 0 } {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
   },
   {
    "id": "P1116",
-   "name": "the wait comes after the held tail's send (UR-23)",
+   "name": "a waiting continuation is sent into the short window (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if avail < wanted && !device_sob {\n            return false;\n        }\n        let count = wanted.min(avail);",
-   "new": "        let count = wanted.min(avail);",
-   "old2": "        let padded_eob = device_eob && sending == 1;",
-   "new2": "        if avail < wanted && !device_sob { return false; }\n        let padded_eob = device_eob && sending == 1;",
+   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {\n            return false;\n        }\n        let count = wanted.min(avail);",
+   "new": "let count = wanted.min(avail);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m9_a_waiting_continuation_leaves_the_held_tail_alone"
@@ -11407,11 +11405,11 @@
       "id": "P1171",
       "name": "a one-sample payload close gets its second sample (D9b-1a T2)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "        let padded_eob = device_eob && sending == 1;",
-      "new": "        let padded_eob = false;",
+      "old": "usize::from(device_eob && sending == 1) };",
+      "new": "0 };",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
-      "filter": "ur_23_a_one_sample_burst_has_a_one_sample_safe_restart"
+      "filter": "ur_23_a_one_sample_continuation_eob_is_padded_to_two"
      },
      {
       "id": "P1172",
@@ -11427,8 +11425,8 @@
       "id": "P1173",
       "name": "the T3 open flush contains two samples (D9b-1a T3)",
       "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "        let zeros = [Iq::default(); 2];",
-      "new": "        let zeros = [Iq::default(); 1];",
+      "old": "let zeros = [Iq::default(); 4];",
+      "new": "let zeros = [Iq::default(); 2];",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_13_arm_radiates_nothing"
@@ -11547,8 +11545,8 @@
        "id": "P1185",
        "name": "a burst acknowledgement waits until its last sample plays (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/device.rs",
-       "old": "            let tick = Some(self.cursor.saturating_sub(packet.ratio));",
-       "new": "            let tick = Some(start);",
+       "old": "let tick = Some(self.cursor.saturating_add(1));",
+       "new": "let tick = Some(self.cursor.saturating_sub(packet.ratio));",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_33_a_burst_s_acknowledgement_comes_once_its_end_has_played"
@@ -11577,7 +11575,7 @@
        "id": "P1188",
        "name": "a ticked BurstAck does not retire a future burst (D9b-1a)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "(pending.channels.contains(&channel) && root_tick <= tick).then_some(index)",
+       "old": "(pending.channels.contains(&channel) && root_tick < tick).then_some(index)",
        "new": "pending.channels.contains(&channel).then_some(index)",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
@@ -12167,8 +12165,8 @@
         "id": "P1312",
         "name": "only a fully acknowledged T3 advances the front (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "            if flush.acknowledged {\n                self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));\n            }",
-        "new": "            self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));",
+        "old": "if flush.acknowledged {\n                self.chain.advance_front(clock.domain, clock.at_or_after(tick));\n            }",
+        "new": "self.chain.advance_front(clock.domain, clock.at_or_after(tick));",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
@@ -13938,5 +13936,225 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "a_receive_restart_rises_at_the_new_tone_after_the_device_fill"
+    },
+    {
+      "id": "N48S1-01",
+      "name": "a BurstAck retires a burst whose first instant is at its tick (UR-28, N4)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "(pending.channels.contains(&channel) && root_tick < tick).then_some(index)",
+      "new": "(pending.channels.contains(&channel) && root_tick <= tick).then_some(index)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_28_an_ack_at_a_bursts_end_plus_one_tick_keeps_the_burst_at_the_next_sample"
+    },
+    {
+      "id": "N48S1-02",
+      "name": "the reopen front is the acknowledged tick plus two (UR-22, TBD-d2)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "self.chain.advance_front(clock.domain, clock.at_or_after(tick));",
+      "new": "self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
+    },
+    {
+      "id": "N48S1-03",
+      "name": "a flush Underflow after its channel's ACK is counted as the flush's (UR-28 flush attribution)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {",
+      "new": "TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_flush_underflows_are_recorded_as_the_flushs"
+    },
+    {
+      "id": "N48S1-04",
+      "name": "a flush report of any code is counted as the flush's (UR-28 flush attribution)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "} else if matches!(report.code, TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {",
+      "new": "} else if expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_t3_flush_attribution_is_per_channel_and_code_bounded"
+    },
+    {
+      "id": "N48S1-05",
+      "name": "a flush Underflow is stashed as a Run report instead of recorded as the flush's (UR-28 flush attribution)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {\n                        self.record_tx_async(stream, report);",
+      "new": "TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {\n                        self.stash_tx_report(stream, report);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_flush_underflows_are_recorded_as_the_flushs"
+    },
+    {
+      "id": "N48S1-06",
+      "name": "a repeat's first send is not tiled to four samples (UR-22, FS-6)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "let tiled = open.held.repeat && open.held.samples[0].len() > len as usize;",
+      "new": "let tiled = false;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_repeat_of_one_to_three_samples_tiles_its_first_send"
+    },
+    {
+      "id": "N48S1-07",
+      "name": "a first send's closing packet is not padded to four (UR-22, FS-2)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else",
+      "new": "let pad = if device_sob && device_eob { 0 } else",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_one_sample_burst_restarts_after_its_padded_device_burst"
+    },
+    {
+      "id": "N48S1-08",
+      "name": "the restart after a padded close is one sample after its payload (UR-23, D9b-1a)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "self.chain.advance_front(clock.domain, open.next.saturating_add(pad as i64 + 1));",
+      "new": "self.chain.advance_front(clock.domain, open.next.saturating_add(1));",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_one_sample_burst_restarts_after_its_padded_device_burst"
+    },
+    {
+      "id": "N48S1-09",
+      "name": "a flush's BurstAck does not acknowledge its channel (UR-22 T3)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && acknowledged.insert(report.channel) {",
+      "new": "if report.code == TxCode::BurstAck && expected.contains(&report.channel) && acknowledged.insert(report.channel) && false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
+    },
+    {
+      "id": "N48S1-10",
+      "name": "the Mock's front ignores a short burst's padded device floor (UR-22, TBD-m1)",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor))",
+      "new": "merge_front(previous, handed.map(|sample| sample.saturating_add(2)))",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_channel",
+      "filter": "mr_17_a_one_sample_burst_uses_the_safe_sample"
+    },
+    {
+      "id": "N48S1-11",
+      "name": "a first send cut short of four samples is not refused (UR-22, FS-4)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "if device_sob && switch_cut.is_some_and(|cut| cut - next < min_first) {",
+      "new": "if device_sob && switch_cut.is_some_and(|cut| cut - next < 0) {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_cut_before_four_first_samples_is_refused"
+    },
+    {
+      "id": "N48S1-12",
+      "name": "a four-sample first send is held back as three and one (UR-22, FS-1, N1)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count <= min_first);",
+      "new": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_four_sample_first_send_is_not_held"
+    },
+    {
+      "id": "N48S1-13",
+      "name": "an undersized timed first packet is played instead of dropped through its EOB (UR-33, M1)",
+      "file": "crates/ezsdr-radio-uhd/src/device.rs",
+      "old": "if undersized && packet.radio_time.is_some() {",
+      "new": "if false && packet.radio_time.is_some() {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_33_an_undersized_timed_first_packet_is_dropped"
+    },
+    {
+      "id": "N48S1-14",
+      "name": "a first send that waited past its device lead is sent instead of judged by its late policy (UR-21, FS-5)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "let late_start = self.open.as_ref().is_some_and(|open| open.first && !self.chain.continues_at(next) && !matches!(self.start_outcome(clock, open.held.k, open.held.policy), Ok(LateOutcome::OnTime {})));",
+      "new": "let late_start = false;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_wait_past_the_start_lead_follows_the_late_policy"
+    },
+    {
+      "id": "N48S1-15",
+      "name": "a continuation of fewer than four samples waits for the first-send minimum (UR-23, TBD-b4)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+      "new": "if avail < if device_sob { wanted.min(min_first) } else { min_first } {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_continuation_of_two_samples_is_sent_at_once_with_no_minimum"
+    },
+    {
+      "id": "N48S1-16",
+      "name": "a Stop keeps only the payload front, not a short burst's padded floor (MR-17, MR-25, TBD-m2)",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "self.remember_tx_front(k, domain, floor);",
+      "new": "let _ = (k, domain, floor);",
+      "crate": "ezsdr-acceptance",
+      "test_bin": "parity",
+      "filter": "s1_parity_stop_during_padded_device_burst"
+    },
+    {
+      "id": "N48S1-17",
+      "name": "a first send one tick inside its device lead is sent without its late policy (UR-21, FS-5, C2)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "!matches!(self.start_outcome(clock, open.held.k, open.held.policy), Ok(LateOutcome::OnTime {}))",
+      "new": "clock.instant(next) < now",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_23_a_first_send_one_tick_inside_its_lead"
+    },
+    {
+      "id": "N48S1-18",
+      "name": "a flush TimeError is stashed as a Run report instead of recorded as the flush's (UR-28 flush attribution, code list)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+      "old": "TxCode::Underflow | TxCode::TimeError) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {",
+      "new": "TxCode::Underflow) && expected.contains(&report.channel) && !acknowledged.contains(&report.channel) {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_flush_underflows_are_recorded_as_the_flushs"
+    },
+    {
+      "id": "N48S1-23",
+      "name": "a first send that does not fit the window is handed over (MR-25, UR-23 D4)",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": ".filter(|_| start.saturating_add(first) <= window_end)",
+      "new": ".filter(|_| true)",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_channel",
+      "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
+    },
+    {
+      "id": "N48S1-24",
+      "name": "a padded first send copies only channel 0's payload (UR-22 D6, grouped channels)",
+      "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+      "old": "padded[channel][..sending].copy_from_slice(&slices[channel][..sending]);",
+      "new": "if channel == 0 { padded[channel][..sending].copy_from_slice(&slices[channel][..sending]); }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "lib",
+      "filter": "ur_22_a_two_channel_one_sample_burst_is_padded_on_both_channels"
+    },
+    {
+      "id": "N48S1-25",
+      "name": "a held burst's first send is counted as one sample against the window (MR-25, UR-23 D4)",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "held.len.min(DEVICE_MIN_FIRST_SEND)",
+      "new": "held.len.min(1)",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_channel",
+      "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
+    },
+    {
+      "id": "N48S1-29",
+      "name": "a held burst's first send is counted as its own length, not as four samples, when it is a repeat (UR-22, MR-25 D4)",
+      "file": "crates/ezsdr-mock-radio/src/lib.rs",
+      "old": "if held.repeat { DEVICE_MIN_FIRST_SEND } else { held.len.min(DEVICE_MIN_FIRST_SEND) }",
+      "new": "held.len.min(DEVICE_MIN_FIRST_SEND)",
+      "crate": "ezsdr-mock-radio",
+      "test_bin": "mock_channel",
+      "filter": "mr_25_a_repeat_first_send_is_judged_at_four_samples"
     }
   ]

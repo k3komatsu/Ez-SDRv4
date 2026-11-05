@@ -19,7 +19,7 @@ use serde_json::json;
 
 use super::control::Planned;
 use super::core::{Clock, Core, Streams, lock, stream_key};
-use crate::device::{Dir, Iq, TxCode, TxReport};
+use crate::device::{Dir, Iq, MIN_FIRST_SEND, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::DEVICE_LEAD_NS;
 use ezsdr_radio::timeline::{Channels, StreamKey};
@@ -370,7 +370,8 @@ impl Tx {
                 .enumerate()
                 .filter_map(|(index, pending)| {
                     let root_tick = self.core.clocks.convert(pending.target, self.core.root).and_then(|converted| converted.floor().ticks_in(self.core.root)).ok()?;
-                    (pending.channels.contains(&channel) && root_tick <= tick).then_some(index)
+                    // Strictly before the tick: at 200 MS/s a burst one sample after the previous end starts at the ACK's own tick (UR-28).
+                    (pending.channels.contains(&channel) && root_tick < tick).then_some(index)
                 })
                 .collect()
         } else {
@@ -423,6 +424,14 @@ impl Tx {
             return true;
         }
         if let Some(next) = self.open.as_ref().map(|o| o.next) {
+            // UR-21: a first send not yet handed over, whose start is no longer a device lead away, is judged by its late policy again.
+            let late_start =
+                self.open.as_ref().is_some_and(|open| open.first && !self.chain.continues_at(next) && !matches!(self.start_outcome(clock, open.held.k, open.held.policy), Ok(LateOutcome::OnTime {})));
+            if late_start {
+                let open = self.open.take().expect("a burst is open");
+                self.held.insert(open.held.k, open.held);
+                return true;
+            }
             if clock.instant(next) < now {
                 self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-22: the transmit timeline expired; burst not resumed" }));
                 self.abandon(true, 0, true);
@@ -514,19 +523,29 @@ impl Tx {
             return false;
         }
         let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, TX_SEND_CAP);
+        let (start, next, first) = {
+            let open = self.open.as_ref().expect("a burst is open");
+            (open.held.k, open.next, open.first)
+        };
+        let device_sob = first && !self.chain.continues_at(start);
+        let min_first = MIN_FIRST_SEND as i64;
+        if device_sob && switch_cut.is_some_and(|cut| cut - next < min_first) {
+            return self.refuse_first_send();
+        }
         let open = self.open.as_mut().expect("a burst is open");
         let len = open.held.waveform_len as i64;
-        let start = open.held.k;
         let offset = if open.held.repeat { (open.next - start).rem_euclid(len) } else { open.next - start };
         let tiled = open.held.repeat && open.held.samples[0].len() > len as usize;
         let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };
+        if device_sob {
+            wanted = wanted.max(if tiled { min_first } else { min_first.min(len - offset) });
+        }
         let cut = [held_cut, switch_cut].into_iter().flatten().min();
         if let Some(cut) = cut {
             wanted = wanted.min(cut - open.next);
         }
         let avail = window_cut - open.next;
-        let device_sob = open.first && !self.chain.continues_at(start);
-        if avail < wanted && !device_sob {
+        if avail < if device_sob { wanted.min(min_first) } else { wanted } {
             return false;
         }
         let count = wanted.min(avail);
@@ -549,8 +568,9 @@ impl Tx {
         // of a burst that continues the device burst there (Review N, B3; Review O, O-B1).
         // A one-sample burst's first buffer is not held: its start goes with it.
         let open_ended = clock.instant(open.next + count) - self.core.now() > self.core.ticks(DEVICE_LEAD_NS);
-        let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);
-        let device_eob = eob && !ends_at_held && !hold;
+        let hold = eob && !ends_at_held && open_ended && !(device_sob && count <= min_first);
+        // A short first send is closed here even where a booking follows at its end: that booking meets the padded front (UR-22).
+        let device_eob = eob && (!ends_at_held || device_sob && count < min_first) && !hold;
         let sending = (if hold { count - 1 } else { count }) as usize;
         // The held tail is at `start - 1`; the continuation cursor already follows it.
         if continuing {
@@ -573,16 +593,17 @@ impl Tx {
                 }
             }
         }
-        let padded_eob = device_eob && sending == 1;
-        let device_count = sending + usize::from(padded_eob);
-        let mut padded = [[Iq::default(); 2]; TX_CHANNELS_MAX];
+        // A closing packet is padded with zeros (UR-22: a first send to four, a continuation to two).
+        let pad = if device_sob && device_eob { MIN_FIRST_SEND.saturating_sub(sending) } else { usize::from(device_eob && sending == 1) };
+        let device_count = sending + pad;
+        let mut padded = [[Iq::default(); MIN_FIRST_SEND]; TX_CHANNELS_MAX];
         let mut sent = [&[][..]; TX_CHANNELS_MAX];
-        if padded_eob {
+        if pad > 0 {
             for channel in 0..channels {
-                padded[channel][0] = slices[channel][0];
+                padded[channel][..sending].copy_from_slice(&slices[channel][..sending]);
             }
             for channel in 0..channels {
-                sent[channel] = &padded[channel];
+                sent[channel] = &padded[channel][..device_count];
             }
         } else {
             for (slice, channel) in sent[..channels].iter_mut().zip(slices[..channels].iter()) {
@@ -688,7 +709,7 @@ impl Tx {
             if !device_eob {
                 // The device burst remains open at the next sample.
             } else {
-                self.chain.advance_front(clock.domain, open.next.saturating_add(if padded_eob { 2 } else { 1 }));
+                self.chain.advance_front(clock.domain, open.next.saturating_add(pad as i64 + 1));
             }
             self.forget(&open.held);
         }
@@ -735,6 +756,15 @@ impl Tx {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
         }
         self.forget(&open.held);
+    }
+
+    /// UR-22: a first send needs four samples per channel before the clock's cut; a short one
+    /// is not made, and its burst is cancelled as UR-25 cancels one that cannot start.
+    fn refuse_first_send(&mut self) -> bool {
+        let Some(open) = self.open.take() else { return true };
+        self.report_cancelled_burst("UR-22: the first send needs 4 samples per channel before the clock's cut", ezsdr_radio::CancelReason::ColdChange);
+        self.forget(&open.held);
+        true
     }
 
     /// Closes with exactly two samples and their first SampleClock instant: held tail + zero,
@@ -799,7 +829,7 @@ impl Tx {
         let result = core.reopen_tx_streamer(self.k, self.channels);
         if let (Ok(flush), Some(clock), Some(tick)) = (&result, self.clock, result.as_ref().ok().and_then(|flush| flush.ack_tick)) {
             if flush.acknowledged {
-                self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));
+                self.chain.advance_front(clock.domain, clock.at_or_after(tick));
             }
         }
         let mut halted = false;
@@ -902,13 +932,20 @@ impl Tx {
     }
 
     /// UR-21: booking's verdict can expire before the first device hand-over.
+    /// UR-21: the late policy's verdict on a device burst's start at `k`, judged at the decision instant and its device lead.
+    fn start_outcome(&self, clock: Clock, k: i64, policy: LatePolicy) -> Result<LateOutcome, ezsdr_kernel::time::TimeError> {
+        let lead = self.core.ticks(DEVICE_LEAD_NS);
+        let now = clock.at_or_after(ezsdr_radio::timeline::decided_at(self.core.now(), clock.origin, lead));
+        policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS))
+    }
+
     fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {
         let lead = self.core.ticks(DEVICE_LEAD_NS);
         let now = clock.at_or_after(ezsdr_radio::timeline::decided_at(self.core.now(), clock.origin, lead));
         let current = clock.at_or_after(clock.instant(now) + lead);
         let front = self.chain.front().filter(|(domain, _)| *domain == clock.domain).map(|(_, sample)| sample);
         let bound = ezsdr_radio::timeline::later_bound(current, front);
-        let outcome = held.policy.decide(&self.core.clocks, TimePoint::new(clock.domain, held.k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS));
+        let outcome = self.start_outcome(clock, held.k, held.policy);
         let outcome = outcome
             .and_then(|outcome| ezsdr_radio::timeline::late_policy_front_outcome(held.policy, held.k, current, front, |ticks| self.front_late_by(clock, ticks)).map(|front| front.unwrap_or(outcome)));
         match outcome {
@@ -1332,7 +1369,7 @@ mod tests {
         lock(&core.streams).give_back(claim);
         assert!(tx.pass(), "the owner retries the reopen after the claim is returned");
         assert!(!tx.chain.needs_reopen());
-        assert!(device.calls().iter().any(|call| call == "tx_send 0 n=2 at=- sob=true eob=true"), "the retry runs T3: {:?}", device.calls());
+        assert!(device.calls().iter().any(|call| call == "tx_send 0 n=4 at=- sob=true eob=true"), "the retry runs T3: {:?}", device.calls());
 
         let (stopped_core, stopped_device, _, _) = super::super::test_support::rig();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -1428,7 +1465,7 @@ mod tests {
                 lock(&core.rec).rejected.iter().all(|row| !row["reason"].as_str().is_some_and(|reason| reason.contains("could not be reopened"))),
                 "Stop/loss is not reported as a failed-reopen cancellation"
             );
-            assert!(spy.log().iter().filter(|call| call.starts_with("tx_send")).all(|call| call.contains("n=2 at=- sob=true eob=true")), "only T3, never experiment payload, is sent: {:?}", spy.log());
+            assert!(spy.log().iter().filter(|call| call.starts_with("tx_send")).all(|call| call.contains("n=4 at=- sob=true eob=true")), "only T3, never experiment payload, is sent: {:?}", spy.log());
             if let Some(start) = order_after_loss {
                 assert!(
                     spy.order()[start..].iter().all(|call| !matches!(*call, "tx_close" | "tx_open" | "tx_send" | "tx_async")),
@@ -1526,7 +1563,7 @@ mod tests {
             let calls = device.calls();
             let opens: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.starts_with("tx_open 0 ")).map(|(index, _)| index).collect();
             let reopened = *opens.get(1).expect("the streamer was reopened");
-            let flush = calls.iter().enumerate().skip(reopened + 1).find(|(_, call)| *call == "tx_send 0 n=2 at=- sob=true eob=true").map(|(index, _)| index).expect("T3 flush");
+            let flush = calls.iter().enumerate().skip(reopened + 1).find(|(_, call)| *call == "tx_send 0 n=4 at=- sob=true eob=true").map(|(index, _)| index).expect("T3 flush");
             let payload = calls.iter().enumerate().skip(flush + 1).find(|(_, call)| call.contains(&target_send)).map(|(index, _)| index).expect("B's first payload");
             assert!(reopened < flush && flush < payload, "reopen/T3/payload order: {calls:?}");
         }
@@ -1557,12 +1594,12 @@ mod tests {
             assert_ne!(tx.streamer, old_generation, "the replacement generation was adopted ({fault:?})");
             assert!(tx.unacked.is_empty(), "old-generation correlations are discarded ({fault:?})");
             assert_eq!(lock(&core.rec).rejected.iter().filter(|row| row["call"] == "tx_flush").count(), 1, "the incomplete T3 is recorded ({fault:?}): {:?}", lock(&core.rec).rejected);
-            assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true), "an absent acknowledgement is not recorded as one ({fault:?})");
+            assert!(lock(&core.rec).device_async.iter().all(|row| row["tx_flush"] != true || row["code"] != "BurstAck"), "an absent acknowledgement is not recorded as one ({fault:?})");
             assert!(!device.calls().iter().any(|call| call.contains(&format!("at={} sob=true", clock.instant(target)))), "no experiment payload crossed the reopen turn ({fault:?})");
 
             assert!(tx.pass(), "Clean recovery did not permit the next owner dispatch ({fault:?})");
             assert!(
-                device.calls().iter().any(|call| call == &format!("tx_send 0 n=2 at={} sob=true eob=true", clock.instant(target))),
+                device.calls().iter().any(|call| call == &format!("tx_send 0 n=4 at={} sob=true eob=true", clock.instant(target))),
                 "the next timed dispatch follows today's Clean behavior ({fault:?}): {:?}",
                 device.calls()
             );
@@ -1685,7 +1722,7 @@ mod tests {
             assert!(tx.pass(), "the later burst was not sent after recovery");
             let calls = device.calls();
             let reopened = calls.iter().enumerate().filter(|(_, call)| call.starts_with("tx_open 0 ")).nth(1).map(|(index, _)| index).expect("the streamer was reopened");
-            let flush = calls.iter().enumerate().skip(reopened + 1).find(|(_, call)| *call == "tx_send 0 n=2 at=- sob=true eob=true").map(|(index, _)| index).expect("T3 flush");
+            let flush = calls.iter().enumerate().skip(reopened + 1).find(|(_, call)| *call == "tx_send 0 n=4 at=- sob=true eob=true").map(|(index, _)| index).expect("T3 flush");
             let payload = calls.iter().enumerate().skip(flush + 1).find(|(_, call)| call.contains(&target_send)).map(|(index, _)| index).expect("later burst payload");
             assert!(reopened < flush && flush < payload, "reopen/T3/payload order (failed close={fail_stop_close}): {calls:?}");
         }
@@ -2041,13 +2078,13 @@ mod tests {
         book_burst(&mut control, &core, 1, clock, 9_999, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
         assert!(tx.step(), "the one-sample predecessor was not handed over");
-        assert_eq!(tx.chain.front(), Some((clock.domain, 10_002)), "the two-sample device EOB establishes the safe restart sample");
+        assert_eq!(tx.chain.front(), Some((clock.domain, 10_004)), "the padded device EOB establishes the safe restart sample");
 
         book_burst(&mut control, &core, 2, clock, 9_999, &b_wave, false, LatePolicy::SendAsapAndFlag);
         drain_tx(&mut tx);
         let calls = device.calls().len();
         assert!(tx.step(), "the first late dispatch did not defer B past the window");
-        assert!(tx.held.contains_key(&10_002), "B was not retained at its first safe start");
+        assert!(tx.held.contains_key(&10_004), "B was not retained at its first safe start");
         let first: Vec<_> =
             events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
         assert_eq!(first.len(), 1, "{first:?}");
@@ -2342,7 +2379,7 @@ mod tests {
         drain_tx(&mut tx);
         assert!(tx.step());
         assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).is_empty());
-        assert_eq!(sends(&device).last(), Some(&(2, true, true)));
+        assert_eq!(sends(&device).last(), Some(&(4, true, true)), "a one-sample first send is padded to four (UR-22)");
         assert_eq!(device.transmitted(clock.instant(5_000), 1), vec![Some([0.75, -0.25])]);
     }
 
@@ -2595,11 +2632,11 @@ mod tests {
                 assert_eq!(device.calls().len(), before, "a dropped B reached the device");
             } else {
                 assert!(errors.is_empty(), "the first safe sample is on time: {errors:?}");
-                assert_eq!(sends(&device).last(), Some(&(2, true, true)), "B starts with a timed SOB after H+3");
+                assert_eq!(sends(&device).last(), Some(&(4, true, true)), "B starts with a timed SOB after H+3, padded to four");
                 assert_eq!(device.transmitted(clock.instant(10_000), 4), vec![Some([0.0, 0.0]), Some([0.0, 0.0]), None, Some([0.75, -0.25])]);
-                device_at(&core, &time, &device, clock.instant(10_004));
+                device_at(&core, &time, &device, clock.instant(10_007) + 1);
                 tx.reports(Wall::ZERO);
-                assert!(lock(&core.rec).device_async.iter().any(|row| row["code"] == "BurstAck" && row["tick"] == clock.instant(10_004)), "the safe burst's acknowledgement is read");
+                assert!(lock(&core.rec).device_async.iter().any(|row| row["code"] == "BurstAck" && row["tick"] == clock.instant(10_007) + 1), "the safe burst's acknowledgement is read");
             }
         }
     }
@@ -2623,33 +2660,36 @@ mod tests {
         book_burst(&mut control, &core, 2, clock, 9_999, &a_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
         assert!(tx.step(), "the one-sample A at 9 999 was not handed over");
-        assert_eq!(sends(&device).last(), Some(&(1, true, false)), "A stays open for the held burst at the window edge");
+        assert_eq!(sends(&device).last(), Some(&(4, true, true)), "A is padded and closed at once; B, booked at its end, meets the padded front (UR-22)");
         tx.stop_now("test Stop", ezsdr_radio::CancelReason::Stop);
-        assert_eq!(sends(&device).last(), Some(&(2, false, true)), "Stop closes the open device burst with two zeros");
+        assert_eq!(sends(&device).last(), Some(&(4, true, true)), "Stop sends nothing after the closed device burst");
 
         assert_eq!(lock(&core.rec).bursts.len(), 1, "only A has a burst record");
         assert_eq!(lock(&core.rec).bursts[0]["samples"], 1);
-        assert_eq!(device.transmitted(clock.instant(9_999), 3), vec![Some([0.5, 0.0]), Some([0.0, 0.0]), Some([0.0, 0.0])], "FakeDevice received only A and the two-zero EOB, not B");
+        assert_eq!(device.transmitted(clock.instant(9_999), 4), vec![Some([0.5, 0.0]), Some([0.0, 0.0]), Some([0.0, 0.0]), Some([0.0, 0.0])], "FakeDevice received only A and its padding, not B");
 
         let before = device.calls().len();
-        device_at(&core, &time, &device, core.ticks(2_001));
-        book_burst(&mut control, &core, 3, clock, 10_002, &b_wave, false, LatePolicy::DropAndFlag);
+        device_at(&core, &time, &device, core.ticks(4_001));
+        book_burst(&mut control, &core, 3, clock, 10_003, &b_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
-        assert!(tx.step(), "C at H+1 was not considered");
+        assert!(tx.step(), "C at the padded front less one was not considered");
         let errors: Vec<_> =
             events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
-        assert_eq!(errors.len(), 1, "C at H+1 is late: {errors:?}");
+        assert_eq!(errors.len(), 1, "C one sample before the padded front is late: {errors:?}");
         assert_eq!(errors[0].payload["outcome"], "drop");
         assert_eq!(errors[0].payload["late_by_ns"], 1_000);
         assert_eq!(device.calls().len(), before, "late C reached FakeDevice");
 
-        device_at(&core, &time, &device, core.ticks(3_001));
-        book_burst(&mut control, &core, 4, clock, 10_003, &b_wave, false, LatePolicy::DropAndFlag);
+        device_at(&core, &time, &device, core.ticks(5_001));
+        book_burst(&mut control, &core, 4, clock, 10_004, &b_wave, false, LatePolicy::DropAndFlag);
         drain_tx(&mut tx);
-        assert!(tx.step(), "C at H+2 was not considered");
-        assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "C at H+2 is on time");
-        assert_eq!(sends(&device).last(), Some(&(2, true, true)), "C starts a new device burst at H+3");
-        assert_eq!(device.transmitted(clock.instant(10_000), 4), vec![Some([0.0, 0.0]), Some([0.0, 0.0]), None, Some([0.0, 0.5])]);
+        assert!(tx.step(), "C at the padded front was not considered");
+        assert!(
+            events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR),
+            "C at the padded front is on time"
+        );
+        assert_eq!(sends(&device).last(), Some(&(4, true, true)), "C starts a new device burst at the padded front");
+        assert_eq!(device.transmitted(clock.instant(10_004), 4), vec![Some([0.0, 0.5]), Some([0.0, 0.0]), Some([0.0, 0.0]), Some([0.0, 0.0])]);
     }
 
     #[test]
@@ -2725,10 +2765,10 @@ mod tests {
     }
 
     #[test]
-    fn ur_23_a_one_sample_burst_has_a_one_sample_safe_restart() {
+    fn ur_23_a_one_sample_burst_restarts_after_its_padded_device_burst() {
         let (a_wave, a_bytes) = waveform_input("one_sample_eob", &[[0.25, 0.0]]);
         let (b_wave, b_bytes) = waveform_input("one_sample_successor", &[[0.75, -0.25]]);
-        for (target, expect_late) in [(2_002, true), (2_003, false)] {
+        for (target, expect_late) in [(2_004, true), (2_005, false)] {
             let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
@@ -2743,8 +2783,8 @@ mod tests {
             book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
             drain_tx(&mut tx);
             assert!(tx.step(), "A's one-sample device burst was not ended");
-            assert_eq!(tx.chain.front(), Some((clock.domain, 2_003)), "A's two-sample EOB leaves the exclusive end plus one safe sample");
-            assert_eq!(sends(&device).first(), Some(&(2, true, true)));
+            assert_eq!(tx.chain.front(), Some((clock.domain, 2_005)), "A's padded device burst ends at 2 004; its safe sample is one later");
+            assert_eq!(sends(&device).first(), Some(&(4, true, true)));
 
             book_burst(&mut control, &core, 2, clock, target, &b_wave, false, LatePolicy::SendAsapAndFlag);
             drain_tx(&mut tx);
@@ -2759,8 +2799,8 @@ mod tests {
             } else {
                 assert!(errors.is_empty(), "{errors:?}");
             }
-            assert_eq!(sends(&device).last(), Some(&(2, true, true)));
-            assert_eq!(device.transmitted(clock.instant(2_003), 1), vec![Some([0.75, -0.25])], "B's actual start");
+            assert_eq!(sends(&device).last(), Some(&(4, true, true)));
+            assert_eq!(device.transmitted(clock.instant(2_005), 1), vec![Some([0.75, -0.25])], "B's actual start");
         }
     }
 
@@ -2800,12 +2840,12 @@ mod tests {
         assert_eq!(late[0].payload["outcome"], "send_asap");
         assert_eq!(late[0].payload["late_by_ns"], 2_000);
         assert_eq!(late[0].payload["target"]["ticks"], 8_000);
-        assert_eq!(sends(&device).last(), Some(&(2, true, true)), "B uses a timed SOB at the close's safe sample");
+        assert_eq!(sends(&device).last(), Some(&(4, true, true)), "B uses a timed SOB at the close's safe sample");
         assert_eq!(device.transmitted(clock.instant(7_998), 5), vec![Some([0.25, 0.0]), Some([0.25, 0.0]), Some([0.0, 0.0]), None, Some([0.75, -0.25])]);
         device_at(&core, &time, &device, clock.instant(8_004));
         tx.reports(Wall::ZERO);
         assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "Underflow" && row["code"] != "TimeError"));
-        assert!(lock(&core.rec).device_async.iter().any(|row| row["code"] == "BurstAck" && row["tick"] == clock.instant(8_000)));
+        assert!(lock(&core.rec).device_async.iter().any(|row| row["code"] == "BurstAck" && row["tick"] == clock.instant(8_001) + 1));
     }
 
     #[test]
@@ -3096,11 +3136,10 @@ mod tests {
         tx.remember_burst(a);
         tx.remember_burst(b);
         for channel in [0, 1] {
-            tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(a.ticks_in(clock.domain).unwrap())), channel });
+            tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(a.ticks_in(clock.domain).unwrap()) + 1), channel });
         }
         tx.report(crate::device::TxReport { code: crate::device::TxCode::TimeError, tick: Some(clock.instant(b.ticks_in(clock.domain).unwrap()) + 200), channel: 0 });
         let emitted = events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
-        eprintln!("events={emitted:?}");
         assert!(emitted.iter().any(|e| e.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR), "burst B TIME_ERROR must survive both ACKs of A");
     }
 
@@ -3427,7 +3466,7 @@ mod tests {
         assert_eq!(lock(&core.rec).device_async.last().map(|row| row["stream"].as_u64()), Some(Some(0)), "stream 0's row names its stream");
         assert_eq!(
             inner.calls().iter().filter(|call| call.starts_with("tx_send")).map(String::as_str).collect::<Vec<_>>(),
-            ["tx_send 1 n=2 at=- sob=true eob=true"],
+            ["tx_send 1 n=4 at=- sob=true eob=true"],
             "only the open-time flush was sent: {:?}",
             inner.calls()
         );
@@ -3665,11 +3704,11 @@ mod tests {
         let target = record["target"]["ticks"].as_i64().expect("the record's target");
         let end = clock.instant(target + record["samples"].as_i64().expect("the record's samples"));
         assert!(end <= stop + window, "the record ends {} ms after the stop", (end - stop) / core.ticks(1_000_000));
-        // The device's own end is the record's plus the two zero samples in the EOB.
-        device_at(&core, &time, &device, end + 2 * clock.n);
+        // The device's own end is the record's plus the two zero samples in the EOB; its ACK is one tick later.
+        device_at(&core, &time, &device, end + 2 * clock.n + 1);
         tx.reports(Wall::ZERO);
         let ack = lock(&core.rec).device_async.iter().find(|row| row["code"] == "BurstAck").expect("the end-of-burst's acknowledgement")["tick"].as_i64().unwrap();
-        assert_eq!(ack, end + clock.n, "{:?}", lock(&core.rec).device_async);
+        assert_eq!(ack, end + 2 * clock.n + 1, "{:?}", lock(&core.rec).device_async);
         assert!(lock(&core.rec).device_async.iter().all(|row| row["code"] != "TimeError" && row["code"] != "Underflow"), "{:?}", lock(&core.rec).device_async);
     }
 
@@ -3819,7 +3858,8 @@ mod tests {
             let safe = cursor + 3;
             lock(&core.held).insert((clock.domain, safe));
             tx.command(TxCmd::Burst(continuation(&clock, safe, 1_000)));
-            device_at(&core, &time, &device, core.ticks(31_004_000));
+            // The window reaches four samples past B's first send (FS-3: a first send never goes short).
+            device_at(&core, &time, &device, core.ticks(31_006_000));
             // The device gets past B's safe target while the owner's manual clock stays fixed.
             device.set_time(core.ticks(70_000_000));
             assert!(tx.step(), "{what}: B's timed send");
@@ -3967,7 +4007,7 @@ mod tests {
             });
             assert!(passed, "{fault:?}: the owner did not reopen the uncertain streamer");
             let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
-            assert!(sends[2].contains("n=2 at=- sob=true eob=true"), "{fault:?}: recovery flush was not the first send after the failed close: {sends:?}");
+            assert!(sends[2].contains("n=4 at=- sob=true eob=true"), "{fault:?}: recovery flush was not the first send after the failed close: {sends:?}");
             assert_eq!(sends.len(), 3, "{fault:?}: timed experiment data crossed streamer replacement: {sends:?}");
             assert!(!tx.chain.needs_reopen());
             assert!(tx.unacked.is_empty(), "{fault:?}: replacing the streamer retained old-generation correlations");
@@ -3995,7 +4035,7 @@ mod tests {
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
         tx.remember_burst(TimePoint::new(clock.domain, 20_000));
-        tx.report(TxReport { code: TxCode::BurstAck, tick: Some(clock.instant(20_000)), channel: 0 });
+        tx.report(TxReport { code: TxCode::BurstAck, tick: Some(clock.instant(20_000) + 1), channel: 0 });
         assert!(tx.unacked.is_empty(), "the experiment ack is not swallowed as the missing flush ack");
 
         let next = TimePoint::new(clock.domain, 30_000);
@@ -4020,7 +4060,7 @@ mod tests {
         assert_eq!(tx.chain.front(), None, "an attempted two-sample EOB is not a safe front");
         let sends: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
         assert_eq!(sends.len(), 1, "the uncertain EOB is not followed by a close on the same streamer: {sends:?}");
-        assert!(sends[0].contains("n=1 at=500000 sob=true eob=false"), "the short EOB transferred only the payload prefix: {sends:?}");
+        assert!(sends[0].contains("n=2 at=500000 sob=true eob=false"), "the short padded EOB transferred two of its four samples: {sends:?}");
         assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("did not complete"))));
         assert!(lock(&core.rec).rejected.iter().any(|row| row["call"] == "tx_close"), "the failed EOB is identified as an uncertain close");
 
@@ -4034,9 +4074,9 @@ mod tests {
         assert!(!tx.chain.needs_reopen());
         let flush_tick =
             lock(&core.rec).device_async.iter().find(|row| row["tx_flush"] == true && row["code"] == "BurstAck").and_then(|row| row["tick"].as_i64()).expect("the recovery flush ack was recorded");
-        assert_eq!(tx.chain.front(), Some((clock.domain, clock.at_or_after(flush_tick) + 2)), "the recovered flush ack establishes the safe front after both zeros");
+        assert_eq!(tx.chain.front(), Some((clock.domain, clock.at_or_after(flush_tick))), "the recovered flush ack establishes the safe front after both zeros");
         let after_flush: Vec<_> = device.calls().into_iter().filter(|call| call.starts_with("tx_send")).collect();
-        assert!(after_flush[1].contains("n=2 at=- sob=true eob=true"), "the replacement flush precedes any next timed burst: {after_flush:?}");
+        assert!(after_flush[1].contains("n=4 at=- sob=true eob=true"), "the replacement flush precedes any next timed burst: {after_flush:?}");
 
         // Both clocks, the Core's and the device's, are put at one instant before the next burst is booked and dispatched, with the device's clock held.
         assert!(device.time_now().unwrap() <= TX_RECOVERY_RESUME, "the held clock stands before the resume instant");
@@ -4641,6 +4681,413 @@ mod tests {
     }
 
     #[test]
+    fn ur_22_a_short_first_send_is_padded_to_four() {
+        // UR-22: a first send of one to three samples goes at once as one timed SOB+EOB of four, its zeros after its samples.
+        for len in 1..=3 {
+            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            txp_give(&mut tx, &core, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
+            txp_drain(&mut tx);
+            assert_eq!(sends(&device), [(4, true, true)], "len {len}: {:?}", device.calls());
+            let mut expected: Vec<Option<[f32; 2]>> = (0..len).map(|i| Some([(i + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+            expected.resize(4, Some([0.0, 0.0]));
+            assert_eq!(device.transmitted(clock.instant(3_000), 4), expected, "len {len}");
+            assert_eq!(tx.chain.front(), Some((clock.domain, 3_005)), "len {len}: the padded end + 1");
+        }
+    }
+
+    #[test]
+    fn ur_23_a_one_sample_continuation_eob_is_padded_to_two() {
+        // UR-22 (N2): a one-sample continuation that closes the device burst is padded to two, not to four.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(tx.open.as_ref().unwrap().next, 8_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 9_600, 1, false, LatePolicy::DropAndFlag));
+        assert!(tx.step());
+        assert_eq!(*sends(&device).last().unwrap(), (1_600, false, false));
+        device_at(&core, &time, &device, txp_ticks(7_601));
+        txp_drain(&mut tx);
+        assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "{:?}", device.calls());
+        assert_eq!(tx.chain.front(), Some((clock.domain, 9_603)));
+    }
+
+    #[test]
+    fn ur_23_a_first_send_waits_for_four_window_samples() {
+        // UR-22 (FS-3, N5): a first send never goes short of four samples; it waits for window space and sends four at once.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_010_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(992));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "a first send of two samples was handed over: {:?}", device.calls());
+        device_at(&core, &time, &device, txp_ticks(994));
+        while sends(&device).is_empty() && tx.step() {}
+        assert_eq!(sends(&device), [(4, true, false)], "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_22_a_repeat_of_one_to_three_samples_tiles_its_first_send() {
+        // UR-22 (FS-6): a repeat's first send is its waveform tiled to at least four samples, all payload.
+        for len in 1..=3 {
+            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            let mut burst = txp_burst(&clock, 3_000, len, true, LatePolicy::DropAndFlag);
+            burst.tile_repeat();
+            txp_give(&mut tx, &core, burst);
+            assert!(tx.step());
+            let first = sends(&device)[0];
+            assert!(first.0 >= 4 && first.1, "len {len}: {first:?}: {:?}", device.calls());
+            let expected: Vec<Option<[f32; 2]>> = (0..4).map(|i| Some([((i % len) + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+            assert_eq!(device.transmitted(clock.instant(3_000), 4), expected, "len {len}");
+        }
+    }
+
+    #[test]
+    fn ur_23_a_short_first_send_closes_before_a_booking_at_its_end() {
+        // UR-22 (N3): a padded short first send is closed; a Kernel burst booked at its payload end is not continued into the padding.
+        let (core, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 2, false, LatePolicy::DropAndFlag));
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_002, 5, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device)[0], (4, true, true), "{:?}", device.calls());
+        assert!(
+            !device.calls().iter().any(|call| call.starts_with("tx_send") && call.contains(&format!("at={} ", clock.instant(3_002)))),
+            "the booking at the padded end was continued: {:?}",
+            device.calls()
+        );
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(late.len(), 1, "B at 3 002 is before the padded front 3 005 and is judged late: {events:?}");
+        assert_eq!(late[0].payload["outcome"], "drop");
+    }
+
+    #[test]
+    fn ur_23_a_four_sample_first_send_is_not_held() {
+        // UR-22 (FS-1, N1): a first send of four samples goes at once, its last sample is not held back.
+        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 4, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_cut_before_four_first_samples_is_refused() {
+        // UR-22 (FS-4): a first send the clock's cut leaves short of four samples is not made; its burst is cancelled, not late.
+        let (core, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 8, false, LatePolicy::DropAndFlag));
+        tx.cut = Some(txp_ticks(3_002));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "{:?}", device.calls());
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{events:?}");
+        assert!(events.iter().any(|event| event.payload.to_string().contains("needs 4 samples")), "{events:?}");
+    }
+
+    #[test]
+    fn ur_22_a_padded_send_counts_payload_only() {
+        // UR-22 (FS-T4): the two samples of a padded first send are payload; its four device samples are not counted as payload.
+        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 2, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
+        let rec = lock(&core.rec);
+        assert_eq!(rec.stats.get("tx_samples"), Some(&2), "{:?}", rec.stats);
+        assert_eq!(rec.bursts.len(), 1, "{:?}", rec.bursts);
+        assert_eq!(rec.bursts[0]["samples"], 2, "{:?}", rec.bursts);
+    }
+
+    #[test]
+    fn ur_22_a_two_channel_one_sample_burst_is_padded_on_both_channels() {
+        // UR-22 (D6): a one-sample burst on a two-channel stream is one timed SOB+EOB of four per call, padded on each channel; its front is the padded end + 1.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
+        let start = 500_000;
+        for channel in 0..2 {
+            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
+        }
+        device.rx_open(0, &[0, 1]).unwrap();
+        device.rx_start(0, clock.instant(start)).unwrap();
+        device_at(&core, &time, &device, clock.instant(start - 400_000));
+        let mut burst = txp_burst(&clock, start, 1, false, LatePolicy::DropAndFlag);
+        burst.samples = Arc::new(vec![vec![[0.1, 0.0]], vec![[0.2, 0.0]]]);
+        txp_give(&mut tx, &core, burst);
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
+        assert_eq!(tx.chain.front(), Some((clock.domain, start + 5)), "the padded end + 1");
+        device_at(&core, &time, &device, clock.instant(start + 4));
+        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 4, Wall::from_millis(10), false) else { panic!("the loopback contains both channels") };
+        assert_eq!(samples, [vec![[0.1, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], vec![[0.2, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]], "both channels are padded with zeros after their sample");
+    }
+
+    #[test]
+    fn ur_23_a_continuation_of_two_samples_is_sent_at_once_with_no_minimum() {
+        // UR-23 (FS-7, TBD-b4): a continuation has no four-sample minimum: the two samples the window holds go at once. The window ends 2 samples after A's 7 000.
+        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(Some(7_002_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 4_000, false, LatePolicy::DropAndFlag));
+        txp_give(&mut tx, &core, txp_burst(&clock, 7_000, 2, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device).iter().filter(|send| send.1).count(), 1, "one device start: {:?}", device.calls());
+        assert_eq!(*sends(&device).last().unwrap(), (1, false, false), "B's first sample goes at once; its last is the held tail: {:?}", device.calls());
+        assert_eq!(device.transmitted(clock.instant(7_000), 1), vec![Some([1.0 / 100_000.0, 7_000f32 / 10_000.0])]);
+    }
+
+    #[test]
+    fn ur_23_a_four_sample_window_takes_a_first_send_of_four() {
+        // UR-22 (N5): a window that holds exactly four samples of the burst admits a first send of four; the next chunk waits for the window to empty.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(1_000));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(4, true, false)], "{:?}", device.calls());
+        assert!(device.transmitted(clock.instant(3_000), 4).iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn ur_28_grouped_channels_retire_per_position() {
+        // UR-28 (F8-b): one stream with two channel positions: the ACK of position 0 retires only its own pending entry, and a duplicate ACK of 0 leaves position 1's.
+        let (core, _, _, _events) = super::super::test_support::rig();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core, 0, cmds, Some(clock), Channels::first(2));
+        let burst = TimePoint::new(clock.domain, 10_000);
+        tx.remember_burst(burst);
+        let ack = |channel| TxReport { code: TxCode::BurstAck, tick: Some(clock.instant(10_000) + 1), channel };
+        tx.report(ack(0));
+        assert_eq!(tx.unacked.iter().map(|pending| pending.channels.iter().copied().collect::<Vec<_>>()).collect::<Vec<_>>(), [vec![1]]);
+        tx.report(ack(0));
+        assert_eq!(tx.unacked.iter().map(|pending| pending.channels.iter().copied().collect::<Vec<_>>()).collect::<Vec<_>>(), [vec![1]], "a duplicate ACK retired position 1");
+        tx.report(ack(1));
+        assert!(tx.unacked.is_empty());
+    }
+
+    #[test]
+    fn ur_28_split_streams_retire_their_own_pending() {
+        // UR-28 (F8-c): two streams, one channel each: each stream's ACK retires its own pending entry and not the other's.
+        let (core, _, _, _events) = super::super::test_support::rig();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_a, cmds_a) = std::sync::mpsc::channel();
+        let (_to_b, cmds_b) = std::sync::mpsc::channel();
+        let mut a = Tx::new(core.clone(), 0, cmds_a, Some(clock), Channels::first(1));
+        let mut b = Tx::new(core, 1, cmds_b, Some(clock), Channels::first(1));
+        let first = TimePoint::new(clock.domain, 10_000);
+        let second = TimePoint::new(clock.domain, 20_000);
+        a.remember_burst(first);
+        b.remember_burst(second);
+        let ack = TxReport { code: TxCode::BurstAck, tick: Some(clock.instant(10_000) + 1), channel: 0 };
+        a.report(ack);
+        assert!(a.unacked.is_empty(), "stream 0's own ACK retires its pending entry");
+        assert_eq!(b.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [second], "stream 1 keeps its entry");
+        b.report(ack);
+        assert_eq!(b.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [second], "stream 0's ACK at 10 000 does not retire stream 1's burst at 20 000");
+        b.report(TxReport { code: TxCode::BurstAck, tick: Some(clock.instant(20_000) + 1), channel: 0 });
+        assert!(b.unacked.is_empty(), "stream 1's own ACK retires its entry");
+    }
+
+    #[test]
+    fn ur_28_a_device_burst_over_two_kernel_bursts_keeps_both_records() {
+        // UR-28, UR-23 (F8-d): B booked at A's end continues A's device burst: one pending correlation for the device burst's start, and both Kernel bursts in the record.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let clock = tx.clock.expect("a transmit clock");
+        let b = continuation(&clock, 70_000, 1_000);
+        lock(&core.held).insert((clock.domain, 70_000));
+        tx.command(TxCmd::Burst(b));
+        device_at(&core, &time, &device, core.ticks(62_000_000));
+        assert!(tx.step());
+        device_at(&core, &time, &device, core.ticks(69_000_000));
+        assert!(tx.step());
+        assert_eq!(tx.unacked.len(), 1, "{:?}", tx.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>());
+        let rec = lock(&core.rec);
+        assert_eq!(rec.bursts.len(), 2, "{:?}", rec.bursts);
+    }
+
+    #[test]
+    fn ur_22_a_first_send_is_never_undersized() {
+        // UR-22 (F6-c): every first send of one to nine samples, each its own device burst, reaches the device with at least four samples per channel.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        for (index, len) in [1usize, 2, 3, 4, 5, 9].into_iter().enumerate() {
+            let start = 3_000 + 10_000 * index as i64;
+            device_at(&core, &time, &device, txp_ticks(start - 2_000));
+            txp_give(&mut tx, &core, txp_burst(&clock, start, len, false, LatePolicy::DropAndFlag));
+            txp_drain(&mut tx);
+        }
+        let sent = sends(&device);
+        assert_eq!(sent.iter().filter(|send| send.1).count(), 6, "{sent:?}");
+        assert!(sent.iter().filter(|send| send.1).all(|send| send.0 >= 4), "{sent:?}");
+    }
+
+    #[test]
+    fn ur_23_a_held_tail_is_timed_at_its_instant() {
+        // UR-23 (F5-e): the held tail goes out at its own sample instant, not untimed.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let clock = tx.clock.expect("a transmit clock");
+        device_at(&core, &time, &device, core.ticks(68_000_000));
+        txp_drain(&mut tx);
+        assert!(sends(&device).ends_with(&[(2, false, true)]), "{:?}", device.calls());
+        assert!(device.calls().iter().any(|call| call.starts_with("tx_send") && call.contains(&format!("at={} ", clock.instant(69_999)))), "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_burst_at_the_end_of_a_closed_burst_is_late() {
+        // UR-23 (F4-late): a burst booked at the closed device burst's exclusive end is late (gap 0), not continued.
+        let (core, device, time, mut tx, _frozen) = at_a_held_tail(Vec::new());
+        let clock = tx.clock.expect("a transmit clock");
+        device_at(&core, &time, &device, core.ticks(68_000_000));
+        txp_drain(&mut tx);
+        assert!(tx.open.is_none() && tx.chain.tail().is_none(), "A's held sample did not go out at the deadline: {:?}", device.calls());
+        let before = sends(&device);
+        lock(&core.held).insert((clock.domain, 70_000));
+        tx.command(TxCmd::Burst(continuation(&clock, 70_000, 1_000)));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), before, "a burst at the closed end was sent: {:?}", device.calls());
+        assert!(lock(&core.rec).rejected.iter().any(|row| row["reason"] == "UR-21: the late policy dropped the burst"), "{:?}", lock(&core.rec).rejected);
+    }
+
+    #[test]
+    fn ur_23_a_short_burst_then_an_adjacent_burst_booked_after_dispatch_follows_the_late_policy() {
+        // UR-22 (N3): a short first send is padded and closed at once; an adjacent burst booked after that dispatch is judged against the padded front.
+        let (core, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 2, false, LatePolicy::DropAndFlag));
+        assert!(tx.step());
+        assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_002, 5, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(4, true, true)], "the booking at the padded end was continued: {:?}", device.calls());
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(late.len(), 1, "{events:?}");
+        assert_eq!(late[0].payload["outcome"], "drop");
+    }
+
+    #[test]
+    fn ur_23_stop_while_the_first_send_waits_sends_nothing() {
+        // UR-22 (FS-3): a first send waiting for four samples of window space sends nothing once Stop cancels it.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(999));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "{:?}", device.calls());
+        tx.stop_now("test stop", ezsdr_radio::CancelReason::Stop);
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "a first send went after Stop: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_loss_while_the_first_send_waits_sends_nothing() {
+        // UR-22 (FS-3): a device loss while a first send waits for window space sends nothing more.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(999));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "{:?}", device.calls());
+        core.device_lost("test loss while the first send waits");
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "a first send went after the loss: {:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_wait_past_the_start_lead_follows_the_late_policy() {
+        // UR-22 (FS-5): a first send that waited past its start is judged by its late policy before dispatch, not sent.
+        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(999));
+        txp_drain(&mut tx);
+        device_at(&core, &time, &device, txp_ticks(3_001));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "a late first send was handed over: {:?}", device.calls());
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(late.len(), 1, "{events:?}");
+        assert_eq!(late[0].payload["outcome"], "drop");
+    }
+
+    #[test]
+    fn ur_23_a_wait_past_the_start_lead_moves_a_send_asap_first_send() {
+        // UR-21, UR-22 (FS-5, SendAsapAndFlag): a first send that waited past its start is moved to the cursor, not dropped; the moved send opens a device burst.
+        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::SendAsapAndFlag));
+        device_at(&core, &time, &device, txp_ticks(999));
+        txp_drain(&mut tx);
+        device_at(&core, &time, &device, txp_ticks(3_001));
+        txp_drain(&mut tx);
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let late: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(late.len(), 1, "{events:?}");
+        assert_eq!(late[0].payload["outcome"], "send_asap", "{events:?}");
+        assert!(sends(&device).first().is_some_and(|send| send.1), "the moved first send opens a device burst: {:?}", device.calls());
+        assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
+    }
+
+    /// UR-21, UR-22 (C2): a first send that waits for window space is judged at its device lead. Window space for four samples
+    /// appears at 1 000 samples; the start at 3 000 is then a device lead (2 000 samples) away, so `now_ticks` is the lead boundary
+    /// or one tick past it. Returns the sends and the TIME_ERROR outcomes.
+    fn first_send_at_its_lead(policy: LatePolicy, now_ticks: i64) -> (Vec<(usize, bool, bool)>, Vec<String>) {
+        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, policy));
+        device_at(&core, &time, &device, txp_ticks(999));
+        txp_drain(&mut tx);
+        device_at(&core, &time, &device, now_ticks);
+        txp_drain(&mut tx);
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let outcomes = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).map(|event| event.payload["outcome"].as_str().unwrap().to_owned()).collect();
+        (sends(&device), outcomes)
+    }
+
+    #[test]
+    fn ur_23_a_first_send_one_tick_inside_its_lead_follows_drop_and_flag() {
+        let (sends, outcomes) = first_send_at_its_lead(LatePolicy::DropAndFlag, txp_ticks(1_000) + 1);
+        assert!(sends.is_empty(), "a first send inside its lead was handed over: {sends:?}");
+        assert_eq!(outcomes, ["drop"]);
+    }
+
+    #[test]
+    fn ur_23_a_first_send_at_its_lead_boundary_is_sent_by_drop_and_flag() {
+        let (sends, outcomes) = first_send_at_its_lead(LatePolicy::DropAndFlag, txp_ticks(1_000));
+        assert!(sends.first().is_some_and(|send| send.1), "{sends:?}");
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+    }
+
+    #[test]
+    fn ur_23_a_first_send_one_tick_inside_its_lead_follows_send_asap_and_flag() {
+        let (sends, outcomes) = first_send_at_its_lead(LatePolicy::SendAsapAndFlag, txp_ticks(1_000) + 1);
+        assert_eq!(outcomes, ["send_asap"]);
+        assert!(sends.first().is_some_and(|send| send.1), "the moved first send opens a device burst: {sends:?}");
+    }
+
+    #[test]
+    fn ur_23_a_first_send_at_its_lead_boundary_is_sent_by_send_asap_and_flag() {
+        let (sends, outcomes) = first_send_at_its_lead(LatePolicy::SendAsapAndFlag, txp_ticks(1_000));
+        assert!(sends.first().is_some_and(|send| send.1), "{sends:?}");
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+    }
+
+    #[test]
+    fn ur_23_a_long_burst_in_many_chunks_plays_contiguously() {
+        // UR-23 (F5-d): a burst sent in many window-sized chunks plays every sample once, in place, as one device burst.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_200_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 3_000, false, LatePolicy::DropAndFlag));
+        for step in 0..600 {
+            device_at(&core, &time, &device, txp_ticks(100 * step));
+            txp_drain(&mut tx);
+        }
+        assert!(sends(&device).len() > 3, "the burst was not sent in chunks: {:?}", device.calls());
+        assert_eq!(sends(&device).iter().filter(|send| send.1).count(), 1, "{:?}", device.calls());
+        let expected: Vec<Option<[f32; 2]>> = (0..3_000).map(|i| Some([(i + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+        assert_eq!(device.transmitted(clock.instant(3_000), 3_000), expected, "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_28_an_ack_at_a_bursts_end_plus_one_tick_keeps_the_burst_at_the_next_sample() {
+        // UR-28 (N4): at 200 MS/s the BurstAck tick (exclusive end + 1 tick) is the next sample's instant; a burst starting there is not yet acknowledged.
+        let (core, _, _, _events) = super::super::test_support::rig();
+        let clock = core.register(Dir::Tx, 1, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        let mut tx = Tx::new(core, 0, cmds, Some(clock), Channels::first(1));
+        let first = TimePoint::new(clock.domain, 10_000);
+        let next = TimePoint::new(clock.domain, 10_011);
+        tx.remember_burst(first);
+        tx.remember_burst(next);
+        tx.report(crate::device::TxReport { code: crate::device::TxCode::BurstAck, tick: Some(clock.instant(10_010) + 1), channel: 0 });
+        assert_eq!(tx.unacked.iter().map(|pending| pending.target).collect::<Vec<_>>(), [next]);
+    }
+
+    #[test]
     fn ur_23_m4c_a_stop_during_a_continuation_s_wait_ends_the_device_burst_once() {
         // The waiting state (an open burst still `first`, its device burst continued) meets Stop, with and without a held tail.
         let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
@@ -4751,15 +5198,15 @@ mod tests {
         device.rx_start(0, clock.instant(start)).unwrap();
         device_at(&core, &time, &device, clock.instant(start - 400_000));
 
-        let a = [vec![[0.1, 0.01], [0.2, 0.02], [0.3, 0.03]], vec![[0.4, 0.04], [0.5, 0.05], [0.6, 0.06]]];
-        let mut first = one_shot(&clock, start, 2, a[0].clone());
+        let a = [vec![[0.1, 0.01], [0.2, 0.02], [0.3, 0.03], [0.4, 0.04], [0.5, 0.05]], vec![[0.6, 0.06], [0.7, 0.07], [0.8, 0.08], [0.9, 0.09], [1.0, 0.1]]];
+        let mut first = one_shot(&clock, start, 5, a[0].clone());
         first.samples = Arc::new(a.to_vec());
         txp_give(&mut tx, &core, first);
         assert!(tx.step());
-        assert_eq!(sends(&device), [(2, true, false)]);
+        assert_eq!(sends(&device), [(4, true, false)]);
 
         let b = [vec![[0.7, 0.07], [0.8, 0.08]], vec![[0.9, 0.09], [1.0, 0.1]]];
-        let mut next = one_shot(&clock, start + 3, 2, b[0].clone());
+        let mut next = one_shot(&clock, start + 5, 2, b[0].clone());
         next.samples = Arc::new(b.to_vec());
         txp_give(&mut tx, &core, next);
         assert!(tx.step());
@@ -4768,11 +5215,11 @@ mod tests {
         tx.command(TxCmd::Stop);
         assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "Stop ends on the next burst's held tail and one zero");
 
-        device_at(&core, &time, &device, clock.instant(start + 6));
-        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 6, Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
+        device_at(&core, &time, &device, clock.instant(start + 8));
+        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 8, Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
         assert_eq!(
             samples,
-            [[a[0][0], a[0][1], a[0][2], b[0][0], b[0][1], [0.0, 0.0]].to_vec(), [a[1][0], a[1][1], a[1][2], b[1][0], b[1][1], [0.0, 0.0]].to_vec(),],
+            [[a[0][0], a[0][1], a[0][2], a[0][3], a[0][4], b[0][0], b[0][1], [0.0, 0.0]].to_vec(), [a[1][0], a[1][1], a[1][2], a[1][3], a[1][4], b[1][0], b[1][1], [0.0, 0.0]].to_vec(),],
             "continuation and EOB preserve each channel's held sample"
         );
     }

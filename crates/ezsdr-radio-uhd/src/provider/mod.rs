@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn ur_13_arm_radiates_nothing() {
-        // UR-13 (MA-13): `arm` sends only T3's two-zero flush and consumes its BurstAck; it
+        // UR-13 (MA-13): `arm` sends only T3's four-zero flush and consumes its BurstAck; it
         // does not send any sample-bearing experiment burst.
         let binding: Binding = serde_json::from_value(json!({
             "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
@@ -861,7 +861,7 @@ mod tests {
         radio.arm().expect("arm");
         let calls = device.calls();
         let sends: Vec<_> = calls.iter().filter(|call| call.starts_with("tx_send")).collect();
-        assert_eq!(sends, [&"tx_send 0 n=2 at=- sob=true eob=true"], "arm sends only its untimed T3 flush: {calls:?}");
+        assert_eq!(sends, [&"tx_send 0 n=4 at=- sob=true eob=true"], "arm sends only its untimed T3 flush: {calls:?}");
         assert!(calls.iter().position(|call| call.starts_with("tx_open")).unwrap() < calls.iter().position(|call| call.starts_with("tx_send")).unwrap());
         assert_eq!(lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] == true).count(), 1, "the opener consumes the flush acknowledgement");
         assert_eq!(calls.iter().filter(|call| call.starts_with("tx_open")).count(), 1, "the transmit streamer's open: {calls:?}");
