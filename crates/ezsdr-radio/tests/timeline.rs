@@ -58,6 +58,16 @@ fn planned(line: &Line) -> Vec<(i64, Option<i64>)> {
     line.plan.iter().map(|segment| (segment.origin, segment.cut.map(|k| segment.instant(k).unwrap()))).collect()
 }
 
+/// The line booked with the items that take effect by `t`: what the public plan and `streaming()`
+/// say at `t` (RM-25).
+fn prefix(stream: &Stream, items: &[Item], t: i64) -> Line {
+    let mut line = Line::new(*stream);
+    for item in items.iter().filter(|item| item.e <= t) {
+        line.book(*item).unwrap();
+    }
+    line
+}
+
 #[test]
 fn rm_26_each_stream_takes_its_own_directions_start_lead() {
     // RM-4, RM-25: the TimingEnvelope has one start lead per direction, and a stream's new
@@ -426,6 +436,24 @@ fn refusal_streams(direction: Direction) -> [Stream; 2] {
     [base, Stream { lead: 5 * MS, ..base }]
 }
 
+/// N6 (note 48 S2b-ii, G5): the halt rule through the public plan and `streaming()`. A refused
+/// `start_rx` leaves the stream streaming and plans no segment for itself; a later Stop stops it,
+/// and the next `start_rx` starts it again.
+#[test]
+fn halt_rule_is_streaming_and_refusal_exclusion() {
+    let rx = stream(Direction::Rx, 1);
+    let mut line = Line::new(rx);
+    line.book(item(1_000 * MS, 0, 1_000 * MS, Kind::Stop)).unwrap();
+    line.book(refused(item(2_000 * MS, 1, 2_000 * MS, Kind::Start))).unwrap();
+    assert!(line.streaming(), "a refused start leaves the stream on");
+    assert_eq!(planned(&line), [(0, Some(1_000 * MS))], "the refused segment is in no plan");
+    line.book(item(3_000 * MS, 2, 3_000 * MS, Kind::Stop)).unwrap();
+    assert!(!line.streaming(), "a Stop after the refusal stops the stream");
+    line.book(item(3_000 * MS, 3, 3_000 * MS, Kind::Start)).unwrap();
+    assert!(line.streaming(), "the next start_rx starts it");
+    assert_eq!(planned(&line), [(0, Some(1_000 * MS)), (3_050 * MS, None)]);
+}
+
 /// RM-25 (design 43), O-eq: on a generated sequence, refusing one `start_rx` changes
 /// no segment that a later item begins (origin and cut), and leaves the refused one out of the
 /// plan; the refusal booked with the item and recorded after it plan the same. A `start_rx`
@@ -457,7 +485,8 @@ fn rm_25_a_refusal_does_not_move_a_later_origin() {
             let others: Vec<Segment> = plain.iter().filter(|segment| segment.by != Some(k)).copied().collect();
             assert_eq!(booked, others, "seed {seed}: refusing {k} moves a later segment");
             check(&stream, &booked, seed);
-            // Recorded after the booking, the refusal plans the same, and so does `halted`.
+            // Recorded after the booking, the refusal plans the same, and at every instant the plan
+            // and `streaming()` agree.
             let (mut full, mut after) = (Line::new(stream), Line::new(stream));
             let mut direct = Line::new(stream);
             for item in &items {
@@ -468,7 +497,9 @@ fn rm_25_a_refusal_does_not_move_a_later_origin() {
             assert!(after.refuse(k).unwrap());
             assert_eq!(after.plan, direct.plan, "seed {seed}: a refusal recorded after the booking plans differently");
             for item in &in_order(&items) {
-                assert_eq!(after.halted(item.e), direct.halted(item.e), "seed {seed}, t {}", item.e);
+                let (after_t, direct_t) = (prefix(&stream, &after.items, item.e), prefix(&stream, &direct.items, item.e));
+                assert_eq!(planned(&after_t), planned(&direct_t), "seed {seed}, t {}", item.e);
+                assert_eq!(after_t.streaming(), direct_t.streaming(), "seed {seed}, t {}", item.e);
             }
             compared += 1;
         }
@@ -512,7 +543,9 @@ fn rm_25_a_refused_receive_segment_is_not_in_the_plan() {
         }
         assert_eq!(booked.plan, after.plan);
         for item in &items {
-            assert_eq!(booked.halted(item.e), after.halted(item.e));
+            let (booked_t, after_t) = (prefix(&rx, &booked.items, item.e), prefix(&rx, &after.items, item.e));
+            assert_eq!(planned(&booked_t), planned(&after_t), "at {}", item.e);
+            assert_eq!(booked_t.streaming(), after_t.streaming(), "at {}", item.e);
         }
     }
 }
@@ -534,12 +567,12 @@ fn rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it() {
     };
     // A Stop cuts the refused virtual segment at its own instant (cut 2 000 ms), and the start after
     // it begins a lead later.
-    let line = case(
-        "Stop, S1 refused, Stop, S2",
-        &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(2_000 * MS, 2, 2_000 * MS, Kind::Stop), item(2_000 * MS, 3, 2_000 * MS, Kind::Start)],
-        &[(0, Some(500 * MS)), (2_050 * MS, None)],
-    );
-    assert!(line.halted(1_999 * MS) && !line.halted(2_000 * MS), "halted until S2 takes effect");
+    let items = [stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(2_000 * MS, 2, 2_000 * MS, Kind::Stop), item(2_000 * MS, 3, 2_000 * MS, Kind::Start)];
+    case("Stop, S1 refused, Stop, S2", &items, &[(0, Some(500 * MS)), (2_050 * MS, None)]);
+    // The refusal holds until S2 takes effect: by 1 999 ms the plan has the stop's segment alone.
+    assert_eq!(planned(&prefix(&rx, &items, 1_999 * MS)), [(0, Some(500 * MS))], "halted until S2 takes effect");
+    assert!(prefix(&rx, &items, 1_999 * MS).streaming(), "a refused start leaves the stream on");
+    assert_eq!(planned(&prefix(&rx, &items, 2_000 * MS)), [(0, Some(500 * MS)), (2_050 * MS, None)], "S2 begins the segment a lead later");
     case(
         "S2 inside S1's lead",
         &[stop, refused(item(1_000 * MS, 1, 1_000 * MS, Kind::Start)), item(1_010 * MS, 2, 1_010 * MS, Kind::Stop), item(1_010 * MS, 3, 1_010 * MS, Kind::Start)],
@@ -675,8 +708,24 @@ fn rm_25_a_pruned_line_with_a_refused_segment_plans_as_one_that_keeps_every_item
                     line.book(item(1_600 * MS, 3, 1_600 * MS, Kind::Start)).unwrap();
                 }
             }
+            // The pruned line, booked by `t`: the items before the prune, the prune, then the rest.
+            let pruned_by = |t: i64| {
+                let (early, late): (Vec<Item>, Vec<Item>) = full.items.iter().partition(|item| item.e < prune_at);
+                let mut line = Line::new(rx_stream(&[0, 1], 1_000_000));
+                for item in early.iter().filter(|item| item.e <= t) {
+                    line.book(*item).unwrap();
+                }
+                line.prune(prune_at);
+                for item in late.iter().filter(|item| item.e <= t) {
+                    line.book(*item).unwrap();
+                }
+                line
+            };
             for t in [1_000 * MS, 1_050 * MS, 1_400 * MS, 1_500 * MS, 1_700 * MS, 2_000 * MS] {
-                assert_eq!(pruned.halted(t), full.halted(t), "prune {prune_at}, step {step}, t {t}");
+                let full_t = prefix(&rx_stream(&[0, 1], 1_000_000), &full.items, t);
+                let pruned_t = pruned_by(t);
+                assert_eq!(planned(&pruned_t), planned(&full_t), "prune {prune_at}, step {step}, t {t}");
+                assert_eq!(pruned_t.streaming(), full_t.streaming(), "prune {prune_at}, step {step}, t {t}");
             }
             assert_eq!(planned(&pruned), planned(&full), "prune {prune_at}, step {step}");
         }

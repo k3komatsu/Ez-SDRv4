@@ -796,16 +796,6 @@
   "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources"
  },
  {
-  "id": "J65",
-  "name": "#64 (owner, 2026-10-09): a stream counts as halted by its whole line, not by what is in effect at the instant",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "sorted(&self.items).into_iter().filter(|item| item.e <= t).collect();",
-  "new": "sorted(&self.items).into_iter().filter(|item| item.e <= i64::MAX).collect();",
-  "crate": "ezsdr-radio",
-  "test_bin": "timeline",
-  "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
- },
- {
   "id": "J66",
   "name": "UR-6 (review round 1, 2026-10-09): the Provider expects the epoch of a locked clock whatever its clock source",
   "file": "crates/ezsdr-radio-uhd/src/provider/mod.rs",
@@ -824,16 +814,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_the_root_s_epoch_is_the_pps_edge_with_external_sources"
- },
-  {
-  "id": "J70",
-  "name": "#64 (review round 1, 2026-10-09): a refusal at the command's own instant does not halt it yet",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "sorted(&self.items).into_iter().filter(|item| item.e <= t).collect();",
-  "new": "sorted(&self.items).into_iter().filter(|item| item.e < t).collect();",
-  "crate": "ezsdr-radio",
-  "test_bin": "timeline",
-  "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
  },
  {
   "id": "J72",
@@ -4408,16 +4388,6 @@
   "filter": "rm_12_a_stream_node_names_its_direction_and_number"
  },
  {
-  "id": "P90",
-  "name": "RM-34: a successful move does not clear a halt",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "self.on = true; self.halted = item.refused;",
-  "new": "self.on = true; self.halted = self.halted || item.refused;",
-  "crate": "ezsdr-radio",
-  "test_bin": "timeline",
-  "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
- },
- {
   "id": "P93",
   "name": "RM-25: a stream whose set is empty begins a segment",
   "file": "crates/ezsdr-radio/src/timeline.rs",
@@ -5617,22 +5587,12 @@
    "test_bin": "lib",
    "filter": "ur_13_a_failed_open_by_the_owner_is_opened_again"
   },
- {
-    "id": "P368",
-    "name": "the owner configures a segment again although its record holds the same configuration (UR-13)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "                    Owner::Nothing\n                } else {",
-    "new": "                    Owner::Configure\n                } else {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_36_the_owner_step_follows_the_record"
- },
   {
     "id": "P369",
     "name": "a receive owner that finds its record unknown or another set does not open the streamer (UR-13, S1)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
     "old": "            _ => Owner::Open,",
-    "new": "            _ => Owner::Nothing,",
+    "new": "            _ => Owner::Configure,",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_13_a_failed_open_by_the_owner_is_opened_again"
@@ -5866,16 +5826,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_15_a_failed_later_start_closes_after_the_owners_joined"
- },
- {
-  "id": "P460",
-  "name": "a successful cold change leaves the stream halted (UR-25, D3)",
-  "file": "crates/ezsdr-radio/src/timeline.rs",
-  "old": "self.on = true; self.halted = item.refused;",
-  "new": "self.on = true; self.halted = true;",
-  "crate": "ezsdr-radio",
-  "test_bin": "timeline",
-  "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
  },
  {
   "id": "P461",
@@ -6679,28 +6629,28 @@
     "id": "P561",
     "name": "RM-16: Stop cancellation incorrectly emits COMMAND_REJECTED",
     "file": "crates/ezsdr-radio/src/lib.rs",
-    "old": "matches!(reason, CancelReason::ColdChange)",
-    "new": "matches!(reason, CancelReason::Stop | CancelReason::ColdChange)",
+    "old": "matches!(reason, CancelReason::ClockEnded)",
+    "new": "matches!(reason, CancelReason::Stop | CancelReason::ClockEnded)",
     "crate": "ezsdr-radio",
     "test_bin": "lib",
-    "filter": "cancellation_reports_only_cold_change"
+    "filter": "cancellation_reports_only_clock_ended"
   },
   {
     "id": "P562",
     "name": "RM-16: cold-change cancellation fails to emit COMMAND_REJECTED",
     "file": "crates/ezsdr-radio/src/lib.rs",
-    "old": "matches!(reason, CancelReason::ColdChange)",
+    "old": "matches!(reason, CancelReason::ClockEnded)",
     "new": "matches!(reason, CancelReason::Stop)",
     "crate": "ezsdr-radio",
     "test_bin": "lib",
-    "filter": "cancellation_reports_only_cold_change"
+    "filter": "cancellation_reports_only_clock_ended"
   },
   {
     "id": "P563",
     "name": "Mock TX Stop uses the cold-change report policy",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
     "old": "self.stop_tx(k, now, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::Stop)?;",
-    "new": "self.stop_tx(k, now, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::ColdChange)?;",
+    "new": "self.stop_tx(k, now, \"MR-25: cancelled by stop\", ezsdr_radio::CancelReason::ClockEnded)?;",
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_tx_stream_stop_cancels_held_bursts"
@@ -6710,7 +6660,7 @@
     "name": "Mock Provider::stop uses the cold-change report policy",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
     "old": "self.stop_at(mode, now, \"MR-25: cancelled by stop\", seq, ezsdr_radio::CancelReason::ProviderStop)",
-    "new": "self.stop_at(mode, now, \"MR-25: cancelled by stop\", seq, ezsdr_radio::CancelReason::ColdChange)",
+    "new": "self.stop_at(mode, now, \"MR-25: cancelled by stop\", seq, ezsdr_radio::CancelReason::ClockEnded)",
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_provider_stop_cancels_held_bursts"
@@ -6720,7 +6670,7 @@
     "name": "Mock loss uses the cold-change report policy",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
     "old": "self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::Loss)?;",
-    "new": "self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::ColdChange)?;",
+    "new": "self.stop_at(StopMode::Abort, tick, DEVICE_LOST, seq, ezsdr_radio::CancelReason::ClockEnded)?;",
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_loss_cancels_held_bursts_without_rejection"
@@ -6730,7 +6680,7 @@
     "name": "UHD TX Stop uses the cold-change report policy",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
     "old": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::Stop),",
-    "new": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::ColdChange),",
+    "new": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::ClockEnded),",
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_tx_stream_stop_cancels_held_bursts"
@@ -6740,7 +6690,7 @@
     "name": "UHD Provider::stop uses the cold-change report policy",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
     "old": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);",
-    "new": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ColdChange);",
+    "new": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ClockEnded);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_26_shutdown_after_loss_cancels_held_bursts_record_only"
@@ -10198,8 +10148,8 @@
    "id": "P1111",
    "name": "the wanted size ignores the next held burst's start (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        let cut = [held_cut, switch_cut].into_iter().flatten().min();",
-   "new": "        let cut = [None, switch_cut].into_iter().flatten().min();",
+   "old": "        let cut = [held_cut, clock_cut].into_iter().flatten().min();",
+   "new": "        let cut = [None, clock_cut].into_iter().flatten().min();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m4b_the_buffer_before_a_held_start_is_not_split"
@@ -10208,7 +10158,7 @@
    "id": "P1112",
    "name": "the wanted size ignores a cold change's cut (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        let cut = [held_cut, switch_cut].into_iter().flatten().min();",
+   "old": "        let cut = [held_cut, clock_cut].into_iter().flatten().min();",
    "new": "        let cut = [held_cut, None].into_iter().flatten().min();",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -10979,7 +10929,7 @@
        "id": "P1208",
        "name": "a failed reopen settles the open burst's reservation and cancellation (D9b-1a fix 4)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "        if let Some(open) = self.open.take() {\n            self.forget(&open.held);\n            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ColdChange);\n        }",
+       "old": "        if let Some(open) = self.open.take() {\n            self.forget(&open.held);\n            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ClockEnded);\n        }",
        "new": "        let _ = self.open.take();",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
@@ -10989,8 +10939,8 @@
        "id": "P1209",
        "name": "a failed reopen finishes the in-flight burst record (D9b-1a fix 4)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ColdChange);\n        }\n        if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {\n            lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect(\"a record\"));\n        }",
-       "new": "            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ColdChange);\n        }\n        let _ = self.tracker.as_mut();",
+       "old": "            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ClockEnded);\n        }\n        if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {\n            lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect(\"a record\"));\n        }",
+       "new": "            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ClockEnded);\n        }\n        let _ = self.tracker.as_mut();",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
        "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
@@ -12116,16 +12066,6 @@
       "filter": "ur_29_an_owner_does_not_configure_a_segment_a_stop_dropped_from_the_plan"
     },
     {
-      "id": "P420",
-      "name": "the record's mark is its segment's command alone (UR-36, S14)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "                if state.configured.is_some() && state.configured == by {",
-      "new": "                if state.configured.is_some() {",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "fake",
-      "filter": "ur_36_every_restart_is_configured_with_the_connect_values"
-    },
-    {
       "id": "P153",
       "name": "a receive stream without a link still publishes a block after start_rx",
       "file": "crates/ezsdr-mock-radio/src/lib.rs",
@@ -12464,16 +12404,6 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_25_a_refused_start_is_labelled_as_a_command_with_the_start_s_id"
-    },
-    {
-      "id": "N47S3-23",
-      "name": "the owner configures a begun start once however often it asks (always configure)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "if state.configured.is_some() && state.configured == by {",
-      "new": "if false && state.configured == by {",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_36_owner_configure_is_once_per_command_and_again_for_the_next"
     },
     {
       "id": "N47S3-24",
@@ -13185,8 +13115,8 @@
       "id": "N48S1-11",
       "name": "a first send cut short of four samples is not refused (UR-22, FS-4)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "if device_sob && switch_cut.is_some_and(|cut| cut - next < min_first) {",
-      "new": "if device_sob && switch_cut.is_some_and(|cut| cut - next < 0) {",
+      "old": "if device_sob && clock_cut.is_some_and(|cut| cut - next < min_first) {",
+      "new": "if device_sob && clock_cut.is_some_and(|cut| cut - next < 0) {",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_23_a_cut_before_four_first_samples_is_refused"
@@ -13390,5 +13320,25 @@
     "crate": "ezsdr-radio",
     "test_bin": "radio_model",
     "filter": "rm_20_a_timing_document_with_a_removed_key_is_refused"
+  },
+  {
+    "id": "N-05",
+    "name": "a refused receive segment's run is not marked refused in the planned replay (RM-25, S2b-ii)",
+    "file": "crates/ezsdr-radio/src/timeline.rs",
+    "old": "self.refused_running = item.refused;",
+    "new": "self.refused_running = false;",
+    "crate": "ezsdr-radio",
+    "test_bin": "timeline",
+    "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
+  },
+  {
+    "id": "N48S2-01",
+    "name": "a burst cancelled before its start keeps its reservation after a failed reopen (UR-25, S2a-ii open question 1)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.forget(held);",
+    "new": "let _ = held;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
   }
 ]

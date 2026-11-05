@@ -248,8 +248,8 @@ impl Clock {
 /// [`StreamState`] (RM-29, design 33 D15). Lock order: this, then `rec`; never held across a
 /// device call.
 pub(crate) struct Streams {
-    /// The instance's lines, one per stream, keyed by `(direction, k)` (RM-25, RM-29,
-    /// RM-34); none for a receive side with no link.
+    /// The instance's lines, one per stream, keyed by `(direction, k)` (RM-25, RM-29); none for
+    /// a receive side with no link.
     pub lines: timeline::Lines,
     /// The instance's receive streams; `k` is a stream's number (RM-29).
     pub rx: Vec<StreamState>,
@@ -303,11 +303,10 @@ pub(crate) enum DeviceSet {
     Open(Channels),
 }
 
-/// What a segment's owner does before it begins, from the record (UR-25): nothing, configure
-/// the open streamer, or open it again and configure.
+/// What a segment's owner does before it begins, from the record (UR-25): configure the open
+/// streamer, or open it again and configure.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Owner {
-    Nothing,
     Configure,
     Open,
 }
@@ -436,7 +435,7 @@ impl Streams {
     }
 
     /// UR-25: the shutdown's report read takes no holder check, so that a detached uhd-control
-    /// left in `FromNone` cannot hold it (UR-16).
+    /// still holding the stream cannot block it (UR-16).
     pub fn begin_shutdown_read(&mut self, stream: StreamKey) {
         self.stream_mut(stream).claims.reading = true;
     }
@@ -608,19 +607,11 @@ impl Streams {
             .collect()
     }
 
-    /// What the owner of `stream` does before it begins a segment that holds `set`, begun by
-    /// the command `by` (UR-36): nothing when the record has that set open and configured for
-    /// that command; a configure when only the command differs; an open otherwise.
-    pub fn owner_step(&self, stream: StreamKey, set: Channels, by: Option<u64>) -> Owner {
-        let state = self.stream(stream);
-        match state.set {
-            DeviceSet::Open(open) if open == set => {
-                if state.configured.is_some() && state.configured == by {
-                    Owner::Nothing
-                } else {
-                    Owner::Configure
-                }
-            }
+    /// What the owner of `stream` does before it begins a segment that holds `set` (UR-36): a
+    /// configure when the record has that set open; an open otherwise.
+    pub fn owner_step(&self, stream: StreamKey, set: Channels) -> Owner {
+        match self.stream(stream).set {
+            DeviceSet::Open(open) if open == set => Owner::Configure,
             _ => Owner::Open,
         }
     }
@@ -1307,10 +1298,7 @@ impl Core {
             if current.refused {
                 return Ok(false);
             }
-            let step = streams.owner_step(stream, current.set(), current.segment.by);
-            if step == Owner::Nothing {
-                return Ok(true);
-            }
+            let step = streams.owner_step(stream, current.set());
             let Some(claim) = streams.claim_owner(stream) else { return Ok(false) };
             (current, step, claim)
         };
@@ -1996,18 +1984,13 @@ mod tests {
 
     #[test]
     fn ur_36_the_owner_step_follows_the_record() {
-        // UR-36: nothing when the record has the set open and configured for that command; a configure when only
-        // the command differs, or none was recorded; an open when the set is not the open one.
+        // UR-36: a configure when the record has the set open; an open when nothing is open or the set is not the open one.
         let mut streams = Streams::with_streams(2, 2);
         let (k, set) = (stream_key(Dir::Rx, 0), Channels::first(1));
-        assert_eq!(streams.owner_step(k, set, Some(4)), Owner::Open, "nothing is open");
+        assert_eq!(streams.owner_step(k, set), Owner::Open, "nothing is open");
         streams.record_open(k, Some(set));
-        assert_eq!(streams.owner_step(k, set, Some(4)), Owner::Configure, "open, not configured");
-        assert_eq!(streams.owner_step(k, Channels::first(2), Some(4)), Owner::Open, "another set");
-        streams.record_configured(k, Some(4));
-        assert_eq!(streams.owner_step(k, set, Some(4)), Owner::Nothing, "this command's configuration stands");
-        assert_eq!(streams.owner_step(k, set, Some(5)), Owner::Configure, "another command");
-        assert_eq!(streams.owner_step(k, set, None), Owner::Configure, "the first segment has no command");
+        assert_eq!(streams.owner_step(k, set), Owner::Configure, "open");
+        assert_eq!(streams.owner_step(k, Channels::first(2)), Owner::Open, "another set");
     }
 
     #[test]

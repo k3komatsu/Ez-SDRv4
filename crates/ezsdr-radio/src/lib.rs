@@ -117,13 +117,14 @@ pub enum CancelReason {
     ProviderStop,
     /// Device loss cancelled the burst.
     Loss,
-    /// A `cold` change cancelled the burst on its old transmit clock.
-    ColdChange,
+    /// The burst's transmit clock ended before the burst could start: the clock ended at its
+    /// origin, or a failed streamer reopen ended it.
+    ClockEnded,
 }
 
 /// Whether cancelling a held burst for `reason` emits `radio.COMMAND_REJECTED` (RM-16).
 pub const fn cancellation_reports(reason: CancelReason) -> bool {
-    matches!(reason, CancelReason::ColdChange)
+    matches!(reason, CancelReason::ClockEnded)
 }
 
 static RADIO_NAMESPACE: OnceLock<Namespace> = OnceLock::new();
@@ -816,8 +817,8 @@ mod tests {
     use super::{CancelReason, cancellation_reports};
 
     #[test]
-    fn cancellation_reports_only_cold_change() {
-        for (reason, reports) in [(CancelReason::Stop, false), (CancelReason::ProviderStop, false), (CancelReason::Loss, false), (CancelReason::ColdChange, true)] {
+    fn cancellation_reports_only_clock_ended() {
+        for (reason, reports) in [(CancelReason::Stop, false), (CancelReason::ProviderStop, false), (CancelReason::Loss, false), (CancelReason::ClockEnded, true)] {
             assert_eq!(cancellation_reports(reason), reports, "{reason:?}");
         }
     }

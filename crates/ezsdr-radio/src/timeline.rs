@@ -12,7 +12,7 @@ use ezsdr_kernel::time::{Duration, Rational, TimeError};
 /// The Kernel's `ChannelMask` limit: a logical channel number is 0…63, one bit each (S1).
 const CHANNEL_LIMIT: u32 = 64;
 
-/// The set of logical channels a stream holds (RM-21, RM-34): channel numbers 0…63, each
+/// The set of logical channels a stream holds (RM-21): channel numbers 0…63, each
 /// held at most once. Two configurations with the same number of channels are the same
 /// configuration only when their sets are (design 33 D3's2).
 ///
@@ -43,7 +43,7 @@ impl Channels {
         self.0 & mask(channel) != 0
     }
 
-    /// The set with `channel` added (RM-34).
+    /// The set with `channel` added.
     pub fn with(self, channel: u32) -> Channels {
         Channels(self.0 | mask(channel))
     }
@@ -68,7 +68,7 @@ impl PartialEq for Channels {
 impl Eq for Channels {}
 
 /// A stream's configuration: the set of channels it holds and its root ticks per sample
-/// (RM-21, RM-34).
+/// (RM-21).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Config {
     /// The channels the stream holds, from `radio.{rx,tx}.channels` (RM-4) or from the
@@ -238,15 +238,6 @@ impl Line {
         Ok(self.replan(&made)?.into_iter().find(|segment| segment.origin == origin && segment.config == config))
     }
 
-    /// RM-25: a refusal in effect by `t` has halted the stream, and no `start_rx` has started it
-    /// again by then; a pruned refusal counts (#64).
-    pub fn halted(&self, t: i64) -> bool {
-        let mut state = self.start.clone();
-        let made: Vec<Item> = sorted(&self.items).into_iter().filter(|item| item.e <= t).collect();
-        state.replay(&self.stream, &made).expect("the plan made these cuts already");
-        state.halted
-    }
-
     /// RM-21: the stream is streaming: the line, replayed over every item booked so far in the
     /// order they take effect, ends on. A booked `start_rx` turns it on at its effective instant,
     /// and a later-booked `Stop` that takes effect before that instant does not cancel it; a start
@@ -414,10 +405,9 @@ struct State {
     /// The last cut's instant and the configuration it ended (RM-25's start rule).
     previous: Option<(i64, Config)>,
     config: Config,
-    /// RM-21: a receive stream is on from the Run's start; a refusal halts it until its next
-    /// `start_rx`.
+    /// RM-21: a receive stream is on from the Run's start, and a refused `start_rx` leaves it on:
+    /// the refusal only keeps that segment out of the plan (RM-25).
     on: bool,
-    halted: bool,
     /// Transmit only: the instant of a loss or `Provider::stop`; an item booked at or after it is
     /// planned after it.
     ended: Option<i64>,
@@ -432,7 +422,7 @@ impl State {
     fn new(stream: &Stream) -> State {
         let config = stream.config;
         let running = (!config.channels.is_empty()).then_some(Segment { origin: stream.origin, cut: None, config, by: None });
-        State { out: Vec::new(), running, previous: None, config, on: true, halted: false, ended: None, over: false, refused_running: false }
+        State { out: Vec::new(), running, previous: None, config, on: true, ended: None, over: false, refused_running: false }
     }
 
     /// The items, in the order they take effect, take effect in turn.
@@ -459,7 +449,6 @@ impl State {
                 }
                 Kind::Start if receive && !self.on => {
                     self.on = true;
-                    self.halted = item.refused;
                     if !self.config.channels.is_empty() {
                         self.running = Some(self.begin(stream, item, self.config)?);
                         self.refused_running = item.refused;

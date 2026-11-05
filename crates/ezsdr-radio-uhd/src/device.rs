@@ -352,8 +352,8 @@ pub enum FakeFault {
     TxOpenFails(usize),
     /// The `nth` device `rates` read (0-based) reports a non-profile set, once (UR-13 post-open check).
     RatesMismatch(usize),
-    /// The first receive `apply` is refused, once: uhd-control's configuration of an enable
-    /// from no stream fails after its open (UR-13).
+    /// The first receive `apply` is refused, once, whichever caller makes it: a configure after
+    /// an open fails (UR-13).
     RxApplyFails,
 }
 

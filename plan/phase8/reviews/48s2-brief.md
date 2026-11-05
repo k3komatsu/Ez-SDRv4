@@ -697,3 +697,105 @@ First write your own failure scenarios for this change, then check:
 5. design/ text (06, 07, 09, 18) and KNOWN_LIMITATIONS: every sentence S2b-i makes false is amended (KL-16's lead row; KL-34's "Gone" entry kept as history?); nothing of S2b-ii done early.
 6. Maintainability per AGENTS §9.
 For each major finding give a minimal sequence and the observable wrong outcome. Output: scenario list (short), findings P1/P2/P3 with path:line, verdict CODE OK / CODE NEEDS CHANGES. At most 120 lines.
+
+---
+
+## `brief-impl-b2.md`
+
+## Brief: design note 48 S2 — implement sub-step S2b-ii (A3, A6, A7, B5, B7; the last of S2)
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`, HEAD = the commit that closed S2b-i (`git log -1`), clean tree. Nobody else edits the tree. The `opencode run` client's PID belongs to you; it is not another agent.
+
+Read:
+- `AGENTS.md`: Safety core, §6, §7, and §9 with Maintainability.
+- From `~/.cache/ezsdr-fixes/2026-11-05-n48s2/`: `brief.md`, your `test-plan.md` (rev 2), and `rulings-plan.md` (R1–R10 and Round 2, S1–S12).
+
+### Task
+
+1. The test plan is `test-plan.md` (rev 6: §9 α, §10 β, §11 S2a-ii, §12 S2b-i). Keep it as `test-plan.v6.md`, then record S2b-ii in a new §13 (rev 7).
+2. **Implement S2b-ii only**, as rev 3 §6 and its maps assign:
+   - **A3:** `Line::halted` and `State.halted` go. The halt rule stays, pinned through the public plan (`made()` prefix, S2): N6, the replacement at `tests/timeline.rs:540` (at 1 999 ms `[(0, 500 ms)]`, at 2 000 ms also `(2 050 ms, None)`), the retargets at :469 and :677; `streaming()` asserted separately for admission.
+   - **A6:** the stale text note 48 A6 lists (empty UR-24/UR-25 headings, `FromNone`, the RM-34 citation, "pending switch", the Mock `advance` description, `RxApplyFails`'s description, `release_window_ns` mentions left over); `switch_cut` is renamed to say what it is (the clock's end cut) and its check stays. Changes tables and withdrawn-rule stubs stay as history.
+   - **A7:** the Mock's always-empty `applied` section (its writer, readers, spec and record tests); staged values and the device read-back stay apart.
+   - **B5:** `CancelReason::ColdChange` → `ClockEnded` for all its constructors (the clock ended at its origin, a failed reopen, and S1's short first send before the clock's cut; S8: no `FirstSendShort`); `cancellation_reports`, event counts and records unchanged. Also fix the shared reason text "its transmit clock was never started" so it fits a clock ended by a failed reopen too (re-check P3).
+   - **B7:** the `owner_step` `Nothing` arm goes (no production path, R7); `Open` stays. P369's `new` becomes `Owner::Configure` (S3). N8 as a cheap pin if rev 3 keeps it.
+   - The later-burst cancellation after a failed reopen (S2a-ii fix round, tx.rs ~1543–1557) gets its own mutation row with its killer (S2a-ii open question 1).
+   - Rows per rev 3 plus the mechanical sweep; the spec text rev 3 assigns to S2b-ii. Do the whole of S2b-ii, keeping the tree green; never end your turn with a command still running in the background.
+   - Follow the plan.
+   - Extend it (§13, the S2b-ii implementation record) for every state or failure path the implementation adds.
+   - **Every planned test of S2a-i is written. None is a "gap" to report.** If a planned test cannot be written as planned, say why with evidence, and give what replaces it.
+
+### Rules
+
+**Mutation rows**
+- Make text edits only, in `plan/maintenance/tools/mutations.json` and `plan/*/tools/mutations.json`. Never re-serialize the file.
+- Use Rust token anchors. Each row matches exactly once and names its killing test.
+- The mechanical sweep (S3): after the code change, a script lists every row that is `NOT FOUND`. Save its output as `sweep-b2.txt`. Delete only the listed rows whose behaviour is gone. Each row on retained code is decided as rev 3 says.
+- Confirm each new or retargeted row in a throwaway copy outside the repository:
+  - copy: `rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3`;
+  - build with `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`;
+  - run `find <copy> -type f -exec touch {} +` before building;
+  - use one copy at a time;
+  - a compile failure is not a kill;
+  - logs go in `probes-b2/`.
+- Never run `mutate.py`, `remote_mutate.py` or `gate.py`. Never apply a mutant to the tree.
+- Existing rows whose `old` lies in a function you change: re-run them in the copy too.
+
+**Runs and state**
+- Run single tests with `timeout 300`. Your tool stops a command at 120 s, so run longer commands with a longer timeout, in the foreground. Leave no process running.
+- Test temp files go on `/tmp`.
+- Make no git state changes, no version bumps, and no `SCHEMA_CHANGELOG` entry. Regenerate any changed schema, so `schema_freeze` and `rm_20_schema_freeze` are green.
+- Write what happened, never what was not done.
+
+**End checks**
+- `cargo fmt --all`.
+- clippy `-D warnings` for the workspace, and for `-p ezsdr-radio-uhd --features uhd --all-targets`, both via `python3 plan/maintenance/tools/remote/rdev.py -- <cmd>`.
+- The remote workspace tests, after your last edit.
+- The Python 3.14 suite (handoff §5).
+- `git ls-files -m -o --exclude-standard | while read f; do [ -e "$f" ] && chmod go+r "$f"; done`.
+- `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base HEAD` must give 0. If you rename or drop tests, list each with its reason in `plan/phase8/reviews/48s2b2-renames.txt`, in the format of `48s1-renames.txt`, and pass `--renames`.
+
+### Self-review (one round)
+
+Run it in the foreground with `timeout 2400`. Use free DeepSeek first:
+
+`opencode2 run --standalone -m opencode/deepseek-v4.1-flash-free#max --agent plan --auto "<checklist>"`
+
+Use Go (`opencode-go/deepseek-v4.1-flash#max`) only if free refuses.
+
+Checklist:
+1. Every S2b-ii test in rev 3 is written, observes what the plan says, and its row breaks it.
+2. Scope against rev 3: missing and extra (nothing beyond S2b-ii; note 47 stages 4–5 and B4/B6 stay out).
+3. Every "no caller / unreachable" claim behind a deletion: grep the callers.
+4. Every `design/` text this sub-step makes false is amended in this sub-step.
+5. Maintainability: no leftovers of the deleted paths. No retained behaviour lost its only test.
+
+Fix every finding, or reject it with a reason.
+
+### Report (at most 15 lines)
+
+- Rev 3: per ruling, what changed.
+- S2a-i: what was deleted and what was kept.
+- Tests: added, moved and deleted, with counts.
+- Rows: deleted, retargeted and added, with probe outcomes and the sweep.
+- Suites and `rules.py`.
+- Self-review findings and their disposition.
+- Deviations, and open questions with your recommendation.
+
+---
+
+## `brief-sol-code-b2.md`
+
+You are the independent reviewer (Sol), read-only, in ~/local_work/Ez-SDRv4 (HEAD d3ae04d; the sub-step's changes are uncommitted: `git diff HEAD`, `git status`). Do not edit, format, build in the tree or commit; never run mutate.py or remote_mutate.py. To run a test, use a throwaway copy (`rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3 ~/local_work/Ez-SDRv4/ /tmp/sol-s2a/`, `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`, `timeout 300`).
+
+AGENTS.md §9 step 7: review the code of sub-step S2b-ii of design note 48 S2, the last one — A3 (`Line::halted`/`State.halted` removed; the halt rule kept through the public plan), A6 (stale text; `switch_cut` → `clock_cut`), A7 (the Mock's always-empty `applied` section removed), B5 (`CancelReason::ColdChange` → `ClockEnded` for all constructors; the shared reason text fixed), B7 (`owner_step`'s `Nothing` arm removed, `Open` kept; P369 retargeted), and a row for the later-burst cancellation after a failed reopen. α, β, S2a-ii and S2b-i are committed at HEAD. Inputs in ~/.cache/ezsdr-fixes/2026-11-05-n48s2/: brief.md, rulings-plan.md (R2, R7, R8, S2, S3, S7, S8 matter here), test-plan.md (§13 is the S2b-ii record), sweep-b2.txt, probes-b2/, and the end of impl-b2.log (the implementer's report: three deviations and three open points).
+
+First write your own failure scenarios for this change, then check:
+1. A3: is the halt rule still pinned exactly as ruled (S2): the prefix plan through the public `made()` at 1 999 ms `[(0, 500 ms)]` and at 2 000 ms also `(2 050 ms, None)`, the retargets at tests/timeline.rs :469 and :677, refusal exclusion through the public plan, and admission's `streaming()` separately? The implementer's deviation 1 asserts `streaming()` true at 1 999 ms instead of `!streaming()` — fine — but did the prefix-plan assertions get written, or did `streaming()` replace them? Deviation 2: N6 uses one fixed sequence, the seeded equivalence covered by a retargeted test — enough?
+2. B7: with `by` gone from `owner_step` and the `Nothing` arm deleted, can a production sequence now configure the device twice or skip a configure (the implementer says a repeat configure is now an extra device call, not a wrong result)? Is the caller trace (`rx.rs:354`, one-way `from`, `Ok(false)` at core.rs ~1321) still true after S2? Is dropping N8 acceptable?
+3. B5: every `ColdChange` constructor is now `ClockEnded`; `cancellation_reports`, event counts and records unchanged; the reason text fits a clock ended at its origin, by a failed reopen and by a short first send's cut.
+4. A6/A7: nothing reachable removed; the staged values and the device read-back stay apart; leftovers (`parity.rs:12` still cites withdrawn RM-34; `StreamState.configured` without a production decision reader).
+5. Rows: 7 deleted, 14 retargeted, 2 added — dispositions right, no row on retained code dropped.
+6. design/ text (05 UC-6, 07 RM-16, 09 MR-27, 18 UR-17/UR-36, Vision §13/§14 and its index row) correct; with S2 complete, search design/, KNOWN_LIMITATIONS.md and the Vision for any remaining mention of the removed mechanisms (timed `apply`, `rx_stop`'s `at`, `command_queue_depth`, `COMMAND_QUEUE_FULL`, `release_window`, `tx_dsp_gates`, `Recovery::Halted`, `Line::halted`, `ColdChange`, `applied`) outside Changes tables, withdrawn-rule stubs and Gone entries.
+7. Maintainability per AGENTS §9.
+For each major finding give a minimal sequence and the observable wrong outcome. Output: scenario list (short), findings P1/P2/P3 with path:line, verdict CODE OK / CODE NEEDS CHANGES. At most 120 lines.

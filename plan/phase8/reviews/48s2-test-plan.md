@@ -751,3 +751,68 @@ Scope: rev 3 §6 S2b-i (A2's key, payload, event kind and schema; B3, the receiv
 - Python 3.14 suite (`~/.cache/ezsdr-venv/bin/python -m unittest discover -s python/tests`, `EZSDR_SERVER` = the debug `ezsdr-server` built from this tree): 92 tests, OK.
 - `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base HEAD --renames plan/phase8/reviews/48s2b1-renames.txt`: 0 problems.
 - Not run: `mutate.py`, `remote_mutate.py` and `gate.py` (forbidden for this step); the mutation sweep on sim02/sim03 is the orchestrator's gate.
+
+## 13. Implementation record: S2b-ii (rev 7, implemented 2026-11-06)
+
+Scope: rev 3 §6 S2b-ii (A3, A6, A7, B5, B7; the `Nothing` arm of R7 and its row N-03; the `CancelReason` rename; the `applied` section; the spec text of §3.2–§3.5 that S2b-ii owns; the later-burst row of S2a-ii open question 1). The base is `d3ae04d`; the tree is uncommitted. Rev 6 is kept as `test-plan.v6.md`. Not done, as the brief says: note 47 stages 4–5, B4 and B6. N8 was not written (see deviation 3). `test-plan.md` header still reads rev 5, as it did in §12.
+
+**Implementation**
+- **A3 (halt).** `Line::halted` (`timeline.rs`) and `State.halted` are removed. The halt rule is `streaming()` plus the refusal exclusion (N6). `refused_running` stays: `cut` and `finish` use it for planning.
+- **A6 (names and comments).** `switch_cut` is renamed `clock_cut` in `tx.rs` `send` (it is the clock's cut). The "pending switch" comment, the `cancel_unstarted` doc, the `FromNone` comment, the `Streams.lines` and `device.rs` `RxApplyFails` docs are reworded. The two empty headings in `control.rs` (UR-24, UR-25) go. The RM-34 citations in the touched comments of `ezsdr-radio` and `ezsdr-mock-radio` go (RM-34 is withdrawn, `design/07` line 325). The Mock `advance` rank comment says rank 2, the rank the code pushes.
+- **A7 (`applied` section).** The Mock's `applied` section insert goes (`ezsdr-mock-radio/src/lib.rs`); the section-name lists in `mock_radio.rs` and `v58.rs` have six names.
+- **B5 (`ClockEnded`).** `CancelReason::ColdChange` is `CancelReason::ClockEnded` everywhere (`ezsdr-radio`, the Mock, `tx.rs`). The UR-25 reason text is "UR-25: its transmit clock ended before the burst could start", shared by the orphaned clock and a clock ended by a failed reopen (the brief's re-check P3). The later-burst message says "releases its reservation".
+- **B7 and R7 (`Nothing` arm).** `Owner::Nothing` is removed, and `owner_step(stream, set)` loses its `by` parameter. An open set is always configured (`Owner::Configure`), so the configured-skip in `owner_step` and its `Nothing` branch in `owner_configure` are gone. The only production caller of `owner_configure` is `rx.rs:354`, which moves `from` past the segment (`rx.rs:362`), so no path reached the arm. `StreamState.configured` keeps its writer (`record_configured`) and its reader in the tx save and restore (`tx.rs` ~825–838).
+- **Later-burst row.** The burst cancelled before its start keeps its reservation when `cancel_unstarted` no longer calls `forget`. The row is `N48S2-01`, killed by `ur_22_underflow_close_failure_reopens_before_the_next_payload` (its `!contains` after `TxCmd::Burst`).
+
+**Rulings and design text**
+- Rulings applied: R7 (arm deleted on the caller trace), S7 (N8 optional, deviation 3), the A6 rename, and the B5 text.
+- Design text made false by this step, amended in this step: `design/09` MR-27 (six sections; the `applied` entry gone; Changes row 2026-11-06); `design/18` UR-36 (the "not configured again" sentence deleted) and UR-17 (the configure is not skipped; Changes row); `design/05` UC-6 (the queue sentence deleted; Changes row); `design/07` RM-16 (test citation renamed; Changes row); `design/vision/03` §13 and §14 (the queue constraint and the queue-depth aspect removed) with a row in the Vision's revision table.
+- `KNOWN_LIMITATIONS.md`: KL-16's status was checked as rev 3 §3.6 asks. Its claim (the Mock's receive configure takes no time, so it never reports `radio.START_LEAD_SHORT`) still holds, so no reword. No other entry names a removed mechanism.
+
+**Tests**
+- Added (1): N6 `halt_rule_is_streaming_and_refusal_exclusion` (`ezsdr-radio/tests/timeline.rs`), passing. Also added the helper `prefix(stream, items, t)`.
+- Retargeted (values, no rename): the seeded test (`:500–501`, the plan's `halted` check now a plan check); `rm_25_a_refused_receive_segment_is_not_in_the_plan` (`:546–549`); the "Stop, S1 refused, Stop, S2" case of `rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it` (`:573–575`, the 1 999 and 2 000 ms plan checks); `rm_25_a_pruned_line_…` (`:723–728`, through a `pruned_by` closure).
+- Renamed (2), listed in `plan/phase8/reviews/48s2b2-renames.txt`: `cancellation_reports_only_cold_change` → `cancellation_reports_only_clock_ended`; `ur_36_owner_configure_is_once_per_command_and_again_for_the_next` → `ur_36_owner_configure_takes_each_command_s_own_snapshot` (second call and its assertion deleted).
+- Reduced: `ur_36_the_owner_step_follows_the_record` keeps three assertions (nothing open → `Open`; open → `Configure`; another set → `Open`).
+- Deleted: none. The workspace count is 1 779 passed, 0 failed, up one from N6.
+
+**Deviations from rev 3** (each is named because the plan does not match what the code allows)
+1. **The 1 999 ms check (§1.9).** The plan says `!streaming()`. The code and N6(a) give `streaming()` true: a refused `start_rx` leaves the stream on (`design/07` RM-21 and RM-25: "a halted stream is streaming"). The test asserts the plan (`:573`) and `streaming()` true (`:574`). Implementing the plan literally would fail.
+2. **N6's sequences.** The plan asks for the seeded sequences of the existing test. N6 uses one fixed sequence; the seeded equivalence is covered by the retarget at `:500–501`, and the absolute admission property by N6 itself.
+3. **N8 not written.** It is optional (§1.12, S7). Its job was to show that a production run never configures a begun segment twice. The deletion rests on the caller trace above, which is the basis the plan named. The check would count `apply` calls per start in the differential harness; I did not build it. No replacement pin was written, so a repeat configure in production would now be an extra device call, not a wrong result.
+4. **`owner_step`'s `by` parameter.** Without `by`, the plan's "another command" and "None" assertions cannot be written; they are dropped, as the owner's `Configure` now follows only the record's set.
+5. **Design text.** The UR-36 and UR-17 sentences the arm's removal made false are in this step (rev 3 §3.3 said "reword if"). The Vision index row says the constraint is removed because no radio key is a timed command (note 47); the X3x0 does have a bounded command queue, and that is a hardware fact, not the reason.
+6. **Row id.** The later-burst row was first written as `N-14`, which the device.rs `apply_delay` row already has. The self-review found it; the row is `N48S2-01`, and its probe was repeated under that id.
+
+**Mutation rows** (`plan/maintenance/tools/mutations.json` and `plan/phase7/tools/mutations.json`, text edits only, not re-serialised; the maintenance list 1 344 → 1 339 rows, phase7 `R14` retargeted)
+- Deleted (behaviour gone; the sweep's NOT FOUND rows): J65, J70, P90, P460 (`Line::halted`, `State.halted`); P368 (the `Nothing` arm); P420 and N47S3-23 (the configured-skip of `owner_step`).
+- Retargeted: P369 (new text `Owner::Nothing` → `Owner::Configure`); P561, P562 (`ColdChange` → `ClockEnded`, filters renamed); P563, P565, P566, P569, P570 (the new text's `ColdChange` → `ClockEnded`); P1208, P1209 (`ClockEnded`); P1111, P1112, N48S1-11 (`switch_cut` → `clock_cut`); phase7 R14 (old text becomes the `owner_step` arm, the new text keeps `&& false`).
+- Added: N-05 (`self.refused_running = item.refused;` → `false`, killed by the retargeted `rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it`); N48S2-01 (the later-burst row).
+- Sweep (`sweep-b2.txt`): before the edits, 15 rows were NOT FOUND, each with its disposition; after the edits and `cargo fmt --all`, 1 694 rows are checked, with 0 NOT FOUND and every row `anchor ok`.
+- Probes (throwaway copy `/tmp/opencode/b2-copy`, outside the repository; rsync without `.git`, `.cargo`, `target`, `v3`; `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`; a copy touched before each build; one copy at a time; `timeout 300` per run). Logs and `results.jsonl` in `probes-b2/`:
+  - The 16 new or retargeted rows: KILLED, each by its named test. P1209 had one compile failure (its new text still named `ColdChange`), then KILLED after the fix.
+  - The rows whose `old` lies in a changed function (101 rows, from a script that maps each changed line to its enclosing `fn`): all KILLED by their named tests, the Mock comment edits included (F24, P566 re-run after the comment fixes).
+  - N-14's probe was run under its first id before the rename to `N48S2-01`; the rename was re-probed KILLED.
+  - Not re-run: the rows whose anchors sit in comment-only hunks of `timeline.rs` and `ezsdr-mock-radio` (the sweep shows every anchor `anchor ok`).
+
+**Self-review (one round)**
+- `opencode/deepseek-v4.1-flash-free#max` refused on the free quota; `opencode-go/deepseek-v4.1-flash#max` ran (`selfreview-b2.out`; checklist `selfreview-b2-prompt.md`).
+- Findings and disposition:
+  1. F1, `design/09` §6 row `mr_03`: "all seven MR-27 sections". **Adopted, fixed** (six).
+  2. F2, the Mock comments: the `advance` paragraph still described timed updates that `Staging::set` refuses, and "the updates of the same instant" stayed. **Adopted, fixed.** The review's rank point was right, and my own edit had made it worse: I wrote "rank 1" where the code pushes the Tune at rank 2; the comment now says rank 2.
+  3. F3, duplicate id `N-14`. **Adopted, fixed** (`N48S2-01`, re-probed KILLED; no duplicate ids remain in either list).
+  4. F4, this §13 record. **Adopted**, written here.
+  5. F5, `timeline.rs` `on` doc said a refusal "halts" it. **Adopted, fixed**: a refused `start_rx` leaves the stream on; the refusal keeps that segment out of the plan (RM-25).
+  - Also adopted from the review's notes: the Vision index row's reason was imprecise; reworded (see deviation 5).
+  - Noted, not fixed: `crates/ezsdr-acceptance/tests/parity.rs:12` still cites the withdrawn RM-34 (its test file is outside the A6 comments; a one-line fix for a later step). `StreamState.configured` has no production decision reader after this step; only its save and restore and the tests read it. S10 and Q5 keep it on purpose, so a later step should decide whether the record's round trip still earns its keep.
+- Reviewer's scope, deletion and design checks passed; the reviewer found no major and no correctness defect.
+
+**Checks at the end**
+- `cargo fmt --all --check` (`rdev.py`): clean, exit 0.
+- `rdev.py -- cargo clippy --workspace --all-targets -- -D warnings` and `-p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings`: exit 0 (`clippy-ws-b2.log`, `clippy-uhd-b2.log`).
+- `rdev.py -- cargo test --workspace --no-fail-fast`, after the last edit: 1 779 passed, 0 failed, 69 result lines (`ws-tests-b2.log`).
+- `rdev.py -- cargo test -p ezsdr-radio-uhd --features uhd --lib --test uhd_api`: 357 and 5 passed (`uhd-tests-b2.log`). The `--test hardware --no-run` build also passed earlier, before the comment fixes.
+- Python 3.14 suite (`python -m unittest discover -s python/tests`, after `cargo build -p ezsdr-server`, on the rdev host): 92 tests, OK (`python-suite-b2.log`). The 3.9 container was not run.
+- `chmod go+r` on the modified and new files: done.
+- `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base HEAD --renames plan/phase8/reviews/48s2b2-renames.txt`: 0 problems; `rules.py --self-test`: exit 0.
+- Not run: `mutate.py`, `remote_mutate.py` and `gate.py` (forbidden for this step); the full mutation run is the orchestrator's gate.

@@ -60,7 +60,7 @@ pub fn descriptor() -> ModuleDescriptor {
 ///
 /// An instance owns its streams: receive and transmit state lives in [`RxStream`] and
 /// [`TxStream`], one entry per stream number `k` (RM-29), and their timelines live together
-/// in [`timeline::Lines`] so a move can hold two at once (RM-34). Logical-channel RF timelines
+/// in [`timeline::Lines`]. Logical-channel RF timelines
 /// and the instance's one SimulationChannel stay here.
 pub struct MockRadio {
     instance: ProviderInstance,
@@ -82,7 +82,7 @@ pub struct MockRadio {
     events: Option<std::sync::Arc<dyn EventSink>>,
     root: Option<ClockDomainId>,
     /// The instance's streams' timelines, one line per stream, keyed by `(direction, k)`
-    /// (RM-25, RM-34); a stream's line is absent until `start` and `arm` book it.
+    /// (RM-25); a stream's line is absent until `start` and `arm` book it.
     lines: timeline::Lines,
     /// The instance's receive streams; `k` is a stream's number (RM-29, MR-10).
     rx: Vec<RxStream>,
@@ -325,12 +325,12 @@ impl MockRadio {
         (rx, tx)
     }
 
-    /// The key the instance's lines hold receive stream `k` under (RM-29, RM-34).
+    /// The key the instance's lines hold receive stream `k` under (RM-29).
     fn rx_key(k: usize) -> StreamKey {
         stream_key(Direction::Rx, k)
     }
 
-    /// The key the instance's lines hold transmit stream `k` under (RM-29, RM-34).
+    /// The key the instance's lines hold transmit stream `k` under (RM-29).
     fn tx_key(k: usize) -> StreamKey {
         stream_key(Direction::Tx, k)
     }
@@ -393,7 +393,6 @@ impl MockRadio {
         sections.insert(section("faults"), serde_json::json!([]));
         sections.insert(section("rejected"), serde_json::json!([]));
         sections.insert(section("stats"), serde_json::json!({"rx_blocks": 0, "rx_samples": 0, "tx_blocks": 0, "rx_clipped": 0, "tx_clipped": 0}));
-        sections.insert(section("applied"), serde_json::json!([]));
         sections.insert(section("segments"), serde_json::json!([]));
         let instance = ProviderInstance {
             id: id.clone(),
@@ -1791,8 +1790,8 @@ impl MockRadio {
     }
 
     /// The step's ordered loop up to `u` (RM-25, MR-20): every stream's receive segment
-    /// beginnings, then faults, held bursts and updates by instant and arrival, then the untimed
-    /// tunes of the instant (MR-34), the streams emitted up to each.
+    /// beginnings, then faults and held bursts by instant and arrival, then the untimed tunes of
+    /// the instant (MR-34), the streams emitted up to each.
     fn advance(&mut self, u: i64) -> Result<bool, ModuleError> {
         let mut progressed = false;
         loop {
@@ -1805,14 +1804,11 @@ impl MockRadio {
                     }
                 }
             }
-            // MR-34: an untimed tune comes after the instant's faults, held bursts and updates
-            // (rank 2). The pushes into each `channel::Timeline` are then in instant order, which
-            // `channel::Timeline::at` relies on. A timed update received at `now` takes effect no
-            // earlier than `now + min_timed_command_lead_ns` (MR-18's `earliest`), so with a lead
-            // above zero it never lands on an instant the loop has passed. The `ideal` profile's
-            // lead is 0, but it is deterministic, and an untimed tune leaves its phases as they are
-            // (MR-34). MA-30 does not order an instant's Actions before the loop passes that instant
-            // (design 09 MR-34's ceiling).
+            // MR-34: an untimed tune comes after the instant's faults and held bursts (rank 2). The
+            // pushes into each `channel::Timeline` are then in instant order, which
+            // `channel::Timeline::at` relies on. On a deterministic channel an untimed tune leaves its
+            // stream's phases as they are; otherwise it redraws them (MR-34). MA-30 does not order an instant's Actions before the loop passes that
+            // instant (design 09 MR-34's ceiling).
             if self.started {
                 for k in 0..self.rx.len() {
                     if let Some(key) = self.tune_next(k) {
@@ -1901,14 +1897,14 @@ fn rm25(error: ezsdr_kernel::time::TimeError) -> ModuleError {
     ModuleError::rejected(format!("RM-25: {error}"))
 }
 
-/// The key the instance's lines hold a stream under (RM-29, RM-34).
+/// The key the instance's lines hold a stream under (RM-29).
 fn stream_key(direction: Direction, k: usize) -> StreamKey {
     (direction, k as u32)
 }
 
 /// MR-34's order of the untimed tunes at one instant, among themselves: by stream number.
-/// `advance` takes them after the receive segment beginnings, the faults, the held bursts and
-/// the updates of the same instant (rank 2).
+/// `advance` takes them after the receive segment beginnings, the faults and the held bursts of
+/// the same instant (rank 2).
 fn tune_order(k: usize) -> u64 {
     k as u64 + 1
 }
@@ -2069,7 +2065,7 @@ impl Provider for MockRadio {
                 let tx = channel::TxShared::new(channel::TxPlan { segments: BTreeMap::new(), channel_models: tx_channels });
                 let lo_retune = SimRng::new(seed, &format!("{}/lo/retune", self.selector_id()));
                 // One transmitter covers the instance's logical channels; segment membership
-                // selects the owning stream at each instant (MR-32, RM-34).
+                // selects the owning stream at each instant (MR-32).
                 medium.join(&ctx.run, &f.id, &spec, seed, root_rate.num(), tx.clone()).map_err(|error| self.reject(format!("MR-31: {error}")))?;
                 for stream in &mut self.tx {
                     stream.plan = Some(tx.clone());
@@ -2214,7 +2210,7 @@ impl Provider for MockRadio {
             // A start that failed leaves no receive stream behind: the instance's lines are
             // rebuilt without the receive ones, and every transmit stream's line — inserted at
             // `arm`, before `start` — is put back. Nothing else is booked between `arm` and
-            // `start`, so the rebuild drops no move (RM-34): a Session or Module Action is
+            // `start`, so the rebuild drops nothing: a Session or Module Action is
             // refused unless the Run is Running (RS-18), and a scheduled UpdateParameter is
             // dispatched only after every `start` returns (KC-14, KC-17, KC-18).
             let tx_lines: Vec<(usize, Line)> = (0..self.tx.len()).filter_map(|k| self.lines.line(Self::tx_key(k)).cloned().map(|line| (k, line))).collect();

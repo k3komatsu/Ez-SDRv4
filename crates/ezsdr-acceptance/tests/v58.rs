@@ -281,7 +281,7 @@ fn v58_07_manifest_records_every_input_and_output() {
     assert_eq!(manifest.links.len(), manifest.plan.as_ref().unwrap().links.len());
     // MR-27: a MockRadio section carries no instance id; the Kernel files it under the
     // instance's source (RS-39).
-    for suffix in ["envelope", "bursts", "faults", "rejected", "stats", "applied"] {
+    for suffix in ["envelope", "bursts", "faults", "rejected", "stats"] {
         let name = format!("ezsdr.radio.mock.{suffix}");
         assert!(manifest.section(&source("mock"), &name).is_some(), "missing section {name}");
     }
@@ -674,12 +674,12 @@ fn v58_08_two_mock_radios_communicate_through_the_channel() {
 
 #[test]
 fn v58_08_b_two_mocks_in_one_run_keep_both_sets_of_sections() {
-    // Decision 2, RS-39: two MockRadio instances write the same six section names, and the
+    // Decision 2, RS-39: two MockRadio instances write the same section names, and the
     // Kernel files each under its writer's source, so both survive. Keyed by name alone,
     // the last instance written won and the other's records were silently gone.
     let temp = rig::TempDir::new("v58-08-sections");
     let (manifest, _) = link_run(&temp, "a", "b", "x3xx", false, coupling("a", "b", -6.0, 1_000, Some(-30.0), 0), &ramp(3_000));
-    for suffix in ["applied", "bursts", "envelope", "faults", "rejected", "stats"] {
+    for suffix in ["bursts", "envelope", "faults", "rejected", "stats"] {
         let name = format!("ezsdr.radio.mock.{suffix}");
         let writers: Vec<_> = manifest.sections.iter().filter(|s| s.name.as_str() == name).map(|s| s.source.clone()).collect();
         assert_eq!(writers, [source("dev_rx"), source("dev_tx")], "{name}");

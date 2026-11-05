@@ -930,8 +930,8 @@
   "id": "R14",
   "name": "the receive streamer reopened at every segment (P1-3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-  "old": "            DeviceSet::Open(open) if open == set => {",
-  "new": "            DeviceSet::Open(open) if open == set && false => {",
+  "old": "            DeviceSet::Open(open) if open == set => Owner::Configure,",
+  "new": "            DeviceSet::Open(open) if open == set && false => Owner::Configure,",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "rm_26_the_timeline_against_uhd_rx"

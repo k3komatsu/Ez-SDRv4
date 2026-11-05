@@ -9,8 +9,8 @@
 //! device), the UHD-only opening checks (the subdev spec, the serial, the rate set, the
 //! front ends — UR-5, items 2–5) and the UHD-only refusals (UR-12's read-back, UR-21's
 //! target kinds); block contents and physical instants beyond VH-8's own columns; and a
-//! channel moving from one stream to another (RM-34: the UHD Module refuses it until
-//! 1b-4e-2). The Manifest's `sequence` is compared as an order, not as numbers: each
+//! channel moving from one stream to another (RM-34, withdrawn: channel sets are fixed for
+//! the Run). The Manifest's `sequence` is compared as an order, not as numbers: each
 //! Provider counts its own arrivals from its own origin (MockRadio's faults first, uhd-control's
 //! loss as 0). Both providers share `channels::Description`, so a shared mistake inside it
 //! is invisible here: this file is a net for divergences, and the specs' own tests are the

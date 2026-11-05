@@ -543,7 +543,7 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.perf.wire_bytes_per_sample")], one(Scalar::from(wire)));
         // The common sections and layout segment table are filed under the instance source.
         let names: Vec<String> = radio.instance().sections.keys().map(|name| name.as_str().to_owned()).collect();
-        assert_eq!(names, ["applied", "bursts", "envelope", "faults", "rejected", "segments", "stats"].map(|suffix| format!("ezsdr.radio.mock.{suffix}")));
+        assert_eq!(names, ["bursts", "envelope", "faults", "rejected", "segments", "stats"].map(|suffix| format!("ezsdr.radio.mock.{suffix}")));
         assert_eq!(envelope["profile"]["name"], name);
         let version = if name == "x3xx" { serde_json::json!({ "major": 0, "minor": 1, "patch": 0 }) } else { serde_json::json!({ "major": 2, "minor": 0, "patch": 0 }) };
         assert_eq!(envelope["profile"]["version"], version);

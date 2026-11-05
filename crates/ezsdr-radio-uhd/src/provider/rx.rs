@@ -2588,10 +2588,9 @@ mod tests {
     }
 
     #[test]
-    fn ur_36_owner_configure_is_once_per_command_and_again_for_the_next() {
-        // UR-36: the configure is keyed on the command that began the segment, not on the values or the stream: the same command configures
-        // once however often the owner asks, the next command configures again with its own snapshot, and a command with the same values as
-        // the one before still configures (the device may have been retuned by a refusal's partial apply).
+    fn ur_36_owner_configure_takes_each_command_s_own_snapshot() {
+        // UR-36: each segment's configure applies its own command's snapshot, not the values of the one before, and a command with the same
+        // values as the one before still configures (the device may have been retuned by a refusal's partial apply).
         let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default()));
         let dynamic: Arc<dyn Device> = device.clone();
         let (core, _time, _events) = super::super::test_support::rig_on(dynamic, vec![link()], 2_000);
@@ -2614,8 +2613,6 @@ mod tests {
         assert!(core.owner_configure(Dir::Rx, 0, &planned[0]).unwrap());
         assert_eq!(applies().len(), 1);
         assert!(applies()[0].contains("freq=2000000000"), "{:?}", applies());
-        assert!(core.owner_configure(Dir::Rx, 0, &planned[0]).unwrap(), "the second call finds the segment configured");
-        assert_eq!(applies().len(), 1, "one configure per command: {:?}", device.calls());
         assert!(core.owner_configure(Dir::Rx, 0, &planned[1]).unwrap());
         assert_eq!(applies().len(), 2);
         assert!(applies()[1].contains("freq=3000000000"), "the new command's own snapshot: {:?}", applies());

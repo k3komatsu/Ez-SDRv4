@@ -233,8 +233,8 @@ pub trait Provider: Send {
   *Producer obligation.*
 - **UC-5** `atomic_realtime`: the value applies to every sample processed after the Action is received and not before its effective instant, with no state in which part of the value is applied.
   *Producer obligation.*
-- **UC-6** `hardware_timed`: the device applies the value at exactly the effective instant; a device that applies commands only on a sample grid advances it to the next sample instant (MockRadio applies at the instant itself, MR-18). Absent `at`, the effective instant is the current instant at receipt plus the target's lead from receipt (`min_command_lead` less its delivery allowance, MA-10). An `at` closer than that lead is late: the target applies the value at the current instant plus that lead and emits its Vocabulary's late-command event. A pending `hardware_timed` update occupies one slot of the device's command queue until it applies, and a full queue refuses it with the Vocabulary's queue event.
-  *Producer obligation*; MockRadio's tests are MR-18's.
+- **UC-6** `hardware_timed`: the device applies the value at exactly the effective instant; a device that applies commands only on a sample grid advances it to the next sample instant. Absent `at`, the effective instant is the current instant at receipt plus the target's lead from receipt (`min_command_lead` less its delivery allowance, MA-10). An `at` closer than that lead is late: the target applies the value at the current instant plus that lead and emits its Vocabulary's late-command event.
+  *Producer obligation.*
 
 ### Sink, Link and Authority
 
@@ -443,3 +443,4 @@ The Peripheral and Endpoint vocabularies. The WASM and GPU execution ABIs, which
 | 2026-10-17 | MA-32, MA-34, MA-35, MA-44 | a `VocabularyDescriptor`'s `KeyDecl`s may carry a numbered segment, and registration refuses a declaration outside its own prefix (MA-34) and a bad position, and two declarations that cover one concrete key (SB-2a); MA-35's list of what a `KeyDecl` carries and MA-44's keys name it; MA-32 cites MA-34 and SB-2a rather than restating them | [Phase 8 design 33](../plan/phase8/33-channels-and-streams.md) D2, §5 stage 1b-1 |
 | 2026-10-25 | MA-2, MA-7, MA-10, MA-11, MA-13, MA-14a, MA-17, MA-18, MA-25, MA-29, MA-30, MA-34, MA-37, MA-38, MA-39, MA-41, MA-42, UC-1 | Test lines narrowed to what their tests assert, tests that pin a condition named, and conditions no test asserts listed under none named (second test-line sweep); no change of behaviour | [plan 32](../plan/maintenance/32-test-line-sweep.md) |
 | 2026-11-04 | MA-10, MA-24, UC-1 | the test lines no longer cite MockRadio's timed-update and `cold` tests: no radio key has an update class | [Phase 8 note 47](../plan/phase8/47-no-change-while-streaming.md) stage 2 |
+| 2026-11-06 | UC-6 | note 48 S2b-ii: the sentence on the device's command queue leaves: no radio key has an update class (`design/07`), so no `hardware_timed` update waits in a queue of the Module | [note 48](../plan/phase8/48-simplification-inventory.md) S2b-ii |

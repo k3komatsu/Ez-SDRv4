@@ -1,0 +1,2 @@
+ur_36_owner_configure_is_once_per_command_and_again_for_the_next -> ur_36_owner_configure_takes_each_command_s_own_snapshot
+cancellation_reports_only_cold_change -> cancellation_reports_only_clock_ended

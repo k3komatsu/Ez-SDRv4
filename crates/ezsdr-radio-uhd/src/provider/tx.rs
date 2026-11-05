@@ -341,10 +341,10 @@ impl Tx {
         self.cut = self.clock.and_then(|clock| self.plan.get(self.at).and_then(|current| current.segment.cut).map(|cut| clock.instant(cut)));
     }
 
-    /// UR-25: a burst booked on a clock that ended at its origin is cancelled.
+    /// UR-25: a burst booked on a clock that has ended is cancelled.
     fn cancel_unstarted(&self, held: &Held) {
         self.forget(held);
-        self.report_cancelled_burst("UR-25: its transmit clock was never started", ezsdr_radio::CancelReason::ColdChange);
+        self.report_cancelled_burst("UR-25: its transmit clock ended before the burst could start", ezsdr_radio::CancelReason::ClockEnded);
     }
 
     fn forget(&self, held: &Held) {
@@ -498,7 +498,7 @@ impl Tx {
                 }
                 if cut_k.is_some_and(|cut| held.k >= cut) {
                     // A late-policy move cannot send on the old clock past its cut.
-                    // The pending switch will cancel this old-clock reservation.
+                    // The clock's end cancels this reservation (UR-25).
                     self.held.insert(held.k, held);
                     return true;
                 }
@@ -517,7 +517,7 @@ impl Tx {
 
     /// Hands the next buffer of the open burst to the device (UR-22, UR-23). False, with nothing handed over, while the window
     /// cannot yet take all that the other limits allow, except for the burst's first timed buffer, which takes what fits.
-    fn send(&mut self, clock: Clock, held_cut: Option<i64>, switch_cut: Option<i64>, window_cut: i64) -> bool {
+    fn send(&mut self, clock: Clock, held_cut: Option<i64>, clock_cut: Option<i64>, window_cut: i64) -> bool {
         if self.chain.needs_reopen() {
             return false;
         }
@@ -528,7 +528,7 @@ impl Tx {
         };
         let device_sob = first && !self.chain.continues_at(start);
         let min_first = MIN_FIRST_SEND as i64;
-        if device_sob && switch_cut.is_some_and(|cut| cut - next < min_first) {
+        if device_sob && clock_cut.is_some_and(|cut| cut - next < min_first) {
             return self.refuse_first_send();
         }
         let open = self.open.as_mut().expect("a burst is open");
@@ -539,7 +539,7 @@ impl Tx {
         if device_sob {
             wanted = wanted.max(if tiled { min_first } else { min_first.min(len - offset) });
         }
-        let cut = [held_cut, switch_cut].into_iter().flatten().min();
+        let cut = [held_cut, clock_cut].into_iter().flatten().min();
         if let Some(cut) = cut {
             wanted = wanted.min(cut - open.next);
         }
@@ -550,7 +550,7 @@ impl Tx {
         let count = wanted.min(avail);
         debug_assert!(count > 0, "the send is inside the in-flight window");
         let ends_waveform = !open.held.repeat && offset + count == len;
-        let ends_at_held = held_cut.is_some_and(|h| open.next + count == h) && switch_cut.is_none_or(|cut| h_lt(held_cut, cut));
+        let ends_at_held = held_cut.is_some_and(|h| open.next + count == h) && clock_cut.is_none_or(|cut| h_lt(held_cut, cut));
         let eob = ends_waveform || ends_at_held;
         let mut slices = [&[][..]; TX_CHANNELS_MAX];
         for (slice, channel) in slices.iter_mut().zip(open.held.samples.iter()) {
@@ -761,7 +761,7 @@ impl Tx {
     /// is not made, and its burst is cancelled as UR-25 cancels one that cannot start.
     fn refuse_first_send(&mut self) -> bool {
         let Some(open) = self.open.take() else { return true };
-        self.report_cancelled_burst("UR-22: the first send needs 4 samples per channel before the clock's cut", ezsdr_radio::CancelReason::ColdChange);
+        self.report_cancelled_burst("UR-22: the first send needs 4 samples per channel before the clock's cut", ezsdr_radio::CancelReason::ClockEnded);
         self.forget(&open.held);
         true
     }
@@ -854,7 +854,7 @@ impl Tx {
         if halted {
             for held in std::mem::take(&mut self.held).into_values() {
                 self.forget(&held);
-                self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ColdChange);
+                self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ClockEnded);
             }
         }
         if let Err(error) = &result {
@@ -870,7 +870,7 @@ impl Tx {
     fn halt_failed_reopen(&mut self, streams: &mut Streams, key: StreamKey) {
         if let Some(open) = self.open.take() {
             self.forget(&open.held);
-            self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ColdChange);
+            self.report_cancelled_burst("UR-22: cancelled because the TX streamer could not be reopened", ezsdr_radio::CancelReason::ClockEnded);
         }
         if let Some(record) = self.tracker.as_mut().and_then(BurstTracker::stop) {
             lock(&self.core.rec).bursts.push(serde_json::to_value(record).expect("a record"));
@@ -1546,12 +1546,12 @@ mod tests {
                 let _ = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
                 lock(&core.held).insert((clock.domain, later));
                 tx.command(TxCmd::Burst(held(&clock, later, 1, LatePolicy::DropAndFlag)));
-                assert!(!lock(&core.held).contains(&(clock.domain, later)), "a burst after the failed reopen keeps its reservation ({reopen_fault:?})");
+                assert!(!lock(&core.held).contains(&(clock.domain, later)), "a burst after the failed reopen releases its reservation ({reopen_fault:?})");
                 assert!(tx.clock.is_none(), "a burst after the failed reopen restarts the clock ({reopen_fault:?})");
                 tx.pass();
                 let calls = device.calls();
                 assert!(calls.iter().all(|call| !call.contains(&target_send) && !call.contains(&later_send)), "a later turn sent a burst on the failed chain ({reopen_fault:?}): {calls:?}");
-                let cancelled = lock(&core.rec).rejected.iter().filter(|row| row["reason"] == "UR-25: its transmit clock was never started").count();
+                let cancelled = lock(&core.rec).rejected.iter().filter(|row| row["reason"] == "UR-25: its transmit clock ended before the burst could start").count();
                 assert_eq!(cancelled, 1, "the later burst's cancellation is reported once ({reopen_fault:?})");
                 let commands =
                     events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count();
@@ -3524,7 +3524,7 @@ mod tests {
         assert!(!lock(&core.held).contains(&(current.domain, 20)));
         let rejected = lock(&core.rec).rejected.clone();
         assert_eq!(rejected.len(), 1, "{rejected:?}");
-        assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock was never started");
+        assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock ended before the burst could start");
         assert!(events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED));
         assert!(!device.calls().iter().any(|call| call.starts_with("tx_send ")));
     }
@@ -3545,7 +3545,7 @@ mod tests {
         assert!(!lock(&core.held).contains(&(ended.domain, 30)));
         let rejected = lock(&core.rec).rejected.clone();
         assert_eq!(rejected.len(), 1, "{rejected:?}");
-        assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock was never started");
+        assert_eq!(rejected[0]["reason"], "UR-25: its transmit clock ended before the burst could start");
         let rejected_events: Vec<_> =
             events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
         assert_eq!(rejected_events.len(), 1, "{rejected_events:?}");

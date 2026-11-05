@@ -80,3 +80,36 @@ Sol: CODE OK, no findings. Self-review (Go DeepSeek; free refused): four adopted
   - The KNOWN_LIMITATIONS lead row marks the earlier restart observations as pre-B3 and asks for re-measurement before the profile lead is lowered.
 - Gate PASS (the first launch failed in chmod over the deleted schema file, before any step ran).
 - Open for the bench: re-measure the receive restart lead (`hw_b8_raw_restart_lead`) after B3.
+
+## S2b-ii code
+
+- Implementer's deviations accepted:
+  - The 1 999 ms check asserts `streaming()` true, as RM-21/RM-25 say. The prefix-plan assertions through `made()` are also written; Sol confirmed this.
+  - N6 is one fixed sequence. The seeded equivalence stays in a retargeted test.
+  - `owner_step` loses `by`.
+- N8 is not written (it was optional). Sol accepts the deletion on the caller trace, not on "a duplicate configure is harmless".
+- `StreamState.configured` is kept per S10. It has no production decision reader now; its removal is a later step's question.
+- Self-review (Go DeepSeek; free refused): five minor findings, all fixed.
+- Sol found no P1 or P2. Its four P3 text corrections were applied by the orchestrator:
+  - the Mock phase comment now says deterministic channels only;
+  - UC-6 no longer cites MockRadio and MR-18;
+  - `parity.rs`'s RM-34 note says it is withdrawn;
+  - the `vh_8` row in `design/18` §6 is narrowed to what those tests assert.
+- Gate PASS, mutation 1693/1694 (known survivor).
+
+## Counts (S2)
+
+| Source | Major | Minor |
+|---|---|---|
+| Sol, test plan rev 1 | 6 P2 | 2 P3 |
+| Opus, plan rev 2 re-check | 1 P2 (a block deletion that would have dropped retained tests' killers) | several named fixes (S1–S12) |
+| Sol, code α | 0 | 0 |
+| Sol, code β | 1 P2 (P4 C/A reopen sequence) | 0 |
+| Gate β | 1 survivor (P1187: its killer observed through the removed FIFO) | — |
+| Sol, code S2a-ii | 2 P2 (reader exclusion pinned only by a precondition; the failed reopen never delivered a later burst) | 1 P3 |
+| Opus, S2a-ii fix re-check | 0 | 2 P3 |
+| Gate S2a-ii | 1 survivor (P1309: the killer started from an already-clean state) | — |
+| Sol, code S2b-i | 0 | 2 P3 (docs) |
+| Sol, code S2b-ii | 0 | 4 P3 (text) |
+
+Mechanisms: none of the definitions fits. Every major was a test that lost or never had its observation after a deletion, or a plan gap. The pattern to remember for later deletion steps: when a mechanism goes, check that each kept test still observes its behaviour by another path. Both gate survivors came from a test that had observed through the deleted mechanism.
