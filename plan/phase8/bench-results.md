@@ -296,3 +296,22 @@ TXS（send は最大 20 000 sample，短い repeat は tile）の worktree で `
 - **(h) 受信の start lead の群**：二台とも PASS．候補の最小 3 ms でも，4 条件（値を変えない再開，1 GHz をまたぐ再開，それぞれ送信の companion〈10 MS/s の PN〉つき）のすべての再開が予約した origin にあり，`LATE_COMMAND` も `START_LEAD_SHORT` もない．残りのリード（origin − 設定の完了）の最小は約 6.7〜9.4 ms（origin は止めた時刻＋release window などでも後ろへ押される，INFERRED）．profile の `rx_start_lead_ns` 50 ms は実機より大きく余裕がある（段階 4 の材料，profile はまだ変えない）．companion の送信は Run 全体で fault 0〜2（#78 と同じものと読む）．
 
 **owner の決定（2026-11-05）**：送信の chunk ごとの時刻（D9b-1a）は最初だけ時刻つき・続きは時刻なしに戻し（#70 の 2 サンプル以上の閉じる send は残す），#72 は note 47 で前提がなくなったとして閉じる．先に FakeDevice で #78 を再現する．その前に，Run の中の値の変更や burst の途中の時刻つきの設定のために入れた仕組みを棚卸しする設計メモ 48 を書き，理由がなくなった物を簡素化の段階で消す．その後の実機で 200 MS/s の Module の負荷の試験（受信・送信の 1 channel の長時間，同時運転）と延ばした (c) の #70・(d)・(e)・(f) を流す．
+
+### 2026-11-05（続き）：UHD だけの最小再現（C++，`plan/phase8/tools/uhd-repro/tx_repro.cpp`）
+
+#78 の原因を Module から切り離すため，`multi_usrp`・`tx_streamer`・`recv_async_msg` だけで送る C++ を書いた（Ez-SDR のコードを通さない．Sol の事前確認 FIX FIRST の 7 件を入れてから流した）．二台（#2 UBX，#1 OBX，slot A，30 dB loopback，1 GHz，gain 0 dB）で同じ結果．log は `~/.cache/ezsdr-fixes/2026-11-05-n48s1/uhd-repro/`（repo の外），まとめは同じ所の `hardware-facts-cpp.md`．
+
+- **単独の短い burst**（一回の send に SOB＋EOB，各 3 回）：
+
+  | rate（補間） | 時刻つき 2 | 時刻つき 3 | 時刻なし 2 | 時刻なし 3 | 4〜512 |
+  |---|---|---|---|---|---|
+  | 1 MS/s（200） | 捨てられる（TimeError 32，ACK なし） | 捨てられる | Underflow 8〜9 | Underflow 13 | 問題なし |
+  | 2 MS/s（100） | 捨てられる（TimeError 28） | 捨てられる（TimeError 6） | Underflow 4 | Underflow 6 | 問題なし |
+  | 10 MS/s（20） | 問題なし | 問題なし | Underflow 0〜1 | Underflow 1 | 問題なし |
+  | 50，200 MS/s | 問題なし | 問題なし | 問題なし | 問題なし | 問題なし |
+
+  時刻なしの 2 サンプルの SOB＋EOB は T3 flush の形で，その Underflow が #78 の一つ目の出どころ（VERIFIED）．時刻つきの burst の ACK は 126 回すべて終わりの 1 tick 後．
+- **一つの burst を二つの send に分ける**（時刻つきの最初の send＋時刻なしの閉じる send，1 と 2 MS/s，各 3 回）：1＋2，1＋3，2＋2，2＋3，3＋2 は試行によって捨てられる・Underflow・ACK のずれ（−3〜＋53 tick）．**4＋2 は 12 回すべて問題なし**．規則は合計の長さではなく，**device burst の最初の send が channel ごとに 4 サンプル以上**（VERIFIED，1 と 2 MS/s）．仕組みは DUC の補間のフィルタに小さな packet が留まること（INFERRED）．
+- **閉じた後の次の burst**：長い burst（9 999＋2 サンプルの close）の後，次の時刻つきの burst を close の終わりちょうどに置くと丸ごと捨てられ，＋1，＋2，＋3，＋1000 サンプルなら鳴る（各 5 回）．UR-22 の「閉じた後の安全な開始は終わり＋1 サンプル」は装置の規則（VERIFIED）．
+- **#70 の試験の形**（2 サンプルの burst の 25 µs 後に 1 万サンプル）：2 サンプルの burst が捨てられ（TimeError 32，ACK なし），後の burst は時刻どおり．続きの send を全部時刻つきにしても最初だけにしても同じ．「すべての send に時刻」は #78 のどの症状とも関係しない．
+- 試していないこと：一つの streamer で二つの channel，10〜50 MS/s の間の rate．
