@@ -146,6 +146,8 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 
 実機（報告 E4 §6 の 3 の 3 番目）は段階 3 と 4 の rate の受け入れの条件として，その段階の中か直後に置く（Sol 12）．確かめること：新しい rate，旧 burst の末尾，時刻，最初の sample，read-back，streamer を作り直さないこと．
 
+**実機（2026-11-05，[bench-results](bench-results.md) §「2026-11-05」）**：段階 3 の道は二台（UBX，OBX）とも PASS（拒否と Action の id，予約した origin，read-back．再開の最初の約 13＋10 サンプルは装置が出す 0 と立ち上がり：FakeDevice と MockRadio で再現する）．**受信の rate の受け入れの条件は満たした**（開いたままの streamer で 1 → 2 → 10 → 1 MS/s，二台とも．受け付けるのは段階 4 以降の段階で決める）．送信の rate は #2 が PASS，#1 が INCONCLUSIVE で，まだ満たさない．§2.1 の 3 の送信の設定の安全の条件は二台で観測した：前の burst の ACK（毎回 e＋1 tick）の後の時刻なしの設定は，＋0〜＋20 ms のどれでも末尾を乱さず，e の 4.6 ms 前の設定はすぐ末尾を変えた（破壊的な対照）．受信の start lead は候補 3 ms でも遅れない．Module を通る送信の underflow（#78）が見つかり，owner は段階 4 の前に，この段階たちの理由がなくなった仕組みを棚卸しする設計メモ 48 と簡素化の段階を入れると決めた（handoff (7) ③′）．段階 6 の片付けはその簡素化に吸収する．
+
 ## 5. 消える範囲（Sol の洗い出し）
 
 Sol の一覧（規則と名のあるテスト，本体の区間，mutation の行の family，ほかに直す試験）は [reviews/47-draft-sol.md](reviews/47-draft-sol.md) の「Removal inventory」にある．各段階の brief はそこから自分の範囲を引く．Sol の注意：広い ID の範囲や，名前に `cold`・`front`・`timed` を含むだけで消してはいけない（残る機能が使うものがある）．

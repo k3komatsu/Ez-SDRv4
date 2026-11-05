@@ -13583,8 +13583,8 @@
       "id": "N47B-07",
       "name": "tx rate: any B onset passes",
       "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
-      "old": "    match (b_onset, b_expected_onset) {\n        (Some(onset), Some(expected)) if (onset - expected).abs() <= onset_tolerance_ticks => {}\n        (Some(onset), Some(expected)) => return Verdict::Fail(format!(\"B starts at {onset} for the expected {expected} (the control burst's delay included)\")),",
-      "new": "    match (b_onset, b_expected_onset) {\n        (Some(onset), Some(expected)) if true => {}\n        (Some(onset), Some(expected)) => return Verdict::Fail(format!(\"B starts at {onset} for the expected {expected} (the control burst's delay included)\")),",
+      "old": "    match (b_onset, b_expected_onset) {\n        (Some(onset), Some(expected)) if (onset - expected).abs() <= onset_tolerance_ticks => {}\n        (Some(onset), Some(expected)) => return Verdict::Inconclusive(format!(\"the rest holds; B starts {:+} ticks off the expected {expected}: onset precision\", onset - expected)),",
+      "new": "    match (b_onset, b_expected_onset) {\n        (Some(onset), Some(expected)) if true => {}\n        (Some(onset), Some(expected)) => return Verdict::Inconclusive(format!(\"the rest holds; B starts {:+} ticks off the expected {expected}: onset precision\", onset - expected)),",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
@@ -13928,5 +13928,15 @@
       "crate": "ezsdr-radio-uhd",
       "test_bin": "fake",
       "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
+    },
+    {
+      "id": "N47B-42",
+      "name": "restart tone: a late onset after the booked origin passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "if onset > RESTART_ONSET_MAX_SAMPLES {",
+      "new": "if onset > RESTART_ONSET_MAX_SAMPLES + 100 {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_restart_rises_at_the_new_tone_after_the_device_fill"
     }
   ]

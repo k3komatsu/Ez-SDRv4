@@ -273,3 +273,26 @@ TXS（send は最大 20 000 sample，短い repeat は tile）の worktree で `
 | 20 000 | 3 000 019 | 約 20 000 | Success，underflow 0（TXS の前は約 150 s で underflow） |
 
 1 channel 200 MS/s の送信は 300 s を通った（VERIFIED，2 試行）．cap 20 000 はこの rate で足りる．より長い時間と RX 同時運転は段階 4 の throughput で測る．
+
+## 2026-11-05：note 47 段階 3 の後（#2＝X300 347D541＋UBX/CBX，#1＝X300 347D545＋OBX，commit `9dab08a`＋実機で直した試験）
+
+手順は [bench.md](bench.md) §「2026-11-05 の手順」．att は 3 つの board とも 30 dB で，それぞれ自分の loopback（owner）．log は `~/.cache/ezsdr-bench/2026-11-05/`（repo の外）．PC は当日再起動した（kernel 7.0.0-42）．
+
+- **ホスト**：PC 側の 2 本の 10 GbE のケーブルが逆だった（#1 が `enp1s0f0np0`，#2 が `enp1s0f1np1` で答えた）．`usrp-net.sh` が両方の NIC に同じ subnet を付けていたので，ブロードキャストの `uhd_find_devices` は二台を見つけ，`uhd_usrp_probe` は「No devices found」になった．owner がケーブルを入れ替えた．`usrp-net.sh` は NIC ごとに subnet を一つにし，取り違えを `CABLES SWAPPED` で止める形に直した．手順の (a) に `ping -I` の確かめを足した．
+- **(b) raw の D9 probe**：二台とも前の記録と同じ．P5 A は −19 ms，P5 B と C は e＋25 µs，P6 は e＋25 µs，P7 は移らない，D70 は 1 サンプルの burst の後が −149.8 ms（対照は＋21〜38 µs），P4 は A と C で DDC の設定が残り（150 kHz），B は残らない．
+- **(c) 本番の試験**：
+  - `hw_p72_…` は二台とも PASS（26 send がすべて時刻つき，閉じる send は 2 サンプル以上，flush の ACK あり）．#72 の閉じる条件（(c)1 と raw P6 が両方の board で PASS）を満たした．ただし owner は #72 を「note 47 で前提がなくなった」として閉じると決めた（下）．
+  - `hw_p70_…` は二台とも FAIL．#70 の症状は Module の道では出ない（後の burst の onset は 1 サンプルの試行で 25 サンプル，対照で 25〜26 サンプル）．FAIL の理由は，対照を含む両方の試行の TIME_ERROR 1 と TX_UNDERFLOW 10〜11（#78）．#70 は開いたまま．
+  - `hw_n47_rx_restart_with_new_values`（段階 3 の道）は二台とも PASS．流れている間の値は Action の id つきで拒まれ，区間は途切れない．`Stop`→値→時刻つき `start_rx` は予約した origin のとおりに始まり，`GAP_BEFORE`・`LATE_COMMAND` なし，`START_LEAD_SHORT` 0．新しい区間は信号の立ち上がりから 50 kHz．設定時の read-back は 1000.05 MHz と 6 dB．試験の期待は実機で 3 か所直した（owner の承認．origin は登録された SampleClock から，窓は新しい区間の sample から，判定は立ち上がりから）．
+  - **装置の性質**（INFERRED：DDC のフィルタが満たされる時間）：受信を再開するたびに，最初の約 13 サンプルが厳密に 0，続く約 10 サンプルで振幅が立ち上がる（1 MS/s，UBX と OBX）．古い周波数のサンプルはない．gap の印は付かない．owner：v4 の制限ではなく装置の性質なので，FakeDevice と MockRadio（profile の値）で再現する．rate ごとの数はまだ測っていない．
+- **(d) L2 の送信の試験（#1）**：`hw_b6_…`・`hw_b7_…`（`TX_UNDERFLOW` starved，burst の約 1.4〜1.5 ms 目），`hw_b8_burst_at_a_sent_burst_s_end`（装置の TimeError/Underflow），`hw_b8_burst_one_sample_after_a_burst`（`radio.TIME_ERROR`）が FAIL．`hw_b8_preemption`・`hw_h5_…`・`hw_txp_b0_send_sizes`・`hw_b9_transmit_only_session`（60 s）は PASS．Module を通る送信はどれも UHD が `U` を約 9 個出し，raw の送信は出さない → #78．
+- **(e) TX200 と (f) ssh 切断**：#78 を直した後の実機に延ばした（owner）．
+- **(g) raw の note 47 の probe**：
+  - T4 受信（開いたままの streamer で 1 → 2 → 10 → 1 MS/s）：二台とも PASS（read-back，block の時刻の間隔，tone）．**note 47 §1 の受信の rate の受け入れの条件を満たした**．
+  - T4 送信（1 → 2 MS/s）：#2 PASS，#1 INCONCLUSIVE（B の最初の窓に coherent な tone がない）．送信の rate の条件はまだ閉じない．
+  - T5（前の burst の後に時刻なしで送信の設定）：二台とも，m＝0（実際は e の約 0.2 ms 後），＋1，＋5，＋20 ms と ＋5 ms の gain（＋6 dB）のすべてで A の末尾が無傷（tone 100 kHz，電力の比 0.998〜0.999）．burst ACK は毎回 e＋1 tick．B はどれも新しい値（例外は #1 の m＝＋1 の 1 回で，B の最初の窓が INCONCLUSIVE）．**破壊的な対照**（owner の承認，#2，e の 4.6 ms 前）は A の末尾が新しい周波数（約 200 kHz）に変わり PASS：probe は乱れを見つけられ，時刻なしの送信の設定は burst の途中ではすぐ効く．B の始まりは対照の遅れから数 µs ずれる（＋7〜14 µs など）．試験はこれを INCONCLUSIVE として印字する（実機で直した，owner の承認）．
+  - T6 制御の呼び出し（#2，50 回，中央値）：受信の周波数 17 µs（小さな変更）／39 µs（1 GHz をまたぐ），送信の周波数 15／42 µs，gain 8〜20 µs，rate 24〜58 µs，`time_now` 113 µs，`rx_open` 0.32 ms，`tx_open` 0.65 ms，サンプルの流れる中での時刻つきの受信の周波数 114 µs．関数が戻るまでの時間で，RF の整定ではない．
+  - T6 受信の buffer（#2）：1 MS/s は 5 s 止めても overflow なし，10 MS/s は 559 ms まで大丈夫で 635 ms で overflow，50 MS/s は 100 ms まで大丈夫で 176 ms で overflow（`rmem_max` 50 MB，`recv_buff_size` は既定．約 25〜30 MB の socket buffer に相当，INFERRED）．
+- **(h) 受信の start lead の群**：二台とも PASS．候補の最小 3 ms でも，4 条件（値を変えない再開，1 GHz をまたぐ再開，それぞれ送信の companion〈10 MS/s の PN〉つき）のすべての再開が予約した origin にあり，`LATE_COMMAND` も `START_LEAD_SHORT` もない．残りのリード（origin − 設定の完了）の最小は約 6.7〜9.4 ms（origin は止めた時刻＋release window などでも後ろへ押される，INFERRED）．profile の `rx_start_lead_ns` 50 ms は実機より大きく余裕がある（段階 4 の材料，profile はまだ変えない）．companion の送信は Run 全体で fault 0〜2（#78 と同じものと読む）．
+
+**owner の決定（2026-11-05）**：送信の chunk ごとの時刻（D9b-1a）は最初だけ時刻つき・続きは時刻なしに戻し（#70 の 2 サンプル以上の閉じる send は残す），#72 は note 47 で前提がなくなったとして閉じる．先に FakeDevice で #78 を再現する．その前に，Run の中の値の変更や burst の途中の時刻つきの設定のために入れた仕組みを棚卸しする設計メモ 48 を書き，理由がなくなった物を簡素化の段階で消す．その後の実機で 200 MS/s の Module の負荷の試験（受信・送信の 1 channel の長時間，同時運転）と延ばした (c) の #70・(d)・(e)・(f) を流す．

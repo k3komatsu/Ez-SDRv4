@@ -3669,16 +3669,29 @@ fn hw_n47_rx_restart_with_new_values() {
         let entry = run.submit(set(key, ezsdr_kernel::spec::Value::num(value).unwrap()), None).unwrap();
         assert!(admitted(&entry), "{key} on the stopped stream: {:?}", entry.outcome);
     }
-    let planned = after_ticks(&run, ms(50));
-    let planned_tick = planned.ticks_in(planned.domain()).expect("the planned origin in root ticks");
-    // A capture from the booked origin shows the published first block there, and its continuity carries the
-    // Sink's GAP_BEFORE when the block began later.
-    let capture = verb("capture", output("rec"), Some(planned), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(10_000))]);
+    // RM-25 moves a request that is earlier than the previous cut plus the lead, or the ready instant plus the lead, to a
+    // later lattice instant (bench 2026-11-05: a request 50 ms after the stop moved by 5.88 ms). The request is therefore
+    // 200 ms ahead and on the 1 MS/s lattice, so the booked origin should equal it; the origin the Module booked is read
+    // from its registered SampleClock below, never from the request or the device call.
+    let ahead = after_ticks(&run, ms(200));
+    let requested_tick = align_to(ahead.ticks_in(ahead.domain()).expect("the request in root ticks"), 200);
+    let requested = TimePoint::new(ahead.domain(), requested_tick);
+    // A capture from the request shows the published first block there, and its continuity carries the Sink's
+    // GAP_BEFORE when the block began later.
+    let capture = verb("capture", output("rec"), Some(requested), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(10_000))]);
     assert!(admitted(&run.submit(capture, None).unwrap()), "the capture at the restart's origin");
     let rx_starts_before = probe.count("rx_start");
-    let start = run.submit(verb("start_rx", resource("radio/rx/s0"), Some(planned), &[]), None).unwrap();
+    let clocks_before = run.sample_clocks().len();
+    let start = run.submit(verb("start_rx", resource("radio/rx/s0"), Some(requested), &[]), None).unwrap();
     assert!(admitted(&start), "the timed restart: {:?}", start.outcome);
-    wait(&mut run, ms(130));
+    wait(&mut run, ms(280));
+    // The Module registers the restart's SampleClock at its first block (UR-17); its origin is the booked instant.
+    let clocks = run.sample_clocks();
+    let booked = (clocks.len() > clocks_before)
+        .then(|| clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()).and_then(|clock| clock.origin.ticks_in(clock.root).ok()))
+        .flatten();
+    println!("n47 stage 3 (c): requested {requested_tick}, booked origin {booked:?}");
+    let planned_tick = booked.unwrap_or(requested_tick);
     // The quiet baseline is measured only after the transmit repeat is stopped, never from an interval in which the
     // receive was stopped (a stopped receive has no samples at all).
     let stop_repeat = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
@@ -3691,10 +3704,22 @@ fn hw_n47_rx_restart_with_new_values() {
     let first = n47::first_tick_at_or_after(&probe_block_lengths(&probe), planned_tick);
     let published = manifest.artifacts.iter().find(|(o, _)| o.as_str() == "rec").and_then(|(_, list)| list.first());
     let gap_before = published.and_then(|artifact| artifact.continuity.first()).is_some_and(|map| !map.gaps.is_empty());
-    verdict("n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE", n47::restart_origin_verdict(Some(planned_tick), origin, first, gap_before));
+    // RM-25 never books before the request, and this request is far enough ahead to be booked as asked: a booked origin
+    // other than the request is a timed start that was not honoured (v3's onTime behaviour), whatever the device did.
+    let booked_verdict = match booked {
+        Some(tick) if tick == requested_tick => Verdict::Pass(format!("the booked origin is the request {requested_tick}")),
+        Some(tick) => Verdict::Fail(format!("the booked origin {tick} is not the request {requested_tick}")),
+        None => Verdict::Inconclusive("no SampleClock registered for the restart".to_owned()),
+    };
+    verdict("n47 stage 3 (c): the timed restart is booked at its request", booked_verdict);
+    verdict("n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE", n47::restart_origin_verdict(booked, origin, first, gap_before));
     let floor = blocks.last().and_then(|(last, _)| window_power_at(&blocks, last - ms(11), last - ms(1), 200));
     let first_window = match floor {
-        Some(floor) => common::tone::first_window_verdict(&blocks, planned_tick, 200, 50e3, 10e3, floor),
+        Some(floor) => {
+            let (outcome, fill) = n47::restart_tone_verdict(&blocks, planned_tick, 200, floor, 50e3);
+            println!("n47 stage 3 (c): restart fill {fill:?} (exact-zero samples, onset sample, from the booked origin)");
+            outcome
+        }
         None => Verdict::Inconclusive("no quiet window after the transmit repeat stopped: the noise floor is not measured".to_owned()),
     };
     verdict("n47 stage 3 (c): the new segment's first millisecond holds the tone at 50 kHz", first_window);

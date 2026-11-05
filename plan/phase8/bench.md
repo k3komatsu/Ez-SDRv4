@@ -430,7 +430,10 @@ stop の規則：`Control operation timed out waiting for space in command buffe
 
 ### (a) ホスト確認と装置確認（送信なし，#2 → #1，約 10 分，estimate）
 
+PC の再起動の後は，まず owner が `sudo bash ~/ezsdr-bench/usrp-net.sh`（tree の外．NIC ごとに subnet を一つだけ付け，各 X300 が自分の NIC で答えるかを確かめる．ケーブルが逆なら `CABLES SWAPPED` で exit 1）を流す．2026-11-05 は PC 側の 2 本のケーブルが逆で，両方の NIC に同じ subnet が付いていたため，ブロードキャストの `uhd_find_devices` だけが見え，`uhd_usrp_probe` は「No devices found」になった．
+
 ```sh
+ping -c2 -W1 -I enp1s0f0np0 192.168.47.37 && ping -c2 -W1 -I enp1s0f1np1 192.168.40.36   # 各 X300 が自分の NIC で答える．答えなければ止める（ケーブルの取り違え）
 plan/phase8/tools/bench-host.sh --nic enp1s0f0np0 --subnet 47            # #2．read-only．不足があれば exit 1
 docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.47.37
 # 盤を替えて #1
