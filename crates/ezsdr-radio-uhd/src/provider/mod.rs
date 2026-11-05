@@ -868,31 +868,6 @@ mod tests {
     }
 
     #[test]
-    fn ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp() {
-        let spy = Arc::new(crate::provider::test_support::LockSpy::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
-        let (core, _, _) = test_support::rig_on(spy.clone(), Vec::new(), 2_000);
-        spy.watch(&core);
-        let binding: Binding = serde_json::from_value(json!({
-            "module": { "id": "ezsdr.radio.uhd", "version": { "major": 0, "minor": 4, "patch": 0 } },
-            "profile": { "name": "x3xx", "version": { "major": 0, "minor": 1, "patch": 0 } },
-            "selector": { "args": "type=fake-rig", "rx": ["0:A:ubx:0"], "tx": ["0:A:ubx:0"] }
-        }))
-        .unwrap();
-        let mut radio = UhdRadio::from_binding(&binding, spy.clone()).unwrap();
-        let handle = core.clocks.declare_sample_clock(core.stream_node(Dir::Tx, 0), core.root, ezsdr_kernel::time::Rational::new(200, 1).unwrap()).unwrap();
-        radio.prepared = Some(Prepared {
-            core: core.clone(),
-            actions: Arc::new(NoActions),
-            config: BTreeMap::new(),
-            rx: Vec::new(),
-            tx: vec![PreparedStream { k: 0, handle: Some(handle), channels: Channels::first(1), clock: None }],
-        });
-        super::core::assert_tx_open_flush_barrier(core, spy, move || {
-            radio.arm().unwrap();
-        });
-    }
-
-    #[test]
     fn measurement_timing_candidate_updates_every_surface_and_the_start_boundary() {
         use ezsdr_kernel::spec::{CapabilityValue, Scalar};
 

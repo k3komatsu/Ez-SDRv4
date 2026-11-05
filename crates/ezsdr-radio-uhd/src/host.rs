@@ -453,6 +453,14 @@ impl HostClock {
         Some(token)
     }
 
+    /// Test only: the threads queued on clock lock `key`; none on the real clock.
+    #[cfg(test)]
+    fn lock_queue(&self, key: u64) -> usize {
+        let Some(m) = &self.inner.manual else { return 0 };
+        let (st, _) = state(m);
+        st.locks.get(&key).map_or(0, |lock| lock.waiters.len())
+    }
+
     /// Releases the clock lock `key` held by `token`, handing it to the next waiter (§4.7).
     fn release_lock(&self, key: u64, token: u64) {
         let Some(m) = &self.inner.manual else { return };
@@ -540,17 +548,18 @@ impl<T> ClockMutex<T> {
         ClockGuard { clock: self.clock.clone(), key: self.key, token, data: Some(data) }
     }
 
-    /// Test only: whether some thread holds the lock now (a `try_lock` that fails).
-    #[cfg(test)]
-    pub(crate) fn is_held(&self) -> bool {
-        self.data.try_lock().is_err()
-    }
-
     /// Test only: how many threads are inside `lock` without having it yet: the handshake
     /// that a thread has reached the lock and is held there by its holder.
     #[cfg(test)]
     pub(crate) fn waiters(&self) -> usize {
         self.waiting.load(Ordering::SeqCst)
+    }
+
+    /// Test only: how many threads are queued on this lock behind its holder (§4.7). A queued
+    /// thread stays counted until the holder hands the lock over, so it is not transient.
+    #[cfg(test)]
+    pub(crate) fn queued(&self) -> usize {
+        self.clock.lock_queue(self.key)
     }
 }
 

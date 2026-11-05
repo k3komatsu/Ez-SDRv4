@@ -469,3 +469,132 @@ Change nothing else. Run the end checks in the foreground. No self-review round.
 ### Report (at most 6 lines)
 
 The cause with path:line, the fix, the probes, the suites, `rules.py`.
+
+---
+
+## `brief-impl-a2.md`
+
+## Brief: design note 48 S2 — implement sub-step S2a-ii (A4, A5 `Channels::without`, A5′)
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`, HEAD `aed8111` (β committed), clean tree. Nobody else edits the tree. The `opencode run` client's PID belongs to you; it is not another agent.
+
+Read:
+- `AGENTS.md`: Safety core, §6, §7, and §9 with Maintainability.
+- From `~/.cache/ezsdr-fixes/2026-11-05-n48s2/`: `brief.md`, your `test-plan.md` (rev 2), and `rulings-plan.md` (R1–R10 and Round 2, S1–S12).
+
+### Task
+
+1. The test plan is `test-plan.md` (rev 4, with §9 the α record and §10 the β record). Keep it as `test-plan.v4.md`, then record S2a-ii in a new §11 (rev 5).
+2. **Implement S2a-ii only**, as rev 3 §6 and its maps assign: A4 (`Core.tx_dsp_gates`, `lock_tx_dsp` and its callers; keep the report gate, generation separation, the flush ACK and deadline and unrelated-report keeping, and the reader-exclusion test over both `open_tx_device` and `reopen_tx_streamer` — S11, N-09, N-10), A5 (`Channels::without`: retarget the test at rx.rs ~1702 first, then delete the method), A5′ (`Recovery::Halted` folded; the tests that a failed reopen sends neither the held nor a new payload stay, with N-11's assertion at tx.rs ~1545), the ur_22 timed-DSP-wait tests (mod.rs ~871, tx.rs ~1344) per the map, rows per rev 3 plus the mechanical sweep, and the spec text rev 3 assigns to S2a-ii. Also the two items carried from β (§10): reword design/18:249 (UR-22: no timed TX DSP value is issued; the DUC FIFO sentence goes), and rename the timed row and printed summary of `hw_n47_raw_control_call_durations` to say it times `tune_auto` with a command time. Do not start S2b. Do the whole of S2a-ii, keeping the tree green; never end your turn with a command still running in the background.
+   - Follow the plan.
+   - Extend it (§11, the S2a-ii implementation record) for every state or failure path the implementation adds.
+   - **Every planned test of S2a-i is written. None is a "gap" to report.** If a planned test cannot be written as planned, say why with evidence, and give what replaces it.
+
+### Rules
+
+**Mutation rows**
+- Make text edits only, in `plan/maintenance/tools/mutations.json` and `plan/*/tools/mutations.json`. Never re-serialize the file.
+- Use Rust token anchors. Each row matches exactly once and names its killing test.
+- The mechanical sweep (S3): after the code change, a script lists every row that is `NOT FOUND`. Save its output as `sweep-a2.txt`. Delete only the listed rows whose behaviour is gone. Each row on retained code is decided as rev 3 says.
+- Confirm each new or retargeted row in a throwaway copy outside the repository:
+  - copy: `rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3`;
+  - build with `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`;
+  - run `find <copy> -type f -exec touch {} +` before building;
+  - use one copy at a time;
+  - a compile failure is not a kill;
+  - logs go in `probes-a2/`.
+- Never run `mutate.py`, `remote_mutate.py` or `gate.py`. Never apply a mutant to the tree.
+- Existing rows whose `old` lies in a function you change: re-run them in the copy too.
+
+**Runs and state**
+- Run single tests with `timeout 300`. Your tool stops a command at 120 s, so run longer commands with a longer timeout, in the foreground. Leave no process running.
+- Test temp files go on `/tmp`.
+- Make no git state changes, no version bumps, and no `SCHEMA_CHANGELOG` entry. Regenerate any changed schema, so `schema_freeze` and `rm_20_schema_freeze` are green.
+- Write what happened, never what was not done.
+
+**End checks**
+- `cargo fmt --all`.
+- clippy `-D warnings` for the workspace, and for `-p ezsdr-radio-uhd --features uhd --all-targets`, both via `python3 plan/maintenance/tools/remote/rdev.py -- <cmd>`.
+- The remote workspace tests, after your last edit.
+- The Python 3.14 suite (handoff §5).
+- `git ls-files -m -o --exclude-standard | xargs chmod go+r`.
+- `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base HEAD` must give 0. If you rename or drop tests, list each with its reason in `plan/phase8/reviews/48s2a2-renames.txt`, in the format of `48s1-renames.txt`, and pass `--renames`.
+
+### Self-review (one round)
+
+Run it in the foreground with `timeout 2400`. Use free DeepSeek first:
+
+`opencode2 run --standalone -m opencode/deepseek-v4.1-flash-free#max --agent plan --auto "<checklist>"`
+
+Use Go (`opencode-go/deepseek-v4.1-flash#max`) only if free refuses.
+
+Checklist:
+1. Every S2a-ii test in rev 3 is written, observes what the plan says, and its row breaks it.
+2. Scope against rev 3: missing and extra (nothing of S2b).
+3. Every "no caller / unreachable" claim behind a deletion: grep the callers.
+4. Every `design/` text this sub-step makes false is amended in this sub-step.
+5. Maintainability: no leftovers of the deleted paths. No retained behaviour lost its only test.
+
+Fix every finding, or reject it with a reason.
+
+### Report (at most 15 lines)
+
+- Rev 3: per ruling, what changed.
+- S2a-i: what was deleted and what was kept.
+- Tests: added, moved and deleted, with counts.
+- Rows: deleted, retargeted and added, with probe outcomes and the sweep.
+- Suites and `rules.py`.
+- Self-review findings and their disposition.
+- Deviations, and open questions with your recommendation.
+
+---
+
+## `brief-sol-code-a2.md`
+
+You are the independent reviewer (Sol), read-only, in ~/local_work/Ez-SDRv4 (HEAD aed8111; the sub-step's changes are uncommitted: `git diff HEAD`, `git status`). Do not edit, format, build in the tree or commit; never run mutate.py or remote_mutate.py. To run a test, use a throwaway copy (`rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3 ~/local_work/Ez-SDRv4/ /tmp/sol-s2a/`, `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`, `timeout 300`).
+
+AGENTS.md §9 step 7: review the code of sub-step S2a-ii of design note 48 S2 — A4 (`Core.tx_dsp_gates`/`lock_tx_dsp` removed; the report gate, generation separation, flush ACK/deadline and unrelated-report keeping stay), A5 (`Channels::without` removed after its test was retargeted), A5′ (`Recovery::Halted` folded: `reopen_failed` sets `Clean`, the burst stays closed), the UR-22 text at design/18:249, and the `hw_n47` timed row renamed. α and β are committed at HEAD. Inputs in ~/.cache/ezsdr-fixes/2026-11-05-n48s2/: brief.md, rulings-plan.md, test-plan.md (§11 is the S2a-ii record), sweep-a2.txt, probes-a2/, and the end of impl-a2.log (the implementer's report and open questions: N-09/N-10 killed only by the `is_held` precondition; `reopen_failed`'s `burst = Closed` a no-op on reachable paths; a dead plan cursor `self.at`).
+
+First write your own failure scenarios for this change, then check:
+1. Without the DSP gates, can a report reader (shutdown, the owner, recovery) take the T3 flush's ACK or a burst's report, or can the flush overlap a send, on either open path (`open_tx_device`, `reopen_tx_streamer`)? Does `ur_22_t3_flush_ack_is_not_taken_by_shutdown` really pin that, or only the `is_held` precondition (N-09/N-10)? If the latter, give the assertion that would.
+2. A failed reopen after A5′: neither the held nor a new payload is sent, the clock ends, cancellation reports and counts unchanged (B5's rename is S2b), recovery state after it is what UR-22/F8 say.
+3. `Channels::without`'s removal changed no production behaviour; the retargeted rx.rs test still pins what it pinned.
+4. Rows: P1175–P1178, P1307, P1310, N-04 deleted; N-09, N-10, N-11 added; dispositions right, no row on retained code dropped.
+5. design/ text (UR-22 at :249 and anything else S2a-ii makes false) amended; nothing of S2b done early.
+6. Maintainability per AGENTS §9.
+For each major finding give a minimal sequence and the observable wrong outcome. Output: scenario list (short), findings P1/P2/P3 with path:line, verdict CODE OK / CODE NEEDS CHANGES. At most 100 lines.
+
+---
+
+## `brief-fix-a2.md`
+
+## Brief: design note 48 S2a-ii — fix round 1
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`, HEAD `aed8111`. The tree holds your uncommitted S2a-ii changes; keep them. Nobody else edits the tree.
+
+Read these files in `~/.cache/ezsdr-fixes/2026-11-05-n48s2/`:
+- `brief-impl-a2.md`: its rules and end checks apply.
+- `test-plan.md` §11.
+- Sol's review at the end of `sol-code-a2.log`.
+
+### Task (Sol's three findings, all adopted)
+
+1. **P2: reader exclusion.** The test is `ur_22_t3_flush_ack_is_not_taken_by_shutdown` (core.rs ~1539–1588).
+   - Give it a deterministic checkpoint. The checkpoint must tell a reader that is really queued on the report lock apart from one that has entered the device read. A transient `waiters()` count is not enough (`host.rs:535–539`).
+   - Your earlier explanation was wrong: `test_support.rs:386–388` allows overlapping calls with the same name.
+   - On both open paths, return the flush result and assert that `flush.acknowledged` is true and `flush.stopped` is false.
+   - Also assert that the shutdown reader got `None`. Assert exactly one channel-0 `BurstAck` with `tx_flush == true`, and no missing-ACK rejection.
+   - Show in a throwaway copy (`probes-a2b/`) that removing either report gate fails a behavioural assertion, independently of `is_held`. Re-anchor N-09 and N-10 so their killer is that assertion.
+2. **P2: failed reopen.** This is the reopen-fault branch in tx.rs ~1529–1544.
+   - Extend it with a distinct later burst and its reservation, delivered through `command(TxCmd::Burst(...))`, then run another turn.
+   - Assert that no payload is sent, the reservation is released, and the clock is still absent.
+   - Also assert exactly the expected additional cancellation report and event.
+   - Use no new fixture.
+   - Confirm that N-11 and the rows on this branch still die.
+3. **P3: bench instructions.** In `plan/phase8/bench.md` ~549, describe the renamed `tune_auto`-with-command-time row apart from the setter-plus-read-back rows, as `hardware.rs:3083–3095` now prints them. Keep its safety instructions.
+
+Change nothing else. Record this in §11 ("fix round 1"). Run the end checks in the foreground. No self-review round is needed for this fix.
+
+### Report (at most 8 lines)
+
+For each item: the change, the assertions, and the probes. Then the suites and `rules.py`.

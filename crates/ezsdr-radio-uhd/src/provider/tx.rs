@@ -104,7 +104,6 @@ enum Recovery {
     #[default]
     Clean,
     ReopenNeeded,
-    Halted,
 }
 
 #[derive(Default)]
@@ -179,7 +178,7 @@ impl TxChain {
 
     fn reopen_failed(&mut self) {
         self.burst = DeviceBurst::Closed;
-        self.recovery = Recovery::Halted;
+        self.recovery = Recovery::Clean;
     }
 
     fn provider_stop(&mut self) {
@@ -1264,15 +1263,15 @@ mod tests {
         }
     }
 
-    fn recovery_rig(device: Arc<dyn Device>) -> (Arc<Core>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock) {
+    fn recovery_rig(device: Arc<dyn Device>) -> (Arc<Core>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, Clock, Arc<ezsdr_kernel::event::EventCollector>) {
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 200_000_000;
-        let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), description);
+        let (core, time, events) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::new(), description);
         device.tx_open(0, &[0]).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        (core, time, tx, clock)
+        (core, time, tx, clock, events)
     }
 
     #[test]
@@ -1317,10 +1316,11 @@ mod tests {
         chain.open_device_burst(90, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         chain.mark_reopen_needed();
         chain.reopen_failed();
-        assert_eq!(chain.recovery(), Recovery::Halted);
-        assert!(chain.next().is_none() && chain.tail().is_none());
-        chain.provider_stop();
         assert_eq!(chain.recovery(), Recovery::Clean);
+        assert!(chain.next().is_none() && chain.tail().is_none());
+        chain.mark_reopen_needed();
+        chain.provider_stop();
+        assert_eq!(chain.recovery(), Recovery::Clean, "Provider::stop ends pending reopen work");
         chain.open_device_burst(100, Some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
         chain.mark_reopen_needed();
         chain.lose();
@@ -1338,20 +1338,6 @@ mod tests {
     /// Transmit stream 0's clock, registered at `arm` (RM-25).
     fn tx_clock(core: &Core) -> Clock {
         lock(&core.streams).stream(stream_key(Dir::Tx, 0)).clocks[0]
-    }
-
-    #[test]
-    fn ur_22_tx_owner_reopen_waits_for_t3_flush_ack_before_timed_tx_dsp() {
-        let (core, spy) = spy_rig();
-        spy.watch(&core);
-        spy.tx_open(0, &[0]).unwrap();
-        let clock = core.register(Dir::Tx, 200, 0).unwrap();
-        let (_to_tx, cmds) = std::sync::mpsc::channel();
-        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
-        tx.chain.mark_reopen_needed();
-        super::super::core::assert_tx_open_flush_barrier(core, spy, move || {
-            assert!(tx.pass());
-        });
     }
 
     #[test]
@@ -1458,7 +1444,7 @@ mod tests {
             let (mut tx, worked) = finished.recv_timeout(Wall::from_secs(10)).unwrap();
             assert!(worked, "the owner handled the interrupted recovery");
             assert_eq!(lock(&core.streams).holder(key), Holder::Free, "the recovery claim is always returned");
-            assert_eq!(tx.chain.recovery(), Recovery::Clean, "Stop/loss must not mark the chain Halted");
+            assert_eq!(tx.chain.recovery(), Recovery::Clean, "Stop/loss must leave the chain Clean");
             assert!(tx.held.contains_key(&target), "recovery interruption does not refuse the pending burst");
             assert!(lock(&core.held).contains(&(clock.domain, target)), "the pending reservation survives until Stop cleanup");
             assert!(
@@ -1496,7 +1482,7 @@ mod tests {
                 faults.push(fault);
             }
             let device = Arc::new(FakeDevice::new(FakeConfig { faults, ..FakeConfig::default() }));
-            let (core, time, mut tx, clock) = recovery_rig(device.clone());
+            let (core, time, mut tx, clock, events) = recovery_rig(device.clone());
             device.set_time(0);
 
             let start = clock.at_or_after(device.time_now().unwrap() + core.ticks(5_000_000));
@@ -1543,7 +1529,8 @@ mod tests {
                 tx.tracker = Some(tracker);
                 assert!(tx.pass(), "the failed reopen was not handled ({reopen_fault:?})");
                 assert!(!tx.chain.needs_reopen(), "the failed reopen is no longer pending ({reopen_fault:?})");
-                assert_eq!(tx.chain.recovery(), Recovery::Halted, "a failed reopen enters Halted ({reopen_fault:?})");
+                assert!(tx.clock.is_none(), "a failed reopen ends the stream's clock ({reopen_fault:?})");
+                assert!(tx.chain.next().is_none() && tx.chain.tail().is_none(), "a failed reopen closes the device burst ({reopen_fault:?})");
                 assert!(tx.open.is_none(), "B was cancelled from the send barrier ({reopen_fault:?})");
                 assert!(!lock(&core.held).contains(&(clock.domain, target)), "B's reservation was released ({reopen_fault:?})");
                 let rejected = lock(&core.rec).rejected.clone();
@@ -1554,6 +1541,21 @@ mod tests {
                 let calls = device.calls();
                 assert!(calls.iter().all(|call| !call.contains(&target_send)), "B's payload was never sent ({reopen_fault:?}): {calls:?}");
                 assert_eq!(device.transmitted(clock.instant(target), 3), [None, None, None], "no B samples reached the device ({reopen_fault:?})");
+                let later = target + 1_000;
+                let later_send = format!("at={} sob=true", clock.instant(later));
+                let _ = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+                lock(&core.held).insert((clock.domain, later));
+                tx.command(TxCmd::Burst(held(&clock, later, 1, LatePolicy::DropAndFlag)));
+                assert!(!lock(&core.held).contains(&(clock.domain, later)), "a burst after the failed reopen keeps its reservation ({reopen_fault:?})");
+                assert!(tx.clock.is_none(), "a burst after the failed reopen restarts the clock ({reopen_fault:?})");
+                tx.pass();
+                let calls = device.calls();
+                assert!(calls.iter().all(|call| !call.contains(&target_send) && !call.contains(&later_send)), "a later turn sent a burst on the failed chain ({reopen_fault:?}): {calls:?}");
+                let cancelled = lock(&core.rec).rejected.iter().filter(|row| row["reason"] == "UR-25: its transmit clock was never started").count();
+                assert_eq!(cancelled, 1, "the later burst's cancellation is reported once ({reopen_fault:?})");
+                let commands =
+                    events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0)).iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).count();
+                assert_eq!(commands, 1, "the later burst's cancellation emits one COMMAND_REJECTED ({reopen_fault:?})");
                 continue;
             }
             assert!(tx.pass(), "the owner did not replace the uncertain streamer");
@@ -1573,7 +1575,7 @@ mod tests {
     fn ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3() {
         for fault in [FakeFault::DropBurstAck, FakeFault::ShortSend(0), FakeFault::FailSend(0)] {
             let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault.clone()], ..FakeConfig::default() }));
-            let (core, _time, mut tx, clock) = recovery_rig(device.clone());
+            let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
             let old_front = (clock.domain, 123);
             tx.chain.advance_front(old_front.0, old_front.1);
             let old_target = TimePoint::new(clock.domain, 10);
@@ -1636,7 +1638,7 @@ mod tests {
     fn ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts() {
         for fault in [FakeFault::TxOpenFails(1), FakeFault::RatesMismatch(0)] {
             let device = Arc::new(FakeDevice::new(FakeConfig { faults: vec![fault.clone()], ..FakeConfig::default() }));
-            let (core, _time, mut tx, clock) = recovery_rig(device.clone());
+            let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
             {
                 let mut streams = lock(&core.streams);
                 assert!(tx.plan_section(&mut streams, stream_key(Dir::Tx, 0)), "the initial segment is active before recovery ({fault:?})");
@@ -1700,7 +1702,7 @@ mod tests {
     fn ur_22_tx_stop_preserves_recovery_for_later_bursts() {
         for (fail_stop_close, has_tail) in [(true, true), (true, false), (false, false)] {
             let device = Arc::new(FakeDevice::new(FakeConfig::default()));
-            let (core, _time, mut tx, clock) = recovery_rig(device.clone());
+            let (core, _time, mut tx, clock, _events) = recovery_rig(device.clone());
             if fail_stop_close {
                 tx.chain.open_device_burst(100, has_tail.then_some(Tail { samples: [[0.25, 0.0]; TX_CHANNELS_MAX], channels: 1 }));
                 *device.eob_error.lock().unwrap() = Some(crate::DeviceError::failed("controlled Stop EOB failure"));
@@ -3040,7 +3042,7 @@ mod tests {
     #[test]
     fn ur_29_non_lost_payload_eob_error_after_concurrent_loss_does_not_reopen() {
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
-        let (core, _, mut tx, clock) = recovery_rig(device.clone());
+        let (core, _, mut tx, clock, _events) = recovery_rig(device.clone());
         tx.chain.advance_front(clock.domain, 123);
         let front = tx.chain.front();
         let target = clock.at_or_after(core.now() + core.ticks(60_000_000));

@@ -1699,7 +1699,7 @@ mod tests {
         let stream = core.id.child("rx/s1").unwrap();
         let handle = core.clocks.declare_sample_clock(stream, core.root, Rational::new(200, 1).unwrap()).unwrap();
         let clock = Clock { domain: handle.id(), origin: 0, n: 200 };
-        let config = Config { channels: Channels::first(2).without(0), ratio: Rational::new(200, 1).unwrap() };
+        let config = Config { channels: Channels::first(0).with(1), ratio: Rational::new(200, 1).unwrap() };
         {
             let mut streams = lock(&core.streams);
             let mut line = Line::new(ezsdr_radio::timeline::Stream { direction: Direction::Rx, origin: 0, config, lead: 0, call: 0, release_window: 0, allowance: 0 });

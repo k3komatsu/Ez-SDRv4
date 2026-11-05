@@ -731,8 +731,6 @@ pub(crate) struct Core {
     device_gate: Mutex<()>,
     /// Each receive chain's owner transitions share a clock lock (L1).
     pub rx_chain: Vec<ClockMutex<RxChain>>,
-    /// A timed TX DSP write and the open-time flush share each channel's gate (D9b-1a).
-    tx_dsp_gates: Vec<ClockMutex<()>>,
     /// Every tx_async reader, including shutdown, shares one per-stream gate.
     tx_report_gates: Vec<ClockMutex<()>>,
     tx_report_stash: Vec<Mutex<VecDeque<TxReport>>>,
@@ -795,7 +793,6 @@ impl Core {
         let tx_id = description.stream_node(&id, Dir::Tx, 0);
         let rx_count = description.stream_count(Dir::Rx);
         let tx_count = description.stream_count(Dir::Tx);
-        let tx_channel_count = device.channels(Dir::Tx);
         let host = device.host();
         links.resize_with(rx_count, Vec::new);
         // UR-12, UR-20: every receive stream's node is below the instance root the Kernel
@@ -816,7 +813,6 @@ impl Core {
             device,
             device_gate: Mutex::new(()),
             rx_chain: (0..rx_count).map(|_| host.clock_mutex(RxChain::default())).collect(),
-            tx_dsp_gates: (0..tx_channel_count).map(|_| host.clock_mutex(())).collect(),
             tx_report_gates: (0..tx_count).map(|_| host.clock_mutex(())).collect(),
             tx_report_stash: (0..tx_count).map(|_| Mutex::new(VecDeque::new())).collect(),
             id,
@@ -1060,15 +1056,6 @@ impl Core {
         decimation(self.mcr, rate).map(|n| n as i64).ok_or_else(|| DeviceError::failed(format!("UR-12: {rate} S/s is no decimation of {} Hz", self.mcr)))
     }
 
-    /// UR-13, UR-36: the device's open of `k`'s streamer of `dir` on `set`; the record is the
-    /// caller's (see `record_opened`).
-    pub fn lock_tx_dsp(&self, channels: &[usize]) -> Vec<ClockGuard<'_, ()>> {
-        let mut channels = channels.to_vec();
-        channels.sort_unstable();
-        channels.dedup();
-        channels.into_iter().filter_map(|channel| self.tx_dsp_gates.get(channel)).map(ClockMutex::lock).collect()
-    }
-
     pub fn lock_tx_reports(&self, stream: usize) -> ClockGuard<'_, ()> {
         self.tx_report_gates[stream].lock()
     }
@@ -1094,7 +1081,6 @@ impl Core {
         if channels.is_empty() || self.is_lost() {
             return TxFlushResult { acknowledged: channels.is_empty(), ack_tick: None, stopped: self.is_lost() };
         }
-        let _dsp = self.lock_tx_dsp(channels);
         let _reports = self.lock_tx_reports(stream);
         self.tx_flush_locked(stream, channels)
     }
@@ -1183,11 +1169,10 @@ impl Core {
         TxFlushResult { acknowledged: acknowledged == expected, ack_tick, stopped }
     }
 
-    /// Opens TX and completes its flush while the same DSP and report gates remain held, so
-    /// neither a timed tune nor another async reader can cross the open/flush boundary.
+    /// Opens TX and completes its flush while the report gate remains held, so no other
+    /// async reader can take the flush acknowledgement.
     pub fn open_tx_device(&self, k: usize, set: Channels) -> Result<TxFlushResult, DeviceError> {
         let channels = channel_list(set);
-        let _dsp = self.lock_tx_dsp(&channels);
         let _reports = self.lock_tx_reports(k);
         self.open_tx_device_locked(k, set, &channels)
     }
@@ -1197,7 +1182,6 @@ impl Core {
     pub fn reopen_tx_streamer(&self, k: usize, set: Channels) -> Result<TxFlushResult, DeviceError> {
         let stream = stream_key(Dir::Tx, k);
         let channels = channel_list(set);
-        let _dsp = self.lock_tx_dsp(&channels);
         let _reports = self.lock_tx_reports(k);
         self.close_device(Dir::Tx, k);
         lock(&self.streams).record_open(stream, None);
@@ -1226,6 +1210,8 @@ impl Core {
         Ok(flush)
     }
 
+    /// UR-13, UR-36: the device's open of `k`'s streamer of `dir` on `set`; the record is the
+    /// caller's (see `record_opened`).
     pub fn open_device(&self, dir: Dir, k: usize, set: Channels) -> Result<(), DeviceError> {
         let _reports = (dir == Dir::Tx).then(|| self.lock_tx_reports(k));
         self.open_device_locked(dir, k, set)
@@ -1366,38 +1352,6 @@ impl Core {
         let domain = self.clocks.register_sample_clock(&handle, origin).map_err(|e| e.to_string())?;
         Ok(Clock { domain, origin, n })
     }
-}
-
-#[cfg(test)]
-pub(super) fn assert_tx_open_flush_barrier(core: Arc<Core>, spy: Arc<super::test_support::LockSpy>, open: impl FnOnce() + Send + 'static) {
-    let gate = spy.stop_after("tx_send");
-    let host = core.device.host();
-    let opener = host.spawn("tx-open-route", open).unwrap();
-    gate.wait();
-    assert!(core.tx_dsp_gates[0].is_held(), "the opener must hold the timed-DSP gate through its flush acknowledgement");
-
-    let core_ = core.clone();
-    let timed = host
-        .spawn("timed-tx-dsp", move || {
-            let _dsp = core_.lock_tx_dsp(&[0]);
-            core_.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }).unwrap();
-        })
-        .unwrap();
-    let deadline = std::time::Instant::now() + Wall::from_secs(10);
-    while core.tx_dsp_gates[0].waiters() == 0 && std::time::Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert!(core.tx_dsp_gates[0].waiters() > 0, "timed DSP did not reach the flush's channel gate");
-    assert_eq!(spy.seen("apply"), 0, "timed TX DSP crossed the flush-ack barrier");
-
-    gate.release();
-    opener.join().unwrap();
-    timed.join().unwrap();
-    let order = spy.order();
-    let flush = order.iter().position(|call| *call == "tx_send").unwrap();
-    let ack = order.iter().enumerate().skip(flush + 1).find_map(|(i, call)| (*call == "tx_async").then_some(i)).unwrap();
-    let apply = order.iter().position(|call| *call == "apply").unwrap();
-    assert!(flush < ack && ack < apply, "flush -> ack read -> timed DSP: {order:?}");
 }
 
 #[cfg(test)]
@@ -1567,84 +1521,74 @@ mod tests {
     }
 
     #[test]
-    fn ur_22_t3_flush_ack_is_a_timed_dsp_barrier() {
-        use crate::device::{Dir, FakeConfig, Settings};
+    fn ur_22_t3_flush_ack_is_not_taken_by_shutdown() {
+        use crate::device::Dir;
         use crate::provider::test_support::LockSpy;
         use std::sync::Arc;
 
-        let spy = Arc::new(LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
-        let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
-        spy.watch(&core);
-        let gate = spy.stop_before("tx_async");
-        let opener = core
-            .device
-            .host()
-            .spawn("tx-flush-open", {
-                let core = core.clone();
-                move || {
-                    core.open_tx_device(0, Channels::first(1)).unwrap();
-                }
-            })
-            .unwrap();
-        gate.wait();
-        assert!(core.tx_report_gates[0].is_held(), "the opener must own async reports through its flush acknowledgement");
+        for reopen in [false, true] {
+            let spy = Arc::new(LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
+            let (core, _time, _events) = super::super::test_support::rig_on(spy.clone(), Vec::new(), 2_000);
+            spy.watch(&core);
+            let gate = spy.stop_before("tx_async");
+            let (opened, flush_result) = std::sync::mpsc::channel();
+            let opener = core
+                .device
+                .host()
+                .spawn("tx-flush-open", {
+                    let core = core.clone();
+                    move || {
+                        let flush = if reopen { core.reopen_tx_streamer(0, Channels::first(1)) } else { core.open_tx_device(0, Channels::first(1)) };
+                        let _ = opened.send(flush.unwrap());
+                    }
+                })
+                .unwrap();
+            gate.wait();
+            // The flush's acknowledgement is due now: a reader that got past the report gate
+            // would take it at once (the host clock stays put, so the flush's deadline does not move).
+            spy.set_time(spy.time_now().unwrap() + 1_000_000);
 
-        let (done, finished) = std::sync::mpsc::channel();
-        let timed = core
-            .device
-            .host()
-            .spawn("timed-tx-dsp", {
-                let core = core.clone();
-                move || {
-                    let _dsp = core.lock_tx_dsp(&[0]);
-                    core.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }).unwrap();
-                    let _ = done.send(());
-                }
-            })
-            .unwrap();
-        let shutdown_stream = stream_key(Dir::Tx, 0);
-        let (shutdown_started, shutdown_start) = std::sync::mpsc::channel();
-        lock(&core.streams).begin_shutdown_read(shutdown_stream);
-        let (shutdown_done, shutdown_report) = std::sync::mpsc::channel();
-        let shutdown = core
-            .device
-            .host()
-            .spawn("shutdown-tx-report", {
-                let core = core.clone();
-                move || {
-                    let _ = shutdown_started.send(());
-                    let _reports = core.lock_tx_reports(0);
-                    let report = core.device.tx_async(0, Wall::ZERO).unwrap();
-                    lock(&core.streams).end_read(shutdown_stream);
-                    let _ = shutdown_done.send(report);
-                }
-            })
-            .unwrap();
-        shutdown_start.recv_timeout(Wall::from_secs(2)).unwrap();
-        let deadline = std::time::Instant::now() + Wall::from_secs(2);
-        while core.tx_report_gates[0].waiters() == 0 && spy.seen("tx_async") == 1 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
+            let shutdown_stream = stream_key(Dir::Tx, 0);
+            lock(&core.streams).begin_shutdown_read(shutdown_stream);
+            let (shutdown_done, shutdown_report) = std::sync::mpsc::channel();
+            let shutdown = core
+                .device
+                .host()
+                .spawn("shutdown-tx-report", {
+                    let core = core.clone();
+                    move || {
+                        let _reports = core.lock_tx_reports(0);
+                        let report = core.device.tx_async(0, Wall::ZERO).unwrap();
+                        lock(&core.streams).end_read(shutdown_stream);
+                        let _ = shutdown_done.send(report);
+                    }
+                })
+                .unwrap();
+            let deadline = std::time::Instant::now() + Wall::from_secs(2);
+            while core.tx_report_gates[0].queued() == 0 && spy.seen("tx_async") == 1 && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            let queued_at_release = core.tx_report_gates[0].queued();
+            let reads_at_release = spy.seen("tx_async");
+
+            gate.release();
+            opener.join().unwrap();
+            shutdown.join().unwrap();
+            let flush = flush_result.recv().unwrap();
+            let shutdown_got = shutdown_report.recv().unwrap();
+            assert!(flush.acknowledged && !flush.stopped, "the opener's flush was not acknowledged (reopen: {reopen})");
+            assert!(shutdown_got.is_none(), "shutdown's reader took a report from the opener's flush (reopen: {reopen})");
+            let flush_acks = lock(&core.rec).device_async.iter().filter(|row| row["code"] == "BurstAck" && row["channel"] == 0 && row["tx_flush"] == true).count();
+            assert_eq!(flush_acks, 1, "the flush's BurstAck is recorded once (reopen: {reopen})");
+            assert!(lock(&core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "no BurstAck was missing (reopen: {reopen})");
+            let order = spy.order();
+            let send = order.iter().position(|call| *call == "tx_send").unwrap();
+            let ack = order.iter().position(|call| *call == "tx_async").unwrap();
+            assert!(send < ack, "flush -> ack read: {order:?} (reopen: {reopen})");
+            assert_eq!(spy.log().iter().filter(|call| call.starts_with("tx_send")).count(), 1);
+            assert_eq!(spy.seen("tx_async"), 2, "shutdown owns the next read after the flush (reopen: {reopen})");
+            assert_eq!((queued_at_release, reads_at_release), (1, 1), "shutdown was not queued on the report lock behind the opener (reopen: {reopen})");
         }
-        let shutdown_waited_for_report = core.tx_report_gates[0].waiters() > 0;
-        let reads_before_flush_ack = spy.seen("tx_async");
-        assert!(finished.try_recv().is_err(), "timed TX DSP crossed the open-time flush wait");
-        assert_eq!(spy.seen("apply"), 0, "no timed write reached the device before the flush ack");
-
-        gate.release();
-        opener.join().unwrap();
-        timed.join().unwrap();
-        shutdown.join().unwrap();
-        assert!(shutdown_waited_for_report, "shutdown's reader did not wait behind the opener's report ownership");
-        assert_eq!(reads_before_flush_ack, 1, "shutdown read an async report before the opener consumed the flush ack");
-        assert!(shutdown_report.recv().unwrap().is_none());
-        assert!(finished.try_recv().is_ok());
-        let order = spy.order();
-        let flush = order.iter().position(|call| *call == "tx_send").unwrap();
-        let ack = order.iter().position(|call| *call == "tx_async").unwrap();
-        let apply = order.iter().position(|call| *call == "apply").unwrap();
-        assert!(flush < ack && ack < apply, "flush -> ack read -> timed DSP: {order:?}");
-        assert_eq!(spy.log().iter().filter(|call| call.starts_with("tx_send")).count(), 1);
-        assert_eq!(spy.seen("tx_async"), 2, "shutdown owns the next read after the flush");
     }
 
     #[test]

@@ -10786,46 +10786,6 @@
       "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
      },
      {
-      "id": "P1175",
-      "name": "arm holds the timed-DSP gate through the flush ack (D9b-1a T3)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
-      "new": "        let channels = channel_list(set);\n        let _dsp = ();\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp"
-     },
-     {
-      "id": "P1176",
-      "name": "from-none enable holds the timed-DSP gate through the flush ack (D9b-1a T3)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
-      "new": "        let channels = channel_list(set);\n        let _dsp = ();\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp"
-     },
-     {
-      "id": "P1177",
-      "name": "the TX owner holds the timed-DSP gate through the flush ack (D9b-1a T3)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.close_device(Dir::Tx, k);",
-      "new": "        let channels = channel_list(set);\n        let _dsp = ();\n        let _reports = self.lock_tx_reports(k);\n        self.close_device(Dir::Tx, k);",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_22_tx_owner_reopen_waits_for_t3_flush_ack_before_timed_tx_dsp"
-     },
-     {
-      "id": "P1178",
-      "name": "shutdown cannot steal the open flush acknowledgement (D9b-1a T3)",
-      "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-      "old": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
-      "new": "        let channels = channel_list(set);\n        let _dsp = self.lock_tx_dsp(&channels);\n        let _reports = ();\n        self.open_tx_device_locked(k, set, &channels)",
-      "crate": "ezsdr-radio-uhd",
-      "test_bin": "lib",
-      "filter": "ur_22_t3_flush_ack_is_a_timed_dsp_barrier"
-     },
-     {
       "id": "P1179",
       "name": "T3 missing acknowledgements use one 100 ms deadline (D9b-1a T3)",
       "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
@@ -11426,16 +11386,6 @@
         "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
       },
       {
-        "id": "P1307",
-        "name": "a failed reopen enters Halted recovery and abandons its cursor (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "    fn reopen_failed(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Halted;\n    }",
-        "new": "    fn reopen_failed(&mut self) {\n        self.burst = DeviceBurst::Closed;\n        self.recovery = Recovery::Clean;\n    }",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "tx_chain_recovery_transitions"
-      },
-      {
         "id": "P1309",
         "name": "Provider::stop ends pending reopen work (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -11444,16 +11394,6 @@
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "tx_chain_recovery_transitions"
-      },
-      {
-        "id": "P1310",
-        "name": "a nonterminal failed reopen enters Halted at the owner call site (L2)",
-        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "                self.halt_failed_reopen(&mut streams, key);\n                self.chain.reopen_failed();\n                halted = true;",
-        "new": "                self.halt_failed_reopen(&mut streams, key);\n                self.chain.reopen_succeeded();\n                halted = true;",
-        "crate": "ezsdr-radio-uhd",
-        "test_bin": "lib",
-        "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
       },
       {
         "id": "P1311",
@@ -13500,5 +13440,35 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "start_rx_staged_values_are_read_back"
+  },
+  {
+    "id": "N-09",
+    "name": "the open-time flush takes no report gate, so shutdown can take its acknowledgement (UR-22, S2a-ii)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "let _reports = self.lock_tx_reports(k);\n        self.open_tx_device_locked(k, set, &channels)",
+    "new": "let _reports = ();\n        self.open_tx_device_locked(k, set, &channels)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_22_t3_flush_ack_is_not_taken_by_shutdown"
+  },
+  {
+    "id": "N-10",
+    "name": "the owner's reopen takes no report gate, so shutdown can take its acknowledgement (UR-22, S2a-ii)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "let _reports = self.lock_tx_reports(k);\n        self.close_device(Dir::Tx, k);",
+    "new": "let _reports = ();\n        self.close_device(Dir::Tx, k);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_22_t3_flush_ack_is_not_taken_by_shutdown"
+  },
+  {
+    "id": "N-11",
+    "name": "a failed nonterminal reopen does not mark the chain (UR-22, S2a-ii)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.chain.reopen_failed();\n                halted = true;",
+    "new": "halted = true;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
   }
 ]

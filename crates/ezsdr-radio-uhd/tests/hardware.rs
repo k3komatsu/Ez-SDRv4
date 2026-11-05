@@ -3080,10 +3080,10 @@ fn hw_n47_raw_control_call_durations() {
         );
     }
     let _ = drain(&*device);
-    rows.push(stats_row("rx_tune_auto_timed_with_samples", &timed_rx));
+    rows.push(stats_row("rx_tune_auto_with_command_time", &timed_rx));
     raw_rx(&*device, 1e6, hz);
     println!(
-        "n47 control calls: wall clock per call is setter + read-back/enqueue latency, not RF settling or timed execution; a timed transmit change is not measured (note 39 §1: untimed continuations do not drain the DUC)"
+        "n47 control calls: wall clock per call is setter + read-back/enqueue latency, except rx_tune_auto_with_command_time, which times UhdDevice::tune_auto with its command time (an instant ahead on the receive stream); none is RF settling or timed execution; a timed transmit change is not measured (note 39 §1: untimed continuations do not drain the DUC)"
     );
     for row in &rows {
         println!("n47 control calls {}: min {} median {} p99 {} max {} ns", row["call"], row["min_ns"], row["median_ns"], row["p99_ns"], row["max_ns"]);
@@ -3092,7 +3092,7 @@ fn hw_n47_raw_control_call_durations() {
         "hw_n47_raw_control_call_durations",
         (rows.len() * reps) as u32,
         serde_json::json!({
-            "note": "wall clock per call is the setter plus read-back/enqueue latency, not RF settling or timed execution",
+            "note": "wall clock per call is the setter plus read-back/enqueue latency, except rx_tune_auto_with_command_time, which times UhdDevice::tune_auto with its command time; none is RF settling or timed execution",
             "calls": rows,
         }),
     );

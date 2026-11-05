@@ -48,11 +48,6 @@ impl Channels {
         Channels(self.0 | mask(channel))
     }
 
-    /// The set without `channel` (RM-34).
-    pub fn without(self, channel: u32) -> Channels {
-        Channels(self.0 & !mask(channel))
-    }
-
     /// The channels in the set, smallest first.
     pub fn iter(self) -> impl Iterator<Item = u32> {
         (0..CHANNEL_LIMIT).filter(move |channel| self.contains(*channel))

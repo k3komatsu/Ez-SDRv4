@@ -1,0 +1,3 @@
+ur_22_t3_flush_ack_is_a_timed_dsp_barrier -> ur_22_t3_flush_ack_is_not_taken_by_shutdown
+ur_22_arm_waits_for_t3_flush_ack_before_timed_tx_dsp -> -
+ur_22_tx_owner_reopen_waits_for_t3_flush_ack_before_timed_tx_dsp -> -

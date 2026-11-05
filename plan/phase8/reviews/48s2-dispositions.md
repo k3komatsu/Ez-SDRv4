@@ -55,3 +55,11 @@ Sol: CODE OK, no findings. Self-review (Go DeepSeek; free refused): four adopted
 - Sol: CODE NEEDS CHANGES, one P2 — the deleted P4 test also pinned that case C closes and reopens the streamer and case A does not, independent of the FIFO. Fixed: `ur_24_d9_p4_c_closes_and_reopens_the_streamer_and_a_does_not` with an untimed tune; P1224 retargeted to it and killed.
 - Gate 1: FAIL, P1187 survived. Its killer observed the lost DUC header only through the removed FIFO (`dsp_pending`); the kept assertions do not change under the mutant. Fixed with an assertion on the DUC header (`tx_header`). Gate 2: PASS.
 - Orchestrator: KNOWN_LIMITATIONS KL-9 (Gone) notes that its FakeDevice FIFO test went in S2a-i-β.
+
+## S2a-ii code
+
+- Implementer's questions: `reopen_failed`'s `burst = Closed` kept as the contract (a no-op on reachable paths); the dead plan cursor `self.at` left to note 47 stage 4 (B4); bench.md:549 fixed in the fix round; KL-9 already annotated in β.
+- Self-review (Go DeepSeek; free refused): no P1/P2; a stale "Halted" message fixed.
+- Sol: CODE NEEDS CHANGES. P2: the reader-exclusion test killed N-09/N-10 only through the `is_held` precondition. P2: the failed-reopen branch never delivered a later burst. P3: bench.md described the renamed `tune_auto` row like the others. All fixed: a test-only `ClockMutex::queued()` checkpoint with behavioural assertions on both open paths; a later burst through `command`, released reservation, no clock, one UR-25 row and one COMMAND_REJECTED; bench.md T6.
+- Opus re-check: FIXES OK. N-09 and N-10 die at the behavioural assertion (3/3 each); 40/40 under CPU load; COMMAND_REJECTED is RM-25's observable. P3 for S2b: the shared reason text "its transmit clock was never started" does not fit a clock ended by a failed reopen.
+- Gate 1: FAIL, P1309 survived. `tx_chain_recovery_transitions` called `provider_stop` after `reopen_failed`, already `Clean` once `Halted` was folded. The orchestrator made the test call it from `ReopenNeeded`; P1309 killed. Gate 2: PASS.
