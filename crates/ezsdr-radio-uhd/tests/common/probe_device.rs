@@ -77,6 +77,24 @@ pub fn receive_sample_follows_start(start: &Json, sample: &Json) -> bool {
         && start["at"].as_i64().zip(sample["outcome"]["first_tick"].as_i64()).is_some_and(|(at, first)| first >= at)
 }
 
+/// Waits for the `start_index`th (0-based) `rx_start` and the first sample after it; `None` at `timeout`.
+pub fn wait_for_rx_start_and_sample(probe: &ProbeDevice, start_index: usize, timeout: Wall) -> Option<Json> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let rows = probe.rows();
+        let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index).cloned();
+        if let Some(start) = start {
+            if let Some(sample) = rows.iter().find(|row| receive_sample_follows_start(&start, row)).cloned() {
+                return Some(json!({ "rx_start": start, "rx_sample": sample }));
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Wall::from_millis(1));
+    }
+}
+
 impl Drop for ProbeDevice {
     fn drop(&mut self) {
         self.control_log.lock().unwrap().push("drop");

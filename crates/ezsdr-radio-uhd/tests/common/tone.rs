@@ -7,6 +7,12 @@
 /// Ticks of the master clock in a millisecond (200 MHz).
 const MS: i64 = 200_000;
 
+/// The master clock, in hertz.
+pub const MCR_HZ: f64 = 200_000_000.0;
+
+/// Ticks a sample at 1 Msps.
+pub const PER_1MSPS: i64 = 200;
+
 /// Ticks of a 25-sample window at 1 Msps.
 const SPAN: i64 = 25 * 200;
 
@@ -56,6 +62,12 @@ impl ToneReport {
 /// A window's coherence (the length of its summed lag-1 products over the sum of their lengths:
 /// 1 for a pure tone, about 1/√n for noise) and its frequency at 1 Msps.
 pub fn window_tone(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> (f64, f64) {
+    window_tone_at(w, PER_1MSPS)
+}
+
+/// `window_tone` at `ticks_per_sample` root ticks a sample (T4: the receive rate changes while the
+/// transmit tone's hertz stays the same).
+pub fn window_tone_at(w: &[(i64, ezsdr_radio_uhd::Iq)], ticks_per_sample: i64) -> (f64, f64) {
     let (mut re, mut im, mut norm) = (0.0f64, 0.0f64, 0.0f64);
     for pair in w.windows(2) {
         let (a, b) = (pair[0].1, pair[1].1);
@@ -64,7 +76,8 @@ pub fn window_tone(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> (f64, f64) {
         im += im_k;
         norm += re_k.hypot(im_k);
     }
-    (if norm > 0.0 { re.hypot(im) / norm } else { 0.0 }, im.atan2(re) / (2.0 * std::f64::consts::PI) * 1e6)
+    let hz = im.atan2(re) / (2.0 * std::f64::consts::PI) * (MCR_HZ / ticks_per_sample as f64);
+    (if norm > 0.0 { re.hypot(im) / norm } else { 0.0 }, hz)
 }
 
 /// Classifies `samples` (ticks of 200 a sample) around a burst `[burst_start, burst_end)` and a
@@ -106,7 +119,88 @@ pub fn classify_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], burst_start: i64, b
 /// The 25-sample windows of `samples` whose ticks are one spacing apart: a window that straddles a hole in the capture (the
 /// packets' timestamps jump across missing samples) is dropped.
 pub fn contiguous_windows(samples: &[(i64, ezsdr_radio_uhd::Iq)]) -> impl Iterator<Item = &[(i64, ezsdr_radio_uhd::Iq)]> {
-    samples.chunks_exact(25).filter(|w| w[24].0 - w[0].0 == 24 * 200)
+    contiguous_windows_at(samples, PER_1MSPS)
+}
+
+/// `contiguous_windows` at `ticks_per_sample` root ticks a sample (T4: a receive rate change).
+pub fn contiguous_windows_at(samples: &[(i64, ezsdr_radio_uhd::Iq)], ticks_per_sample: i64) -> impl Iterator<Item = &[(i64, ezsdr_radio_uhd::Iq)]> {
+    samples.chunks_exact(25).filter(move |w| w[24].0 - w[0].0 == 24 * ticks_per_sample)
+}
+
+/// The mean power of the 25-sample windows in `[from, to)`, at `ticks_per_sample` root ticks a sample: the noise a tone
+/// is looked for against, as `classify_tone` measures it; `None` when the stretch holds fewer than ten windows.
+pub fn window_power_at(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, to: i64, ticks_per_sample: i64) -> Option<f64> {
+    let span = 25 * ticks_per_sample;
+    let powers: Vec<f64> = contiguous_windows_at(samples, ticks_per_sample)
+        .filter(|w| w[0].0 >= from && w[0].0 + span <= to)
+        .map(|w| w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / 25.0)
+        .collect();
+    (powers.len() >= 10).then(|| powers.iter().sum::<f64>() / powers.len() as f64)
+}
+
+/// `window_power_at` at 1 Msps.
+pub fn window_power(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, to: i64) -> Option<f64> {
+    window_power_at(samples, from, to, PER_1MSPS)
+}
+
+/// One millisecond of a segment's tone: the median window frequency, the window furthest from that median (a wrong
+/// initial tone shows here even when a later majority is right) and the mean power.
+#[derive(Debug, PartialEq)]
+pub struct FirstMillisecond {
+    pub hz: f64,
+    pub worst_hz: f64,
+    pub power: f64,
+}
+
+/// The first millisecond of `samples` from `from`, at `ticks_per_sample` root ticks a sample: every 25-sample window
+/// that covers `[from, from + 1 ms)` from the window containing `from` through the window ending at or after
+/// `from + 1 ms` must be present, consecutive and coherent (over 0.5); `None` when the stretch is not fully covered
+/// this way (a missing beginning or ending is then not read as a tone).
+pub fn first_ms_tone(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, ticks_per_sample: i64) -> Option<FirstMillisecond> {
+    let span = 25 * ticks_per_sample;
+    let mut windows: Vec<(i64, f64, f64)> = contiguous_windows_at(samples, ticks_per_sample)
+        .filter(|w| w[0].0 + span > from && w[0].0 < from + MS)
+        .map(|w| {
+            let (coherence, hz) = window_tone_at(w, ticks_per_sample);
+            let power = w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / 25.0;
+            (w[0].0, coherence, hz, power)
+        })
+        .filter(|(_, coherence, _, _)| *coherence > 0.5)
+        .map(|(start, _, hz, power)| (start, hz, power))
+        .collect();
+    // The first window must already cover `from` (else the beginning is missing), the windows must be consecutive,
+    // and the last must reach `from + 1 ms` (else the end is missing).
+    if windows.first().is_none_or(|(start, ..)| *start > from) || windows.last().is_none_or(|(start, ..)| start + span < from + MS) || windows.windows(2).any(|pair| pair[1].0 != pair[0].0 + span) {
+        return None;
+    }
+    windows.sort_by_key(|(start, ..)| *start);
+    let mut freqs: Vec<f64> = windows.iter().map(|(_, hz, _)| *hz).collect();
+    freqs.sort_by(f64::total_cmp);
+    let hz = freqs[freqs.len() / 2];
+    let worst_hz = freqs.iter().fold(0.0f64, |worst, f| worst.max((f - hz).abs()));
+    let power = windows.iter().map(|(_, _, power)| *power).sum::<f64>() / windows.len() as f64;
+    Some(FirstMillisecond { hz, worst_hz, power })
+}
+
+/// The median frequency of `first_ms_tone`, or why there is none.
+pub fn first_ms_frequency(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, ticks_per_sample: i64) -> Option<f64> {
+    first_ms_tone(samples, from, ticks_per_sample).map(|first| first.hz)
+}
+
+/// What a receive segment's first millisecond says of a tone `expected_hz` from `origin`, at `ticks_per_sample` a sample:
+/// the stage-3 restart's evidence at the segment's first window (the tone comes with the segment, so only the first
+/// millisecond tells whether the configure settled before it). `floor` is the quiet power measured separately, never
+/// from an interval in which the receive was stopped; the loopback's delay is not read into this verdict.
+pub fn first_window_verdict(blocks: &[(i64, ezsdr_radio_uhd::Iq)], origin: i64, ticks_per_sample: i64, expected_hz: f64, tolerance_hz: f64, floor: f64) -> Verdict {
+    match first_ms_tone(blocks, origin, ticks_per_sample) {
+        Some(first) if first.power <= 4.0 * floor => Verdict::Fail(format!("the segment's first window power {:.3e} is not above 4 x the noise {floor:.3e}", first.power)),
+        Some(first) if (first.hz - expected_hz).abs() > tolerance_hz => Verdict::Fail(format!("the segment's first millisecond holds {:.0} Hz, not {expected_hz:.0} Hz", first.hz)),
+        Some(first) if first.worst_hz > tolerance_hz => {
+            Verdict::Fail(format!("a window of the first millisecond is {:.0} Hz from its median {:.0} Hz: the tone was not settled at the segment's beginning", first.worst_hz, first.hz))
+        }
+        Some(first) => Verdict::Pass(format!("every window of the segment's first millisecond holds the tone at {:.0} Hz, above 4 x the noise", first.hz)),
+        None => Verdict::Inconclusive("the segment's first millisecond is not covered by consecutive coherent windows from its beginning through its end".to_owned()),
+    }
 }
 
 /// Whether a move whose first shifted window starts at `at` is dated by the window before it, which starts at `before`: that
@@ -120,50 +214,6 @@ pub fn median_freq(freqs: &[(i64, f64)], from: i64, to: i64) -> Option<f64> {
     let mut f: Vec<f64> = freqs.iter().filter(|(t, _)| *t >= from && *t < to).map(|(_, f)| *f).collect();
     f.sort_by(f64::total_cmp);
     f.get(f.len() / 2).copied()
-}
-
-/// The first window that begins a run of three windows all more than 25 kHz off `base_hz` (`windows` are `(start, hz)` in
-/// order), and whether that move is dated: the base window before the run ends where the run begins.
-fn first_move(windows: &[(i64, f64)], base_hz: f64) -> Option<(i64, bool)> {
-    let i = windows.windows(3).position(|w| w.iter().all(|(_, hz)| (hz - base_hz).abs() > 25e3) && w[2].0 - w[0].0 == 2 * SPAN)?;
-    let dated = i > 0 && (windows[i - 1].1 - base_hz).abs() <= 25e3 && move_is_dated(windows[i - 1].0, windows[i].0);
-    Some((windows[i].0, dated))
-}
-
-/// What a receive segment (ticks `from`..`to`) shows of the 100 kHz tone: the base throughout when there is no change (`e` None);
-/// the base up to `e`, then 50 kHz, with the move dated and within 25 000 ticks of `e` when there is one.
-pub fn segment_tone_verdict(blocks: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, to: i64, e: Option<i64>) -> Verdict {
-    let freqs: Vec<(i64, f64)> = contiguous_windows(blocks)
-        .filter_map(|w| {
-            let (coherence, hz) = window_tone(w);
-            (coherence > 0.5).then_some((w[0].0, hz))
-        })
-        .collect();
-    let Some(base) = median_freq(&freqs, from + 5 * MS, e.unwrap_or(to) - MS) else {
-        return Verdict::Inconclusive("no coherent tone in the segment's windows before e".to_owned());
-    };
-    let inside: Vec<(i64, f64)> = freqs.iter().copied().filter(|(t, _)| (from..to).contains(t)).collect();
-    let moved = first_move(&inside, base);
-    let moved_at = moved.map(|(at, _)| at);
-    match e {
-        None if (base - 100e3).abs() <= 10e3 && moved.is_none() => Verdict::Pass(format!("the tone holds at {base:.0} Hz")),
-        None => Verdict::Fail(format!("the tone is at {base:.0} Hz and moved at {moved_at:?}, with no change applied in this segment")),
-        Some(e) => match median_freq(&freqs, e + 5 * MS, to - MS) {
-            None => Verdict::Inconclusive("no coherent tone after e".to_owned()),
-            Some(after) => {
-                let steady = (base - 100e3).abs() <= 10e3 && (after - 50e3).abs() <= 10e3;
-                match moved {
-                    Some((at, false)) if steady => {
-                        Verdict::Inconclusive(format!("the tone moved at {at} ticks, but samples are missing between its last base window and the first shifted one: the move is not dated"))
-                    }
-                    Some((at, true)) if steady && (at - e).abs() <= 25_000 => {
-                        Verdict::Pass(format!("{base:.0} Hz before e, {after:.0} Hz after it, the move {:.1} µs from e", (at - e) as f64 / 200.0))
-                    }
-                    _ => Verdict::Fail(format!("{base:.0} Hz before e, {after:.0} Hz after it, the move at {moved_at:?} for e {e}")),
-                }
-            }
-        },
-    }
 }
 
 /// `classify_tone`'s verdict for a probe's line: the move, or why there is none to report.
@@ -272,4 +322,62 @@ pub fn continuation_in_loopback(samples: &[(i64, ezsdr_radio_uhd::Iq)], start: i
         return Err(format!("INCONCLUSIVE: the continuation's interval was captured in only {covered} samples"));
     }
     Ok(samples.iter().filter(|(t, s)| *t >= next + 100 * 200 && *t < next + 2_000 * 200 && s[0].abs() + s[1].abs() > median / 2.0).count())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tone at `hz` sampled at `MCR_HZ / per` samples a second, from tick 0.
+    fn tone(per: i64, hz: f64, n: usize) -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        let rate = MCR_HZ / per as f64;
+        (0..n).map(|i| (i as i64 * per, [(0.4 * (2.0 * std::f64::consts::PI * hz * i as f64 / rate).cos()) as f32, (0.4 * (2.0 * std::f64::consts::PI * hz * i as f64 / rate).sin()) as f32])).collect()
+    }
+
+    #[test]
+    fn a_window_reads_its_hz_at_any_sample_rate() {
+        for per in [PER_1MSPS, 100, 20] {
+            let samples = tone(per, 100e3, 100);
+            let (coherence, hz) = window_tone_at(&samples[..25], per);
+            assert!(coherence > 0.999, "{per}: {coherence}");
+            assert!((hz - 100e3).abs() < 1.0, "{per}: {hz}");
+        }
+    }
+
+    #[test]
+    fn the_first_millisecond_verdict_reads_only_that_window() {
+        let origin = 20 * MS;
+        let quiet: Vec<(i64, ezsdr_radio_uhd::Iq)> = (0..origin / PER_1MSPS).map(|i| (i * PER_1MSPS, [0.0, 0.0])).collect();
+        let mut samples = quiet.clone();
+        samples.extend((0..20_000).map(|i| {
+            let phase = 2.0 * std::f64::consts::PI * 50e3 * i as f64 / 1e6;
+            (origin + i as i64 * PER_1MSPS, [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32])
+        }));
+        let floor = window_power_at(&samples, origin - 10 * MS, origin - 2 * MS, PER_1MSPS).expect("a quiet floor before the segment");
+        assert!(first_ms_frequency(&samples, origin, PER_1MSPS).is_some_and(|hz| (hz - 50e3).abs() < 1.0));
+        assert!(matches!(first_window_verdict(&samples, origin, PER_1MSPS, 50e3, 10e3, floor), Verdict::Pass(_)));
+        assert!(matches!(first_window_verdict(&samples, origin, PER_1MSPS, 100e3, 10e3, floor), Verdict::Fail(_)), "a wrong tone");
+        assert!(matches!(first_window_verdict(&samples, origin, PER_1MSPS, 50e3, 10e3, 1.0), Verdict::Fail(_)), "below the noise");
+        // The requested beginning missing: the capture starts 200 µs into the millisecond.
+        let missing_prefix: Vec<(i64, ezsdr_radio_uhd::Iq)> = samples.iter().copied().filter(|(tick, _)| *tick >= origin + 200 * PER_1MSPS).collect();
+        assert!(matches!(first_window_verdict(&missing_prefix, origin, PER_1MSPS, 50e3, 10e3, floor), Verdict::Inconclusive(_)), "a missing prefix");
+        // The requested end missing: only 900 µs of the millisecond were captured.
+        let missing_suffix: Vec<(i64, ezsdr_radio_uhd::Iq)> = samples.iter().copied().filter(|(tick, _)| *tick < origin + 900 * PER_1MSPS).collect();
+        assert!(matches!(first_window_verdict(&missing_suffix, origin, PER_1MSPS, 50e3, 10e3, floor), Verdict::Inconclusive(_)), "a missing suffix");
+        // The initial tone wrong for 200 µs while the rest is right: the majority's median is not enough.
+        let wrong_start: Vec<(i64, ezsdr_radio_uhd::Iq)> = samples
+            .iter()
+            .copied()
+            .map(|(tick, sample)| {
+                if (origin..origin + 200 * PER_1MSPS).contains(&tick) {
+                    let i = (tick - origin) / PER_1MSPS;
+                    let phase = 2.0 * std::f64::consts::PI * 100e3 * i as f64 / 1e6;
+                    (tick, [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32])
+                } else {
+                    (tick, sample)
+                }
+            })
+            .collect();
+        assert!(matches!(first_window_verdict(&wrong_start, origin, PER_1MSPS, 50e3, 10e3, floor), Verdict::Fail(_)), "a wrong initial tone");
+    }
 }

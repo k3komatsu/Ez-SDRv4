@@ -925,20 +925,27 @@ pub const COMPANION_RATE_HZ: u64 = 10_000_000;
 
 /// The condition row of a lead measured with a stream of `companion` running: the subject's stream at `rate_hz` and the companion's at `COMPANION_RATE_HZ`.
 pub fn companion_condition(id: &str, subject: Direction, rate_hz: u64, companion: Direction) -> Condition {
+    companion_condition_at(id, subject, rate_hz, companion, COMPANION_RATE_HZ)
+}
+
+/// `companion_condition` with the companion's rate read back from the device (note 47 stage 3's group requests it at
+/// connect and records the rate the clock then shows).
+pub fn companion_condition_at(id: &str, subject: Direction, rate_hz: u64, companion: Direction, companion_rate_hz: u64) -> Condition {
     Condition {
         id: id.to_owned(),
-        streams: vec![stream_condition(subject, 0, vec![0], rate_hz as f64), stream_condition(companion, 0, vec![0], COMPANION_RATE_HZ as f64)],
+        streams: vec![stream_condition(subject, 0, vec![0], rate_hz as f64), stream_condition(companion, 0, vec![0], companion_rate_hz as f64)],
         concurrent: vec![stream_ref(subject, 0), stream_ref(companion, 0)],
         reopened: false,
     }
 }
 
-/// What a companion stream did over a Run, for the record only: the Run-wide samples it moved and its faults. The numbers
-/// are not attributed to the trials of a lead or gap, so no value is decided from them.
-pub fn companion_observation(manifest: &Manifest, direction: Direction) -> Json {
+/// What a companion stream did over a Run, for the record only: the Run-wide samples it moved and its faults. The
+/// numbers are not attributed to the trials of a lead or gap, so no value is decided from them. `rate_hz` is the rate
+/// the group ran the companion at (the clock's read-back where the group read one).
+pub fn companion_observation(manifest: &Manifest, direction: Direction, rate_hz: u64) -> Json {
     let (stat, event) = if direction == Direction::Tx { ("tx_samples", "radio.TX_UNDERFLOW") } else { ("rx_samples", "radio.RX_OVERFLOW") };
     json!({
-        "observation_only": true, "direction": if direction == Direction::Tx { "tx" } else { "rx" }, "rate_hz": COMPANION_RATE_HZ,
+        "observation_only": true, "direction": if direction == Direction::Tx { "tx" } else { "rx" }, "rate_hz": rate_hz,
         "run_samples_moved": manifest.section(&common::usrp(), "ezsdr.radio.uhd.stats").and_then(|stats| stats.get(stat)).and_then(Json::as_u64),
         "faults": manifest.events.delivered.iter().filter(|row| row.kind.as_str() == event).count(),
         "note": "Run-wide counts, not attributed to the trials: the condition's candidates are recorded here and do not enter the value row, which stays from the solo conditions",

@@ -14,6 +14,7 @@ use ezsdr_kernel::coordinator::RunHandle;
 use ezsdr_kernel::id::ClockDomainId;
 use ezsdr_kernel::manifest::{ArtifactRef, Manifest};
 use ezsdr_kernel::run::{Lease, RunState};
+use ezsdr_kernel::session::SessionAction;
 use ezsdr_kernel::spec::{Ident, Key};
 use ezsdr_kernel::stream::{BurstEnd, Direction};
 use ezsdr_kernel::time::{SampleClockRecord, TimePoint};
@@ -2069,15 +2070,17 @@ pub fn run_raw_group_leased(lease: &mut DeviceLease, groups: &mut GroupRun, desc
 pub type ProviderMeasure = fn(Arc<dyn Device>, &MeasurementPlan) -> Result<MeasurementGroup, String>;
 
 /// The Provider groups in the order the record runs them, each with the value keys it supplies.
-pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static str]); 7] {
+pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static str]); 9] {
     [
         ("min_timed_command_lead", measure_min_timed_command_lead, &["radio.timing.min_timed_command_lead_ns"]),
         ("tx_in_flight", measure_tx_in_flight, &["radio.timing.tx_in_flight_ns"]),
+        ("rx_start_lead", measure_rx_start_lead, &["radio.timing.rx_start_lead_ns"]),
         ("rx_throughput", measure_rx_throughput, &["radio.perf.rx_bytes_per_s"]),
         ("overflow_restart_gap", measure_overflow_restart_gap, &[]),
         ("tx_throughput", measure_tx_throughput, &["radio.perf.tx_bytes_per_s"]),
         ("full_duplex", measure_full_duplex, &["radio.full_duplex", "radio.hardware_time"]),
         // The companion groups come after every group that decides a value, and carry no value key: a failure of one is its own.
+        ("rx_start_lead_with_tx", measure_rx_start_lead_with_tx, &[]),
         ("overflow_restart_gap_with_tx", measure_overflow_restart_gap_with_tx, &[]),
     ]
 }
@@ -2825,6 +2828,264 @@ pub fn measure_tx_in_flight(device: Arc<dyn Device>, plan: &MeasurementPlan) -> 
     })
 }
 
+/// The receive-restart conditions of note 47 stage 3: the values unchanged, and a retune across the board's
+/// 1 GHz tuning-path boundary on every restart (UBX `db_ubx.cpp:1153-1172`, OBX `obx_expert.cpp:293-300`;
+/// the endpoints are on opposite sides and never 1 GHz itself).
+const RX_START_LEAD_RETUNE_HZ: (f64, f64) = (999_500_000.0, 1_000_500_000.0);
+
+/// One restart of the receive start-lead group: the origin the Module booked (its registered SampleClock, not the device
+/// call), the device's `rx_start` tick, the first block after it, and the two reports that make the stage fail. `lead_left_ns`
+/// is the remaining lead at every candidate, from the configure record when it holds one, never only from the warning.
+#[derive(Clone, Debug)]
+struct RxStartTrial {
+    expected: Option<i64>,
+    origin: Option<i64>,
+    first_tick: Option<i64>,
+    started: bool,
+    late: bool,
+    short: bool,
+    lead_left_ns: Option<i64>,
+}
+
+/// Whether one restart of the group succeeded: no `LATE_COMMAND` and no `START_LEAD_SHORT`, the start issued, and both
+/// the device start and the first published block at the booked origin. A late-then-restarted start is a failure even
+/// though samples arrive. The first block at the booked origin is also the group's `GAP_BEFORE` check: the Sink sets that
+/// flag only when its first block starts after the requested origin, and the first device block exactly at the booked
+/// origin is the same fact, with no capture artifact (which would measure the Sink, not the restart).
+fn rx_start_trial_class(trial: &RxStartTrial) -> TrialClass {
+    if trial.late || trial.short {
+        TrialClass::ProviderFailure
+    } else if !trial.started || trial.expected.is_none() {
+        TrialClass::Incomplete
+    } else if trial.origin != trial.expected || trial.first_tick != trial.expected {
+        TrialClass::ProviderFailure
+    } else {
+        TrialClass::Success
+    }
+}
+
+/// One restart: a stream-scoped `Stop`, the condition's values (when `set_values`), then an untimed `start_rx`; waits
+/// until the start's first sample or the timeout, then for the SampleClock the Module registered for the restart.
+fn restart_trial(run: &mut RunHandle, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>) -> Result<RxStartTrial, String> {
+    let stop = run.submit(SessionAction::Stop { target: Some(super::resource("radio/rx/s0")) }, None).map_err(|error| error.to_string())?;
+    if !super::admitted(&stop) {
+        return Err(format!("the receive Stop was not admitted: {:?}", stop.outcome));
+    }
+    if let Some((frequency, gain)) = values {
+        for (key, value) in [("radio.rx.c0.frequency_hz", frequency), ("radio.rx.c0.gain_db", gain)] {
+            let entry = run.submit(super::set(key, ezsdr_kernel::spec::Value::num(value).ok_or("invalid receive value")?), None).map_err(|error| error.to_string())?;
+            if !super::admitted(&entry) {
+                return Err(format!("{key} was not admitted on the stopped stream: {:?}", entry.outcome));
+            }
+        }
+    }
+    let clocks_before = run.sample_clocks().len();
+    let start_index = probe.count("rx_start");
+    let start = run.submit(super::verb("start_rx", super::resource("radio/rx/s0"), None, &[]), None).map_err(|error| error.to_string())?;
+    if !super::admitted(&start) {
+        return Ok(RxStartTrial { expected: None, origin: None, first_tick: None, started: false, late: false, short: false, lead_left_ns: None });
+    }
+    super::wait(run, super::ms(i64::try_from(lead_ns / 1_000_000).map_err(|_| "receive lead exceeds i64 ms".to_owned())? + 60));
+    let got = super::probe_device::wait_for_rx_start_and_sample(probe, start_index, Wall::from_secs(2));
+    let (origin, first_tick) = match &got {
+        Some(row) => (row["rx_start"]["at"].as_i64(), row["rx_sample"]["outcome"]["first_tick"].as_i64()),
+        None => (None, None),
+    };
+    // The Module registers the restart's SampleClock at its first block (UR-17); its origin is the booked instant.
+    let mut expected = None;
+    let deadline = Instant::now() + Wall::from_secs(2);
+    while Instant::now() < deadline {
+        let clocks = run.sample_clocks();
+        if clocks.len() > clocks_before {
+            expected = clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()).and_then(|clock| clock.origin.ticks_in(clock.root).ok());
+            break;
+        }
+        std::thread::sleep(Wall::from_millis(1));
+    }
+    Ok(RxStartTrial { expected, origin, first_tick, started: origin.is_some(), late: false, short: false, lead_left_ns: None })
+}
+
+/// The tick a `LATE_COMMAND` or `START_LEAD_SHORT` payload names as the planned origin.
+fn requested_tick(event: &ezsdr_kernel::event::Event) -> Option<i64> {
+    event.payload["requested"]["ticks"].as_i64()
+}
+
+/// The remaining lead of one restart's configure, from the configure record: the start attempt's origin minus the last
+/// receive `applied` row's `at` before the booked origin (the SampleClock's), in nanoseconds. It is read whether or not
+/// a `START_LEAD_SHORT` warning was emitted, and can be negative when the configure ended after the attempt.
+fn configure_lead_left(manifest: &Manifest, before: Option<i64>, origin: Option<i64>, master_clock_hz: u64) -> Option<i64> {
+    let (before, origin) = (before?, origin?);
+    let completion = super::section(manifest, "applied")
+        .as_array()?
+        .iter()
+        .filter(|row| row["key"].as_str().is_some_and(|key| key.starts_with("radio.rx.")))
+        .filter_map(|row| row["at"]["ticks"].as_i64())
+        .filter(|at| *at < before)
+        .max()?;
+    i64::try_from((i128::from(origin) - i128::from(completion)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()
+}
+
+/// The companion group's Session: the profile's default asking plus `COMPANION_RATE_HZ` for the transmit stream at
+/// connect, and the rate the clock then reads back; a profile that cannot express the rate runs the companion at its
+/// default and says so.
+fn companion_session(device: Arc<dyn Device>, timing: ezsdr_radio::TimingEnvelope) -> Result<(RunHandle, super::TempDir, u64), String> {
+    let default_rate = 1_000_000;
+    let read_back = |run: &RunHandle| stream_clock(run, Direction::Tx).ok().map(|clock| clock.nominal_rate.num() / clock.nominal_rate.den());
+    match candidate_session_asking(device.clone(), timing, asking_with_companion_rate) {
+        Ok((run, dir)) => {
+            let rate = read_back(&run).unwrap_or(default_rate);
+            if rate != COMPANION_RATE_HZ {
+                println!("n47 start lead: the companion's transmit rate reads back {rate} S/s, not {COMPANION_RATE_HZ} S/s; its condition names the read-back");
+            }
+            Ok((run, dir, rate))
+        }
+        Err(error) => {
+            println!("n47 start lead: the transmit rate {COMPANION_RATE_HZ} S/s is not expressible at connect ({error}); the companion runs at the profile's default {default_rate} S/s");
+            let (run, dir) = candidate_session_asking(device, timing, super::rx0_tx0)?;
+            let rate = read_back(&run).unwrap_or(default_rate);
+            Ok((run, dir, rate))
+        }
+    }
+}
+/// The companion Session's initial asking: the transmit channel in stream 0 and `COMPANION_RATE_HZ` for its rate.
+fn asking_with_companion_rate(profile: &Json) -> ezsdr_kernel::session::InitialRequests {
+    let rate = ezsdr_kernel::spec::Scalar::try_from(COMPANION_RATE_HZ as f64).expect("a companion rate");
+    super::with_initial(super::rx0_tx0(profile), &[("radio.tx.s0.sample_rate_hz", rate)])
+}
+
+/// The receive `start_rx` start lead (UR-25, RM-6): for each candidate lead, restarts of a stopped stream with the
+/// values unchanged (`restart-same`) and across the board's 1 GHz tuning-path boundary on every restart
+/// (`restart-retune`); a stage succeeds only when no restart is late, reports a short lead, or begins off its booked
+/// origin.
+pub fn measure_rx_start_lead(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    rx_start_lead_group(device, plan, false)
+}
+
+/// The same group with a transmit stream repeating at `COMPANION_RATE_HZ` in the profile: its own group, an observation
+/// that decides no value, so that an error here never discards `measure_rx_start_lead`'s result.
+pub fn measure_rx_start_lead_with_tx(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
+    rx_start_lead_group(device, plan, true)
+}
+
+fn rx_start_lead_group(device: Arc<dyn Device>, plan: &MeasurementPlan, companion_group: bool) -> Result<MeasurementGroup, String> {
+    plan.validate()?;
+    if companion_group {
+        if let Some(skipped) = companion_inapplicable(&device, "provider_rx_start_lead_with_tx")? {
+            return Ok(skipped);
+        }
+    }
+    let mut condition_rows = Vec::new();
+    let mut candidates: BTreeMap<String, Vec<CandidateStage>> = BTreeMap::new();
+    let mut observation_stages = Vec::new();
+    let mut total = 0usize;
+    let (companion_bytes, _) = super::transmit_waveform(1_000);
+    let mut companion_rate = COMPANION_RATE_HZ;
+    for (retune, id) in [(false, "restart-same"), (true, "restart-retune")] {
+        let condition = if companion_group { format!("{id}-with-tx") } else { id.to_owned() };
+        let mut stages = Vec::new();
+        for value in &plan.rx_start_leads_ns {
+            let probe = Arc::new(super::probe_device::ProbeDevice::new(device.clone()));
+            probe.keep_rx_blocks();
+            let timing = candidate_timing("rx_start_lead_ns", *value)?;
+            let (mut run, _dir, rate) = if companion_group {
+                let (run, dir, rate) = companion_session(probe.clone(), timing)?;
+                (run, dir, rate)
+            } else {
+                let (run, dir) = candidate_session_asking(probe.clone(), timing, super::rx0)?;
+                (run, dir, 0)
+            };
+            if companion_group {
+                companion_rate = rate;
+            }
+            super::past_t0(&mut run, super::ms(100));
+            if companion_group {
+                super::past_tx_origin(&mut run);
+                start_repeat(&mut run, &companion_bytes)?;
+            }
+            // The setup restart puts the stream on the condition's first values; the trials then restart it.
+            let first_frequency = RX_START_LEAD_RETUNE_HZ.0;
+            let mut frequency = first_frequency;
+            let mut gain = 6.0;
+            let setup = restart_trial(&mut run, &probe, *value, Some((frequency, gain)))?;
+            if !setup.started {
+                return Err(format!("{condition} {value}: the setup restart did not begin"));
+            }
+            let mut trials = Vec::new();
+            for index in 0..plan.step_trials {
+                if retune {
+                    frequency = if frequency == RX_START_LEAD_RETUNE_HZ.0 { RX_START_LEAD_RETUNE_HZ.1 } else { RX_START_LEAD_RETUNE_HZ.0 };
+                    gain = if index % 2 == 0 { 3.0 } else { 6.0 };
+                }
+                let values = retune.then_some((frequency, gain));
+                trials.push(restart_trial(&mut run, &probe, *value, values)?);
+            }
+            let manifest = run.finish();
+            let late: Vec<i64> = super::events_of(&manifest, "radio.LATE_COMMAND").iter().filter_map(requested_tick).collect();
+            let short: Vec<(i64, i64)> = super::events_of(&manifest, "radio.START_LEAD_SHORT").iter().filter_map(|event| requested_tick(event).zip(event.payload["lead_left_ns"].as_i64())).collect();
+            let master_clock_hz = device.master_clock_rate();
+            for trial in &mut trials {
+                let short_event = trial.origin.and_then(|origin| short.iter().filter(|(at, _)| *at == origin).map(|(_, lead)| *lead).min());
+                if let Some(origin) = trial.origin {
+                    trial.late = late.contains(&origin);
+                }
+                trial.short = short_event.is_some();
+                // The remaining lead is recorded for every candidate, warning or not: from the configure record first,
+                // and from the warning's payload when the record holds no row.
+                trial.lead_left_ns = configure_lead_left(&manifest, trial.expected, trial.origin, master_clock_hz).or(short_event);
+            }
+            let classes: Vec<TrialClass> = trials.iter().map(rx_start_trial_class).collect();
+            let mut stage = candidate_stage_json(&condition, *value, &classes, &[]);
+            if let Some(rows) = stage["trials"].as_array_mut() {
+                for (row, trial) in rows.iter_mut().zip(&trials) {
+                    row["expected_origin"] = json!(trial.expected);
+                    row["origin"] = json!(trial.origin);
+                    row["first_tick"] = json!(trial.first_tick);
+                    row["started"] = json!(trial.started);
+                    row["late_command"] = json!(trial.late);
+                    row["start_lead_short"] = json!(trial.short);
+                    row["lead_left_ns"] = json!(trial.lead_left_ns);
+                }
+            }
+            stage["smallest_lead_left_ns"] = json!(trials.iter().filter_map(|trial| trial.lead_left_ns).min());
+            if companion_group {
+                stage["companion"] = companion_observation(&manifest, Direction::Tx, companion_rate);
+                stage["companion_rate_hz"] = json!(companion_rate);
+            }
+            observation_stages.push(stage);
+            stages.push(CandidateStage { value: *value, trials: classes });
+            total += plan.step_trials;
+        }
+        candidates.insert(condition.clone(), stages);
+        condition_rows.push(if companion_group { companion_condition_at(&condition, Direction::Rx, 1_000_000, Direction::Tx, companion_rate) } else { rx_condition(&condition, 1_000_000.0) });
+    }
+    if companion_group {
+        return Ok(MeasurementGroup {
+            conditions: condition_rows,
+            values: vec![],
+            observations: vec![observation(
+                "provider_rx_start_lead_with_tx",
+                "tests/hardware.rs::hw_measurements_record",
+                None,
+                observation_trials(total)?,
+                json!({ "observation_only": true, "interval_ns": plan.interval_ns, "candidates": observation_stages }),
+            )?],
+        });
+    }
+    let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
+    let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
+    Ok(MeasurementGroup {
+        conditions: condition_rows,
+        values: vec![measured],
+        observations: vec![observation(
+            "provider_rx_start_lead",
+            "tests/hardware.rs::hw_measurements_record",
+            None,
+            observation_trials(total)?,
+            json!({ "interval_ns": plan.interval_ns, "candidates": observation_stages }),
+        )?],
+    })
+}
+
 /// Submits a capture of `samples` at `target` on the output `rec`; whether the Session admitted it.
 fn capture_action(run: &mut RunHandle, target: TimePoint, samples: i64) -> Result<bool, String> {
     let entry =
@@ -3117,7 +3378,7 @@ pub fn measure_overflow_restart_gap_with_tx(device: Arc<dyn Device>, plan: &Meas
         let artifacts = serde_json::to_value(&manifest.artifacts).map_err(|error| error.to_string())?;
         let mut evidence = extract_overflow_trial(&events, &artifacts, &manifest.clocks.sample_clocks, rate_hz, plan.overflow_after_ms, stall_ms);
         evidence.class = if rejection.is_some() { TrialClass::AdmissionRejection } else { evidence.class };
-        trials.push((evidence, rejection, companion_observation(&manifest, Direction::Tx)));
+        trials.push((evidence, rejection, companion_observation(&manifest, Direction::Tx, COMPANION_RATE_HZ)));
     }
     let gap_ns: Vec<_> = trials.iter().filter(|(evidence, ..)| evidence.class == TrialClass::Success).filter_map(|(evidence, ..)| evidence.gap_ns).collect();
     Ok(MeasurementGroup {
@@ -3994,21 +4255,6 @@ fn capture_record(artifacts: &Json, clocks: &[SampleClockRecord], plan: &TrialPl
     Some(TrialRecord { samples, end_tick: plan.expected_end_tick })
 }
 
-fn effective_cold_lead_ns(manifest: &Manifest, plan: &TrialPlan, master_clock_hz: u64) -> Option<i64> {
-    let booked = plan.booked_tick?;
-    let timing = super::section(manifest, "timing").as_array()?;
-    let (row, booked_at) = timing
-        .iter()
-        .filter(|row| row["what"] == "cold_change" && row["key"] == "radio.rx.s0.sample_rate_hz")
-        .filter_map(|row| row["booked_at"].as_i64().map(|tick| (row, tick)))
-        .min_by_key(|(_, tick)| i128::from(*tick).abs_diff(i128::from(booked)))?;
-    let e = row["e"].as_i64()?;
-    let rx_clocks: Vec<_> = manifest.clocks.sample_clocks.iter().filter(|clock| clock.stream.to_string().ends_with("usrp/rx/s0")).collect();
-    let old_index = rx_clocks.iter().position(|clock| clock.ended_at.and_then(|ended| ended.ticks_in(clock.root).ok()) == Some(e))?;
-    let origin = rx_clocks.get(old_index + 1)?.origin.ticks_in(rx_clocks[old_index + 1].root).ok()?;
-    i64::try_from((i128::from(origin) - i128::from(booked_at)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()
-}
-
 fn observation_trials(trials: usize) -> Result<u32, String> {
     u32::try_from(trials).map_err(|_| "measurement observation exceeds the record's u32 trial limit".to_owned())
 }
@@ -4776,12 +5022,12 @@ mod tests {
         let stages = |failed: &[u64]| {
             [1, 2, 3].into_iter().map(|value| CandidateStage { value, trials: vec![if failed.contains(&value) { TrialClass::ProviderFailure } else { TrialClass::Success }; 2] }).collect()
         };
-        let candidates = BTreeMap::from([("cold-fast".to_owned(), stages(&[1])), ("cold-slow".to_owned(), stages(&[1, 2]))]);
+        let candidates = BTreeMap::from([("restart-same".to_owned(), stages(&[1])), ("restart-retune".to_owned(), stages(&[1, 2]))]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, 2).unwrap();
         let measured = numeric_value("radio.timing.rx_start_lead_ns", &summary, &candidates, 2, "tests/hardware.rs::hw_measurements_record").unwrap();
         assert!(matches!(measured, ValueRecord::Measured {
             key, worst: model::Worst::Number(3.0), trials: 2, condition, test
-        } if key.as_str() == "radio.timing.rx_start_lead_ns" && condition == "cold-slow"
+        } if key.as_str() == "radio.timing.rx_start_lead_ns" && condition == "restart-retune"
             && test == "tests/hardware.rs::hw_measurements_record"));
 
         let rates = [10_000_000, 20_000_000, 40_000_000];
@@ -4796,6 +5042,60 @@ mod tests {
         assert!(matches!(measured, ValueRecord::Measured {
             key, worst: model::Worst::Number(40.0), trials: 1, condition, ..
         } if key.as_str() == "radio.perf.rx_bytes_per_s" && condition == "rx-20msps"));
+    }
+
+    #[test]
+    fn rx_start_lead_group_runs_on_the_fake() {
+        // One configure delay, three candidates: the rehearsal holds a LATE candidate and a SHORT one as well as
+        // successful ones (the two conditions configure different amounts), and every trial records its remaining
+        // lead from the configure record, warning or not.
+        let mut plan = MeasurementPlan::rehearsal();
+        plan.rx_start_leads_ns = vec![3_000_000, 5_000_000, 10_000_000];
+        let device = super::super::fake_real(ezsdr_radio_uhd::FakeConfig { apply_delay: Wall::from_millis(8), ..ezsdr_radio_uhd::FakeConfig::default() });
+        let group = measure_rx_start_lead(device, &plan).unwrap();
+        let row = group.observations.iter().find(|row| row.name == "provider_rx_start_lead").expect("the group's observation");
+        let stages = row.result["candidates"].as_array().expect("the candidate stages");
+        let conditions: Vec<&str> = stages.iter().map(|stage| stage["condition"].as_str().unwrap()).collect();
+        assert_eq!(conditions, ["restart-same"; 3].into_iter().chain(["restart-retune"; 3]).collect::<Vec<_>>());
+        assert!(stages.iter().any(|stage| stage["trials"][0]["late_command"] == true), "a LATE candidate: {stages:?}");
+        assert!(stages.iter().any(|stage| stage["trials"][0]["start_lead_short"] == true), "a SHORT candidate: {stages:?}");
+        for condition in ["restart-same", "restart-retune"] {
+            let successful = stages
+                .iter()
+                .find(|stage| stage["condition"].as_str() == Some(condition) && stage["candidate"].as_u64() == Some(10_000_000))
+                .unwrap_or_else(|| panic!("{condition} 10000000: {stages:?}"));
+            assert_eq!(successful["classes"]["Success"].as_u64(), Some(1), "the 10 ms candidate passes: {successful:?}");
+            assert!(
+                successful["smallest_lead_left_ns"].as_i64().is_some_and(|ns| ns >= 5_000_000),
+                "the successful candidate's remaining lead is origin minus the configure's completion: {successful:?}"
+            );
+        }
+        for stage in stages {
+            for trial in stage["trials"].as_array().expect("trials") {
+                assert!(trial["lead_left_ns"].as_i64().is_some(), "every trial records its remaining lead: {trial:?}");
+            }
+        }
+        assert!(matches!(&group.values[0], ValueRecord::Measured { worst: model::Worst::Number(ns), .. } if *ns == 10_000_000.0), "{:?}", group.values);
+    }
+
+    #[test]
+    fn a_restart_trial_fails_on_a_late_or_short_start_or_an_origin_it_missed() {
+        let trial = |expected, origin, first_tick, started, late, short| RxStartTrial { expected, origin, first_tick, started, late, short, lead_left_ns: None };
+        assert_eq!(rx_start_trial_class(&trial(Some(10), Some(10), Some(10), true, false, false)), TrialClass::Success);
+        assert_eq!(rx_start_trial_class(&trial(Some(10), Some(10), Some(10), true, true, false)), TrialClass::ProviderFailure);
+        assert_eq!(rx_start_trial_class(&trial(Some(10), Some(10), Some(10), true, false, true)), TrialClass::ProviderFailure);
+        assert_eq!(rx_start_trial_class(&trial(None, None, None, false, false, false)), TrialClass::Incomplete);
+        // 1 ms = 200 000 ticks: a start the Module planned at O but issued at O + 1 ms fails, whether the device's
+        // start or the first published block is the shifted one.
+        assert_eq!(rx_start_trial_class(&trial(Some(10_000), Some(210_000), Some(210_000), true, false, false)), TrialClass::ProviderFailure);
+        assert_eq!(rx_start_trial_class(&trial(Some(10_000), Some(10_000), Some(210_000), true, false, false)), TrialClass::ProviderFailure);
+        assert_eq!(
+            rx_start_trial_class(&trial(Some(10_000), Some(210_000), Some(10_000), true, false, false)),
+            TrialClass::ProviderFailure,
+            "the device start is shifted while the first block is not"
+        );
+        // No booked SampleClock to judge against is incomplete, not a pass.
+        assert_eq!(rx_start_trial_class(&trial(None, Some(10_000), Some(10_000), true, false, false)), TrialClass::Incomplete);
     }
 
     #[test]

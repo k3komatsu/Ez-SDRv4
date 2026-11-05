@@ -1,0 +1,6 @@
+# Tests dropped with note 47 stage 3's deleted behaviour (2026-11-05).
+# hw_p4_... and hw_l1_... submitted a receive change during a Run (a Spec schedule update or a held tune), which
+# stage 2 removed: a radio value has no update class during a Run, and stage 3 re-introduces it only on a stopped
+# stream. hw_d9_p4_ddc_entry_after_an_early_stop stays: it drives the raw Device, not the Module.
+hw_p4_rx_timed_tune_then_early_stop -> -
+hw_l1_held_rx_tune_applies_when_its_segment_streams -> -

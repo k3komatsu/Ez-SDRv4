@@ -35,6 +35,7 @@ mod watchdog;
 pub use watchdog::watch;
 pub mod d9;
 pub mod measurement;
+pub mod n47;
 pub mod observations;
 pub mod probe_device;
 pub mod tone;

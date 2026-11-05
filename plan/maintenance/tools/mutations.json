@@ -10280,8 +10280,8 @@
    "id": "P994",
    "name": "the tone threshold ignores the noise power floor (probe classifier)",
    "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
-   "old": "4.0 * floor",
-   "new": "0.0",
+   "old": "let threshold = floor.map_or(0.0, |floor| 4.0 * floor);",
+   "new": "let threshold = floor.map_or(0.0, |floor| 0.0);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
@@ -13518,5 +13518,415 @@
       "old": " or not isinstance(key, (int, str))",
       "new": "",
       "python": "test_easy_api.StartValues.test_ea_16_start_checks_everything_before_sending"
+    },
+    {
+      "id": "N47B-01",
+      "name": "rx rate: the applied rate's comparison inverted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if (applied - asked).abs() > asked.abs() * 1e-9 + 1e-6 {\n        return Verdict::Fail(format!(\"the device read back {applied} S/s for the asked {asked} S/s\"));\n    }\n    let new: Vec<&(i64, usize)> = blocks.iter().filter(|(tick, _)| *tick >= planned).collect();",
+      "new": "    if (applied - asked).abs() < asked.abs() * 1e-9 + 1e-6 {\n        return Verdict::Fail(format!(\"the device read back {applied} S/s for the asked {asked} S/s\"));\n    }\n    let new: Vec<&(i64, usize)> = blocks.iter().filter(|(tick, _)| *tick >= planned).collect();",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_rate_change_reads_back_starts_at_its_tick_and_steps_by_the_new_rate"
+    },
+    {
+      "id": "N47B-02",
+      "name": "rx rate: a first block off the planned start passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        return Verdict::Fail(format!(\"the first block is at {} for the planned start {planned}\", first.0));",
+      "new": "        return Verdict::Pass(format!(\"the first block is at {} for the planned start {planned}\", first.0));",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_rate_change_reads_back_starts_at_its_tick_and_steps_by_the_new_rate"
+    },
+    {
+      "id": "N47B-03",
+      "name": "rx rate: the block spacing check inverted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        if pair[1].0 != expected {\n            return Verdict::Fail(format!(\"a block begins at {} where the block before it ends at {expected}\", pair[1].0));\n        }\n    }\n    match tone {",
+      "new": "        if pair[1].0 == expected {\n            return Verdict::Fail(format!(\"a block begins at {} where the block before it ends at {expected}\", pair[1].0));\n        }\n    }\n    match tone {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_rate_change_reads_back_starts_at_its_tick_and_steps_by_the_new_rate"
+    },
+    {
+      "id": "N47B-04",
+      "name": "rx rate: any tone passes the tone comparison",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        Some(hz) if (hz - tone_hz).abs() <= TONE_TOLERANCE_HZ => Verdict::Pass(format!(\"{applied} S/s, blocks at {per} ticks a sample, the tone at {hz:.0} Hz\")),",
+      "new": "        Some(hz) if true => Verdict::Pass(format!(\"{applied} S/s, blocks at {per} ticks a sample, the tone at {hz:.0} Hz\")),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_rate_change_reads_back_starts_at_its_tick_and_steps_by_the_new_rate"
+    },
+    {
+      "id": "N47B-05",
+      "name": "rx rate: the one-open check removed",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if opens != 1 {\n        return Verdict::Fail(format!(\"the probe opened the receive streamer {opens} times, not once\"));\n    }",
+      "new": "    if false {\n        return Verdict::Fail(format!(\"the probe opened the receive streamer {opens} times, not once\"));\n    }",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_rate_change_reads_back_starts_at_its_tick_and_steps_by_the_new_rate"
+    },
+    {
+      "id": "N47B-06",
+      "name": "tx rate: an ACK past the burst end's window is accepted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    delta >= -2 * per && delta <= 1",
+      "new": "    delta >= -2 * per && delta <= 2",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
+    },
+    {
+      "id": "N47B-07",
+      "name": "tx rate: any B onset passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    match (b_onset, b_expected_onset) {\n        (Some(onset), Some(expected)) if (onset - expected).abs() <= onset_tolerance_ticks => {}\n        (Some(onset), Some(expected)) => return Verdict::Fail(format!(\"B starts at {onset} for the expected {expected} (the control burst's delay included)\")),",
+      "new": "    match (b_onset, b_expected_onset) {\n        (Some(onset), Some(expected)) if true => {}\n        (Some(onset), Some(expected)) => return Verdict::Fail(format!(\"B starts at {onset} for the expected {expected} (the control burst's delay included)\")),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
+    },
+    {
+      "id": "N47B-08",
+      "name": "tx rate: TIME_ERROR and underflow ignored",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if time_errors > 0 || underflows > 0 {",
+      "new": "    if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
+    },
+    {
+      "id": "N47B-09",
+      "name": "tail: a truncated tail's power passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "tail.is_some_and(|hz| (hz - a_tone).abs() <= TONE_TOLERANCE_HZ) && ratio.is_some_and(|ratio| (min_ratio..=max_ratio).contains(&ratio))",
+      "new": "tail.is_some_and(|hz| (hz - a_tone).abs() <= TONE_TOLERANCE_HZ) && ratio.is_some()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_setting_after_the_burst_end_leaves_the_tail_or_the_control_shows_the_hazard"
+    },
+    {
+      "id": "N47B-10",
+      "name": "tail: a move before e counts as intact",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "ratio.is_some_and(|ratio| (min_ratio..=max_ratio).contains(&ratio)) && move_at.is_none_or(|at| at >= e);",
+      "new": "ratio.is_some_and(|ratio| (min_ratio..=max_ratio).contains(&ratio)) && true;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_setting_after_the_burst_end_leaves_the_tail_or_the_control_shows_the_hazard"
+    },
+    {
+      "id": "N47B-11",
+      "name": "call stats: p99 reports the maximum",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "Some(CallStats { min_ns: sorted[0], median_ns: sorted[sorted.len() / 2], p99_ns: sorted[last * 99 / 100], max_ns: sorted[last] })",
+      "new": "Some(CallStats { min_ns: sorted[0], median_ns: sorted[sorted.len() / 2], p99_ns: sorted[last], max_ns: sorted[last] })",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "call_stats_order_and_percentile"
+    },
+    {
+      "id": "N47B-12",
+      "name": "buffer bracket: the shortest overflow is the longest overflowing stall",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    let Some(&shortest_overflow_ms) = overflowed.first() else {",
+      "new": "    let Some(&shortest_overflow_ms) = overflowed.last() else {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_buffer_bracket_reports_its_two_ends_or_the_trial_that_saw_an_overflow"
+    },
+    {
+      "id": "N47B-13",
+      "name": "streaming value: no refusal passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        1 => Verdict::Pass(\"one radio.COMMAND_REJECTED names the Action\".to_owned()),",
+      "new": "        0 => Verdict::Pass(\"one radio.COMMAND_REJECTED names the Action\".to_owned()),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_stage_three_verdicts_name_their_failure"
+    },
+    {
+      "id": "N47B-14",
+      "name": "restart origin: a device start after the booked origin passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        Some(at) if at == expected => {}",
+      "new": "        Some(at) if at >= expected => {}",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_stage_three_verdicts_name_their_failure"
+    },
+    {
+      "id": "N47B-15",
+      "name": "read-back: the read-back and its difference are not compared",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        (Some(claimed), Some(read_back), Some(difference)) if claimed == asked && read_back == asked && difference == 0.0 => {",
+      "new": "        (Some(claimed), Some(read_back), Some(difference)) if claimed == asked => {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_stage_three_verdicts_name_their_failure"
+    },
+    {
+      "id": "N47B-16",
+      "name": "continuity: the spacing check inverted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        if pair[1].0 != expected {\n            return Verdict::Fail(format!(\"a block begins at {} where the block before it ends at {expected}\", pair[1].0));\n        }\n    }\n    if inside.is_empty()",
+      "new": "        if pair[1].0 == expected {\n            return Verdict::Fail(format!(\"a block begins at {} where the block before it ends at {expected}\", pair[1].0));\n        }\n    }\n    if inside.is_empty()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "continuity_and_the_hold_verdict_read_a_hole_and_a_moved_tone"
+    },
+    {
+      "id": "N47B-17",
+      "name": "hold: any tone passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        Some(hz) if (hz - expected_hz).abs() <= TONE_TOLERANCE_HZ => Verdict::Pass(format!(\"the tone holds at {hz:.0} Hz\")),",
+      "new": "        Some(hz) if true => Verdict::Pass(format!(\"the tone holds at {hz:.0} Hz\")),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "continuity_and_the_hold_verdict_read_a_hole_and_a_moved_tone"
+    },
+    {
+      "id": "N47B-18",
+      "name": "start-lead trial: a START_LEAD_SHORT trial succeeds",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+      "old": "    if trial.late || trial.short {\n        TrialClass::ProviderFailure",
+      "new": "    if trial.late {\n        TrialClass::ProviderFailure",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_restart_trial_fails_on_a_late_or_short_start_or_an_origin_it_missed"
+    },
+    {
+      "id": "N47B-19",
+      "name": "start-lead group: a late restart is not marked late",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+      "old": "                    trial.late = late.contains(&origin);",
+      "new": "                    trial.late = false;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "rx_start_lead_group_runs_on_the_fake"
+    },
+    {
+      "id": "N47B-20",
+      "name": "first window: a wrong tone passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "        Some(first) if (first.hz - expected_hz).abs() > tolerance_hz => Verdict::Fail(format!(\"the segment's first millisecond holds {:.0} Hz, not {expected_hz:.0} Hz\", first.hz)),",
+      "new": "        Some(first) if false => Verdict::Fail(format!(\"the segment's first millisecond holds {:.0} Hz, not {expected_hz:.0} Hz\", first.hz)),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_first_millisecond_verdict_reads_only_that_window"
+    },
+    {
+      "id": "N47B-21",
+      "name": "late-command verdict: any count passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "if late_commands == 0 { Verdict::Pass",
+      "new": "if late_commands >= 0 { Verdict::Pass",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_stage_three_verdicts_name_their_failure"
+    },
+    {
+      "id": "N47B-22",
+      "name": "start-lead value: no candidate passes is a pass",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        None => Verdict::Inconclusive(format!(\"no candidate lead passed: {}\", reason.unwrap_or(\"no reason recorded\"))),",
+      "new": "        None => Verdict::Pass(format!(\"no candidate lead passed: {}\", reason.unwrap_or(\"no reason recorded\"))),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_stage_three_verdicts_name_their_failure"
+    },
+    {
+      "id": "N47B-23",
+      "name": "rx rate: a failed drain still changes the rate",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if !drained {",
+      "new": "    if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_receive_rate_change_reads_back_starts_at_its_tick_and_steps_by_the_new_rate"
+    },
+    {
+      "id": "N47B-24",
+      "name": "first window: a missing ending is still a coverage",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "        || windows.last().is_none_or(|(start, ..)| start + span < from + MS)",
+      "new": "        || false",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_first_millisecond_verdict_reads_only_that_window"
+    },
+    {
+      "id": "N47B-25",
+      "name": "first window: a wrong initial tone passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "        Some(first) if first.worst_hz > tolerance_hz => {",
+      "new": "        Some(first) if false => {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_first_millisecond_verdict_reads_only_that_window"
+    },
+    {
+      "id": "N47B-26",
+      "name": "first window: a window below the noise passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "        Some(first) if first.power <= 4.0 * floor => Verdict::Fail(format!(\"the segment's first window power {:.3e} is not above 4 x the noise {floor:.3e}\", first.power)),",
+      "new": "        Some(first) if false => Verdict::Fail(format!(\"the segment's first window power {:.3e} is not above 4 x the noise {floor:.3e}\", first.power)),",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_first_millisecond_verdict_reads_only_that_window"
+    },
+    {
+      "id": "N47B-27",
+      "name": "first window: a missing beginning is still a coverage",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "    if windows.first().is_none_or(|(start, ..)| *start > from)",
+      "new": "    if false",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_first_millisecond_verdict_reads_only_that_window"
+    },
+    {
+      "id": "N47B-28",
+      "name": "restart origin: a first block after the booked origin passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        Some(first) if first == expected => {}",
+      "new": "        Some(first) if first >= expected => {}",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_stage_three_verdicts_name_their_failure"
+    },
+    {
+      "id": "N47B-29",
+      "name": "tail: a control issued after e is still the control",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "        if issued >= e || returned >= e {",
+      "new": "        if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_setting_after_the_burst_end_leaves_the_tail_or_the_control_shows_the_hazard"
+    },
+    {
+      "id": "N47B-30",
+      "name": "tail: a non-negative trial issued before e passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if issued < e {",
+      "new": "    if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_setting_after_the_burst_end_leaves_the_tail_or_the_control_shows_the_hazard"
+    },
+    {
+      "id": "N47B-31",
+      "name": "tail: a gain trial's B power is not compared",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "            (Some(b_power), Some((_, steady))) if steady > 0.0 && (low..=high).contains(&(b_power / steady)) => {}",
+      "new": "            (Some(b_power), Some((_, steady))) if steady > 0.0 => {}",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_setting_after_the_burst_end_leaves_the_tail_or_the_control_shows_the_hazard"
+    },
+    {
+      "id": "N47B-32",
+      "name": "drain: two timeouts with a packet between them are quiet",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    events.len() >= 2 && events[events.len() - 2..].iter().all(|event| event == \"Timeout\")",
+      "new": "    events.len() >= 2",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_drain_is_quiet_only_after_two_timeouts_with_no_packet_between_them"
+    },
+    {
+      "id": "N47B-33",
+      "name": "buffer stall: a drain that does not span the stall is a NoOverflow",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if first > stall_start.saturating_add(slack_ticks) || end.saturating_add(slack_ticks) < stall_end {",
+      "new": "    if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_buffer_stall_counts_only_when_it_overflowed_or_the_drain_spans_the_stall"
+    },
+    {
+      "id": "N47B-34",
+      "name": "restarted stream: a first block off the start is accepted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    if first.0 != start {",
+      "new": "    if false {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_restarted_stream_needs_its_start_and_an_unbroken_run_through_the_progress_target"
+    },
+    {
+      "id": "N47B-35",
+      "name": "burst send: the closing samples are sent in the payload",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    Some(BurstSend { offset, len: chunk.min(remaining - 2), eob: false, padded: false })",
+      "new": "    Some(BurstSend { offset, len: chunk.min(remaining), eob: false, padded: false })",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_burst_send_keeps_a_two_sample_closing_send_after_a_short_acceptance"
+    },
+    {
+      "id": "N47B-36",
+      "name": "start-lead group: the remaining lead's sign is inverted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+      "old": "    i64::try_from((i128::from(origin) - i128::from(completion)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()",
+      "new": "    i64::try_from((i128::from(completion) - i128::from(origin)) * 1_000_000_000 / i128::from(master_clock_hz)).ok()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "rx_start_lead_group_runs_on_the_fake"
+    },
+    {
+      "id": "N47B-37",
+      "name": "start-lead trial: a device start off the booked origin passes",
+      "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
+      "old": "    } else if trial.origin != trial.expected || trial.first_tick != trial.expected {",
+      "new": "    } else if trial.first_tick != trial.expected {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_restart_trial_fails_on_a_late_or_short_start_or_an_origin_it_missed"
+    },
+    {
+      "id": "N47B-38",
+      "name": "tx rate: an ACK before the burst end's window is accepted",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "    delta >= -2 * per && delta <= 1",
+      "new": "    delta >= -3 * per && delta <= 1",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
+    },
+    {
+      "id": "N47B-39",
+      "name": "tail: the tail's power bound is ±0.5 dB, not ±1 dB",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "pub const TAIL_POWER_DB: f64 = 1.0;",
+      "new": "pub const TAIL_POWER_DB: f64 = 0.5;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_setting_after_the_burst_end_leaves_the_tail_or_the_control_shows_the_hazard"
+    },
+    {
+      "id": "N47B-40",
+      "name": "burst ACK count: every ACK tick in any window is counted for a burst",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "report.code == ezsdr_radio_uhd::TxCode::BurstAck && report.tick.is_some_and(|tick| (from..=to).contains(&tick))",
+      "new": "report.code == ezsdr_radio_uhd::TxCode::BurstAck && report.tick.is_some()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_burst_ack_confirms_an_end_only_inside_its_window_and_once_per_burst"
+    },
+    {
+      "id": "N47B-41",
+      "name": "transmit rate verdict: B's ACK not read is INCONCLUSIVE, not a FAIL",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "if b_acks == 0 {",
+      "new": "if b_acks == 99 {",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_transmit_rate_change_needs_the_ack_the_two_tones_and_b_the_loop_delay"
     }
   ]

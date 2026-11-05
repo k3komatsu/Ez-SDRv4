@@ -16,7 +16,8 @@ use ezsdr_kernel::time::{ClockRegistry, TimePoint};
 use ezsdr_radio_uhd::{Device, DeviceAuthority, Dir, Settings, UhdRadio};
 use serde_json::Value as Json;
 
-use common::tone::{Verdict, classify_tone, continuation_in_loopback, median_freq, segment_tone_verdict, tone_verdict};
+use common::probe_device::wait_for_rx_start_and_sample;
+use common::tone::{Verdict, classify_tone, continuation_in_loopback, median_freq, tone_verdict, window_power, window_power_at};
 use common::*;
 
 fn args() -> String {
@@ -368,6 +369,8 @@ struct Read {
     blocks: Vec<(i64, usize)>,
     samples: Vec<(i64, ezsdr_radio_uhd::Iq)>,
     other: Vec<(i64, String)>,
+    /// Every outcome in order, samples as `"samples"`: the quiet interval is counted over this, not over `other`.
+    events: Vec<String>,
 }
 
 impl Read {
@@ -390,19 +393,33 @@ fn read_on(device: &dyn Device, k: usize, limit: Wall, keep: Option<i64>, until:
         match device.rx_recv(k, 2_000, Wall::from_millis(100), false) {
             ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
                 out.blocks.push((first_tick, samples[0].len()));
+                out.events.push("samples".to_owned());
                 if let Some(per) = keep {
                     out.samples.extend(samples[0].iter().enumerate().map(|(i, s)| (first_tick + i as i64 * per, *s)));
                 }
             }
-            other => out.other.push((device.time_now().unwrap_or(-1), format!("{other:?}"))),
+            other => {
+                out.events.push(format!("{other:?}"));
+                out.other.push((device.time_now().unwrap_or(-1), format!("{other:?}")));
+            }
         }
     }
     out
 }
 
-/// Reads until two timeouts in a row: the stream has stopped.
-fn drain(device: &dyn Device) -> Read {
-    read(device, Wall::from_secs(3), None, |r| r.other.len() >= 2 && r.other[r.other.len() - 2..].iter().all(|(_, o)| o == "Timeout"))
+/// A drain's result: what was read, and whether the stream reached a quiet interval (two timeouts in a row with no
+/// packet between them) before the limit. A drain that ran out of time is not quiet.
+#[derive(Default, Debug)]
+struct Drain {
+    read: Read,
+    quiet: bool,
+}
+
+/// Reads until two consecutive timeouts: the stream has stopped. The quiet count resets on every packet.
+fn drain(device: &dyn Device) -> Drain {
+    let read = read(device, Wall::from_secs(3), None, |r| n47::drain_quiet(&r.events));
+    let quiet = n47::drain_quiet(&read.events);
+    Drain { read, quiet }
 }
 
 #[test]
@@ -421,15 +438,15 @@ fn hw_b8_raw_rx_timed_stop() {
         device.rx_stop(0, if lead_ms == 0 { None } else { Some(at) }).unwrap();
         let issued = device.time_now().unwrap();
         let after = drain(&*device);
-        let end = after.end(200).or(before.end(200)).unwrap();
+        let end = after.read.end(200).or(before.end(200)).unwrap();
         println!(
             "B8 rx stop lead {lead_ms} ms: first block {:?} (start {start}); stop issued at {issued_before}…{issued} for {}; last sample end {end}: {:+.3} ms from the issue, {:+.3} ms from the stop's time; after the stop: {} blocks, {:?}",
             before.blocks.first(),
             if lead_ms == 0 { "now".to_owned() } else { at.to_string() },
             (end - issued) as f64 / TICKS_PER_MS as f64,
             (end - at) as f64 / TICKS_PER_MS as f64,
-            after.blocks.len(),
-            after.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>()
+            after.read.blocks.len(),
+            after.read.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>()
         );
     }
 }
@@ -693,7 +710,8 @@ fn hw_b8_raw_in_flight_window() {
 
 // Parked (note 47 stage 2): `hw_b8_cold_change_capture`, `hw_b8_cold_change_capture_low_rate` and
 // `hw_b8_cold_change_timing_at_the_extremes` measured a receive rate change during a Run, which no longer exists.
-// Stage 3's `start_rx` start-lead measurement takes their place.
+// The restored receive start-lead group takes their place: `measurement::measure_rx_start_lead` and its
+// `_with_tx` companion, run by `hw_n47_rx_start_lead_group` and by `hw_measurements_record`.
 
 // ---------------------------------------------------------------- B8 through the Module
 
@@ -952,17 +970,6 @@ fn first_steps(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, n: usize) -> V
             format!("{:.0}", step / (2.0 * std::f64::consts::PI) * 1e6)
         })
         .collect()
-}
-
-/// The mean power of the 25-sample windows in `[from, to)`: the noise a tone is looked for against,
-/// as `classify_tone` measures it; `None` when the stretch holds fewer than ten windows.
-fn window_power(samples: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, to: i64) -> Option<f64> {
-    let powers: Vec<f64> = samples
-        .chunks_exact(25)
-        .filter(|w| w[24].0 - w[0].0 == 24 * 200 && w[0].0 >= from && w[24].0 + 200 <= to)
-        .map(|w| w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / 25.0)
-        .collect();
-    (powers.len() >= 10).then(|| powers.iter().sum::<f64>() / powers.len() as f64)
 }
 
 /// The tick at which a tone first appears at or after `from`: the first of three consecutive
@@ -1974,23 +1981,6 @@ fn hw_h2_underflow_mid_burst() {
     );
 }
 
-fn wait_for_rx_start_and_sample(probe: &probe_device::ProbeDevice, start_index: usize, timeout: Wall) -> Option<Json> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let rows = probe.rows();
-        let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index).cloned();
-        if let Some(start) = start {
-            if let Some(sample) = rows.iter().find(|row| probe_device::receive_sample_follows_start(&start, row)).cloned() {
-                return Some(serde_json::json!({ "rx_start": start, "rx_sample": sample }));
-            }
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Wall::from_millis(1));
-    }
-}
-
 fn tx_send_rows_since(probe: &probe_device::ProbeDevice, count: usize) -> Vec<Json> {
     probe.rows().into_iter().filter(|row| row["call"] == "tx_send").skip(count).collect()
 }
@@ -2633,7 +2623,34 @@ fn hw_measurements_record() {
     println!("Wrote hardware measurement record to {}", path.display());
 }
 
-/// The waveform lengths of `hw_tx200_hot_path_probe` (`EZSDR_TX200_LENGTHS`, comma-separated complex samples).
+/// The start-lead group's value as a verdict: the measured smallest lead, or the reason no candidate passed.
+fn start_lead_verdict(group: &measurement::MeasurementGroup) -> Verdict {
+    use ezsdr_radio::measurement::{ValueRecord, Worst};
+    match group.values.first() {
+        Some(ValueRecord::Measured { worst: Worst::Number(ns), .. }) => n47::start_lead_value_verdict(Some(*ns), None),
+        Some(ValueRecord::Measured { .. }) => n47::start_lead_value_verdict(None, Some("the value is not a number")),
+        Some(ValueRecord::Unmeasured { reason, .. }) => n47::start_lead_value_verdict(None, Some(reason)),
+        None => n47::start_lead_value_verdict(None, Some("the group supplied no value")),
+    }
+}
+
+/// T3: the restored receive start-lead group on its own (note 47 stage 3's named follow-up before any profile
+/// `rx_start_lead_ns` changes). `restart-same` keeps the values and `restart-retune` crosses the board's 1 GHz tuning
+/// path on every restart; a stage fails on `radio.LATE_COMMAND` or `radio.START_LEAD_SHORT`, and each stage records
+/// the smallest `lead_left_ns` seen.
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47_rx_start_lead_group() {
+    let device = usrp();
+    pin_slot_a(&*device);
+    let plan = measurement::MeasurementPlan::process_env().expect("measurement trial counts are valid before opening the USRP");
+    let group = measurement::measure_rx_start_lead(device.clone(), &plan).expect("the receive start-lead group");
+    println!("n47 start lead: values {:?}; observations {:?}", group.values, group.observations);
+    verdict("n47 start lead: the smallest candidate lead leaves every stage's restart at its origin", start_lead_verdict(&group));
+    let companion = measurement::measure_rx_start_lead_with_tx(device, &plan).expect("the receive start-lead group with a transmit stream");
+    println!("n47 start lead with tx: observations {:?}", companion.observations);
+}
+
 fn tx200_lengths() -> Vec<usize> {
     match std::env::var("EZSDR_TX200_LENGTHS") {
         Ok(text) => text
@@ -2801,11 +2818,11 @@ fn verdict(claim: &str, outcome: Verdict) {
     }
 }
 
-/// A tone `offset_hz` from the carrier at 1 Msps, amplitude 0.4; its magnitude bound is asserted.
-fn tone_wave(n: usize, offset_hz: f64) -> Vec<(f32, f32)> {
+/// A tone `offset_hz` from the carrier at `rate` S/s, amplitude 0.4, `n` samples; its magnitude bound is asserted.
+fn tone_wave(rate: f64, n: usize, offset_hz: f64) -> Vec<(f32, f32)> {
     let wave: Vec<(f32, f32)> = (0..n)
         .map(|i| {
-            let phase = 2.0 * std::f64::consts::PI * offset_hz * (i as f64 / 1e6);
+            let phase = 2.0 * std::f64::consts::PI * offset_hz * (i as f64 / rate);
             ((0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32)
         })
         .collect();
@@ -2828,7 +2845,7 @@ fn ticked(samples: &[(f32, f32)], first: i64, per: i64) -> Vec<(i64, ezsdr_radio
     samples.iter().enumerate().map(|(i, (re, im))| (first + i as i64 * per, [*re, *im])).collect()
 }
 
-/// Every sample of a Run's device blocks with its root tick (200 ticks apart at 1 Msps, as `read` keeps them).
+/// Every sample of a probe's device blocks with its root tick (200 ticks apart at 1 Msps).
 fn device_samples(blocks: &[(i64, Vec<ezsdr_radio_uhd::Iq>)]) -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
     blocks.iter().flat_map(|(first, samples)| samples.iter().enumerate().map(move |(i, sample)| (first + i as i64 * 200, *sample))).collect()
 }
@@ -2851,121 +2868,6 @@ fn data_sends(probe: &probe_device::ProbeDevice) -> Vec<Json> {
     probe.rows().into_iter().filter(|row| row["call"] == "tx_send" && row["tx_flush"] != true).collect()
 }
 
-/// Whether the tone of `blocks` (the burst `[burst.0, burst.1)`, root ticks) leaves 100 kHz at `e`: the claim that a timed change
-/// takes effect there. `classify_tone` judges tone against noise; a move is dated to within 25 000 ticks (125 µs, a window).
-fn retune_verdict(blocks: &[(i64, ezsdr_radio_uhd::Iq)], burst: (i64, i64), e: i64) -> Verdict {
-    let report = classify_tone(blocks, burst.0, burst.1, e, 100e3);
-    if !report.usable() {
-        Verdict::Inconclusive(tone_verdict(&report))
-    } else if report.at_or_before {
-        Verdict::Inconclusive(format!("the tone was off 100 kHz in its first window, so the move is not dated: {}", tone_verdict(&report)))
-    } else {
-        match report.moves_at {
-            Some(at) if at.abs() <= 25_000 => Verdict::Pass(tone_verdict(&report)),
-            Some(_) => Verdict::Fail(tone_verdict(&report)),
-            None => Verdict::Fail(format!("the tone stayed at 100 kHz after e: {}", tone_verdict(&report))),
-        }
-    }
-}
-
-/// Whether a Run's timed receive change was handed to the device, and returned, before the Run's stop was booked. `booked` is the
-/// probe's host clock just before the Run's finish, which books the stop; the device's `rx_stop` comes later.
-fn handover_verdict(rows: &[Json], booked: u64) -> Verdict {
-    match rows.iter().find(|row| row["call"] == "apply_timed" && row["direction"] == "rx") {
-        None => Verdict::Inconclusive("no timed receive apply reached the device".to_owned()),
-        Some(apply) if !apply["result"]["error"].is_null() => Verdict::Inconclusive(format!("the timed receive apply failed: {}", apply["result"]["error"])),
-        Some(apply) => match apply["host_return_ns"].as_u64() {
-            Some(returned) if returned <= booked => Verdict::Pass(format!("the timed receive apply returned at {returned} ns, before the stop was booked at {booked} ns")),
-            returned => Verdict::Inconclusive(format!("the apply returned at {returned:?} ns and the stop was booked at {booked} ns: not shown before the stop")),
-        },
-    }
-}
-
-/// The effective logical cut (root ticks) of a Run's untimed receive stop, from its timing row; `None` when no stop was booked.
-fn stop_cut(manifest: &ezsdr_kernel::manifest::Manifest) -> Option<i64> {
-    section(manifest, "timing").as_array().unwrap().iter().find(|row| row["what"] == "rx_stop_untimed").and_then(|row| row["cut"].as_i64())
-}
-
-/// Whether the stop's effective cut lies before `e` (`early`) or at or after it (the control), as the case under test requires.
-fn cut_verdict(cut: Option<i64>, e: i64, early: bool) -> Verdict {
-    let side = if early { "before e" } else { "at or after e" };
-    match cut {
-        None => Verdict::Inconclusive("no untimed receive stop was booked: the effective cut is not observed".to_owned()),
-        Some(cut) if (cut < e) == early => Verdict::Pass(format!("the effective cut is {:.3} ms from e, {side}", (cut - e) as f64 / TICKS_PER_MS as f64)),
-        Some(cut) => Verdict::Inconclusive(format!("the effective cut is {:.3} ms from e, not {side}: the case under test is not reached", (cut - e) as f64 / TICKS_PER_MS as f64)),
-    }
-}
-
-/// Whether the published capture holds the cut's samples: `cut` is the sample count the Sink was asked for.
-fn publication_verdict(published: usize, cut: i64) -> Verdict {
-    let published = published as i64;
-    if published == cut {
-        Verdict::Pass(format!("{published} samples published, stopping at the cut"))
-    } else if published > cut {
-        Verdict::Fail(format!("{published} samples published past the cut {cut}"))
-    } else {
-        Verdict::Inconclusive(format!("{published} samples published of the cut {cut}"))
-    }
-}
-
-/// Whether the Provider rejected a drain or a restore in the Run: either is evidence against the drain across the cut.
-fn reject_verdict(manifest: &ezsdr_kernel::manifest::Manifest) -> Verdict {
-    let rejected: Vec<&Json> = section(manifest, "rejected").as_array().unwrap().iter().filter(|row| row["call"] == "rx_drain" || row["call"] == "rx_restore").collect();
-    if rejected.is_empty() { Verdict::Pass("no rx_drain or rx_restore rejection".to_owned()) } else { Verdict::Fail(format!("the Provider rejected {rejected:?}")) }
-}
-
-/// Whether a Run's receive from its first sample holds the 100 kHz tone the transmitter sends, between `from` and `to` (root ticks).
-fn successor_verdict(blocks: &[(i64, ezsdr_radio_uhd::Iq)], from: i64, to: i64) -> Verdict {
-    let Some(floor) = window_power(blocks, from - ms(9), from - ms(1)) else {
-        return Verdict::Inconclusive("no noise before the tone".to_owned());
-    };
-    let Some(start) = tone_start(blocks, from - ms(1), floor) else {
-        return Verdict::Inconclusive("no tone in the successor's receive".to_owned());
-    };
-    match median_freq(&tone_freqs(blocks), start, to) {
-        Some(hz) if (hz - 100e3).abs() <= 10e3 => Verdict::Pass(format!("the tone is at {hz:.0} Hz from {start}")),
-        Some(hz) => Verdict::Fail(format!("the successor's tone is at {hz:.0} Hz, not 100 kHz")),
-        None => Verdict::Inconclusive("the tone is too short to measure".to_owned()),
-    }
-}
-
-/// What one Run of the receive probes (`hw_p4_…`, `hw_l1_…`) leaves behind: its Manifest, the probe's rows of it, the device's samples
-/// of it (root ticks, before the capture's publication cut), the samples its capture published, the host clock when its stop was
-/// booked, and its receive clock (origin in root ticks, root ticks a sample).
-struct ReceiveRun {
-    manifest: ezsdr_kernel::manifest::Manifest,
-    rows: Vec<Json>,
-    device: Vec<(i64, ezsdr_radio_uhd::Iq)>,
-    published: usize,
-    booked: u64,
-    origin: i64,
-    per: i64,
-}
-
-/// One Run of the receive probes: a 60 ms tone sent from 10 ms, a receive capture of `cut` samples and, when `retune`, a receive
-/// change of +50 kHz at e = 20 ms. The capture is read here, because the directory it lives in is dropped when this returns.
-fn receive_retune_run(probe: &Arc<probe_device::ProbeDevice>, hz: f64, cut: i64, retune: bool) -> ReceiveRun {
-    let (bytes, waveform) = waveform_of(&tone_wave(60_000, 100e3));
-    let mut spec = with_burst(with_tx(receive_spec(1, 1e6, hz, Some(cut)), 1e6), &waveform, false, "send_asap_and_flag", 10_000);
-    if retune {
-        spec["schedule"].as_array_mut().unwrap().push(serde_json::json!({ "at": { "clock": "radio", "offset_ticks": 20_000 }, "action": {
-            "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(), "key": "radio.rx.c0.frequency_hz", "value": hz + 50e3 } }));
-    }
-    let dir = TempDir::new();
-    let inputs = std::collections::BTreeMap::from([(waveform.hash.clone(), bytes)]);
-    let (rows_before, blocks_before) = (probe.rows().len(), probe.rx_blocks().len());
-    let mut run = spec_run(&spec, &bench_profile(&**probe, &dir, serde_json::json!({}), bench_envelope(&**probe), false), probe.clone(), inputs);
-    let horizon = after(&run, ms(10_000));
-    let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-    let booked = probe.host_ns();
-    let manifest = run.finish();
-    let (origin, per) = rx_clock(&manifest);
-    let (acked, refused) = flush_evidence(&manifest);
-    println!("flush evidence: acknowledged {acked}, refused {refused:?}");
-    let published = read_capture(&capture_of(&manifest, "rec"), 1).remove(0).len();
-    ReceiveRun { manifest, rows: probe.rows()[rows_before..].to_vec(), device: device_samples(&probe.rx_blocks()[blocks_before..]), published, booked, origin, per }
-}
-
 /// One trial of `hw_p70_…`: the tone's onset (root ticks, `None` when there is no tone) and the burst's booked instant.
 struct OneSample {
     onset: Option<i64>,
@@ -2979,7 +2881,7 @@ fn one_sample_trial(device: Arc<dyn Device>, samples: usize, late: bool) -> OneS
     let dir = TempDir::new();
     let mut run = tx_session(device, &dir);
     let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 2][..samples]);
-    let (tone, _) = waveform_of(&tone_wave(10_000, 100e3));
+    let (tone, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));
     let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 5_000);
     let capture_at = after_ticks(&run, ms(10));
@@ -3009,7 +2911,7 @@ fn hw_p72_timed_tx_chunks_are_timed_and_flushed() {
     let device = usrp();
     let hz = pin_slot_a(&*device);
     let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    let (bytes, waveform) = waveform_of(&tone_wave(60_000, 100e3));
+    let (bytes, waveform) = waveform_of(&tone_wave(1e6, 60_000, 100e3));
     let spec = with_burst(with_tx(receive_spec(1, 1e6, hz, Some(90_000)), 1e6), &waveform, false, "send_asap_and_flag", 10_000);
     let dir = TempDir::new();
     let inputs = std::collections::BTreeMap::from([(waveform.hash.clone(), bytes)]);
@@ -3082,95 +2984,750 @@ fn hw_p70_one_sample_burst_then_timed_burst() {
     }
 }
 
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_p4_rx_timed_tune_then_early_stop() {
-    // D9b-2 R2′ on the production path (the counterpart of raw P4). A timed receive change at e = 20 ms is handed to the device before
-    // the stop is booked. The early case books the stop with its effective cut before e, so e is still pending; the control books it
-    // after e. Each case checks the handover, the effective cut, the published capture, the rejections, the device's samples after e
-    // (classified independently of the publication cut) and a second Run on the same device. The successor is a second Run, labelled
-    // below: the Spec schedule can stop, restart and change the receive stream in one Run (the L1 smoke does), but this test's
-    // early-stop evidence is read from the Run's finish, so the successor-in-Run form is a separate change.
-    let device = usrp();
-    let hz = pin_slot_a(&*device);
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.keep_rx_blocks();
-    for (case, cut, early) in [("early stop (cut 18 000 samples, before e)", 18_000i64, true), ("control (cut 26 000 samples, after e)", 26_000, false)] {
-        let run = receive_retune_run(&probe, hz, cut, true);
-        let e = run.origin + 20_000 * run.per;
-        verdict(&format!("P4 {case}: the timed receive change is handed to the device before the stop is booked"), handover_verdict(&run.rows, run.booked));
-        verdict(&format!("P4 {case}: the stop's effective cut is on the case's side of e"), cut_verdict(stop_cut(&run.manifest), e, early));
-        verdict(&format!("P4 {case}: published samples stop at the cut"), publication_verdict(run.published, cut));
-        verdict(&format!("P4 {case}: the Provider rejects no drain or restore"), reject_verdict(&run.manifest));
-        verdict(
-            &format!("P4 {case}: the device's samples show the retuned tone from e (100 kHz to 50 kHz)"),
-            retune_verdict(&run.device, (run.origin + 10_000 * run.per, run.origin + 70_000 * run.per), e),
-        );
-        let successor = receive_retune_run(&probe, hz, 30_000, false);
-        verdict(
-            &format!("P4 {case}: a second Run on the same device receives the tone at 100 kHz"),
-            successor_verdict(&successor.device, successor.origin + 10_000 * successor.per, successor.origin + 30_000 * successor.per),
-        );
+/// Aligns `tick` up to `per` ticks.
+fn align_to(tick: i64, per: i64) -> i64 {
+    tick.div_euclid(per) * per + if tick.rem_euclid(per) == 0 { 0 } else { per }
+}
+
+/// Sends `wave` as one device burst from `first_at`, in chunks, handling partial sends. The last two samples are kept
+/// for the closing send, which always carries the EOB with at least two samples (a one-sample tail is padded with a
+/// zero, as the Module's own end-of-burst path does). Returns the waveform samples accepted.
+fn send_burst(device: &dyn Device, wave: &[ezsdr_radio_uhd::Iq], first_at: Option<i64>) -> usize {
+    let mut accepted = 0usize;
+    let mut at = first_at;
+    while let Some(plan) = n47::burst_send(accepted, wave.len(), 20_000) {
+        let padded = [wave[plan.offset], ezsdr_radio_uhd::Iq::default()];
+        let slice: &[ezsdr_radio_uhd::Iq] = if plan.padded { &padded } else { &wave[plan.offset..plan.offset + plan.len] };
+        let sent = device.tx_send(0, &[slice], at, accepted == 0, plan.eob, Wall::from_millis(500)).expect("the device accepts the burst");
+        assert!(sent > 0, "the device accepted no samples of the burst");
+        accepted += sent.min(plan.len - usize::from(plan.padded));
+        at = None;
     }
-    println!(
-        "P4 successor segment in the same Run: not exercised; the successor above is a second Run. A Spec schedule can stop, restart and change the receive stream in one Run (see the L1 smoke), but the early-stop evidence here (handover before the stop booking, the stop's timing row, the cut) is read from the Run's finish, so that form needs its own evidence first."
-    );
-    println!("P4 restoration after Provider::stop: not observed (no hook reads the device's DDC after a Run's stop).");
+    accepted
+}
+
+/// Drains the transmit reports that are already there, `None` when none.
+fn drain_tx_reports(device: &dyn Device) -> Vec<ezsdr_radio_uhd::TxReport> {
+    let mut reports = Vec::new();
+    while let Some(report) = device.tx_async(0, Wall::from_millis(10)).expect("a transmit report") {
+        reports.push(report);
+    }
+    reports
+}
+
+/// Waits for the next burst ACK (or `timeout`) and returns it with every report read on the way.
+fn wait_burst_ack(device: &dyn Device, timeout: Wall) -> (Option<i64>, Vec<ezsdr_radio_uhd::TxReport>) {
+    let begun = Instant::now();
+    let mut reports = Vec::new();
+    while begun.elapsed() < timeout {
+        if let Some(report) = device.tx_async(0, Wall::from_millis(20)).expect("a transmit report") {
+            let ack = (report.code == ezsdr_radio_uhd::TxCode::BurstAck).then_some(report.tick).flatten();
+            reports.push(report);
+            if ack.is_some() {
+                return (ack, reports);
+            }
+        }
+    }
+    (None, reports)
+}
+
+/// The two-zero-sample untimed flush of a new transmit streamer, and the reports its ACK and a first control leave.
+fn flush_transmit(device: &dyn Device) -> Vec<ezsdr_radio_uhd::TxReport> {
+    let zeros = [ezsdr_radio_uhd::Iq::default(); 2];
+    device.tx_send(0, &[&zeros], None, true, true, Wall::from_millis(500)).expect("the flush is sent");
+    let (ack, _) = wait_burst_ack(device, Wall::from_secs(2));
+    assert!(ack.is_some(), "the transmit flush's burst ACK");
+    drain_tx_reports(device)
+}
+
+/// A call's durations under its statistics, as the control-call observation keeps them.
+fn stats_row(name: &str, durations: &[u64]) -> Json {
+    let stats = n47::call_stats(durations).expect("nonempty durations");
+    serde_json::json!({ "call": name, "min_ns": stats.min_ns, "median_ns": stats.median_ns, "p99_ns": stats.p99_ns, "max_ns": stats.max_ns, "durations_ns": durations })
+}
+
+/// Times `reps` calls, returning each call's wall-clock nanoseconds.
+fn timed_calls(reps: usize, mut call: impl FnMut(usize)) -> Vec<u64> {
+    (0..reps)
+        .map(|index| {
+            let begun = Instant::now();
+            call(index);
+            begun.elapsed().as_nanos() as u64
+        })
+        .collect()
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_l1_held_rx_tune_applies_when_its_segment_streams() {
-    // L1 (note 44 §3.1, §3.8), the two-segment smoke. One Spec Run: the receive stream stops at 40 ms and starts again at 50 ms
-    // (its segment begins after the start lead, about 50 ms on FakeDevice), and a receive change at 150 ms is armed with them, so it
-    // is booked while the first segment streams and must take effect inside the second. A 100 kHz tone repeats from the same board's
-    // transmit. Not exercised: the held case proper, a change whose e falls in the second segment's start lead while its preparation
-    // is still pending.
+fn hw_n47_raw_control_call_durations() {
+    // Note 47 T6: a control call's wall clock is its setter plus read-back/enqueue latency, not RF settling or timed
+    // execution. Only a timed receive frequency change is timed: receive samples cover its instant. A timed transmit
+    // change is not measured at all: a burst's untimed continuations do not drain the DUC (design note 39 §1 and raw
+    // P7), so the timed commands would sit in the FIFO and could wedge the X300; queuing them is not a measurement
+    // this probe may make. The antenna timing runs with both streams stopped and no transmit samples; the transmit
+    // gain and rate timings run with no burst open.
+    let device = raw();
+    let hz = pin_slot_a(&*device);
+    let chan = d9_channel();
+    let mut rows = Vec::new();
+    let reps = 50;
+    let rx_small = timed_calls(reps, |index| {
+        let freq = hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 };
+        device.apply(Dir::Rx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+    });
+    rows.push(stats_row("rx_apply_frequency_small_step", &rx_small));
+    let rx_boundary = timed_calls(reps, |index| {
+        let freq = if index % 2 == 0 { hz - 400e3 } else { hz + 400e3 };
+        device.apply(Dir::Rx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+    });
+    rows.push(stats_row("rx_apply_frequency_across_1_ghz", &rx_boundary));
+    let tx_small = timed_calls(reps, |index| {
+        let freq = hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 };
+        device.apply(Dir::Tx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+    });
+    rows.push(stats_row("tx_apply_frequency_small_step", &tx_small));
+    let tx_boundary = timed_calls(reps, |index| {
+        let freq = if index % 2 == 0 { hz - 400e3 } else { hz + 400e3 };
+        assert!(SAFE_TX_HZ.contains(&freq), "bench RF safety: {freq} Hz is outside SAFE_TX_HZ");
+        device.apply(Dir::Tx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+    });
+    rows.push(stats_row("tx_apply_frequency_across_1_ghz", &tx_boundary));
+    let rx_gain = timed_calls(reps, |index| {
+        device.apply(Dir::Rx, chan, &Settings { gain: Some(if index % 2 == 0 { 0.0 } else { 1.0 }), ..Settings::default() }, None).unwrap();
+    });
+    rows.push(stats_row("rx_apply_gain", &rx_gain));
+    // No burst is open and no samples flow: the transmit gain is the setter plus its read-back only.
+    let tx_gain = timed_calls(reps, |index| {
+        device.apply(Dir::Tx, chan, &Settings { gain: Some(if index % 2 == 0 { 0.0 } else { 1.0 }), ..Settings::default() }, None).unwrap();
+    });
+    // Back to the probes' initial state before anything else runs (the alternation may end at +1 dB).
+    device.apply(Dir::Tx, chan, &Settings { gain: Some(0.0), ..Settings::default() }, None).unwrap();
+    rows.push(stats_row("tx_apply_gain", &tx_gain));
+    let antenna = timed_calls(reps, |index| {
+        let antenna = if index % 2 == 0 { "TX/RX" } else { "RX2" };
+        let applied = device.apply(Dir::Rx, chan, &Settings { antenna: Some(antenna.to_owned()), ..Settings::default() }, None).unwrap();
+        assert_eq!(applied.antenna.as_deref(), Some(antenna), "the antenna's read-back");
+    });
+    device.apply(Dir::Rx, chan, &Settings { antenna: Some("RX2".to_owned()), ..Settings::default() }, None).unwrap();
+    rows.push(stats_row("rx_apply_antenna", &antenna));
+    let rates = timed_calls(reps, |index| {
+        device.apply(Dir::Rx, chan, &Settings { rate: Some(if index % 2 == 0 { 2e6 } else { 1e6 }), ..Settings::default() }, None).unwrap();
+    });
+    device.apply(Dir::Rx, chan, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+    rows.push(stats_row("rx_apply_rate", &rates));
+    let tx_rates = timed_calls(reps, |index| {
+        device.apply(Dir::Tx, chan, &Settings { rate: Some(if index % 2 == 0 { 2e6 } else { 1e6 }), ..Settings::default() }, None).unwrap();
+    });
+    device.apply(Dir::Tx, chan, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+    rows.push(stats_row("tx_apply_rate", &tx_rates));
+    let clocks = timed_calls(reps, |_| {
+        device.time_now().unwrap();
+    });
+    rows.push(stats_row("time_now", &clocks));
+    let opens = timed_calls(reps, |_| {
+        device.rx_open(0, &[chan]).unwrap();
+    });
+    device.rx_close(0);
+    rows.push(stats_row("rx_open", &opens));
+    let tx_opens = timed_calls(reps, |_| {
+        device.tx_open(0, &[chan]).unwrap();
+    });
+    device.tx_close(0);
+    rows.push(stats_row("tx_open", &tx_opens));
+
+    // A timed receive frequency change, with a receive stream covering the instant in the same direction.
+    raw_rx(&*device, 1e6, hz);
+    let start = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    device.rx_start(0, start).unwrap();
+    let mut timed_rx = Vec::new();
+    let mut lost = None;
+    for index in 0..reps {
+        let at = align_to(device.time_now().unwrap() + 100 * TICKS_PER_MS, 200);
+        let begun = Instant::now();
+        let result = device.apply(Dir::Rx, chan, &Settings { freq: Some(hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 }), ..Settings::default() }, Some(at));
+        timed_rx.push(begun.elapsed().as_nanos() as u64);
+        if let Err(error) = result {
+            lost = Some(format!("the timed receive apply failed: {}", error.message));
+            break;
+        }
+        let got = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|end| end >= at + 5 * TICKS_PER_MS) || r.other.iter().any(|(_, other)| other.starts_with("LateCommand")));
+        if got.other.iter().any(|(_, other)| other.starts_with("LateCommand")) {
+            lost = Some(format!("the timed receive apply at {at} was late: coverage was lost"));
+            break;
+        }
+        if got.end(200).is_none_or(|end| end < at + 5 * TICKS_PER_MS) {
+            lost = Some(format!("the receive stream did not cover the timed apply at {at}: no samples past its instant"));
+            break;
+        }
+    }
+    device.rx_stop(0, None).ok();
+    if let Some(reason) = lost {
+        panic!(
+            "n47 control calls: the timed receive apply lost coverage ({reason}); a timed command may still sit in the device's FIFO. Power-cycle the device before the next test; this probe issues no further apply and does not reopen the receive stream."
+        );
+    }
+    let _ = drain(&*device);
+    rows.push(stats_row("rx_apply_frequency_timed_with_samples", &timed_rx));
+    raw_rx(&*device, 1e6, hz);
+    println!(
+        "n47 control calls: wall clock per call is setter + read-back/enqueue latency, not RF settling or timed execution; a timed transmit change is not measured (note 39 §1: untimed continuations do not drain the DUC)"
+    );
+    for row in &rows {
+        println!("n47 control calls {}: min {} median {} p99 {} max {} ns", row["call"], row["min_ns"], row["median_ns"], row["p99_ns"], row["max_ns"]);
+    }
+    measurement::push_raw_observation(
+        "hw_n47_raw_control_call_durations",
+        (rows.len() * reps) as u32,
+        serde_json::json!({
+            "note": "wall clock per call is the setter plus read-back/enqueue latency, not RF settling or timed execution",
+            "calls": rows,
+        }),
+    );
+}
+
+/// One buffer stall: what the drain showed (an overflow, no overflow with samples spanning the stall, or a trial
+/// that says nothing), the drained samples' first and end ticks, and the outcomes seen.
+fn buffer_stall(device: &dyn Device, stall_ms: u64, stall_start: i64, per: i64) -> (n47::StallOutcome, Option<(i64, i64)>, Vec<String>) {
+    std::thread::sleep(Wall::from_millis(stall_ms));
+    let begun = Instant::now();
+    let limit = Wall::from_millis(stall_ms.saturating_add(3_000));
+    let mut overflow = false;
+    let mut idle = 0;
+    let mut first: Option<i64> = None;
+    let mut end: Option<i64> = None;
+    let mut outcomes = Vec::new();
+    while begun.elapsed() < limit && idle < 3 {
+        match device.rx_recv(0, 2_000, Wall::from_millis(100), false) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                idle = 0;
+                first.get_or_insert(first_tick);
+                end = Some(first_tick + samples.first().map_or(0, Vec::len) as i64 * per);
+                outcomes.push(format!("samples {first_tick} {}", samples.first().map_or(0, Vec::len)));
+            }
+            ezsdr_radio_uhd::RxRecv::Overflow { out_of_sequence } => {
+                idle = 0;
+                overflow = true;
+                outcomes.push(format!("overflow {out_of_sequence}"));
+            }
+            ezsdr_radio_uhd::RxRecv::Timeout => idle += 1,
+            ezsdr_radio_uhd::RxRecv::LateCommand => outcomes.push("late_command".to_owned()),
+            other => outcomes.push(format!("{other:?}")),
+        }
+    }
+    let outcome = n47::stall_outcome(overflow, first, end, stall_start, stall_ms, TICKS_PER_MS, 5 * TICKS_PER_MS);
+    (outcome, first.zip(end), outcomes)
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47_raw_rx_buffer_capacity() {
+    // Note 47 T6: how long a receive reader may stall before the first overflow. Every trial proves its stream first
+    // (the restart ran from its tick through 20 ms) and, when no overflow is reported, that the drain's samples span
+    // the stall; a trial that proves neither is recorded incomplete and never used in the bisection. Samples are
+    // counted and dropped, never kept.
+    let device = raw();
+    let hz = pin_slot_a(&*device);
+    let rmem_max = std::fs::read_to_string("/proc/sys/net/core/rmem_max").unwrap_or_else(|_| "unknown".to_owned()).trim().to_owned();
+    let rmem_default = std::fs::read_to_string("/proc/sys/net/core/rmem_default").unwrap_or_else(|_| "unknown".to_owned()).trim().to_owned();
+    println!(
+        "n47 buffer: net.core.rmem_max {rmem_max}, rmem_default {rmem_default}; device args {:?}; requested recv_buff_size: default (the args name none); actual socket size unknown (the Device trait does not read SO_RCVBUF; UHD's X300 default is about link_rate/50, 25 MB at 10 GbE, INFERRED from x300_eth_mgr.cpp:250-251)",
+        args()
+    );
+    let mut observations = Vec::new();
+    for rate in [1e6, 10e6, 50e6] {
+        raw_rx(&*device, rate, hz);
+        let per = (common::MCR as f64 / rate) as i64;
+        let start = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, per);
+        device.rx_start(0, start).unwrap();
+        let baseline = read(&*device, Wall::from_secs(3), None, |r| r.end(per).is_some_and(|end| end >= start + 20 * TICKS_PER_MS));
+        if !n47::restart_streamed(&baseline.blocks, per, start, start + 20 * TICKS_PER_MS) {
+            println!("n47 buffer {rate}: the baseline did not stream from its tick through 20 ms ({} blocks); this rate is not measured", baseline.blocks.len());
+            device.rx_stop(0, None).ok();
+            let _ = drain(&*device);
+            observations.push(serde_json::json!({ "rate_hz": rate, "baseline": "failed", "blocks": baseline.blocks.len() }));
+            continue;
+        }
+        let mut trials: Vec<(u64, bool)> = Vec::new();
+        let mut rows = Vec::new();
+        let stop = {
+            let mut test = |stall_ms: u64| -> Option<bool> {
+                device.rx_stop(0, None).ok();
+                let _ = drain(&*device);
+                let start = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, per);
+                device.rx_start(0, start).unwrap();
+                let before = read(&*device, Wall::from_secs(2), None, |r| r.end(per).is_some_and(|end| end >= start + 20 * TICKS_PER_MS));
+                if !n47::restart_streamed(&before.blocks, per, start, start + 20 * TICKS_PER_MS) {
+                    rows.push(serde_json::json!({ "stall_ms": stall_ms, "incomplete": "the trial's restart did not stream from its tick through 20 ms", "blocks": before.blocks }));
+                    return None;
+                }
+                let stall_start = before.end(per).unwrap_or(start);
+                let (outcome, sample_span, outcomes) = buffer_stall(&*device, stall_ms, stall_start, per);
+                match outcome {
+                    n47::StallOutcome::Overflow => {
+                        trials.push((stall_ms, true));
+                        rows.push(
+                            serde_json::json!({ "stall_ms": stall_ms, "overflow": true, "stall_start": stall_start, "samples": sample_span, "outcomes": outcomes.iter().take(20).collect::<Vec<_>>() }),
+                        );
+                        Some(true)
+                    }
+                    n47::StallOutcome::NoOverflow => {
+                        trials.push((stall_ms, false));
+                        rows.push(
+                        serde_json::json!({ "stall_ms": stall_ms, "overflow": false, "stall_start": stall_start, "samples": sample_span, "outcomes": outcomes.iter().take(20).collect::<Vec<_>>() }),
+                    );
+                        Some(false)
+                    }
+                    n47::StallOutcome::Incomplete => {
+                        rows.push(serde_json::json!({ "stall_ms": stall_ms, "incomplete": "the drain did not span the stall", "stall_start": stall_start, "samples": sample_span, "outcomes": outcomes.iter().take(20).collect::<Vec<_>>() }));
+                        None
+                    }
+                }
+            };
+            let low = test(100);
+            let mut stop = low.is_none();
+            if low == Some(false) {
+                let high = test(5_000);
+                stop = high.is_none();
+                if high == Some(true) {
+                    let (mut ok, mut over) = (100u64, 5_000u64);
+                    let mut steps = 0;
+                    while over - ok > 1 && steps < 6 {
+                        let mid = ok + (over - ok) / 2;
+                        match test(mid) {
+                            Some(true) => over = mid,
+                            Some(false) => ok = mid,
+                            None => {
+                                stop = true;
+                                break;
+                            }
+                        }
+                        steps += 1;
+                    }
+                }
+            }
+            stop
+        };
+        device.rx_stop(0, None).ok();
+        let _ = drain(&*device);
+        let bracket = n47::overflow_bracket(&trials);
+        if stop {
+            println!("n47 buffer {rate}: a trial was incomplete; the bracket {bracket:?} uses only the complete trials {trials:?}");
+        }
+        println!("n47 buffer {rate}: baseline contiguous over 20 ms; bracket {bracket:?}; trials {trials:?}");
+        observations.push(serde_json::json!({ "rate_hz": rate, "baseline": "contiguous", "bracket": format!("{bracket:?}"), "incomplete": stop, "trials": rows,
+            "rmem_max": rmem_max, "rmem_default": rmem_default }));
+        if rate == 50e6 {
+            println!("n47 buffer 50 MS/s: the 2026-10-28 record sustains 800 MB/s at 200 MS/s (plan/phase8/bench-results.md:167); this baseline is the current board's check");
+        }
+    }
+    measurement::push_raw_observation("hw_n47_raw_rx_buffer_capacity", 3, serde_json::json!({ "rates": observations }));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47_raw_tx_setting_after_a_burst_end() {
+    // Note 47 T5: an untimed transmit setting m ms after the previous burst's end must leave that burst's tail intact;
+    // the +5 ms gain trial changes 0 dB to +6 dB under the owner's attenuator confirmation (the owner allows the
+    // transmit gain up to its maximum with the attenuator in the loopback, 2026-10-27). m = -5 ms is the
+    // owner-approved disruptive control (EZSDR_N47_T5_CONTROL=1) and is never a production operation.
+    let device = raw();
+    let hz = pin_slot_a(&*device);
+    let f2 = hz + 100e3;
+    assert!(SAFE_TX_HZ.contains(&f2), "bench RF safety: {f2} Hz is outside SAFE_TX_HZ");
+    raw_tx(&*device, 1e6, hz);
+    flush_transmit(&*device);
+    raw_rx(&*device, 1e6, hz);
+    // The control burst measures the loopback's delay for this (1 MS/s, 1 MS/s) pair; B is judged against it.
+    let control_at = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    device.rx_start(0, control_at - 20 * TICKS_PER_MS).unwrap();
+    send_burst(&*device, &iq(&tone_wave(1e6, 5_000, 100e3)), Some(control_at));
+    let (control_ack, _) = wait_burst_ack(&*device, Wall::from_secs(2));
+    assert!(control_ack.is_some(), "the control burst's ACK");
+    let control = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= control_at + 10 * TICKS_PER_MS));
+    device.rx_stop(0, None).unwrap();
+    let _ = drain(&*device);
+    let control_samples = control.samples;
+    let control_onset =
+        window_power(&control_samples, control_at - 20 * TICKS_PER_MS, control_at - 10 * TICKS_PER_MS).and_then(|floor| tone_start(&control_samples, control_at - 5 * TICKS_PER_MS, floor));
+    let loop_delay = control_onset.map(|onset| onset - control_at);
+    let group_start = Instant::now();
+    let mut rows = Vec::new();
+    let mut offsets: Vec<i64> = vec![0, 1, 5, 20];
+    if std::env::var("EZSDR_N47_T5_CONTROL").ok().as_deref() == Some("1") {
+        offsets.push(-5);
+    }
+    let mut trials: Vec<(i64, bool)> = offsets.into_iter().map(|m| (m, false)).collect();
+    trials.push((5, true));
+    for (m, gain_trial) in trials {
+        if group_start.elapsed() > Wall::from_secs(120) {
+            println!("n47 T5: the probe's time bound passed before m = {m} ms; stopping rather than queueing more settings");
+            break;
+        }
+        // Restore the initial state between trials.
+        device.apply(Dir::Tx, d9_channel(), &Settings { freq: Some(hz), gain: Some(0.0), ..Settings::default() }, None).unwrap();
+        let a = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+        device.rx_start(0, a - 20 * TICKS_PER_MS).unwrap();
+        let wave_a = iq(&tone_wave(1e6, 100_000, 100e3));
+        send_burst(&*device, &wave_a, Some(a));
+        let e = a + wave_a.len() as i64 * 200;
+        // The apply is issued before A's burst ACK is awaited: the −5 ms control must be able to go out before
+        // A ends, and its ACK is collected afterwards like the others.
+        let target = e + m * TICKS_PER_MS;
+        let begun = Instant::now();
+        while device.time_now().unwrap() < target && begun.elapsed() < Wall::from_secs(2) {
+            std::thread::sleep(Wall::from_micros(100));
+        }
+        let issued = device.time_now().unwrap();
+        let applied = if gain_trial {
+            device.apply(Dir::Tx, d9_channel(), &Settings { gain: Some(6.0), ..Settings::default() }, None).unwrap()
+        } else {
+            device.apply(Dir::Tx, d9_channel(), &Settings { freq: Some(f2), ..Settings::default() }, None).unwrap()
+        };
+        let returned = device.time_now().unwrap();
+        if gain_trial {
+            assert!((applied.gain - 6.0).abs() < 1e-9, "the gain's read-back: {applied:?}");
+        } else {
+            assert!((applied.freq - f2).abs() < 1.0, "the frequency's read-back: {applied:?}");
+        }
+        let (a_ack, _) = wait_burst_ack(&*device, Wall::from_secs(3));
+        let b = align_to((e + m * TICKS_PER_MS + 50 * TICKS_PER_MS).max(returned + 52 * TICKS_PER_MS), 200);
+        let wave_b = iq(&tone_wave(1e6, 50_000, 100e3));
+        send_burst(&*device, &wave_b, Some(b));
+        let (b_ack, _) = wait_burst_ack(&*device, Wall::from_secs(3));
+        let got = read(&*device, Wall::from_secs(3), Some(200), |r| r.end(200).is_some_and(|end| end >= b + wave_b.len() as i64 * 200 + 30 * TICKS_PER_MS));
+        device.rx_stop(0, None).unwrap();
+        let _ = drain(&*device);
+        let samples = got.samples;
+        // A's windows are placed at where A's end appears in the capture: the control burst measured the loopback's
+        // delay for this (TX rate, RX rate) pair; without it the windows stay unshifted and the trial says so.
+        let shift = loop_delay.unwrap_or(0);
+        let at_e = e + shift;
+        let move_at = classify_tone(&samples, a, at_e, at_e, 100e3).moves_at;
+        let tail_tone = common::tone::first_ms_frequency(&samples, at_e - TICKS_PER_MS, 200);
+        let steady = window_power(&samples, a + shift + 10 * TICKS_PER_MS, at_e - 10 * TICKS_PER_MS);
+        let tail = window_power(&samples, at_e - TICKS_PER_MS, at_e);
+        let b_expected = loop_delay.map(|delay| b + delay);
+        let b_onset = window_power(&samples, b - 20 * TICKS_PER_MS, b - 10 * TICKS_PER_MS).and_then(|floor| tone_start(&samples, b - 5 * TICKS_PER_MS, floor));
+        let b_tone = b_expected.and_then(|onset| common::tone::first_ms_frequency(&samples, onset, 200));
+        let b_power = b_expected.and_then(|onset| common::tone::first_ms_tone(&samples, onset, 200)).map(|first| first.power);
+        let expected_b = if gain_trial { 100e3 } else { 200e3 };
+        let (min_ratio, max_ratio) = if gain_trial { (10f64.powf(-n47::TAIL_POWER_DB / 10.0), 10f64.powf(n47::TAIL_POWER_DB / 10.0)) } else { (0.5, 2.0) };
+        // `moves_at` is relative to the capture-frame `at_e`; `+ e` puts it in A's transmit frame, as `tail_verdict` compares it with `e`.
+        let move_at = move_at.map(|at| at + e);
+        let outcome = match (steady, tail) {
+            (Some(steady), Some(tail)) => n47::tail_verdict(
+                m,
+                e,
+                200,
+                issued,
+                returned,
+                a_ack,
+                100e3,
+                tail_tone,
+                Some((tail, steady)),
+                min_ratio,
+                max_ratio,
+                move_at,
+                b_tone,
+                expected_b,
+                b_onset,
+                b_expected,
+                1_000,
+                b_power,
+                if gain_trial { 6.0 } else { 0.0 },
+            ),
+            _ => Verdict::Inconclusive("A's steady or tail power was not captured".to_owned()),
+        };
+        println!(
+            "n47 T5 m = {m:+} ms{}: apply issued at device {issued} and returned at {returned} (e = {e}, margin {:+.3} ms); A ack {a_ack:?} ({:?} from e), B {b}.., B ack {b_ack:?}; loop delay {loop_delay:?} (A's windows at {at_e}); move {move_at:?}, tail {tail_tone:?}, power {tail:?}/{steady:?}, B tone {b_tone:?} power {b_power:?}",
+            if gain_trial { " (gain +6 dB)" } else { "" },
+            (issued - e) as f64 / TICKS_PER_MS as f64,
+            a_ack.map(|ack| ack - e)
+        );
+        verdict(&format!("n47 T5 m = {m:+} ms{}: the untimed setting leaves A's tail intact and B at {}", if gain_trial { " (gain)" } else { "" }, if gain_trial { "f1" } else { "f2" }), outcome);
+        rows.push(serde_json::json!({ "m_ms": m, "gain_trial": gain_trial, "a": a, "e": e, "at_e": at_e, "loop_delay": loop_delay, "b": b, "issued": issued, "returned": returned,
+            "a_ack": a_ack, "b_ack": b_ack, "move_at": move_at, "tail_tone": tail_tone, "tail_power": tail, "steady_power": steady, "b_tone": b_tone, "applied": format!("{applied:?}") }));
+    }
+    // The probes' initial state: 0 dB transmit gain (the gain trial raised it).
+    device.apply(Dir::Tx, d9_channel(), &Settings { gain: Some(0.0), ..Settings::default() }, None).unwrap();
+    measurement::push_raw_observation("hw_n47_raw_tx_setting_after_a_burst_end", rows.len() as u32, serde_json::json!({ "trials": rows }));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47_raw_rx_rate_on_an_open_streamer() {
+    // Note 47 T4: a rate change on a held-open receive streamer. The tone source runs at a fixed 1 MS/s and is
+    // restarted for each trial, then stopped and its burst acknowledged before the next; only the receive rate
+    // changes. The old stream's packets are drained to a quiet interval before the rate is applied, every block at
+    // or after the planned start is checked against the device's own packet timestamps, and a failed drain leaves the
+    // rate unchanged and the trial INCONCLUSIVE.
+    let inner = raw();
+    let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+    probe.keep_rx_blocks();
+    let hz = pin_slot_a(&*probe);
+    let tone = iq(&tone_wave(1e6, 1_000_000, 100e3));
+    raw_tx(&*probe, 1e6, hz);
+    raw_rx(&*probe, 1e6, hz);
+    let mut observations = Vec::new();
+    let mut reports = Vec::new();
+    for rate in [1e6, 2e6, 10e6, 1e6] {
+        probe.rx_stop(0, None).ok();
+        let stale = drain(&*probe);
+        let per = (common::MCR as f64 / rate) as i64;
+        if !stale.quiet {
+            let opens = probe.control_log().iter().filter(|call| **call == "rx_open").count();
+            verdict(
+                &format!("n47 raw rx rate {rate:.0}: the read-back, the tick spacing and the fixed tone at the new rate"),
+                n47::rx_rate_verdict(rate, rate, 0, &[], per, None, 100e3, opens, false),
+            );
+            observations.push(serde_json::json!({
+                "rate_hz": rate, "incomplete": "the old stream did not drain quietly; no rate was applied",
+                "stale_blocks": stale.read.blocks.len(), "stale_other": stale.read.other.iter().filter(|(_, other)| other != "Timeout").collect::<Vec<_>>(),
+            }));
+            continue;
+        }
+        let applied = probe.apply(Dir::Rx, d9_channel(), &Settings { rate: Some(rate), ..Settings::default() }, None).unwrap();
+        let planned = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, per);
+        let source_at = align_to(probe.time_now().unwrap() + 20 * TICKS_PER_MS, 200);
+        let got = std::thread::scope(|scope| {
+            let source = scope.spawn(|| send_burst(&*probe, &tone, Some(source_at)));
+            probe.rx_start(0, planned).unwrap();
+            let got =
+                read(&*probe, Wall::from_secs(2), Some(per), |r| r.end(per).is_some_and(|end| end >= planned + 20 * TICKS_PER_MS) || r.other.iter().any(|(_, other)| other.starts_with("LateCommand")));
+            probe.rx_stop(0, None).unwrap();
+            source.join().expect("the tone source's send");
+            got
+        });
+        // The source is stopped by its own end of burst, and that end is acknowledged before the next trial.
+        let (source_ack, source_reports) = wait_burst_ack(&*probe, Wall::from_secs(3));
+        reports.extend(source_reports);
+        let fresh: Vec<(i64, usize)> = got.blocks.iter().copied().filter(|(tick, _)| *tick >= planned).collect();
+        let tone_hz = common::tone::first_ms_frequency(&got.samples, planned, per);
+        let opens = probe.control_log().iter().filter(|call| **call == "rx_open").count();
+        verdict(
+            &format!("n47 raw rx rate {rate:.0}: the read-back, the tick spacing and the fixed tone at the new rate"),
+            n47::rx_rate_verdict(rate, applied.rate, planned, &fresh, per, tone_hz, 100e3, opens, true),
+        );
+        observations.push(serde_json::json!({
+            "rate_hz": rate, "applied_rate": applied.rate, "applied_freq": applied.freq, "planned": planned, "per": per,
+            "blocks": &fresh, "tone_hz": tone_hz, "source_at": source_at, "source_ack": source_ack,
+            "stale_blocks": stale.read.blocks.len(),
+            "stale_other": stale.read.other.iter().filter(|(_, other)| other != "Timeout").collect::<Vec<_>>(),
+            "other": got.other.iter().filter(|(_, other)| other != "Timeout").collect::<Vec<_>>(),
+        }));
+    }
+    probe.rx_stop(0, None).ok();
+    let _ = drain(&*probe);
+    println!("n47 raw rx rate: the tone source's burst ACKs {reports:?}");
+    measurement::push_raw_observation("hw_n47_raw_rx_rate_on_an_open_streamer", 4, serde_json::json!({ "changes": observations }));
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47_raw_tx_rate_on_an_open_streamer() {
+    // Note 47 T4: a transmit rate change on a held-open streamer. The receive stays at 1 MS/s; a control burst at each
+    // transmit rate calibrates the loopback's delay, so B's onset is judged against it rather than against one sample.
+    let inner = raw();
+    let probe = Arc::new(probe_device::ProbeDevice::new(inner));
+    let hz = pin_slot_a(&*probe);
+    raw_tx(&*probe, 1e6, hz);
+    let flush = flush_transmit(&*probe);
+    raw_rx(&*probe, 1e6, hz);
+    let mut reports = flush;
+    let rx_start = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    probe.rx_start(0, rx_start).unwrap();
+    let control_r1 = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    send_burst(&*probe, &iq(&tone_wave(1e6, 5_000, 100e3)), Some(control_r1));
+    let (_, control_reports) = wait_burst_ack(&*probe, Wall::from_secs(2));
+    reports.extend(control_reports);
+    reports.extend(drain_tx_reports(&*probe));
+    let a = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    let wave_a = iq(&tone_wave(1e6, 100_000, 100e3));
+    send_burst(&*probe, &wave_a, Some(a));
+    let e = a + wave_a.len() as i64 * 200;
+    let (a_ack, a_reports) = wait_burst_ack(&*probe, Wall::from_secs(5));
+    reports.extend(a_reports);
+    reports.extend(drain_tx_reports(&*probe));
+    while probe.time_now().unwrap() <= e + 5 * TICKS_PER_MS {
+        std::thread::sleep(Wall::from_micros(200));
+    }
+    let applied = probe.apply(Dir::Tx, d9_channel(), &Settings { rate: Some(2e6), ..Settings::default() }, None).unwrap();
+    let control_r2 = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    send_burst(&*probe, &iq(&tone_wave(2e6, 10_000, 100e3)), Some(control_r2));
+    let (_, control_reports) = wait_burst_ack(&*probe, Wall::from_secs(2));
+    reports.extend(control_reports);
+    reports.extend(drain_tx_reports(&*probe));
+    let b = align_to((e + 5 * TICKS_PER_MS + 50 * TICKS_PER_MS).max(probe.time_now().unwrap() + 52 * TICKS_PER_MS), 200);
+    let wave_b = iq(&tone_wave(2e6, 100_000, 100e3));
+    send_burst(&*probe, &wave_b, Some(b));
+    let (b_ack, b_reports) = wait_burst_ack(&*probe, Wall::from_secs(5));
+    reports.extend(b_reports);
+    reports.extend(drain_tx_reports(&*probe));
+    // Counted after the last drain, so a late duplicate for A is still seen; a duplicate is a second ACK and the verdict fails.
+    let a_acks = n47::burst_acks_in(&reports, a, e + 1);
+    let b_acks = n47::burst_acks_in(&reports, b, b + wave_b.len() as i64 * 100 + 1);
+    let got = read(&*probe, Wall::from_secs(3), Some(200), |r| r.end(200).is_some_and(|end| end >= b + wave_b.len() as i64 * 100 + 50 * TICKS_PER_MS));
+    probe.rx_stop(0, None).ok();
+    let samples = got.samples;
+    let floor = window_power(&samples, control_r1 - 20 * TICKS_PER_MS, control_r1 - 10 * TICKS_PER_MS);
+    let onset1 = floor.and_then(|floor| tone_start(&samples, control_r1 - 5 * TICKS_PER_MS, floor));
+    let floor2 = window_power(&samples, control_r2 - 20 * TICKS_PER_MS, control_r2 - 10 * TICKS_PER_MS);
+    let onset2 = floor2.and_then(|floor| tone_start(&samples, control_r2 - 5 * TICKS_PER_MS, floor));
+    let delay2 = onset2.map(|two| two - control_r2);
+    let b_expected = delay2.map(|delay| b + delay);
+    let a_tail = common::tone::first_ms_frequency(&samples, e - TICKS_PER_MS, 200);
+    let b_tone = b_expected.and_then(|onset| common::tone::first_ms_frequency(&samples, onset, 200));
+    let floor_b = window_power(&samples, b - 20 * TICKS_PER_MS, b - 10 * TICKS_PER_MS);
+    let b_onset = floor_b.and_then(|floor| tone_start(&samples, b - 5 * TICKS_PER_MS, floor));
+    let count = |code: ezsdr_radio_uhd::TxCode| reports.iter().filter(|report| report.code == code).count();
+    let opened = probe.control_log().iter().filter(|call| **call == "tx_open").count();
+    verdict(
+        "n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz",
+        n47::tx_rate_verdict(
+            2e6,
+            applied.rate,
+            a_ack,
+            e,
+            200,
+            a_tail,
+            100e3,
+            b_onset,
+            b_expected,
+            1_000,
+            b_tone,
+            100e3,
+            a_acks,
+            b_acks,
+            count(ezsdr_radio_uhd::TxCode::TimeError),
+            count(ezsdr_radio_uhd::TxCode::Underflow) + count(ezsdr_radio_uhd::TxCode::UnderflowInPacket),
+            opened,
+        ),
+    );
+    println!(
+        "n47 raw tx rate: A {a}..{e}, ack {a_ack:?} ({:?} from e); control {control_r1}/{control_r2}, onsets {onset1:?}/{onset2:?}, loop delay {delay2:?}; B {b}.., onset {b_onset:?}, ack {b_ack:?} ({:?} from B's end); reports {reports:?}",
+        a_ack.map(|ack| ack - e),
+        b_ack.map(|ack| ack - (b + wave_b.len() as i64 * 100))
+    );
+    measurement::push_raw_observation(
+        "hw_n47_raw_tx_rate_on_an_open_streamer",
+        1,
+        serde_json::json!({ "a": a, "e": e, "b": b, "a_ack": a_ack, "b_ack": b_ack, "control": [control_r1, control_r2], "onsets": [onset1, onset2],
+            "delay": delay2, "a_tail": a_tail, "b_tone": b_tone, "applied_rate": applied.rate, "applied_freq": applied.freq, "reports": reports.len() }),
+    );
+}
+
+/// T2: note 47 stage 3 on the production path. A receive stream runs at f1 with a 100 kHz tone repeated by the same
+/// board's transmitter; a value submitted while it streams is refused with its Action id and the tone stays; a
+/// stream-scoped `Stop`, two values and a timed `start_rx` then give a segment at f1 + 50 kHz whose first block is at
+/// the planned origin and whose first millisecond holds the tone at 50 kHz. The antenna is not exercised (the loopback
+/// is wired to one port). `radio.START_LEAD_SHORT` is counted, not a failure (KL-35: the profile lead is not re-measured).
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47_rx_restart_with_new_values() {
     let device = usrp();
     let hz = pin_slot_a(&*device);
     let probe = Arc::new(probe_device::ProbeDevice::new(device));
     probe.keep_rx_blocks();
-    let (bytes, waveform) = waveform_of(&tone_wave(60_000, 100e3));
-    let mut spec = with_burst(with_tx(receive_spec(1, 1e6, hz, None), 1e6), &waveform, true, "send_asap_and_flag", 10_000);
-    let rx = serde_json::to_value(resource("radio/rx/s0")).unwrap();
-    let schedule = spec["schedule"].as_array_mut().unwrap();
-    schedule.push(serde_json::json!({ "at": { "clock": "radio", "offset_ticks": 40_000 }, "action": { "kind": "stop", "target": rx } }));
-    schedule.push(serde_json::json!({ "at": { "clock": "radio", "offset_ticks": 50_000 }, "action": { "kind": "command", "target": rx, "verb": "start_rx", "params": {} } }));
-    schedule.push(serde_json::json!({ "at": { "clock": "radio", "offset_ticks": 150_000 }, "action": {
-        "kind": "update_parameter", "target": serde_json::to_value(resource("radio")).unwrap(), "key": "radio.rx.c0.frequency_hz", "value": hz + 50e3 } }));
     let dir = TempDir::new();
-    let inputs = std::collections::BTreeMap::from([(waveform.hash.clone(), bytes)]);
-    let (rows_before, blocks_before) = (probe.rows().len(), probe.rx_blocks().len());
-    let mut run = spec_run(&spec, &bench_profile(&*probe, &dir, serde_json::json!({}), bench_envelope(&*probe), false), probe.clone(), inputs);
-    past_t0(&mut run, ms(250));
-    let manifest = run.finish();
-    let blocks = device_samples(&probe.rx_blocks()[blocks_before..]);
-    let rows = probe.rows()[rows_before..].to_vec();
-    let segments: Vec<(i64, i64)> = manifest
-        .clocks
-        .sample_clocks
-        .iter()
-        .filter(|r| r.stream.to_string().ends_with("usrp/rx/s0"))
-        .filter_map(|r| Some((r.origin.ticks_in(r.root).ok()?, r.ended_at?.ticks_in(r.root).ok()?)))
-        .collect();
-    if segments.len() != 2 {
-        let why = format!("{} receive segments in the Run, not two", segments.len());
-        verdict("L1 smoke: the first segment holds 100 kHz (the change is not in it)", Verdict::Inconclusive(why.clone()));
-        verdict("L1 smoke: the second segment holds 100 kHz up to e and moves to 50 kHz at e", Verdict::Inconclusive(why));
-        return;
-    }
-    let ((origin1, end1), (origin2, end2)) = (segments[0], segments[1]);
-    let e = rows
-        .iter()
-        .find(|row| row["call"] == "apply_timed" && row["direction"] == "rx" && row["settings"]["freq"].as_f64() == Some(hz + 50e3) && row["result"]["error"].is_null())
-        .and_then(|row| row["e"].as_i64());
-    verdict("L1 smoke: the first segment holds 100 kHz (the change is not in it)", segment_tone_verdict(&blocks, origin1 + ms(15), end1, None));
-    let outcome = match e {
-        None => Verdict::Inconclusive("no timed receive apply of the change reached the device".to_owned()),
-        Some(e) if e <= origin2 || e >= end2 => Verdict::Inconclusive(format!("the applied instant {e} is outside the second segment {origin2}..{end2}")),
-        Some(e) => segment_tone_verdict(&blocks, origin2, end2, Some(e)),
+    let profile = bench_profile(&*probe, &dir, serde_json::json!({}), bench_envelope(&*probe), true);
+    let mut run = session_with(&profile, probe.clone(), &rx0_tx0(&profile));
+    past_t0(&mut run, ms(10));
+    past_tx_origin(&mut run);
+    let (bytes, _) = waveform_of(&tone_wave(1e6, 60_000, 100e3));
+    assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&bytes)).unwrap()));
+    wait(&mut run, ms(60));
+    let first_origin = probe.rows().into_iter().find(|row| row["call"] == "rx_start").and_then(|row| row["at"].as_i64());
+    let at_first = device_samples(&probe.rx_blocks());
+    let first_tone = match first_origin {
+        Some(origin) => n47::tone_hold_verdict(&at_first, origin + ms(10), origin + ms(50), 200, 100e3),
+        None => Verdict::Inconclusive("no rx_start row records the first segment's origin".to_owned()),
     };
-    verdict("L1 smoke: the second segment holds 100 kHz up to e and moves to 50 kHz at e", outcome);
+    verdict("n47 stage 3 (a): the first segment holds the 100 kHz tone", first_tone);
+
+    // (b) a receive value while the stream runs: the Kernel admits it, the Provider refuses it with its id, and the
+    // stream keeps its tone and its timestamps.
+    let entry = run.submit(set("radio.rx.c0.frequency_hz", ezsdr_kernel::spec::Value::num(hz + 50e3).unwrap()), None).unwrap();
+    let dispatched: Vec<u64> = match &entry.outcome {
+        ezsdr_kernel::session::Outcome::Admitted { dispatched, .. } => dispatched.iter().map(|id| id.0).collect(),
+        ezsdr_kernel::session::Outcome::Rejected { .. } => Vec::new(),
+    };
+    wait(&mut run, ms(30));
+    let events = run.events(0);
+    let refusals = events.iter().filter(|event| event.kind == kind("radio.COMMAND_REJECTED") && event.payload["action"].as_u64().is_some_and(|id| dispatched.contains(&id))).count();
+    verdict("n47 stage 3 (b): a receive value while the stream runs is refused with its Action id", n47::streaming_value_verdict(admitted(&entry), refusals));
+    let after_refusal = device_samples(&probe.rx_blocks());
+    let after_tone = match after_refusal.last() {
+        Some((tick, _)) => n47::tone_hold_verdict(&after_refusal, tick - ms(20), *tick, 200, 100e3),
+        None => Verdict::Inconclusive("no block after the refused value".to_owned()),
+    };
+    verdict("n47 stage 3 (b): the refused value leaves the stream at f1 without a gap", after_tone);
+
+    // (c) Stop only the receive stream; set the new values; a timed start; the new segment at f1 + 50 kHz.
+    let stop = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/rx/s0")) }, None).unwrap();
+    assert!(admitted(&stop), "the receive Stop: {:?}", stop.outcome);
+    for (key, value) in [("radio.rx.c0.frequency_hz", hz + 50e3), ("radio.rx.c0.gain_db", 6.0)] {
+        let entry = run.submit(set(key, ezsdr_kernel::spec::Value::num(value).unwrap()), None).unwrap();
+        assert!(admitted(&entry), "{key} on the stopped stream: {:?}", entry.outcome);
+    }
+    let planned = after_ticks(&run, ms(50));
+    let planned_tick = planned.ticks_in(planned.domain()).expect("the planned origin in root ticks");
+    // A capture from the booked origin shows the published first block there, and its continuity carries the
+    // Sink's GAP_BEFORE when the block began later.
+    let capture = verb("capture", output("rec"), Some(planned), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(10_000))]);
+    assert!(admitted(&run.submit(capture, None).unwrap()), "the capture at the restart's origin");
+    let rx_starts_before = probe.count("rx_start");
+    let start = run.submit(verb("start_rx", resource("radio/rx/s0"), Some(planned), &[]), None).unwrap();
+    assert!(admitted(&start), "the timed restart: {:?}", start.outcome);
+    wait(&mut run, ms(130));
+    // The quiet baseline is measured only after the transmit repeat is stopped, never from an interval in which the
+    // receive was stopped (a stopped receive has no samples at all).
+    let stop_repeat = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
+    assert!(admitted(&stop_repeat), "stopping the transmit repeat: {:?}", stop_repeat.outcome);
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    let blocks = device_samples(&probe.rx_blocks());
+    let starts: Vec<Json> = probe.rows().into_iter().filter(|row| row["call"] == "rx_start").skip(rx_starts_before).collect();
+    let origin = starts.first().and_then(|row| row["at"].as_i64());
+    let first = n47::first_tick_at_or_after(&probe_block_lengths(&probe), planned_tick);
+    let published = manifest.artifacts.iter().find(|(o, _)| o.as_str() == "rec").and_then(|(_, list)| list.first());
+    let gap_before = published.and_then(|artifact| artifact.continuity.first()).is_some_and(|map| !map.gaps.is_empty());
+    verdict("n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE", n47::restart_origin_verdict(Some(planned_tick), origin, first, gap_before));
+    let floor = blocks.last().and_then(|(last, _)| window_power_at(&blocks, last - ms(11), last - ms(1), 200));
+    let first_window = match floor {
+        Some(floor) => common::tone::first_window_verdict(&blocks, planned_tick, 200, 50e3, 10e3, floor),
+        None => Verdict::Inconclusive("no quiet window after the transmit repeat stopped: the noise floor is not measured".to_owned()),
+    };
+    verdict("n47 stage 3 (c): the new segment's first millisecond holds the tone at 50 kHz", first_window);
+    let late = events_of(&manifest, "radio.LATE_COMMAND").len();
+    verdict("n47 stage 3 (c): the restart is not reported late", n47::restart_late_verdict(late));
+    let short = events_of(&manifest, "radio.START_LEAD_SHORT").len();
+    println!("n47 stage 3 (c): radio.START_LEAD_SHORT counted {short} (reported, not a FAIL: the profile lead is not yet re-measured, KL-35)");
+    match probe.rows().into_iter().find(|row| row["call"] == "rx_start").and_then(|row| row["at"].as_i64()) {
+        Some(origin0) => {
+            let blocks_at = probe_block_lengths(&probe);
+            let before = blocks_at.iter().filter(|(tick, _)| *tick >= origin0 && *tick < planned_tick).copied().collect::<Vec<_>>();
+            verdict("n47 stage 3 (b): the first segment has no gap across the refusal", n47::continuity_verdict(&before, 200, origin0, planned_tick));
+        }
+        None => verdict("n47 stage 3 (b): the first segment has no gap across the refusal", Verdict::Inconclusive("no rx_start row records the first segment's origin".to_owned())),
+    }
+    // (d) the read-back is the configure's: `Core::configure` records claimed/read_back/difference and the Manifest
+    // exports them as `applied`. This is not a fresh measurement of the device after the Run.
+    let applied = section(&manifest, "applied").as_array().cloned().unwrap_or_default();
+    let read = |leaf: &str| applied.iter().rev().find(|row| row["key"].as_str().is_some_and(|key| key == format!("radio.rx.c0.{leaf}").as_str())).cloned();
+    for (leaf, asked) in [("frequency_hz", hz + 50e3), ("gain_db", 6.0)] {
+        let row = read(leaf);
+        let verdict_name = format!("n47 stage 3 (d): the configure read back the new {leaf} (configure-time read-back, not a post-Run measurement)");
+        match row {
+            Some(row) => verdict(&verdict_name, n47::readback_verdict(asked, row["claimed"].as_f64(), row["read_back"].as_f64(), row["difference"].as_f64())),
+            None => verdict(&verdict_name, n47::readback_verdict(asked, None, None, None)),
+        }
+    }
+    println!("n47 stage 3: antenna not exercised (the loopback is wired to one port).");
+}
+
+/// The probe's kept device blocks as `(first tick, samples)`.
+fn probe_block_lengths(probe: &probe_device::ProbeDevice) -> Vec<(i64, usize)> {
+    probe.rx_blocks().iter().map(|(first, samples)| (*first, samples.len())).collect()
 }
 
 #[test]
