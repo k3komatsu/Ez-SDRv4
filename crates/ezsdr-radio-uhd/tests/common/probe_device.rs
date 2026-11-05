@@ -25,7 +25,7 @@ pub struct ProbeDevice {
     rows: Mutex<Vec<Json>>,
     dropped_rows: AtomicUsize,
     tx_eob_count: AtomicUsize,
-    /// The calls in order: `apply`, `apply_timed`, `apply_failed`, `time_now`, `rx_open`, `tx_open`, `rx_recv`, `rx_stop`, `rx_close` and `drop`.
+    /// The calls in order: `apply`, `apply_failed`, `time_now`, `rx_open`, `tx_open`, `rx_recv`, `rx_stop`, `rx_close` and `drop`.
     control_log: Arc<Mutex<Vec<&'static str>>>,
     /// Replaces what `rx_recv` returns while it holds a sequence; an empty sequence times out.
     rx_script: Mutex<Option<RxScript>>,
@@ -34,7 +34,6 @@ pub struct ProbeDevice {
     /// Called with the count (1-based) of the untimed `apply` about to go to the device.
     before_untimed_apply: Mutex<Option<ApplyHook>>,
     untimed_applies: AtomicUsize,
-    timed_applies: AtomicUsize,
     /// The untimed `apply` (1-based) that fails, once counted down to 1.
     fail_untimed_apply: Mutex<Option<usize>>,
     tx_generations: Mutex<BTreeMap<usize, u64>>,
@@ -111,7 +110,6 @@ impl ProbeDevice {
             fail_restoring_apply: AtomicBool::new(false),
             before_untimed_apply: Mutex::new(None),
             untimed_applies: AtomicUsize::new(0),
-            timed_applies: AtomicUsize::new(0),
             fail_untimed_apply: Mutex::new(None),
             tx_generations: Mutex::new(BTreeMap::new()),
             tx_underflow_after_send: AtomicBool::new(false),
@@ -198,10 +196,6 @@ impl ProbeDevice {
         self.tx_underflow_after_send.store(true, Ordering::Release);
     }
 
-    pub fn timed_apply_count(&self) -> usize {
-        self.timed_applies.load(Ordering::Acquire)
-    }
-
     /// A bracketed device-time sample for the H4 dispatch observation.
     pub fn clock_anchor(&self) -> Result<(i64, u64, u64), DeviceError> {
         self.read_time_now("h4_anchor")
@@ -281,20 +275,6 @@ impl ProbeDevice {
             "host_after_ns": host_after_ns, "result": value }));
         result.map(|tick| (tick, host_before_ns, host_after_ns))
     }
-
-    fn record_timed_apply(&self, dir: Dir, chan: usize, settings: &Settings, at: i64, result: &Result<Applied, DeviceError>) {
-        let result = match result {
-            Ok(applied) => json!({ "rate": applied.rate, "freq": applied.freq, "gain": applied.gain, "antenna": applied.antenna }),
-            Err(error) => json!({ "error": error.message, "lost": error.lost }),
-        };
-        self.record(json!({
-            "call": "apply_timed", "direction": if dir == Dir::Rx { "rx" } else { "tx" }, "channel": chan,
-            "e": at, "host_return_ns": self.host_ns(),
-            "settings": { "rate": settings.rate, "freq": settings.freq, "gain": settings.gain, "antenna": settings.antenna },
-            "gain_only": settings.gain.is_some() && settings.rate.is_none() && settings.freq.is_none() && settings.antenna.is_none(),
-            "result": result,
-        }));
-    }
 }
 
 fn rx_outcome(result: &RxRecv) -> Json {
@@ -350,38 +330,29 @@ impl Device for ProbeDevice {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        if at.is_some() {
-            self.timed_applies.fetch_add(1, Ordering::AcqRel);
-        } else {
-            let count = self.untimed_applies.fetch_add(1, Ordering::AcqRel) + 1;
-            let hook = self.before_untimed_apply.lock().unwrap().take();
-            if let Some(mut hook) = hook {
-                hook(count);
-                *self.before_untimed_apply.lock().unwrap() = Some(hook);
-            }
+    fn apply(&self, dir: Dir, chan: usize, settings: &Settings) -> Result<Applied, DeviceError> {
+        let count = self.untimed_applies.fetch_add(1, Ordering::AcqRel) + 1;
+        let hook = self.before_untimed_apply.lock().unwrap().take();
+        if let Some(mut hook) = hook {
+            hook(count);
+            *self.before_untimed_apply.lock().unwrap() = Some(hook);
         }
-        if at.is_none() && self.fail_restoring_apply.load(Ordering::Acquire) && settings.rate.is_some() && settings.freq.is_some() && settings.gain.is_some() && settings.antenna.is_some() {
+        if self.fail_restoring_apply.load(Ordering::Acquire) && settings.rate.is_some() && settings.freq.is_some() && settings.gain.is_some() && settings.antenna.is_some() {
             self.control_log.lock().unwrap().push("apply_failed");
             return Err(DeviceError::failed("probe: scripted restore failure"));
         }
-        if at.is_none() {
-            let mut failing = self.fail_untimed_apply.lock().unwrap();
-            if let Some(remaining) = failing.as_mut() {
-                *remaining -= 1;
-                if *remaining == 0 {
-                    *failing = None;
-                    self.control_log.lock().unwrap().push("apply_failed");
-                    return Err(DeviceError::failed("probe: scripted apply failure"));
-                }
+        let mut failing = self.fail_untimed_apply.lock().unwrap();
+        if let Some(remaining) = failing.as_mut() {
+            *remaining -= 1;
+            if *remaining == 0 {
+                *failing = None;
+                self.control_log.lock().unwrap().push("apply_failed");
+                return Err(DeviceError::failed("probe: scripted apply failure"));
             }
         }
-        self.control_log.lock().unwrap().push(if at.is_some() { "apply_timed" } else { "apply" });
-        let result = self.inner.apply(dir, chan, settings, at);
-        if let Some(at) = at {
-            self.record_timed_apply(dir, chan, settings, at, &result);
-        }
-        result
+        drop(failing);
+        self.control_log.lock().unwrap().push("apply");
+        self.inner.apply(dir, chan, settings)
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("rx_open");
@@ -394,23 +365,15 @@ impl Device for ProbeDevice {
         self.record(json!({ "call": "rx_start", "stream": stream, "at": at, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.control_log.lock().unwrap().push("rx_start_now");
-        let before = self.host_ns();
-        let result = self.inner.rx_start_now(stream);
-        let after = self.host_ns();
-        self.record(json!({ "call": "rx_start_now", "stream": stream, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
-        result
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.inner.rx_packet_samples(stream)
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("rx_stop");
         let before = self.host_ns();
-        let result = self.inner.rx_stop(stream, at);
+        let result = self.inner.rx_stop(stream);
         let after = self.host_ns();
-        self.record(json!({ "call": "rx_stop", "stream": stream, "at": at, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
+        self.record(json!({ "call": "rx_stop", "stream": stream, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {

@@ -917,20 +917,10 @@
   "filter": "ur_12_every_advertised_rate_is_accepted"
  },
  {
-  "id": "R12",
-  "name": "a planned receive cut handed to the device as a timed stop (P1-1; design-notes §11 F1)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-   "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, None);",
-   "new": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, Some(cut));",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "rm_26_the_timeline_against_uhd_rx"
- },
- {
   "id": "R13",
   "name": "UR-25's untimed stop at the cut removed (P1-3; §11 F1)",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
-    "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k, None);",
+    "old": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = self.core.device.rx_stop(self.k);",
     "new": "            self.core.timing(json!({ \"what\": \"rx_stop_untimed\", \"cut\": cut, \"at\": now }));\n            let result = Ok(());",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",

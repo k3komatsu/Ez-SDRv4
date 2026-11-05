@@ -287,3 +287,185 @@ First write your own failure scenarios for this deletion, then check:
 4. design/18 changes (line 30, UR-34) correct and in the right sub-step; nothing else in design/ made false by α.
 5. Maintainability per AGENTS §9.
 For each major finding give a minimal sequence and the observable wrong outcome. Output: scenario list (short), findings P1/P2/P3 with path:line, verdict CODE OK / CODE NEEDS CHANGES. At most 100 lines.
+
+---
+
+## `brief-impl-a1b.md`
+
+## Brief: design note 48 S2 — implement sub-step S2a-i-β (the timed device paths)
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`, HEAD = the commit that closed S2a-i-α (`git log -1`), clean tree. Nobody else edits the tree. The `opencode run` client's PID belongs to you; it is not another agent.
+
+Read:
+- `AGENTS.md`: Safety core, §6, §7, and §9 with Maintainability.
+- From `~/.cache/ezsdr-fixes/2026-11-05-n48s2/`: `brief.md`, your `test-plan.md` (rev 2), and `rulings-plan.md` (R1–R10 and Round 2, S1–S12).
+
+### Task
+
+1. The test plan is rev 3 (`test-plan.md`, with §0 Round 3 and §9 the α record). Keep it as `test-plan.v3a.md`, then record β in a new §10 (rev 4).
+2. **Implement S2a-i-β only** (T1): `Device::apply`'s and `rx_stop`'s `at` leave the trait (A1, A1′); FakeDevice's timed command queue, `settle`, `FakeConfig::command_queue`, the DSP FIFO and its flow parts go, keeping `Dsp.log` (frequency history), `tx_header` and `tx_header_stale` (S12); `UhdDevice::tune_dsp`/`tune_auto` keep `at` as UhdDevice-only bench methods (S10, T2); A5 per rev 3 (`Channels::without` has a caller at rx.rs:1707: decide by rev 3, report); N1, N2, N10, N11 and every β test rev 3 names; the D9 table (S4); the rows rev 3 decides for β (P215, P219, P369 only if B7 is β — otherwise later, P985, P990) plus the mechanical sweep; the spec text rev 3 assigns to β (UR-2, UR-33, UR-22 at design/18:249). Do not start S2a-ii or S2b. This session has no time limit: do the whole of β, keeping the tree green; do not stop because the work is large. Work in passes as you need, but report only when all of β is done and the tree is green.
+   - Follow the plan.
+   - Extend it (§10, the β implementation record) for every state or failure path the implementation adds.
+   - **Every planned test of S2a-i is written. None is a "gap" to report.** If a planned test cannot be written as planned, say why with evidence, and give what replaces it.
+   - Do not start S2a-ii.
+
+### Rules
+
+**Mutation rows**
+- Make text edits only, in `plan/maintenance/tools/mutations.json` and `plan/*/tools/mutations.json`. Never re-serialize the file.
+- Use Rust token anchors. Each row matches exactly once and names its killing test.
+- The mechanical sweep (S3): after the code change, a script lists every row that is `NOT FOUND`. Save its output as `sweep-a1b.txt`. Delete only the listed rows whose behaviour is gone. Each row on retained code is decided as rev 3 says.
+- Confirm each new or retargeted row in a throwaway copy outside the repository:
+  - copy: `rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3`;
+  - build with `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`;
+  - run `find <copy> -type f -exec touch {} +` before building;
+  - use one copy at a time;
+  - a compile failure is not a kill;
+  - logs go in `probes-a1b/`.
+- Never run `mutate.py`, `remote_mutate.py` or `gate.py`. Never apply a mutant to the tree.
+- Existing rows whose `old` lies in a function you change: re-run them in the copy too.
+
+**Runs and state**
+- Run single tests with `timeout 300`. Your tool stops a command at 120 s, so run longer commands with a longer timeout, in the foreground. Leave no process running.
+- Test temp files go on `/tmp`.
+- Make no git state changes, no version bumps, and no `SCHEMA_CHANGELOG` entry. Regenerate any changed schema, so `schema_freeze` and `rm_20_schema_freeze` are green.
+- Write what happened, never what was not done.
+
+**End checks**
+- `cargo fmt --all`.
+- clippy `-D warnings` for the workspace, and for `-p ezsdr-radio-uhd --features uhd --all-targets`, both via `python3 plan/maintenance/tools/remote/rdev.py -- <cmd>`.
+- The remote workspace tests, after your last edit.
+- The Python 3.14 suite (handoff §5).
+- `git ls-files -m -o --exclude-standard | xargs chmod go+r`.
+- `PYTHONDONTWRITEBYTECODE=1 python3 plan/maintenance/tools/rules.py --base HEAD` must give 0. If you rename or drop tests, list each with its reason in `plan/phase8/reviews/48s2a1b-renames.txt`, in the format of `48s1-renames.txt`, and pass `--renames`.
+
+### Self-review (one round)
+
+Run it in the foreground with `timeout 2400`. Use free DeepSeek first:
+
+`opencode2 run --standalone -m opencode/deepseek-v4.1-flash-free#max --agent plan --auto "<checklist>"`
+
+Use Go (`opencode-go/deepseek-v4.1-flash#max`) only if free refuses.
+
+Checklist:
+1. Every S2a-i-β test in rev 3 is written, observes what the plan says, and its row breaks it.
+2. Scope against rev 3: missing and extra (nothing of S2a-ii or S2b).
+3. Every "no caller / unreachable" claim behind a deletion: grep the callers.
+4. Every `design/` text this sub-step makes false is amended in this sub-step.
+5. Maintainability: no leftovers of the deleted paths. No retained behaviour lost its only test.
+
+Fix every finding, or reject it with a reason.
+
+### Report (at most 15 lines)
+
+- Rev 3: per ruling, what changed.
+- S2a-i: what was deleted and what was kept.
+- Tests: added, moved and deleted, with counts.
+- Rows: deleted, retargeted and added, with probe outcomes and the sweep.
+- Suites and `rules.py`.
+- Self-review findings and their disposition.
+- Deviations, and open questions with your recommendation.
+
+---
+
+## `brief-impl-a1b2.md`
+
+## Brief: design note 48 S2 — finish sub-step S2a-i-β (continuation)
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`. Nobody else edits the tree.
+
+The previous run of `brief-impl-a1b.md` stopped before it reported. It had started a probe batch in the background and then ended its turn. That batch has since finished. Its logs are in `~/.cache/ezsdr-fixes/2026-11-05-n48s2/probes-a1b/` (`summary.txt` and one log per row). The tree holds that run's uncommitted β changes: `git diff HEAD`. Keep them.
+
+### Task
+
+Read `brief-impl-a1b.md` in full. Its task, rules, self-review and report format all apply. Then finish β from where the tree is:
+1. Read the probe results (P985, P986, P1201, P1210 and the rest).
+2. Fix or retarget any row that is not killed.
+3. Make the spec edits.
+4. Do the mechanical sweep (`sweep-a1b.txt`).
+5. Update the test plan's §10, the β implementation record (rev 4; keep the current file as `test-plan.v3a.md` if that is not done already).
+6. Run the end checks.
+7. Run the self-review round.
+8. Report.
+
+**Never leave a command running in the background when you end your turn.** Run every probe batch, test and self-review in the foreground with a long enough `timeout`, and wait for it. A run that ends while its own background job is still going stops without a report.
+
+---
+
+## `brief-sol-code-a1b.md`
+
+You are the independent reviewer (Sol), read-only, in ~/local_work/Ez-SDRv4 (HEAD 991d52a; the sub-step's changes are uncommitted: `git diff HEAD`, `git status`). Do not edit, format, build in the tree or commit; never run mutate.py or remote_mutate.py. To run a test, use a throwaway copy (`rsync -a --no-times --exclude .cargo --exclude target --exclude .git --exclude v3 ~/local_work/Ez-SDRv4/ /tmp/sol-s2a/`, `CARGO_TARGET_DIR=~/.cache/cargo-target/Ez-SDRv4-review CARGO_INCREMENTAL=0`, `timeout 300`).
+
+AGENTS.md §9 step 7: review the code of sub-step S2a-i-β of design note 48 S2 — removing the timed device paths: `Device::apply`'s and `rx_stop`'s `at`, `rx_start_now`, FakeDevice's timed command queue, DDC/DUC FIFOs and flows (keeping `Dsp.log` frequency history and the TX header state), with `UhdDevice::tune_dsp`/`tune_auto` kept as bench-only methods. α (the queue measurement group) is committed at HEAD. Inputs in ~/.cache/ezsdr-fixes/2026-11-05-n48s2/: brief.md, rulings-plan.md (R1–R10, S1–S12, T1–T3), test-plan.md (rev 4: §10 is the β implementation record and deviations), sweep-a1b.txt, probes-a1b/ and probes-a1b2/ (row probe logs), selfreview-a1b2.out and the end of impl-a1b2.log (the implementer's report: P1224 deleted, design/18:249 left to S2a-ii, `hw_n47_raw_control_call_durations` now timing `tune_auto`). You reviewed rev 1 of this plan (sol-plan.log).
+
+First write your own failure scenarios for this change, then check:
+1. G1/G2 hold: untimed apply, coercion, read-back, refusal, `apply_delay` (N1/N2), sample-time frequency history (the loopback split test), front-end preservation, stale TX header and P5/D70 packet state, the T3 flush and its report attribution from S1. Did any deleted or rewritten test (19 deleted, 8 renamed/retargeted) take the only pin of a reachable behaviour? Check against rev 3's map and rulings S1–S12.
+2. FakeDevice after the FIFO/flow removal still models what the Module relies on (receive start/stop, stale header, DDC restart, sample production) and is not looser than the hardware it stands for.
+3. Every production caller of `apply`/`rx_stop` passed `None` before (the deletion changes no production behaviour); `UhdDevice` lost no untimed path; the bench methods keep `at`.
+4. Mutation rows: 18 deleted, 4 added, 4 retargeted, P1224 deleted (its behaviour only in a hardware probe): each disposition right; no row on retained code dropped; the sweep complete.
+5. design/ text: UR-2, UR-33 and any other text β makes false amended now; design/18:249 (UR-22's timed TX DSP sentences) correctly left to S2a-ii (A4); nothing of S2a-ii/S2b done early.
+6. Maintainability per AGENTS §9 (leftovers of the deleted paths, write-only state, stale comments).
+For each major finding give a minimal sequence and the observable wrong outcome. Output: scenario list (short), findings P1/P2/P3 with path:line, verdict CODE OK / CODE NEEDS CHANGES. At most 120 lines.
+
+---
+
+## `brief-fix-a1b.md`
+
+## Brief: design note 48 S2a-i-β — fix round 1
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`). You work in `~/local_work/Ez-SDRv4`, HEAD `991d52a`. The tree holds your uncommitted β changes; keep them. Nobody else edits the tree.
+
+Read these files in `~/.cache/ezsdr-fixes/2026-11-05-n48s2/`:
+- `brief-impl-a1b.md`: its rules and end checks apply.
+- `test-plan.md` §10.
+- Sol's review at the end of `sol-code-a1b.log`.
+
+### Task (Sol P2, adopted)
+
+The deleted P4 test also checked that case C really closes and reopens the streamer and that case A does not. This check does not depend on the FIFO. Restore only that check:
+- Write a small FakeDevice sequence test of `p4_dsp_only` (`tests/common/d9.rs` ~225–229) with an untimed or no-op tune closure.
+- Assert `rx_close`/`rx_open` for `DspOnlyReopen`, and assert they are absent for case A.
+- Retarget P1224 to this test. Do not delete P1224. Confirm the kill in a throwaway copy (`probes-a1b3/`).
+- Record this in §10 and in the renames file if needed.
+
+Change nothing else. Also do the orchestrator's two notes:
+1. P1224 is no longer deleted (it is retargeted now).
+2. Leave `design/18:249` and the `hw_n47_raw_control_call_durations` rename for S2a-ii. Record both in §10 as carried to S2a-ii.
+
+Run all of the end checks in the foreground. No self-review round is needed for this fix.
+
+### Report (at most 6 lines)
+
+Give the test, the row and its probe, and the suites. Run `rules.py`.
+
+---
+
+## `brief-fix-a1b2.md`
+
+## Brief: design note 48 S2a-i-β — gate fix (mutation P1187 survives)
+
+You are the implementer (`anthropic/claude-haiku-5-5#high`) in `~/local_work/Ez-SDRv4`. HEAD is `991d52a`. Your β changes are uncommitted in the tree; keep them. Nobody else edits the tree. The rules and end checks of `brief-impl-a1b.md` apply.
+
+### What failed
+
+The orchestrator's gate (`gate-a1b/mutation.log`) reports that row **P1187** now SURVIVES:
+- name: "a one-sample EOB drops the next timed header (D9b-1a)";
+- file: `device.rs`;
+- change: `self.eob_lost = true` → `false`;
+- filter: `ur_33_a_one_sample_eob_loses_the_next_timed_header`.
+
+The same row was killed at HEAD `991d52a`. So β changed either the FakeDevice DUC model or this test's path, and the killing test passes without the lost header.
+
+### Task
+
+1. In a throwaway copy, find why. Compare the DUC/`Duc::packet`/`has_time`/`eob_lost` logic and the test at HEAD and in the tree. Check whether the flow or FIFO removal dropped a step that consumed `eob_lost`, or whether something else now makes the next packet start early.
+2. If β lost behaviour that the hardware has (a one-sample EOB loses the next timed header, D9b-1a, hardware-verified), restore it in the model. If instead the test now passes for a wrong reason, make it observe the header loss again.
+3. Show that P1187 is killed again in the copy (logs in `probes-a1b4/`).
+4. Re-probe the other rows in the functions you touch.
+5. Record what you found in `test-plan.md` §10.
+
+Change nothing else. Run the end checks in the foreground. No self-review round.
+
+### Report (at most 6 lines)
+
+The cause with path:line, the fix, the probes, the suites, `rules.py`.

@@ -1065,7 +1065,7 @@ mod tests {
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
         let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]), layout_description());
         let _frozen = hold(&core, &time, &device);
@@ -1156,7 +1156,7 @@ mod tests {
 
     /// A receive-only rig with its events: uhd-control booking on the manual clock held at 0.
     fn staging_rig() -> (Arc<Core>, Control, Arc<crate::device::FakeDevice>, Arc<ezsdr_kernel::event::EventCollector>, crate::provider::test_support::Frozen) {
-        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() };
         let (core, device, time, events) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
         let frozen = hold(&core, &time, &device);
         let (control, _owner) = control(&core, &[Dir::Rx]);
@@ -1380,7 +1380,7 @@ mod tests {
     fn ur_26_a_peer_stream_s_state_does_not_matter_and_an_instance_stop_stops_both() {
         // S5 on the layout (two receive streams, c0 in stream 0 and c1 in stream 1): after a `Stop` of stream 0 only c0's value is accepted, and
         // stream 1's line takes nothing; a `Stop` of the instance makes c1's value acceptable as well.
-        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() }));
+        let device = Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() }));
         let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>], vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
         let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::new(), layout_description());
         let _frozen = hold(&core, &time, &device);

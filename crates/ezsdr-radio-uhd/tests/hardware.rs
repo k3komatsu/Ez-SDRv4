@@ -63,7 +63,7 @@ fn hw_b1_probe() {
     }
     // What a Session would inherit if nothing configured the transmitter (UR-25).
     for chan in 0..device.channels(Dir::Tx) {
-        println!("B1 tx {chan}: {:?}", device.apply(Dir::Tx, chan, &Settings::default(), None));
+        println!("B1 tx {chan}: {:?}", device.apply(Dir::Tx, chan, &Settings::default()));
     }
 }
 
@@ -345,7 +345,7 @@ fn raw() -> Arc<dyn Device> {
 
 fn raw_rx(device: &dyn Device, rate: f64, freq: f64) {
     let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
-    device.apply(Dir::Rx, d9_channel(), &settings, None).unwrap();
+    device.apply(Dir::Rx, d9_channel(), &settings).unwrap();
     device.rx_open(0, &[d9_channel()]).unwrap();
 }
 
@@ -353,7 +353,7 @@ fn raw_rx(device: &dyn Device, rate: f64, freq: f64) {
 fn raw_tx(device: &dyn Device, rate: f64, freq: f64) {
     assert!(SAFE_TX_HZ.contains(&freq) && rate <= 2e6, "bench.md RF safety: {freq} Hz at {rate} S/s");
     let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) };
-    let applied = device.apply(Dir::Tx, d9_channel(), &settings, None).unwrap();
+    let applied = device.apply(Dir::Tx, d9_channel(), &settings).unwrap();
     assert!(applied.gain == 0.0 && SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");
     device.tx_open(0, &[d9_channel()]).unwrap();
 }
@@ -424,35 +424,6 @@ fn drain(device: &dyn Device) -> Drain {
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_raw_rx_timed_stop() {
-    // UR-25's INFERRED point: does the X3x0 honour the time of a continuous stream's stop?
-    // (UHD 4.10's radio_rx_core.v: "timed STOP commands are not supported".)
-    let device = raw();
-    raw_rx(&*device, 1e6, 1e9);
-    for lead_ms in [0, 1, 5, 20, 100, 500] {
-        let start = (device.time_now().unwrap() / 200 + 20_000) * 200;
-        device.rx_start(0, start).unwrap();
-        let before = read(&*device, Wall::from_secs(2), None, |r| r.end(200).is_some_and(|e| e >= start + 200 * TICKS_PER_MS));
-        let issued_before = device.time_now().unwrap();
-        let at = issued_before + lead_ms * TICKS_PER_MS;
-        device.rx_stop(0, if lead_ms == 0 { None } else { Some(at) }).unwrap();
-        let issued = device.time_now().unwrap();
-        let after = drain(&*device);
-        let end = after.read.end(200).or(before.end(200)).unwrap();
-        println!(
-            "B8 rx stop lead {lead_ms} ms: first block {:?} (start {start}); stop issued at {issued_before}…{issued} for {}; last sample end {end}: {:+.3} ms from the issue, {:+.3} ms from the stop's time; after the stop: {} blocks, {:?}",
-            before.blocks.first(),
-            if lead_ms == 0 { "now".to_owned() } else { at.to_string() },
-            (end - issued) as f64 / TICKS_PER_MS as f64,
-            (end - at) as f64 / TICKS_PER_MS as f64,
-            after.read.blocks.len(),
-            after.read.other.iter().filter(|(_, o)| o != "Timeout").collect::<Vec<_>>()
-        );
-    }
-}
-
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_raw_device_lead() {
     // The device lead: the least lead from `time_now()` at which a timed burst is played
     // and not reported late (below UR-21's 2 ms, which the Module never probes).
@@ -510,12 +481,12 @@ fn hw_b8_raw_restart_lead() {
     for (cold, reopen) in [(false, false), (true, false), (true, true)] {
         for lead_ms in [100i64, 50, 25, 10, 5, 2, 1] {
             let stopped = device.time_now().unwrap();
-            device.rx_stop(0, None).unwrap();
+            device.rx_stop(0).unwrap();
             let mut apply_ms = 0.0;
             if cold {
                 rate = if rate == 1e6 { 2e6 } else { 1e6 };
                 let begun = Instant::now();
-                device.apply(Dir::Rx, 0, &Settings { rate: Some(rate), ..Settings::default() }, None).unwrap();
+                device.apply(Dir::Rx, 0, &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
                 apply_ms = begun.elapsed().as_secs_f64() * 1e3;
             }
             if reopen {
@@ -551,7 +522,7 @@ fn hw_b8_raw_restart_lead() {
             let _ = read(&*device, Wall::from_millis(200), None, |_| false);
         }
     }
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let _ = drain(&*device);
     measurement::push_raw_observation("hw_b8_raw_restart_lead", 21, serde_json::json!({ "restarts": observations }));
 }
@@ -562,7 +533,7 @@ fn hw_b8_raw_timed_tune_phase() {
     // `phase_behavior_on_retune: random_unless_timed_tune` (UR-9): after the LOs have been
     // elsewhere, is the loop's phase the same when both return by a timed tune, and random
     // when they return untimed? A 100 kHz tone, its phase a function of the device tick.
-    let device = raw();
+    let device = raw_uhd();
     raw_rx(&*device, 1e6, 1e9);
     raw_tx(&*device, 1e6, 1e9);
     let f_bb = 100e3;
@@ -578,18 +549,18 @@ fn hw_b8_raw_timed_tune_phase() {
         for cycle in 0..6 {
             // Scramble both LOs, then return to 1 GHz.
             for dir in [Dir::Tx, Dir::Rx] {
-                device.apply(dir, 0, &Settings { freq: Some(999_700_000.0 + cycle as f64 * 50_000.0), ..Settings::default() }, None).unwrap();
+                device.apply(dir, 0, &Settings { freq: Some(999_700_000.0 + cycle as f64 * 50_000.0), ..Settings::default() }).unwrap();
             }
             let tune = (device.time_now().unwrap() / 200 + 40_000) * 200;
             for dir in [Dir::Tx, Dir::Rx] {
-                device.apply(dir, 0, &Settings { freq: Some(f0), ..Settings::default() }, timed.then_some(tune)).unwrap();
+                device.tune_auto(dir, 0, f0, timed.then_some(tune)).unwrap();
             }
             let start = tune + 100 * TICKS_PER_MS;
             device.rx_start(0, start).unwrap();
             let burst: Vec<_> = (0..20_000).map(|i| tone_at(start + i * 200)).collect();
             let sent = device.tx_send(0, &[&burst], Some(start), true, true, Wall::from_millis(500)).unwrap();
             let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 25 * TICKS_PER_MS));
-            device.rx_stop(0, None).unwrap();
+            device.rx_stop(0).unwrap();
             let _ = drain(&*device);
             let mut reports = Vec::new();
             while let Some(report) = device.tx_async(0, Wall::from_millis(10)).unwrap() {
@@ -782,67 +753,6 @@ fn hw_b8_preemption() {
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_raw_timed_retune() {
-    // bench.md B8's timed retunes: a receive retune at a lead from `time_now()` (0: untimed),
-    // seen in a 100 kHz loopback tone moving to 50 kHz; when does it begin and settle?
-    let device = raw();
-    raw_rx(&*device, 1e6, 1e9);
-    raw_tx(&*device, 1e6, 1e9);
-    let tone: Vec<_> = (0..60_000)
-        .map(|i| {
-            let phase = 2.0 * std::f64::consts::PI * 100e3 * (i as f64 / 1e6);
-            [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32]
-        })
-        .collect();
-    for lead_us in [10_000i64, 5_000, 2_000, 1_000, 500, 200, 0] {
-        device.apply(Dir::Rx, 0, &Settings { freq: Some(1e9), ..Settings::default() }, None).unwrap();
-        let start = (device.time_now().unwrap() / 200 + 100_000) * 200;
-        device.rx_start(0, start).unwrap();
-        device.tx_send(0, &[&tone], Some(start), true, true, Wall::from_millis(500)).unwrap();
-        while device.time_now().unwrap() < start + 20 * TICKS_PER_MS {
-            std::thread::sleep(Wall::from_micros(200));
-        }
-        let now = device.time_now().unwrap();
-        let at = now + lead_us * 200;
-        let begun = Instant::now();
-        device.apply(Dir::Rx, 0, &Settings { freq: Some(1_000_050_000.0), ..Settings::default() }, (lead_us > 0).then_some(at)).unwrap();
-        let apply_us = begun.elapsed().as_micros();
-        let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 55 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
-        let _ = drain(&*device);
-        while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
-        // The tone's frequency over windows of 25 samples.
-        let windows: Vec<(i64, f64)> = got
-            .samples
-            .chunks_exact(25)
-            .map(|w| {
-                let (mut re, mut im) = (0.0f64, 0.0f64);
-                for pair in w.windows(2) {
-                    let (a, b) = (pair[0].1, pair[1].1);
-                    re += f64::from(b[0] * a[0] + b[1] * a[1]);
-                    im += f64::from(b[1] * a[0] - b[0] * a[1]);
-                }
-                (w[0].0, im.atan2(re) / (2.0 * std::f64::consts::PI) * 1e6)
-            })
-            .filter(|(t, _)| *t >= start + TICKS_PER_MS && *t < start + 55 * TICKS_PER_MS)
-            .collect();
-        let begins = windows.iter().find(|(_, f)| (f - 100e3).abs() > 10e3).map(|(t, _)| *t);
-        let settled = windows.iter().rposition(|(_, f)| (f - 50e3).abs() > 2e3).and_then(|i| windows.get(i + 1)).map(|(t, _)| *t);
-        let us = |t: Option<i64>| t.map(|t| format!("{:+.1} µs", (t - at) as f64 / 200.0));
-        println!(
-            "B8 retune lead {lead_us} µs: asked at {at} (issued at {now}, apply {apply_us} µs); the tone leaves 100 kHz at {:?}, settles at 50 kHz at {:?} (from the asked instant); before {:.0} Hz, after {:.0} Hz",
-            us(begins),
-            us(settled),
-            windows.first().map_or(0.0, |w| w.1),
-            windows.last().map_or(0.0, |w| w.1)
-        );
-    }
-}
-
-// ---------------------------------------------------------------- MA-1: the LO phase after an untimed receive tune
-
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_ma1_phase_after_a_pre_start_tune() {
     // MA-1 (UR-24's Ceiling, KL-32): the receive frequency a Session asks for at connect is applied untimed, so the loopback's phase
     // has no timed tune's guarantee. `EZSDR_MA1_SESSIONS` Sessions (5 by default), each with its own device open; the spread of their
@@ -911,7 +821,7 @@ fn tone_1msps(n: usize) -> Vec<ezsdr_radio_uhd::Iq> {
         .collect()
 }
 
-/// The received tone's frequency over windows of 25 samples at 1 Msps, as `hw_b8_raw_timed_retune`.
+/// The received tone's frequency over windows of 25 samples at 1 Msps.
 fn tone_freqs(samples: &[(i64, ezsdr_radio_uhd::Iq)]) -> Vec<(i64, f64)> {
     samples
         .chunks_exact(25)
@@ -991,7 +901,7 @@ fn hw_d9_p1_ddc_entries_wait_for_samples() {
         device.rx_start(0, start).unwrap();
         device.tx_send(0, &[&tone], Some(start), true, true, Wall::from_millis(500)).unwrap();
         let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= start + 30 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         let _ = drain(&*device);
         let reports = flush_tx(&*device);
         let freqs = tone_freqs(&got.samples);
@@ -1040,7 +950,7 @@ fn hw_d9_p2_duc_entry_after_its_samples() {
         let sent = device.tx_send(0, &[tail], None, false, true, Wall::from_secs(2)).unwrap();
         log.push(format!("tail {sent} sent by {}", device.time_now().unwrap()));
         let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= start + 60 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         let _ = drain(&*device);
         let reports = flush_tx(&*device);
         let freqs = tone_freqs(&got.samples);
@@ -1077,7 +987,7 @@ fn hw_d9_p3_duc_entries_between_bursts() {
     log.push(format!("then untimed dsp {}", device.tune_dsp(Dir::Tx, chan, 0.0, None).unwrap()));
     device.tx_send(0, &[&burst], Some(at(60)), true, true, Wall::from_secs(1)).unwrap();
     let got = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|e| e >= at(75)));
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let _ = drain(&*device);
     let reports = flush_tx(&*device);
     let freqs = tone_freqs(&got.samples);
@@ -1130,8 +1040,8 @@ fn report_d9_p4(result: common::d9::P4Result) {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_d9_p4_ddc_entry_after_an_early_stop() {
-    // R2: the shared A/C device sequence is model-checked on FakeDevice; this raw probe retains
-    // the RF-tone verdict. B remains hardware-only because it characterizes AUTO/AUTO tuning.
+    // R2: the A/C device sequence has no FakeDevice check since note 48 S2a-i-β; this raw probe is
+    // its only check and keeps the RF-tone verdict. B remains hardware-only because it characterizes AUTO/AUTO tuning.
     let device = raw_uhd();
     let chan = d9_channel();
     common::d9::open_raw(&*device, chan);
@@ -1161,7 +1071,7 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
     }
     let got = read(&*device, Wall::from_secs(2), Some(200), |_| device.time_now().unwrap() >= e - 5 * TICKS_PER_MS);
     let stopping = device.time_now().unwrap();
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let stopped = device.time_now().unwrap();
     let tail = read_tail(&*device);
     let last = tail.samples.last().or(got.samples.last()).map(|(t, _)| *t);
@@ -1169,7 +1079,7 @@ fn hw_d9_p4_ddc_entry_after_an_early_stop() {
     device.rx_start(0, again).unwrap();
     device.tx_send(0, &[&tone], Some(again), true, true, Wall::from_secs(2)).unwrap();
     let after = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= again + 20 * TICKS_PER_MS));
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let _ = drain(&*device);
     let reports = flush_tx(&*device);
     let freqs = tone_freqs(&after.samples);
@@ -1616,7 +1526,7 @@ fn hw_m1_rx_front_end_moves_between_streamers() {
     let start = (device.time_now().unwrap() / per + 50_000) * per;
     device.rx_start(0, start).unwrap();
     let first = read_on(&*device, 0, Wall::from_secs(2), None, |r| r.end(per).is_some_and(|e| e >= start + 100 * TICKS_PER_MS));
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let rest = read_on(&*device, 0, Wall::from_secs(3), None, |r| r.other.len() >= 2 && r.other[r.other.len() - 2..].iter().all(|(_, o)| o == "Timeout"));
     println!(
         "M1 rx s0: first block {:?}, {} blocks, breaks {:?}, after stop {} blocks, other {:?}",
@@ -1642,7 +1552,7 @@ fn hw_m1_rx_front_end_moves_between_streamers() {
     );
     assert_eq!(moved.blocks.first().map(|b| b.0), Some(start), "stream 1 starts at its tick");
     assert!(breaks(&moved, per).is_empty() && other.is_empty(), "stream 1 streams 500 ms without a gap");
-    device.rx_stop(1, None).unwrap();
+    device.rx_stop(1).unwrap();
 }
 
 #[test]
@@ -1691,7 +1601,7 @@ fn hw_m2_tx_front_end_moves_between_streamers() {
         };
         (reader.join().unwrap(), acks0, acks1, opened)
     });
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let rms = |from: i64, to: i64| {
         let w: Vec<f32> = rx.samples.iter().filter(|(t, _)| *t >= from && *t < to).map(|(_, s)| s[0] * s[0] + s[1] * s[1]).collect();
         ((w.iter().sum::<f32>() / w.len().max(1) as f32).sqrt(), w.len())
@@ -1816,7 +1726,7 @@ fn safe_pn_iq(n: usize) -> Vec<ezsdr_radio_uhd::Iq> {
 
 fn restore_raw_probe(device: &dyn Device) -> Json {
     let mut errors = Vec::new();
-    if let Err(error) = device.rx_stop(0, None) {
+    if let Err(error) = device.rx_stop(0) {
         errors.push(format!("rx_stop: {}", error.message));
     }
     let drain = drain_without_clock(device, Wall::from_millis(10), Wall::from_millis(300));
@@ -1826,7 +1736,7 @@ fn restore_raw_probe(device: &dyn Device) -> Json {
     for (dir, antenna) in [(Dir::Rx, "RX2"), (Dir::Tx, "TX/RX")] {
         for chan in 0..device.channels(dir) {
             let settings = Settings { rate: Some(1e6), freq: Some(1e9), gain: Some(0.0), antenna: Some(antenna.to_owned()) };
-            match device.apply(dir, chan, &settings, None) {
+            match device.apply(dir, chan, &settings) {
                 Ok(readback) => {
                     applied.push(serde_json::json!({ "direction": dir.name(), "channel": chan, "rate": readback.rate, "freq": readback.freq, "gain": readback.gain, "antenna": readback.antenna }))
                 }
@@ -1878,7 +1788,7 @@ fn hw_h1_late_multi_packet_burst() {
                 let received = read_until_tick_without_clock(&*device, d0 + 110 * TICKS_PER_MS, 200, Wall::from_millis(500));
                 let intervals = observations::heard_intervals(&received.samples, 200, SIGNAL_THRESHOLD, LOOPBACK_DELAY_SAMPLES);
                 let reports = raw_report_rows(&*device, Wall::from_secs(1));
-                device.rx_stop(0, None).unwrap_or_else(|error| println!("H1 rx_stop: {}", error.message));
+                device.rx_stop(0).unwrap_or_else(|error| println!("H1 rx_stop: {}", error.message));
                 let drain = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
                 trials.push(serde_json::json!({
                     "mode": mode, "late_ms_from_pretrial_device_read_inferred": late_ms, "trial": trial,
@@ -1969,7 +1879,7 @@ fn hw_h2_underflow_mid_burst() {
         } else {
             no_underflow.push(row);
         }
-        device.rx_stop(0, None).unwrap_or_else(|error| println!("H2 rx_stop: {}", error.message));
+        device.rx_stop(0).unwrap_or_else(|error| println!("H2 rx_stop: {}", error.message));
         let _ = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
     }
     let cleanup = restore_raw_probe(&*device);
@@ -2408,7 +2318,7 @@ fn hw_ur17_receive_call_duration() {
                 "rate_hz": rate, "request_samples": request_samples, "packet_samples": packet_samples,
                 "calls": calls, "summary": summary,
             }));
-            let _ = device.rx_stop(0, None);
+            let _ = device.rx_stop(0);
             let _ = drain_without_clock(&*device, Wall::from_millis(10), Wall::from_millis(300));
         }
     }
@@ -3069,59 +2979,59 @@ fn hw_n47_raw_control_call_durations() {
     // P7), so the timed commands would sit in the FIFO and could wedge the X300; queuing them is not a measurement
     // this probe may make. The antenna timing runs with both streams stopped and no transmit samples; the transmit
     // gain and rate timings run with no burst open.
-    let device = raw();
+    let device = raw_uhd();
     let hz = pin_slot_a(&*device);
     let chan = d9_channel();
     let mut rows = Vec::new();
     let reps = 50;
     let rx_small = timed_calls(reps, |index| {
         let freq = hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 };
-        device.apply(Dir::Rx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Rx, chan, &Settings { freq: Some(freq), ..Settings::default() }).unwrap();
     });
     rows.push(stats_row("rx_apply_frequency_small_step", &rx_small));
     let rx_boundary = timed_calls(reps, |index| {
         let freq = if index % 2 == 0 { hz - 400e3 } else { hz + 400e3 };
-        device.apply(Dir::Rx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Rx, chan, &Settings { freq: Some(freq), ..Settings::default() }).unwrap();
     });
     rows.push(stats_row("rx_apply_frequency_across_1_ghz", &rx_boundary));
     let tx_small = timed_calls(reps, |index| {
         let freq = hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 };
-        device.apply(Dir::Tx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, chan, &Settings { freq: Some(freq), ..Settings::default() }).unwrap();
     });
     rows.push(stats_row("tx_apply_frequency_small_step", &tx_small));
     let tx_boundary = timed_calls(reps, |index| {
         let freq = if index % 2 == 0 { hz - 400e3 } else { hz + 400e3 };
         assert!(SAFE_TX_HZ.contains(&freq), "bench RF safety: {freq} Hz is outside SAFE_TX_HZ");
-        device.apply(Dir::Tx, chan, &Settings { freq: Some(freq), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, chan, &Settings { freq: Some(freq), ..Settings::default() }).unwrap();
     });
     rows.push(stats_row("tx_apply_frequency_across_1_ghz", &tx_boundary));
     let rx_gain = timed_calls(reps, |index| {
-        device.apply(Dir::Rx, chan, &Settings { gain: Some(if index % 2 == 0 { 0.0 } else { 1.0 }), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Rx, chan, &Settings { gain: Some(if index % 2 == 0 { 0.0 } else { 1.0 }), ..Settings::default() }).unwrap();
     });
     rows.push(stats_row("rx_apply_gain", &rx_gain));
     // No burst is open and no samples flow: the transmit gain is the setter plus its read-back only.
     let tx_gain = timed_calls(reps, |index| {
-        device.apply(Dir::Tx, chan, &Settings { gain: Some(if index % 2 == 0 { 0.0 } else { 1.0 }), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, chan, &Settings { gain: Some(if index % 2 == 0 { 0.0 } else { 1.0 }), ..Settings::default() }).unwrap();
     });
     // Back to the probes' initial state before anything else runs (the alternation may end at +1 dB).
-    device.apply(Dir::Tx, chan, &Settings { gain: Some(0.0), ..Settings::default() }, None).unwrap();
+    device.apply(Dir::Tx, chan, &Settings { gain: Some(0.0), ..Settings::default() }).unwrap();
     rows.push(stats_row("tx_apply_gain", &tx_gain));
     let antenna = timed_calls(reps, |index| {
         let antenna = if index % 2 == 0 { "TX/RX" } else { "RX2" };
-        let applied = device.apply(Dir::Rx, chan, &Settings { antenna: Some(antenna.to_owned()), ..Settings::default() }, None).unwrap();
+        let applied = device.apply(Dir::Rx, chan, &Settings { antenna: Some(antenna.to_owned()), ..Settings::default() }).unwrap();
         assert_eq!(applied.antenna.as_deref(), Some(antenna), "the antenna's read-back");
     });
-    device.apply(Dir::Rx, chan, &Settings { antenna: Some("RX2".to_owned()), ..Settings::default() }, None).unwrap();
+    device.apply(Dir::Rx, chan, &Settings { antenna: Some("RX2".to_owned()), ..Settings::default() }).unwrap();
     rows.push(stats_row("rx_apply_antenna", &antenna));
     let rates = timed_calls(reps, |index| {
-        device.apply(Dir::Rx, chan, &Settings { rate: Some(if index % 2 == 0 { 2e6 } else { 1e6 }), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Rx, chan, &Settings { rate: Some(if index % 2 == 0 { 2e6 } else { 1e6 }), ..Settings::default() }).unwrap();
     });
-    device.apply(Dir::Rx, chan, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+    device.apply(Dir::Rx, chan, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
     rows.push(stats_row("rx_apply_rate", &rates));
     let tx_rates = timed_calls(reps, |index| {
-        device.apply(Dir::Tx, chan, &Settings { rate: Some(if index % 2 == 0 { 2e6 } else { 1e6 }), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, chan, &Settings { rate: Some(if index % 2 == 0 { 2e6 } else { 1e6 }), ..Settings::default() }).unwrap();
     });
-    device.apply(Dir::Tx, chan, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+    device.apply(Dir::Tx, chan, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
     rows.push(stats_row("tx_apply_rate", &tx_rates));
     let clocks = timed_calls(reps, |_| {
         device.time_now().unwrap();
@@ -3147,7 +3057,7 @@ fn hw_n47_raw_control_call_durations() {
     for index in 0..reps {
         let at = align_to(device.time_now().unwrap() + 100 * TICKS_PER_MS, 200);
         let begun = Instant::now();
-        let result = device.apply(Dir::Rx, chan, &Settings { freq: Some(hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 }), ..Settings::default() }, Some(at));
+        let result = device.tune_auto(Dir::Rx, chan, hz + if index % 2 == 0 { 1_000.0 } else { 2_000.0 }, Some(at)).map(|_| ());
         timed_rx.push(begun.elapsed().as_nanos() as u64);
         if let Err(error) = result {
             lost = Some(format!("the timed receive apply failed: {}", error.message));
@@ -3163,14 +3073,14 @@ fn hw_n47_raw_control_call_durations() {
             break;
         }
     }
-    device.rx_stop(0, None).ok();
+    device.rx_stop(0).ok();
     if let Some(reason) = lost {
         panic!(
-            "n47 control calls: the timed receive apply lost coverage ({reason}); a timed command may still sit in the device's FIFO. Power-cycle the device before the next test; this probe issues no further apply and does not reopen the receive stream."
+            "n47 control calls: the timed receive apply lost coverage ({reason}); Power-cycle the device before the next test; this probe issues no further apply and does not reopen the receive stream."
         );
     }
     let _ = drain(&*device);
-    rows.push(stats_row("rx_apply_frequency_timed_with_samples", &timed_rx));
+    rows.push(stats_row("rx_tune_auto_timed_with_samples", &timed_rx));
     raw_rx(&*device, 1e6, hz);
     println!(
         "n47 control calls: wall clock per call is setter + read-back/enqueue latency, not RF settling or timed execution; a timed transmit change is not measured (note 39 §1: untimed continuations do not drain the DUC)"
@@ -3245,7 +3155,7 @@ fn hw_n47_raw_rx_buffer_capacity() {
         let baseline = read(&*device, Wall::from_secs(3), None, |r| r.end(per).is_some_and(|end| end >= start + 20 * TICKS_PER_MS));
         if !n47::restart_streamed(&baseline.blocks, per, start, start + 20 * TICKS_PER_MS) {
             println!("n47 buffer {rate}: the baseline did not stream from its tick through 20 ms ({} blocks); this rate is not measured", baseline.blocks.len());
-            device.rx_stop(0, None).ok();
+            device.rx_stop(0).ok();
             let _ = drain(&*device);
             observations.push(serde_json::json!({ "rate_hz": rate, "baseline": "failed", "blocks": baseline.blocks.len() }));
             continue;
@@ -3254,7 +3164,7 @@ fn hw_n47_raw_rx_buffer_capacity() {
         let mut rows = Vec::new();
         let stop = {
             let mut test = |stall_ms: u64| -> Option<bool> {
-                device.rx_stop(0, None).ok();
+                device.rx_stop(0).ok();
                 let _ = drain(&*device);
                 let start = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, per);
                 device.rx_start(0, start).unwrap();
@@ -3310,7 +3220,7 @@ fn hw_n47_raw_rx_buffer_capacity() {
             }
             stop
         };
-        device.rx_stop(0, None).ok();
+        device.rx_stop(0).ok();
         let _ = drain(&*device);
         let bracket = n47::overflow_bracket(&trials);
         if stop {
@@ -3347,7 +3257,7 @@ fn hw_n47_raw_tx_setting_after_a_burst_end() {
     let (control_ack, _) = wait_burst_ack(&*device, Wall::from_secs(2));
     assert!(control_ack.is_some(), "the control burst's ACK");
     let control = read(&*device, Wall::from_secs(2), Some(200), |r| r.end(200).is_some_and(|end| end >= control_at + 10 * TICKS_PER_MS));
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let _ = drain(&*device);
     let control_samples = control.samples;
     let control_onset =
@@ -3367,7 +3277,7 @@ fn hw_n47_raw_tx_setting_after_a_burst_end() {
             break;
         }
         // Restore the initial state between trials.
-        device.apply(Dir::Tx, d9_channel(), &Settings { freq: Some(hz), gain: Some(0.0), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, d9_channel(), &Settings { freq: Some(hz), gain: Some(0.0), ..Settings::default() }).unwrap();
         let a = align_to(device.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
         device.rx_start(0, a - 20 * TICKS_PER_MS).unwrap();
         let wave_a = iq(&tone_wave(1e6, 100_000, 100e3));
@@ -3382,9 +3292,9 @@ fn hw_n47_raw_tx_setting_after_a_burst_end() {
         }
         let issued = device.time_now().unwrap();
         let applied = if gain_trial {
-            device.apply(Dir::Tx, d9_channel(), &Settings { gain: Some(6.0), ..Settings::default() }, None).unwrap()
+            device.apply(Dir::Tx, d9_channel(), &Settings { gain: Some(6.0), ..Settings::default() }).unwrap()
         } else {
-            device.apply(Dir::Tx, d9_channel(), &Settings { freq: Some(f2), ..Settings::default() }, None).unwrap()
+            device.apply(Dir::Tx, d9_channel(), &Settings { freq: Some(f2), ..Settings::default() }).unwrap()
         };
         let returned = device.time_now().unwrap();
         if gain_trial {
@@ -3398,7 +3308,7 @@ fn hw_n47_raw_tx_setting_after_a_burst_end() {
         send_burst(&*device, &wave_b, Some(b));
         let (b_ack, _) = wait_burst_ack(&*device, Wall::from_secs(3));
         let got = read(&*device, Wall::from_secs(3), Some(200), |r| r.end(200).is_some_and(|end| end >= b + wave_b.len() as i64 * 200 + 30 * TICKS_PER_MS));
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         let _ = drain(&*device);
         let samples = got.samples;
         // A's windows are placed at where A's end appears in the capture: the control burst measured the loopback's
@@ -3452,7 +3362,7 @@ fn hw_n47_raw_tx_setting_after_a_burst_end() {
             "a_ack": a_ack, "b_ack": b_ack, "move_at": move_at, "tail_tone": tail_tone, "tail_power": tail, "steady_power": steady, "b_tone": b_tone, "applied": format!("{applied:?}") }));
     }
     // The probes' initial state: 0 dB transmit gain (the gain trial raised it).
-    device.apply(Dir::Tx, d9_channel(), &Settings { gain: Some(0.0), ..Settings::default() }, None).unwrap();
+    device.apply(Dir::Tx, d9_channel(), &Settings { gain: Some(0.0), ..Settings::default() }).unwrap();
     measurement::push_raw_observation("hw_n47_raw_tx_setting_after_a_burst_end", rows.len() as u32, serde_json::json!({ "trials": rows }));
 }
 
@@ -3474,7 +3384,7 @@ fn hw_n47_raw_rx_rate_on_an_open_streamer() {
     let mut observations = Vec::new();
     let mut reports = Vec::new();
     for rate in [1e6, 2e6, 10e6, 1e6] {
-        probe.rx_stop(0, None).ok();
+        probe.rx_stop(0).ok();
         let stale = drain(&*probe);
         let per = (common::MCR as f64 / rate) as i64;
         if !stale.quiet {
@@ -3489,7 +3399,7 @@ fn hw_n47_raw_rx_rate_on_an_open_streamer() {
             }));
             continue;
         }
-        let applied = probe.apply(Dir::Rx, d9_channel(), &Settings { rate: Some(rate), ..Settings::default() }, None).unwrap();
+        let applied = probe.apply(Dir::Rx, d9_channel(), &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
         let planned = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, per);
         let source_at = align_to(probe.time_now().unwrap() + 20 * TICKS_PER_MS, 200);
         let got = std::thread::scope(|scope| {
@@ -3497,7 +3407,7 @@ fn hw_n47_raw_rx_rate_on_an_open_streamer() {
             probe.rx_start(0, planned).unwrap();
             let got =
                 read(&*probe, Wall::from_secs(2), Some(per), |r| r.end(per).is_some_and(|end| end >= planned + 20 * TICKS_PER_MS) || r.other.iter().any(|(_, other)| other.starts_with("LateCommand")));
-            probe.rx_stop(0, None).unwrap();
+            probe.rx_stop(0).unwrap();
             source.join().expect("the tone source's send");
             got
         });
@@ -3519,7 +3429,7 @@ fn hw_n47_raw_rx_rate_on_an_open_streamer() {
             "other": got.other.iter().filter(|(_, other)| other != "Timeout").collect::<Vec<_>>(),
         }));
     }
-    probe.rx_stop(0, None).ok();
+    probe.rx_stop(0).ok();
     let _ = drain(&*probe);
     println!("n47 raw rx rate: the tone source's burst ACKs {reports:?}");
     measurement::push_raw_observation("hw_n47_raw_rx_rate_on_an_open_streamer", 4, serde_json::json!({ "changes": observations }));
@@ -3554,7 +3464,7 @@ fn hw_n47_raw_tx_rate_on_an_open_streamer() {
     while probe.time_now().unwrap() <= e + 5 * TICKS_PER_MS {
         std::thread::sleep(Wall::from_micros(200));
     }
-    let applied = probe.apply(Dir::Tx, d9_channel(), &Settings { rate: Some(2e6), ..Settings::default() }, None).unwrap();
+    let applied = probe.apply(Dir::Tx, d9_channel(), &Settings { rate: Some(2e6), ..Settings::default() }).unwrap();
     let control_r2 = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
     send_burst(&*probe, &iq(&tone_wave(2e6, 10_000, 100e3)), Some(control_r2));
     let (_, control_reports) = wait_burst_ack(&*probe, Wall::from_secs(2));
@@ -3570,7 +3480,7 @@ fn hw_n47_raw_tx_rate_on_an_open_streamer() {
     let a_acks = n47::burst_acks_in(&reports, a, e + 1);
     let b_acks = n47::burst_acks_in(&reports, b, b + wave_b.len() as i64 * 100 + 1);
     let got = read(&*probe, Wall::from_secs(3), Some(200), |r| r.end(200).is_some_and(|end| end >= b + wave_b.len() as i64 * 100 + 50 * TICKS_PER_MS));
-    probe.rx_stop(0, None).ok();
+    probe.rx_stop(0).ok();
     let samples = got.samples;
     let floor = window_power(&samples, control_r1 - 20 * TICKS_PER_MS, control_r1 - 10 * TICKS_PER_MS);
     let onset1 = floor.and_then(|floor| tone_start(&samples, control_r1 - 5 * TICKS_PER_MS, floor));

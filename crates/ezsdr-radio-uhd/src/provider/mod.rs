@@ -1130,8 +1130,8 @@ mod tests {
         fn ref_locked(&self) -> Result<Option<bool>, crate::DeviceError> {
             self.inner.ref_locked()
         }
-        fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<crate::device::Applied, crate::DeviceError> {
-            self.inner.apply(dir, chan, settings, at)
+        fn apply(&self, dir: Dir, chan: usize, settings: &Settings) -> Result<crate::device::Applied, crate::DeviceError> {
+            self.inner.apply(dir, chan, settings)
         }
         fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), crate::DeviceError> {
             self.inner.rx_open(stream, channels)
@@ -1139,14 +1139,11 @@ mod tests {
         fn rx_start(&self, stream: usize, at: i64) -> Result<(), crate::DeviceError> {
             self.inner.rx_start(stream, at)
         }
-        fn rx_start_now(&self, stream: usize) -> Result<(), crate::DeviceError> {
-            self.inner.rx_start_now(stream)
-        }
         fn rx_packet_samples(&self, stream: usize) -> usize {
             self.inner.rx_packet_samples(stream)
         }
-        fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), crate::DeviceError> {
-            self.inner.rx_stop(stream, at)
+        fn rx_stop(&self, stream: usize) -> Result<(), crate::DeviceError> {
+            self.inner.rx_stop(stream)
         }
         fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> crate::device::RxRecv {
             if stream == 0 {

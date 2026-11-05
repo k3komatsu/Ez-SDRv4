@@ -182,21 +182,19 @@ pub trait Device: Send + Sync {
     fn time_now(&self) -> Result<i64, DeviceError>;
     /// Whether the reference is locked; `None` when the device has no such sensor.
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError>;
-    /// Applies settings to one channel, as a timed command when `at` is given.
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError>;
+    /// Applies settings to one channel now.
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError>;
     /// Opens receive stream `stream` for the device channels `channels` (UR-2, UR-3;
     /// design 33 D5's `uhd_stream_args_t.channel_list`).
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError>;
     /// A timed continuous start of receive stream `stream`.
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError>;
-    /// Starts receive immediately (`stream_now`), without a timed start at a sampled current time.
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError>;
     /// Samples a receive packet of stream `stream` carries (UHD's `max_num_samps`); 0 when
     /// that streamer is not open or packets are not known (UR-25: a stop's delivery waits
     /// for the packet holding the cut).
     fn rx_packet_samples(&self, stream: usize) -> usize;
-    /// Stops stream `stream`'s continuous stream, at a device tick when given.
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError>;
+    /// Stops stream `stream`'s continuous stream.
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError>;
     /// Receives up to `n` samples per channel; `one_packet` returns after the first packet.
     fn rx_recv(&self, stream: usize, n: usize, timeout: Duration, one_packet: bool) -> RxRecv;
     /// Opens transmit stream `stream` for the device channels `channels`.
@@ -286,8 +284,6 @@ pub enum FakeFault {
     RxPanic(Duration),
     /// `rx_recv` returns only `Timeout`.
     Silence(Duration),
-    /// The receive chain stops transferring samples at this instant until it is started again.
-    RxFlowStall(Duration),
     /// Every timed `tx_send` blocks forever.
     TxBlocks,
     /// Every `tx_send` takes this long before the device sees it.
@@ -370,8 +366,6 @@ pub struct FakeConfig {
     pub drift_ppm: f64,
     /// The wall time an untimed `apply` takes.
     pub apply_delay: Duration,
-    /// Timed commands not yet in effect that the device queue holds before it blocks.
-    pub command_queue: usize,
     /// The loopback's delay in receive samples.
     pub loopback_delay_samples: i64,
     /// The scripted faults.
@@ -408,7 +402,6 @@ impl Default for FakeConfig {
             master_clock_rate: 200_000_000,
             drift_ppm: 0.0,
             apply_delay: Duration::ZERO,
-            command_queue: 16,
             loopback_delay_samples: 0,
             faults: Vec::new(),
             front_ends: vec!["UBX", "UBX"],
@@ -493,28 +486,14 @@ impl RxStreamer {
     }
 }
 
-/// The most timed frequency commands a chain's DSP holds in the fake (UR-33). A conservative
-/// envelope of the fake, not the hardware's exact capacity (INFERRED; `axi_tag_time.v` has
-/// further queues of its own).
-const DSP_FIFO: usize = 32;
-
-/// One chain's DDC (receive) or DUC (transmit) frequency state in the fake (UR-33): the timed
-/// commands it holds, the ticks its samples pass, and every change it has made. The FIFO
-/// belongs to the front end, not to a streamer, so closing a streamer does not empty it
-/// (INFERRED; P4 measures it).
+/// One chain's DDC (receive) or DUC (transmit) frequency state in the fake (UR-33): every change
+/// it has made, and the DUC's last header time. The chain belongs to the front end, not to a
+/// streamer, so closing a streamer does not reset it.
 struct Dsp {
     /// The value before the first entry of `log`.
     initial: f64,
-    /// The timed commands, `(instant, frequency)`, in the order given.
-    fifo: VecDeque<(i64, f64)>,
-    /// Each change of the value: `(tick, frequency, timed)`; an untimed write at the time it
-    /// was made, a timed one at the sample that took it.
-    log: Vec<(i64, f64, bool)>,
-    /// The device ticks at which samples pass the chain, as `(start, end)`, `end` none while
-    /// the stream runs: radio rate for a DDC, after interpolation for a DUC.
-    flows: Vec<(i64, Option<i64>, i64)>,
-    /// Ticks before it have been looked at.
-    cursor: i64,
+    /// Each change of the value, `(tick, frequency)`: an untimed write at the time it was made.
+    log: Vec<(i64, f64)>,
     /// Last DUC header time, retained across streamer close/reopen (F7).
     tx_header: Option<i64>,
     tx_header_stale: bool,
@@ -522,7 +501,7 @@ struct Dsp {
 
 impl Dsp {
     fn new(initial: f64) -> Dsp {
-        Dsp { initial, fifo: VecDeque::new(), log: Vec::new(), flows: Vec::new(), cursor: i64::MIN, tx_header: None, tx_header_stale: false }
+        Dsp { initial, log: Vec::new(), tx_header: None, tx_header_stale: false }
     }
 }
 
@@ -538,7 +517,7 @@ fn freq_of(st: &Fake, dir: Dir, chan: usize, t: i64) -> f64 {
     let current = st.settings[dir as usize].get(chan).map_or(0.0, |channel| channel.freq);
     let Some(dest) = st.spec[dir as usize].get(chan) else { return current };
     let Some(chain) = st.dsp.get(&(dir as usize, *dest)) else { return current };
-    chain.log.iter().rev().find(|(tick, ..)| *tick <= t).map_or(chain.initial, |(_, freq, _)| *freq)
+    chain.log.iter().rev().find(|(tick, _)| *tick <= t).map_or(chain.initial, |(_, freq)| *freq)
 }
 
 /// The frequency of `dir`'s channel `chan` over ticks `(from, to]` when no change falls inside
@@ -547,34 +526,8 @@ fn freq_constant(st: &Fake, dir: Dir, chan: usize, from: i64, to: i64) -> Option
     let dest = st.spec[dir as usize].get(chan)?;
     match st.dsp.get(&(dir as usize, *dest)) {
         None => st.settings[dir as usize].get(chan).map(|channel| channel.freq),
-        Some(chain) if chain.log.iter().any(|(tick, ..)| *tick > from && *tick <= to) => None,
+        Some(chain) if chain.log.iter().any(|(tick, _)| *tick > from && *tick <= to) => None,
         Some(_) => Some(freq_of(st, dir, chan, from)),
-    }
-}
-
-/// Samples start passing `dir`'s channels `channels` at tick `at`.
-fn open_flow(st: &mut Fake, dir: Dir, channels: &[usize], at: i64) {
-    for chan in channels {
-        if let Some(chain) = dsp_of(st, dir, *chan) {
-            chain.flows.push((at, None, at));
-        }
-    }
-}
-
-/// The streamer on `channels` stops passing samples at tick `now`; a start that had not begun
-/// never does.
-fn close_flow(st: &mut Fake, dir: Dir, channels: &[usize], now: i64) {
-    for chan in channels {
-        if let Some(chain) = dsp_of(st, dir, *chan) {
-            chain.flows = std::mem::take(&mut chain.flows)
-                .into_iter()
-                .filter_map(|(start, end, logical)| match end {
-                    None if start >= now => None,
-                    None => Some((start, Some(now), logical)),
-                    end => Some((start, end, logical)),
-                })
-                .collect();
-        }
     }
 }
 
@@ -591,7 +544,6 @@ fn clear_tx_header(st: &mut Fake, channels: &[usize]) {
         if let Some(chain) = dsp_of(st, Dir::Tx, *chan) {
             chain.tx_header = None;
             chain.tx_header_stale = false;
-            chain.cursor = i64::MIN;
         }
     }
 }
@@ -772,12 +724,6 @@ struct Fake {
     /// Each direction's channels some streamer has been opened on (UR-33's `rates`
     /// pre-chain path and the duplicate-open refusal).
     opened: [std::collections::BTreeSet<usize>; 2],
-    /// The timed commands not yet in effect, in order: the instant, the direction, the
-    /// `(slot, front end)` the command was booked on — UHD's timed commands are the radio
-    /// block's, so a spec change moves or drops the destination, never re-points it — and
-    /// the settings.
-    commands: VecDeque<(i64, Dir, (usize, u32), Settings)>,
-    last_command: i64,
     /// Each chain's DSP state, by direction and front end (UR-33).
     dsp: BTreeMap<(usize, (usize, u32)), Dsp>,
     rx: BTreeMap<usize, RxStreamer>,
@@ -853,8 +799,6 @@ impl FakeDevice {
                 spec,
                 settings,
                 opened: [std::collections::BTreeSet::new(), std::collections::BTreeSet::new()],
-                commands: VecDeque::new(),
-                last_command: i64::MIN,
                 dsp: BTreeMap::new(),
                 rx: BTreeMap::new(),
                 tx: BTreeMap::new(),
@@ -1022,111 +966,29 @@ impl FakeDevice {
         (base + drift) as i64
     }
 
-    /// The device's clock set to root tick `at`, for a test that reads what the device holds at
-    /// an instant of its own (UR-33): its queue's commands due by then apply, as a device's
-    /// would. Forward only — the clock is never taken back — and on a manual clock whose
-    /// participants stop it (`test_support::Frozen`), so the test's assertion holds.
+    /// The device's clock set to root tick `at`, for a test that reads what the device holds at an
+    /// instant of its own (UR-33). Forward only — the clock is never taken back — and on a manual
+    /// clock whose participants stop it (`test_support::Frozen`), so the test's assertion holds.
     #[cfg(test)]
     pub fn set_time(&self, at: i64) {
         let mut st = self.lock();
         let base = self.base(&st);
         st.offset = at - base;
-        self.settle(&mut st);
     }
 
-    /// What the device holds on `dir`'s channel `chan` now, its timed commands due by now
-    /// applied (UR-33's read-back; a test's view of the setting, not of a stream's samples).
+    /// What the device holds on `dir`'s channel `chan` now (UR-33's read-back; a test's view of the
+    /// setting, not of a stream's samples).
     #[cfg(test)]
     pub fn read_back(&self, dir: Dir, chan: usize) -> Settings {
-        let mut st = self.lock();
-        self.settle(&mut st);
+        let st = self.lock();
         let channel = &st.settings[dir as usize][chan];
         Settings { rate: Some(channel.rate), freq: Some(channel.freq), gain: Some(channel.gain), antenna: Some(channel.antenna.clone()) }
-    }
-
-    /// Applies the timed commands now in effect (UR-33's in-order command queue): each to the
-    /// channel its front end serves under the spec now, so a spec change that kept that front
-    /// end applies it to its new channel, and one that dropped it applies nothing.
-    fn settle(&self, st: &mut Fake) {
-        let now = self.now(st);
-        while st.commands.front().is_some_and(|(at, ..)| *at <= now) {
-            let (_, dir, dest, s) = st.commands.pop_front().expect("checked");
-            let Some(chan) = st.spec[dir as usize].iter().position(|entry| *entry == dest) else { continue };
-            // A frequency reaches the chain's DSP through its own FIFO (`drain`), whose
-            // samples decide when it takes effect; the radio's queue carries the gain.
-            let channel = &mut st.settings[dir as usize][chan];
-            if let Some(gain) = s.gain {
-                channel.gain = (gain * 2.0).round() / 2.0;
-            }
-        }
-        self.drain(st, now);
-    }
-
-    /// UR-33: the timed frequency commands the chains' samples have taken by `now`. A chain takes
-    /// one command per tick of its flow — radio rate, not the host's samples —, at the first
-    /// tick at or after the command's instant; a chain no sample passes takes none, whether or
-    /// not the host reads what comes out.
-    fn drain(&self, st: &mut Fake, now: i64) {
-        let Fake { dsp, spec, settings, .. } = st;
-        for ((dir, dest), chain) in dsp.iter_mut() {
-            while let Some(&(instant, freq)) = chain.fifo.front() {
-                let want = instant.max(chain.cursor);
-                let mut at = None;
-                for (start, end, logical) in &chain.flows {
-                    let logical_tick = want.max(*logical);
-                    let tick = start.saturating_add(logical_tick.saturating_sub(*logical));
-                    if end.is_some_and(|end| tick >= end) {
-                        continue;
-                    }
-                    if tick <= now {
-                        at = Some((logical_tick, tick));
-                    }
-                    break;
-                }
-                let Some((logical_tick, tick)) = at else { break };
-                chain.fifo.pop_front();
-                chain.log.push((tick, freq, true));
-                chain.cursor = logical_tick.saturating_add(1);
-                if let Some(chan) = spec[*dir].iter().position(|entry| entry == dest) {
-                    settings[*dir][chan].freq = freq;
-                }
-            }
-            // Intervals wholly past are no longer needed: a command given from now on is due no
-            // earlier than now.
-            chain.flows.retain(|(_, end, _)| end.is_none_or(|end| end > now));
-        }
-    }
-
-    /// The receive streamer `stream` stops passing samples now (closed, replaced or stopped).
-    fn end_rx_flow(&self, st: &mut Fake, stream: usize) {
-        self.settle(st);
-        let now = self.now(st);
-        if let Some(channels) = st.rx.get(&stream).map(|streamer| streamer.channels.clone()) {
-            close_flow(st, Dir::Rx, &channels, now);
-        }
-    }
-
-    /// How many timed frequency commands `dir`'s channel `chan` holds that no sample has taken
-    /// yet (UR-33), by the device's time now.
-    pub fn dsp_pending(&self, dir: Dir, chan: usize) -> usize {
-        let mut st = self.lock();
-        self.settle(&mut st);
-        dsp_of(&mut st, dir, chan).map_or(0, |chain| chain.fifo.len())
-    }
-
-    /// Every change of the frequency of `dir`'s channel `chan`: `(tick, frequency, timed)`
-    /// (UR-33). A timed change is at the sample that took it, an untimed one at its write.
-    pub fn dsp_log(&self, dir: Dir, chan: usize) -> Vec<(i64, f64, bool)> {
-        let mut st = self.lock();
-        self.settle(&mut st);
-        dsp_of(&mut st, dir, chan).map_or_else(Vec::new, |chain| chain.log.clone())
     }
 
     /// The frequency `dir`'s channel `chan` has at tick `tick`, as the samples of that tick see
     /// it (UR-33): what later writes or later samples take does not change it.
     pub fn freq_at(&self, dir: Dir, chan: usize, tick: i64) -> f64 {
-        let mut st = self.lock();
-        self.settle(&mut st);
+        let st = self.lock();
         freq_of(&st, dir, chan, tick)
     }
 
@@ -1188,44 +1050,32 @@ impl FakeDevice {
         [((t / rx_ratio).rem_euclid(65_536)) as f32 / 65_536.0, 0.0]
     }
 
-    fn start_rx(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+    fn start_rx(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         if self.unreachable() {
             return Err(self.timed_out());
         }
         let mut st = self.lock();
         self.lost(&st)?;
-        st.calls.push(match at {
-            Some(at) => format!("rx_start {stream} {at}"),
-            None => format!("rx_start_now {stream}"),
-        });
+        st.calls.push(format!("rx_start {stream} {at}"));
         if !st.rx.contains_key(&stream) {
             return Err(DeviceError::failed(format!("fake: receive stream {stream} is not open")));
         }
         let now = self.now(&st);
-        let timed = at.is_some();
-        let at = at.unwrap_or(now);
         let ratio = st.rx[&stream].channels.first().and_then(|chan| st.settings[0].get(*chan)).map_or(1, |channel| self.ratio(channel.rate));
-        // A stream-now start cannot become a late timed command.
-        let scripted = timed.then(|| self.config.faults.iter().position(|f| *f == FakeFault::LateStart).filter(|i| !st.fired[*i])).flatten();
-        self.settle(&mut st);
-        let channels: Vec<usize> = st.rx[&stream].channels.clone();
+        let scripted = self.config.faults.iter().position(|f| *f == FakeFault::LateStart).filter(|i| !st.fired[*i]);
         match scripted {
             Some(index) => {
                 st.fired[index] = true;
                 st.rx.get_mut(&stream).expect("checked").late = Some(at);
             }
             None if at < now => st.rx.get_mut(&stream).expect("checked").late = Some(at),
-            None if st.rx[&stream].end.is_some() => {
-                // Behind the stopped stream's tail, which is delivered first.
-                st.rx.get_mut(&stream).expect("checked").then = Some(at);
-                open_flow(&mut st, Dir::Rx, &channels, at);
-            }
+            // Behind the stopped stream's tail, which is delivered first.
+            None if st.rx[&stream].end.is_some() => st.rx.get_mut(&stream).expect("checked").then = Some(at),
             None => {
                 let streamer = st.rx.get_mut(&stream).expect("checked");
                 streamer.next = Some(at);
                 streamer.origin = at;
                 streamer.ratio = ratio;
-                open_flow(&mut st, Dir::Rx, &channels, at);
             }
         }
         Ok(())
@@ -1284,23 +1134,12 @@ impl Device for FakeDevice {
         // `multi_usrp_rfnoc.cpp:2822-2834`; the other direction's stay). No thread holds one
         // (the trait's precondition).
         match dir {
-            Dir::Rx => {
-                // The streamers' samples stop passing the chains under the map they ran on.
-                let streams: Vec<usize> = st.rx.keys().copied().collect();
-                for stream in streams {
-                    self.end_rx_flow(&mut st, stream);
-                }
-                st.rx.clear();
-            }
+            Dir::Rx => st.rx.clear(),
             Dir::Tx => st.tx.clear(),
         }
         // A rebuilt channel map's chains are new: its channels count as unconnected again
         // (UR-33's `rates_before_open`).
         st.opened[dir as usize].clear();
-        // The commands due up to now are settled under the spec this change is leaving: one
-        // whose front end it drops is settled then, and the channel that front end comes back
-        // on does not inherit it (UR-33).
-        self.settle(&mut st);
         // A front end that stays keeps its settings; a new one starts at its defaults
         // (UR-33). The device's channels are the spec's, in its order.
         let old = std::mem::replace(&mut st.spec[dir as usize], spec);
@@ -1352,10 +1191,6 @@ impl Device for FakeDevice {
         st.calls.push(format!("set_time_zero {}", if at_next_pps { "pps" } else { "now" }));
         st.zero = self.host.now();
         st.offset = 0;
-        // A new timeline: nothing queued on the old one survives (a device's queues are
-        // in its own time).
-        st.commands.clear();
-        st.last_command = i64::MIN;
         for streamer in st.tx.values_mut() {
             streamer.radio.cursor = i64::MIN;
             streamer.radio.active = false;
@@ -1423,7 +1258,7 @@ impl Device for FakeDevice {
         Ok(Some(!unlocked))
     }
 
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
         if self.unreachable() {
             return Err(self.timed_out());
         }
@@ -1436,63 +1271,13 @@ impl Device for FakeDevice {
                 s.antenna.as_deref().unwrap_or("-")
             )
         };
-        if let Some(at) = at {
-            // The in-order, back-pressuring queue: it blocks while full (UR-33).
-            loop {
-                let mut st = self.lock();
-                self.lost(&st)?;
-                if chan >= st.spec[dir as usize].len() {
-                    return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
-                }
-                self.settle(&mut st);
-                if st.commands.len() < self.config.command_queue {
-                    let now = self.now(&st);
-                    let effective = at.max(st.last_command).max(now);
-                    if let Some(freq) = s.freq {
-                        // UR-33: the chain's own FIFO. A DDC that holds as many as the fake's
-                        // envelope stops acknowledging (UHD's wedge: the call times out); a DUC
-                        // never does, and the model of what it keeps is in `DSP_FIFO`'s note.
-                        let chain = dsp_of(&mut st, dir, chan).expect("the channel was checked");
-                        if chain.fifo.len() >= DSP_FIFO {
-                            if dir == Dir::Rx {
-                                return Err(DeviceError::failed("fake: control operation timed out waiting for ACK (UHD error 47)"));
-                            }
-                            // MODEL (INFERRED): the time of the new command is lost and its value
-                            // replaces the youngest one's, so the pairing of times and values breaks.
-                            if let Some(last) = chain.fifo.back_mut() {
-                                last.1 = freq;
-                            }
-                        } else {
-                            chain.fifo.push_back((effective, freq));
-                        }
-                    }
-                    st.last_command = effective;
-                    // The destination is the front end the channel names now — the radio
-                    // block's —, not the channel number: the block outlives a spec change,
-                    // the channel number does not (UR-33).
-                    let dest = st.spec[dir as usize][chan];
-                    st.commands.push_back((effective, dir, dest, s.clone()));
-                    st.calls.push(format!("apply {} {chan} {} at={at} effective={effective}", dir.name(), describe(s)));
-                    let c = &st.settings[dir as usize][chan];
-                    return Ok(Applied { rate: c.rate, freq: c.freq, gain: c.gain, antenna: None });
-                }
-                drop(st);
-                self.host.sleep(Duration::from_millis(1));
-            }
-        }
         self.host.sleep(self.config.apply_delay);
         let mut st = self.lock();
         self.lost(&st)?;
         if chan >= st.spec[dir as usize].len() {
             return Err(DeviceError::failed(format!("fake: no {} channel {chan}", dir.name())));
         }
-        self.settle(&mut st);
-        // UR-33: a DDC whose FIFO is full does not acknowledge a write of its frequency, timed
-        // or not (shake-out 2 of the bench: the untimed one hung too).
-        if dir == Dir::Rx && s.freq.is_some() && dsp_of(&mut st, dir, chan).is_some_and(|chain| chain.fifo.len() >= DSP_FIFO) {
-            return Err(DeviceError::failed("fake: control operation timed out waiting for ACK (UHD error 47)"));
-        }
-        st.calls.push(format!("apply {} {chan} {} at=-", dir.name(), describe(s)));
+        st.calls.push(format!("apply {} {chan} {}", dir.name(), describe(s)));
         if dir == Dir::Rx {
             if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxApplyFails).filter(|i| !st.fired[*i]) {
                 st.fired[index] = true;
@@ -1512,7 +1297,7 @@ impl Device for FakeDevice {
         if let Some(freq) = s.freq {
             let tick = self.now(&st);
             if let Some(chain) = dsp_of(&mut st, dir, chan) {
-                chain.log.push((tick, freq, false));
+                chain.log.push((tick, freq));
             }
         }
         let channel = &mut st.settings[dir as usize][chan];
@@ -1547,7 +1332,6 @@ impl Device for FakeDevice {
         let channels: &[usize] = if channels.is_empty() { &[0] } else { channels };
         // UR-25, as `UhdDevice` does: this stream's old streamer goes before the new one is
         // made, so a refused reopen leaves the stream with none.
-        self.end_rx_flow(&mut st, stream);
         st.rx.remove(&stream);
         if let Some(index) = self.config.faults.iter().position(|f| *f == FakeFault::RxOpenFails).filter(|i| !st.fired[*i]) {
             st.fired[index] = true;
@@ -1576,11 +1360,7 @@ impl Device for FakeDevice {
     }
 
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
-        self.start_rx(stream, Some(at))
-    }
-
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.start_rx(stream, None)
+        self.start_rx(stream, at)
     }
 
     fn rx_packet_samples(&self, stream: usize) -> usize {
@@ -1590,24 +1370,21 @@ impl Device for FakeDevice {
         self.config.rx_packet.unwrap_or(0)
     }
 
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
         if self.unreachable() {
             return Err(self.timed_out());
         }
         let mut st = self.lock();
         self.lost(&st)?;
-        st.calls.push(format!("rx_stop {stream} {}", at.map_or("now".to_owned(), |t| t.to_string())));
-        // The X3x0 stops a continuous stream at once, whatever the stop's time: UHD 4.10's
-        // `radio_rx_core.v` takes STOP outside its command FIFO, "timed STOP commands are
-        // not supported" (VERIFIED on the bench, design-notes §11 F1). What it produced
-        // before the stop is still delivered (the bench: 1–2 blocks after it).
-        self.settle(&mut st);
+        // The X3x0 stops a continuous stream at once: UHD 4.10's `radio_rx_core.v` takes STOP
+        // outside its command FIFO, and "timed STOP commands are not supported" (VERIFIED on the
+        // bench, design-notes §11 F1). What it produced before the stop is still delivered (the
+        // bench: 1–2 blocks after it).
+        st.calls.push(format!("rx_stop {stream} now"));
         let now = self.now(&st);
-        let Some(channels) = st.rx.get(&stream).map(|streamer| streamer.channels.clone()) else {
+        if !st.rx.contains_key(&stream) {
             return Err(DeviceError::failed(format!("fake: receive stream {stream} is not open")));
-        };
-        // Samples stop passing the chains now (a start that had not begun never does).
-        close_flow(&mut st, Dir::Rx, &channels, now);
+        }
         let streamer = st.rx.get_mut(&stream).expect("checked");
         streamer.then = None;
         match streamer.next {
@@ -1676,14 +1453,9 @@ impl Device for FakeDevice {
         let mut jumped = false;
         for (index, fault) in self.config.faults.iter().enumerate() {
             let at = match fault {
-                FakeFault::Overflow(at)
-                | FakeFault::SequenceError(at)
-                | FakeFault::Alignment(at)
-                | FakeFault::Jump(at)
-                | FakeFault::Repeat(at)
-                | FakeFault::RxPanic(at)
-                | FakeFault::Silence(at)
-                | FakeFault::RxFlowStall(at) => self.ticks_of(*at),
+                FakeFault::Overflow(at) | FakeFault::SequenceError(at) | FakeFault::Alignment(at) | FakeFault::Jump(at) | FakeFault::Repeat(at) | FakeFault::RxPanic(at) | FakeFault::Silence(at) => {
+                    self.ticks_of(*at)
+                }
                 _ => continue,
             };
             let silent = matches!(fault, FakeFault::Silence(_));
@@ -1717,14 +1489,6 @@ impl Device for FakeDevice {
                 }
                 FakeFault::RxPanic(_) => panic!("fake: rx_recv panics"),
                 FakeFault::Silence(_) => {
-                    drop(st);
-                    self.host.sleep(timeout);
-                    return RxRecv::Timeout;
-                }
-                FakeFault::RxFlowStall(at) => {
-                    let channels = st.rx[&stream].channels.clone();
-                    close_flow(&mut st, Dir::Rx, &channels, self.ticks_of(*at));
-                    st.rx.get_mut(&stream).expect("checked").next = None;
                     drop(st);
                     self.host.sleep(timeout);
                     return RxRecv::Timeout;
@@ -1809,7 +1573,6 @@ impl Device for FakeDevice {
         if got == 0 {
             return RxRecv::Timeout;
         }
-        self.settle(&mut st);
         let channels = st.rx[&stream].channels.clone();
         let delay = self.config.loopback_delay_samples * ratio;
         let samples = channels
@@ -1953,7 +1716,6 @@ impl Device for FakeDevice {
         let cursor = {
             let mut st = self.lock();
             self.lost(&st)?;
-            self.settle(&mut st);
             let now = self.now(&st);
             // The stream's ratio: its first channel's rate (UHD's one rate per streamer).
             let ratio = st.tx.get(&stream).and_then(|streamer| streamer.channels.first().copied()).and_then(|chan| st.settings[1].get(chan)).map_or(1, |channel| self.ratio(channel.rate));
@@ -2001,7 +1763,6 @@ impl Device for FakeDevice {
             let mut st = self.lock();
             for chan in channels {
                 if let Some(chain) = dsp_of(&mut st, Dir::Tx, chan) {
-                    chain.flows.push((from, Some(to), logical));
                     chain.tx_header = Some(logical.saturating_add(to.saturating_sub(from)));
                     chain.tx_header_stale = false;
                 }
@@ -2098,7 +1859,6 @@ impl Device for FakeDevice {
     fn rx_close(&self, stream: usize) {
         let mut st = self.lock();
         st.calls.push(format!("rx_close {stream}"));
-        self.end_rx_flow(&mut st, stream);
         st.rx.remove(&stream);
     }
 
@@ -2114,10 +1874,6 @@ impl Device for FakeDevice {
         // UR-2, UR-16: every streamer of both directions, as UHD frees each of a device's.
         let mut st = self.lock();
         st.calls.push("close_streams".to_owned());
-        let streams: Vec<usize> = st.rx.keys().copied().collect();
-        for stream in streams {
-            self.end_rx_flow(&mut st, stream);
-        }
         st.rx.clear();
         let tx_channels: Vec<Vec<usize>> = st.tx.values().map(|streamer| streamer.channels.clone()).collect();
         for channels in tx_channels {
@@ -2223,7 +1979,7 @@ mod tests {
     /// start.
     fn start_rx(device: &FakeDevice) -> i64 {
         device.set_time_zero(false).unwrap();
-        device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         device.rx_open(0, &[0]).unwrap();
         let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
         device.rx_start(0, start).unwrap();
@@ -2253,25 +2009,6 @@ mod tests {
     }
 
     #[test]
-    fn ur_33_a_timed_receive_stop_stops_the_stream_at_once() {
-        // design-notes §11 F1: the X3x0 ignores the stop's time. What was produced before the
-        // stop is still delivered; nothing after it. The receiver falls 5 ms of the device's time
-        // behind before it issues a stop timed 100 ms ahead, so the stream holds samples produced
-        // before the stop.
-        let device = manual(FakeConfig::default());
-        let (behind, issued, tail) = participant(&device, |device| {
-            let start = start_rx(&device);
-            let blocks = blocks_until(&device, |b| end_of(b) >= start + ms(20));
-            device.host().sleep(Duration::from_millis(5));
-            let issued = device.time_now().unwrap();
-            device.rx_stop(0, Some(issued + ms(100))).unwrap();
-            (end_of(&blocks), issued, blocks_until(&device, |_| false))
-        });
-        assert_eq!(tail.first().map(|(t, _)| *t), Some(behind), "the tail begins where the stream was: {tail:?}");
-        assert_eq!(end_of(&tail), issued, "the tail ends at the stop's issue, not at its time: {tail:?}");
-    }
-
-    #[test]
     fn ur_33_a_stopped_stream_s_tail_comes_before_the_next_stream() {
         // The bench: 1–2 blocks after an untimed stop. The stop's tail, then the next stream from
         // its start. On the bench's 3 ms link the receiver is behind the device when it stops.
@@ -2280,7 +2017,7 @@ mod tests {
             let start = start_rx(&device);
             let _ = blocks_until(&device, |b| end_of(b) >= start + ms(20));
             let stopped = device.time_now().unwrap();
-            device.rx_stop(0, None).unwrap();
+            device.rx_stop(0).unwrap();
             let next = (stopped / 200 + 30_000) * 200;
             device.rx_start(0, next).unwrap();
             (stopped, next, blocks_until(&device, |b| b.iter().any(|(t, _)| *t >= next)))
@@ -2299,7 +2036,7 @@ mod tests {
         let device = manual(FakeConfig::default());
         let (got, waited) = participant(&device, |device| {
             let _ = start_rx(&device);
-            device.rx_stop(0, None).unwrap();
+            device.rx_stop(0).unwrap();
             let _ = blocks_until(&device, |_| false);
             let begun = device.host().now();
             let got = device.rx_recv(0, 2_000, Duration::from_millis(60), false);
@@ -2328,7 +2065,7 @@ mod tests {
                 .host()
                 .spawn("stopper", move || {
                     clock.sleep(Duration::from_millis(8));
-                    stopper.rx_stop(0, None).unwrap();
+                    stopper.rx_stop(0).unwrap();
                 })
                 .unwrap();
             let cut = device.rx_recv(0, 20_000, Duration::from_millis(5), false);
@@ -2343,43 +2080,6 @@ mod tests {
         assert!(first_tick == from && end >= stop && end - 200 < stop, "the request cut short returned [{first_tick}, {end}) of the stream at {from} stopped at {stop}");
         assert_eq!(next, RxRecv::Timeout, "the call after it");
         assert!(waited >= Duration::from_millis(50), "the call after it waited {waited:?} of the device's clock, not its whole timeout");
-    }
-
-    #[test]
-    fn ur_33_a_command_due_while_its_front_end_was_out_never_applies() {
-        // UR-33: a spec change settles the commands due up to it under the spec it is leaving,
-        // so a command whose instant passes while its front end is out is dropped — the channel
-        // that front end comes back on starts at its defaults —, while one not yet due at the
-        // return still applies to that front end's channel at its instant. One participant, so
-        // the host's load cannot move the clock between the booking and the spec changes.
-        let dir = Dir::Rx;
-        // Due while slot B was out of the spec: settled under "A:0" and dropped.
-        let device = manual(FakeConfig::default());
-        let dropped = participant(&device, move |device| {
-            let set = |gain: f64| Settings { gain: Some(gain), ..Settings::default() };
-            device.set_time_zero(false).unwrap();
-            device.apply(dir, 1, &set(3.0), Some(device.time_now().unwrap() + ms(5))).unwrap();
-            device.set_subdev_spec(dir, "A:0").unwrap();
-            device.host().sleep(Duration::from_millis(10));
-            device.set_subdev_spec(dir, "A:0 B:0").unwrap();
-            // A no-op timed change runs the queue's settle first.
-            device.apply(dir, 0, &Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
-            device.apply(dir, 1, &Settings::default(), None).unwrap().gain
-        });
-        assert_eq!(dropped, 0.0, "a command due while its front end was out applied after its return");
-        // Not yet due at the return: it stays in the queue and applies under the spec then.
-        let device = manual(FakeConfig::default());
-        let kept = participant(&device, move |device| {
-            let set = |gain: f64| Settings { gain: Some(gain), ..Settings::default() };
-            device.set_time_zero(false).unwrap();
-            device.apply(dir, 1, &set(3.0), Some(device.time_now().unwrap() + ms(200))).unwrap();
-            device.set_subdev_spec(dir, "A:0").unwrap();
-            device.set_subdev_spec(dir, "A:0 B:0").unwrap();
-            device.host().sleep(Duration::from_millis(210));
-            device.apply(dir, 0, &Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
-            device.apply(dir, 1, &Settings::default(), None).unwrap().gain
-        });
-        assert_eq!(kept, 3.0, "a command not yet due did not apply to the front end that came back");
     }
 
     #[test]
@@ -2522,7 +2222,7 @@ mod tests {
             assert_eq!(read(0, 300), a[..300], "stream 0 returns its own channel's signal");
             assert_eq!(read(1, 300), b[..300], "stream 1 returns its own channel's signal");
             // Each streamer carries its own stop: stopping stream 1 leaves stream 0 running.
-            device.rx_stop(1, None).unwrap();
+            device.rx_stop(1).unwrap();
             // The instant is read after the stop, so it is at or past the stop the device took: a
             // stop that took stream 0 (P216) delivers no sample at or after that instant, ever.
             let stopped = device.time_now().unwrap();
@@ -2633,56 +2333,51 @@ mod tests {
     }
 
     #[test]
-    fn ur_33_a_timed_command_follows_its_front_end_across_a_spec() {
-        // UR-33: a timed command's destination is the front end (the radio block) it was booked
-        // on: a spec change that keeps that front end applies it to its new channel, one that
-        // drops it applies nothing — never another front end, and never out of range. The
-        // command is a gain: a frequency waits in its chain's DSP FIFO for samples (UR-33).
-        let device = manual(FakeConfig::default());
-        participant(&device, |device| {
-            let dir = Dir::Rx;
-            let set = |gain: f64| Settings { gain: Some(gain), ..Settings::default() };
-            // Dropped: slot B's command outlives the spec "A:0" and touches nothing.
-            device.set_time_zero(false).unwrap();
-            device.apply(dir, 1, &set(3.0), Some(device.time_now().unwrap() + ms(5))).unwrap();
-            device.set_subdev_spec(dir, "A:0").unwrap();
-            // Past the queued command's instant, a no-op timed change settles the queue first.
-            device.host().sleep(Duration::from_millis(10));
-            device.apply(dir, 0, &Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
-            assert_eq!(device.apply(dir, 0, &Settings::default(), None).unwrap().gain, 0.0, "the dropped front end's command touched channel 0");
-        });
-        let device = manual(FakeConfig::default());
-        participant(&device, |device| {
-            let dir = Dir::Rx;
-            let set = |gain: f64| Settings { gain: Some(gain), ..Settings::default() };
-            // Moved: the command for slot B applies to B's channel after the spec reorders it.
-            device.set_time_zero(false).unwrap();
-            device.apply(dir, 1, &set(3.0), Some(device.time_now().unwrap() + ms(5))).unwrap();
-            device.set_subdev_spec(dir, "B:0 A:0").unwrap();
-            device.host().sleep(Duration::from_millis(10));
-            device.apply(dir, 0, &Settings::default(), Some(device.time_now().unwrap() + ms(50))).unwrap();
-            assert_eq!(device.apply(dir, 0, &Settings::default(), None).unwrap().gain, 3.0, "the command followed its front end to channel 0");
-            assert_eq!(device.apply(dir, 1, &Settings::default(), None).unwrap().gain, 0.0, "and left the channel it was booked with");
-        });
-    }
-
-    #[test]
     fn ur_33_the_antenna_is_read_back_after_an_untimed_change() {
         // UR-33, design 33 D16: `Applied.antenna` is what the device reports back after a
-        // change that named one, and a timed change, which is not read back, names none.
+        // change that named one, and a change that names none reads back none.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             let dir = Dir::Rx;
             let set = |name: &str| Settings { antenna: Some(name.to_owned()), ..Settings::default() };
-            assert_eq!(device.apply(dir, 0, &set("TX/RX"), None).unwrap().antenna.as_deref(), Some("TX/RX"));
-            assert_eq!(device.apply(dir, 0, &Settings::default(), None).unwrap().antenna, None, "a change that names none");
-            let at = device.time_now().unwrap() + ms(5);
-            assert_eq!(device.apply(dir, 0, &set("RX2"), Some(at)).unwrap().antenna, None, "a timed change is not read back");
+            assert_eq!(device.apply(dir, 0, &set("TX/RX")).unwrap().antenna.as_deref(), Some("TX/RX"));
+            assert_eq!(device.apply(dir, 0, &Settings::default()).unwrap().antenna, None, "a change that names none");
         });
     }
 
     #[test]
-    fn ur_33_the_fake_device_keeps_the_devices_queues() {
+    fn untimed_apply_sleeps_apply_delay_on_the_host_clock() {
+        // G1: an untimed change takes the device's apply delay on the host's clock; the manual
+        // clock makes the wait exact.
+        let device = manual(FakeConfig { apply_delay: Duration::from_millis(7), ..FakeConfig::default() });
+        let waited = participant(&device, |device| {
+            let begun = device.host().now();
+            device.apply(Dir::Rx, 0, &Settings::default()).unwrap();
+            device.host().now() - begun
+        });
+        assert_eq!(waited, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn start_rx_staged_values_are_read_back() {
+        // G1, UR-12: a stopped stream takes untimed values at once. The device coerces the gain to
+        // a half step, reads back the frequency and antenna, and answers a rate it does not provide
+        // with another; the next start runs on the staged frequency.
+        let device = manual(FakeConfig { faults: vec![FakeFault::WrongRate { claimed: 2e6, applied: 1.9e6, nth: 0 }], ..FakeConfig::default() });
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.rx_open(0, &[0]).unwrap();
+            let staged = Settings { rate: Some(2e6), freq: Some(2e9), gain: Some(3.3), antenna: Some("RX2".to_owned()) };
+            let applied = device.apply(Dir::Rx, 0, &staged).unwrap();
+            assert_eq!((applied.rate, applied.freq, applied.gain, applied.antenna.as_deref()), (1.9e6, 2e9, 3.5, Some("RX2")));
+            let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.rx_start(0, start).unwrap();
+            assert_eq!(device.freq_at(Dir::Rx, 0, start), 2e9, "the stream starts on the staged frequency");
+        });
+    }
+
+    #[test]
+    fn ur_33_a_timed_sob_met_while_a_burst_plays_does_not_restart_it() {
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -2699,51 +2394,7 @@ mod tests {
             assert!(!codes.contains(&TxCode::TimeError), "an active burst's timed SOB was checked: {codes:?}");
             assert_eq!(device.unended_bursts(), 1, "the active device burst was not restarted by SOB");
             assert_eq!(device.transmitted(now + ms(10), 200), vec![Some(wave[0]); 200], "the active radio timeline continues contiguously");
-            // In-order commands: one before a queued one takes effect after it.
-            let settings = Settings { freq: Some(2e9), ..Settings::default() };
-            device.apply(Dir::Rx, 0, &settings, Some(now + ms(100))).unwrap();
-            device.apply(Dir::Rx, 0, &settings, Some(now + ms(50))).unwrap();
-            let last = device.calls().into_iter().rev().find(|c| c.starts_with("apply rx")).unwrap();
-            assert!(last.ends_with(&format!("effective={}", now + ms(100))), "{last}");
         });
-        // 17 commands not yet in effect: the 17th waits for the queue to make room, which only
-        // the device's own time can do. The call's device time before and after is the evidence,
-        // not a wall window: the participant holds the clock while it waits on plain channels, so
-        // the call is made at zero with the 16 commands still due at 20 ms and later, and it can
-        // return only once the clock reached the first one.
-        let full = manual(FakeConfig::default());
-        let worker = participant(&full, |full| {
-            full.set_time_zero(false).unwrap();
-            let settings = Settings { freq: Some(2e9), ..Settings::default() };
-            for i in 0..16 {
-                full.apply(Dir::Rx, 0, &settings, Some(ms(20) + i)).unwrap();
-            }
-            let (started, came) = channel();
-            let (finished, done) = channel();
-            let blocked = full.clone();
-            let worker = full
-                .host()
-                .spawn("blocked apply", move || {
-                    let _ = started.send(blocked.time_now().unwrap());
-                    let _ = blocked.apply(Dir::Rx, 0, &Settings::default(), Some(ms(100)));
-                    let _ = finished.send(blocked.time_now().unwrap());
-                })
-                .unwrap();
-            assert_eq!(came.recv_timeout(Duration::from_secs(1)).expect("the 17th apply is made"), 0, "the queue is full at the device's zero");
-            // The clock runs only while every participant waits: this one waits past the first
-            // command's instant, so the blocked call's retries reach it.
-            full.host().sleep(Duration::from_millis(200));
-            let after = done.recv_timeout(Duration::from_secs(1)).expect("the 17th apply returns once the queue has room");
-            assert!(after >= ms(20), "the 17th apply waited for the first command: it returned at {after}");
-            let calls = full.calls();
-            let applies: Vec<_> = calls.iter().filter(|c| c.starts_with("apply rx")).collect();
-            assert_eq!(applies.len(), 17, "{calls:?}");
-            assert!(applies[16].ends_with(&format!("at={} effective={}", ms(100), ms(100))), "{}", applies[16]);
-            worker
-        });
-        // The participant has given the clock back: the queued commands come due and the
-        // blocked call returns, so its thread is collected.
-        worker.join().unwrap();
     }
 
     #[test]
@@ -2811,7 +2462,7 @@ mod tests {
             assert_eq!(device.tx_async(0, Duration::ZERO).unwrap(), None, "the one-sample EOB has no acknowledgement");
 
             device.set_time(first + 200);
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(first + 200)).unwrap();
+            device.apply(Dir::Tx, 0, &freq(2e9)).unwrap();
             let target = (device.time_now().unwrap() / 200 + 150_000) * 200;
             let wave = [[0.25f32, 0.0]; 100];
             device.tx_send(0, &[&wave], Some(target), true, true, Duration::from_secs(1)).unwrap();
@@ -2821,8 +2472,7 @@ mod tests {
             assert!(start < target - ms(100), "the lost DUC header made the next timed packet start early: {start} vs {target}");
             assert_eq!(device.transmitted(start, 1), [Some(wave[0])]);
             assert_eq!(device.transmitted(target, 1), [None]);
-            assert_eq!(device.dsp_log(Dir::Tx, 0), [], "the lost header keeps the next packet off the old DUC timeline");
-            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "the one-sample EOB must not consume a later timed DUC value");
+            assert_eq!(tx_header(&device), Some(first + 200), "the lost header's packet takes no DUC time, so the one-sample packet's header stays");
         });
     }
 
@@ -2889,13 +2539,13 @@ mod tests {
             let next = [[0.3f32, 0.0]; 2];
             let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
             let dry = t0 + first.len() as i64 * 200;
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(dry + 200)).unwrap();
             device.tx_send(0, &[&first], Some(t0), true, false, Duration::from_secs(1)).unwrap();
             device.set_time(dry + ms(5));
             assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().unwrap().code, TxCode::Underflow);
 
             let resumed = device.time_now().unwrap();
             device.tx_send(0, &[&rest], Some(resumed), false, false, Duration::from_secs(1)).unwrap();
+            assert_eq!(tx_header(&device), Some(dry + rest.len() as i64 * 200), "the DUC consumes the dropped continuation");
             let future = (resumed / 200 + 5_000) * 200;
             device.tx_send(0, &[&next], Some(future), false, true, Duration::from_secs(1)).unwrap();
             let reports: Vec<_> = std::iter::from_fn(|| device.tx_async(0, Duration::ZERO).unwrap()).collect();
@@ -2903,7 +2553,6 @@ mod tests {
             assert_eq!(codes, [TxCode::TimeError, TxCode::TimeError], "{reports:?}");
             assert!(reports.iter().all(|report| report.tick.is_some_and(|tick| tick >= resumed)), "{reports:?}");
             assert_eq!(device.transmitted(dry, rest.len() + next.len()), vec![None; rest.len() + next.len()]);
-            assert_eq!(device.dsp_log(Dir::Tx, 0), vec![(dry + 200, 2e9, true)], "the rejected DUC continuation consumes its timed value");
         });
     }
 
@@ -2940,7 +2589,8 @@ mod tests {
 
     #[test]
     fn ur_33_a_duc_timeline_survives_radio_underflow() {
-        // Underflow idles the radio but does not restart the DUC's sample-count timeline.
+        // Underflow idles the radio but does not restart the DUC's sample-count timeline: the
+        // continuation after it still carries the timed count, so the idle radio rejects it.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
@@ -2954,7 +2604,6 @@ mod tests {
             assert_eq!(device.tx_async(0, Duration::ZERO).unwrap().unwrap().code, TxCode::Underflow);
 
             let resume = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(resume)).unwrap();
             let rest = [[0.2f32, 0.0]; 2];
             device.tx_send(0, &[&rest], Some(resume), false, true, Duration::from_secs(1)).unwrap();
             let late = device.tx_async(0, Duration::ZERO).unwrap().expect("the idle radio rejects the stale DUC timestamp");
@@ -2962,24 +2611,74 @@ mod tests {
             assert!(late.tick.unwrap() < resume, "the report is radio-current-time, not the host header: {late:?}");
             device.set_time(resume + 200);
             assert_eq!(device.transmitted(resume, rest.len()), [None, None], "the late continuation was dropped");
-            assert_eq!(device.dsp_log(Dir::Tx, 0), [], "the DUC command is still ahead of its surviving timeline");
-            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "underflow did not reset DUC sample time");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_untimed_continuation_clears_the_duc_timeline() {
+        // UR-33: an untimed continuation takes the DUC's timed sample count and then clears it, so
+        // a continuation after it has no time and leaves the header where it was.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let wave = [[0.1f32, 0.0]; 4];
+            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
+            device.tx_send(0, &[&wave], Some(t0), true, false, Duration::from_secs(1)).unwrap();
+            assert_eq!(tx_header(&device), Some(t0 + 4 * 200));
+            device.tx_send(0, &[&wave], None, false, false, Duration::from_secs(1)).unwrap();
+            assert_eq!(tx_header(&device), Some(t0 + 8 * 200), "the untimed continuation runs on the timed count");
+            device.tx_send(0, &[&wave], None, false, false, Duration::from_secs(1)).unwrap();
+            assert_eq!(tx_header(&device), Some(t0 + 8 * 200), "the continuation after it has no DUC time");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_untimed_sob_clears_duc_time_until_a_fresh_burst() {
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            let t0 = device.time_now().unwrap();
+            let ratio = 200;
+            let command = t0 + 5 * ratio;
+            send(&device, Some(t0), 2, true, false);
+            send(&device, None, 2, true, false);
+            assert_eq!(tx_header(&device), Some(t0 + 4 * ratio), "the untimed SOB runs on the timed count");
+            send(&device, Some(command), 2, false, false);
+            assert_eq!(tx_header(&device), Some(t0 + 4 * ratio), "the timed continuation after the untimed SOB has no DUC time");
+
+            send(&device, None, 2, false, true);
+            let next = command + 5 * ratio;
+            device.set_time(next);
+            send(&device, Some(next), 2, true, false);
+            assert_eq!(tx_header(&device), Some(next + 2 * ratio), "the fresh timed burst takes its own time");
         });
     }
 
     #[test]
     fn ur_33_an_active_timed_sob_keeps_the_duc_sample_timeline() {
-        let device = manual(wide());
+        let device = manual(FakeConfig::default());
         participant(&device, |device| {
             device.set_time_zero(false).unwrap();
             device.tx_open(0, &[0]).unwrap();
             let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
             send(&device, Some(t0), 2, true, false);
-            let taken = t0 + 3 * 200;
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(taken)).unwrap();
+            assert_eq!(tx_header(&device), Some(t0 + 2 * 200));
             send(&device, Some(t0 + ms(2)), 2, true, true);
-            device.set_time(t0 + ms(1));
-            assert_eq!(device.dsp_log(Dir::Tx, 0), vec![(taken, 2e9, true)], "an active timed SOB did not reset the DUC's sample-count timeline");
+            assert_eq!(tx_header(&device), Some(t0 + 4 * 200), "an active timed SOB did not reset the DUC's sample-count timeline");
+        });
+    }
+
+    #[test]
+    fn ur_33_an_untimed_burst_takes_no_duc_entry() {
+        // UR-33 (R5, H4): a burst that starts without a time never has one.
+        let device = manual(FakeConfig::default());
+        participant(&device, |device| {
+            device.set_time_zero(false).unwrap();
+            device.tx_open(0, &[0]).unwrap();
+            send(&device, None, 2_000, false, false);
+            assert_eq!(tx_header(&device), None, "an untimed burst has no DUC time");
         });
     }
 
@@ -3058,14 +2757,8 @@ mod tests {
         });
     }
 
-    // ------------------------------------------------------------ the DSP FIFOs (UR-33)
-
     fn freq(hz: f64) -> Settings {
         Settings { freq: Some(hz), ..Settings::default() }
-    }
-
-    fn wide() -> FakeConfig {
-        FakeConfig { command_queue: 64, ..FakeConfig::default() }
     }
 
     /// Transmits `n` samples of one value from `start` on transmit channel 0, so that a
@@ -3078,243 +2771,60 @@ mod tests {
     }
 
     #[test]
-    fn ur_33_a_timed_ddc_value_waits_for_an_input_sample_at_or_after_its_time() {
-        // UR-33 (R5): the value is the DDC's from the first input sample at or after its
-        // instant, not from the instant, and not before the stream flows.
+    fn ur_33_an_untimed_write_lands_at_once() {
+        // UR-33 (R5): an untimed write is the chain's value from the instant it is made.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
-            let start = start_rx(&device);
-            let e = start + ms(2);
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(e)).unwrap();
-            assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
-            assert_eq!(device.read_back(Dir::Rx, 0).freq, Some(1e9), "a frequency is not the radio queue's");
-            device.host().sleep(Duration::from_millis(20));
-            assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
-            assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(e, 2e9, true)]);
-            assert_eq!((device.freq_at(Dir::Rx, 0, e - 1), device.freq_at(Dir::Rx, 0, e)), (1e9, 2e9));
+            let _ = start_rx(&device);
+            device.apply(Dir::Rx, 0, &freq(3e9)).unwrap();
+            let written = device.time_now().unwrap();
+            assert_eq!(device.freq_at(Dir::Rx, 0, written), 3e9, "the untimed write is at once");
         });
     }
 
     #[test]
-    fn ur_33_a_ddc_takes_one_entry_per_radio_rate_tick() {
-        // UR-33 (R5): three commands due before the stream starts are taken by three
-        // consecutive input samples — ticks of the radio's rate —, not all at once.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            for (k, hz) in [2e9, 3e9, 4e9].into_iter().enumerate() {
-                device.apply(Dir::Rx, 0, &freq(hz), Some(start - ms(3) + ms(k as i64))).unwrap();
-            }
-            device.host().sleep(Duration::from_millis(20));
-            assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(start, 2e9, true), (start + 1, 3e9, true), (start + 2, 4e9, true)]);
-        });
-    }
-
-    #[test]
-    fn ur_33_a_stale_tx_header_advances_the_dsp_fifo_on_logical_ticks() {
-        // A surviving DUC header shifts the logical sample clock past radio time. Several
-        // already-due commands still take on consecutive logical ticks, not one radio tick.
-        let device = manual(FakeConfig::default());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let old_start = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            let first = [BURST; 2];
-            assert_eq!(device.tx_send(0, &[&first], Some(old_start), true, true, Duration::from_secs(1)).unwrap(), 2);
-            let stale_header = old_start + 2 * 200;
-            device.tx_close(0);
-            device.host().sleep(Duration::from_millis(10));
-            let _ = device.dsp_log(Dir::Tx, 0); // settle and retire the old physical flow
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            assert!(start < stale_header);
-            for (offset, hz) in [2e9, 3e9, 4e9].into_iter().enumerate() {
-                device.apply(Dir::Tx, 0, &freq(hz), Some(stale_header - 3 + offset as i64)).unwrap();
-            }
-            let second = [BURST; 2];
-            assert_eq!(device.tx_send(0, &[&second], Some(start), true, true, Duration::from_secs(1)).unwrap(), 2);
-            device.host().sleep(Duration::from_millis(10));
-            let taken: Vec<_> = device.dsp_log(Dir::Tx, 0).into_iter().filter(|(_, hz, timed)| *timed && [2e9, 3e9, 4e9].contains(hz)).map(|(tick, hz, _)| (tick, hz)).collect();
-            assert_eq!(taken, [(start, 2e9), (start + 1, 3e9), (start + 2, 4e9)]);
-        });
-    }
-
-    #[test]
-    fn ur_33_decimation_does_not_change_the_consumption_rate() {
-        // UR-33 (R5): at 1 MS/s (200 ticks a host sample) the same three commands are taken at
-        // `s`, `s + 1` and `s + 2`, the radio's input samples; the host sample stamped `s` sees
-        // the first value and the one stamped `s + 200` the third. Receive and transmit
-        // frequencies agree only at the third, where the loopback shows the burst.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            device.apply(Dir::Tx, 0, &freq(4e9), None).unwrap();
-            loopback_burst(&device, start, 400);
-            for (k, hz) in [2e9, 3e9, 4e9].into_iter().enumerate() {
-                device.apply(Dir::Rx, 0, &freq(hz), Some(start - ms(3) + ms(k as i64))).unwrap();
-            }
-            let RxRecv::Samples { first_tick, samples } = device.rx_recv(0, 4, Duration::from_millis(50), false) else { panic!("samples") };
-            assert_eq!(first_tick, start);
-            assert_eq!(device.dsp_log(Dir::Rx, 0).iter().map(|(tick, ..)| *tick).collect::<Vec<_>>(), [start, start + 1, start + 2]);
-            assert_eq!((device.freq_at(Dir::Rx, 0, start), device.freq_at(Dir::Rx, 0, start + 1), device.freq_at(Dir::Rx, 0, start + 2)), (2e9, 3e9, 4e9));
-            assert_ne!(samples[0][0], BURST, "the sample stamped `s` has the first value");
-            assert_eq!(samples[0][1], BURST, "the sample stamped `s + 200` has the third");
-            assert_eq!(device.freq_at(Dir::Rx, 0, start + 200), 4e9);
-        });
-    }
-
-    #[test]
-    fn ur_33_a_flowing_ddc_consumes_while_the_host_does_not_read() {
-        // UR-33 (R5): the samples pass the DDC whether or not the host reads them, so forty
-        // commands given over forty ms leave nothing waiting and fill nothing, with no
-        // `rx_recv` at all.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            device.host().sleep(Duration::from_millis(8));
-            for k in 0..40 {
-                let now = device.time_now().unwrap();
-                device.apply(Dir::Rx, 0, &freq(1e9 + (k + 1) as f64 * 1e6), Some(now + ms(1))).unwrap_or_else(|error| panic!("command {k}: {error}"));
-                device.host().sleep(Duration::from_millis(2));
-            }
-            assert!(start > 0);
-            assert_eq!(device.dsp_pending(Dir::Rx, 0), 0);
-            assert_eq!(device.dsp_log(Dir::Rx, 0).len(), 40);
-            assert_eq!(device.freq_at(Dir::Rx, 0, i64::MAX), 1e9 + 40e6);
-        });
-    }
-
-    #[test]
-    fn ur_33_a_later_write_does_not_change_samples_already_produced() {
-        // UR-33 (R5): a sample's value is the chain's at its own tick. The receive and transmit
-        // frequencies agree at first (the burst shows), differ from a timed command at 2 ms on, and
-        // agree again from an untimed write at 4 ms; written later, the untimed write must not make
-        // the samples between show the burst.
+    fn untimed_write_in_a_loopback_burst_splits_the_received_samples() {
+        // UR-33 (R5): a sample's value is the chain's at its own tick. An untimed write made in the
+        // middle of a loopback burst leaves the samples before it as the burst, and the samples
+        // after it do not carry the burst's frequency.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
             let start = start_rx(&device);
             loopback_burst(&device, start, 7_000);
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(start + ms(2))).unwrap();
             device.host().sleep(Duration::from_millis(9));
-            device.apply(Dir::Rx, 0, &freq(1e9), None).unwrap();
+            device.apply(Dir::Rx, 0, &freq(2e9)).unwrap();
             device.host().sleep(Duration::from_millis(2));
             let RxRecv::Samples { samples, .. } = device.rx_recv(0, 5_000, Duration::from_millis(50), false) else { panic!("samples") };
-            assert_eq!(samples[0][100], BURST, "before the timed command");
-            assert_ne!(samples[0][3_000], BURST, "between the timed command and the untimed write");
-            assert_eq!(samples[0][4_500], BURST, "after the untimed write");
+            assert_eq!(samples[0][100], BURST, "before the write");
+            assert_eq!(samples[0][3_000], BURST, "before the write");
+            assert_ne!(samples[0][4_500], BURST, "after the write");
         });
     }
 
     #[test]
-    fn ur_33_a_stopped_ddc_takes_nothing() {
-        // UR-33 (R5): a command given after the stream stopped is not taken while no sample
-        // passes, and the restart's first sample takes it.
+    fn untimed_front_end_value_follows_the_spec() {
+        // UR-33: a spec change moves each front end with its settings: an untimed frequency set on
+        // channel 1 is read back on channel 0 once the spec reorders the front ends, and channel 1
+        // takes the default.
         let device = manual(FakeConfig::default());
         participant(&device, |device| {
-            let start = start_rx(&device);
-            device.host().sleep(Duration::from_millis(8));
-            device.rx_stop(0, None).unwrap();
-            let now = device.time_now().unwrap();
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(now + ms(1))).unwrap();
-            device.host().sleep(Duration::from_millis(5));
-            assert_eq!((device.dsp_pending(Dir::Rx, 0), device.dsp_log(Dir::Rx, 0).len()), (1, 0), "{start}");
-            assert_eq!(device.read_back(Dir::Rx, 0).freq, Some(1e9), "the radio's queue does not apply a frequency at its instant");
-            let again = (device.time_now().unwrap() / 200 + 2_000) * 200;
-            device.rx_start(0, again).unwrap();
-            device.host().sleep(Duration::from_millis(5));
-            assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(again, 2e9, true)]);
-        });
-    }
-
-    #[test]
-    fn ur_33_a_full_ddc_refuses_the_next_timed_write() {
-        // UR-33 (R5): the fake's DDC holds 32 commands (a conservative envelope, not the
-        // hardware's capacity); the 33rd write times out, and so does an untimed frequency write
-        // to the chain, while an untimed gain write and another chain's frequency do not.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            for k in 0..32 {
-                device.apply(Dir::Rx, 0, &freq(1e9 + (k + 1) as f64 * 1e6), Some(start + ms(k as i64 + 1))).unwrap();
-            }
-            let calls = device.calls().len();
-            let full = device.apply(Dir::Rx, 0, &freq(9e9), Some(start + ms(40)));
-            assert!(full.as_ref().is_err_and(|error| error.message.contains("UHD error 47") && !error.lost), "{full:?}");
-            assert_eq!(device.dsp_pending(Dir::Rx, 0), 32);
-            assert_eq!(device.calls().len(), calls, "a refused write leaves no call");
-            assert!(device.apply(Dir::Rx, 0, &freq(9e9), None).is_err(), "an untimed frequency write hangs as well");
-            assert!(device.apply(Dir::Rx, 0, &Settings { gain: Some(3.0), ..Settings::default() }, None).is_ok(), "a gain does not touch the DDC");
-            assert!(device.apply(Dir::Rx, 1, &freq(2e9), Some(start + ms(40))).is_ok(), "another chain's FIFO is its own");
-        });
-    }
-
-    #[test]
-    fn ur_33_an_untimed_write_lands_at_once_and_a_waiting_entry_overwrites_it_later() {
-        // UR-33 (R5, H2): an untimed write is the value at once; a timed command still waiting
-        // takes the value from its own sample on, whichever was given first.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(start + ms(3))).unwrap();
-            device.host().sleep(Duration::from_millis(2));
-            device.apply(Dir::Rx, 0, &freq(3e9), None).unwrap();
-            let written = device.time_now().unwrap();
-            assert_eq!(device.freq_at(Dir::Rx, 0, written), 3e9, "the untimed write is at once");
-            device.host().sleep(Duration::from_millis(10));
-            assert_eq!(device.freq_at(Dir::Rx, 0, start + ms(3)), 2e9, "the waiting command overwrites it from its sample on");
-            assert_eq!(device.freq_at(Dir::Rx, 0, start + ms(3) - 1), 3e9);
-        });
-    }
-
-    #[test]
-    fn ur_33_a_ddc_fifo_outlives_its_streamer() {
-        // UR-33 (R5, INFERRED: P4 measures it): the FIFO belongs to the front end, so closing
-        // and opening the streamer keeps the command, and the new stream's first sample takes it.
-        let device = manual(FakeConfig::default());
-        participant(&device, |device| {
+            let dir = Dir::Rx;
             device.set_time_zero(false).unwrap();
-            device.rx_open(0, &[0]).unwrap();
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(device.time_now().unwrap() + ms(2))).unwrap();
-            device.rx_close(0);
-            device.rx_open(0, &[0]).unwrap();
-            assert_eq!(device.dsp_pending(Dir::Rx, 0), 1);
-            let start = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            device.rx_start(0, start).unwrap();
-            device.host().sleep(Duration::from_millis(10));
-            assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(start, 2e9, true)]);
+            device.apply(dir, 1, &freq(2e9)).unwrap();
+            device.set_subdev_spec(dir, "B:0 A:0").unwrap();
+            assert_eq!(device.read_back(dir, 0).freq, Some(2e9), "the front end followed its settings to channel 0");
+            assert_eq!(device.read_back(dir, 1).freq, Some(1e9), "and channel 1 took the default");
         });
     }
 
     /// A timed transmit send of `n` samples at `at` (`None` for one without a time).
+    fn tx_header(device: &FakeDevice) -> Option<i64> {
+        device.lock().dsp.get(&(Dir::Tx as usize, (0, 0))).and_then(|chain| chain.tx_header)
+    }
+
     fn send(device: &FakeDevice, at: Option<i64>, n: usize, sob: bool, eob: bool) {
         let wave = vec![BURST; n];
         device.tx_send(0, &[&wave], at, sob, eob, Duration::from_secs(1)).unwrap();
-    }
-
-    #[test]
-    fn ur_33_an_untimed_sob_clears_duc_time_until_a_fresh_burst() {
-        let device = manual(wide());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let t0 = device.time_now().unwrap();
-            let ratio = 200;
-            let command = t0 + 5 * ratio;
-            send(&device, Some(t0), 2, true, false);
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(command)).unwrap();
-            send(&device, None, 2, true, false);
-            send(&device, Some(command), 2, false, false);
-            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "the untimed SOB and timed continuation do not take the command");
-            assert!(device.dsp_log(Dir::Tx, 0).is_empty());
-
-            send(&device, None, 2, false, true);
-            let next = command + 5 * ratio;
-            device.set_time(next);
-            send(&device, Some(next), 2, true, false);
-            device.set_time(next + 2 * ratio);
-            assert_eq!(device.dsp_log(Dir::Tx, 0), [(next, 2e9, true)], "the fresh timed burst takes the pending command");
-        });
     }
 
     #[test]
@@ -3351,141 +2861,6 @@ mod tests {
             send(&device, Some(start), 1, true, true);
             device.set_time(start);
             assert!(device.tx_async(0, Duration::ZERO).unwrap().is_none(), "the one-sample EOB loses its acknowledgement");
-        });
-    }
-
-    #[test]
-    fn ur_33_a_timed_duc_value_is_taken_only_while_has_time_holds() {
-        // UR-33 (R5, H4): a burst's samples carry a time from its first timed send until a send
-        // without one; a timed send after that does not bring it back, so a command whose instant
-        // lies in it waits for the next burst's first sample. Where it lies in the first send, that
-        // send's own sample takes it.
-        let device = manual(wide());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            send(&device, Some(t0), 2_000, true, false);
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(t0 + ms(5))).unwrap();
-            send(&device, None, 2_000, false, false);
-            send(&device, Some(t0 + ms(4)), 2_000, false, false);
-            send(&device, None, 0, false, true);
-            device.host().sleep(Duration::from_millis(25));
-            assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "no sample took it in the burst");
-            let next = t0 + ms(30);
-            device.tx_open(0, &[0]).ok();
-            send(&device, Some(next), 100, true, true);
-            device.host().sleep(Duration::from_millis(40));
-            assert_eq!(device.dsp_log(Dir::Tx, 0), vec![(next, 2e9, true)]);
-        });
-        let device = manual(wide());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(t0 + ms(1))).unwrap();
-            send(&device, Some(t0), 2_000, true, true);
-            device.host().sleep(Duration::from_millis(15));
-            assert_eq!(device.dsp_log(Dir::Tx, 0), vec![(t0 + ms(1), 2e9, true)], "the first send's own sample");
-        });
-    }
-
-    #[test]
-    fn ur_33_an_untimed_burst_takes_no_duc_entry() {
-        // UR-33 (R5, H4): a burst that starts without a time never has one.
-        let device = manual(wide());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let now = device.time_now().unwrap();
-            device.apply(Dir::Tx, 0, &freq(2e9), Some(now)).unwrap();
-            send(&device, None, 2_000, false, true);
-            device.host().sleep(Duration::from_millis(15));
-            assert_eq!((device.dsp_pending(Dir::Tx, 0), device.dsp_log(Dir::Tx, 0).len()), (1, 0));
-        });
-    }
-
-    #[test]
-    fn ur_33_a_full_duc_is_a_model_that_breaks_the_time_value_pairing() {
-        // UR-33 (R5): MODEL, INFERRED — not a hardware contract. A DUC never refuses a write; the
-        // fake keeps 32 commands, drops the time of one given beyond them and lets its value replace
-        // the youngest kept one's. Distinct instants and values show what that makes of the
-        // pairing: 36 commands leave 32 values, the last of them 36's at the 32nd's instant.
-        let device = manual(wide());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.tx_open(0, &[0]).unwrap();
-            let t0 = (device.time_now().unwrap() / 200 + 5_000) * 200;
-            for k in 0..36 {
-                device.apply(Dir::Tx, 0, &freq(1e9 + (k + 1) as f64 * 1e6), Some(t0 + (k as i64 + 1) * 1_000)).expect("a DUC never refuses");
-            }
-            assert_eq!(device.dsp_pending(Dir::Tx, 0), 32);
-            send(&device, Some(t0), 2_000, true, true);
-            device.host().sleep(Duration::from_millis(15));
-            let log = device.dsp_log(Dir::Tx, 0);
-            assert_eq!(log.len(), 32);
-            assert_eq!(log[31], (t0 + 32_000, 1e9 + 36e6, true), "the 32nd instant carries the 36th value");
-            assert_eq!(log[30], (t0 + 31_000, 1e9 + 31e6, true));
-        });
-    }
-
-    #[test]
-    fn ur_33_a_fresh_device_has_empty_fifos() {
-        // UR-33 (R5): a device just made holds no command in any chain, as UHD's open leaves it.
-        let device = FakeDevice::new(FakeConfig::default());
-        assert!([Dir::Rx, Dir::Tx].iter().all(|dir| (0..2).all(|chan| device.dsp_pending(*dir, chan) == 0 && device.dsp_log(*dir, chan).is_empty())));
-    }
-
-    #[test]
-    fn ur_33_each_chain_has_its_own_fifo() {
-        // UR-33 (R5): two receive chains hold their own commands; only the one a stream's samples
-        // pass takes its command.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(start + ms(1))).unwrap();
-            device.apply(Dir::Rx, 1, &freq(3e9), Some(start + ms(1))).unwrap();
-            device.host().sleep(Duration::from_millis(20));
-            assert_eq!((device.dsp_pending(Dir::Rx, 0), device.dsp_pending(Dir::Rx, 1)), (0, 1));
-            assert_eq!((device.freq_at(Dir::Rx, 0, i64::MAX), device.freq_at(Dir::Rx, 1, i64::MAX)), (2e9, 1e9));
-        });
-    }
-
-    #[test]
-    fn ur_33_a_stream_that_starts_now_takes_a_due_command_at_its_first_sample() {
-        // UR-33 (R5): a command due at the very tick a stream starts is taken by that tick's
-        // sample, not the next.
-        let device = manual(FakeConfig::default());
-        participant(&device, |device| {
-            device.set_time_zero(false).unwrap();
-            device.rx_open(0, &[0]).unwrap();
-            let now = device.time_now().unwrap();
-            device.rx_start(0, now).unwrap();
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(now)).unwrap();
-            device.host().sleep(Duration::from_millis(2));
-            assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(now, 2e9, true)]);
-        });
-    }
-
-    #[test]
-    fn ur_33_replacing_the_subdev_spec_stops_the_receive_flow() {
-        // UR-33 (R5): a new channel map disconnects the open streamers, so no sample passes a DDC
-        // until a stream is opened and started again; a command given for later is not taken by
-        // an imaginary stream, and the restart's first sample takes it.
-        let device = manual(wide());
-        participant(&device, |device| {
-            let start = start_rx(&device);
-            device.host().sleep(Duration::from_millis(8));
-            let e = device.time_now().unwrap() + ms(5);
-            device.apply(Dir::Rx, 0, &freq(2e9), Some(e)).unwrap();
-            device.set_subdev_spec(Dir::Rx, "A:0 B:0").unwrap();
-            device.host().sleep(Duration::from_millis(20));
-            assert_eq!((device.dsp_pending(Dir::Rx, 0), device.dsp_log(Dir::Rx, 0).len()), (1, 0), "no stream, no sample ({start})");
-            device.rx_open(0, &[0]).unwrap();
-            let again = (device.time_now().unwrap() / 200 + 2_000) * 200;
-            device.rx_start(0, again).unwrap();
-            device.host().sleep(Duration::from_millis(10));
-            assert_eq!(device.dsp_log(Dir::Rx, 0), vec![(again, 2e9, true)]);
         });
     }
 }

@@ -222,10 +222,10 @@ impl Device for GuardedDevice {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         refuse_or!(self, self.inner().ref_locked())
     }
-    fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+    fn apply(&self, dir: Dir, chan: usize, settings: &Settings) -> Result<Applied, DeviceError> {
         match self.refusal() {
             Some(error) => Err(error),
-            None => self.note(self.inner().apply(dir, chan, settings, at), true),
+            None => self.note(self.inner().apply(dir, chan, settings), true),
         }
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
@@ -234,14 +234,11 @@ impl Device for GuardedDevice {
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         refuse_or!(self, self.inner().rx_start(stream, at))
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        refuse_or!(self, self.inner().rx_start_now(stream))
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         if self.refusal().is_some() { 0 } else { self.inner().rx_packet_samples(stream) }
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        refuse_or!(self, self.inner().rx_stop(stream, at))
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        refuse_or!(self, self.inner().rx_stop(stream))
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         if let Some(error) = self.refusal() {
@@ -401,8 +398,8 @@ impl Device for CountingDevice {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        self.inner.apply(dir, chan, settings, at)
+    fn apply(&self, dir: Dir, chan: usize, settings: &Settings) -> Result<Applied, DeviceError> {
+        self.inner.apply(dir, chan, settings)
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         let result = self.inner.rx_open(stream, channels);
@@ -416,14 +413,11 @@ impl Device for CountingDevice {
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         self.inner.rx_start(stream, at)
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.inner.rx_start_now(stream)
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.inner.rx_packet_samples(stream)
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        self.inner.rx_stop(stream, at)
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream)
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         if self.fault.starve_rx == Some(stream) {

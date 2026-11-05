@@ -855,7 +855,7 @@ fn apply_numeric(device: &dyn Device, dir: Dir, channel: usize, setting: Numeric
         NumericSetting::Frequency => Settings { freq: Some(requested), ..Settings::default() },
         NumericSetting::Gain => Settings { gain: Some(requested), ..Settings::default() },
     };
-    match device.apply(dir, channel, &settings, None) {
+    match device.apply(dir, channel, &settings) {
         Ok(applied) => {
             let returned = match setting {
                 NumericSetting::Rate => applied.rate,
@@ -873,7 +873,7 @@ fn apply_numeric(device: &dyn Device, dir: Dir, channel: usize, setting: Numeric
 }
 
 fn apply_antenna(device: &dyn Device, dir: Dir, channel: usize, requested: &str) -> AntennaReadback {
-    match device.apply(dir, channel, &Settings { antenna: Some(requested.to_owned()), ..Settings::default() }, None) {
+    match device.apply(dir, channel, &Settings { antenna: Some(requested.to_owned()), ..Settings::default() }) {
         Ok(applied) => AntennaReadback { requested: requested.to_owned(), returned: applied.antenna, error: None },
         Err(error) => AntennaReadback { requested: requested.to_owned(), returned: None, error: Some(error.message) },
     }
@@ -1266,7 +1266,6 @@ pub fn restore_measurement_defaults(device: &dyn Device, description: &channels:
                 dir,
                 channel_index,
                 &Settings { rate: Some(channels::DEFAULT_SAMPLE_RATE_HZ), freq: Some(1_000_000_000.0), gain: Some(0.0), antenna: Some(channel.default_antenna.clone()) },
-                None,
             ) {
                 let message = format!("could not restore {:?} channel {channel_index}: {}", dir, error.message);
                 raw.fail(message.clone());

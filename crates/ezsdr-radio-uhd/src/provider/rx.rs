@@ -284,7 +284,7 @@ impl Rx {
         if active {
             let now = self.core.now();
             self.core.timing(json!({ "what": "rx_stop_untimed", "cut": cut, "at": now }));
-            let result = self.core.device.rx_stop(self.k, None);
+            let result = self.core.device.rx_stop(self.k);
             match chain.stop_result(result) {
                 Ok(()) => {
                     lock(&self.core.rec).applied.push(json!({ "key": "rx_stop", "at": self.core.at(cut), "issued": self.core.at(now) }));
@@ -402,7 +402,7 @@ impl Rx {
                 self.follow();
             }
             Err(error) => {
-                let stop = self.core.device.rx_stop(self.k, None);
+                let stop = self.core.device.rx_stop(self.k);
                 if let Err(stop_error) = chain.stop_result(stop) {
                     self.core.device_failed(None, "stop", &stop_error);
                 }
@@ -847,21 +847,15 @@ mod tests {
     }
 
     #[test]
-    fn ur_24_fake_ddc_distinguishes_host_silence_from_a_stalled_ddc() {
-        for (fault, pending) in [(crate::device::FakeFault::Silence(Wall::ZERO), 0), (crate::device::FakeFault::RxFlowStall(Wall::ZERO), 1)] {
-            let device = crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults: vec![fault], ..Default::default() });
-            let _frozen = super::super::test_support::Frozen::of(&device);
-            device.set_time(0);
-            device.rx_open(0, &[0]).unwrap();
-            device.rx_start(0, 0).unwrap();
-            assert!(matches!(device.rx_recv(0, 2_000, Wall::ZERO, false), RxRecv::Timeout));
-            let at = 200_000;
-            device.apply(Dir::Rx, 0, &crate::device::Settings { freq: Some(1.001e9), ..Default::default() }, Some(at)).unwrap();
-            device.set_time(400_000);
-            assert!(matches!(device.rx_recv(0, 2_000, Wall::ZERO, false), RxRecv::Timeout), "no host block is delivered");
-            assert_eq!(device.dsp_pending(Dir::Rx, 0), pending, "host silence and stopped chain flow are distinct");
-            assert_eq!(device.dsp_log(Dir::Rx, 0).len(), usize::from(pending == 0), "only flowing DDC samples take the timed entry");
-        }
+    fn ur_24_fake_host_silence_delivers_no_block() {
+        let device = crate::device::FakeDevice::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::Silence(Wall::ZERO)], ..Default::default() });
+        let _frozen = super::super::test_support::Frozen::of(&device);
+        device.set_time(0);
+        device.rx_open(0, &[0]).unwrap();
+        device.rx_start(0, 0).unwrap();
+        assert!(matches!(device.rx_recv(0, 2_000, Wall::ZERO, false), RxRecv::Timeout));
+        device.set_time(400_000);
+        assert!(matches!(device.rx_recv(0, 2_000, Wall::ZERO, false), RxRecv::Timeout), "no host block is delivered");
     }
 
     #[test]
@@ -888,7 +882,7 @@ mod tests {
         assert_eq!(call, 20_000);
         time.advance_to(core.at(now)).unwrap();
         spy.set_time(now);
-        spy.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }, None).unwrap();
+        spy.apply(Dir::Rx, 0, &crate::device::Settings { rate: Some(1e6), freq: Some(1e9), ..Default::default() }).unwrap();
         spy.rx_start(0, now).unwrap();
         rx.stream.as_mut().unwrap().expected = expected;
         core.rx_chain[0].lock().request_cut(cut);
@@ -984,7 +978,7 @@ mod tests {
         assert!(matches!(rx.turn(), Turn::Exit));
 
         assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Uncertain);
-        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start_now") || call.starts_with("rx_recv")), "shutdown has no streamer to recover");
+        assert!(!device.calls().iter().any(|call| call.starts_with("rx_start") || call.starts_with("rx_recv")), "shutdown has no streamer to recover");
     }
 
     #[test]
@@ -995,6 +989,7 @@ mod tests {
         let frozen = super::super::test_support::Frozen::on(spy.host());
         spy.set_time(core.now());
         let (mut rx, clock) = rx(&core, 1);
+        let starts = spy.seen("rx_start");
         let stop_at = core.now();
         {
             let mut streams = lock(&core.streams);
@@ -1011,7 +1006,7 @@ mod tests {
 
         assert!(rx.stream.is_none());
         assert_eq!(spy.seen("rx_stop"), 1);
-        assert_eq!(spy.seen("rx_start_now"), 0, "a failed stop starts no recovery");
+        assert_eq!(spy.seen("rx_start"), starts, "a failed stop starts no recovery");
         assert_eq!(spy.seen("rx_recv"), 0);
         assert_eq!(core.rx_chain[0].lock().device(), RxDevice::Uncertain, "a refused stop leaves the device fact uncertain");
         // The refusal is labelled as a stop (RM-22), not as an update.
@@ -1043,7 +1038,7 @@ mod tests {
 
     #[test]
     fn ur_24_a_loss_published_before_rx_recv_skips_the_device_call() {
-        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..Default::default() }));
+        let spy = Arc::new(super::super::test_support::LockSpy::new(crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..Default::default() }));
         let (core, _time, events) = super::super::test_support::rig_on_description(spy.clone(), vec![link()], BTreeMap::new(), super::super::test_support::default_description(2_000));
         spy.watch(&core);
         let _frozen = super::super::test_support::Frozen::on(spy.host());
@@ -1547,7 +1542,7 @@ mod tests {
             assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 1)), Some((0, config, 0)), "the T0 stream begins at its planned segment");
             assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((0, config, 700)), "stream 0's floor stands");
         }
-        core.rx_chain[1].lock().stop_result(device.rx_stop(1, None)).unwrap();
+        core.rx_chain[1].lock().stop_result(device.rx_stop(1)).unwrap();
         rx.finish();
         let streams = lock(&core.streams);
         assert_eq!(streams.first_undelivered(stream_key(Dir::Rx, 0)), Some((0, config, 700)), "stream 0's floor stands");
@@ -2467,7 +2462,7 @@ mod tests {
     /// uhd-rx with the manual clock held, one segment planned at `origin` begun by the command 1, and the owner's configure taking until
     /// `completion` (the probe moves the Core's clock and the device's together, as a slow `apply` does). Returns what `begin` left.
     fn begin_with_configure_ending_at(origin_ms: i64, completion_ns: i64) -> (Arc<Core>, Arc<crate::device::FakeDevice>, Vec<ezsdr_kernel::event::Event>, i64) {
-        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..crate::device::FakeConfig::default() };
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() };
         let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link()]);
         let _frozen = super::super::test_support::Frozen::of(&device);
         super::super::test_support::device_at(&core, &time, &device, 0);
@@ -2520,7 +2515,7 @@ mod tests {
     /// delivers its first block. Returns the events, the first block's header and the restart instant `rx_restart` recorded.
     fn begin_and_recover_from_a_missed_start(completion_ns: i64, faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Vec<ezsdr_kernel::event::Event>, ezsdr_kernel::stream::BlockHeader, i64, i64) {
         let link = link();
-        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, faults, ..crate::device::FakeConfig::default() };
+        let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, faults, ..crate::device::FakeConfig::default() };
         let (core, device, time, events) = super::super::test_support::rig_with(config, vec![link.clone()]);
         let _frozen = super::super::test_support::Frozen::of(&device);
         super::super::test_support::device_at(&core, &time, &device, 0);

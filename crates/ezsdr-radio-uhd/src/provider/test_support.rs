@@ -271,7 +271,7 @@ struct Hold {
 /// while one is held" check.
 fn family(name: &str) -> Option<Dir> {
     match name {
-        "rx_open" | "rx_close" | "rx_start" | "rx_start_now" | "rx_recv" | "rx_packet_samples" | "rx_stop" => Some(Dir::Rx),
+        "rx_open" | "rx_close" | "rx_start" | "rx_recv" | "rx_packet_samples" | "rx_stop" => Some(Dir::Rx),
         "tx_open" | "tx_close" | "tx_send" | "tx_async" => Some(Dir::Tx),
         _ => None,
     }
@@ -281,8 +281,6 @@ fn family(name: &str) -> Option<Dir> {
 /// lock (UR-25, design 33 D15): the test build counts the caller's own guards, so a line
 /// another thread holds is not mistaken for the caller's. It counts each call, so a test can
 /// prove its sequence passed one, and it can hold a chosen call until the test lets it go.
-type RxApplyPending = (usize, Option<i64>, f64, usize);
-
 pub(super) struct LockSpy {
     inner: FakeDevice,
     core: Mutex<Weak<Core>>,
@@ -291,7 +289,6 @@ pub(super) struct LockSpy {
     rx_requests: Mutex<Vec<usize>>,
     rx_one_packet: Mutex<Vec<bool>>,
     rx_packet_max: Mutex<Option<usize>>,
-    rx_apply_pending: Mutex<Vec<RxApplyPending>>,
     hosts: Mutex<Vec<bool>>,
     before: Mutex<BTreeMap<&'static str, Hold>>,
     after: Mutex<BTreeMap<&'static str, Hold>>,
@@ -312,7 +309,6 @@ impl LockSpy {
             rx_requests: Mutex::new(Vec::new()),
             rx_one_packet: Mutex::new(Vec::new()),
             rx_packet_max: Mutex::new(None),
-            rx_apply_pending: Mutex::new(Vec::new()),
             hosts: Mutex::new(Vec::new()),
             before: Mutex::new(BTreeMap::new()),
             after: Mutex::new(BTreeMap::new()),
@@ -462,17 +458,14 @@ impl Device for LockSpy {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
         self.call("apply", || {
             if dir == Dir::Rx {
-                if let Some(freq) = s.freq {
-                    self.rx_apply_pending.lock().unwrap().push((chan, at, freq, self.inner.dsp_pending(dir, chan)));
-                }
                 if let Some(error) = self.rx_apply_error.lock().unwrap().take() {
                     return Err(error);
                 }
             }
-            self.inner.apply(dir, chan, s, at)
+            self.inner.apply(dir, chan, s)
         })
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
@@ -484,16 +477,13 @@ impl Device for LockSpy {
             None => self.inner.rx_start(stream, at),
         })
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.call("rx_start_now", || self.inner.rx_start_now(stream))
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.call("rx_packet_samples", || self.rx_packet_max.lock().unwrap().unwrap_or_else(|| self.inner.rx_packet_samples(stream)))
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
         self.call("rx_stop", || match self.rx_stop_error.lock().unwrap().take() {
             Some(error) => Err(error),
-            None => self.inner.rx_stop(stream, at),
+            None => self.inner.rx_stop(stream),
         })
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
@@ -535,8 +525,8 @@ impl Device for LockSpy {
 }
 
 /// A `FakeDevice` with one scripted refusal `FakeConfig::faults` does not carry (UR-33's
-/// vocabulary keeps to what a device does): the first `apply` of `dir` of the class named — of
-/// the device channel `chan`, when one is named — fails before anything is applied, which a set
+/// vocabulary keeps to what a device does): the first `apply` of `dir` — of the device channel
+/// `chan`, when one is named — fails before anything is applied, which a set
 /// whose channels are applied one by one and a configuration of a streamer already open need
 /// (UR-13). The fake behind it is unchanged by the refused call. Every `apply` it was given is
 /// kept, in order, so a test sees an attempt a refusal cut short.
@@ -544,26 +534,24 @@ pub(super) struct ApplyFails {
     inner: Arc<FakeDevice>,
     dir: Dir,
     chan: Option<usize>,
-    /// The class it refuses: `Some(true)` a timed `apply`, `Some(false)` an untimed one.
-    timed: Option<bool>,
     /// Whether the refusal is a lost device (`DeviceError::lost`).
     lost: bool,
     fired: AtomicBool,
-    attempts: Mutex<Vec<(Dir, usize, Option<i64>)>>,
+    attempts: Mutex<Vec<(Dir, usize)>>,
 }
 
 impl ApplyFails {
     pub fn new(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
-        ApplyFails::of(inner, dir, chan, false, false)
+        ApplyFails::of(inner, dir, chan, false)
     }
 
-    /// The first untimed `apply` of `dir` — of `chan`, when one is named — fails as a lost device.
+    /// The first `apply` of `dir` — of `chan`, when one is named — fails as a lost device.
     pub fn lost(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>) -> ApplyFails {
-        ApplyFails::of(inner, dir, chan, false, true)
+        ApplyFails::of(inner, dir, chan, true)
     }
 
-    fn of(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>, timed: bool, lost: bool) -> ApplyFails {
-        ApplyFails { inner, dir, chan, timed: Some(timed), lost, fired: AtomicBool::new(false), attempts: Mutex::new(Vec::new()) }
+    fn of(inner: Arc<FakeDevice>, dir: Dir, chan: Option<usize>, lost: bool) -> ApplyFails {
+        ApplyFails { inner, dir, chan, lost, fired: AtomicBool::new(false), attempts: Mutex::new(Vec::new()) }
     }
 }
 
@@ -604,12 +592,12 @@ impl Device for ApplyFails {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        self.attempts.lock().unwrap().push((dir, chan, at));
-        if dir == self.dir && Some(at.is_some()) == self.timed && self.chan.is_none_or(|want| want == chan) && !self.fired.swap(true, Ordering::SeqCst) {
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
+        self.attempts.lock().unwrap().push((dir, chan));
+        if dir == self.dir && self.chan.is_none_or(|want| want == chan) && !self.fired.swap(true, Ordering::SeqCst) {
             return if self.lost { Err(DeviceError { lost: true, message: "test: scripted loss on an apply".to_owned() }) } else { Err(DeviceError::failed("test: scripted refusal of an apply")) };
         }
-        self.inner.apply(dir, chan, s, at)
+        self.inner.apply(dir, chan, s)
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.inner.rx_open(stream, channels)
@@ -617,14 +605,11 @@ impl Device for ApplyFails {
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         self.inner.rx_start(stream, at)
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.inner.rx_start_now(stream)
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.inner.rx_packet_samples(stream)
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        self.inner.rx_stop(stream, at)
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream)
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
         self.inner.rx_recv(stream, n, timeout, one_packet)
@@ -658,7 +643,7 @@ impl Device for ApplyFails {
     }
 }
 
-/// A `FakeDevice` whose untimed `apply` of one direction and channel is held after the
+/// A `FakeDevice` whose `apply` of one direction and channel is held after the
 /// device returned (L1, L2, S16a in the unit rigs): the test publishes a loss while the
 /// owner is between its configuration and its start.
 pub(super) struct HoldApply {
@@ -675,7 +660,7 @@ impl HoldApply {
         HoldApply { inner, dir, chan, reached: Mutex::new(None), release: Mutex::new(None), pending: Mutex::new(false) }
     }
 
-    /// Arms the gate for the next untimed apply of its direction and channel.
+    /// Arms the gate for the next apply of its direction and channel.
     pub fn arm(&self) -> (Receiver<()>, Sender<()>) {
         let (reached, reached_rx) = channel();
         let (release, release_rx) = channel();
@@ -723,9 +708,9 @@ impl Device for HoldApply {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        let applied = self.inner.apply(dir, chan, s, at)?;
-        let held = at.is_none() && dir == self.dir && self.chan.is_none_or(|want| want == chan) && std::mem::replace(&mut *self.pending.lock().unwrap(), false);
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
+        let applied = self.inner.apply(dir, chan, s)?;
+        let held = dir == self.dir && self.chan.is_none_or(|want| want == chan) && std::mem::replace(&mut *self.pending.lock().unwrap(), false);
         if held {
             if let Some(reached) = self.reached.lock().unwrap().take() {
                 let _ = reached.send(());
@@ -742,14 +727,11 @@ impl Device for HoldApply {
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         self.inner.rx_start(stream, at)
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.inner.rx_start_now(stream)
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.inner.rx_packet_samples(stream)
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        self.inner.rx_stop(stream, at)
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream)
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
         self.inner.rx_recv(stream, n, timeout, one_packet)
@@ -845,8 +827,8 @@ impl Device for ReportFeed {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        self.inner.apply(dir, chan, s, at)
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
+        self.inner.apply(dir, chan, s)
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.inner.rx_open(stream, channels)
@@ -854,14 +836,11 @@ impl Device for ReportFeed {
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         self.inner.rx_start(stream, at)
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.inner.rx_start_now(stream)
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.inner.rx_packet_samples(stream)
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        self.inner.rx_stop(stream, at)
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream)
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: std::time::Duration, one_packet: bool) -> RxRecv {
         self.inner.rx_recv(stream, n, timeout, one_packet)
@@ -995,8 +974,8 @@ impl Device for TxSpy {
     fn ref_locked(&self) -> Result<Option<bool>, DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        self.inner.apply(dir, chan, s, at)
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
+        self.inner.apply(dir, chan, s)
     }
     fn rx_open(&self, stream: usize, channels: &[usize]) -> Result<(), DeviceError> {
         self.inner.rx_open(stream, channels)
@@ -1004,14 +983,11 @@ impl Device for TxSpy {
     fn rx_start(&self, stream: usize, at: i64) -> Result<(), DeviceError> {
         self.inner.rx_start(stream, at)
     }
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.inner.rx_start_now(stream)
-    }
     fn rx_packet_samples(&self, stream: usize) -> usize {
         self.inner.rx_packet_samples(stream)
     }
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        self.inner.rx_stop(stream, at)
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        self.inner.rx_stop(stream)
     }
     fn rx_recv(&self, stream: usize, n: usize, timeout: Wall, one_packet: bool) -> RxRecv {
         self.inner.rx_recv(stream, n, timeout, one_packet)

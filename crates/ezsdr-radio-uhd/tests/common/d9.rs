@@ -129,9 +129,9 @@ pub fn tone_1msps(n: usize) -> Vec<Iq> {
 pub fn open_raw(device: &dyn Device, chan: usize) {
     assert!(SAFE_TX_HZ.contains(&BASE_HZ) && SAFE_TX_HZ.contains(&(BASE_HZ + SHIFT_HZ + 100e3)));
     assert!(tone_1msps(25).iter().all(|sample| f64::from(sample[0]).hypot(f64::from(sample[1])) <= 0.5), "bench.md RF safety: probe amplitude is at most 0.5");
-    device.apply(Dir::Rx, chan, &Settings { rate: Some(1e6), freq: Some(BASE_HZ), gain: Some(0.0), antenna: Some("RX2".to_owned()) }, None).unwrap();
+    device.apply(Dir::Rx, chan, &Settings { rate: Some(1e6), freq: Some(BASE_HZ), gain: Some(0.0), antenna: Some("RX2".to_owned()) }).unwrap();
     device.rx_open(0, &[chan]).unwrap();
-    let applied = device.apply(Dir::Tx, chan, &Settings { rate: Some(1e6), freq: Some(BASE_HZ), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) }, None).unwrap();
+    let applied = device.apply(Dir::Tx, chan, &Settings { rate: Some(1e6), freq: Some(BASE_HZ), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) }).unwrap();
     assert_eq!(applied.gain, 0.0);
     assert!(SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");
     device.tx_open(0, &[chan]).unwrap();
@@ -204,7 +204,7 @@ fn read_tail(device: &dyn Device) -> Capture {
     out
 }
 
-/// P4 A/C's raw device sequence, shared with FakeDevice; the hardware caller keeps the RF verdict.
+/// P4 A/C's raw device sequence; the hardware caller keeps the RF verdict.
 pub fn p4_dsp_only(device: &dyn Device, chan: usize, tune: &mut DspTune<'_>, case: P4Case) -> P4Result {
     assert!(SAFE_TX_HZ.contains(&(BASE_HZ + SHIFT_HZ + 100e3)));
     let tone = tone_1msps(100_000);
@@ -218,7 +218,7 @@ pub fn p4_dsp_only(device: &dyn Device, chan: usize, tune: &mut DspTune<'_>, cas
     let mut log = vec![format!("tune_dsp {dsp} (call {before_apply}..{})", device.time_now().unwrap())];
     let before = read_device_until(device, Wall::from_secs(2), SAMPLE_TICKS, || device.time_now().unwrap() >= e - 5 * MS);
     let stopping = device.time_now().unwrap();
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     let stopped = device.time_now().unwrap();
     let tail = read_tail(device);
     let last = tail.samples.last().or(before.samples.last()).map(|(tick, _)| *tick);
@@ -231,7 +231,7 @@ pub fn p4_dsp_only(device: &dyn Device, chan: usize, tune: &mut DspTune<'_>, cas
     device.rx_start(0, again).unwrap();
     device.tx_send(0, &[&tone], Some(again), true, true, TX_TIMEOUT).unwrap();
     let after = read_capture_until(device, again + 20 * MS);
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     drain_rx(device);
     let reports = reports(device, Wall::from_millis(10)).into_iter().map(|report| format!("{:?}", report.code)).collect();
     P4Result { case, start, e, stopping, stopped, last, again, before, after, log, reports }
@@ -314,7 +314,7 @@ pub fn p5_stale_header(device: &dyn Device, chan: usize, tune: &mut DspTune<'_>,
         let end_at = (case != P5Case::NoStaleHeader).then_some(old_start + 10 * MS);
         device.tx_send(0, &[&[]], end_at, false, true, TX_TIMEOUT).unwrap();
         let _ = read_until(device, old_start + 15 * MS);
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         drain_rx(device);
         let _ = reports(device, Wall::from_millis(10));
         reopen_after_reset(device, chan);
@@ -326,7 +326,7 @@ pub fn p5_stale_header(device: &dyn Device, chan: usize, tune: &mut DspTune<'_>,
         let dsp = tune(Dir::Tx, chan, SHIFT_HZ, Some(e)).unwrap();
         device.tx_send(0, &[&tone], Some(start), true, true, TX_TIMEOUT).unwrap();
         let capture = read_until(device, start + 60 * MS);
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         drain_rx(device);
         let tx_reports = reports(device, Wall::from_millis(10));
         out.push(P5Result { case, old_header, start, e, dsp, flush_reports, capture, reports: tx_reports });
@@ -351,7 +351,7 @@ pub fn p6_every_chunk_timed(device: &dyn Device, chan: usize, tune: &mut DspTune
         let dsp = tune(Dir::Tx, chan, SHIFT_HZ, Some(e)).unwrap();
         timed_chunks(device, start, &tone, if late_tune { 25_000..60_000 } else { 0..60_000 }, !late_tune, true);
         let capture = read_until(device, start + 60 * MS);
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         drain_rx(device);
         out.push(P6Result { case, start, e, dsp, capture, reports: reports(device, Wall::from_millis(10)) });
     }
@@ -366,7 +366,7 @@ pub fn p6_every_chunk_timed(device: &dyn Device, chan: usize, tune: &mut DspTune
     let resumed_at = device.time_now().unwrap();
     let send = device.tx_send(0, &[&tone[20_000..22_000]], Some(queued_end), false, true, TX_TIMEOUT);
     let capture = read_until(device, resumed_at + 5 * MS);
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     drain_rx(device);
     let tx_reports = reports(device, Wall::from_millis(10));
     (out, StarvationResult { start, queued_end, resumed_at, send, capture, reports: tx_reports })
@@ -390,7 +390,7 @@ pub fn p7_untimed_continuations(device: &dyn Device, chan: usize, tune: &mut Dsp
         k += n;
     }
     let capture = read_until(device, start + 60 * MS);
-    device.rx_stop(0, None).unwrap();
+    device.rx_stop(0).unwrap();
     drain_rx(device);
     let mut tx_reports = flush_reports;
     tx_reports.extend(reports(device, Wall::from_millis(10)));
@@ -416,7 +416,7 @@ pub fn d70_one_sample_then_two(device: &dyn Device, chan: usize, tune: &mut DspT
         let start = after_ms(device, 150);
         device.tx_send(0, &[&tone], Some(start), true, true, TX_TIMEOUT).unwrap();
         let capture = read_until(device, start + 40 * MS);
-        device.rx_stop(0, None).unwrap();
+        device.rx_stop(0).unwrap();
         drain_rx(device);
         out.push(D70Result { case, rx_at, start, priming_reports, capture, reports: reports(device, Wall::from_millis(10)) });
     }

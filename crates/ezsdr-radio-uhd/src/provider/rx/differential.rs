@@ -653,9 +653,9 @@ impl Device for Scripted {
 
     /// The FakeDevice's, which refuses a rate once when asked to (`WrongRate`); the receive
     /// rate it applied starts the next stream.
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
-        let applied = self.inner.apply(dir, chan, s, at)?;
-        if dir == Dir::Rx && chan == 0 && at.is_none() && s.rate.is_some() {
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
+        let applied = self.inner.apply(dir, chan, s)?;
+        if dir == Dir::Rx && chan == 0 && s.rate.is_some() {
             let mut world = lock(&self.world);
             world.last_apply = s.freq.zip(s.gain);
             world.rate = applied.rate;
@@ -702,30 +702,18 @@ impl Device for Scripted {
         Ok(())
     }
 
-    fn rx_start_now(&self, _stream: usize) -> Result<(), DeviceError> {
-        let mut world = lock(&self.world);
-        if world.lost {
-            return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
-        }
-        let at = world.now;
-        world.call("rx_start_now".to_owned());
-        let n = (200e6 / world.rate).round() as i64;
-        world.runs.push_back(Run { origin: at, n, next: at, end: None });
-        Ok(())
-    }
-
     fn rx_packet_samples(&self, _stream: usize) -> usize {
         0
     }
 
-    /// The X3x0 stops a running stream at once, whatever the stop's time (design-notes §11
-    /// F1); a start still queued is not cancelled (#56).
-    fn rx_stop(&self, _stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
+    /// The X3x0 stops a running stream at once (design-notes §11 F1); a start still queued is
+    /// not cancelled (#56).
+    fn rx_stop(&self, _stream: usize) -> Result<(), DeviceError> {
         let mut world = lock(&self.world);
         if world.lost {
             return Err(DeviceError { lost: true, message: "scripted: the device is gone".to_owned() });
         }
-        world.call(format!("rx_stop {}", at.map_or("now".to_owned(), |t| t.to_string())));
+        world.call("rx_stop now".to_owned());
         let now = world.now;
         for run in world.runs.iter_mut().filter(|run| run.end.is_none() && run.origin <= now) {
             run.end = Some(now);

@@ -1808,7 +1808,7 @@ mod tests {
         // host wake-up. Synchronize the manual decision clock to the fake afterward.
         let (core, device, time, _) = super::super::test_support::rig();
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -1845,7 +1845,7 @@ mod tests {
         for (policy, expected) in [(LatePolicy::DropAndFlag, "drop"), (LatePolicy::RejectAtPlan, "plan_violation"), (LatePolicy::SendAsapAndFlag, "send_asap")] {
             let (core, device, time, events) = super::super::test_support::rig();
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2005,14 +2005,14 @@ mod tests {
             ("handed before later receipt", LatePolicy::SendAsapAndFlag),
             ("handed at same instant drop", LatePolicy::DropAndFlag),
         ] {
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, cmds) = booking_control(&core);
             let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2064,14 +2064,14 @@ mod tests {
     fn ur_21_a_send_asap_move_is_reported_once_across_handovers() {
         let (a_wave, a_bytes) = waveform_input("one_sample_front", &[[0.25, 0.0]]);
         let (b_wave, b_bytes) = waveform_input("rechecked_start", &[[0.75, -0.25]]);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2106,14 +2106,14 @@ mod tests {
         let a_samples = vec![[0.25, 0.0]; 2_000];
         let (a_wave, a_bytes) = waveform_input("preempt_repeat", &a_samples);
         let (b_wave, b_bytes) = waveform_input("preempted_send_asap", &[[0.75, -0.25], [0.5, 0.125]]);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2152,7 +2152,7 @@ mod tests {
         let b_samples = vec![[0.75, -0.25]; 2_000];
         let (a_wave, a_bytes) = waveform_input("stream0", &a_samples);
         let (b_wave, b_bytes) = waveform_input("stream1", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
@@ -2161,7 +2161,7 @@ mod tests {
         device.tx_open(0, &[0]).unwrap();
         device.tx_open(1, &[1]).unwrap();
         for channel in [0, 1] {
-            device.apply(Dir::Tx, channel, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, channel, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         }
         let c0 = core.register_in(Dir::Tx, 0, 200, 0).unwrap();
         let c1 = core.register_in(Dir::Tx, 1, 200, 0).unwrap();
@@ -2192,14 +2192,14 @@ mod tests {
         let b_samples = vec![[0.75, -0.25]; 1_000];
         let (a_wave, a_bytes) = waveform_input("expired_a", &a_samples);
         let (b_wave, b_bytes) = waveform_input("expired_b", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2224,14 +2224,14 @@ mod tests {
         let (a_wave, a_bytes) = waveform_input("window_repeat", &a_samples);
         let (b_wave, b_bytes) = waveform_input("window_boundary", &b_samples);
         for (rate, root_ticks_per_sample, start, expected_cut) in [(1e6, 200, 9_000, 10_000), (390_625.0, 512, 979, 3_907)] {
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
             let clock = core.register(Dir::Tx, root_ticks_per_sample, 0).unwrap();
             let (mut control, cmds) = booking_control_on(&core, clock);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2283,7 +2283,7 @@ mod tests {
     fn ur_21_tx_reads_in_flight_window_from_description() {
         let samples = vec![[0.25, 0.0]; 10_000];
         let (wave, bytes) = waveform_input("custom_window", &samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 4_000_000;
@@ -2291,7 +2291,7 @@ mod tests {
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (mut control, cmds) = booking_control_on(&core, clock);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2301,14 +2301,14 @@ mod tests {
         assert_eq!(tx.open.as_ref().unwrap().next, 4_000);
         assert_eq!(sends(&device).iter().map(|(n, _, _)| n).sum::<usize>(), 1_000);
 
-        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() }));
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 4_000_000;
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]), description);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (mut control, cmds) = booking_control_on(&core, clock);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2323,14 +2323,14 @@ mod tests {
     fn measurement_candidate_in_flight_window_sets_the_tx_chunk_size() {
         let samples = vec![[0.25, 0.0]; 10_000];
         let (wave, bytes) = waveform_input("candidate_chunk", &samples);
-        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() }));
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
         let mut description = super::super::test_support::default_description(10_000);
         description.timing.tx_in_flight_ns = 8_000_000;
         let (core, time, _) = super::super::test_support::rig_on_description(device.clone(), Vec::new(), BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]), description);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (mut control, cmds) = booking_control_on(&core, clock);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2365,13 +2365,13 @@ mod tests {
     fn ur_21_a_new_burst_without_an_open_predecessor_is_on_time() {
         let samples = vec![[0.75, -0.25]];
         let (wave, bytes) = waveform_input("alone", &samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]));
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2389,14 +2389,14 @@ mod tests {
         let b_samples = vec![[0.75, -0.25]];
         let (a_wave, a_bytes) = waveform_input("finite_predecessor", &a_samples);
         let (b_wave, b_bytes) = waveform_input("after_finite", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2420,14 +2420,14 @@ mod tests {
         let b_samples = vec![[0.75, -0.25]];
         let (a_wave, a_bytes) = waveform_input("long_finite", &a_samples);
         let (b_wave, b_bytes) = waveform_input("inside_long_finite", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2454,14 +2454,14 @@ mod tests {
         let b_samples = vec![[0.75, -0.25]; 2_000];
         let (a_wave, a_bytes) = waveform_input("held_repeat", &a_samples);
         let (b_wave, b_bytes) = waveform_input("inside_held_repeat", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2495,14 +2495,14 @@ mod tests {
         let (c_wave, c_bytes) = waveform_input("at_cursor", &[[0.5, 0.25]]);
         let b_samples = vec![[0.75, -0.25]; 2_000];
         let (b_wave, b_bytes) = waveform_input("moved_after_cursor", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes)), (c_wave.hash.clone(), Arc::<[u8]>::from(c_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2550,14 +2550,14 @@ mod tests {
         let (a_wave, a_bytes) = waveform_input("boundary_repeat", &a_samples);
         let (b_wave, b_bytes) = waveform_input("boundary_b", &b_samples);
         for delta in 0..=1 {
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, cmds) = booking_control(&core);
             let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2593,14 +2593,14 @@ mod tests {
         let (a_wave, a_bytes) = waveform_input("repeat", &a_samples);
         let (b_wave, b_bytes) = waveform_input("after_stop", &b_samples);
         for delta in 0..=3 {
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, cmds) = booking_control(&core);
             let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2645,14 +2645,14 @@ mod tests {
     fn ur_23_stop_does_not_send_unhanded_window_edge_payload() {
         let (a_wave, a_bytes) = waveform_input("window_edge_a", &[[0.5, 0.0]]);
         let (b_wave, b_bytes) = waveform_input("window_edge_b", &[[0.0, 0.5]]);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2696,13 +2696,13 @@ mod tests {
     fn ur_23_stop_closes_a_running_repeat_at_its_handed_cursor() {
         let samples = vec![[0.25, 0.0]; 2_000];
         let (wave, bytes) = waveform_input("running_repeat", &samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let (core, time, _) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, BTreeMap::from([(wave.hash.clone(), Arc::<[u8]>::from(bytes))]));
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2728,14 +2728,14 @@ mod tests {
         let b_samples: Vec<[f32; 2]> = (0..1_000).map(|n| [-0.5, n as f32 / 1_000.0]).collect();
         let (a_wave, a_bytes) = waveform_input("finite_a", &a_samples);
         let (b_wave, b_bytes) = waveform_input("finite_b", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2769,14 +2769,14 @@ mod tests {
         let (a_wave, a_bytes) = waveform_input("one_sample_eob", &[[0.25, 0.0]]);
         let (b_wave, b_bytes) = waveform_input("one_sample_successor", &[[0.75, -0.25]]);
         for (target, expect_late) in [(2_004, true), (2_005, false)] {
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, cmds) = booking_control(&core);
             let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2810,14 +2810,14 @@ mod tests {
         let b_samples = vec![[0.75, -0.25]];
         let (a_wave, a_bytes) = waveform_input("eob_a", &a_samples);
         let (b_wave, b_bytes) = waveform_input("eob_b", &b_samples);
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let device = Arc::new(FakeDevice::new(config));
         let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
         let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let (mut control, cmds) = booking_control(&core);
         let clock = tx_clock(&core);
         let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -2879,7 +2879,7 @@ mod tests {
         };
         let (a_wave, b_wave) = (input("waveform", &a_bytes), input("waveform2", &b_bytes));
         for (policy, outcome) in [(LatePolicy::SendAsapAndFlag, "send_asap"), (LatePolicy::DropAndFlag, "drop")] {
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(
                 device.clone(),
@@ -2890,7 +2890,7 @@ mod tests {
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, handed) = booking_control(&core);
             let clock = tx_clock(&core);
             let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -2970,12 +2970,12 @@ mod tests {
         // RM-15 as VE-2 amends it: B, late against the open burst A's next sample, moves
         // there under `send_asap`; C is already held at that sample, so B is refused
         // (`TIME_ERROR { refused }`, `COMMAND_REJECTED`) and C keeps its start.
-        let config = FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() };
         let (core, device, time, events) = crate::provider::test_support::rig_with(config, Vec::new());
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let origin = (core.now() / 200 + 1) * 200;
         let clock = core.register(Dir::Tx, 200, origin).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -3556,12 +3556,12 @@ mod tests {
     /// 30 000 samples driven in 13 steps of up to 2 500 samples, so its last sample is held
     /// back and `continues_at` is 70 000 (design note 37, T1–T5).
     fn at_a_held_tail(faults: Vec<crate::device::FakeFault>) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Tx, crate::provider::test_support::Frozen) {
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, faults, ..FakeConfig::default() };
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
         let frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(_to_tx);
@@ -3675,12 +3675,12 @@ mod tests {
     fn ur_23_a_stop_ends_the_burst_within_the_in_flight_window() {
         // UR-23, RM-16: payload stops at the first SampleClock sample at or after `s + W`;
         // the two-zero EOB is separate. The fake's Session test reads the receipt instant.
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(_to_tx);
@@ -3801,12 +3801,12 @@ mod tests {
         // RM-15: held bursts go out in target order, whatever order they were booked in. The
         // Spec sorts its entries by instant, so its two bursts arrive in target order; the
         // reverse booking is pinned here, on the controlled clock.
-        let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, ..FakeConfig::default() };
+        let config = FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() };
         let (core, device, time, _) = crate::provider::test_support::rig_with(config, Vec::new());
         let _frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 200, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(_to_tx);
@@ -3831,12 +3831,12 @@ mod tests {
         // report after a short send or an error that may have accepted samples.
         for (fault, cursor) in [(crate::device::FakeFault::ShortSend(0), 40_499), (crate::device::FakeFault::FailSend(0), 40_999)] {
             let what = format!("{fault:?}");
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults: vec![fault], ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, faults: vec![fault], ..FakeConfig::default() };
             let (core, device, time, events) = crate::provider::test_support::rig_with(config, Vec::new());
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             std::mem::forget(_to_tx);
@@ -3899,12 +3899,12 @@ mod tests {
         ];
         for (fault, len) in cases {
             let nth = format!("{fault:?}");
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults: vec![fault], ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, faults: vec![fault], ..FakeConfig::default() };
             let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let clock = core.register(Dir::Tx, 200, 0).unwrap();
             let (_to_tx, cmds) = std::sync::mpsc::channel();
             std::mem::forget(_to_tx);
@@ -3981,7 +3981,7 @@ mod tests {
             let frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
             let clock = core.register(Dir::Tx, 1, 0).unwrap();
             let sample = [[0.25, 0.0]];
             device.tx_send(0, &[&sample], Some(clock.instant(500_000)), true, false, Wall::ZERO).unwrap();
@@ -4096,14 +4096,14 @@ mod tests {
         let (b_wave, b_bytes) = waveform_input("after_abandon", &[[0.75, -0.25]]);
         for (fault, cursor) in [(crate::device::FakeFault::ShortSend(0), 40_500), (crate::device::FakeFault::FailSend(0), 41_000)] {
             let case = format!("{fault:?}");
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults: vec![fault], ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, faults: vec![fault], ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, cmds) = booking_control(&core);
             let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -4166,14 +4166,14 @@ mod tests {
             [(crate::device::FakeFault::ShortSend(4), 8_499, true, 499), (crate::device::FakeFault::FailSend(4), 8_999, true, 499), (crate::device::FakeFault::FailSend(3), 8_000, false, 0)]
         {
             let case = format!("{fault:?}");
-            let config = FakeConfig { clock: ClockMode::Manual, command_queue: 64, faults: vec![fault], ..FakeConfig::default() };
+            let config = FakeConfig { clock: ClockMode::Manual, faults: vec![fault], ..FakeConfig::default() };
             let device = Arc::new(FakeDevice::new(config));
             let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes.clone())), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes.clone()))]);
             let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
             let _frozen = crate::provider::test_support::Frozen::of(&device);
             device_at(&core, &time, &device, 0);
             device.tx_open(0, &[0]).unwrap();
-            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (mut control, cmds) = booking_control(&core);
             let clock = tx_clock(&core);
             let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
@@ -4269,7 +4269,7 @@ mod tests {
         rate: f64,
         ticks_per_sample: i64,
     ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::provider::test_support::Frozen) {
-        let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..FakeConfig::default() }));
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let mut description = super::super::test_support::default_description(block_len);
         if let Some(window) = window_ns {
             description.timing.tx_in_flight_ns = window;
@@ -4278,7 +4278,7 @@ mod tests {
         let frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         device.tx_open(0, &[0]).unwrap();
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }, None).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(rate), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, ticks_per_sample, 0).unwrap();
         let (to_tx, cmds) = std::sync::mpsc::channel();
         std::mem::forget(to_tx);
@@ -4292,14 +4292,14 @@ mod tests {
         faults: Vec<FakeFault>,
         inputs: BTreeMap<ContentHash, Arc<[u8]>>,
     ) -> (Arc<Core>, Arc<FakeDevice>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<EventCollector>, Clock, Tx, crate::provider::test_support::Frozen) {
-        let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, faults, ..FakeConfig::default() }));
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, faults, ..FakeConfig::default() }));
         let (core, time, events) = super::super::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
         let frozen = crate::provider::test_support::Frozen::of(&device);
         device_at(&core, &time, &device, 0);
         let channel_ids: Vec<_> = (0..channels).collect();
         device.tx_open(0, &channel_ids).unwrap();
         for &channel in &channel_ids {
-            device.apply(Dir::Tx, channel, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Tx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         let clock = core.register(Dir::Tx, 1, 0).unwrap();
         let (_to_tx, cmds) = std::sync::mpsc::channel();
@@ -4558,7 +4558,7 @@ mod tests {
         let start = 500_000;
         device_at(&core, &time, &device, clock.instant(start - 400_000));
         for channel in 0..2 {
-            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         device.rx_open(1, &[0, 1]).unwrap();
         device.rx_start(1, clock.instant(start)).unwrap();
@@ -4800,7 +4800,7 @@ mod tests {
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
         let start = 500_000;
         for channel in 0..2 {
-            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         device.rx_open(0, &[0, 1]).unwrap();
         device.rx_start(0, clock.instant(start)).unwrap();
@@ -5192,7 +5192,7 @@ mod tests {
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_high_rate_rig(2, Vec::new(), BTreeMap::new());
         let start = 500_000;
         for channel in 0..2 {
-            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }, None).unwrap();
+            device.apply(Dir::Rx, channel, &Settings { rate: Some(200e6), ..Settings::default() }).unwrap();
         }
         device.rx_open(0, &[0, 1]).unwrap();
         device.rx_start(0, clock.instant(start)).unwrap();
@@ -5287,7 +5287,7 @@ mod tests {
     /// `setup` sees the spy before they run. The owners are joined after each has sent its first buffer (a wait for an event,
     /// not a time bound), and the Provider's thread names are `uhd-tx-s<k>`.
     fn txp_owners(owners: usize, setup: impl FnOnce(&super::super::test_support::TxSpy)) -> (Arc<Core>, Arc<FakeDevice>, Arc<super::super::test_support::TxSpy>, Arc<EventCollector>) {
-        let inner = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..FakeConfig::default() }));
+        let inner = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let spy = Arc::new(super::super::test_support::TxSpy::new(inner.clone()));
         setup(&spy);
         let (core, time, events) = super::super::test_support::rig_on_description(spy.clone(), Vec::new(), BTreeMap::new(), super::super::test_support::default_description(2_000));
@@ -5299,7 +5299,7 @@ mod tests {
         let mut threads = Vec::new();
         for k in 0..owners {
             inner.tx_open(k, &[k]).unwrap();
-            inner.apply(Dir::Tx, k, &Settings { rate: Some(1e6), ..Settings::default() }, None).unwrap();
+            inner.apply(Dir::Tx, k, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
             let (to_tx, cmds) = std::sync::mpsc::channel();
             let burst = txp_burst(&clock, 3_000, 30_000, true, LatePolicy::DropAndFlag);
             lock(&core.held).insert((burst.domain, burst.k));
@@ -5391,7 +5391,7 @@ mod tests {
     /// burst at sample 1 250 in its channel, which fills the window with three buffers: the next one is 12.5 ms away.
     #[allow(clippy::type_complexity)]
     fn txp_idle_owner() -> (Arc<Core>, Arc<FakeDevice>, Arc<super::super::test_support::TxSpy>, std::sync::mpsc::Sender<TxCmd>, Tx, crate::provider::test_support::Frozen) {
-        let inner = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, command_queue: 64, ..FakeConfig::default() }));
+        let inner = Arc::new(FakeDevice::new(FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() }));
         let spy = Arc::new(super::super::test_support::TxSpy::new(inner.clone()));
         let mut description = super::super::test_support::default_description(2_000);
         description.timing.tx_in_flight_ns = 50_000_000;
@@ -5399,7 +5399,7 @@ mod tests {
         let frozen = crate::provider::test_support::Frozen::of(&inner);
         device_at(&core, &time, &inner, 0);
         inner.tx_open(0, &[0]).unwrap();
-        inner.apply(Dir::Tx, 0, &Settings { rate: Some(1e5), ..Settings::default() }, None).unwrap();
+        inner.apply(Dir::Tx, 0, &Settings { rate: Some(1e5), ..Settings::default() }).unwrap();
         let clock = core.register(Dir::Tx, 2_000, 0).unwrap();
         let (to_tx, cmds) = std::sync::mpsc::channel();
         let burst = txp_burst(&clock, 1_250, 5_000, true, LatePolicy::DropAndFlag);

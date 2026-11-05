@@ -781,7 +781,7 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     assert_eq!(restored.len(), description.rx.len() + description.tx.len());
     for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
         for (channel_index, channel) in channels.iter().enumerate() {
-            let expected = format!("apply {} {channel_index} rate={} freq=1000000000 gain=0 antenna={} at=-", dir.name(), ezsdr_radio::channels::DEFAULT_SAMPLE_RATE_HZ, channel.default_antenna,);
+            let expected = format!("apply {} {channel_index} rate={} freq=1000000000 gain=0 antenna={}", dir.name(), ezsdr_radio::channels::DEFAULT_SAMPLE_RATE_HZ, channel.default_antenna,);
             assert!(restored.contains(&expected), "missing restored settings: {expected}; {restored:?}");
         }
     }
@@ -789,9 +789,9 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     // The transmit frequency sweep runs at gain 0 and ends back on the safe 1 GHz; no streamer is opened for it.
     let calls = inner.calls();
     let first_sweep = calls.iter().position(|call| call.starts_with("apply tx 0 rate=- freq=10000000 gain=-")).expect("the transmit sweep starts at the grid's low end");
-    assert_eq!(calls[first_sweep - 1], "apply tx 0 rate=- freq=- gain=0 antenna=- at=-");
+    assert_eq!(calls[first_sweep - 1], "apply tx 0 rate=- freq=- gain=0 antenna=-");
     let last_sweep = calls.iter().rposition(|call| call.starts_with("apply tx 0 rate=- freq=8400000000 gain=-")).expect("the transmit sweep ends at the grid's high end");
-    assert_eq!(calls[last_sweep + 1], "apply tx 0 rate=- freq=1000000000 gain=- antenna=- at=-");
+    assert_eq!(calls[last_sweep + 1], "apply tx 0 rate=- freq=1000000000 gain=- antenna=-");
 
     let measured_keys: std::collections::BTreeSet<_> = group
         .values
@@ -1135,7 +1135,7 @@ fn raw_group_restores_after_a_panic_in_it() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::measure_raw_group(probe.clone(), &description, &plan)));
     assert!(outcome.is_err());
     let calls = device.calls();
-    let restored = |dir: &str, antenna: &str| format!("apply {dir} 0 rate={} freq=1000000000 gain=0 antenna={antenna} at=-", ezsdr_radio::channels::DEFAULT_SAMPLE_RATE_HZ);
+    let restored = |dir: &str, antenna: &str| format!("apply {dir} 0 rate={} freq=1000000000 gain=0 antenna={antenna}", ezsdr_radio::channels::DEFAULT_SAMPLE_RATE_HZ);
     assert_eq!(calls.last(), Some(&restored("tx", &description.tx[0].default_antenna)), "{calls:?}");
     assert!(calls.contains(&restored("rx", &description.rx[0].default_antenna)), "{calls:?}");
 }
@@ -1647,9 +1647,9 @@ fn ur_12_every_advertised_rate_is_accepted() {
     assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 257.4), 258);
     assert_eq!(ezsdr_radio::x3xx::clip_decimation(200_000_000, 200e6 / 2041.0), 2040);
     let fake_device = FakeDevice::new(FakeConfig::default());
-    let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 257.0), ..ezsdr_radio_uhd::Settings::default() }, None).unwrap();
+    let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 257.0), ..ezsdr_radio_uhd::Settings::default() }).unwrap();
     assert_eq!(applied.rate, 200e6 / 256.0, "the fake clips like the device");
-    let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 2041.0), ..ezsdr_radio_uhd::Settings::default() }, None).unwrap();
+    let applied = fake_device.apply(ezsdr_radio_uhd::Dir::Rx, 0, &ezsdr_radio_uhd::Settings { rate: Some(200e6 / 2041.0), ..ezsdr_radio_uhd::Settings::default() }).unwrap();
     assert_eq!(applied.rate, 200e6 / 2040.0, "and to the top of the grid");
     // 200 MHz / 3 prepares and captures.
     let dir = TempDir::new();
@@ -2542,9 +2542,9 @@ fn ur_33_the_front_end_table_follows_the_subdev_spec() {
     // channels are the radio blocks', whose registers a channel map does not touch).
     let device = fake(FakeConfig { front_ends: vec!["BasicRX"], ..FakeConfig::default() });
     let set = ezsdr_radio_uhd::Settings { freq: Some(2e9), ..ezsdr_radio_uhd::Settings::default() };
-    device.apply(dir, 1, &set, None).unwrap();
+    device.apply(dir, 1, &set).unwrap();
     device.set_subdev_spec(dir, "A:1").unwrap();
-    assert_eq!(device.apply(dir, 0, &ezsdr_radio_uhd::Settings::default(), None).unwrap().freq, 2e9, "A:1's setting stayed with it");
+    assert_eq!(device.apply(dir, 0, &ezsdr_radio_uhd::Settings::default()).unwrap().freq, 2e9, "A:1's setting stayed with it");
 }
 
 #[test]
@@ -3104,8 +3104,8 @@ impl Device for Watched {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
         self.inner.serial()
@@ -3122,14 +3122,11 @@ impl Device for Watched {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.inner.rx_recv(s, n, t, one_packet)
@@ -3263,15 +3260,13 @@ struct Descheduled {
     inner: FakeDevice,
     plan: Mutex<Option<Deschedule>>,
     entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    /// Every `apply`, in order: `(timed, the device clock at entry, at return)` (§4.7's test).
-    applies: Mutex<Vec<(bool, Wall, Wall)>>,
     /// The last `rx_recv` returned samples, so the next one is the stall's own position.
     after_block: std::sync::atomic::AtomicBool,
 }
 
 impl Descheduled {
     fn new(inner: FakeDevice) -> Descheduled {
-        Descheduled { inner, plan: Mutex::new(None), entered: Mutex::new(None), applies: Mutex::new(Vec::new()), after_block: Default::default() }
+        Descheduled { inner, plan: Mutex::new(None), entered: Mutex::new(None), after_block: Default::default() }
     }
 
     /// Arms the planned hold; the receiver fires when the hold begins.
@@ -3350,11 +3345,8 @@ impl Device for Descheduled {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        let begun = self.inner.host().now();
-        let applied = self.inner.apply(d, c, s, at);
-        self.applies.lock().unwrap().push((at.is_some(), begun, self.inner.host().now()));
-        applied
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
         self.inner.serial()
@@ -3371,14 +3363,11 @@ impl Device for Descheduled {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         use std::sync::atomic::Ordering::SeqCst;
@@ -3577,9 +3566,9 @@ impl Device for LostAtShutdown {
         self.call("ref_locked");
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
         self.call("apply");
-        self.inner.apply(d, c, s, at)
+        self.inner.apply(d, c, s)
     }
     fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
         self.inner.serial()
@@ -3598,16 +3587,12 @@ impl Device for LostAtShutdown {
         self.call("rx_start");
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.call("rx_start_now");
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.call("rx_stop");
-        self.inner.rx_stop(s, at)
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.call("rx_recv");
@@ -3920,8 +3905,8 @@ impl Device for Gated {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_open(s, c)
@@ -3929,14 +3914,11 @@ impl Device for Gated {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.hold_call(s, "rx_recv");
@@ -4161,8 +4143,8 @@ impl Device for Recording {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn serial(&self) -> Result<String, ezsdr_radio_uhd::DeviceError> {
         self.record(|| "serial".to_owned());
@@ -4181,14 +4163,11 @@ impl Device for Recording {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.inner.rx_recv(s, n, t, one_packet)
@@ -4336,8 +4315,8 @@ impl Device for Mislabelled {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_open(s, c)
@@ -4345,14 +4324,11 @@ impl Device for Mislabelled {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.inner.rx_recv(s, n, t, one_packet)
@@ -4537,8 +4513,8 @@ impl Device for SerialFails {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_open(s, c)
@@ -4546,14 +4522,11 @@ impl Device for SerialFails {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.inner.rx_recv(s, n, t, one_packet)
@@ -4675,8 +4648,8 @@ impl Device for RatesMisreported {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn rates(&self, dir: ezsdr_radio_uhd::Dir, chan: usize) -> Result<Vec<(f64, f64, f64)>, ezsdr_radio_uhd::DeviceError> {
         if self.failing == Some(dir) {
@@ -4694,14 +4667,11 @@ impl Device for RatesMisreported {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.inner.rx_recv(s, n, t, one_packet)
@@ -4866,7 +4836,7 @@ fn ur_12_a_layout_s_stream_zero_declares_its_clock_and_opens_its_channels() {
     let ports: Vec<String> = direct.radio.instance().tree.ports.iter().map(|port| port.name.as_str().to_owned()).collect();
     assert_eq!(ports, ["rx0", "rx1"]);
     let log = direct.device.calls();
-    assert!(log.iter().any(|call| call == "apply rx 1 rate=2000000 freq=1000000000 gain=0 antenna=RX2 at=-"), "{log:?}");
+    assert!(log.iter().any(|call| call == "apply rx 1 rate=2000000 freq=1000000000 gain=0 antenna=RX2"), "{log:?}");
     assert!(!log.iter().any(|call| call.starts_with("apply rx 0 ")), "c0 is in no stream: {log:?}");
     assert!(!log.iter().any(|call| call == "rx_open 0 []"), "{log:?}");
     let _ = direct.finish();
@@ -4895,7 +4865,7 @@ fn ur_12_a_layout_s_stream_zero_applies_each_channel_s_own_settings() {
     assert_eq!(calls(&direct.device, "rx_open"), ["rx_open 0 [0, 1]"]);
     assert_eq!(
         calls(&direct.device, "apply rx"),
-        ["apply rx 0 rate=2000000 freq=1000000000 gain=5 antenna=RX2 at=-", "apply rx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX at=-",],
+        ["apply rx 0 rate=2000000 freq=1000000000 gain=5 antenna=RX2", "apply rx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX",],
         "{:?}",
         direct.device.calls()
     );
@@ -4920,7 +4890,7 @@ fn ur_13_a_layout_s_transmit_stream_zero_opens_its_channel_list() {
         json!({  "rx": [], "tx": ["0:A:ubx:0", "0:B:ubx:0"] }),
     );
     assert_eq!(calls(&direct.device, "tx_open"), ["tx_open 0 [1]"]);
-    assert!(calls(&direct.device, "apply tx").contains(&"apply tx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX at=-".to_owned()), "{:?}", direct.device.calls());
+    assert!(calls(&direct.device, "apply tx").contains(&"apply tx 1 rate=2000000 freq=2400000000 gain=7.5 antenna=TX/RX".to_owned()), "{:?}", direct.device.calls());
     assert!(!calls(&direct.device, "apply tx").iter().any(|call| call.starts_with("apply tx 0 ")), "{:?}", direct.device.calls());
     let records = direct.clocks.sample_clock_records();
     assert_eq!(records.len(), 1, "{records:?}");
@@ -5875,8 +5845,8 @@ fn ur_16_a_panicking_later_stream_ends_the_run() {
         fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
             self.inner.ref_locked()
         }
-        fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-            self.inner.apply(d, c, s, at)
+        fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+            self.inner.apply(d, c, s)
         }
         fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
             self.inner.rx_open(s, c)
@@ -5884,14 +5854,11 @@ fn ur_16_a_panicking_later_stream_ends_the_run() {
         fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
             self.inner.rx_start(s, at)
         }
-        fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-            self.inner.rx_start_now(s)
-        }
         fn rx_packet_samples(&self, s: usize) -> usize {
             self.inner.rx_packet_samples(s)
         }
-        fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-            self.inner.rx_stop(s, at)
+        fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+            self.inner.rx_stop(s)
         }
         fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
             assert_ne!(s, 1, "fake: rx_recv panics");
@@ -6002,9 +5969,9 @@ impl ezsdr_radio_uhd::Device for HoldAfterApply {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        let applied = self.inner.apply(d, c, s, at)?;
-        let hold = at.is_none() && d == ezsdr_radio_uhd::Dir::Rx && *self.pending.lock().unwrap() == Some(c);
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        let applied = self.inner.apply(d, c, s)?;
+        let hold = d == ezsdr_radio_uhd::Dir::Rx && *self.pending.lock().unwrap() == Some(c);
         if hold {
             *self.pending.lock().unwrap() = None;
             if let Some(reached) = self.reached.lock().unwrap().take() {
@@ -6022,14 +5989,11 @@ impl ezsdr_radio_uhd::Device for HoldAfterApply {
     fn rx_start(&self, s: usize, at: i64) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         self.inner.rx_recv(s, n, t, one_packet)
@@ -6091,7 +6055,7 @@ fn ur_26_a_receive_start_queued_by_the_stop_is_issued_and_ends_at_its_origin() {
     assert_eq!(calls(&direct.device, "rx_stop 1 now").len(), 2, "the old segment's cut and the queued start's origin: {log:?}");
     let records = direct.clocks.sample_clock_records();
     assert_eq!(records.iter().filter(|record| record.stream.path() == "usrp/rx/s1").count(), 1, "no clock is registered without a block: {records:?}");
-    assert!(log.iter().any(|call| call.starts_with("apply rx 1 ") && call.ends_with("at=-")), "{log:?}");
+    assert!(log.iter().any(|call| call.starts_with("apply rx 1 ")), "{log:?}");
     direct.radio.cleanup();
 }
 
@@ -6199,7 +6163,7 @@ fn ur_36_every_restart_is_configured_with_the_connect_values() {
         direct.start_rx_at("usrp/rx/s0", None);
         direct.settle(Wall::from_millis(200));
         assert!(direct.device.calls()[mark..].iter().any(|call| call.starts_with("apply rx")), "restart {restart} left its segment unconfigured: {:?}", &direct.device.calls()[mark..]);
-        assert_eq!(direct.device.freq_at(Dir::Rx, 0, direct.now()), 2.0e9, "restart {restart} keeps the connect value: {:?}", direct.device.dsp_log(Dir::Rx, 0));
+        assert_eq!(direct.device.freq_at(Dir::Rx, 0, direct.now()), 2.0e9, "restart {restart} keeps the connect value");
     }
     let _ = direct.finish();
 }
@@ -6251,8 +6215,8 @@ impl ezsdr_radio_uhd::Device for OnceFails {
     fn ref_locked(&self) -> Result<Option<bool>, ezsdr_radio_uhd::DeviceError> {
         self.inner.ref_locked()
     }
-    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings, at: Option<i64>) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
-        self.inner.apply(d, c, s, at)
+    fn apply(&self, d: ezsdr_radio_uhd::Dir, c: usize, s: &ezsdr_radio_uhd::Settings) -> Result<ezsdr_radio_uhd::Applied, ezsdr_radio_uhd::DeviceError> {
+        self.inner.apply(d, c, s)
     }
     fn rx_open(&self, s: usize, c: &[usize]) -> Result<(), ezsdr_radio_uhd::DeviceError> {
         self.inner.rx_open(s, c)
@@ -6269,14 +6233,11 @@ impl ezsdr_radio_uhd::Device for OnceFails {
         }
         self.inner.rx_start(s, at)
     }
-    fn rx_start_now(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_start_now(s)
-    }
     fn rx_packet_samples(&self, s: usize) -> usize {
         self.inner.rx_packet_samples(s)
     }
-    fn rx_stop(&self, s: usize, at: Option<i64>) -> Result<(), ezsdr_radio_uhd::DeviceError> {
-        self.inner.rx_stop(s, at)
+    fn rx_stop(&self, s: usize) -> Result<(), ezsdr_radio_uhd::DeviceError> {
+        self.inner.rx_stop(s)
     }
     fn rx_recv(&self, s: usize, n: usize, t: Wall, one_packet: bool) -> ezsdr_radio_uhd::RxRecv {
         if s == 0 {
@@ -6822,10 +6783,10 @@ fn a_stage_that_wedges_the_handle_stops_the_group_and_caps_the_capacity() {
 fn assert_refused_without_reaching(guard: &measurement::GuardedDevice, device: &FakeDevice) {
     let before = device.calls().len();
     let settings = ezsdr_radio_uhd::Settings { rate: Some(1e6), freq: Some(1e9), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
-    assert!(guard.apply(Dir::Rx, 0, &settings, None).is_err());
+    assert!(guard.apply(Dir::Rx, 0, &settings).is_err());
     assert!(guard.rx_open(0, &[0]).is_err() && guard.tx_open(0, &[0]).is_err());
     assert!(guard.time_now().is_err() && guard.serial().is_err() && guard.front_end(Dir::Rx, 0).is_err());
-    assert!(guard.set_sources("internal", "internal").is_err() && guard.rx_start(0, 0).is_err() && guard.rx_stop(0, None).is_err());
+    assert!(guard.set_sources("internal", "internal").is_err() && guard.rx_start(0, 0).is_err() && guard.rx_stop(0).is_err());
     assert!(matches!(guard.rx_recv(0, 100, Wall::from_millis(1), false), ezsdr_radio_uhd::RxRecv::Failed(_)));
     guard.rx_close(0);
     guard.tx_close(0);
@@ -7195,7 +7156,6 @@ fn h4_fake_session_records_tx_headroom_and_load_with_no_run_time_update() {
     let result = Json::Object(group.observations[0].result.clone().into_iter().collect());
     assert!(matches!(result["status"].as_str(), Some("complete" | "partial")), "{result}");
     assert_eq!((result["master_clock_hz"].as_u64(), result["sample_rate_hz"].as_u64()), (Some(200_000_000), Some(10_000_000)));
-    assert_eq!(probe.timed_apply_count(), 0, "no timed update reached the device");
     assert!(result["tx_payload_send_count"].as_u64().unwrap() > 0, "{result}");
     assert!(!result["tx_headroom"].as_array().unwrap().is_empty(), "{result}");
     assert_eq!(result["tx_headroom_proxy"].as_str(), Some("nominal next-sample submission margin; not RF execution time"));
@@ -7263,7 +7223,7 @@ fn a_reopen_of_the_same_stream_and_a_disjoint_channel_set_are_allowed() {
     guard.rx_open(0, &[0]).unwrap();
     let at = guard.time_now().unwrap() + 20_000_000;
     guard.rx_start(0, at).unwrap();
-    guard.rx_stop(0, None).unwrap();
+    guard.rx_stop(0).unwrap();
     guard.rx_open(0, &[0]).unwrap();
     guard.rx_open(0, &[0]).unwrap();
     assert_eq!(guard.latched(), None, "a same-stream re-open replaces its entry and is forwarded");
@@ -7313,35 +7273,28 @@ fn the_waveforms_of_the_added_transmissions_stay_within_half_a_unit() {
     assert!(magnitudes.iter().all(|magnitude| *magnitude <= 0.5) && magnitudes.iter().any(|magnitude| *magnitude > 0.4), "{magnitudes:?}");
 }
 
-// ---------------------------------------------------------------- D9a: a frequency and the DDC/DUC FIFOs (UR-24, UR-33)
+// ---------------------------------------------------------------- D9a: raw probes (UR-24, UR-33)
 
 #[test]
-fn ur_24_d9_p4_a_and_c_keep_a_pre_stop_ddc_entry_until_restart_samples() {
-    // Bench-results.md 2026-10-29 §P4 A/C measured a stale DDC entry on UBX and OBX;
-    // this test checks only FakeDevice's FIFO and sample-time model, not the RF tone verdict.
+fn ur_24_d9_p4_c_closes_and_reopens_the_streamer_and_a_does_not() {
+    // P4 C's close and reopen is checked on the calls, not on the DSP FIFO the fake no longer models.
     let device = fake(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
-    let mut tune = |dir, chan, offset, at| device.apply(dir, chan, &ezsdr_radio_uhd::Settings { freq: Some(1e9 + offset), ..Default::default() }, at).map(|_| offset);
+    let mut tune = |dir, chan, offset, _at| device.apply(dir, chan, &ezsdr_radio_uhd::Settings { freq: Some(1e9 + offset), ..Default::default() }).map(|_| offset);
     common::d9::open_raw(&*device, 0);
     for case in [common::d9::P4Case::DspOnly, common::d9::P4Case::DspOnlyReopen] {
-        let before = device.dsp_log(Dir::Rx, 0).len();
-        let result = common::d9::p4_dsp_only(&*device, 0, &mut tune, case);
-        assert_eq!(
-            result.log.iter().any(|row| row == "closed and reopened the streamer"),
-            case == common::d9::P4Case::DspOnlyReopen,
-            "the C case must actually close and reopen the streamer: {result:?}"
-        );
-        assert!(result.last.is_some_and(|tick| tick < result.e) && result.stopped < result.e, "the raw stop preceded the timed DDC entry: {result:?}");
-        let consumed: Vec<_> = device.dsp_log(Dir::Rx, 0).into_iter().skip(before).filter(|(_, freq, timed)| *timed && *freq == 1e9 + 50e3).collect();
-        assert_eq!(consumed, [(result.again, 1e9 + 50e3, true)], "P4 {case:?}: the old entry was consumed by the restart's first sample");
-        assert_eq!(device.freq_at(Dir::Rx, 0, result.again), 1e9 + 50e3, "P4 {case:?}: the next stream starts on the stale value");
-        assert_eq!(device.dsp_pending(Dir::Rx, 0), 0, "P4 {case:?}: the restart consumed the DDC entry");
+        let before = device.calls().len();
+        common::d9::p4_dsp_only(&*device, 0, &mut tune, case);
+        let streamer: Vec<String> = device.calls()[before..].iter().filter(|call| call.starts_with("rx_close") || call.starts_with("rx_open")).cloned().collect();
+        let expected: &[&str] = if case == common::d9::P4Case::DspOnlyReopen { &["rx_close 0", "rx_open 0 [0]"] } else { &[] };
+        assert_eq!(streamer, expected, "{case:?}: the streamer is closed and reopened only in case C");
     }
 }
 
 #[test]
 fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {
     let device = fake(FakeConfig::default());
-    let mut tune = |dir, chan, offset, at| device.apply(dir, chan, &ezsdr_radio_uhd::Settings { freq: Some(1e9 + offset), ..Default::default() }, at).map(|_| offset);
+    // An untimed tune: the fake has no timed one, and the bench's timed tune is `UhdDevice::tune_auto`.
+    let mut tune = |dir, chan, offset, _at| device.apply(dir, chan, &ezsdr_radio_uhd::Settings { freq: Some(1e9 + offset), ..Default::default() }).map(|_| offset);
 
     // Bench-results.md §D9 (2026-10-29): P5 A is early with the stale header; the untimed-close
     // control has none; P5 C's acknowledged two-zero flush restores the transition at e.
@@ -7350,37 +7303,19 @@ fn ur_33_d9_raw_probes_match_the_x3xx_tx_model() {
     assert_eq!(p5[1].old_header, None);
     assert!(p5[2].flush_reports.iter().any(|report| report.code == TxCode::BurstAck && report.channel == 0));
     // FakeDevice cannot reproduce the RF loopback (its receive path forwards samples only when RX and
-    // TX frequencies match), so the tone verdict is the bench's; the DSP log below is the fake's
-    // check. No assertion on the fake's verdict: it depends on wall-clock timing (2026-11-01).
-    let timed: Vec<_> = device.dsp_log(Dir::Tx, 0).into_iter().filter(|(_, freq, is_timed)| *is_timed && *freq == 1e9 + 50e3).collect();
-    assert_eq!(timed.iter().map(|(tick, ..)| *tick).collect::<Vec<_>>(), [p5[0].start, p5[1].e, p5[2].e], "P5 A applies at the new burst's first sample; control and P5 C apply at e");
+    // TX frequencies match), so the tone verdict is the bench's. No assertion on the fake's verdict:
+    // it depends on wall-clock timing (2026-11-01).
 
-    // Bench-results.md §D9: P6 moves at e for both command placements; starvation reports
+    // Bench-results.md §D9: P6's chunks carry their first sample's time; starvation reports
     // Underflow then TimeError and the accepted late continuation does not reach loopback.
     let before_calls = device.calls().len();
-    let before_log = device.dsp_log(Dir::Tx, 0).len();
-    let (p6, starvation) = common::d9::p6_every_chunk_timed(&*device, 0, &mut tune);
-    // As for P5, the tone verdict is the bench's; the DSP timing below is the fake's check.
-    let timed: Vec<_> = device.dsp_log(Dir::Tx, 0).into_iter().skip(before_log).filter(|(_, freq, is_timed)| *is_timed && *freq == 1e9 + 50e3).collect();
-    assert_eq!(timed.iter().map(|(tick, ..)| *tick).collect::<Vec<_>>(), [p6[0].e, p6[1].e]);
+    let (_, starvation) = common::d9::p6_every_chunk_timed(&*device, 0, &mut tune);
     assert!(device.calls()[before_calls..].iter().filter(|call| call.starts_with("tx_send 0 n=2000 ")).all(|call| !call.contains("at=-")), "P6 sends every chunk with its first sample's time");
     let codes = common::d9::report_codes(&starvation.reports);
     assert!(codes.contains(&TxCode::Underflow) && codes.contains(&TxCode::TimeError), "{codes:?}");
     // FakeDevice emits its deterministic ramp when the TX source is absent; the hardware
     // continuation classifier can count that ramp as signal, so reports and TX samples decide.
     assert!(device.transmitted(starvation.queued_end + 100 * 200, 1_900).iter().all(Option::is_none), "late continuation samples are absent from FakeDevice's loopback source");
-
-    // Bench-results.md §D9: P7's untimed continuation keeps the old tone through e + 40 ms;
-    // the DUC value remains queued because those samples carry no time.
-    let before = device.dsp_log(Dir::Tx, 0).len();
-    let p7 = common::d9::p7_untimed_continuations(&*device, 0, &mut tune);
-    // P7 does produce the unchanged waveform loopback (pinned below); the tone verdict is the bench's.
-    let p7_log = device.dsp_log(Dir::Tx, 0);
-    assert!(p7_log[before..].iter().all(|(_, _, timed)| !timed));
-    assert_eq!(device.dsp_pending(Dir::Tx, 0), 1);
-    let tone = common::d9::tone_1msps(60_000);
-    let sample = p7.capture.samples.iter().find(|(tick, _)| *tick == p7.start + 25 * ms(1)).unwrap().1;
-    assert_eq!(sample, tone[25_000], "the old 100 kHz tone remains unchanged through the timed command");
 
     // Bench-results.md §D70: one-sample EOB has no ack and loses the next timed start; the
     // two-zero control is acknowledged and keeps the requested start.

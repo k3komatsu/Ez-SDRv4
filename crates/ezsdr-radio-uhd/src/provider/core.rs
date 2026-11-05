@@ -1028,7 +1028,7 @@ impl Core {
             if self.is_lost() {
                 return Err(DeviceError { lost: true, message: "UR-29: the device is lost before the next channel's apply".to_owned() });
             }
-            let applied = self.device.apply(dir, *chan, settings, None)?;
+            let applied = self.device.apply(dir, *chan, settings)?;
             let at = self.at(self.now());
             let mut rec = lock(&self.rec);
             for (name, claimed, read) in [("sample_rate_hz", Some(rate), applied.rate), ("frequency_hz", settings.freq, applied.freq), ("gain_db", settings.gain, applied.gain)] {
@@ -1380,7 +1380,7 @@ pub(super) fn assert_tx_open_flush_barrier(core: Arc<Core>, spy: Arc<super::test
     let timed = host
         .spawn("timed-tx-dsp", move || {
             let _dsp = core_.lock_tx_dsp(&[0]);
-            core_.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
+            core_.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }).unwrap();
         })
         .unwrap();
     let deadline = std::time::Instant::now() + Wall::from_secs(10);
@@ -1597,7 +1597,7 @@ mod tests {
                 let core = core.clone();
                 move || {
                     let _dsp = core.lock_tx_dsp(&[0]);
-                    core.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }, Some(10_000)).unwrap();
+                    core.device.apply(Dir::Tx, 0, &Settings { freq: Some(1.1e9), ..Settings::default() }).unwrap();
                     let _ = done.send(());
                 }
             })
@@ -1912,33 +1912,6 @@ mod tests {
         assert!(!error.lost && error.message.contains("Provider::stop"), "{error:?}");
         assert!(!core.is_lost());
         assert!(lock(&core.rec).rejected.iter().all(|row| row["call"] != "tx_flush"), "Stop is distinct from a missing ack");
-    }
-
-    #[test]
-    fn ur_22_t3_flush_clears_the_header_but_does_not_drain_timed_dsp_fifo() {
-        use crate::device::{Dir, FakeConfig, Settings};
-        use ezsdr_radio::timeline::Channels;
-
-        let config = FakeConfig { clock: crate::ClockMode::Manual, ..FakeConfig::default() };
-        let (core, device, _time, _events) = super::super::test_support::rig_with(config, Vec::new());
-        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), freq: Some(1e9), ..Settings::default() }, None).unwrap();
-        let old_start = 4_000_000;
-        device.apply(Dir::Tx, 0, &Settings { freq: Some(1.00005e9), ..Settings::default() }, Some(old_start + 600)).unwrap();
-        let old_burst = [[0.25, 0.0]; 2];
-        device.tx_open(0, &[0]).unwrap();
-        device.tx_send(0, &[&old_burst], Some(old_start), true, true, Wall::ZERO).unwrap();
-        device.tx_close(0);
-        assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "the command lies beyond the old burst");
-
-        let flush = core.open_tx_device(0, Channels::first(1)).unwrap();
-        assert!(flush.acknowledged, "T3 consumed its flush BurstAck");
-        assert_eq!(device.dsp_pending(Dir::Tx, 0), 1, "an untimed flush is not a DUC FIFO drain");
-        assert!(device.dsp_log(Dir::Tx, 0).iter().all(|(_, _, timed)| !timed), "the queued timed value is not taken by the flush");
-
-        let next_start = 6_000_000;
-        device.tx_send(0, &[&old_burst], Some(next_start), true, true, Wall::ZERO).unwrap();
-        device.set_time(next_start);
-        assert_eq!(device.dsp_log(Dir::Tx, 0).last(), Some(&(next_start, 1.00005e9, true)), "the old timed value later overrides the new configuration on the next timed burst");
     }
 
     fn cfg(channels: u32) -> Config {

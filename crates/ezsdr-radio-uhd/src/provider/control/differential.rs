@@ -166,9 +166,7 @@ impl DataLink for NoLink {
 /// once its origin has passed and ends it at its cut once that has passed too, as UR-17 says;
 /// layer 3 runs the real ones.
 fn run(sequence: &Sequence) -> Record {
-    // The FakeDevice's queue drains on the host's clock, which this rig does not advance.
-    let fake = FakeConfig { command_queue: usize::MAX, ..FakeConfig::default() };
-    let (core, device, time, _events) = super::super::test_support::rig_with(fake, vec![Arc::new(NoLink)]);
+    let (core, device, time, _events) = super::super::test_support::rig_with(FakeConfig::default(), vec![Arc::new(NoLink)]);
     let tx = core.register(Dir::Tx, 200, 0).unwrap();
     device.rx_open(0, &[0, 1]).unwrap();
     device.tx_open(0, &[0, 1]).unwrap();

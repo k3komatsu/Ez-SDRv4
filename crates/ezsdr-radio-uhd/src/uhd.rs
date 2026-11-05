@@ -527,7 +527,7 @@ impl UhdDevice {
         let empty = cstring("")?;
         let _control = lock(&self.control);
         // SAFETY: every pointer passed outlives its call; the command time is set and
-        // cleared under the control mutex, as `apply` does.
+        // cleared under the control mutex, as `tune_auto` does.
         unsafe {
             if let Some(at) = at {
                 let (full, frac) = to_time_spec(at, self.mcr);
@@ -560,7 +560,7 @@ impl UhdDevice {
         let empty = cstring("")?;
         let _control = lock(&self.control);
         // SAFETY: every pointer passed outlives its call; the command time is set and
-        // cleared under the control mutex, as `apply` does.
+        // cleared under the control mutex, as `tune_dsp` does.
         unsafe {
             if let Some(at) = at {
                 let (full, frac) = to_time_spec(at, self.mcr);
@@ -884,17 +884,13 @@ impl Device for UhdDevice {
         }
     }
 
-    fn apply(&self, dir: Dir, chan: usize, s: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
+    fn apply(&self, dir: Dir, chan: usize, s: &Settings) -> Result<Applied, DeviceError> {
         let empty = cstring("")?;
         let antenna = s.antenna.as_deref().map(cstring).transpose()?;
         let _control = lock(&self.control);
-        // SAFETY: every pointer passed outlives its call; the command time is set and
-        // cleared under the control mutex, as it is per-motherboard state (UR-3).
+        // SAFETY: every pointer passed outlives its call; the device's calls are made under the
+        // control mutex (UR-3).
         unsafe {
-            if let Some(at) = at {
-                let (full, frac) = to_time_spec(at, self.mcr);
-                self.check_usrp("uhd_usrp_set_command_time", uhd_usrp_set_command_time(self.usrp, full, frac, 0), false)?;
-            }
             let applied = (|| {
                 if let Some(rate) = s.rate {
                     match dir {
@@ -931,10 +927,7 @@ impl Device for UhdDevice {
                 }
                 Ok::<(), DeviceError>(())
             })();
-            // A command time left set would make every later untimed call timed.
-            let cleared = if at.is_some() { self.check_usrp("uhd_usrp_clear_command_time", uhd_usrp_clear_command_time(self.usrp, 0), false) } else { Ok(()) };
             applied?;
-            cleared?;
             let (mut rate, mut freq, mut gain) = (0.0, 0.0, 0.0);
             match dir {
                 Dir::Rx => {
@@ -950,8 +943,8 @@ impl Device for UhdDevice {
             }
             // The antenna read back after an untimed change that named one (UR-2, design 33
             // D16): UHD's getter reads the property the setter wrote.
-            let antenna = match (s.antenna.as_ref(), at) {
-                (Some(_), None) => {
+            let antenna = match s.antenna.as_ref() {
+                Some(_) => {
                     let mut code = UHD_ERROR_NONE;
                     let read = text(|b, n| {
                         // SAFETY: `text`'s buffer is writable for the length passed.
@@ -998,16 +991,12 @@ impl Device for UhdDevice {
         self.stream_cmd(stream, true, Some(at))
     }
 
-    fn rx_start_now(&self, stream: usize) -> Result<(), DeviceError> {
-        self.stream_cmd(stream, true, None)
-    }
-
     fn rx_packet_samples(&self, stream: usize) -> usize {
         lock(&self.rx).get(&stream).map_or(0, |stream| stream.spp)
     }
 
-    fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
-        self.stream_cmd(stream, false, at)
+    fn rx_stop(&self, stream: usize) -> Result<(), DeviceError> {
+        self.stream_cmd(stream, false, None)
     }
 
     fn rx_recv(&self, stream: usize, n: usize, timeout: Duration, one_packet: bool) -> RxRecv {
@@ -1210,7 +1199,6 @@ mod ffi_tests {
     static TX_ASYNC_METADATA_FREES: AtomicUsize = AtomicUsize::new(0);
     static TX_STREAMER_FREES: AtomicUsize = AtomicUsize::new(0);
     static TX_SEND_OBSERVATIONS: Mutex<Vec<TxSendObservation>> = Mutex::new(Vec::new());
-    static STREAM_CMD: Mutex<Option<(c_int, bool, i64, f64)>> = Mutex::new(None);
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     struct TxMetadata {
@@ -1457,18 +1445,6 @@ mod ffi_tests {
         }
     }
 
-    #[test]
-    fn ur_24_rx_recovery_start_uses_uhd_stream_now() {
-        let _test = lock(&TEST_LOCK);
-        *lock(&STREAM_CMD) = None;
-        let device = rx_dummy(false);
-        device.rx_open(0, &[0]).unwrap();
-        device.rx_start_now(0).unwrap();
-        assert_eq!(*lock(&STREAM_CMD), Some((UHD_STREAM_MODE_START_CONTINUOUS, true, 0, 0.0)));
-        device.rx_close(0);
-        std::mem::forget(device);
-    }
-
     #[unsafe(no_mangle)]
     extern "C" fn uhd_rx_streamer_recv(
         _h: uhd_rx_streamer_handle,
@@ -1488,11 +1464,8 @@ mod ffi_tests {
     }
 
     #[unsafe(no_mangle)]
-    extern "C" fn uhd_rx_streamer_issue_stream_cmd(_h: uhd_rx_streamer_handle, cmd: *const uhd_stream_cmd_t) -> c_int {
+    extern "C" fn uhd_rx_streamer_issue_stream_cmd(_h: uhd_rx_streamer_handle, _cmd: *const uhd_stream_cmd_t) -> c_int {
         native_entry();
-        // SAFETY: `stream_cmd` passes its live stack command for this call.
-        let cmd = unsafe { &*cmd };
-        *lock(&STREAM_CMD) = Some((cmd.stream_mode, cmd.stream_now, cmd.time_spec_full_secs, cmd.time_spec_frac_secs));
         UHD_ERROR_NONE
     }
 

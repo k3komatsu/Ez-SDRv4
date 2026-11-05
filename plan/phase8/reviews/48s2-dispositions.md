@@ -47,3 +47,11 @@ Adopt every fix the re-check names (its text is in the orchestrator's records; s
 ## S2a-i-α code
 
 Sol: CODE OK, no findings. Self-review (Go DeepSeek; free refused): four adopted (stale bench lines, design/18:30 clause, a stray comma, an unused import), `FakeFault::TimeReadFails` removed with its only test, one rejected (`RxRecv` is used by `measurement/multichannel.rs`). Open, outside S2: UR-34's Test line names `manifest_evidence_extracts_six_classes_and_rejects_boundary_acknowledgements`, absent at c58cb32.
+
+## S2a-i-β code
+
+- Implementer's questions: P1224 — first accepted for deletion, then retargeted after Sol's P2 (below). `design/18:249` (UR-22's timed TX DSP sentences) and the `hw_n47_raw_control_call_durations` rename (its timed row now times `tune_auto`) carried to S2a-ii.
+- Self-review (Go DeepSeek; free refused): six adopted, one rejected (A4 thread names belong to S2a-ii), one recorded (`hw_n47` timed row).
+- Sol: CODE NEEDS CHANGES, one P2 — the deleted P4 test also pinned that case C closes and reopens the streamer and case A does not, independent of the FIFO. Fixed: `ur_24_d9_p4_c_closes_and_reopens_the_streamer_and_a_does_not` with an untimed tune; P1224 retargeted to it and killed.
+- Gate 1: FAIL, P1187 survived. Its killer observed the lost DUC header only through the removed FIFO (`dsp_pending`); the kept assertions do not change under the mutant. Fixed with an assertion on the DUC header (`tx_header`). Gate 2: PASS.
+- Orchestrator: KNOWN_LIMITATIONS KL-9 (Gone) notes that its FakeDevice FIFO test went in S2a-i-β.
