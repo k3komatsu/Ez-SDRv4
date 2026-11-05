@@ -298,8 +298,6 @@ pub enum FakeFault {
     DropBurstAck,
     /// Every call fails with `lost: true`.
     Lost(Duration),
-    /// `time_now` fails without the device being lost.
-    TimeReadFails(Duration),
     /// `tx_async` fails from this instant on, with this `lost` (UR-28).
     TxAsyncFails(Duration, bool),
     /// `ref_locked` reports an unlocked reference.
@@ -1398,9 +1396,6 @@ impl Device for FakeDevice {
         self.lost(&st)?;
         for (index, fault) in self.config.faults.iter().enumerate() {
             match fault {
-                FakeFault::TimeReadFails(at) if self.now(&st) >= self.ticks_of(*at) => {
-                    return Err(DeviceError::failed("fake: the time read failed"));
-                }
                 FakeFault::TimeReadFailsFor(at, length) if self.now(&st) >= self.ticks_of(*at) && self.now(&st) < self.ticks_of(*at + *length) => {
                     return Err(DeviceError::failed("fake: the time read failed for a while"));
                 }

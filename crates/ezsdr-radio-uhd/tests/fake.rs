@@ -745,38 +745,6 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     assert_eq!(duplex.len(), plan.loopback_trials);
     assert!(duplex.iter().all(|row| row["class"].as_str().is_some_and(|class| !class.is_empty())));
 
-    let queue = result("raw_command_queue_depth");
-    let queue_ids: Vec<_> = queue["conditions"].as_array().unwrap().iter().map(|condition| condition["id"].as_str().unwrap()).collect();
-    assert_eq!(queue_ids, ["queue-rx-gain", "queue-tx-gain", "queue-rx-frequency"]);
-    let excluded: Vec<_> = queue["excluded_conditions"].as_array().unwrap().iter().map(|row| row["id"].as_str().unwrap()).collect();
-    assert_eq!(excluded, ["queue-tx-frequency", "queue-rx-tx-frequency"]);
-    assert!(queue["halted"].is_null());
-    assert_eq!(queue["max_calls"].as_u64(), Some(plan.queue_max_calls as u64));
-    assert_eq!(queue["call_time_limit_ns"].as_u64(), Some(100_000_000));
-    assert_eq!(queue["depth_unit"].as_str(), Some("timed_apply_calls"));
-    assert!(queue["depth_definition"].as_str().is_some_and(|definition| definition.contains("not device FIFO entries")));
-    assert_eq!(queue["back_pressure_attribution"].as_str(), Some("INFERRED"));
-    assert!(queue["back_pressure_basis"].as_str().is_some_and(|basis| basis.contains("do not directly prove credit wait")));
-    assert_eq!(group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().trials, (3 * plan.queue_max_trials) as u32);
-    for condition in queue["conditions"].as_array().unwrap() {
-        let trials = condition["trials"].as_array().unwrap();
-        // The fake never blocks, so no trial succeeds and every condition runs to the plan's limit (stage 3f).
-        assert_eq!(trials.len(), plan.queue_max_trials);
-        assert_eq!((condition["trial_count"].as_u64(), condition["success_count"].as_u64()), (Some(plan.queue_max_trials as u64), Some(0)));
-        assert!(trials.iter().all(|trial| trial["classification"].as_str().is_some_and(|class| !class.is_empty())));
-        assert!(trials.iter().all(|trial| trial["calls"].as_array().is_some_and(|calls| !calls.is_empty() && calls.len() <= plan.queue_max_calls)));
-        for trial in trials {
-            assert!(trial.get("first_command_tick").is_some(), "queue trial omits its first command time: {trial}");
-            for field in ["d0_tick", "h_before_ns", "h_after_ns", "h_after_minus_h_before_ns"] {
-                assert!(trial.get(field).is_some(), "queue trial omits {field}: {trial}");
-            }
-            for call in trial["calls"].as_array().unwrap() {
-                for field in ["scheduled_tick", "duration_ns", "h_i_ns", "device_time_lower_tick", "device_time_upper_tick", "apply_error"] {
-                    assert!(call.get(field).is_some(), "queue call omits {field}: {call}");
-                }
-            }
-        }
-    }
     let coercion: Vec<_> = group.observations.iter().filter(|row| row.name.starts_with("raw_coercion_")).collect();
     assert_eq!(coercion.len(), 10);
     for row in &coercion {
@@ -840,7 +808,6 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
             "radio.hardware_time",
             "radio.perf.rx_bytes_per_s",
             "radio.perf.tx_bytes_per_s",
-            "radio.timing.command_queue_depth",
             "radio.timing.min_timed_command_lead_ns",
             "radio.timing.rx_start_lead_ns",
             "radio.timing.tx_in_flight_ns",
@@ -907,135 +874,41 @@ fn unmeasured_reason<'a>(group: &'a measurement::MeasurementGroup, key: &str) ->
 
 #[test]
 fn raw_group_sends_nothing_after_its_first_failed_apply() {
-    // The first untimed receive apply is the queue-rx-gain trial's reset: it fails, and that apply is
-    // the device's last call: no later trial, no coercion, no restore.
+    // The first untimed receive apply is the first gain request: it fails, and that apply is the
+    // device's last call: no later request, no restore.
     let (device, description, plan) = raw_group_fixture(FakeConfig { faults: vec![FakeFault::RxApplyFails], ..one_obx() });
     let (group, stopped, restore_error) = measurement::measure_raw_group(device.clone(), &description, &plan).unwrap();
     let stopped = stopped.expect("the group stopped on the failed apply");
-    assert!(stopped.contains("queue condition queue-rx-gain") && stopped.contains("scripted refusal"), "{stopped}");
+    assert!(stopped.contains("rx channel 0 Gain request 0") && stopped.contains("scripted refusal"), "{stopped}");
     assert_eq!(restore_error, None, "a skipped restore is not a restore error");
-    let calls = device.calls();
-    assert_eq!(calls.last().map(String::as_str), Some("apply rx 0 rate=- freq=1000000000 gain=- antenna=- at=-"), "{calls:?}");
-    assert!(calls.iter().all(|call| !call.contains("rate=1000000 ")), "no restore apply: {calls:?}");
-    assert!(calls.iter().all(|call| call.contains("antenna=- ")), "no coercion antenna sweep: {calls:?}");
+    assert_eq!(device.calls().len(), 1, "{:?}", device.calls());
     for key in measurement::raw_group_keys(&description) {
         let reason = unmeasured_reason(&group, &key);
         assert!(reason.contains("stopped the raw group") && reason.contains("scripted refusal"), "{key}: {reason}");
     }
-    let queue = &group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().result;
-    assert!(queue["halted"].as_str().is_some_and(|reason| reason.contains("scripted refusal")));
-    assert!(queue["power_cycle_note"].as_str().is_some_and(|note| note.contains("power cycle")));
     let restore = &group.observations.iter().find(|row| row.name == "raw_restore").unwrap().result;
     assert_eq!(restore["status"], "skipped");
-    assert_eq!(queue["conditions"].as_array().unwrap().len(), 1, "later conditions did not run");
-}
-
-/// After the scripted failure marker the handle sees no call but the drain thread's reads. Their
-/// number is not bounded here: the marker is logged by the device, before the command thread
-/// latches the failure, so the drain may read in between. The bound is pinned, with the order
-/// fixed, by `the_drain_begins_no_call_after_the_command_thread_latches` and its converse.
-fn assert_nothing_new_after(log: &[&'static str], marker: &str) {
-    let at = log.iter().rposition(|call| *call == marker).unwrap_or_else(|| panic!("{marker} is not in {log:?}"));
-    let after = &log[at + 1..];
-    assert!(after.iter().all(|call| *call == "rx_recv"), "calls after {marker}: {after:?}");
-}
-
-fn ready_receiver(first_tick: i64) -> ezsdr_radio_uhd::RxRecv {
-    ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples: vec![vec![[0.0, 0.0]]] }
-}
-
-#[test]
-fn a_started_receiver_that_returns_no_samples_stops_the_group_before_any_setting_goes_out() {
-    // The start is reported late and nothing follows: the DDC would hold the settings.
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.script_rx(vec![ezsdr_radio_uhd::RxRecv::LateCommand]);
-    let (group, stopped, _) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
-    let stopped = stopped.expect("the group stopped");
-    assert!(stopped.contains("queue condition queue-rx-frequency") && stopped.contains("no samples") && stopped.contains("late_command"), "{stopped}");
-    let log = probe.control_log();
-    assert_eq!(log.iter().filter(|call| **call == "apply_timed").count(), 2 * plan.queue_max_calls, "only the two gain conditions sent timed settings: {log:?}");
-    assert!(!log.contains(&"rx_stop") && !log.contains(&"rx_close"));
-    assert!(unmeasured_reason(&group, "radio.timing.command_queue_depth").contains("no samples"));
-}
-
-#[test]
-fn a_receiver_whose_samples_stop_short_of_the_last_command_fails_the_trial() {
-    // One sample, then silence: the commands went out but the sample time never passed them.
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.script_rx(vec![ready_receiver(0)]);
-    let (_, stopped, _) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
-    let stopped = stopped.expect("the group stopped");
-    assert!(stopped.contains("short of the last command"), "{stopped}");
-    let log = probe.control_log();
-    assert_eq!(log.iter().filter(|call| **call == "apply_timed").count(), 3 * plan.queue_max_calls);
-    assert!(!log.contains(&"rx_stop") && !log.contains(&"rx_close"), "no stop after the failure: {log:?}");
-    let last_timed = log.iter().rposition(|call| *call == "apply_timed").unwrap();
-    assert!(log[last_timed + 1..].iter().all(|call| *call == "rx_recv"), "while it waited the handle saw only the drain's reads: {:?}", &log[last_timed + 1..]);
-}
-
-#[test]
-fn a_receiver_whose_samples_pass_the_last_command_completes_the_trial() {
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.script_rx(vec![ready_receiver(i64::MAX / 4)]);
-    let (group, stopped, restore_error) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
-    assert_eq!((stopped, restore_error), (None, None));
-    assert_eq!(probe.count("rx_stop"), plan.queue_max_trials);
-    let queue = &group.observations.iter().find(|row| row.name == "raw_command_queue_depth").unwrap().result;
-    let rx = queue["conditions"].as_array().unwrap().iter().find(|condition| condition["id"] == "queue-rx-frequency").unwrap();
-    assert_eq!(rx["trials"][0]["rx_progress"]["end_tick"], i64::MAX / 4 + 200);
-}
-
-#[test]
-fn a_failed_receiver_stop_is_not_followed_by_a_close() {
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.fail_rx_stop();
-    let (_, stopped, _) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
-    assert!(stopped.is_some_and(|reason| reason.contains("rx_stop")));
-    let log = probe.control_log();
-    assert_nothing_new_after(&log, "rx_stop");
-    assert!(!log.contains(&"rx_close"));
 }
 
 #[test]
 fn the_raw_group_deadline_is_checked_between_two_device_calls() {
-    // The second timed apply moves the group's elapsed time past its limit (injected, not slept):
-    // the third is never sent, nor the clock read or the reset.
-    let (device, _, mut plan) = raw_group_fixture(one_obx());
-    plan.queue_ahead_ns = 2_000_000_000; // a call that long stays under the stall limit, so only the deadline ends the loop
+    // The second untimed apply moves the group's elapsed time past its limit (injected, not slept):
+    // the third is never sent.
+    let (device, description, plan) = raw_group_fixture(one_obx());
     let probe = Arc::new(probe_device::ProbeDevice::new(device));
     let raw = Arc::new(measurement::RawGroup::with_limit(Wall::from_secs(3_600)));
     let injected = raw.clone();
-    probe.before_timed_apply(move |count| {
+    probe.before_untimed_apply(move |count| {
         if count == 2 {
             injected.advance_elapsed(Wall::from_secs(7_200))
         }
     });
-    let group = measurement::measure_command_queue_depth(probe.clone(), &plan, &raw).unwrap();
+    let group = measurement::measure_coercion(probe.clone(), &description, &plan, &raw).unwrap();
     assert!(raw.failure().is_some_and(|reason| reason.contains("wall-clock limit")));
     let log = probe.control_log();
-    assert_eq!(log.iter().filter(|call| **call == "apply_timed").count(), 2, "{log:?}");
-    assert_eq!(log.last(), Some(&"apply_timed"), "no clock read or reset after the call that crossed the deadline: {log:?}");
-    assert!(unmeasured_reason(&group, "radio.timing.command_queue_depth").contains("wall-clock limit"));
-}
-
-#[test]
-fn the_deadline_passing_during_the_receiver_s_stop_leaves_the_close_unsent() {
-    let (device, _, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.script_rx(vec![ready_receiver(i64::MAX / 4)]);
-    let raw = Arc::new(measurement::RawGroup::with_limit(Wall::from_secs(3_600)));
-    let injected = raw.clone();
-    probe.after_rx_stop(move || injected.advance_elapsed(Wall::from_secs(7_200)));
-    let group = measurement::measure_command_queue_depth(probe.clone(), &plan, &raw).unwrap();
-    let log = probe.control_log();
-    assert!(log.contains(&"rx_stop"), "the stop was sent and succeeded: {log:?}");
-    assert!(!log.contains(&"rx_close"), "the close, a new call after the deadline, was not: {log:?}");
-    assert!(raw.failure().is_some_and(|reason| reason.contains("wall-clock limit")));
-    assert!(group.observations[0].result["halted"].is_string());
+    assert_eq!(log.iter().filter(|call| **call == "apply").count(), 2, "{log:?}");
+    assert_eq!(log.last(), Some(&"apply"), "no call after the one that crossed the deadline: {log:?}");
+    assert!(unmeasured_reason(&group, "radio.rx.c0.gain_db").contains("wall-clock limit"));
 }
 
 /// The raw group's record run as the caller runs it: the groups, the raw group last, the record's
@@ -1100,95 +973,6 @@ fn a_failed_restore_leaks_the_handle_even_when_the_record_s_writing_panics() {
     assert_eq!(run_record_flow(&probe, &description, &binding, &plan, true), (None, None));
     drop(probe);
     assert!(log.lock().unwrap().contains(&"drop"));
-}
-
-#[test]
-fn the_drain_begins_no_call_after_the_command_thread_latches() {
-    // The command thread's 17th timed apply (the first of queue-rx-frequency) fails once the drain
-    // is inside its 2nd receive; the drain returns only after the latch is seen, and then reads no more.
-    let (device, description, mut plan) = raw_group_fixture(one_obx());
-    // A 2 s horizon (stall limit 1 s): no earlier call ends its condition early by being descheduled.
-    plan.queue_ahead_ns = 2_000_000_000;
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    let (in_flight_tx, in_flight_rx) = std::sync::mpsc::channel::<()>();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let release_rx = Mutex::new(release_rx);
-    probe.script_rx_with(move |call| match call {
-        1 => ready_receiver(i64::MAX / 4),
-        2 => {
-            in_flight_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv_timeout(Wall::from_secs(60)).expect("released within 60 s");
-            ezsdr_radio_uhd::RxRecv::Timeout
-        }
-        _ => ezsdr_radio_uhd::RxRecv::Timeout,
-    });
-    let in_flight_rx = Mutex::new(in_flight_rx);
-    probe.before_timed_apply(move |count| {
-        if count == 2 * 8 + 1 {
-            in_flight_rx.lock().unwrap().recv_timeout(Wall::from_secs(60)).expect("the other thread's call is in flight within 60 s");
-        }
-    });
-    probe.fail_timed_apply(2 * 8 + 1);
-    let raw = Arc::new(measurement::RawGroup::new(&plan));
-    let watched = raw.clone();
-    let releaser = std::thread::spawn(move || {
-        let begun = Instant::now();
-        while watched.failure().is_none() && begun.elapsed() < Wall::from_secs(60) {
-            std::thread::yield_now();
-        }
-        let _ = release_tx.send(());
-    });
-    let group = measurement::measure_command_queue_depth(probe.clone(), &plan, &raw).unwrap();
-    releaser.join().unwrap();
-    assert!(raw.failure().is_some_and(|reason| reason.contains("scripted timed apply failure")));
-    assert_eq!(probe.control_log().iter().filter(|call| **call == "rx_recv").count(), 2, "the drain made the receive it had in flight and began no other after the latch: {:?}", probe.control_log());
-    assert_eq!(probe.control_log().iter().filter(|call| **call == "apply_timed").count(), 2 * 8, "the failing apply is logged apart");
-    assert!(group.observations[0].result["after_a_failure"].as_str().is_some_and(|text| text.contains("at most one more device call")));
-    let _ = description;
-}
-
-#[test]
-fn the_command_thread_begins_no_call_after_the_drain_latches() {
-    // The drain's 2nd receive fails while the command thread is inside its 17th timed apply, which
-    // returns only after the latch is seen; the command thread then submits no more and reads no clock.
-    let (device, _, mut plan) = raw_group_fixture(one_obx());
-    // A 2 s horizon (stall limit 1 s): no earlier call ends its condition early by being descheduled.
-    plan.queue_ahead_ns = 2_000_000_000;
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    let (in_flight_tx, in_flight_rx) = std::sync::mpsc::channel::<()>();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let in_flight_rx = Mutex::new(in_flight_rx);
-    probe.script_rx_with(move |call| match call {
-        1 => ready_receiver(i64::MAX / 4),
-        2 => {
-            in_flight_rx.lock().unwrap().recv_timeout(Wall::from_secs(60)).expect("the other thread's call is in flight within 60 s");
-            ezsdr_radio_uhd::RxRecv::Failed(ezsdr_radio_uhd::DeviceError::failed("scripted receive failure"))
-        }
-        _ => ezsdr_radio_uhd::RxRecv::Timeout,
-    });
-    let release_rx = Mutex::new(release_rx);
-    probe.before_timed_apply(move |count| {
-        if count == 2 * 8 + 1 {
-            in_flight_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv_timeout(Wall::from_secs(60)).expect("released within 60 s");
-        }
-    });
-    let raw = Arc::new(measurement::RawGroup::new(&plan));
-    let watched = raw.clone();
-    let releaser = std::thread::spawn(move || {
-        let begun = Instant::now();
-        while watched.failure().is_none() && begun.elapsed() < Wall::from_secs(60) {
-            std::thread::yield_now();
-        }
-        let _ = release_tx.send(());
-    });
-    measurement::measure_command_queue_depth(probe.clone(), &plan, &raw).unwrap();
-    releaser.join().unwrap();
-    assert!(raw.failure().is_some_and(|reason| reason.contains("scripted receive failure")));
-    let log = probe.control_log();
-    let in_flight = log.iter().rposition(|call| *call == "apply_timed").unwrap();
-    assert_eq!(log.iter().filter(|call| **call == "apply_timed").count(), 2 * 8 + 1, "the call in flight returned, and no other was submitted");
-    assert!(log[in_flight + 1..].iter().all(|call| *call == "rx_recv"), "no clock read, reset or stop after the latch: {:?}", &log[in_flight + 1..]);
 }
 
 #[test]
@@ -1279,36 +1063,6 @@ fn a_probe_s_long_arrays_are_summarised_and_their_rows_go_to_a_side_file() {
 }
 
 #[test]
-fn raw_group_sends_nothing_after_a_failed_timed_apply() {
-    // The 3rd timed apply fails in the queue-rx-gain trial; after it the handle gets no clock read, no
-    // untimed reset and no later trial.
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.fail_timed_apply(3);
-    let (group, stopped, _) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
-    assert!(stopped.is_some_and(|reason| reason.contains("scripted timed apply failure")));
-    let log = probe.control_log();
-    assert_eq!(&log[log.len() - 3..], ["apply_timed", "apply_timed", "apply_timed_failed"], "{log:?}");
-    assert_nothing_new_after(&log, "apply_timed_failed");
-    assert!(unmeasured_reason(&group, "radio.timing.command_queue_depth").contains("scripted timed apply failure"));
-}
-
-#[test]
-fn raw_group_stops_a_streaming_trial_without_stopping_or_resetting_the_receiver() {
-    // The first timed apply of queue-rx-frequency (the 17th overall at 8 calls a trial) fails while the receiver streams.
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    probe.fail_timed_apply(2 * plan.queue_max_calls + 1);
-    let (_, stopped, _) = measurement::measure_raw_group(probe.clone(), &description, &plan).unwrap();
-    assert!(stopped.is_some_and(|reason| reason.contains("queue condition queue-rx-frequency")));
-    let log = probe.control_log();
-    assert_nothing_new_after(&log, "apply_timed_failed");
-    assert_eq!(probe.count("rx_start"), 1);
-    assert_eq!(probe.count("rx_stop"), 0, "a failed trial sends the receiver no stop");
-    assert!(!log.contains(&"rx_close"), "no close after the failure");
-}
-
-#[test]
 fn coercion_stops_after_its_first_failed_apply() {
     let (device, description, plan) = raw_group_fixture(FakeConfig { faults: vec![FakeFault::RxApplyFails], ..one_obx() });
     let raw = measurement::RawGroup::new(&plan);
@@ -1349,24 +1103,12 @@ fn coercion_opens_no_streamer() {
 }
 
 #[test]
-fn raw_group_sends_nothing_after_a_failed_clock_read() {
-    let (device, description, plan) = raw_group_fixture(FakeConfig { faults: vec![FakeFault::TimeReadFails(Wall::ZERO)], ..one_obx() });
-    let (group, stopped, _) = measurement::measure_raw_group(device.clone(), &description, &plan).unwrap();
-    assert!(stopped.is_some());
-    assert!(device.calls().is_empty(), "the failed time read was the group's only call: {:?}", device.calls());
-    assert!(unmeasured_reason(&group, "radio.timing.command_queue_depth").contains("stopped the raw group"));
-}
-
-#[test]
 fn raw_group_limit_stops_every_later_call() {
     let (device, description, plan) = raw_group_fixture(one_obx());
     let over = measurement::RawGroup::with_limit(Wall::ZERO);
-    let group = measurement::measure_command_queue_depth(device.clone(), &plan, &over).unwrap();
+    let group = measurement::measure_coercion(device.clone(), &description, &plan, &over).unwrap();
     assert!(over.failure().is_some_and(|reason| reason.contains("wall-clock limit")));
     assert!(device.calls().is_empty(), "the limit was already passed: {:?}", device.calls());
-    assert!(unmeasured_reason(&group, "radio.timing.command_queue_depth").contains("wall-clock limit"));
-    let group = measurement::measure_coercion(device.clone(), &description, &plan, &over).unwrap();
-    assert!(device.calls().is_empty());
     assert!(unmeasured_reason(&group, "radio.rx.c0.gain_db").contains("wall-clock limit"));
     assert!(unmeasured_reason(&group, "radio.tx.c0.frequency_hz").contains("wall-clock limit"));
     let latch = measurement::RawGroup::with_limit(Wall::from_secs(60));
@@ -1382,12 +1124,12 @@ fn raw_group_limit_stops_every_later_call() {
 
 #[test]
 fn raw_group_restores_after_a_panic_in_it() {
-    // A timed apply panics in the first queue condition (no failure was latched); the group unwinds and its guard restores.
+    // An untimed apply panics in the coercion sweep (no failure was latched); the group unwinds and its guard restores.
     let (device, description, plan) = raw_group_fixture(one_obx());
     let probe = Arc::new(probe_device::ProbeDevice::new(device.clone()));
-    probe.before_timed_apply(|count| {
+    probe.before_untimed_apply(|count| {
         if count == 2 {
-            panic!("scripted panic in a timed apply")
+            panic!("scripted panic in an untimed apply")
         }
     });
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measurement::measure_raw_group(probe.clone(), &description, &plan)));
@@ -1396,42 +1138,6 @@ fn raw_group_restores_after_a_panic_in_it() {
     let restored = |dir: &str, antenna: &str| format!("apply {dir} 0 rate={} freq=1000000000 gain=0 antenna={antenna} at=-", ezsdr_radio::channels::DEFAULT_SAMPLE_RATE_HZ);
     assert_eq!(calls.last(), Some(&restored("tx", &description.tx[0].default_antenna)), "{calls:?}");
     assert!(calls.contains(&restored("rx", &description.rx[0].default_antenna)), "{calls:?}");
-}
-
-#[test]
-fn a_panic_on_the_command_thread_stops_the_drain_and_the_record_continues() {
-    // The 17th timed apply is the first of queue-rx-frequency, whose receiver is streaming and drained.
-    let (device, description, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device.clone()));
-    probe.before_timed_apply(move |count| {
-        if count == 2 * 8 + 1 {
-            panic!("scripted panic while the receiver streams")
-        }
-    });
-    let mut groups = measurement::GroupRun::new(None);
-    groups.run("raw", &measurement::raw_group_keys(&description), || measurement::measure_raw_group(probe.clone(), &description, &plan).map(|(group, _, _)| group));
-    groups.run("later", &[], || Ok(measurement::MeasurementGroup::default()));
-    assert_eq!(groups.failed().len(), 1);
-    assert!(groups.failed()[0].1.contains("scripted panic while the receiver streams"), "{:?}", groups.failed());
-    assert_eq!(probe.count("rx_start"), 1, "the receiver was streaming when the command thread panicked");
-}
-
-#[test]
-fn queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency() {
-    let (device, _, plan) = raw_group_fixture(one_obx());
-    let probe = Arc::new(probe_device::ProbeDevice::new(device));
-    let group = measurement::measure_command_queue_depth(probe.clone(), &plan, &measurement::RawGroup::new(&plan)).unwrap();
-    assert_eq!(probe.count("rx_start"), plan.queue_max_trials, "one receive start for each queue-rx-frequency trial and none for gain");
-    assert_eq!(probe.count("rx_stop"), plan.queue_max_trials);
-    assert!(probe.count("rx_recv") > 0, "the receiver is drained while the commands are queued");
-    let rows = probe.rows();
-    let start = rows.iter().position(|row| row["call"] == "rx_start").unwrap();
-    assert!(rows[..start].iter().all(|row| row["call"] != "rx_recv"), "no receive before the start");
-    let queue = &group.observations[0].result;
-    let rx_frequency = queue["conditions"].as_array().unwrap().iter().find(|condition| condition["id"] == "queue-rx-frequency").unwrap();
-    assert!(rx_frequency["trials"].as_array().unwrap().iter().all(|trial| trial["rx_streaming"] == true));
-    let gain = queue["conditions"].as_array().unwrap().iter().find(|condition| condition["id"] == "queue-rx-gain").unwrap();
-    assert!(gain["trials"].as_array().unwrap().iter().all(|trial| trial.get("rx_streaming").is_none()));
 }
 
 #[test]
@@ -3046,24 +2752,6 @@ fn a_duplex_pair_that_does_not_flow_says_the_two_values_were_not_shown_to_hold()
         "the failed stream is named: {:?}",
         row.result["streams"]
     );
-}
-
-#[test]
-fn queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number() {
-    // Stage 3e: odd trials wait the plan's delay, even ones two thirds of it, so the blocked call's number can be compared.
-    let (device, _, mut plan) = raw_group_fixture(one_obx());
-    // One success is needed and the fake gives none, so the loop runs to the limit of two.
-    plan.queue_trials = 1;
-    plan.queue_max_trials = 2;
-    let raw = Arc::new(measurement::RawGroup::with_limit(Wall::from_secs(3_600)));
-    let group = measurement::measure_command_queue_depth(device, &plan, &raw).unwrap();
-    let queue = &group.observations[0].result;
-    for condition in queue["conditions"].as_array().unwrap() {
-        let ahead: Vec<_> = condition["trials"].as_array().unwrap().iter().map(|trial| trial["ahead_ns"].as_u64().unwrap()).collect();
-        assert_eq!(ahead, [plan.queue_ahead_ns, plan.queue_ahead_ns / 3 * 2], "{condition}");
-        assert!(condition["blocked_index_across_ahead"]["by_ahead_ns"].is_object(), "{condition}");
-    }
-    assert!(queue["ambiguous_trials"].is_u64());
 }
 
 #[test]

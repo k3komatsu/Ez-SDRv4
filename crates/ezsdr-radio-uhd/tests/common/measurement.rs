@@ -25,8 +25,6 @@ use ezsdr_radio::x3xx::ProviderTerms;
 use ezsdr_radio_uhd::{Device, Dir, RxRecv, Settings};
 use serde_json::{Value as Json, json};
 
-use super::SAFE_TX_HZ;
-
 mod multichannel;
 pub use multichannel::*;
 mod h4;
@@ -221,7 +219,7 @@ fn unmeasured_reason(key: &str) -> &'static str {
         return "Not measured in this record; Phase 8 stage 3c-2a measures raw Device sample-rate read-back.";
     }
     match key {
-        "radio.timing.command_queue_depth" => "Not measured in this record; Phase 8 stage 3c-2a measures raw Device timed-apply queue back-pressure.",
+        "radio.timing.command_queue_depth" => "Not measured in this record; the queue-depth measurement was removed by note 48 S2a-i-α, and the key leaves in note 48 S2b-i.",
         "radio.timing.min_timed_command_lead_ns" | "radio.timing.tx_in_flight_ns" | "radio.perf.rx_bytes_per_s" | "radio.full_duplex" | "radio.hardware_time" => {
             "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run."
         }
@@ -622,13 +620,7 @@ pub struct MeasurementPlan {
     pub throughput_seconds: u64,
     pub loopback_trials: usize,
     pub interval_ns: u64,
-    /// The successful queue trials each condition needs (`EZSDR_MEASURE_QUEUE_TRIALS`); trials go on until it has them or `queue_max_trials` have run.
-    pub queue_trials: usize,
-    /// The most queue trials one condition runs (`EZSDR_MEASURE_QUEUE_MAX_TRIALS`), at least `queue_trials`.
-    pub queue_max_trials: usize,
-    pub queue_ahead_ns: u64,
-    pub queue_max_calls: usize,
-    /// Wall-clock limit of the whole raw group (queue depth and coercion), in milliseconds.
+    /// Wall-clock limit of the whole raw group (coercion), in milliseconds.
     pub raw_group_limit_ms: u64,
     /// Points of each channel's frequency read-back sweep.
     pub frequency_points: usize,
@@ -657,10 +649,6 @@ impl Default for MeasurementPlan {
             throughput_seconds: 60,
             loopback_trials: 20,
             interval_ns: 20_000_000,
-            queue_trials: 5,
-            queue_max_trials: 15,
-            queue_ahead_ns: 3_000_000_000,
-            queue_max_calls: 512,
             raw_group_limit_ms: 300_000,
             frequency_points: 200,
             nics: Vec::new(),
@@ -691,10 +679,6 @@ impl MeasurementPlan {
             throughput_seconds: 1,
             loopback_trials: 1,
             interval_ns: 20_000_000,
-            queue_trials: 1,
-            queue_max_trials: 1,
-            queue_ahead_ns: 20_000_000,
-            queue_max_calls: 8,
             raw_group_limit_ms: 300_000,
             frequency_points: 20,
             nics: Vec::new(),
@@ -725,16 +709,10 @@ impl MeasurementPlan {
             || self.throughput_seconds == 0
             || self.loopback_trials == 0
             || self.interval_ns == 0
-            || self.queue_trials == 0
-            || self.queue_ahead_ns == 0
-            || self.queue_max_calls == 0
             || self.raw_group_limit_ms == 0
             || self.frequency_points < 4
         {
             return Err("measurement counts, the raw group limit and the inter-trial interval must be positive, with at least 4 frequency points".to_owned());
-        }
-        if i64::try_from(self.queue_max_calls).is_err() {
-            return Err("queue command limit exceeds i64".to_owned());
         }
         let step_observations = [self.timed_command_leads_ns.len(), self.in_flight_windows_ns.len(), self.rx_start_leads_ns.len().checked_mul(2).ok_or("receive-start stage count overflow")?];
         for stages in step_observations {
@@ -754,12 +732,6 @@ impl MeasurementPlan {
         if self.loopback_trials > u32::MAX as usize {
             return Err("EZSDR_MEASURE_LOOPBACK_TRIALS exceeds the record's u32 trial limit".to_owned());
         }
-        if self.queue_max_trials < self.queue_trials {
-            return Err("EZSDR_MEASURE_QUEUE_MAX_TRIALS must be at least EZSDR_MEASURE_QUEUE_TRIALS".to_owned());
-        }
-        if self.queue_max_trials.checked_mul(3).is_none_or(|trials| trials > u32::MAX as usize) {
-            return Err("EZSDR_MEASURE_QUEUE_MAX_TRIALS exceeds the record's u32 trial limit".to_owned());
-        }
         Ok(())
     }
 
@@ -778,8 +750,6 @@ impl MeasurementPlan {
             overflow_trials: usize::try_from(count(values, "EZSDR_MEASURE_OVERFLOW_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_OVERFLOW_TRIALS is too large".to_owned())?,
             throughput_seconds: count(values, "EZSDR_MEASURE_THROUGHPUT_SECS", 60)?,
             loopback_trials: usize::try_from(count(values, "EZSDR_MEASURE_LOOPBACK_TRIALS", 20)?).map_err(|_| "EZSDR_MEASURE_LOOPBACK_TRIALS is too large".to_owned())?,
-            queue_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_TRIALS", 5)?).map_err(|_| "EZSDR_MEASURE_QUEUE_TRIALS is too large".to_owned())?,
-            queue_max_trials: usize::try_from(count(values, "EZSDR_MEASURE_QUEUE_MAX_TRIALS", 15)?).map_err(|_| "EZSDR_MEASURE_QUEUE_MAX_TRIALS is too large".to_owned())?,
             nics: values.get("EZSDR_MEASUREMENT_NICS").or(values.get("EZSDR_BENCH_NIC")).map(|text| text.split_whitespace().map(str::to_owned).collect()).unwrap_or_default(),
             tx_waveform_samples: usize::try_from(count(values, "EZSDR_TX_WAVEFORM_SAMPLES", 1_000)?)
                 .ok()
@@ -793,167 +763,18 @@ impl MeasurementPlan {
 
     /// Reads only the documented environment variables and validates before opening a device.
     pub fn process_env() -> Result<MeasurementPlan, String> {
-        let names = [
-            "EZSDR_MEASURE_STEP_TRIALS",
-            "EZSDR_MEASURE_OVERFLOW_TRIALS",
-            "EZSDR_MEASURE_THROUGHPUT_SECS",
-            "EZSDR_MEASURE_LOOPBACK_TRIALS",
-            "EZSDR_MEASURE_QUEUE_TRIALS",
-            "EZSDR_MEASURE_QUEUE_MAX_TRIALS",
-            "EZSDR_MEASUREMENT_NICS",
-            "EZSDR_BENCH_NIC",
-        ];
+        let names = ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS", "EZSDR_MEASUREMENT_NICS", "EZSDR_BENCH_NIC"];
         let values = names.iter().filter_map(|name| std::env::var(name).ok().map(|value| ((*name).to_owned(), value))).collect();
         MeasurementPlan::from_env(&values)
     }
 }
 
-const QUEUE_SPACING_NS: u64 = 1_000_000;
-const QUEUE_CALL_TIME_LIMIT_NS: u64 = 100_000_000;
-const QUEUE_DRAIN_MARGIN_NS: u64 = 10_000_000;
-const QUEUE_RX_START_LEAD_NS: u64 = 50_000_000;
-const QUEUE_RX_READY_LIMIT_MS: u64 = 1_000;
-const QUEUE_TEST: &str = "tests/hardware.rs::hw_measurements_record";
+const RAW_TEST: &str = "tests/hardware.rs::hw_measurements_record";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum QueueTrialClass {
-    Success {
-        depth: usize,
-    },
-    /// The blocked call's device-time interval straddles the first command time: it may have
-    /// waited for the queue or may not. Never a success, never a failure of the trial's kind.
-    Ambiguous {
-        depth: usize,
-    },
-    Incomplete {
-        reason: &'static str,
-    },
-    DeviceFailure {
-        reason: String,
-    },
-}
-
-#[derive(Clone, Debug)]
-struct QueueCall {
-    duration_ns: u64,
-    h_i_ns: Option<u64>,
-    error: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct QueueClock {
-    d0_tick: i64,
-    h_before_ns: u64,
-    h_after_ns: u64,
-}
-
-fn queue_device_time_bounds(clock: QueueClock, h_i_ns: u64, master_clock_hz: u64) -> Option<(i64, i64)> {
-    let since_before = h_i_ns.checked_sub(clock.h_before_ns)?;
-    let since_after = h_i_ns.checked_sub(clock.h_after_ns)?;
-    let upper_ticks = ticks_for_ns(since_before, master_clock_hz).ok()?;
-    let lower_ticks = i64::try_from((u128::from(since_after) * u128::from(master_clock_hz)) / 1_000_000_000).ok()?;
-    Some((clock.d0_tick.checked_add(lower_ticks)?, clock.d0_tick.checked_add(upper_ticks)?))
-}
-
-fn classify_queue_trial(calls: &[QueueCall], clock: QueueClock, first_at: i64, stall_limit_ns: u64, return_limit_ticks: i64, master_clock_hz: u64) -> QueueTrialClass {
-    let Some(read_duration_ns) = clock.h_after_ns.checked_sub(clock.h_before_ns) else {
-        return QueueTrialClass::Incomplete { reason: "the device-time read host interval was invalid" };
-    };
-    if read_duration_ns > QUEUE_CALL_TIME_LIMIT_NS {
-        return QueueTrialClass::Incomplete { reason: "the device-time read took too long to bound the host-clock interval" };
-    }
-    if let Some(reason) = calls.iter().find_map(|call| call.error.as_deref()) {
-        return QueueTrialClass::DeviceFailure { reason: reason.to_owned() };
-    }
-    let stalled: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.duration_ns > stall_limit_ns).collect();
-    let Some((depth, blocked)) = stalled.first().copied() else {
-        return QueueTrialClass::Incomplete { reason: "no timed apply blocked before the call limit" };
-    };
-    if stalled.len() != 1 {
-        return QueueTrialClass::Incomplete { reason: "more than one timed apply crossed the stall limit" };
-    }
-    if calls[..depth].iter().any(|call| call.duration_ns >= QUEUE_CALL_TIME_LIMIT_NS) {
-        return QueueTrialClass::Incomplete { reason: "a call before the blocked apply was not short" };
-    }
-    if calls[..depth].iter().any(|call| call.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)).is_none_or(|(_, upper)| upper >= first_at)) {
-        return QueueTrialClass::Incomplete { reason: "a call before the blocked apply has an upper device-time bound at or after the first command time" };
-    }
-    let Some(latest_return_tick) = first_at.checked_add(return_limit_ticks) else {
-        return QueueTrialClass::Incomplete { reason: "the blocked apply return-time limit overflowed" };
-    };
-    let Some((lower, upper)) = blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)) else {
-        return QueueTrialClass::Incomplete { reason: "the blocked apply has no device-time bounds" };
-    };
-    if upper < first_at {
-        return QueueTrialClass::Incomplete { reason: "the blocked apply returned before the first command time (its upper device-time bound is before it)" };
-    }
-    if upper > latest_return_tick {
-        return QueueTrialClass::Incomplete { reason: "the blocked apply has an upper device-time bound too long after the first command time" };
-    }
-    if lower < first_at {
-        return QueueTrialClass::Ambiguous { depth };
-    }
-    QueueTrialClass::Success { depth }
-}
-
-fn finish_queue_trial(queue_class: QueueTrialClass, operational_error: Option<String>, untimed_error: Option<String>) -> QueueTrialClass {
-    match operational_error.or(untimed_error) {
-        Some(reason) => QueueTrialClass::DeviceFailure { reason },
-        None => queue_class,
-    }
-}
-
-#[derive(Clone)]
-struct QueueOperation {
-    dir: Dir,
-    settings: Settings,
-}
-
-fn queue_condition(id: &str, operations: Vec<QueueOperation>) -> (Condition, Vec<QueueOperation>) {
-    (Condition { id: id.to_owned(), streams: vec![], concurrent: vec![], reopened: false }, operations)
-}
-
-fn queue_operations(dir: Dir, field: &str) -> Vec<QueueOperation> {
-    let settings: Vec<Settings> = match field {
-        "frequency" => [999_600_000.0, 1_000_400_000.0].into_iter().map(|value| Settings { freq: Some(value), ..Settings::default() }).collect(),
-        "gain" => [0.0, 10.0].into_iter().map(|value| Settings { gain: Some(value), ..Settings::default() }).collect(),
-        _ => unreachable!("known queue operation"),
-    };
-    settings.into_iter().map(|settings| QueueOperation { dir, settings }).collect()
-}
-
-/// Receive gain and transmit gain reach the radio alone and need no stream; receive frequency also
-/// writes the DDC, whose timed commands leave only with samples, so its trials stream and drain.
-/// Transmit frequency and the receive/transmit alternation are left out (stage 3c-2c): the DUC
-/// needs transmitted samples, and a continuous transmission adds RF handling this stage does not take on.
-fn queue_conditions() -> Vec<(Condition, Vec<QueueOperation>)> {
-    vec![
-        queue_condition("queue-rx-gain", queue_operations(Dir::Rx, "gain")),
-        queue_condition("queue-tx-gain", queue_operations(Dir::Tx, "gain")),
-        queue_condition("queue-rx-frequency", queue_operations(Dir::Rx, "frequency")),
-    ]
-}
-
-/// Whether a condition's operations write the DDC, which needs a streaming, drained receiver.
-fn queue_streams_rx(operations: &[QueueOperation]) -> bool {
-    operations.iter().any(|operation| operation.dir == Dir::Rx && operation.settings.freq.is_some())
-}
-
-const QUEUE_EXCLUDED_CONDITIONS: [(&str, &str); 2] = [
-    ("queue-tx-frequency", "the DUC takes a timed command only with transmitted samples; a continuous transmission adds RF handling this stage does not take on"),
-    ("queue-rx-tx-frequency", "it alternates the transmit frequency, which is left out for the same reason"),
-];
-
-/// The wall-clock limit and the first-failure latch of the raw group (queue depth and coercion,
-/// stage 3c-2c), shared by the command, drain and cleanup paths.
+/// The wall-clock limit and the first-failure latch of the raw group (coercion, stage 3c-2c).
 ///
-/// The bound it gives, exactly: each path checks the latch before each device call, so once one
-/// thread has latched a failure (or the limit has passed) the other thread begins at most one more
-/// call, the one whose check came before the latch and whose call came after it, and that call
-/// ends by UHD's own 10 s `op_timeout`; a call already running is only waited for; nothing is
-/// begun after that. The two threads' calls are not serialised by a lock, because that would change
-/// how long an `apply` blocks, which is what the queue-depth measurement measures. A wedged
-/// control port needs a power cycle.
+/// Each device call of the group checks the latch before it, so once a failure is latched or the
+/// limit has passed, nothing more is sent. A wedged control port needs a power cycle.
 pub struct RawGroup {
     started: Instant,
     limit: Wall,
@@ -1005,492 +826,6 @@ impl RawGroup {
     fn unmeasured(&self, key: Key, what: &str) -> Option<ValueRecord> {
         self.failure().map(|failure| ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2c stopped the raw group before {what} was complete: {failure}.") })
     }
-}
-
-/// The receive stream's progress as the drain thread sees it: the end of the samples that came
-/// back, and what else `rx_recv` returned. A DDC setting leaves its FIFO only with a sample whose
-/// time reaches it (INFERRED from UHD's `axi_tag_time.v:206-211`), so the end of the samples is
-/// the evidence that the settings drained.
-#[derive(Default)]
-struct RxProgress {
-    state: Mutex<RxState>,
-}
-
-#[derive(Default)]
-struct RxState {
-    first_tick: Option<i64>,
-    end_tick: Option<i64>,
-    counts: BTreeMap<&'static str, u64>,
-}
-
-impl RxProgress {
-    fn note(&self, kind: &'static str) {
-        *self.state.lock().unwrap().counts.entry(kind).or_default() += 1;
-    }
-
-    fn advance(&self, first_tick: i64, end_tick: i64) {
-        let mut state = self.state.lock().unwrap();
-        state.first_tick.get_or_insert(first_tick);
-        if state.end_tick.is_none_or(|end| end_tick > end) {
-            state.end_tick = Some(end_tick);
-        }
-        *state.counts.entry("samples").or_default() += 1;
-    }
-
-    fn end_tick(&self) -> Option<i64> {
-        self.state.lock().unwrap().end_tick
-    }
-
-    fn snapshot(&self) -> Json {
-        let state = self.state.lock().unwrap();
-        json!({ "first_sample_tick": state.first_tick, "end_tick": state.end_tick, "counts": state.counts })
-    }
-}
-
-/// Reads the receive stream until `stop` or the group stops, recording its progress (stage 3c-2c).
-fn drain_receiver(device: &dyn Device, raw: &RawGroup, stop: &AtomicBool, progress: &RxProgress, ticks_per_sample: i64) {
-    while !stop.load(Ordering::Acquire) && !raw.halted() {
-        match device.rx_recv(0, 1_000, Wall::from_millis(100), false) {
-            RxRecv::Samples { first_tick, samples } => {
-                let count = samples.first().map_or(0, Vec::len) as i64;
-                progress.advance(first_tick, first_tick.saturating_add(count.saturating_mul(ticks_per_sample)));
-            }
-            RxRecv::Overflow { .. } => progress.note("overflow"),
-            RxRecv::LateCommand => progress.note("late_command"),
-            RxRecv::Alignment => progress.note("alignment"),
-            RxRecv::BadPacket => progress.note("bad_packet"),
-            RxRecv::Timeout => progress.note("timeout"),
-            RxRecv::Failed(error) => {
-                raw.fail(format!("rx_recv: {}", error.message));
-                break;
-            }
-        }
-    }
-}
-
-/// Sets `stop` when dropped, also while unwinding, so a panic on the command thread cannot leave the drain thread running.
-struct StopOnDrop<'a>(&'a AtomicBool);
-
-impl Drop for StopOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
-fn wait_for_device_tick(device: &dyn Device, raw: &RawGroup, target: i64, timeout: Wall) -> Result<(), String> {
-    let start = Instant::now();
-    loop {
-        if raw.halted() {
-            return Err(raw.failure().unwrap_or_default());
-        }
-        if device.time_now().map_err(|error| error.message)? >= target {
-            return Ok(());
-        }
-        if start.elapsed() >= timeout {
-            return Err(format!("device time did not reach {target} before the wait limit"));
-        }
-        std::thread::sleep(Wall::from_millis(1));
-    }
-}
-
-/// Waits for the end of the received samples to reach `target`: the DDC's settings are out of its
-/// FIFO only once a sample's time has passed them.
-fn wait_for_rx_end(raw: &RawGroup, progress: &RxProgress, target: i64, timeout: Wall) -> Result<(), String> {
-    let start = Instant::now();
-    loop {
-        if raw.halted() {
-            return Err(raw.failure().unwrap_or_default());
-        }
-        let end = progress.end_tick();
-        if end.is_some_and(|end| end >= target) {
-            return Ok(());
-        }
-        if start.elapsed() >= timeout {
-            return Err(format!("the received samples ended at {end:?}, short of the last command's {target}, within the wait limit; DDC settings may remain queued"));
-        }
-        std::thread::sleep(Wall::from_millis(1));
-    }
-}
-
-/// Waits for the first samples of a started receive stream, before any setting is submitted.
-fn wait_for_rx_samples(raw: &RawGroup, progress: &RxProgress, timeout: Wall) -> Result<(), String> {
-    let start = Instant::now();
-    loop {
-        if raw.halted() {
-            return Err(raw.failure().unwrap_or_default());
-        }
-        if progress.end_tick().is_some() {
-            return Ok(());
-        }
-        if start.elapsed() >= timeout {
-            return Err(format!("the started receive stream returned no samples ({})", progress.snapshot()["counts"]));
-        }
-        std::thread::sleep(Wall::from_millis(1));
-    }
-}
-
-/// The trial's result when the group has already stopped, before the next device call.
-fn queue_stopped(trial: usize, raw: &RawGroup) -> Option<(QueueTrialClass, Json)> {
-    if !raw.halted() {
-        return None;
-    }
-    let reason = raw.failure().unwrap_or_default();
-    Some((QueueTrialClass::DeviceFailure { reason: reason.clone() }, json!({ "trial": trial, "classification": "device_failure", "error": reason })))
-}
-
-/// A trial that failed on the device: the group stops with it.
-fn queue_failed(trial: usize, raw: &RawGroup, label: &str, reason: String) -> (QueueTrialClass, Json) {
-    raw.fail(format!("queue condition {label}: {reason}"));
-    (QueueTrialClass::DeviceFailure { reason: reason.clone() }, json!({ "trial": trial, "classification": "device_failure", "error": reason }))
-}
-
-/// One trial: a streaming condition runs it with the receiver open and drained on another thread,
-/// so DDC commands leave the FIFO as the sample time passes them (INFERRED from UHD's
-/// `axi_tag_time.v`, which releases a timed setting only on a sample whose time reaches it). No
-/// setting goes out before the receiver has returned samples, and the receiver is not stopped
-/// before the samples have passed the last command.
-fn queue_trial(device: &dyn Device, operations: &[QueueOperation], plan: &MeasurementPlan, trial: usize, label: &str, raw: &RawGroup) -> Result<(QueueTrialClass, Json), String> {
-    if !queue_streams_rx(operations) {
-        return queue_trial_calls(device, operations, plan, trial, label, raw, None);
-    }
-    let fail = |reason: String| Ok(queue_failed(trial, raw, label, reason));
-    let master = device.master_clock_rate();
-    let ticks_per_sample = i64::try_from(master / 1_000_000).map_err(|_| "ticks per sample overflow")?.max(1);
-    if let Some(stopped) = queue_stopped(trial, raw) {
-        return Ok(stopped);
-    }
-    if let Err(error) = device.apply(Dir::Rx, 0, &Settings { rate: Some(1e6), freq: Some(1e9), gain: Some(0.0), ..Settings::default() }, None) {
-        return fail(error.message);
-    }
-    if let Some(stopped) = queue_stopped(trial, raw) {
-        return Ok(stopped);
-    }
-    if let Err(error) = device.rx_open(0, &[0]) {
-        return fail(error.message);
-    }
-    if let Some(stopped) = queue_stopped(trial, raw) {
-        return Ok(stopped);
-    }
-    let start = match device.time_now() {
-        Ok(now) => now.checked_add(ticks_for_ns(QUEUE_RX_START_LEAD_NS, master)?).ok_or("queue receive start overflow")?,
-        Err(error) => return fail(error.message),
-    };
-    if let Some(stopped) = queue_stopped(trial, raw) {
-        return Ok(stopped);
-    }
-    if let Err(error) = device.rx_start(0, start) {
-        return fail(error.message);
-    }
-    let stop = AtomicBool::new(false);
-    let progress = RxProgress::default();
-    let outcome = std::thread::scope(|scope| {
-        let _cancel = StopOnDrop(&stop);
-        scope.spawn(|| drain_receiver(device, raw, &stop, &progress, ticks_per_sample));
-        if let Err(reason) = wait_for_rx_samples(raw, &progress, Wall::from_millis(QUEUE_RX_READY_LIMIT_MS)) {
-            return Ok(queue_failed(trial, raw, label, reason));
-        }
-        queue_trial_calls(device, operations, plan, trial, label, raw, Some(&progress))
-    });
-    let (mut class, mut row) = outcome?;
-    // A failed trial sends nothing more; a good one stops the receiver and frees it, and a failed
-    // stop is not followed by the close.
-    if !raw.halted() {
-        match device.rx_stop(0, None) {
-            // The deadline can pass during the stop: the close is a new call and is looked at too.
-            Ok(()) => {
-                if !raw.halted() {
-                    device.rx_close(0)
-                }
-            }
-            Err(error) => {
-                let (failed, failed_row) = queue_failed(trial, raw, label, format!("rx_stop: {}", error.message));
-                row["classification"] = failed_row["classification"].clone();
-                row["reason"] = json!(format!("rx_stop: {}", error.message));
-                class = failed;
-            }
-        }
-    }
-    row["rx_streaming"] = json!(true);
-    row["rx_progress"] = progress.snapshot();
-    Ok((class, row))
-}
-
-fn queue_trial_calls(
-    device: &dyn Device,
-    operations: &[QueueOperation],
-    plan: &MeasurementPlan,
-    trial: usize,
-    label: &str,
-    raw: &RawGroup,
-    rx: Option<&RxProgress>,
-) -> Result<(QueueTrialClass, Json), String> {
-    // Every second trial waits for a shorter target (2/3 of the first's), so the blocked call's
-    // number can be compared across two delays: a queue's depth does not move with the delay.
-    let ahead_ns = if trial % 2 == 0 { plan.queue_ahead_ns / 3 * 2 } else { plan.queue_ahead_ns };
-    let ahead_ticks = ticks_for_ns(ahead_ns, device.master_clock_rate())?;
-    let spacing_ticks = ticks_for_ns(QUEUE_SPACING_NS, device.master_clock_rate())?;
-    let margin_ticks = ticks_for_ns(QUEUE_DRAIN_MARGIN_NS, device.master_clock_rate())?;
-    let return_limit_ticks = ticks_for_ns(QUEUE_CALL_TIME_LIMIT_NS, device.master_clock_rate())?;
-    if let Some(stopped) = queue_stopped(trial, raw) {
-        return Ok(stopped);
-    }
-    let h_before = Instant::now();
-    let d0 = match device.time_now() {
-        Ok(now) => now,
-        Err(error) => return Ok(queue_failed(trial, raw, label, error.message)),
-    };
-    let h_after = Instant::now();
-    let clock = QueueClock { d0_tick: d0, h_before_ns: 0, h_after_ns: u64::try_from(h_after.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX) };
-    let first_at = match d0.checked_add(ahead_ticks) {
-        Some(at) => at,
-        None => return Ok(queue_failed(trial, raw, label, "queue target tick overflow".to_owned())),
-    };
-    let stall_limit_ns = ahead_ns / 2;
-    if device.channels(Dir::Tx) == 0 {
-        return Ok(queue_failed(trial, raw, label, "queue probe requires transmit channel 0".to_owned()));
-    }
-    let master_clock_hz = device.master_clock_rate();
-    let mut calls = Vec::new();
-    let mut rows = Vec::new();
-    let mut last_accepted_at = None;
-    let mut operational_error: Option<String> = None;
-    let read_duration_ns = clock.h_after_ns - clock.h_before_ns;
-    if read_duration_ns <= QUEUE_CALL_TIME_LIMIT_NS {
-        if let Some(stopped) = queue_stopped(trial, raw) {
-            return Ok(stopped);
-        }
-        if let Err(error) = device.apply(Dir::Tx, 0, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None) {
-            return Ok(queue_failed(trial, raw, label, error.message));
-        }
-        for index in 0..plan.queue_max_calls {
-            // The deadline and the first failure are looked at before every call.
-            if raw.halted() {
-                operational_error = raw.failure();
-                break;
-            }
-            let index = i64::try_from(index).map_err(|_| "queue command count exceeds i64")?;
-            let at = first_at.checked_add(spacing_ticks.checked_mul(index).ok_or("queue command spacing overflow")?).ok_or("queue command time overflow")?;
-            let operation = &operations[index as usize % operations.len()];
-            if operation.dir == Dir::Tx && operation.settings.freq.is_some_and(|frequency| !SAFE_TX_HZ.contains(&frequency)) {
-                return Err("queue probe requested a TX frequency outside SAFE_TX_HZ".to_owned());
-            }
-            let started = Instant::now();
-            let applied = device.apply(operation.dir, 0, &operation.settings, Some(at));
-            let h_i = Instant::now();
-            let duration_ns = u64::try_from(h_i.duration_since(started).as_nanos()).unwrap_or(u64::MAX);
-            let h_i_ns = u64::try_from(h_i.duration_since(h_before).as_nanos()).unwrap_or(u64::MAX);
-            let apply_error = applied.as_ref().err().map(|error| error.message.clone());
-            let error = apply_error.clone();
-            if applied.is_ok() {
-                last_accepted_at = Some(at);
-            }
-            let bounds = queue_device_time_bounds(clock, h_i_ns, master_clock_hz);
-            calls.push(QueueCall { duration_ns, h_i_ns: Some(h_i_ns), error: error.clone() });
-            rows.push(json!({
-                "number": index + 1,
-                "direction": operation.dir.name(),
-                "scheduled_tick": at,
-                "duration_ns": duration_ns,
-                "h_i_ns": h_i_ns,
-                "device_time_lower_tick": bounds.map(|(lower, _)| lower),
-                "device_time_upper_tick": bounds.map(|(_, upper)| upper),
-                "apply_error": apply_error,
-            }));
-            if let Some(error) = error {
-                raw.fail(format!("queue condition {label}: {error}"));
-                operational_error = Some(error);
-                break;
-            }
-            if duration_ns > stall_limit_ns {
-                break;
-            }
-        }
-    }
-    let queue_class = classify_queue_trial(&calls, clock, first_at, stall_limit_ns, return_limit_ticks, master_clock_hz);
-    // After an error nothing more goes to the handle: no clock read, no untimed reset.
-    if let Some(last_at) = last_accepted_at.filter(|_| operational_error.is_none()) {
-        let target = last_at.checked_add(margin_ticks).ok_or("queue drain time overflow")?;
-        let timeout = Wall::from_nanos(ahead_ns.checked_add(QUEUE_DRAIN_MARGIN_NS + 2_000_000_000).ok_or("queue drain timeout overflow")?);
-        let waited = match rx {
-            // The received samples must pass the last command (their ticks are device ticks).
-            Some(progress) => wait_for_rx_end(raw, progress, target, timeout),
-            None => wait_for_device_tick(device, raw, target, timeout),
-        };
-        if let Err(error) = waited {
-            raw.fail(format!("queue condition {label}: {error}"));
-            operational_error = Some(error);
-        }
-    }
-    let reset_dir = operations.first().map_or(Dir::Rx, |operation| operation.dir);
-    if operational_error.is_none() && raw.halted() {
-        operational_error = raw.failure();
-    }
-    let untimed_error = if operational_error.is_some() {
-        None
-    } else {
-        let error = device.apply(reset_dir, 0, &Settings { freq: Some(1_000_000_000.0), ..Settings::default() }, None).err().map(|error| error.message);
-        if let Some(error) = &error {
-            raw.fail(format!("queue condition {label}: {error}"));
-        }
-        error
-    };
-    let class = finish_queue_trial(queue_class, operational_error, untimed_error.clone());
-    let depth = match &class {
-        QueueTrialClass::Success { depth } => Some(*depth),
-        _ => None,
-    };
-    let blocked_index = match &class {
-        QueueTrialClass::Success { depth } | QueueTrialClass::Ambiguous { depth } => Some(*depth),
-        _ => None,
-    };
-    let class_name = match &class {
-        QueueTrialClass::Success { .. } => "success",
-        QueueTrialClass::Ambiguous { .. } => "ambiguous",
-        QueueTrialClass::Incomplete { .. } => "incomplete",
-        QueueTrialClass::DeviceFailure { .. } => "device_failure",
-    };
-    let class_reason = match &class {
-        QueueTrialClass::Incomplete { reason } => Some((*reason).to_owned()),
-        QueueTrialClass::DeviceFailure { reason } => Some(reason.clone()),
-        QueueTrialClass::Success { .. } | QueueTrialClass::Ambiguous { .. } => None,
-    };
-    Ok((
-        class,
-        json!({
-            "trial": trial,
-            "ahead_ns": ahead_ns,
-            "blocked_index": blocked_index,
-            "d0_tick": clock.d0_tick,
-            "h_before_ns": clock.h_before_ns,
-            "h_after_ns": clock.h_after_ns,
-            "h_after_minus_h_before_ns": read_duration_ns,
-            "first_command_tick": first_at,
-            "classification": class_name,
-            "reason": class_reason,
-            "depth": depth,
-            "calls": rows,
-            "untimed_apply_error": untimed_error,
-        }),
-    ))
-}
-
-fn queue_successes(trials: &[QueueTrialClass]) -> usize {
-    trials.iter().filter(|trial| matches!(trial, QueueTrialClass::Success { .. })).count()
-}
-
-/// A condition's trials stop at `required_trials` successes or `max_trials` trials, whichever comes first.
-fn queue_condition_done(trials: &[QueueTrialClass], required_trials: usize, max_trials: usize) -> bool {
-    queue_successes(trials) >= required_trials || trials.len() >= max_trials
-}
-
-fn summarize_queue_depth(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize) -> Option<(usize, String, usize)> {
-    if conditions.iter().any(|(_, trials)| queue_successes(trials) < required_trials) {
-        return None;
-    }
-    conditions
-        .iter()
-        .flat_map(|(condition, trials)| {
-            trials.iter().filter_map(move |trial| match trial {
-                QueueTrialClass::Success { depth } => Some((*depth, condition.clone(), trials.len())),
-                QueueTrialClass::Ambiguous { .. } | QueueTrialClass::Incomplete { .. } | QueueTrialClass::DeviceFailure { .. } => None,
-            })
-        })
-        .min_by_key(|(depth, _, _)| *depth)
-}
-
-/// The blocked call's number per target delay, from the trials that stalled once in the window
-/// (`success` and `ambiguous`): `agree` is whether one number holds for every delay, null when
-/// fewer than two delays gave one. A queue's depth does not move with the delay; a stall for
-/// another reason (a slow host) would (INFERRED).
-fn queue_index_agreement(trials: &[Json]) -> Json {
-    let mut by_ahead: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    for row in trials.iter().filter(|row| matches!(row["classification"].as_str(), Some("success" | "ambiguous"))) {
-        if let (Some(ahead), Some(index)) = (row["ahead_ns"].as_u64(), row["blocked_index"].as_u64()) {
-            by_ahead.entry(ahead).or_default().push(index);
-        }
-    }
-    let mut all: Vec<u64> = by_ahead.values().flatten().copied().collect();
-    all.sort_unstable();
-    all.dedup();
-    let agree = (by_ahead.len() >= 2).then_some(all.len() == 1);
-    json!({ "by_ahead_ns": by_ahead.iter().map(|(ahead, indexes)| (ahead.to_string(), json!(indexes))).collect::<serde_json::Map<_, _>>(), "agree": agree })
-}
-
-fn queue_depth_value(conditions: &[(String, Vec<QueueTrialClass>)], required_trials: usize, max_trials: usize) -> Result<ValueRecord, String> {
-    let key = Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?;
-    Ok(match summarize_queue_depth(conditions, required_trials) {
-        Some((depth, condition, trials)) => ValueRecord::Measured { key, worst: model::Worst::Number(depth as f64), trials: observation_trials(trials)?, condition, test: QUEUE_TEST.to_owned() },
-        None => ValueRecord::Unmeasured {
-            key,
-            reason: format!(
-                "Phase 8 stage 3f did not obtain {required_trials} successful back-pressure trials in every queue condition within at most {max_trials} trials each ({}).",
-                conditions.iter().map(|(condition, trials)| format!("{condition}: {} successes in {} trials", queue_successes(trials), trials.len())).collect::<Vec<_>>().join(", ")
-            ),
-        },
-    })
-}
-
-/// Measures per-condition timed-apply queue depth on the raw device interface. The value is the
-/// least depth over the conditions measured. The first device error or the group's time limit
-/// stops the group (`raw`): the value is `unmeasured` and the handle gets nothing more.
-pub fn measure_command_queue_depth(device: Arc<dyn Device>, plan: &MeasurementPlan, raw: &RawGroup) -> Result<MeasurementGroup, String> {
-    plan.validate()?;
-    let mut group = MeasurementGroup::default();
-    let mut condition_trials = Vec::new();
-    let mut observed_conditions = Vec::new();
-    let mut total_trials = 0usize;
-    'conditions: for (condition, operations) in queue_conditions() {
-        let mut classes = Vec::new();
-        let mut trials = Vec::new();
-        while !queue_condition_done(&classes, plan.queue_trials, plan.queue_max_trials) {
-            if raw.halted() {
-                break;
-            }
-            let (class, row) = queue_trial(&*device, &operations, plan, classes.len() + 1, &condition.id, raw)?;
-            classes.push(class);
-            trials.push(row);
-            total_trials += 1;
-        }
-        if !trials.is_empty() || raw.failure().is_none() {
-            observed_conditions.push(json!({ "id": condition.id.clone(), "trial_count": classes.len(), "success_count": queue_successes(&classes), "blocked_index_across_ahead": queue_index_agreement(&trials), "trials": trials }));
-            condition_trials.push((condition.id.clone(), classes));
-            group.conditions.push(condition);
-        }
-        if raw.failure().is_some() {
-            break 'conditions;
-        }
-    }
-    group.values.push(match raw.unmeasured(Key::parse("radio.timing.command_queue_depth").map_err(|error| error.to_string())?, "the queue-depth trials") {
-        Some(value) => value,
-        None => queue_depth_value(&condition_trials, plan.queue_trials, plan.queue_max_trials)?,
-    });
-    group.observations.push(observation("raw_command_queue_depth", QUEUE_TEST, None, observation_trials(total_trials.max(1))?, json!({
-        "ahead_ns": plan.queue_ahead_ns,
-        "required_successes": plan.queue_trials,
-        "max_trials": plan.queue_max_trials,
-        "spacing_ns": QUEUE_SPACING_NS,
-        "stall_limit_ns": "half of each trial's own ahead_ns (the trial rows give ahead_ns and every call's duration_ns)",
-        "call_time_limit_ns": QUEUE_CALL_TIME_LIMIT_NS,
-        "host_time_origin": "h_before_ns; all host timestamps are offsets from h_before",
-        "clock_rate_assumption": "device and host clocks advance at the same rate; drift is ignored (INFERRED)",
-        "device_time_bounds": "lower=d0+(h_i-h_after); upper=d0+(h_i-h_before)",
-        "depth_unit": "timed_apply_calls",
-        "depth_definition": "the count of timed Device::apply calls (high-level operations), not device FIFO entries",
-        "back_pressure_attribution": "INFERRED",
-        "back_pressure_basis": "host apply duration and device time do not directly prove credit wait",
-        "value_rule": "the least depth over the conditions measured; the condition is the one that gave it",
-        "rx_frequency_streaming": "queue-rx-frequency opens the receiver, starts it, and drains it on another thread until after the last command's time; INFERRED that a DDC timed command leaves its FIFO only with a sample whose time reaches it (UHD axi_tag_time.v:206-211)",
-        "excluded_conditions": QUEUE_EXCLUDED_CONDITIONS.iter().map(|(id, reason)| json!({ "id": id, "reason": reason })).collect::<Vec<_>>(),
-        "after_a_failure": "once a failure or the limit latches, the other thread begins at most one more device call (its latch check came before the latch), which ends by UHD's 10 s timeout, and nothing after it; the two threads' calls are not serialised",
-        "halted": raw.failure(),
-        "power_cycle_note": raw.failure().map(|_| "a wedged DDC or DUC control port needs a power cycle of the device; the group sent nothing more after the first error"),
-        "max_calls": plan.queue_max_calls,
-        "classification": "success: the blocked call's device-time interval lies wholly at or after the first command time; ambiguous: it straddles that time (never a success, never counted in the value); incomplete: the call returned before that time or too long after it, or the trial did not stall exactly once",
-        "ambiguous_trials": condition_trials.iter().flat_map(|(_, classes)| classes).filter(|class| matches!(class, QueueTrialClass::Ambiguous { .. })).count(),
-        "trial_ahead_ns": "odd trials wait ahead_ns; even trials wait two thirds of it, to compare the blocked call's number across two delays",
-        "conditions": observed_conditions,
-    }))?);
-    Ok(group)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1772,7 +1107,7 @@ fn raw_condition(id: &str) -> Condition {
 }
 
 fn coercion_observation(name: String, condition: &str, result: Json, trials: usize) -> Result<Observation, String> {
-    observation(name, QUEUE_TEST, Some(condition.to_owned()), observation_trials(trials.max(1))?, result)
+    observation(name, RAW_TEST, Some(condition.to_owned()), observation_trials(trials.max(1))?, result)
 }
 
 fn key_name(direction: Dir, channel: usize, field: &str) -> String {
@@ -1785,7 +1120,7 @@ fn key_name(direction: Dir, channel: usize, field: &str) -> String {
 pub fn measure_coercion(device: Arc<dyn Device>, description: &channels::Description, plan: &MeasurementPlan, raw: &RawGroup) -> Result<MeasurementGroup, String> {
     let condition = "raw-device-coercion";
     let mut group = MeasurementGroup { conditions: vec![raw_condition(condition)], ..MeasurementGroup::default() };
-    let test = QUEUE_TEST;
+    let test = RAW_TEST;
     for (dir, channels) in [(Dir::Rx, &description.rx), (Dir::Tx, &description.tx)] {
         for (channel_index, channel) in channels.iter().enumerate() {
             // The transmitter sits at its safe 1 GHz while the gain and antenna sweeps run.
@@ -1959,14 +1294,13 @@ impl Drop for RawRun<'_> {
     }
 }
 
-/// The raw group: queue depth, then coercion, then the restore of the unstreamed bench state.
+/// The raw group: coercion, then the restore of the unstreamed bench state.
 /// Returns the group, why the group stopped if it did, and the restore's error: the last two are the
 /// caller's to report once the record is written. After a stop the caller should leak the device
 /// handle (`std::mem::forget`): its teardown would touch the control port.
 pub fn measure_raw_group(device: Arc<dyn Device>, description: &channels::Description, plan: &MeasurementPlan) -> Result<(MeasurementGroup, Option<String>, Option<String>), String> {
     let mut run = RawRun { device: &*device, description, raw: RawGroup::new(plan), restored: false };
-    let mut group = measure_command_queue_depth(device.clone(), plan, &run.raw)?;
-    group.append(measure_coercion(device.clone(), description, plan, &run.raw)?)?;
+    let mut group = measure_coercion(device.clone(), description, plan, &run.raw)?;
     run.restored = true;
     let (status, error) = match run.raw.failure() {
         Some(failure) => ("skipped", Some(format!("the group stopped ({failure}); nothing was sent to the device afterwards, which may need a power cycle"))),
@@ -1977,7 +1311,7 @@ pub fn measure_raw_group(device: Arc<dyn Device>, description: &channels::Descri
     };
     // Read after the restore: a restore that failed latched the group too.
     let stopped = run.raw.failure();
-    group.observations.push(observation("raw_restore", QUEUE_TEST, None, 1, json!({ "status": status, "detail": error }))?);
+    group.observations.push(observation("raw_restore", RAW_TEST, None, 1, json!({ "status": status, "detail": error }))?);
     Ok((group, stopped, error.filter(|_| status == "failed")))
 }
 
@@ -2054,7 +1388,7 @@ impl Drop for DeviceLease {
 pub fn run_raw_group_leased(lease: &mut DeviceLease, groups: &mut GroupRun, description: &channels::Description, plan: &MeasurementPlan) -> (Option<String>, Option<String>) {
     let (mut stopped, mut restored) = (None, None);
     let device = lease.device();
-    groups.run("raw_queue_depth_and_coercion", &raw_group_keys(description), || {
+    groups.run("raw_coercion", &raw_group_keys(description), || {
         let (group, stop, restore_error) = measure_raw_group(device.clone(), description, plan)?;
         (stopped, restored) = (stop, restore_error);
         Ok(group)
@@ -2085,21 +1419,18 @@ pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static 
     ]
 }
 
-/// The value keys the raw group supplies: queue depth, and each channel's gain, antenna and frequency keys and each stream's rate.
+/// The value keys the raw group supplies: each channel's gain, antenna and frequency keys and each stream's rate.
 pub fn raw_group_keys(description: &channels::Description) -> Vec<String> {
-    let mut keys = vec!["radio.timing.command_queue_depth".to_owned()];
-    keys.extend(
-        unmeasured_values(description)
-            .into_iter()
-            .map(|value| match value {
-                ValueRecord::Measured { key, .. } | ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
-            })
-            .filter(|key| {
-                ["gain_db", "gain_step_db", "antenna", "frequency_hz", "frequency_step_hz", "sample_rate_hz"].iter().any(|leaf| key.ends_with(&format!(".{leaf}")))
-                    && ["radio.rx.", "radio.tx."].iter().any(|prefix| key.starts_with(prefix))
-            }),
-    );
-    keys
+    unmeasured_values(description)
+        .into_iter()
+        .map(|value| match value {
+            ValueRecord::Measured { key, .. } | ValueRecord::Unmeasured { key, .. } => key.as_str().to_owned(),
+        })
+        .filter(|key| {
+            ["gain_db", "gain_step_db", "antenna", "frequency_hz", "frequency_step_hz", "sample_rate_hz"].iter().any(|leaf| key.ends_with(&format!(".{leaf}")))
+                && ["radio.rx.", "radio.tx."].iter().any(|prefix| key.starts_with(prefix))
+        })
+        .collect()
 }
 
 /// Whether the record's raw probes can run on `selector`'s layout. They drive device channel 0, slot A, at 1 GHz, so with a
@@ -2274,7 +1605,7 @@ impl GroupRun {
                 self.measured.values.push(ValueRecord::Unmeasured { key, reason: format!("Phase 8 stage 3c-2c: group `{name}` failed: {error}") });
             }
         }
-        if let Ok(row) = observation(format!("group_failure_{name}"), QUEUE_TEST, None, 1, json!({ "group": name, "error": error })) {
+        if let Ok(row) = observation(format!("group_failure_{name}"), RAW_TEST, None, 1, json!({ "group": name, "error": error })) {
             self.measured.observations.push(row);
         }
         self.failed.push((name.to_owned(), error));
@@ -2326,7 +1657,7 @@ impl GroupRun {
 
     fn record_reopened_failure(&mut self, name: &str, keys: &[String], error: String) {
         self.measured.invalidate_values(keys, &format!("reopened group `{name}` failed: {error}"));
-        if let Ok(row) = observation(format!("group_failure_{name}"), QUEUE_TEST, None, 1, json!({ "group": name, "error": error })) {
+        if let Ok(row) = observation(format!("group_failure_{name}"), RAW_TEST, None, 1, json!({ "group": name, "error": error })) {
             self.measured.observations.push(row);
         }
         self.failed.push((name.to_owned(), error));
@@ -4349,146 +3680,6 @@ mod tests {
     }
 
     #[test]
-    fn command_queue_depth_requires_backpressure_timing_and_success_in_every_condition() {
-        let call = |duration_ns, h_i_ns, error: Option<&str>| QueueCall { duration_ns, h_i_ns, error: error.map(str::to_owned) };
-        let clock = QueueClock { d0_tick: 1_000, h_before_ns: 0, h_after_ns: 10 };
-        let first_at = 1_100;
-        let stall_limit = 1_500_000_000;
-        let return_limit_ticks = 100;
-        let classify = |calls: &[QueueCall], timing| classify_queue_trial(calls, timing, first_at, stall_limit, return_limit_ticks, 1_000_000_000);
-        assert_eq!(classify(&[call(1_000_000, Some(99), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Success { depth: 1 });
-        assert_eq!(classify(&[call(stall_limit + 1, Some(200), None)], QueueClock { h_after_ns: 0, ..clock }), QueueTrialClass::Success { depth: 0 });
-        assert!(matches!(classify(&[call(stall_limit, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&vec![call(1_000_000, Some(99), None); 4], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(100_000_001, Some(99), None)], clock), QueueTrialClass::Incomplete { .. }));
-        // A return whose interval straddles the first command time is ambiguous, not a success.
-        assert_eq!(classify(&[call(stall_limit + 1, Some(109), None)], clock), QueueTrialClass::Ambiguous { depth: 0 });
-        assert!(matches!(classify(&[call(stall_limit + 1, Some(99), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(stall_limit + 1, Some(210), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(stall_limit + 1, None, None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(1_000_000, Some(100), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(1_000_000, Some(101), None), call(stall_limit + 1, Some(111), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(1_000_000, None, None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(QUEUE_CALL_TIME_LIMIT_NS, Some(99), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(classify(&[call(stall_limit + 1, Some(110), None), call(stall_limit + 1, Some(110), None)], clock), QueueTrialClass::Incomplete { .. }));
-        assert!(matches!(
-            classify(&[], QueueClock { h_after_ns: QUEUE_CALL_TIME_LIMIT_NS + 1, ..clock }),
-            QueueTrialClass::Incomplete { reason: "the device-time read took too long to bound the host-clock interval" }
-        ));
-        assert!(matches!(classify(&[call(1, Some(110), Some("apply failed"))], clock), QueueTrialClass::DeviceFailure { .. }));
-        assert_eq!(
-            finish_queue_trial(QueueTrialClass::Success { depth: 1 }, None, Some("untimed reset failed".to_owned())),
-            QueueTrialClass::DeviceFailure { reason: "untimed reset failed".to_owned() }
-        );
-        let conditions = [
-            ("a".to_owned(), vec![QueueTrialClass::Success { depth: 11 }, QueueTrialClass::Success { depth: 9 }]),
-            ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Success { depth: 8 }]),
-        ];
-        assert_eq!(summarize_queue_depth(&conditions, 2), Some((7, "b".to_owned(), 2)));
-        assert!(matches!(queue_depth_value(&conditions, 2, 15).unwrap(), ValueRecord::Measured {
-            key, worst: model::Worst::Number(value), trials: 2, condition, test,
-        } if key.as_str() == "radio.timing.command_queue_depth" && value == 7.0 && condition == "b" && test == QUEUE_TEST));
-        let incomplete = [
-            ("a".to_owned(), vec![QueueTrialClass::Success { depth: 11 }, QueueTrialClass::Success { depth: 9 }]),
-            ("b".to_owned(), vec![QueueTrialClass::Success { depth: 7 }, QueueTrialClass::Incomplete { reason: "no stall" }]),
-        ];
-        assert!(summarize_queue_depth(&incomplete, 2).is_none());
-        assert!(matches!(queue_depth_value(&incomplete, 2, 15).unwrap(), ValueRecord::Unmeasured { reason, .. } if reason.contains("2 successful back-pressure trials in every queue condition")));
-    }
-
-    #[test]
-    fn the_twelve_historical_blocked_returns_are_classified_by_their_interval() {
-        // Stage 3e, F1: the 12 raw-probe returns of the 2026-10-20 and 10-27 benches, in ms
-        // after the 3 s target (+0.17 ... -2.42), against a 50 us device-time read. The lower
-        // bound is the return less the read, the upper the return: at or after the target is
-        // a success, a straddle ambiguous, an upper bound before the target incomplete.
-        let first_at = 3_000_000_000i64;
-        let read_ns = 50_000u64;
-        let clock = QueueClock { d0_tick: 0, h_before_ns: 0, h_after_ns: read_ns };
-        let stall_limit = 1_500_000_000;
-        let classify = |delta_us: i64| {
-            let h_i = (first_at + delta_us * 1_000) as u64;
-            let calls = [QueueCall { duration_ns: 1_000_000, h_i_ns: Some(first_at as u64 - 100_000_000), error: None }, QueueCall { duration_ns: stall_limit + 1, h_i_ns: Some(h_i), error: None }];
-            classify_queue_trial(&calls, clock, first_at, stall_limit, 100_000_000, 1_000_000_000)
-        };
-        let readings = [170, 120, 110, 110, 70, 50, 40, 30, 10, -10, -1_400, -2_420];
-        let classes: Vec<_> = readings.iter().map(|us| classify(*us)).collect();
-        assert_eq!(classes.iter().filter(|class| matches!(class, QueueTrialClass::Success { depth: 1 })).count(), 6, "{classes:?}");
-        assert_eq!(classes.iter().filter(|class| matches!(class, QueueTrialClass::Ambiguous { depth: 1 })).count(), 3, "{classes:?}");
-        assert_eq!(classes.iter().filter(|class| matches!(class, QueueTrialClass::Incomplete { .. })).count(), 3, "{classes:?}");
-        // A slow call that is no queue block returns well before the target: never a success.
-        assert!(matches!(classify(-1_000_000), QueueTrialClass::Incomplete { reason } if reason.contains("returned before")));
-        // One that returns long after it is incomplete too.
-        assert!(matches!(classify(150_000), QueueTrialClass::Incomplete { reason } if reason.contains("too long after")));
-        // Ambiguous trials never count: three of five successes do not make five.
-        let mixed = [("a".to_owned(), vec![QueueTrialClass::Success { depth: 8 }, QueueTrialClass::Ambiguous { depth: 2 }, QueueTrialClass::Success { depth: 9 }])];
-        // The value comes from successes only; the trial count is what the limiting condition actually ran.
-        assert_eq!(summarize_queue_depth(&mixed, 2), Some((8, "a".to_owned(), 3)));
-        assert!(summarize_queue_depth(&mixed, 3).is_none());
-    }
-
-    #[test]
-    fn queue_trials_go_on_until_the_required_successes_or_the_trial_limit() {
-        use QueueTrialClass::{Ambiguous, DeviceFailure, Incomplete, Success};
-        let sequence =
-            [Success { depth: 8 }, Ambiguous { depth: 2 }, Incomplete { reason: "x" }, Success { depth: 9 }, DeviceFailure { reason: "y".to_owned() }, Success { depth: 7 }, Success { depth: 8 }];
-        // Mixed trials: the loop's own stop test, applied as the loop applies it, stops at the third success and runs nothing after it.
-        let run = |required: usize, max: usize, pool: &[QueueTrialClass]| {
-            let mut classes = Vec::new();
-            while !queue_condition_done(&classes, required, max) {
-                classes.push(pool[classes.len()].clone());
-            }
-            classes
-        };
-        let stopped = run(3, 15, &sequence);
-        assert_eq!(stopped.len(), 6, "{stopped:?}");
-        assert_eq!(queue_successes(&stopped), 3);
-        // Ambiguous, incomplete and failed trials never count: with the limit at 5 the third success does not come.
-        let limited = run(3, 5, &sequence);
-        assert_eq!(limited.len(), 5);
-        assert!(queue_successes(&limited) < 3);
-        assert!(summarize_queue_depth(&[("a".to_owned(), limited.clone())], 3).is_none());
-        let reason = match queue_depth_value(&[("a".to_owned(), limited)], 3, 5).unwrap() {
-            ValueRecord::Unmeasured { reason, .. } => reason,
-            other => panic!("{other:?}"),
-        };
-        // Five successes that took eight trials are recorded as eight trials, the count of the condition that gave the value.
-        let slow = [
-            (
-                "a".to_owned(),
-                vec![
-                    Ambiguous { depth: 1 },
-                    Success { depth: 9 },
-                    Incomplete { reason: "x" },
-                    Success { depth: 8 },
-                    Ambiguous { depth: 1 },
-                    Success { depth: 8 },
-                    DeviceFailure { reason: "y".to_owned() },
-                    Success { depth: 8 },
-                ],
-            ),
-            ("b".to_owned(), vec![Success { depth: 12 }, Success { depth: 12 }]),
-        ];
-        assert!(matches!(queue_depth_value(&slow, 2, 15).unwrap(), ValueRecord::Measured { trials: 8, condition, worst: model::Worst::Number(value), .. } if condition == "a" && value == 8.0));
-        assert!(reason.contains("at most 5 trials") && reason.contains("a: 2 successes in 5 trials"), "{reason}");
-        assert!(queue_condition_done(&[Success { depth: 1 }], 1, 15));
-        assert!(!queue_condition_done(&[Ambiguous { depth: 1 }], 1, 2));
-        assert!(queue_condition_done(&[Ambiguous { depth: 1 }, Ambiguous { depth: 1 }], 1, 2));
-    }
-
-    #[test]
-    fn the_blocked_call_s_number_is_compared_across_two_target_delays() {
-        let row = |class: &str, ahead: u64, index: Option<u64>| json!({ "classification": class, "ahead_ns": ahead, "blocked_index": index });
-        let same = queue_index_agreement(&[row("success", 3, Some(8)), row("ambiguous", 2, Some(8)), row("success", 3, Some(8))]);
-        assert_eq!(same["agree"], json!(true));
-        assert_eq!(same["by_ahead_ns"]["2"], json!([8]));
-        // A number that moves with the delay is no queue depth.
-        assert_eq!(queue_index_agreement(&[row("success", 3, Some(8)), row("success", 2, Some(5))])["agree"], json!(false));
-        // Incomplete trials say nothing; one delay alone has nothing to compare.
-        assert_eq!(queue_index_agreement(&[row("success", 3, Some(8)), row("incomplete", 2, Some(5))])["agree"], json!(null));
-    }
-
-    #[test]
     fn coercion_readbacks_keep_only_exact_gain_rate_and_antenna_values() {
         let points = vec![NumericReadback { requested: 1.0, returned: Some(1.0 + 1e-13), error: None }, NumericReadback { requested: 2.0, returned: Some(2.1), error: None }];
         let gain = coercion_grid_value("radio.rx.c0.gain_db", &points, "coercion", "test", gain_readback_matches).unwrap();
@@ -5222,7 +4413,7 @@ mod tests {
         let tx_start_reason = reason("radio.timing.tx_start_lead_ns");
         let overflow_reason = reason("radio.timing.overflow_restart_gap_ns");
         let tx_throughput_reason = reason("radio.perf.tx_bytes_per_s");
-        assert!(queue_reason.contains("3c-2a") && queue_reason.contains("back-pressure"), "{queue_reason}");
+        assert!(queue_reason.contains("S2a-i-α") && queue_reason.contains("S2b-i"), "{queue_reason}");
         assert!(gain_reason.contains("3c-2a") && gain_reason.contains("coercion read-back"), "{gain_reason}");
         assert!(antenna_reason.contains("3c-2a") && antenna_reason.contains("coercion read-back"), "{antenna_reason}");
         assert!(sample_rate_reason.contains("3c-2a") && sample_rate_reason.contains("sample-rate read-back"), "{sample_rate_reason}");
@@ -5343,7 +4534,6 @@ mod tests {
         let names = [
             "hw_b8_raw_device_lead",
             "hw_b8_raw_restart_lead",
-            "hw_b8_raw_queue_depth",
             "hw_b8_raw_in_flight_window",
             "hw_b8_raw_burst_gap",
             "hw_b8_raw_empty_eob_gap",
@@ -5376,10 +4566,8 @@ mod tests {
     #[test]
     fn measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts() {
         assert_eq!(MeasurementPlan::default().overflow_trials, 5);
-        assert_eq!(MeasurementPlan::default().queue_trials, 5);
         let defaults = MeasurementPlan::from_env(&BTreeMap::new()).unwrap();
         assert_eq!((defaults.step_trials, defaults.overflow_trials, defaults.throughput_seconds, defaults.loopback_trials), (100, 5, 60, 20));
-        assert_eq!((defaults.queue_trials, defaults.queue_ahead_ns, defaults.queue_max_calls), (5, 3_000_000_000, 512));
         // RM-6 holds the receive candidates to the release window.
         assert_eq!(defaults.rx_start_leads_ns, [3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]);
         assert_eq!(MeasurementPlan::rehearsal().rx_start_leads_ns, [3_000_000, 5_000_000]);
@@ -5397,19 +4585,10 @@ mod tests {
             ("EZSDR_MEASURE_OVERFLOW_TRIALS".to_owned(), "3".to_owned()),
             ("EZSDR_MEASURE_THROUGHPUT_SECS".to_owned(), "3".to_owned()),
             ("EZSDR_MEASURE_LOOPBACK_TRIALS".to_owned(), "4".to_owned()),
-            ("EZSDR_MEASURE_QUEUE_TRIALS".to_owned(), "2".to_owned()),
         ]);
         let custom = MeasurementPlan::from_env(&values).unwrap();
         assert_eq!((custom.step_trials, custom.overflow_trials, custom.throughput_seconds, custom.loopback_trials), (2, 3, 3, 4));
-        assert_eq!(custom.queue_trials, 2);
-        for name in [
-            "EZSDR_MEASURE_STEP_TRIALS",
-            "EZSDR_MEASURE_OVERFLOW_TRIALS",
-            "EZSDR_MEASURE_THROUGHPUT_SECS",
-            "EZSDR_MEASURE_LOOPBACK_TRIALS",
-            "EZSDR_MEASURE_QUEUE_TRIALS",
-            "EZSDR_MEASURE_QUEUE_MAX_TRIALS",
-        ] {
+        for name in ["EZSDR_MEASURE_STEP_TRIALS", "EZSDR_MEASURE_OVERFLOW_TRIALS", "EZSDR_MEASURE_THROUGHPUT_SECS", "EZSDR_MEASURE_LOOPBACK_TRIALS"] {
             for invalid in ["0", "not-a-number"] {
                 assert!(MeasurementPlan::from_env(&BTreeMap::from([(name.to_owned(), invalid.to_owned())])).is_err(), "{name}={invalid}");
             }
@@ -5417,19 +4596,6 @@ mod tests {
         let mut no_overflow_trials = defaults;
         no_overflow_trials.overflow_trials = 0;
         assert!(no_overflow_trials.validate().is_err());
-        let no_queue_calls = MeasurementPlan { queue_max_calls: 0, ..MeasurementPlan::default() };
-        assert!(no_queue_calls.validate().is_err());
-        let too_many_queue_trials = MeasurementPlan { queue_trials: (u32::MAX as usize / 3) + 1, queue_max_trials: (u32::MAX as usize / 3) + 1, ..MeasurementPlan::default() };
-        assert!(too_many_queue_trials.validate().is_err());
-        assert_eq!(MeasurementPlan::default().queue_max_trials, 15);
-        assert_eq!(custom.queue_max_trials, 15);
-        // The limit may not lie below the successes a condition needs.
-        let limit_below_required = MeasurementPlan { queue_max_trials: 4, ..MeasurementPlan::default() };
-        assert!(limit_below_required.validate().is_err());
-        assert!(MeasurementPlan { queue_max_trials: 5, ..MeasurementPlan::default() }.validate().is_ok());
-        assert!(MeasurementPlan::from_env(&BTreeMap::from([("EZSDR_MEASURE_QUEUE_MAX_TRIALS".to_owned(), "4".to_owned())])).is_err());
-        assert_eq!(MeasurementPlan::from_env(&BTreeMap::from([("EZSDR_MEASURE_QUEUE_MAX_TRIALS".to_owned(), "9".to_owned())])).unwrap().queue_max_trials, 9);
-        assert!(MeasurementPlan::from_env(&BTreeMap::from([("EZSDR_MEASURE_QUEUE_MAX_TRIALS".to_owned(), "0".to_owned())])).is_err());
         let mut missing_stall = MeasurementPlan::default();
         missing_stall.overflow_stall_ms.pop();
         assert!(missing_stall.validate().is_err());
@@ -5523,26 +4689,6 @@ mod tests {
         write_record(&new_path, &record).unwrap();
         let saved: Record = serde_json::from_slice(&std::fs::read(new_path).unwrap()).unwrap();
         assert_eq!(saved, record);
-    }
-
-    #[test]
-    fn queue_conditions_stream_only_for_receive_frequency_and_the_value_is_the_least_depth() {
-        let conditions = queue_conditions();
-        let ids: Vec<_> = conditions.iter().map(|(condition, _)| condition.id.as_str()).collect();
-        assert_eq!(ids, ["queue-rx-gain", "queue-tx-gain", "queue-rx-frequency"]);
-        let streaming: Vec<_> = conditions.iter().map(|(_, operations)| queue_streams_rx(operations)).collect();
-        assert_eq!(streaming, [false, false, true]);
-        assert!(conditions.iter().all(|(_, operations)| operations.iter().all(|operation| operation.dir == Dir::Rx || operation.settings.freq.is_none())), "no transmit frequency operation is queued");
-        // The value is the least depth over every condition measured, and names the condition that gave it.
-        let measured = vec![
-            ("queue-rx-gain".to_owned(), vec![QueueTrialClass::Success { depth: 9 }, QueueTrialClass::Success { depth: 12 }]),
-            ("queue-tx-gain".to_owned(), vec![QueueTrialClass::Success { depth: 10 }, QueueTrialClass::Success { depth: 11 }]),
-            ("queue-rx-frequency".to_owned(), vec![QueueTrialClass::Success { depth: 14 }, QueueTrialClass::Success { depth: 13 }]),
-        ];
-        assert_eq!(summarize_queue_depth(&measured, 2), Some((9, "queue-rx-gain".to_owned(), 2)));
-        let mut slower = measured;
-        slower[0].1 = vec![QueueTrialClass::Success { depth: 15 }, QueueTrialClass::Success { depth: 16 }];
-        assert_eq!(summarize_queue_depth(&slower, 2), Some((10, "queue-tx-gain".to_owned(), 2)));
     }
 
     #[test]

@@ -1,0 +1,21 @@
+# Note 48 S2a-i-α (the raw queue measurement group, `measure_command_queue_depth` and its trials, drain and command thread): tests dropped with the group, each cited by design/18 UR-34 or by a mutation row's killer.
+# The queue group's trial classification, its drain, command thread and receiver-stream conditions:
+command_queue_depth_requires_backpressure_timing_and_success_in_every_condition -> -
+the_twelve_historical_blocked_returns_are_classified_by_their_interval -> -
+the_blocked_call_s_number_is_compared_across_two_target_delays -> -
+queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number -> -
+queue_trials_go_on_until_the_required_successes_or_the_trial_limit -> -
+queue_conditions_stream_only_for_receive_frequency_and_the_value_is_the_least_depth -> -
+queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency -> -
+a_started_receiver_that_returns_no_samples_stops_the_group_before_any_setting_goes_out -> -
+a_receiver_whose_samples_stop_short_of_the_last_command_fails_the_trial -> -
+a_receiver_whose_samples_pass_the_last_command_completes_the_trial -> -
+a_failed_receiver_stop_is_not_followed_by_a_close -> -
+the_deadline_passing_during_the_receiver_s_stop_leaves_the_close_unsent -> -
+the_drain_begins_no_call_after_the_command_thread_latches -> -
+the_command_thread_begins_no_call_after_the_drain_latches -> -
+a_panic_on_the_command_thread_stops_the_drain_and_the_record_continues -> -
+# Raw-group tests whose only claim was the queue condition or the drain (their coercion counterparts remain):
+raw_group_sends_nothing_after_a_failed_clock_read -> -
+raw_group_sends_nothing_after_a_failed_timed_apply -> -
+raw_group_stops_a_streaming_trial_without_stopping_or_resetting_the_receiver -> -

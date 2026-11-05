@@ -9,9 +9,8 @@ use serde_json::{Value as Json, json};
 
 pub const PROBE_ROW_LIMIT: usize = 65_536;
 
-type TimedApplyHook = Box<dyn FnMut(usize) + Send>;
+type ApplyHook = Box<dyn FnMut(usize) + Send>;
 type RxScript = Box<dyn FnMut(usize) -> RxRecv + Send>;
-type StopHook = Box<dyn FnMut() + Send>;
 type KeptBlocks = Option<Vec<(i64, Vec<Iq>)>>;
 
 struct ReceiveGate {
@@ -26,19 +25,16 @@ pub struct ProbeDevice {
     rows: Mutex<Vec<Json>>,
     dropped_rows: AtomicUsize,
     tx_eob_count: AtomicUsize,
-    /// The calls in order: `apply`, `apply_timed`, `apply_failed`, `apply_timed_failed`, `time_now`, `rx_open`, `tx_open`, `rx_recv`, `rx_stop`, `rx_close` and `drop`.
+    /// The calls in order: `apply`, `apply_timed`, `apply_failed`, `time_now`, `rx_open`, `tx_open`, `rx_recv`, `rx_stop`, `rx_close` and `drop`.
     control_log: Arc<Mutex<Vec<&'static str>>>,
     /// Replaces what `rx_recv` returns while it holds a sequence; an empty sequence times out.
     rx_script: Mutex<Option<RxScript>>,
     rx_calls: AtomicUsize,
-    after_rx_stop: Mutex<Option<StopHook>>,
     fail_restoring_apply: AtomicBool,
-    /// Called with the count (1-based) of the timed `apply` about to go to the device.
-    before_timed_apply: Mutex<Option<TimedApplyHook>>,
+    /// Called with the count (1-based) of the untimed `apply` about to go to the device.
+    before_untimed_apply: Mutex<Option<ApplyHook>>,
+    untimed_applies: AtomicUsize,
     timed_applies: AtomicUsize,
-    fail_rx_stop: AtomicBool,
-    /// The timed `apply` (1-based) that fails, once counted down to 1.
-    fail_timed_apply: Mutex<Option<usize>>,
     /// The untimed `apply` (1-based) that fails, once counted down to 1.
     fail_untimed_apply: Mutex<Option<usize>>,
     tx_generations: Mutex<BTreeMap<usize, u64>>,
@@ -112,12 +108,10 @@ impl ProbeDevice {
             control_log: Arc::new(Mutex::new(Vec::new())),
             rx_script: Mutex::new(None),
             rx_calls: AtomicUsize::new(0),
-            after_rx_stop: Mutex::new(None),
             fail_restoring_apply: AtomicBool::new(false),
-            before_timed_apply: Mutex::new(None),
+            before_untimed_apply: Mutex::new(None),
+            untimed_applies: AtomicUsize::new(0),
             timed_applies: AtomicUsize::new(0),
-            fail_rx_stop: AtomicBool::new(false),
-            fail_timed_apply: Mutex::new(None),
             fail_untimed_apply: Mutex::new(None),
             tx_generations: Mutex::new(BTreeMap::new()),
             tx_underflow_after_send: AtomicBool::new(false),
@@ -154,11 +148,6 @@ impl ProbeDevice {
         self.rows.lock().unwrap().iter().filter(|row| row["call"] == call).count()
     }
 
-    /// Makes the `nth` timed `apply` from now (1-based) fail, not lost.
-    pub fn fail_timed_apply(&self, nth: usize) {
-        *self.fail_timed_apply.lock().unwrap() = Some(nth);
-    }
-
     /// Makes the `nth` untimed `apply` from now (1-based) fail, not lost.
     pub fn fail_untimed_apply(&self, nth: usize) {
         *self.fail_untimed_apply.lock().unwrap() = Some(nth);
@@ -166,11 +155,6 @@ impl ProbeDevice {
 
     pub fn control_log(&self) -> Vec<&'static str> {
         self.control_log.lock().unwrap().clone()
-    }
-
-    /// Makes every `rx_stop` fail, not lost.
-    pub fn fail_rx_stop(&self) {
-        self.fail_rx_stop.store(true, Ordering::Release);
     }
 
     /// The log, which outlives the device (it records the `drop`).
@@ -195,19 +179,14 @@ impl ProbeDevice {
         *self.rx_script.lock().unwrap() = Some(Box::new(script));
     }
 
-    /// Runs `hook` after each successful `rx_stop`.
-    pub fn after_rx_stop(&self, hook: impl FnMut() + Send + 'static) {
-        *self.after_rx_stop.lock().unwrap() = Some(Box::new(hook));
-    }
-
     /// Makes every untimed `apply` that restores the unstreamed settings (rate, frequency, gain and antenna at once) fail.
     pub fn fail_restoring_apply(&self) {
         self.fail_restoring_apply.store(true, Ordering::Release);
     }
 
-    /// Runs `hook` with the count of each timed `apply` just before it goes to the device.
-    pub fn before_timed_apply(&self, hook: impl FnMut(usize) + Send + 'static) {
-        *self.before_timed_apply.lock().unwrap() = Some(Box::new(hook));
+    /// Runs `hook` with the count of each untimed `apply` just before it goes to the device.
+    pub fn before_untimed_apply(&self, hook: impl FnMut(usize) + Send + 'static) {
+        *self.before_untimed_apply.lock().unwrap() = Some(Box::new(hook));
     }
 
     pub fn tx_eob_count(&self) -> usize {
@@ -373,24 +352,13 @@ impl Device for ProbeDevice {
     }
     fn apply(&self, dir: Dir, chan: usize, settings: &Settings, at: Option<i64>) -> Result<Applied, DeviceError> {
         if at.is_some() {
-            let count = self.timed_applies.fetch_add(1, Ordering::AcqRel) + 1;
-            let hook = self.before_timed_apply.lock().unwrap().take();
+            self.timed_applies.fetch_add(1, Ordering::AcqRel);
+        } else {
+            let count = self.untimed_applies.fetch_add(1, Ordering::AcqRel) + 1;
+            let hook = self.before_untimed_apply.lock().unwrap().take();
             if let Some(mut hook) = hook {
                 hook(count);
-                *self.before_timed_apply.lock().unwrap() = Some(hook);
-            }
-        }
-        if let Some(at) = at {
-            let mut failing = self.fail_timed_apply.lock().unwrap();
-            if let Some(remaining) = failing.as_mut() {
-                *remaining -= 1;
-                if *remaining == 0 {
-                    *failing = None;
-                    self.control_log.lock().unwrap().push("apply_timed_failed");
-                    let error = DeviceError::failed("probe: scripted timed apply failure");
-                    self.record_timed_apply(dir, chan, settings, at, &Err(error.clone()));
-                    return Err(error);
-                }
+                *self.before_untimed_apply.lock().unwrap() = Some(hook);
             }
         }
         if at.is_none() && self.fail_restoring_apply.load(Ordering::Acquire) && settings.rate.is_some() && settings.freq.is_some() && settings.gain.is_some() && settings.antenna.is_some() {
@@ -439,18 +407,8 @@ impl Device for ProbeDevice {
     }
     fn rx_stop(&self, stream: usize, at: Option<i64>) -> Result<(), DeviceError> {
         self.control_log.lock().unwrap().push("rx_stop");
-        if self.fail_rx_stop.load(Ordering::Acquire) {
-            return Err(DeviceError::failed("probe: scripted rx_stop failure"));
-        }
         let before = self.host_ns();
         let result = self.inner.rx_stop(stream, at);
-        if result.is_ok() {
-            let hook = self.after_rx_stop.lock().unwrap().take();
-            if let Some(mut hook) = hook {
-                hook();
-                *self.after_rx_stop.lock().unwrap() = Some(hook);
-            }
-        }
         let after = self.host_ns();
         self.record(json!({ "call": "rx_stop", "stream": stream, "at": at, "host_before_ns": before, "host_after_ns": after, "result": result.as_ref().err().map(|error| error.message.clone()) }));
         result

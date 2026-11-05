@@ -84,9 +84,9 @@ EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=40 \
   plan/phase8/tools/run-record.sh <commit> addr=192.168.40.36 hw_b1_probe
 ```
 
-必ず `hw_measurements_record` を実行する．任意の `hw_*` test はその前の preflight として実行され，失敗したら record suite は開始しない．8つの必須 metadata は，output（自動で `/bench/measurement.json`），mboard と FPGA image（probe から。probe できない値は `EZSDR_MEASUREMENT_MBOARD` / `EZSDR_MEASUREMENT_FPGA_IMAGE` で指定），host name（既定は `hostname -s`），settings script / version（bench-host の path と出力），load（既定 `none`，`none` または `h4`），commit（snapshot の完全 hash）で組み立てる．`EZSDR_UHD_ARGS` には指定した UHD args を渡す．試行回数等は `EZSDR_MEASURE_STEP_TRIALS`，`EZSDR_MEASURE_OVERFLOW_TRIALS`，`EZSDR_MEASURE_THROUGHPUT_SECS`，`EZSDR_MEASURE_LOOPBACK_TRIALS`，`EZSDR_MEASURE_QUEUE_TRIALS` で調整できる（既定値は measurement code を参照）．queue depth では `EZSDR_MEASURE_QUEUE_TRIALS`（既定 5）は条件ごとに要る**成功**の数で，成功がそろうまで条件ごとに最大 `EZSDR_MEASURE_QUEUE_MAX_TRIALS`（既定 15，`EZSDR_MEASURE_QUEUE_TRIALS` 以上）回まで試行を続ける（段階 3f）．あいまい・不完全の試行は成功に数えない．15 回でそろわなければ queue depth は `unmeasured` で，理由に条件ごとの成功の数が書かれる．
+必ず `hw_measurements_record` を実行する．任意の `hw_*` test はその前の preflight として実行され，失敗したら record suite は開始しない．8つの必須 metadata は，output（自動で `/bench/measurement.json`），mboard と FPGA image（probe から。probe できない値は `EZSDR_MEASUREMENT_MBOARD` / `EZSDR_MEASUREMENT_FPGA_IMAGE` で指定），host name（既定は `hostname -s`），settings script / version（bench-host の path と出力），load（既定 `none`，`none` または `h4`），commit（snapshot の完全 hash）で組み立てる．`EZSDR_UHD_ARGS` には指定した UHD args を渡す．試行回数等は `EZSDR_MEASURE_STEP_TRIALS`，`EZSDR_MEASURE_OVERFLOW_TRIALS`，`EZSDR_MEASURE_THROUGHPUT_SECS`，`EZSDR_MEASURE_LOOPBACK_TRIALS` で調整できる（既定値は measurement code を参照）．queue depth の測定は段階 S2a-i-α で削除した．
 
-出力には `build.log`，`probe.log`，preflight test ごとの log，`hw_measurements_record.log`，および `measurement.json` がある．3c-2c の途中経過 `<OUTPUT>.partial.json` は診断専用で，比較テストは読まない．各 group 後に上書きされ，final record が書けた後に削除される．中断時に残った partial は削除・改名せず log と一緒に保管する（再開可能な record ではない）．3c-3b の reopen は既定計画で追加約9〜10分（RX throughput 7段を各約30秒，RX/TX lead は step trials を半分にして再測；INFERRED）．この追加を含む目安は，#1＋OBX（1 channel）で約60〜75分，#2 の2 channel（UBX＋CBX）で約1時間35分〜1時間55分（INFERRED）．`h4` run は記録 suite 全体を負荷下で行うため，wall time は負荷なしの目安を越えることがある．H4 自体は200 updatesを10 ms間隔で流す約2秒の窓に加え，Run の準備・停止がある（INFERRED）．内訳（基準 suite，分）：raw probe 8，command lead 0.7，in-flight window 0.8，receive-start lead 8.5，transmit-start lead 1.6，受信 throughput 7.5（2 channel では 26），overflow 6，送信 throughput 7.5（同 26），full duplex 1.3，companion 11，raw group 2〜7（queue depth の試行は 1 回約 3〜4 s で，条件 3 つ．成功が早くそろえば 15 試行ほど，どの条件も上限まで行けば 45 試行．INFERRED），同時運転の 1 組 1．SIGKILL や host failure では trap が動かず worker が残り得るため，その場合は `h4-load.log` と記録された PID を確認してから次の run に進む．UR-7 の再試行は 1 回で約 31 秒，PLL が戻らなければ record の latch が止める（下）．log はファイルに書いてから必要箇所を確認する．
+出力には `build.log`，`probe.log`，preflight test ごとの log，`hw_measurements_record.log`，および `measurement.json` がある．3c-2c の途中経過 `<OUTPUT>.partial.json` は診断専用で，比較テストは読まない．各 group 後に上書きされ，final record が書けた後に削除される．中断時に残った partial は削除・改名せず log と一緒に保管する（再開可能な record ではない）．3c-3b の reopen は既定計画で追加約9〜10分（RX throughput 7段を各約30秒，RX/TX lead は step trials を半分にして再測；INFERRED）．この追加を含む目安は，#1＋OBX（1 channel）で約60〜75分，#2 の2 channel（UBX＋CBX）で約1時間35分〜1時間55分（INFERRED）．`h4` run は記録 suite 全体を負荷下で行うため，wall time は負荷なしの目安を越えることがある．H4 自体は200 updatesを10 ms間隔で流す約2秒の窓に加え，Run の準備・停止がある（INFERRED）．内訳（基準 suite，分）：raw probe 8，command lead 0.7，in-flight window 0.8，receive-start lead 8.5，transmit-start lead 1.6，受信 throughput 7.5（2 channel では 26），overflow 6，送信 throughput 7.5（同 26），full duplex 1.3，companion 11，raw group（coercion のみ；時間は未計測），同時運転の 1 組 1．SIGKILL や host failure では trap が動かず worker が残り得るため，その場合は `h4-load.log` と記録された PID を確認してから次の run に進む．UR-7 の再試行は 1 回で約 31 秒，PLL が戻らなければ record の latch が止める（下）．log はファイルに書いてから必要箇所を確認する．
 
 ## 既知の失敗と結果の扱い
 
@@ -140,11 +140,11 @@ EZSDR_BENCH_NIC=enp1s0f0np0 EZSDR_BENCH_SUBNET=40 \
   plan/phase8/tools/run-record.sh <COMMIT> addr=192.168.40.36 hw_b1_probe \
   2>&1 | tee ~/.cache/ezsdr-bench/$(date +%F)/b-record.console.log
 ```
-- 内容：3c-1（start lead，overflow gap，tx throughput），3c-2a（queue depth［queue の上限 512 回，試行ごとに目標までの遅れを 3 s と 2 s で交互に］，coercion），3c-2c（周波数の格子），3c-2b，既定の 1 channel の throughput，同時運転の 1 組，companion．
-- 試行回数の既定（measurement.rs）：STEP 100，OVERFLOW 5，THROUGHPUT_SECS 60，LOOPBACK 20，QUEUE 5．変えるなら `EZSDR_MEASURE_STEP_TRIALS` 等を前置．
+- 内容：3c-1（start lead，overflow gap，tx throughput），3c-2a（coercion），3c-2c（周波数の格子），3c-2b，既定の 1 channel の throughput，同時運転の 1 組，companion．
+- 試行回数の既定（measurement.rs）：STEP 100，OVERFLOW 5，THROUGHPUT_SECS 60，LOOPBACK 20．変えるなら `EZSDR_MEASURE_STEP_TRIALS` 等を前置．
 - BP5 を先に見たいとき（任意）：末尾に `hw_b3_receive_at_t0 hw_b4_capture_at_a_sample_index hw_b5_overflow hw_b6_txrx_and_repeat hw_b7_session_loopback` を足す（preflight．1 本でも失敗なら record は始まらない）．
 - 確認（run directory）：`build.log`，`probe.log`，`bench-host.txt`，`hw_b1_probe.log`，`hw_measurements_record.log`，`measurement.json`（profile 比較の前に書かれるので，比較で落ちても残る）．`measurement.json.partial.json` が残っていたら final は書けていない．最後の profile 比較で落ちることがある（値が profile の 1000 MB/s に届かない）．これは段階 4 の材料で，bench 中に直さない．
-- 見る点：queue depth（`raw_command_queue_depth` の `ambiguous_trials`，`blocked_index_across_ahead.agree`），coercion の格子，TX throughput の Underflow 位置，`provider_duplex_at_the_measured_limits`（`verdict`，`overlap`），overflow の「読み直しから再開まで」の最大と最小．
+- 見る点：coercion の格子，TX throughput の Underflow 位置，`provider_duplex_at_the_measured_limits`（`verdict`，`overlap`），overflow の「読み直しから再開まで」の最大と最小．
 - stop：`Control operation timed out waiting for space in command buffer`，`Reference Clock PLL failed to lock`（`UR-7 retry 3` が出たら latch が立つ），`did not join within 1 s`，`receive Run has no T0`（その rate は成功にしない）．電源 cycle → probe → record を保存．
 
 ### (c) D9 probe P4〜P7 と MA-1 の位相の probe（#1＋OBX，TX あり．各 5〜10 分，estimate）
@@ -231,7 +231,7 @@ docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(i
 ### 流した後
 
 - repo へ写すのは**完了した最終の BP2/BP3 の `measurement.json` だけ**：`crates/ezsdr-radio/measurements/<日付>-<serial>-<構成>.json`（41 §2）．shake-out，`.partial.json`，P4〜P7・MA-1・benchmark_rate の log は写さない．写す前に owner と確認．
-- orchestrator に返すもの：commit hash，run directory の path，各ブロックの結果（完走 / 止まった場所と最後の log 行），`probe.log`（FPGA，serial）と `ref_locked`，att の型番・電力定格，電源 cycle の有無，P4〜P7 と MA-1 の出力，benchmark_rate の summary，`measurement.json` の観測の要約（overflow gap の最大・最小，queue depth と `ambiguous_trials`，coercion の格子，throughput の最大成功段，同時運転の 1 組の verdict）．bench-results.md への追記は orchestrator．
+- orchestrator に返すもの：commit hash，run directory の path，各ブロックの結果（完走 / 止まった場所と最後の log 行），`probe.log`（FPGA，serial）と `ref_locked`，att の型番・電力定格，電源 cycle の有無，P4〜P7 と MA-1 の出力，benchmark_rate の summary，`measurement.json` の観測の要約（overflow gap の最大・最小，coercion の格子，throughput の最大成功段，同時運転の 1 組の verdict）．bench-results.md への追記は orchestrator．
 - 結果から出る owner の決め：overflow_restart_gap_ns と RM-17（最大と最小の差が最大の半分以下ならその最大を値に）；R4 の採否（P6）；R2 の要否（P4）；F7（P5）；MA-1（MockRadio の MR-34 をそろえる段階の前に，位相のばらつきの 2 通りの差）；受信・送信の throughput の値（profile 1000 MB/s）は 2 channel の結果を待って段階 4 で決める．
 
 ## 2026-11-01 の手順（D9b-1a・D9b-2・L1・L2 の実機確認，#70・#72）

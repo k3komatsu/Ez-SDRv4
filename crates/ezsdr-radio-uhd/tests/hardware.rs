@@ -319,8 +319,8 @@ fn hw_b9_usrp2_probe() {
 // ---------------------------------------------------------------- B8 below the Module
 //
 // bench.md B8's rows that the Module's own rules keep a Session from probing (UR-21
-// refuses a burst closer than its 2 ms device lead; the restart lead, the in-flight
-// window and the queue depth are constants): measured on the `Device` itself, as the
+// refuses a burst closer than its 2 ms device lead; the restart lead and the in-flight
+// window are constants): measured on the `Device` itself, as the
 // Module would drive it. RF as bench.md says: the transmitter only inside
 // `SAFE_TX_HZ`, at most 2 Msps (so the emission stays inside the bench envelope's
 // 999–1001 MHz), 0 dB, amplitude ≤ 0.4, into the 30 dB loopback.
@@ -554,37 +554,6 @@ fn hw_b8_raw_restart_lead() {
     device.rx_stop(0, None).unwrap();
     let _ = drain(&*device);
     measurement::push_raw_observation("hw_b8_raw_restart_lead", 21, serde_json::json!({ "restarts": observations }));
-}
-
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_raw_queue_depth() {
-    // UR-24's queue depth (16, INFERRED): timed OBX tunes queued ahead of their time; the
-    // call that blocks marks the depth. Nothing is streamed, so nothing is emitted.
-    let device = raw();
-    let mut observations = Vec::new();
-    for dir in [Dir::Rx, Dir::Tx] {
-        let base = device.time_now().unwrap() + 3_000 * TICKS_PER_MS;
-        let mut took = Vec::new();
-        let mut calls = Vec::new();
-        for i in 0..40i64 {
-            let freq = if i % 2 == 0 { 999_600_000.0 } else { 1_000_400_000.0 };
-            let begun = Instant::now();
-            let result = device.apply(dir, 0, &Settings { freq: Some(freq), ..Settings::default() }, Some(base + i * TICKS_PER_MS));
-            let ms = begun.elapsed().as_secs_f64() * 1e3;
-            took.push(format!("{ms:.2}"));
-            calls.push(serde_json::json!({ "number": i + 1, "duration_ms": ms, "result": format!("{result:?}") }));
-            if result.is_err() || ms > 500.0 {
-                println!("B8 queue {dir:?}: call {} took {ms:.1} ms: {result:?}", i + 1);
-                break;
-            }
-        }
-        println!("B8 queue {dir:?}: apply ms per call {took:?}");
-        std::thread::sleep(Wall::from_millis(3_200));
-        println!("B8 queue {dir:?}: after the queue, untimed {:?}", device.apply(dir, 0, &Settings { freq: Some(1e9), ..Settings::default() }, None));
-        observations.push(serde_json::json!({ "direction": format!("{dir:?}"), "calls": calls, "duration_ms": took }));
-    }
-    measurement::push_raw_observation("hw_b8_raw_queue_depth", 2, serde_json::json!({ "directions": observations }));
 }
 
 #[test]
@@ -2535,10 +2504,9 @@ fn hw_measurements_record() {
     // Each probe and group runs on its own: an error or a panic is that group's failure, its keys are
     // `unmeasured`, and the record is still written (stage 3c-2c).
     let mut groups = measurement::GroupRun::new(metadata.output.as_deref());
-    let raw_probes: [(&str, fn()); 15] = [
+    let raw_probes: [(&str, fn()); 14] = [
         ("hw_b8_raw_device_lead", hw_b8_raw_device_lead),
         ("hw_b8_raw_restart_lead", hw_b8_raw_restart_lead),
-        ("hw_b8_raw_queue_depth", hw_b8_raw_queue_depth),
         ("hw_b8_raw_in_flight_window", hw_b8_raw_in_flight_window),
         ("hw_b8_raw_burst_gap", hw_b8_raw_burst_gap),
         ("hw_b8_raw_empty_eob_gap", hw_b8_raw_empty_eob_gap),
@@ -2600,12 +2568,12 @@ fn hw_measurements_record() {
             let (stopped, restored) = match measurement::record_latch_reason() {
                 Some(reason) => {
                     let skipped = format!("not run: the device handle is latched ({reason}); nothing is sent to it, which may need a power cycle");
-                    groups.run("raw_queue_depth_and_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
+                    groups.run("raw_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
                     (Some(skipped), None)
                 }
                 None => {
                     let outcome = measurement::run_raw_group_leased(&mut lease, &mut groups, &description, &plan);
-                    guard.latch_if_streamers_open("raw_queue_depth_and_coercion");
+                    guard.latch_if_streamers_open("raw_coercion");
                     outcome
                 }
             };
@@ -2640,7 +2608,7 @@ fn hw_measurements_record() {
                 let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
                 groups.run(name, &keys, || Err(skipped.clone()));
             }
-            groups.run("raw_queue_depth_and_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
+            groups.run("raw_coercion", &measurement::raw_group_keys(&description), || Err(skipped.clone()));
             (Some(skipped), None)
         }
     };

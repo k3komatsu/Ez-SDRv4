@@ -7919,7 +7919,7 @@
    "id": "P732",
    "name": "queue depth uses the generic unmeasured reason",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"Not measured in this record; Phase 8 stage 3c-2a measures raw Device timed-apply queue back-pressure.\"",
+   "old": "\"Not measured in this record; the queue-depth measurement was removed by note 48 S2a-i-α, and the key leaves in note 48 S2b-i.\"",
    "new": "\"Not measured in this record; command queue depth awaits independent calibration.\"",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
@@ -8601,76 +8601,6 @@
    "filter": "tx_throughput_uses_the_burst_target_ack_elapsed_and_minimum_samples"
   },
   {
-   "id": "P807",
-   "name": "queue classification treats the stall threshold as blocked",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let stalled: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.duration_ns > stall_limit_ns).collect();",
-   "new": "let stalled: Vec<_> = calls.iter().enumerate().filter(|(_, call)| call.duration_ns >= stall_limit_ns).collect();",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P808",
-   "name": "queue classification accepts a missing blocked-call host timestamp",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let Some((lower, upper)) = blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)) else {\n        return QueueTrialClass::Incomplete { reason: \"the blocked apply has no device-time bounds\" };\n    };",
-   "new": "let (lower, upper) = match blocked.h_i_ns.and_then(|h_i| queue_device_time_bounds(clock, h_i, master_clock_hz)) {\n        Some(bounds) => bounds,\n        None => (first_at, first_at),\n    };",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P809",
-   "name": "queue classification accepts multiple stalled calls",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if stalled.len() != 1 {",
-   "new": "if stalled.len() == 0 {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P810",
-   "name": "queue classification ignores device-call errors",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if let Some(reason) = calls.iter().find_map(|call| call.error.as_deref()) {",
-   "new": "if let Some(reason) = None::<&str> {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P811",
-   "name": "queue depth needs enough successful trials in every condition",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if conditions.iter().any(|(_, trials)| queue_successes(trials) < required_trials) {",
-   "new": "if conditions.iter().all(|(_, trials)| queue_successes(trials) < required_trials) {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P812",
-   "name": "queue depth selects the largest instead of the minimum",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": ".min_by_key(|(depth, _, _)| *depth)",
-   "new": ".max_by_key(|(depth, _, _)| *depth)",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P813",
-   "name": "queue depth value does not preserve the selected minimum",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "key, worst: model::Worst::Number(depth as f64), trials: observation_trials(trials)?, condition,",
-   "new": "key, worst: model::Worst::Number(0.0), trials: observation_trials(trials)?, condition,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
    "id": "P814",
    "name": "gain read-back comparison accepts a mismatched request",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -8793,56 +8723,6 @@
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   },
   {
-   "id": "P826",
-   "name": "queue trial count defaults below the required five",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_trials: 5,",
-   "new": "queue_trials: 1,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P827",
-   "name": "queue trial environment override uses the wrong default",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "count(values, \"EZSDR_MEASURE_QUEUE_TRIALS\", 5)?",
-   "new": "count(values, \"EZSDR_MEASURE_QUEUE_TRIALS\", 1)?",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P828",
-   "name": "queue observation trial-count validation underestimates rows",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "self.queue_max_trials.checked_mul(3)",
-   "new": "self.queue_max_trials.checked_mul(2)",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P829",
-   "name": "queue call limit defaults below the configured maximum",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_max_calls: 512,",
-   "new": "queue_max_calls: 32,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P830",
-   "name": "queue look-ahead defaults below three seconds",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_ahead_ns: 3_000_000_000,",
-   "new": "queue_ahead_ns: 1_000_000_000,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
    "id": "P831",
    "name": "restoration does not latch its failed apply",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -8851,16 +8731,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_defaults_restoration_stops_at_the_first_apply_error"
-  },
-  {
-   "id": "P832",
-   "name": "queue observation drops the scheduled device time",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"scheduled_tick\": at,",
-   "new": "\"scheduled\": at,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   },
   {
    "id": "P833",
@@ -8883,36 +8753,6 @@
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   },
   {
-   "id": "P835",
-   "name": "queue classification accepts a trial with no blocked apply",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "return QueueTrialClass::Incomplete { reason: \"no timed apply blocked before the call limit\" };",
-   "new": "return QueueTrialClass::Success { depth: calls.len() };",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P836",
-   "name": "queue classification ignores slow calls before the blocked apply",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "calls[..depth].iter().any(|call| call.duration_ns >= QUEUE_CALL_TIME_LIMIT_NS)",
-   "new": "false",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P837",
-   "name": "queue classification accepts a failed untimed reset",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "operational_error.or(untimed_error)",
-   "new": "operational_error",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
    "id": "P838",
    "name": "coercion keys lose their not-run explanation",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -8931,86 +8771,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "measurement_record_has_exact_unmeasured_keys_and_valid_conditions"
-  },
-  {
-   "id": "P840",
-   "name": "queue classification accepts a previous return whose upper bound equals the first command time",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "upper >= first_at",
-   "new": "upper > first_at",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P841",
-   "name": "queue classification accepts a device-time read interval over 100 ms",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if read_duration_ns > QUEUE_CALL_TIME_LIMIT_NS {",
-   "new": "if false {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P842",
-   "name": "queue classification takes a blocked return one tick before the first command time for a success",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "    if lower < first_at {",
-   "new": "    if lower < first_at - 1 {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P843",
-   "name": "queue classification rejects an upper device-time bound exactly at the return limit",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "    if upper > latest_return_tick {",
-   "new": "    if upper >= latest_return_tick {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "command_queue_depth_requires_backpressure_timing_and_success_in_every_condition"
-  },
-  {
-   "id": "P844",
-   "name": "queue observation counts FIFO entries instead of timed apply calls",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"depth_unit\": \"timed_apply_calls\",",
-   "new": "\"depth_unit\": \"fifo_entries\",",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
-  },
-  {
-   "id": "P845",
-   "name": "queue observation presents inferred back-pressure as verified",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"back_pressure_attribution\": \"INFERRED\",",
-   "new": "\"back_pressure_attribution\": \"VERIFIED\",",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
-  },
-  {
-   "id": "P846",
-   "name": "queue observation claims host timing directly proves credit wait",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"back_pressure_basis\": \"host apply duration and device time do not directly prove credit wait\",",
-   "new": "\"back_pressure_basis\": \"host apply duration and device time prove credit wait\",",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
-  },
-  {
-   "id": "P847",
-   "name": "queue observation does not distinguish apply calls from FIFO entries",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "\"depth_definition\": \"the count of timed Device::apply calls (high-level operations), not device FIFO entries\",",
-   "new": "\"depth_definition\": \"the count of device FIFO entries\",",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
   },
   {
    "id": "P848",
@@ -9153,38 +8913,6 @@
    "filter": "common::probe_device::tests::tx_eob_count_tracks_recorded_eob_sends"
   },
   {
-   "id": "P862",
-   "name": "a failed queue trial does not latch the group",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "raw.fail(format!(\"queue condition {label}: {reason}\"));\n    (QueueTrialClass::DeviceFailure",
-   "new": "let _ = (label, &reason);\n    (QueueTrialClass::DeviceFailure",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "raw_group_sends_nothing_after_a_failed_clock_read"
-  },
-  {
-   "id": "P863",
-   "name": "a failed timed apply is followed by the drain clock read",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "last_accepted_at.filter(|_| operational_error.is_none())",
-   "new": "last_accepted_at",
-   "old2": "loop {\n        if raw.halted() { return Err(raw.failure().unwrap_or_default()); }\n        if device.time_now()",
-   "new2": "loop {\n        if device.time_now()",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "raw_group_sends_nothing_after_a_failed_timed_apply"
-  },
-  {
-   "id": "P864",
-   "name": "a failed timed apply is followed by the untimed reset",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let untimed_error = if operational_error.is_some() { None } else {",
-   "new": "let untimed_error = if false { None } else {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "raw_group_sends_nothing_after_a_failed_timed_apply"
-  },
-  {
    "id": "P865",
    "name": "the plan's raw group limit is read as seconds",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -9213,46 +8941,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "raw_group_limit_stops_every_later_call"
-  },
-  {
-   "id": "P868",
-   "name": "the receive-frequency queue condition does not stream",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "operation.dir == Dir::Rx && operation.settings.freq.is_some()",
-   "new": "operation.dir == Dir::Rx && operation.settings.freq.is_none()",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency"
-  },
-  {
-   "id": "P869",
-   "name": "the queue trial's receiver is never drained",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "while !stop.load(Ordering::Acquire) && !raw.halted() {",
-   "new": "while false {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_depth_streams_and_drains_the_receiver_only_for_receive_frequency"
-  },
-  {
-   "id": "P870",
-   "name": "a failed streaming queue trial still stops the receiver",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "    if !raw.halted() {\n        match device.rx_stop(0, None) {",
-   "new": "    if true {\n        match device.rx_stop(0, None) {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "raw_group_stops_a_streaming_trial_without_stopping_or_resetting_the_receiver"
-  },
-  {
-   "id": "P871",
-   "name": "the queue value is the greatest depth instead of the least",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": ".min_by_key(|(depth, _, _)| *depth)",
-   "new": ".max_by_key(|(depth, _, _)| *depth)",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_conditions_stream_only_for_receive_frequency_and_the_value_is_the_least_depth"
   },
   {
    "id": "P872",
@@ -9445,16 +9133,6 @@
    "filter": "coercion_stops_after_its_first_failed_apply"
   },
   {
-   "id": "P891",
-   "name": "the queue's excluded conditions are not named",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "(\"queue-tx-frequency\"",
-   "new": "(\"queue-tx-frequency-x\"",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
-  },
-  {
    "id": "P892",
    "name": "a text panic message is not kept in the failure",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -9463,66 +9141,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "group_run_keeps_the_other_groups_after_an_error_or_a_panic"
-  },
-  {
-   "id": "P893",
-   "name": "the receive-frequency trial submits settings without waiting for the first samples",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if let Err(reason) = wait_for_rx_samples(raw, &progress, Wall::from_millis(QUEUE_RX_READY_LIMIT_MS)) {",
-   "new": "if let Err(reason) = Ok::<(), String>(()) {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "a_started_receiver_that_returns_no_samples_stops_the_group_before_any_setting_goes_out"
-  },
-  {
-   "id": "P894",
-   "name": "the receive-frequency trial does not wait for the samples to pass the last command",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "Some(progress) => wait_for_rx_end(raw, progress, target, timeout),",
-   "new": "Some(_) => Ok(()),",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "a_receiver_whose_samples_stop_short_of_the_last_command_fails_the_trial"
-  },
-  {
-   "id": "P895",
-   "name": "the end of the received samples ignores their count",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "progress.advance(first_tick, first_tick.saturating_add(count.saturating_mul(ticks_per_sample)));",
-   "new": "progress.advance(first_tick, first_tick);",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "a_receiver_whose_samples_pass_the_last_command_completes_the_trial"
-  },
-  {
-   "id": "P896",
-   "name": "the drain thread is not stopped when the command thread unwinds",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "fn drop(&mut self) { self.0.store(true, Ordering::Release); }",
-   "new": "fn drop(&mut self) {}",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "a_panic_on_the_command_thread_stops_the_drain_and_the_record_continues"
-  },
-  {
-   "id": "P897",
-   "name": "the queue loop does not look at the deadline before each timed apply",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "            if raw.halted() {\n                operational_error = raw.failure();",
-   "new": "            if false {\n                operational_error = raw.failure();",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_raw_group_deadline_is_checked_between_two_device_calls"
-  },
-  {
-   "id": "P898",
-   "name": "a failed receiver stop is followed by the close",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "match device.rx_stop(0, None) {",
-   "new": "match { let stopped = device.rx_stop(0, None); device.rx_close(0); stopped } {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "a_failed_receiver_stop_is_not_followed_by_a_close"
   },
   {
    "id": "P899",
@@ -9605,17 +9223,6 @@
    "filter": "a_failed_restore_leaks_the_handle_even_when_the_record_s_writing_panics"
   },
   {
-   "id": "P907",
-   "name": "the receiver is closed after a stop that crossed the deadline",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "{\n                if !raw.halted() {\n                    device.rx_close(0)\n                }\n            }",
-   "new": "device.rx_close(0),",
-   "scope": "fn queue_trial",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_deadline_passing_during_the_receiver_s_stop_leaves_the_close_unsent"
-  },
-  {
    "id": "P908",
    "name": "the group's injected elapsed time is ignored",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
@@ -9634,26 +9241,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "a_failed_restore_leaks_the_handle_even_when_the_record_s_writing_panics"
-  },
-  {
-   "id": "P910",
-   "name": "the command loop does not look at the latch before each timed apply",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "            if raw.halted() {\n                operational_error = raw.failure();",
-   "new": "            if false {\n                operational_error = raw.failure();",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_command_thread_begins_no_call_after_the_drain_latches"
-  },
-  {
-   "id": "P911",
-   "name": "a failed drain read is not latched",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "raw.fail(format!(\"rx_recv: {}\", error.message));",
-   "new": "let _ = &error;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_command_thread_begins_no_call_after_the_drain_latches"
   },
   {
    "id": "P912",
@@ -10329,46 +9916,6 @@
    "filter": "the_tone_classifier_finds_an_attenuated_shift_in_noise"
   },
   {
-   "id": "P999",
-   "name": "a queue trial whose interval straddles the first command time is a success (stage 3e)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "    if lower < first_at {\n        return QueueTrialClass::Ambiguous { depth };\n    }\n",
-   "new": "",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_twelve_historical_blocked_returns_are_classified_by_their_interval"
-  },
-  {
-   "id": "P1000",
-   "name": "a blocked call that returned before the first command time is not incomplete (stage 3e)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "    if upper < first_at {\n        return QueueTrialClass::Incomplete",
-   "new": "    if false && upper < first_at {\n        return QueueTrialClass::Incomplete",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_twelve_historical_blocked_returns_are_classified_by_their_interval"
-  },
-  {
-   "id": "P1001",
-   "name": "the blocked call's number of an ambiguous trial is not compared across the delays (stage 3e)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "Some(\"success\" | \"ambiguous\")",
-   "new": "Some(\"success\")",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "the_blocked_call_s_number_is_compared_across_two_target_delays"
-  },
-  {
-   "id": "P1002",
-   "name": "every queue trial waits the plan's delay (stage 3e)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "let ahead_ns = if trial % 2 == 0 { plan.queue_ahead_ns / 3 * 2 } else { plan.queue_ahead_ns };",
-   "new": "let ahead_ns = plan.queue_ahead_ns;",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number"
-  },
-  {
    "id": "P1003",
    "name": "the capacity's condition is the first that passed at T, not the stopper's own family (stage 3e)",
    "file": "crates/ezsdr-radio-uhd/tests/common/measurement/multichannel.rs",
@@ -10557,76 +10104,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measurements"
-  },
-  {
-   "id": "P1038",
-   "name": "a queue condition's trials go on past the required successes (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_successes(trials) >= required_trials || trials.len() >= max_trials",
-   "new": "queue_successes(trials) > required_trials || trials.len() >= max_trials",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
-  },
-  {
-   "id": "P1039",
-   "name": "a queue condition's trials run one past the limit (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_successes(trials) >= required_trials || trials.len() >= max_trials",
-   "new": "queue_successes(trials) >= required_trials || trials.len() > max_trials",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
-  },
-  {
-   "id": "P1040",
-   "name": "the queue loop stops at the required count of trials, not successes (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "while !queue_condition_done(&classes, plan.queue_trials, plan.queue_max_trials) {",
-   "new": "while classes.len() < plan.queue_trials {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_trials_alternate_two_target_delays_and_record_the_blocked_call_s_number"
-  },
-  {
-   "id": "P1041",
-   "name": "validate accepts a queue trial limit one below the required count (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "if self.queue_max_trials < self.queue_trials {",
-   "new": "if self.queue_max_trials + 1 < self.queue_trials {",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P1042",
-   "name": "the queue trial limit defaults to the required count (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "queue_max_trials: 15,",
-   "new": "queue_max_trials: 5,",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P1043",
-   "name": "the queue trial limit's environment default is the required count (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "count(values, \"EZSDR_MEASURE_QUEUE_MAX_TRIALS\", 15)?",
-   "new": "count(values, \"EZSDR_MEASURE_QUEUE_MAX_TRIALS\", 5)?",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "measurement_plan_from_env_uses_defaults_and_rejects_invalid_counts"
-  },
-  {
-   "id": "P1044",
-   "name": "the value's trial count is its successes, not the trials its condition ran (stage 3f)",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "Some((*depth, condition.clone(), trials.len())),",
-   "new": "Some((*depth, condition.clone(), queue_successes(trials))),",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "queue_trials_go_on_until_the_required_successes_or_the_trial_limit"
   },
   {
    "id": "P1045",
