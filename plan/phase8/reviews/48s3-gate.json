@@ -1,0 +1,254 @@
+{
+  "verdict": "FAIL",
+  "reasons": [
+    "mutation: BASELINE FAILED in ['maintenance/N47B-19', 'maintenance/P889']"
+  ],
+  "started": "2026-11-06T08:59:09+00:00",
+  "finished": "2026-11-06T09:19:35+00:00",
+  "renames": "plan/phase8/reviews/48s3-renames.txt",
+  "identity": {
+    "before": {
+      "head": "f1d502e6d25423a33c9bbe59ef29812ef3e02da2",
+      "status": [
+        " M KNOWN_LIMITATIONS.md",
+        " M crates/ezsdr-acceptance/tests/parity.rs",
+        " M crates/ezsdr-mock-radio/src/lib.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_channel.rs",
+        " M crates/ezsdr-radio-uhd/src/device.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M design/09-mock-radio.md",
+        " M design/18-uhd-radio.md",
+        " M plan/maintenance/failure-mechanisms.md",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase7/tools/mutations.json",
+        "?? plan/phase8/reviews/48s3-renames.txt"
+      ],
+      "untracked": [
+        "plan/phase8/reviews/48s3-renames.txt"
+      ],
+      "sha256": "62e82f43de420dbba7e5aebc1a0a8479a839df11c08f0eebf81b2bb502781210"
+    },
+    "after": {
+      "head": "f1d502e6d25423a33c9bbe59ef29812ef3e02da2",
+      "status": [
+        " M KNOWN_LIMITATIONS.md",
+        " M crates/ezsdr-acceptance/tests/parity.rs",
+        " M crates/ezsdr-mock-radio/src/lib.rs",
+        " M crates/ezsdr-mock-radio/tests/mock_channel.rs",
+        " M crates/ezsdr-radio-uhd/src/device.rs",
+        " M crates/ezsdr-radio-uhd/src/provider/tx.rs",
+        " M crates/ezsdr-radio-uhd/tests/fake.rs",
+        " M design/09-mock-radio.md",
+        " M design/18-uhd-radio.md",
+        " M plan/maintenance/failure-mechanisms.md",
+        " M plan/maintenance/tools/mutations.json",
+        " M plan/phase7/tools/mutations.json",
+        "?? plan/phase8/reviews/48s3-renames.txt"
+      ],
+      "untracked": [
+        "plan/phase8/reviews/48s3-renames.txt"
+      ],
+      "sha256": "62e82f43de420dbba7e5aebc1a0a8479a839df11c08f0eebf81b2bb502781210"
+    }
+  },
+  "toolchain": {
+    "docker_image": "sha256:4ad5558bf9906e3b874d0a3e3638ba9c09be57201a9ca8116bc8eb790eb06452",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustfmt": "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)",
+    "python314": "Python 3.14.4",
+    "python39": "Python 3.9.25",
+    "remote": "sim02"
+  },
+  "steps": [
+    {
+      "name": "fmt",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo fmt --all --check",
+      "exit": 0,
+      "seconds": 2.5,
+      "counts": {
+        "diffs": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/fmt.log",
+      "ok": true
+    },
+    {
+      "name": "test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test --workspace --no-fail-fast",
+      "exit": 0,
+      "seconds": 226.9,
+      "counts": {
+        "passed": 1829,
+        "failed": 0,
+        "results": 69,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/test.log",
+      "ok": true
+    },
+    {
+      "name": "clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 5.3,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/clippy.log",
+      "ok": true
+    },
+    {
+      "name": "rules",
+      "command": "python3 plan/maintenance/tools/rules.py --base HEAD --renames plan/phase8/reviews/48s3-renames.txt",
+      "exit": 0,
+      "seconds": 1.3,
+      "counts": {
+        "problems": 0,
+        "base": "HEAD"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/rules.log",
+      "ok": true
+    },
+    {
+      "name": "rules-self-test",
+      "command": "python3 plan/maintenance/tools/rules.py --self-test",
+      "exit": 0,
+      "seconds": 0.0,
+      "counts": {
+        "ok": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/rules-self-test.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-clippy",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo clippy -p ezsdr-radio-uhd --features uhd --all-targets -- -D warnings",
+      "exit": 0,
+      "seconds": 0.8,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 0
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/uhd-clippy.log",
+      "ok": true
+    },
+    {
+      "name": "uhd-test",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --lib --test uhd_api",
+      "exit": 0,
+      "seconds": 18.5,
+      "counts": {
+        "passed": 384,
+        "failed": 0,
+        "results": 2,
+        "failing": []
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/uhd-test.log",
+      "ok": true
+    },
+    {
+      "name": "hw-build",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- cargo test -p ezsdr-radio-uhd --features uhd --test hardware --no-run",
+      "exit": 0,
+      "seconds": 6.7,
+      "counts": {
+        "errors": 0,
+        "warnings": 0,
+        "executables": 1
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/hw-build.log",
+      "ok": true
+    },
+    {
+      "name": "py314",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 -- sh -c 'cargo build -p ezsdr-server && python3 -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 13.1,
+      "counts": {
+        "ran": 92,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/py314.log",
+      "ok": true
+    },
+    {
+      "name": "py39",
+      "command": "python3 plan/maintenance/tools/remote/rdev.py --host sim02 --image python:3.9-slim -- sh -c 'pip -q install --user numpy && EZSDR_SERVER=/cargo-target/debug/ezsdr-server PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s python/tests'",
+      "exit": 0,
+      "seconds": 14.6,
+      "counts": {
+        "ran": 92,
+        "result": "OK"
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/py39.log",
+      "ok": true
+    },
+    {
+      "name": "mutation",
+      "command": "REMOTE_SSH='ssh -o BatchMode=yes' python3 plan/maintenance/tools/remote/remote_mutate.py all sim02:8,sim03:8",
+      "exit": 1,
+      "seconds": 934.6,
+      "counts": {
+        "passed": 1737,
+        "total": 1740
+      },
+      "log": "~/.cache/ezsdr-fixes/2026-11-06-n48s3/gate/mutation.log",
+      "ok": false
+    }
+  ],
+  "mutation": {
+    "lists": {
+      "maintenance": {
+        "passed": 1383,
+        "total": 1385
+      },
+      "phase3": {
+        "passed": 74,
+        "total": 74
+      },
+      "phase4": {
+        "passed": 38,
+        "total": 38
+      },
+      "phase5": {
+        "passed": 29,
+        "total": 29
+      },
+      "phase6": {
+        "passed": 63,
+        "total": 63
+      },
+      "phase7": {
+        "passed": 150,
+        "total": 151
+      }
+    },
+    "not_killed": [
+      "maintenance/N47B-19",
+      "maintenance/P889",
+      "phase7/G09"
+    ],
+    "known": [
+      "phase7/G09"
+    ],
+    "unexpected": [],
+    "baseline_failed": [
+      "maintenance/N47B-19",
+      "maintenance/P889"
+    ],
+    "broken": {},
+    "missing": [],
+    "missing_ids": [],
+    "notes": [],
+    "remote_exit": 1,
+    "hosts": "sim02:8,sim03:8",
+    "images": {
+      "sim02": "sha256:3a0a84309a3e75548f5ee86e0a04056271bd48c77f878bdab797af73f615b2c9",
+      "sim03": "sha256:36981dd3f83681c2160139aef39957a05e194a5682c95166eb9cf46b586fa6f6"
+    }
+  }
+}

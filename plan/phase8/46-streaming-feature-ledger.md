@@ -225,6 +225,7 @@ v3 との比べ（orchestrator が `v3/` を読んだ，master の worktree）�
 | 2026-11-04 | F9 | 時刻つきの gain も，受信は `start_rx`，送信は F2 ① の burst の parameter としてだけ変える | F2 の理由と同じ（owner：gain の変更もそれほどしない） | 流れている間の時刻つきの値が受信・送信ともなくなる．uhd-control の流れている間の release はなくなる（再開の parameter の時刻つきの値の渡し方は設計で決める） |
 | 2026-11-04 | F7 | (b)：流れている burst や予約済みの burst と時刻が重なる予約を拒む．隙間のある後の burst と，有限の burst のちょうど次の sample から続く burst は受け付ける（一つの device burst として続ける）．**加えて repeat 専用の命令**「次の周期の始めで差し替える」（Easy API の形は設計で決める）：利用者は時刻を指定せず，Provider が受け取った時の「今 + in-flight window + device lead」以後で最初の，流れている repeat の周期の境目（origin + k·N）を選び，そこで終えて新しい波形を隙間なく続ける．選んだ時刻は action log と記録に残す．新しい波形の長さは制限しない．**規則：同じ長さなら周期はロックしたまま**（境目は sample の単位で一致し続ける） | v3 の repeat の方針：何周目かは分からないが，周期の中ではロックしている．同じ長さの別の信号に差し替えても，sample の単位で周期を一致させて送りたい．ちょうど続く burst を受け付けたい（owner） | 一般の割り込みとその動く境目（Phase 7 K の N-P1-2 の競合）がなくなる．差し替えの境目は渡し済みの範囲（UR-23：渡すのは「今 + in-flight window」より前だけ）の外から選ぶので，予約の時に一度決めればよい（INFERRED：コードが UR-23 どおりかは未確認）．続きの device burst と最後の sample の取り置きは残る．退けた案：利用者が周期の境目の `at` を指定する形（境目の確かめと受信・送信の格子の一致が要る）．v3 との比べ：v3 は送信が repeat だけで，流れている間の波形の差し替えは send の間で行い，時刻と位置の約束はなかった（`v3/source/controller/cyclictx.d:188-217`，`v3/source/device/package.d:80-125`） |
 | 2026-11-04 | F8 | (a) 今のまま：EOB の send の失敗の直後に開き直して T3 で掃除し，予約済みの burst を送り続ける（掃除の間に時刻が来た burst は late policy に従う） | (b′) との違いは，溜まっている burst の予約を生かすか全部取り消すか．生かす方がよい（owner） | 退けた案：(b′)（予約をすべて取り消し，次に空の stream に予約された burst の前で開き直す），(b)（その stream を Run の終わりまで止める），(c)（Run を止める），v3 の形（EOB の結果も report も見ずに送り続ける，`v3/cpp/uhd_usrp/multiusrp.cpp:613-645`．失敗の後の burst が黙って違う時刻に出うる）．F4a (d) で from none との競合はなくなっている．#75 は残る |
+| 2026-11-06 | F7 の補い | (b) の「有限の burst のちょうど次の sample から続く burst」は，前の burst が 33 サンプル以上の時だけ．32 サンプル以下の burst は一回で閉じて送り，そのちょうど次の予約は late policy で判定する | 装置：開いたままの device burst の最初の send が 28 サンプル以下で続きが後から来ると，補間 80 以上で Underflow（bench 2026-11-06，VERIFIED）．owner：続けない（KL-36） | 退けた案：A の中身と B の先頭を一つの最初の send にまとめる（burst をまたぐ仕組みが増え，受け取り時と送る時のずれは残る）．design note 48 S3（[reviews/48s3-dispositions.md](reviews/48s3-dispositions.md)） |
 
 ## Changes
 
@@ -233,3 +234,4 @@ v3 との比べ（orchestrator が `v3/` を読んだ，master の worktree）�
 | 2026-11-04 | 初版（orchestrator Opus） |
 | 2026-11-04 | 第 3 版：owner の指示で F4 を F4a（channel の組，streamer を開き直す）と F4b（rate と antenna，開き直さない）に分けた．両方に共通の仕組みと不具合は「F4 共通」に置いた |
 | 2026-11-04 | 第 2 版：Sol の事実確認 19 件を入れた．F9（時刻つきの gain）を分けた．§2 を三つに分けた．§4 に量を入れた |
+| 2026-11-06 | F7 の補い（owner の D1，design note 48 S3）：32 サンプル以下の burst のちょうど次の予約は続けない |

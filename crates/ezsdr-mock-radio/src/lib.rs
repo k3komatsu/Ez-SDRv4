@@ -36,6 +36,8 @@ pub use profile::{BLOCK_LEN, Profile, ProfileKind};
 const DEVICE_LOST: &str = "MR-20: device lost";
 /// UR-22 `MIN_FIRST_SEND`: a short finite burst's device burst is padded to this many samples.
 const DEVICE_MIN_FIRST_SEND: i64 = 4;
+/// UR-22 `MIN_OPEN_FIRST_SEND`: a first send that leaves its device burst open carries this many samples (MR-25's hand-over threshold).
+const DEVICE_MIN_OPEN_FIRST_SEND: i64 = 32;
 
 fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").expect("valid module id"), version: Version::new(2, 0, 0) }
@@ -1359,7 +1361,7 @@ impl MockRadio {
         let mut payload = None;
         let mut handed = None;
         let mut device_floor = None;
-        // MR-25: a burst not yet started is handed over once its first send's samples fit the window (UR-22 MIN_FIRST_SEND).
+        // MR-25: a burst not yet started is handed over once its first send's samples fit the window (UR-22 MIN_OPEN_FIRST_SEND).
         let mut include = |order: u64, start: i64, len: i64, repeat: bool, first: i64| {
             let end = (!repeat).then_some(start.saturating_add(len));
             let candidate = handed_end_before(order, before, start, end, window_end).filter(|_| start.saturating_add(first) <= window_end);
@@ -1374,7 +1376,7 @@ impl MockRadio {
                 include(open.order, open.start, open.len, open.repeat, 1);
             }
             for held in self.tx[k].held.values() {
-                include(held.order, held.start, held.len, held.repeat, if held.repeat { DEVICE_MIN_FIRST_SEND } else { held.len.min(DEVICE_MIN_FIRST_SEND) });
+                include(held.order, held.start, held.len, held.repeat, if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) });
             }
         }
         let (front, floor) = if self.profile.timing().tx_in_flight_ns == 0 {

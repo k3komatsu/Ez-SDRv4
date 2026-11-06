@@ -19,7 +19,7 @@ use serde_json::json;
 
 use super::control::Planned;
 use super::core::{Clock, Core, Streams, lock, stream_key};
-use crate::device::{Dir, Iq, MIN_FIRST_SEND, TxCode, TxReport};
+use crate::device::{Dir, Iq, MIN_FIRST_SEND, MIN_OPEN_FIRST_SEND, TxCode, TxReport};
 use crate::host::HostClock;
 use crate::profile::DEVICE_LEAD_NS;
 use ezsdr_radio::timeline::{Channels, StreamKey};
@@ -521,7 +521,8 @@ impl Tx {
         if self.chain.needs_reopen() {
             return false;
         }
-        let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, TX_SEND_CAP);
+        let min_open = MIN_OPEN_FIRST_SEND as i64;
+        let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);
         let (start, next, first) = {
             let open = self.open.as_ref().expect("a burst is open");
             (open.held.k, open.next, open.first)
@@ -536,22 +537,22 @@ impl Tx {
         let offset = if open.held.repeat { (open.next - start).rem_euclid(len) } else { open.next - start };
         let tiled = open.held.repeat && open.held.samples[0].len() > len as usize;
         let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };
-        if device_sob {
-            wanted = wanted.max(if tiled { min_first } else { min_first.min(len - offset) });
-        }
         let cut = [held_cut, clock_cut].into_iter().flatten().min();
         if let Some(cut) = cut {
             wanted = wanted.min(cut - open.next);
         }
         let avail = window_cut - open.next;
-        if avail < if device_sob { wanted.min(min_first) } else { wanted } {
+        if avail < if device_sob { wanted.min(min_open) } else { wanted } {
             return false;
         }
         let count = wanted.min(avail);
         debug_assert!(count > 0, "the send is inside the in-flight window");
         let ends_waveform = !open.held.repeat && offset + count == len;
         let ends_at_held = held_cut.is_some_and(|h| open.next + count == h) && clock_cut.is_none_or(|cut| h_lt(held_cut, cut));
-        let eob = ends_waveform || ends_at_held;
+        // A first send of at most 32 samples is one closed device burst, whether it ends the waveform or reaches a cut (UR-22).
+        let short_first = device_sob && count <= min_open;
+        let closes_at_cut = short_first && cut.is_some_and(|cut| open.next + count == cut);
+        let eob = ends_waveform || ends_at_held || closes_at_cut;
         let mut slices = [&[][..]; TX_CHANNELS_MAX];
         for (slice, channel) in slices.iter_mut().zip(open.held.samples.iter()) {
             *slice = &channel[offset as usize..(offset + count) as usize];
@@ -565,11 +566,11 @@ impl Tx {
         // at its next sample (it is a device lead away): otherwise its last sample is held
         // back, and `step` sends it with end-of-burst at that deadline, or without it ahead
         // of a burst that continues the device burst there (Review N, B3; Review O, O-B1).
-        // A one-sample burst's first buffer is not held: its start goes with it.
+        // A short first buffer is not held: its start goes with it.
         let open_ended = clock.instant(open.next + count) - self.core.now() > self.core.ticks(DEVICE_LEAD_NS);
-        let hold = eob && !ends_at_held && open_ended && !(device_sob && count <= min_first);
+        let hold = eob && !ends_at_held && open_ended && !short_first;
         // A short first send is closed here even where a booking follows at its end: that booking meets the padded front (UR-22).
-        let device_eob = eob && (!ends_at_held || device_sob && count < min_first) && !hold;
+        let device_eob = eob && (!ends_at_held || closes_at_cut) && !hold;
         let sending = (if hold { count - 1 } else { count }) as usize;
         // The held tail is at `start - 1`; the continuation cursor already follows it.
         if continuing {
@@ -3860,8 +3861,8 @@ mod tests {
             let safe = cursor + 3;
             lock(&core.held).insert((clock.domain, safe));
             tx.command(TxCmd::Burst(continuation(&clock, safe, 1_000)));
-            // The window reaches four samples past B's first send (FS-3: a first send never goes short).
-            device_at(&core, &time, &device, core.ticks(31_006_000));
+            // The window reaches 32 samples past B's first send (FS-3: a first send never goes short).
+            device_at(&core, &time, &device, core.ticks(31_034_000));
             // The device gets past B's safe target while the owner's manual clock stays fixed.
             device.set_time(core.ticks(70_000_000));
             assert!(tx.step(), "{what}: B's timed send");
@@ -4714,31 +4715,54 @@ mod tests {
     }
 
     #[test]
-    fn ur_23_a_first_send_waits_for_four_window_samples() {
-        // UR-22 (FS-3, N5): a first send never goes short of four samples; it waits for window space and sends four at once.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_010_000), 2_000);
-        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
-        device_at(&core, &time, &device, txp_ticks(992));
+    fn ur_23_a_first_send_waits_for_32_window_samples() {
+        // UR-22 (S3, #78): an open first send waits for 32 samples of window space, or for its whole length when that is shorter. The window
+        // is 2 100 samples and the burst starts at 3 000: 28, then 31, samples of room at 928 and 931, nothing goes; at 932, 32. The device
+        // lead (2 000 samples) still holds at 932, so the burst is not late.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 10_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(928));
         txp_drain(&mut tx);
-        assert!(sends(&device).is_empty(), "a first send of two samples was handed over: {:?}", device.calls());
-        device_at(&core, &time, &device, txp_ticks(994));
+        assert!(sends(&device).is_empty(), "28 samples of window space were handed over: {:?}", device.calls());
+        device_at(&core, &time, &device, txp_ticks(931));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "31 samples of window space were handed over: {:?}", device.calls());
+        device_at(&core, &time, &device, txp_ticks(932));
         while sends(&device).is_empty() && tx.step() {}
-        assert_eq!(sends(&device), [(4, true, false)], "{:?}", device.calls());
+        assert_eq!(sends(&device), [(32, true, false)], "{:?}", device.calls());
     }
 
     #[test]
-    fn ur_22_a_repeat_of_one_to_three_samples_tiles_its_first_send() {
-        // UR-22 (FS-6): a repeat's first send is its waveform tiled to at least four samples, all payload.
-        for len in 1..=3 {
-            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+    fn ur_23_a_burst_whose_window_first_takes_28_samples_plays_clean_to_its_end() {
+        // UR-22 (S3, #78, the bench's shape): a 10 000-sample burst at 1 MS/s whose window first admits 28 samples (at 928). The first send waits
+        // for 32 (at 932), which still leaves the device lead before the start at 1 000, so FakeDevice sees no open first send under 30 samples:
+        // no Underflow, no TimeError, one BurstAck, the whole waveform played.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_100_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 10_000, false, LatePolicy::DropAndFlag));
+        for samples in [928, 932].into_iter().chain((1_432..14_000).step_by(500)) {
+            device_at(&core, &time, &device, txp_ticks(samples));
+            txp_drain(&mut tx);
+        }
+        tx.reports(Wall::ZERO);
+        let rows = lock(&core.rec).device_async.clone();
+        assert!(rows.iter().all(|row| row["code"] != "Underflow" && row["code"] != "TimeError"), "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row["code"] == "BurstAck").count(), 1, "{rows:?} {:?}", device.calls());
+        let played: Vec<_> = (0..10_000).map(|i| Some([(i + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+        assert_eq!(device.transmitted(clock.instant(3_000), 10_000), played, "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_22_a_repeat_of_one_to_five_samples_tiles_its_first_send() {
+        // UR-22 (FS-6, S3): a repeat's first send is its waveform tiled to 32 payload samples; the window holds exactly 32.
+        for len in [1usize, 3, 5] {
+            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(Some(3_032_000), 2_000);
             let mut burst = txp_burst(&clock, 3_000, len, true, LatePolicy::DropAndFlag);
             burst.tile_repeat();
             txp_give(&mut tx, &core, burst);
             assert!(tx.step());
-            let first = sends(&device)[0];
-            assert!(first.0 >= 4 && first.1, "len {len}: {first:?}: {:?}", device.calls());
-            let expected: Vec<Option<[f32; 2]>> = (0..4).map(|i| Some([((i % len) + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
-            assert_eq!(device.transmitted(clock.instant(3_000), 4), expected, "len {len}");
+            assert_eq!(sends(&device), [(32, true, false)], "len {len}: {:?}", device.calls());
+            let expected: Vec<Option<[f32; 2]>> = (0..32).map(|i| Some([((i % len) + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+            assert_eq!(device.transmitted(clock.instant(3_000), 32), expected, "len {len}");
         }
     }
 
@@ -4768,6 +4792,121 @@ mod tests {
         txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 4, false, LatePolicy::DropAndFlag));
         txp_drain(&mut tx);
         assert_eq!(sends(&device), [(4, true, true)], "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_burst_of_31_or_32_is_sent_whole_without_a_held_tail() {
+        // UR-22 (S3, #78): a finite burst of at most 32 samples is one closed device burst, with no sample held back.
+        for len in [31, 32] {
+            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            txp_give(&mut tx, &core, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
+            txp_drain(&mut tx);
+            assert_eq!(sends(&device), [(len, true, true)], "len {len}: {:?}", device.calls());
+            let played: Vec<_> = (0..len).map(|i| Some([(i + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+            assert_eq!(device.transmitted(clock.instant(3_000), len), played, "len {len}");
+        }
+    }
+
+    #[test]
+    fn ur_23_a_33_sample_burst_sends_32_then_holds_one() {
+        // UR-23 (S3, #78): a finite burst of 33 samples is not short: its first send is 32, and its last sample is held back to its end.
+        let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 33, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(32, true, false)], "{:?}", device.calls());
+        tx.command(TxCmd::Stop);
+        assert_eq!(sends(&device), [(32, true, false), (2, false, true)], "{:?}", device.calls());
+        let mut played: Vec<Option<[f32; 2]>> = (0..33).map(|i| Some([(i + 1) as f32 / 100_000.0, 3_000f32 / 10_000.0])).collect();
+        played.push(Some([0.0, 0.0]));
+        assert_eq!(device.transmitted(clock.instant(3_000), 34), played, "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_burst_booked_at_a_closed_short_burst_s_end_is_late() {
+        // UR-22 (S3, #78): a closed short burst's exclusive end is the front a booking meets, so a booking there is late and one sample later is on time.
+        for len in [4usize, 10, 31, 32] {
+            for (offset, late) in [(0i64, true), (1, false)] {
+                let (core, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+                txp_give(&mut tx, &core, txp_burst(&clock, 3_000, len, false, LatePolicy::DropAndFlag));
+                txp_give(&mut tx, &core, txp_burst(&clock, 3_000 + len as i64 + offset, 4, false, LatePolicy::DropAndFlag));
+                txp_drain(&mut tx);
+                let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+                let errors: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+                if late {
+                    assert_eq!(sends(&device), [(len, true, true)], "len {len}: {:?}", device.calls());
+                    assert_eq!(errors.len(), 1, "len {len}: {events:?}");
+                    assert_eq!(errors[0].payload["outcome"], "drop", "len {len}");
+                } else {
+                    assert_eq!(sends(&device), [(len, true, true), (4, true, true)], "len {len}: {:?}", device.calls());
+                    assert!(errors.is_empty(), "len {len}: {events:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ur_23_a_31_sample_burst_waits_for_all_31() {
+        // UR-22 (S3, #78): a 31-sample burst's first send waits for all 31 of its samples, not for 32. The window holds 30 at once, 31 at 1 sample.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(3_030_000), 2_000);
+        txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 31, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert!(sends(&device).is_empty(), "{:?}", device.calls());
+        device_at(&core, &time, &device, txp_ticks(1));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device), [(31, true, true)], "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_new_sob_after_an_abandon_waits_for_32_window_samples() {
+        // UR-22 (S3, #78): after a failed first send, the next burst's first send waits for 32 samples of window space like any first send.
+        let config = FakeConfig { clock: crate::ClockMode::Manual, faults: vec![crate::device::FakeFault::FailSend(0)], ..FakeConfig::default() };
+        let (core, device, time, _events) = crate::provider::test_support::rig_with(config, Vec::new());
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        device.tx_open(0, &[0]).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+        let clock = core.register(Dir::Tx, 200, 0).unwrap();
+        let (_to_tx, cmds) = std::sync::mpsc::channel();
+        std::mem::forget(_to_tx);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        txp_give(&mut tx, &core, txp_burst(&clock, 40_000, 1_000, false, LatePolicy::DropAndFlag));
+        device_at(&core, &time, &device, txp_ticks(32_031));
+        txp_drain(&mut tx);
+        let failed = sends(&device).len();
+        txp_give(&mut tx, &core, txp_burst(&clock, 42_000, 1_000, false, LatePolicy::DropAndFlag));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device).len(), failed, "31 samples of window space were handed over: {:?}", device.calls());
+        device_at(&core, &time, &device, txp_ticks(32_032));
+        txp_drain(&mut tx);
+        assert_eq!(sends(&device)[failed..], [(32, true, false)], "{:?}", device.calls());
+    }
+
+    #[test]
+    fn ur_23_a_clock_cut_leaving_n_closes_the_device_burst_with_that_send() {
+        // UR-22 (S3, #78): a clock cut that leaves 10 to 32 samples of a burst closes its device burst with that send.
+        for n in [10usize, 31, 32] {
+            let (core, device, _time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 1_000, false, LatePolicy::DropAndFlag));
+            tx.cut = Some(txp_ticks(3_000 + n as i64));
+            txp_drain(&mut tx);
+            assert_eq!(sends(&device), [(n, true, true)], "n {n}: {:?}", device.calls());
+        }
+    }
+
+    #[test]
+    fn ur_23_a_preemption_cut_leaving_n_closes_the_device_burst() {
+        // UR-22 (S3, #78): a booking inside a long burst that is not yet handed over cuts it to n samples, which close the device burst; the booking then meets the closed front and is late.
+        for n in [10usize, 31, 32] {
+            let (core, device, _time, events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
+            txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 1_000, false, LatePolicy::DropAndFlag));
+            txp_give(&mut tx, &core, txp_burst(&clock, 3_000 + n as i64, 4, false, LatePolicy::DropAndFlag));
+            txp_drain(&mut tx);
+            assert_eq!(sends(&device), [(n, true, true)], "n {n}: {:?}", device.calls());
+            let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+            let errors: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+            assert_eq!(errors.len(), 1, "n {n}: {events:?}");
+            assert_eq!(errors[0].payload["outcome"], "drop", "n {n}");
+        }
     }
 
     #[test]
@@ -4831,14 +4970,14 @@ mod tests {
     }
 
     #[test]
-    fn ur_23_a_four_sample_window_takes_a_first_send_of_four() {
-        // UR-22 (N5): a window that holds exactly four samples of the burst admits a first send of four; the next chunk waits for the window to empty.
-        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+    fn ur_23_a_32_sample_window_takes_a_first_send_of_32() {
+        // UR-22 (N5, S3): a window that holds exactly 32 samples of the burst admits a first send of 32; the next chunk waits for the window to empty.
+        let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
         txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::DropAndFlag));
         device_at(&core, &time, &device, txp_ticks(1_000));
         txp_drain(&mut tx);
-        assert_eq!(sends(&device), [(4, true, false)], "{:?}", device.calls());
-        assert!(device.transmitted(clock.instant(3_000), 4).iter().all(Option::is_some));
+        assert_eq!(sends(&device), [(32, true, false)], "{:?}", device.calls());
+        assert!(device.transmitted(clock.instant(3_000), 32).iter().all(Option::is_some));
     }
 
     #[test]
@@ -4901,7 +5040,7 @@ mod tests {
 
     #[test]
     fn ur_22_a_first_send_is_never_undersized() {
-        // UR-22 (F6-c): every first send of one to nine samples, each its own device burst, reaches the device with at least four samples per channel.
+        // UR-22 (F6-c, S3): every first send of one to nine samples, each its own closed device burst, reaches the device padded to four samples per channel; an open first send carries at least 32.
         let (core, device, time, _events, clock, mut tx, _frozen) = txp_rig(None, 2_000);
         for (index, len) in [1usize, 2, 3, 4, 5, 9].into_iter().enumerate() {
             let start = 3_000 + 10_000 * index as i64;
@@ -4911,7 +5050,7 @@ mod tests {
         }
         let sent = sends(&device);
         assert_eq!(sent.iter().filter(|send| send.1).count(), 6, "{sent:?}");
-        assert!(sent.iter().filter(|send| send.1).all(|send| send.0 >= 4), "{sent:?}");
+        assert!(sent.iter().filter(|send| send.1).all(|send| (send.2 && send.0 >= 4) || send.0 >= 32), "{sent:?}");
     }
 
     #[test]
@@ -5002,7 +5141,7 @@ mod tests {
     #[test]
     fn ur_23_a_wait_past_the_start_lead_moves_a_send_asap_first_send() {
         // UR-21, UR-22 (FS-5, SendAsapAndFlag): a first send that waited past its start is moved to the cursor, not dropped; the moved send opens a device burst.
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
         txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, LatePolicy::SendAsapAndFlag));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5016,11 +5155,11 @@ mod tests {
         assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
     }
 
-    /// UR-21, UR-22 (C2): a first send that waits for window space is judged at its device lead. Window space for four samples
+    /// UR-21, UR-22 (C2): a first send that waits for window space is judged at its device lead. Window space for 32 samples
     /// appears at 1 000 samples; the start at 3 000 is then a device lead (2 000 samples) away, so `now_ticks` is the lead boundary
     /// or one tick past it. Returns the sends and the TIME_ERROR outcomes.
     fn first_send_at_its_lead(policy: LatePolicy, now_ticks: i64) -> (Vec<(usize, bool, bool)>, Vec<String>) {
-        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_004_000), 2_000);
+        let (core, device, time, events, clock, mut tx, _frozen) = txp_rig(Some(2_032_000), 2_000);
         txp_give(&mut tx, &core, txp_burst(&clock, 3_000, 30_000, false, policy));
         device_at(&core, &time, &device, txp_ticks(999));
         txp_drain(&mut tx);
@@ -5200,16 +5339,16 @@ mod tests {
         device.rx_start(0, clock.instant(start)).unwrap();
         device_at(&core, &time, &device, clock.instant(start - 400_000));
 
-        let a = [vec![[0.1, 0.01], [0.2, 0.02], [0.3, 0.03], [0.4, 0.04], [0.5, 0.05]], vec![[0.6, 0.06], [0.7, 0.07], [0.8, 0.08], [0.9, 0.09], [1.0, 0.1]]];
-        let mut first = one_shot(&clock, start, 5, a[0].clone());
-        first.samples = Arc::new(a.to_vec());
+        let a: Vec<Vec<[f32; 2]>> = (0..2).map(|c| (0..33).map(|i| [(i + 1) as f32 / 64.0, (c + 1) as f32 / 16.0]).collect()).collect();
+        let mut first = one_shot(&clock, start, 33, a[0].clone());
+        first.samples = Arc::new(a.clone());
         txp_give(&mut tx, &core, first);
         assert!(tx.step());
-        assert_eq!(sends(&device), [(4, true, false)]);
+        assert_eq!(sends(&device), [(32, true, false)]);
 
-        let b = [vec![[0.7, 0.07], [0.8, 0.08]], vec![[0.9, 0.09], [1.0, 0.1]]];
-        let mut next = one_shot(&clock, start + 5, 2, b[0].clone());
-        next.samples = Arc::new(b.to_vec());
+        let b: Vec<Vec<[f32; 2]>> = (0..2).map(|c| (0..2).map(|i| [(40 + i) as f32 / 64.0, (c + 3) as f32 / 16.0]).collect()).collect();
+        let mut next = one_shot(&clock, start + 33, 2, b[0].clone());
+        next.samples = Arc::new(b.clone());
         txp_give(&mut tx, &core, next);
         assert!(tx.step());
         assert_eq!(sends(&device)[1..], [(1, false, false), (1, false, false)], "the first tail precedes the next burst payload");
@@ -5217,13 +5356,10 @@ mod tests {
         tx.command(TxCmd::Stop);
         assert_eq!(*sends(&device).last().unwrap(), (2, false, true), "Stop ends on the next burst's held tail and one zero");
 
-        device_at(&core, &time, &device, clock.instant(start + 8));
-        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 8, Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
-        assert_eq!(
-            samples,
-            [[a[0][0], a[0][1], a[0][2], a[0][3], a[0][4], b[0][0], b[0][1], [0.0, 0.0]].to_vec(), [a[1][0], a[1][1], a[1][2], a[1][3], a[1][4], b[1][0], b[1][1], [0.0, 0.0]].to_vec(),],
-            "continuation and EOB preserve each channel's held sample"
-        );
+        device_at(&core, &time, &device, clock.instant(start + 36));
+        let crate::device::RxRecv::Samples { samples, .. } = device.rx_recv(0, 36, Wall::from_millis(10), false) else { panic!("the loopback contains both channel tails") };
+        let expected: Vec<Vec<[f32; 2]>> = (0..2).map(|c| a[c].iter().chain(b[c].iter()).copied().chain([[0.0, 0.0]]).collect()).collect();
+        assert_eq!(samples, expected, "continuation and EOB preserve each channel's held sample");
     }
 
     #[test]

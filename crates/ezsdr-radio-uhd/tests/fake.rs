@@ -2857,6 +2857,25 @@ fn ur_23_a_burst_alone_is_ended_before_it_runs_dry() {
 }
 
 #[test]
+fn ur_23_a_short_window_first_send_plays_clean_at_1_mhz() {
+    // UR-23 (S3, #78): the first send of a 10 000-sample device burst at 1 MS/s waits for 32 samples of window space, so its open first
+    // packet is not short enough to run dry (FakeDevice's rule at interpolation 80 or more) and the whole waveform plays.
+    let dir = TempDir::new();
+    let device = fake(FakeConfig::default());
+    let samples = tone(10_000);
+    let (bytes, waveform) = waveform_of(&samples);
+    let spec = with_burst(with_tx(receive_spec(1, 1e6, 1e9, None), 1e6), &waveform, false, "drop_and_flag", 20_000);
+    let manifest = finish_spec(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(waveform.hash.clone(), bytes)])), ms(80));
+    let rows = section(&manifest, "async").as_array().unwrap().clone();
+    let codes: Vec<_> = rows.iter().map(|r| r["code"].as_str().unwrap().to_owned()).collect();
+    assert!(!codes.iter().any(|code| code == "Underflow" || code == "TimeError"), "{codes:?}; sends: {:?}", calls(&device, "tx_send"));
+    assert_eq!(rows.iter().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true).count(), 1, "{codes:?}");
+    let sends = tx_sends(&device);
+    let played: Vec<_> = samples.iter().map(|s| Some([s.0, s.1])).collect();
+    assert_eq!(device.transmitted(sends[0].at.unwrap(), samples.len()), played, "{:?}", calls(&device, "tx_send"));
+}
+
+#[test]
 fn ur_23_a_burst_at_the_first_safe_sample_after_a_held_tail_close_is_played() {
     // T2's held-tail close sends tail+zero, so the first safe start is c + 2. Both bursts are
     // booked in the Spec before the Run starts; A's device burst includes the closing zero.

@@ -7111,7 +7111,7 @@
   "id": "P656",
   "name": "a short first send that a booking follows is not closed at its end (UR-23, N3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let device_eob = eob && (!ends_at_held || device_sob && count < min_first) && !hold;",
+  "old": "let device_eob = eob && (!ends_at_held || closes_at_cut) && !hold;",
   "new": "let device_eob = eob && !ends_at_held && !hold;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
@@ -7636,7 +7636,7 @@
    "id": "P714",
    "name": "TX chunks ignore the candidate in-flight window",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, TX_SEND_CAP);",
+    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);",
    "new": "let chunk = self.core.block_len as i64;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -10118,18 +10118,18 @@
    "id": "P1108",
    "name": "uhd-tx hands a short buffer at a window edge it cannot fill (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
    "new": "if avail < if device_sob { 1 } else { wanted } {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
-   "filter": "ur_23_a_first_send_waits_for_four_window_samples"
+   "filter": "ur_23_a_first_send_waits_for_32_window_samples"
   },
   {
    "id": "P1109",
    "name": "a buffer waits when the window takes exactly all of it (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
-   "new": "if avail <= if device_sob { wanted.min(min_first) } else { wanted } {",
+   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
+   "new": "if avail <= if device_sob { wanted.min(min_open) } else { wanted } {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m1_a_repeat_stops_short_of_a_window_edge_it_cannot_fill"
@@ -10168,7 +10168,7 @@
    "id": "P1113",
    "name": "the first timed buffer waits for a whole buffer too (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
+   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
    "new": "if avail < wanted {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -10188,8 +10188,8 @@
    "id": "P1115",
    "name": "a continuation's first buffer is exempt from the wait (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
-   "new": "if avail < if device_sob { wanted.min(min_first) } else { 0 } {",
+   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
+   "new": "if avail < if device_sob { wanted.min(min_open) } else { 0 } {",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
@@ -10198,7 +10198,7 @@
    "id": "P1116",
    "name": "a waiting continuation is sent into the short window (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {\n            return false;\n        }\n        let count = wanted.min(avail);",
+   "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {\n            return false;\n        }\n        let count = wanted.min(avail);",
    "new": "let count = wanted.min(avail);",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
@@ -10529,7 +10529,7 @@
     "id": "P1160",
     "name": "the quarter-window still limits the TX chunk",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(1, TX_SEND_CAP);",
+    "old": "let chunk = (self.core.ticks(self.core.description.timing.tx_in_flight_ns) / clock.n / 4).clamp(min_open, TX_SEND_CAP);",
     "new": "let chunk = self.core.block_len as i64;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -13069,7 +13069,7 @@
       "new": "let tiled = false;",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
-      "filter": "ur_22_a_repeat_of_one_to_three_samples_tiles_its_first_send"
+      "filter": "ur_22_a_repeat_of_one_to_five_samples_tiles_its_first_send"
     },
     {
       "id": "N48S1-07",
@@ -13125,7 +13125,7 @@
       "id": "N48S1-12",
       "name": "a four-sample first send is held back as three and one (UR-22, FS-1, N1)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count <= min_first);",
+      "old": "let hold = eob && !ends_at_held && open_ended && !short_first;",
       "new": "let hold = eob && !ends_at_held && open_ended && !(device_sob && count == 1);",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -13155,8 +13155,8 @@
       "id": "N48S1-15",
       "name": "a continuation of fewer than four samples waits for the first-send minimum (UR-23, TBD-b4)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "if avail < if device_sob { wanted.min(min_first) } else { wanted } {",
-      "new": "if avail < if device_sob { wanted.min(min_first) } else { min_first } {",
+      "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
+      "new": "if avail < if device_sob { wanted.min(min_open) } else { min_open } {",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_23_a_continuation_of_two_samples_is_sent_at_once_with_no_minimum"
@@ -13215,7 +13215,7 @@
       "id": "N48S1-25",
       "name": "a held burst's first send is counted as one sample against the window (MR-25, UR-23 D4)",
       "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "held.len.min(DEVICE_MIN_FIRST_SEND)",
+      "old": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND)",
       "new": "held.len.min(1)",
       "crate": "ezsdr-mock-radio",
       "test_bin": "mock_channel",
@@ -13225,11 +13225,11 @@
       "id": "N48S1-29",
       "name": "a held burst's first send is counted as its own length, not as four samples, when it is a repeat (UR-22, MR-25 D4)",
       "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "if held.repeat { DEVICE_MIN_FIRST_SEND } else { held.len.min(DEVICE_MIN_FIRST_SEND) }",
-      "new": "held.len.min(DEVICE_MIN_FIRST_SEND)",
+      "old": "if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
+      "new": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND)",
       "crate": "ezsdr-mock-radio",
       "test_bin": "mock_channel",
-      "filter": "mr_25_a_repeat_first_send_is_judged_at_four_samples"
+      "filter": "mr_25_a_repeat_first_send_is_judged_at_32_samples"
     },
 {
     "id": "N-12",
@@ -13580,5 +13580,233 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "a_rate_mismatch_never_passes"
+  },
+  {
+    "id": "N48S3-01",
+    "name": "first send threshold 32 -> 31",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
+    "new": "if avail < if device_sob { wanted.min(min_open - 1) } else { wanted } {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_first_send_waits_for_32_window_samples"
+  },
+  {
+    "id": "N48S3-02",
+    "name": "first send threshold 32 -> 33",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
+    "new": "if avail < if device_sob { wanted.min(min_open + 1) } else { wanted } {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_first_send_waits_for_32_window_samples"
+  },
+  {
+    "id": "N48S3-04",
+    "name": "first send not capped by the burst remainder",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let mut wanted = if tiled { chunk } else { chunk.min(len - offset) };",
+    "new": "let mut wanted = if tiled { chunk } else { chunk };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_31_sample_burst_waits_for_all_31"
+  },
+  {
+    "id": "N48S3-07",
+    "name": "short first send boundary 32 -> 31 (hold and close)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let short_first = device_sob && count <= min_open;",
+    "new": "let short_first = device_sob && count < min_open;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_burst_of_31_or_32_is_sent_whole_without_a_held_tail"
+  },
+  {
+    "id": "N48S3-08",
+    "name": "short first send boundary 32 -> 33 (hold and close)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let short_first = device_sob && count <= min_open;",
+    "new": "let short_first = device_sob && count <= min_open + 1;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_33_sample_burst_sends_32_then_holds_one"
+  },
+  {
+    "id": "N48S3-12",
+    "name": "refusal of a first send at a clock cut 4 -> 32",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if device_sob && clock_cut.is_some_and(|cut| cut - next < min_first) {",
+    "new": "if device_sob && clock_cut.is_some_and(|cut| cut - next < min_open) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_clock_cut_leaving_n_closes_the_device_burst_with_that_send"
+  },
+  {
+    "id": "N48S3-13",
+    "name": "clock-cut close term removed from eob",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let eob = ends_waveform || ends_at_held || closes_at_cut;",
+    "new": "let eob = ends_waveform || ends_at_held;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_clock_cut_leaving_n_closes_the_device_burst_with_that_send"
+  },
+  {
+    "id": "N48S3-14",
+    "name": "FakeDevice open-short ratio gate 80 -> 81",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "const OPEN_FAULT_MIN_RATIO: i64 = 80;",
+    "new": "const OPEN_FAULT_MIN_RATIO: i64 = 81;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_the_open_short_rule_starts_at_interpolation_80"
+  },
+  {
+    "id": "N48S3-15",
+    "name": "FakeDevice open-short ratio gate removed",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "(1..OPEN_FAULT_BELOW).contains(&packet.n) && packet.ratio >= OPEN_FAULT_MIN_RATIO {",
+    "new": "(1..OPEN_FAULT_BELOW).contains(&packet.n) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_short_open_send_at_10_mhz_is_clean"
+  },
+  {
+    "id": "N48S3-16",
+    "name": "FakeDevice open-short count 30 -> 31",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "const OPEN_FAULT_BELOW: usize = 30;",
+    "new": "const OPEN_FAULT_BELOW: usize = 31;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_an_open_first_send_of_30_is_clean"
+  },
+  {
+    "id": "N48S3-28",
+    "name": "FakeDevice open-short count 30 -> 29",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "const OPEN_FAULT_BELOW: usize = 30;",
+    "new": "const OPEN_FAULT_BELOW: usize = 29;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_an_open_first_packet_of_29_samples_faults"
+  },
+  {
+    "id": "N48S3-22",
+    "name": "FakeDevice gap clause removed (fires at the same tick)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "Burst::Armed(armed) if now <= armed => return false,",
+    "new": "Burst::Armed(_) if false => return false,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_short_open_send_continued_at_the_same_tick_is_clean"
+  },
+  {
+    "id": "N48S3-23",
+    "name": "FakeDevice arms a refused SOB packet",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {",
+    "new": "if !self.active && packet.radio_time.is_some_and(|t| t < now || t <= self.cursor) {\n            if packet.sob && !packet.eob && (1..OPEN_FAULT_BELOW).contains(&packet.n) && packet.ratio >= OPEN_FAULT_MIN_RATIO {\n                self.burst = Burst::Armed(now);\n            }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_refused_sob_packet_does_not_arm_the_short_rule"
+  },
+  {
+    "id": "N48S3-24",
+    "name": "FakeDevice a new SOB does not clear the short-burst state",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "self.burst = Burst::Clean;\n        } else if self.faulted(packet, now, channel_count) {",
+    "new": "} else if self.faulted(packet, now, channel_count) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_new_burst_s_sob_clears_the_short_rule"
+  },
+  {
+    "id": "N48S3-25",
+    "name": "FakeDevice reports two Underflows per channel per burst",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(self.cursor), channel });\n                }\n                self.active = false;",
+    "new": "self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(self.cursor), channel });\n                    self.reports.push_back(TxReport { code: TxCode::Underflow, tick: Some(self.cursor), channel });\n                }\n                self.active = false;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_an_open_short_burst_reports_one_underflow_per_channel"
+  },
+  {
+    "id": "N48S3-42",
+    "name": "the Mock's frontier after a handed burst is one sample past its end, not two (MR-17, note 40 D5)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "handed.map(|sample| sample.saturating_add(2))",
+    "new": "handed.map(|sample| sample.saturating_add(1))",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "s3_parity_booking_after_a_closed_short_burst_follows_d5"
+  },
+  {
+    "id": "N48S3-17",
+    "name": "Mock repeat hand-over threshold 32 -> 4",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
+    "new": "if held.repeat { DEVICE_MIN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_25_a_repeat_first_send_is_judged_at_32_samples"
+  },
+  
+  
+  
+  {
+    "id": "N48S3-21",
+    "name": "Mock hand-over threshold 32 -> 31 (non-repeat)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND)",
+    "new": "held.len.min(DEVICE_MIN_OPEN_FIRST_SEND - 1)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over"
+  },
+  
+  
+  
+  
+  {
+    "id": "N48S3-32",
+    "name": "a read that finds an armed short burst dry leaves it armed",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "streamer.radio.burst = Burst::Timed;",
+    "new": "streamer.radio.burst = Burst::Armed(now);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_read_that_finds_the_short_burst_dry_is_its_one_underflow"
+  },
+  {
+    "id": "N48S3-10",
+    "name": "a short first send never closes its device burst at a cut or its end",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let short_first = device_sob && count <= min_open;",
+    "new": "let short_first = false;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_burst_booked_at_a_closed_short_burst_s_end_is_late"
+  },
+  
+  {
+    "id": "N48S3-34",
+    "name": "FakeDevice takes a continuation's timing from the DUC's residual time, not its own time spec (Sol 2)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "let timed = packet.stamped;",
+    "new": "let timed = packet.radio_time.is_some();",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_timed_open_burst_with_untimed_continuations_reports_once_per_channel"
+  },
+  {
+    "id": "N48S3-35",
+    "name": "the open first send's window wait is 4 samples again, the S1 minimum (S3 review 6)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if avail < if device_sob { wanted.min(min_open) } else { wanted } {",
+    "new": "if avail < if device_sob { wanted.min(4) } else { wanted } {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_burst_whose_window_first_takes_28_samples_plays_clean_to_its_end"
   }
 ]

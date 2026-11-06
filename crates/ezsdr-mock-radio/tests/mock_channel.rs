@@ -574,31 +574,34 @@ fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
 
 #[test]
 fn mr_25_a_first_send_that_does_not_fit_the_window_is_not_handed_over() {
+    // UR-22 (S3): a first send of 32 samples must fit the window; 31 samples of a 40-sample burst do not, 32 do.
     let t0 = 2_000_000_000;
-    let world = World::new(loopback(None));
-    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
-    radio.mock.arm().unwrap();
-    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
-    radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0); 8]), 2_009_998, false));
-    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
-    step(&world, &mut [&mut radio], t0);
-    assert!(records(&radio).is_empty(), "two samples fit the window, four are needed: {:?}", records(&radio));
-    assert!(radio.received(0).iter().all(|(_, re, im)| f32::hypot(*re, *im) < 1e-6), "nothing of the burst is radiated");
+    for (start, handed) in [(2_009_969, false), (2_009_968, true)] {
+        let world = World::new(loopback(None));
+        let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+        radio.mock.arm().unwrap();
+        radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+        radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0); 40]), start, false));
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+        step(&world, &mut [&mut radio], t0);
+        assert_eq!(!records(&radio).is_empty(), handed, "start {start}: {:?}", records(&radio));
+    }
 }
 
 #[test]
-fn mr_25_a_repeat_first_send_is_judged_at_four_samples() {
-    // UR-22: a repeat's first send tiles its waveform to four samples, so a repeat of two does not fit the two samples left in the window.
+fn mr_25_a_repeat_first_send_is_judged_at_32_samples() {
+    // UR-22 (S3): a repeat's first send tiles its waveform to 32 samples, so a repeat of two needs 32 samples of window space.
     let t0 = 2_000_000_000;
-    let world = World::new(loopback(None));
-    let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
-    radio.mock.arm().unwrap();
-    radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
-    radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0); 2]), 2_009_998, true));
-    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
-    step(&world, &mut [&mut radio], t0);
-    assert!(records(&radio).is_empty(), "two samples fit the window, four are needed: {:?}", records(&radio));
-    assert!(radio.received(0).iter().all(|(_, re, im)| f32::hypot(*re, *im) < 1e-6), "nothing of the repeat is radiated");
+    for (start, handed) in [(2_009_969, false), (2_009_968, true)] {
+        let world = World::new(loopback(None));
+        let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+        radio.mock.arm().unwrap();
+        radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+        radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0); 2]), start, true));
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+        step(&world, &mut [&mut radio], t0);
+        assert_eq!(!records(&radio).is_empty(), handed, "start {start}: {:?}", records(&radio));
+    }
 }
 
 #[test]
