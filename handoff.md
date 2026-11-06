@@ -12,7 +12,7 @@
 - **Phase 8（Mock ↔ X310 parity）は Gate P 受理**（owner 2026-10-17）：計画 [plan/phase8/00-overview.md](plan/phase8/00-overview.md)（判断 P1〜P6，段階，bench BP0〜BP5，出口条件），設計 [33-channels-and-streams.md](plan/phase8/33-channels-and-streams.md)（channel と stream，混在 board，`x3xx`，Kernel の変更は `KeyDecl` の番号付き segment だけ）．レビューと調査は `plan/phase8/reviews/`・`research/`．
 - **Phase 8 の段階 1（channel と stream，1a〜1b-7b），設計メモ 35〜43，段階 3（測定と実機の準備：3a〜3g，D9a，MA1，43a，TXP，3c-3b，TXS）は完了**（2026-10-17〜29）．各段階の記録は [計画](plan/phase8/00-overview.md) §8 の判断ログ，レビューは `plan/phase8/reviews/`，実機の結果は [bench-results.md](plan/phase8/bench-results.md)．
 - 実装：13 crate（`crates/`），schema（`schemas/`），Python package（`python/ezsdr`）．確認の手順は §5．
-- open issue：#56・#67（§3），#70（Module の道では症状なし，#78 の後に再確認），#71・#75（§2 の (6)），#77（Mock と照合の模型の fault の順），#78（残りは 48 S3），#79（Mock は受付で，Module は送り出しで判定：note 47 の段階 5）．
+- open issue：#56・#67（§3），#71・#75（§2 の (6)），#77（Mock と照合の模型の fault の順），#79（Mock は受付で，Module は送り出しで判定：note 47 の段階 5．S3 で 1〜32 サンプルに広がった）．#70・#78 は 2026-11-06 の実機で閉じた．
 
 ## 2. 次にすること
 
