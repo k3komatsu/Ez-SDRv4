@@ -598,10 +598,10 @@ export EZSDR_UHD_ARGS=addr=192.168.40.36 && hw hw_n47_rx_start_lead_group       
 
 | | 機材 | 接続 | att |
 |---|---|---|---|
-| #1 | X300＋OBX（slot A） | `addr=192.168.40.36`，NIC `enp1s0f1np1`，`--subnet 40`，`BOARD=36` | 40 dB |
+| #1 | X300＋OBX（slot A） | `addr=192.168.40.36`，NIC `enp1s0f1np1`，`--subnet 40`，`BOARD=36` | 30 dB |
 | #2 | X300＋UBX（slot A）・CBX（slot B） | `addr=192.168.47.37`，NIC `enp1s0f0np0`，`--subnet 47`，`BOARD=37` | 各 30 dB |
 
-- att の値は当日 owner に確かめる（2026-11-05 は三つとも 30 dB だった）．上の表は書いたとおり（#1 40 dB）．2026-11-05 の記録と違うので，当日の値を owner が決め，違えば表を直さずに報告する．
+- att は三つの board とも 30 dB（owner 2026-11-06．2026-11-05 の当日の値に合わせた）．
 - 2 台は同時につながない（owner）．順は **#2 → #1**．
 - 試験はすべて slot A（OBX／UBX）．CBX（slot B）は 1.2 GHz 以上で `SAFE_TX_HZ`（999.5〜1000.5 MHz）の外なので流さない．`iii::pin_to_slot_a` が，試験ごとに slot A だけの layout を組む（TX200・T4 は slot B を送信の channel にしない）．
 - 基準は内部（`internal`）．PPS と 10 MHz はこの日も使わない．
@@ -655,7 +655,7 @@ docker run --rm --network=host ezsdr-v4-dev:uhd4.10 sh -c 'cat /sys/class/net/en
 
 ### (b) #78 と #70：Module の送信の試験（#2 UBX → #1 OBX，TX あり，約 30 分，estimate）
 
-**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**．att の値は当日 owner に確かめる（2026-11-05 は三つとも 30 dB だった）．
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
 
 ```sh
 export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && run_all \
@@ -690,7 +690,7 @@ export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 &&
 
 ### (c) 受信の restart：fill，start lead，raw の restart（#2 UBX → #1 OBX，TX あり（1 MS/s の tone 源と，companion の 10 MS/s），約 40 分，estimate）
 
-**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**．companion の群は PN を 10 MS/s で repeat する（広帯域の送信．owner の att の確認のもとで流す）．
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．companion の群は PN を 10 MS/s で repeat する（広帯域の送信．owner の att の確認のもとで流す）．
 
 ```sh
 export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && run_all \
@@ -708,7 +708,7 @@ export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 &&
 
 ### (d) 送信 rate の受け入れ：`hw_n47_raw_tx_rate_on_an_open_streamer`（#2 UBX → #1 OBX，TX あり，約 20 分，estimate）
 
-**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**
 
 ```sh
 export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_n47_raw_tx_rate_on_an_open_streamer   # #2 UBX slot A
@@ -721,7 +721,7 @@ export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 &&
 
 ### (e) TX200：200 MS/s の送信（#2 UBX，slot A の 1 channel，約 15 分，estimate）
 
-**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**．TX200 は PN（200 MS/s，帯域が広い）を送り，`SAFE_TX_HZ` の範囲に収まらない．**owner が att と広帯域の送信を確認してから流す**．
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．TX200 は PN（200 MS/s，帯域が広い）を送り，`SAFE_TX_HZ` の範囲に収まらない．**owner が att と広帯域の送信を確認してから流す**．
 
 ```sh
 export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0          # #2 UBX slot A（1 channel）
@@ -734,7 +734,7 @@ EZSDR_TX200_LENGTHS=1000,20000 EZSDR_TX200_SECONDS=300 hw hw_tx200_hot_path_prob
 
 ### (f) 200 MS/s の受信・送信・両方：T4 の負荷試験（#2 → #1，TX あり（200 MS/s の PN），約 70 分，estimate）
 
-**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）．owner は広帯域（200 MS/s の PN）の送信も確認する**．
+**送信の前に owner に att を確認する（三つの board とも 30 dB）．owner は広帯域（200 MS/s の PN）の送信も確認する**．
 
 ```sh
 export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0          # #2 UBX slot A
@@ -751,7 +751,7 @@ hw hw_iii_load_200msps
 
 ### (g) 送信中の ssh 切断（#1 OBX，TX あり，約 8 分，estimate）
 
-**送信の前に owner に att を確認する（#1 OBX 40 dB，#2 各 30 dB）**
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**
 
 前提：`ssh localhost` が鍵認証（`BatchMode`）で通ること．独立の受信機を owner に聞く（スペクトラムアナライザ，または #1 の TX を別の受信に配線）．**無いなら `EZSDR_DROP_RX_CHECK` を置かずに流す**：その場合 C2 は NOT DONE と記録され，(g) は閉じない（C1 と C3 の結果は記録する）．
 
