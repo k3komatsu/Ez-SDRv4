@@ -315,3 +315,31 @@ TXS（send は最大 20 000 sample，短い repeat は tile）の worktree で `
 - **閉じた後の次の burst**：長い burst（9 999＋2 サンプルの close）の後，次の時刻つきの burst を close の終わりちょうどに置くと丸ごと捨てられ，＋1，＋2，＋3，＋1000 サンプルなら鳴る（各 5 回）．UR-22 の「閉じた後の安全な開始は終わり＋1 サンプル」は装置の規則（VERIFIED）．
 - **#70 の試験の形**（2 サンプルの burst の 25 µs 後に 1 万サンプル）：2 サンプルの burst が捨てられ（TimeError 32，ACK なし），後の burst は時刻どおり．続きの send を全部時刻つきにしても最初だけにしても同じ．「すべての send に時刻」は #78 のどの症状とも関係しない．
 - 試していないこと：一つの streamer で二つの channel，10〜50 MS/s の間の rate．
+
+## 2026-11-06：note 48 の後（#2＝X300 347D541＋UBX/CBX，#1＝X300 347D545＋OBX，commit `4f7e9e4`）
+
+手順は [bench.md](bench.md) §「2026-11-06 の手順」．二台を同時につないだ（NIC ごとに subnet 一つ）．att は三つの board とも 30 dB，有線の loopback（owner，この日は毎回の確認を省いた）．PC は 11-05 から再起動していない．log は `~/.cache/ezsdr-bench/2026-11-06/`（repo の外）．
+
+- **(a)**：二台とも ping・`bench-host.sh`・`uhd_usrp_probe` が通った（FPGA 39.3）．NIC の counter はコンテナから読める．
+- **(b) #78 と #70（Module の送信）**：`hw_b6`・`hw_b7`・`hw_b8_burst_at_a_sent_burst_s_end`・`hw_b8_preemption`（5 と 3 ms は late 1 つ，10 と 20 ms は 0）・`hw_h5`・`hw_txp_b0`・`hw_p72` は二台とも PASS（11-05 は `hw_b6`・`hw_b7`・`hw_b8` が #78 で FAIL）．`hw_b8_burst_one_sample_after_a_burst` は #2 で PASS（終わり＋1 は late 1 つ，＋2 は 0），#1 で＋2 の試行が Underflow．`hw_s1_short_first_sends` は二台とも，試行のおよそ 2 割で長い burst が数サンプルで Underflow し，続く packet が late（約 160 個）になる．短い burst の長さ（1〜4）には関係しない．`hw_p70` は「一緒に予約」が二台とも PASS（onset の差 0〜1 サンプル），「送った後に予約」は二台とも，対照を含めて TIME_ERROR 1 つ：A の 41 ms 後に A＋5 ms の B を予約するので B は予約の時に装置の lead の中にある（試験の形の欠陥，INFERRED：cause は印字していない）．#70 と #78 はまだ閉じない．
+- **#78 の残りの原因（VERIFIED）**：Module の send を `ProbeDevice` で記録した（一時的な診断，commit しない）．失敗した試行では長い burst の最初の send が 6〜28 サンプル（in-flight の窓に入る分だけ），通った試行では 145〜156 サンプル．続きの send は開始の約 7 ms 前に時刻つきで出ていて，ホストは遅れていない．UHD だけの C++（`plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `head`，続きは最初の send の 0〜2 ms 後，時刻つきと時刻なし）で再現した：
+
+  | rate（補間） | 最初の send ≤ 28 サンプル | ≥ 30 サンプル |
+  |---|---|---|
+  | 0.5，1，1.25，2，2.5 MS/s（400〜80） | 毎回 Underflow（時刻つきの続きは late 約 340 個，時刻なしは TimeError 1 つ） | 問題なし |
+  | 4，5，8，10 MS/s（50〜20） | 2 サンプルでも問題なし | 問題なし |
+
+  #1 の 0.5〜10 MS/s と #2 の 1・2 MS/s（各 6〜10 回）．続きが 0 ms 後（すぐ）なら 28 サンプルでも通ることがある（#2，1 MS/s，5 回中 3 回）．S1 の「device burst の最初の send は 4 サンプル以上」は閉じる send がすぐ続く形（11-05）だけの規則で，続きが後から来る形では低い rate で 30 サンプル以上が要る．C++ の case `s1`（`hw_s1` と同じ形，最初の send が 2 000）は 120 回すべて問題なし．
+- **(c) 受信の再開**：`hw_iii_raw_rx_restart_fill` は二台・8 rate とも PASS（各 5 回，同じ rate ではほぼ同じ値，UBX と OBX で同じ）：
+
+  | rate（MS/s） | 1 | 2 | 5 | 10 | 25 | 50 | 100 | 200 |
+  |---|---|---|---|---|---|---|---|---|
+  | 先頭の 0（サンプル） | 14〜15 | 10 | 14 | 10〜11 | 13 | 9〜10 | 3〜4 | 0 |
+  | 90 % までの立ち上がり（サンプル） | 9〜10 | 8 | 9〜10 | 7〜8 | 11 | 7〜8 | 8〜9 | 0 |
+
+  `hw_n47_rx_restart_with_new_values` は二台とも全 PASS（S2 の後も予約した origin どおり）．`hw_n47_rx_start_lead_group` は二台とも PASS で最小の候補 5 ms（11-05 は 3 ms）：3 ms の `restart-retune` は 100 回とも装置の start と最初の block が origin どおりだが，残りの lead が約 4.1 ms で `START_LEAD_SHORT` が出て数えない．`restart-same` は 3 ms で 100 回成功．`hw_b8_raw_restart_lead` は 1 ms の lead まで開始が予約どおり（＋0 tick）．
+- **(d) 送信の rate**：#1 は PASS（11-05 の INCONCLUSIVE は試験の窓の直しで消えた）．#2 は 3 回とも INCONCLUSIVE：A の ACK・tone・read-back は合い，B の onset だけが予想から −1 200，−2 200，＋2 200 tick（許容 1 000）．向きがそろわないので onset の読みの精度と読む（INFERRED）．送信の rate の受け入れはまだ閉じない．
+- **(e) TX200**（#2，300 s）：長さ 1 000 と 20 000 とも PASS（link の drop 0）．
+- **(f) 200 MS/s の負荷**（各 600 s）：受信は #2 で PASS（1 200 億サンプル，overflow・drop 0），#1 は装置の側は完全だが Module の feed が受け手に渡す前に 46 block を落とした．送信は #2 が約 2.2 s，#1 が約 159 s で一度 Underflow（続く packet が late）．同時運転は #1 で両方向とも 600 s PASS，#2 は受信が完全で送信が約 1.5 s で Underflow．NIC の error・drop はどれも 0．200 MS/s の送信は 6 回中 3 回（TX200 の 2 回，#1 の同時運転）通り，3 回は時刻がばらばらの一度の Underflow：安定しない．
+- **(g) ssh 切断**：流せなかった（この PC の `ssh localhost` が接続を拒む：sshd が動いていない）．送信なし．
+- **その他**：#2 で C++ の 2 MS/s を開く時に一度 `Reference Clock PLL failed to lock to internal source`．直後の `uhd_usrp_probe` は正常．owner が電源を入れ直し，その後は正常．

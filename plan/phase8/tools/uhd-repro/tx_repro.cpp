@@ -16,7 +16,7 @@
 // per trial. Ticks are device ticks at the master clock rate (200 MHz on X300).
 //
 // Build (in ezsdr-v4-dev:uhd4.10): g++ -O2 -std=c++17 tx_repro.cpp -o tx_repro -luhd -lpthread
-// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70] [--trials 5]
+// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1] [--trials 5] [--lead seconds]
 
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/types/time_spec.hpp>
@@ -82,6 +82,8 @@ static std::vector<samp> tone(size_t n, size_t phase0 = 0) {
 }
 
 static bool g_invalid = false;
+static double g_lead = -1;
+static std::vector<size_t> g_heads = {4, 8, 28, 100, 2000};   // case head: first-send sizes (--heads a,b,c); --lead is the gap before the rest   // case s1: seconds ahead of B's start when B is sent; < 0 sends at once
 
 // One send; returns the samples accepted. `at` < 0 means untimed.
 static size_t send(uhd::tx_streamer::sptr& tx, const samp* data, size_t n, long long at, bool sob, bool eob) {
@@ -173,6 +175,8 @@ int main(int argc, char** argv) {
         if (k == "--args") args = v;
         else if (k == "--case") which = v;
         else if (k == "--trials") trials = std::atoi(v.c_str());
+        else if (k == "--lead") g_lead = std::atof(v.c_str());
+        else if (k == "--heads") { g_heads.clear(); size_t p0 = 0; while (p0 <= v.size()) { size_t q = v.find(',', p0); if (q == std::string::npos) q = v.size(); g_heads.push_back(std::stoul(v.substr(p0, q - p0))); p0 = q + 1; } }
         else if (k == "--rate") { RATE = std::atof(v.c_str()); PER = (long long)std::llround(MCR / RATE); }
     }
     if (args.empty()) { std::fprintf(stderr, "--args required\n"); return 2; }
@@ -305,6 +309,68 @@ int main(int argc, char** argv) {
                 std::printf("summary %s trial %d start %lld %s\n", name, t, start, counts(rep).c_str());
                 ack_offsets(name, rep, start + (long long)(head + tail) * PER);
                 if (g_invalid) return finish(tx, 6);
+            }
+        }
+    }
+    if (which == "s1") {
+        // case 6 (bench 2026-11-06, #78 after S1): the Module's shape of hw_s1_short_first_sends. Burst A: `len` payload
+        // samples padded with zeros to four, one timed SOB+EOB send at t. Burst B: 10 000 samples at t + 10 000 samples,
+        // every send timed, 2 000-sample chunks, closed by a timed two-sample EOB (held tail + zero). B is sent at once
+        // (`--lead` < 0) or when its start is `--lead` seconds ahead, as the Module hands a first send inside its window.
+        auto b = tone(10000);
+        for (size_t len : {1, 2, 3, 4}) {
+            for (int t = 0; t < trials; t++) {
+                drain(tx, 0.05, 0.5);
+                std::vector<samp> a(4, samp(0, 0));
+                for (size_t i = 0; i < len; i++) a[i] = samp(0.4f, 0.0f);
+                long long a_start = ahead(u, 0.1);
+                send(tx, a.data(), a.size(), a_start, true, true);
+                long long b_start = a_start + 10000 * PER;
+                if (g_lead >= 0) {
+                    long long due = b_start - (long long)(g_lead * MCR);
+                    while (ticks(u->get_time_now()) < due) std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+                long long sent_at = ticks(u->get_time_now());
+                burst(tx, b, b_start, 2000, true);
+                auto rep = drain(tx, 0.3, 2.0);
+                char name[48];
+                std::snprintf(name, sizeof name, "s1-%zu-lead%.0fms", len, g_lead * 1e3);
+                print_reports(name, t, rep);
+                std::printf("summary %s trial %d a_start %lld b_start %lld b_sent_at %lld (%+lld ticks before b) %s\n", name, t, a_start, b_start, sent_at, b_start - sent_at, counts(rep).c_str());
+                ack_offsets(name, rep, b_start + (long long)(b.size() + 1) * PER);
+                if (g_invalid) return finish(tx, 6);
+            }
+        }
+    }
+    if (which == "head") {
+        // case 7 (bench 2026-11-06, #78): the Module's window-limited first send. A 10 000-sample burst whose first send
+        // is `head` samples (timed SOB) sent 9.9 ms before its start; then the rest goes in 2 500-sample sends,
+        // timed or untimed, and a two-sample EOB close (the gap before the rest is --lead seconds, none when <= 0). Q: does a small first send followed by timed continuations draw
+        // Underflow / late packets where an untimed continuation does not?
+        auto b = tone(10000);
+        for (int timed : {1, 0}) {
+            for (size_t head : g_heads) {
+                for (int t = 0; t < trials; t++) {
+                    drain(tx, 0.05, 0.5);
+                    long long start = ahead(u, 0.0099);
+                    send(tx, b.data(), head, start, true, false);
+                    if (g_lead > 0) std::this_thread::sleep_for(std::chrono::duration<double>(g_lead));
+                    size_t off = head, body = b.size() - 1;
+                    while (off < body) {
+                        size_t k = std::min<size_t>(2500, body - off);
+                        send(tx, &b[off], k, timed ? start + (long long)off * PER : -1, false, false);
+                        off += k;
+                    }
+                    samp close[2] = {b.back(), samp(0, 0)};
+                    send(tx, close, 2, timed ? start + (long long)body * PER : -1, false, true);
+                    auto rep = drain(tx, 0.3, 2.0);
+                    char name[48];
+                    std::snprintf(name, sizeof name, "head-%zu-%s", head, timed ? "timed" : "untimed");
+                    print_reports(name, t, rep);
+                    std::printf("summary %s trial %d start %lld %s\n", name, t, start, counts(rep).c_str());
+                    ack_offsets(name, rep, start + (long long)(b.size() + 1) * PER);
+                    if (g_invalid) return finish(tx, 6);
+                }
             }
         }
     }

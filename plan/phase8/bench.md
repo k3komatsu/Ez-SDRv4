@@ -590,9 +590,9 @@ export EZSDR_UHD_ARGS=addr=192.168.40.36 && hw hw_n47_rx_start_lead_group       
 - orchestrator に返すもの：commit，各ブロックの VERDICT 行（log の path），(b) の P5〜P4 の値と P7 の historical の行，(c)1 の `#72 1a:` 行，(c)3 の T2 の 4 群と `radio.START_LEAD_SHORT` の数，(e) の行，(f) の 3 行と使った受信機（または NOT DONE），(g) の T4 の各 rate の行，T5 の各 m の bracket と hazard，T6 の統計と buffer の bracket，(h) の最小 lead と最小 `lead_left_ns`，電源 cycle の有無．
 - repo へ写すのは，owner が確認したものだけ．log は `~/.cache/ezsdr-bench/<日付>/` に残す．
 
-## <DATE> の手順（note 48 の後）
+## 2026-11-06 の手順（note 48 の後）
 
-`<COMMIT>` は T1〜T5（テスト，`common/iii.rs`，runbook）が入った commit（orchestrator が決める）．書いていないことは「未確認」．出典：この文書の上の 2026-11-05 の節，[bench-results.md](bench-results.md) の 2026-11-05 の節とその C++ の続き，[48 の棚卸し](48-simplification-inventory.md) S1，[design/18](../../design/18-uhd-radio.md) UR-21・UR-22・UR-23・UR-28．
+`<COMMIT>` は T1〜T5（テスト，`common/iii.rs`，runbook）が入った commit（2026-11-06 は `4f7e9e4`．結果は [bench-results.md](bench-results.md) §「2026-11-06」）．書いていないことは「未確認」．出典：この文書の上の 2026-11-05 の節，[bench-results.md](bench-results.md) の 2026-11-05 の節とその C++ の続き，[48 の棚卸し](48-simplification-inventory.md) S1，[design/18](../../design/18-uhd-radio.md) UR-21・UR-22・UR-23・UR-28．
 
 ### 構成と順番
 
