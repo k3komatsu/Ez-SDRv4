@@ -515,9 +515,8 @@ fn v58_15_repeat_wraps_without_a_gap() {
 }
 
 #[test]
-fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_transmit_runtime_change_has_no_class() {
-    // Note 47 stage 3: the envelope is checked on the initial values; a transmit change during the Run is refused as a key with no update class
-    // until stage 4 (RM-27). The receive forms are the two tests below.
+fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect() {
+    // Note 47 stage 3: the envelope is checked on the initial values. The transmit runtime form is the next test; the receive forms are the two below.
     let temp = rig::TempDir::new("v58-16-rf");
     let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }] } }));
     let connect = |frequency: f64| {
@@ -531,20 +530,35 @@ fn v58_16_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_transmit_r
         "an initial frequency outside the band is refused by the envelope: {:?}",
         refused.state()
     );
-    let mut run = connect(2.45e9).expect("an initial frequency inside the band connects");
+    let run = connect(2.45e9).expect("an initial frequency inside the band connects");
+    let clock = root(&run);
+    end_session(run, clock, T0 + 5_000_000);
+}
+
+#[test]
+fn v58_16_a_transmit_value_outside_the_rf_envelope_is_refused_on_an_empty_stream() {
+    // Note 47 stage 4, §58 #16 transmit form: on a stopped transmit stream a value inside the envelope is admitted and staged, one outside it is
+    // refused at admission and logged (RM-19, RM-21), and the value in use stays the one admitted before.
+    let temp = rig::TempDir::new("v58-16-tx-rf");
+    let profile = rig::session_profile("x3xx", json!({ "id": "mock" }), &temp.0, json!({ "radio.rf_envelope": { "allowed_bands": [{ "lo_hz": 2.4e9, "hi_hz": 2.5e9 }] } }));
+    let assembly = rig::assemble(&profile, BTreeMap::new());
+    let initial = asking("radio", &[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", Scalar::Num(ezsdr_kernel::spec::Finite::new(2.45e9).unwrap()))]);
+    let mut run = ezsdr_kernel::coordinator::connect(&profile, &initial, assembly, ezsdr_kernel::run::Lease::attached()).expect("an initial frequency inside the band connects");
     let clock = root(&run);
     run.advance_to(TimePoint::new(clock, T0 + 1_000_000)).unwrap();
-    let mut refused_seqs = Vec::new();
-    for frequency in [2.45e9, 2.6e9] {
-        let entry = run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.frequency_hz").unwrap(), value: Value::num(frequency).unwrap() }, None).unwrap();
-        refused_seqs.push(entry.seq);
-        let Outcome::Rejected { violations } = entry.outcome else { panic!("a runtime radio value change was admitted") };
-        assert!(violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class" && violation.reason.contains("declares no update class")), "{violations:?}");
-    }
-    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.c0.frequency_hz").unwrap()], Value::num(2.45e9).unwrap());
+    let set = |run: &mut ezsdr_kernel::coordinator::RunHandle, frequency: f64| {
+        run.submit(SessionAction::SetParameter { target: resource("radio"), key: Key::parse("radio.tx.c0.frequency_hz").unwrap(), value: Value::num(frequency).unwrap() }, None).unwrap()
+    };
+    let inside = set(&mut run, 2.42e9);
+    assert!(matches!(inside.outcome, Outcome::Admitted { .. }), "{:?}", inside.outcome);
+    let outside = set(&mut run, 2.6e9);
+    let Outcome::Rejected { violations } = &outside.outcome else { panic!("a transmit value outside the envelope was admitted") };
+    assert!(violations.iter().any(|v| v.check.as_str() == "radio.rf_envelope" && v.key.as_ref().is_some_and(|k| k.as_str() == "radio.tx.c0.frequency_hz")), "{violations:?}");
+    assert_eq!(run.effective()[&Ident::parse("radio").unwrap()][&Key::parse("radio.tx.c0.frequency_hz").unwrap()], Value::num(2.42e9).unwrap(), "the refused value was never admitted");
+    let seqs = [inside.seq, outside.seq];
     let manifest = end_session(run, clock, T0 + 5_000_000);
-    for seq in refused_seqs {
-        assert!(manifest.action_log.iter().any(|logged| logged.seq == seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection of action {seq} is logged");
+    for seq in seqs {
+        assert!(manifest.action_log.iter().any(|logged| logged.seq == seq), "action {seq} is logged");
     }
 }
 

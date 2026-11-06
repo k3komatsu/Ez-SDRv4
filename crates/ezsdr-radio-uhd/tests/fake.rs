@@ -23,7 +23,7 @@ use ezsdr_kernel::module_api::{ActionReceiver, ActionSubmitter, AttachedPort, Au
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::run::{RunState, Stage, StopCause, Termination};
-use ezsdr_kernel::session::SessionAction;
+use ezsdr_kernel::session::{Outcome, SessionAction};
 use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
 use ezsdr_kernel::stream::{BurstEnd, DataLinkDecl};
 use ezsdr_kernel::time::{ClockRegistry, Duration, EpochRef, RelativeBudget, TimePoint};
@@ -156,7 +156,6 @@ fn ur_09_the_obx_is_one_channel_from_10_mhz_to_8_4_ghz_defaulting_to_1_ghz() {
     assert_eq!(timing["startup_latency_ns"], 2_000_000_000i64);
     assert_eq!(timing["overflow_restart_gap_ns"], 50_000_000);
     assert_eq!(timing["rx_start_lead_ns"], 50_000_000);
-    assert_eq!(timing["tx_start_lead_ns"], 50_000_000);
     assert_eq!(timing["tx_in_flight_ns"], 10_000_000);
 }
 
@@ -504,7 +503,6 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(capability("radio.timing.startup_latency_ns"), one(Scalar::from(2_000_000_000)));
     assert_eq!(capability("radio.timing.overflow_restart_gap_ns"), one(Scalar::from(50_000_000)));
     assert_eq!(capability("radio.timing.rx_start_lead_ns"), one(Scalar::from(50_000_000)));
-    assert_eq!(capability("radio.timing.tx_start_lead_ns"), one(Scalar::from(50_000_000)));
     assert_eq!(capability("radio.timing.tx_in_flight_ns"), one(Scalar::from(10_000_000)));
     assert_eq!(capability("radio.tx.repeat_max_samples"), one(Scalar::from(4_294_967_295)));
     assert_eq!(capability("radio.tx.repeat_align_samples"), one(Scalar::from(1)));
@@ -517,7 +515,6 @@ fn ur_09_profile_values_reach_the_capabilities_and_the_envelope_section() {
     assert_eq!(envelope["timing"]["startup_latency_ns"], 2_000_000_000i64);
     assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], 50_000_000);
     assert_eq!(envelope["timing"]["rx_start_lead_ns"], 50_000_000);
-    assert_eq!(envelope["timing"]["tx_start_lead_ns"], 50_000_000);
     assert_eq!(envelope["timing"]["tx_in_flight_ns"], 10_000_000);
     assert_eq!(envelope["performance"]["rx_bytes_per_s"], 100_000_000);
     assert_eq!(section_of(instance, "device")["fake"], true);
@@ -530,7 +527,6 @@ fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
         startup_latency_ns: 12_000_002,
         overflow_restart_gap_ns: 17_000_004,
         rx_start_lead_ns: 19_000_005,
-        tx_start_lead_ns: 23_000_006,
         tx_in_flight_ns: 29_000_007,
     };
     let dir = TempDir::new();
@@ -544,7 +540,6 @@ fn measurement_candidate_propagates_all_timing_fields_to_the_run_manifest() {
         ("startup_latency_ns", candidate.startup_latency_ns),
         ("overflow_restart_gap_ns", candidate.overflow_restart_gap_ns),
         ("rx_start_lead_ns", candidate.rx_start_lead_ns),
-        ("tx_start_lead_ns", candidate.tx_start_lead_ns),
         ("tx_in_flight_ns", candidate.tx_in_flight_ns),
     ] {
         assert_eq!(timing[field], value, "{field}");
@@ -1861,6 +1856,63 @@ fn rejection_reason(events: &[Event]) -> String {
 }
 
 #[test]
+fn ur_25_a_first_burst_with_the_connect_values_makes_no_apply() {
+    // M1 (P5): arm publishes generation 0, the connect values' generation, so a burst with no new value applies nothing.
+    let (mut run, device, _dir) = tx_session(FakeConfig::default());
+    let applies = |device: &FakeDevice| device.calls().iter().filter(|call| call.starts_with("apply tx")).count();
+    let before = applies(&device);
+    let _ = send(&mut run, "send", Some(ms(20)), &tone(10));
+    wait(&mut run, ms(40));
+    let _ = run.finish();
+    assert!(device.calls().iter().any(|call| call.starts_with("tx_send ")), "the burst is sent: {:?}", device.calls());
+    assert_eq!(applies(&device), before, "{:?}", device.calls());
+}
+
+#[test]
+fn ur_21_a_refused_configure_refuses_its_burst_through_the_kernel() {
+    // S7 through a Session (R5, M3, RS-16): a refused configure refuses its burst with the burst's Action id, and nothing is sent. A corrected
+    // value before the burst's booked end is refused by the Provider; after it, the value is taken and the next burst is configured with it on
+    // the same clock and sent.
+    const REFUSED: f64 = 2.0e9;
+    const CORRECTED: f64 = 3.0e9;
+    let (mut run, device, _dir) = tx_session(FakeConfig { faults: vec![FakeFault::TxApplyRefused(0, REFUSED)], ..FakeConfig::default() });
+    let tx_clocks = |run: &RunHandle| run.sample_clocks().into_iter().filter(|record| record.stream.path() == "usrp/tx/s0").map(|record| record.domain).collect::<Vec<_>>();
+    let clocks = tx_clocks(&run);
+    let action_of = |entry: &ezsdr_kernel::session::LogEntry| match &entry.outcome {
+        Outcome::Admitted { dispatched, .. } => dispatched[0].0,
+        other => panic!("not admitted: {other:?}"),
+    };
+    let value = |run: &mut RunHandle, frequency: f64| run.submit(set("radio.tx.c0.frequency_hz", Value::num(frequency).unwrap()), None).unwrap();
+    assert!(admitted(&value(&mut run, REFUSED)));
+    // The first burst is 10 ms long and starts 10 ms ahead; the window of its booking is 10 ms to 20 ms after the submit.
+    let at = tx_at(&run, ms(10));
+    let first = send_at(&mut run, "send", Some(at), &tone(10_000));
+    let first_id = action_of(&first);
+    wait(&mut run, ms(12));
+    let early = value(&mut run, CORRECTED);
+    let early_id = action_of(&early);
+    wait(&mut run, ms(1) / 2);
+    wait(&mut run, ms(9));
+    assert!(admitted(&value(&mut run, CORRECTED)));
+    let sent_before = tx_experiment_sends(&device, "tx_send").len();
+    let at = tx_at(&run, ms(10));
+    let next = send_at(&mut run, "send", Some(at), &tone(2_000));
+    assert!(admitted(&next));
+    wait(&mut run, ms(12));
+    let clocks_after = tx_clocks(&run);
+    let manifest = run.finish();
+    let rejected: Vec<_> = events_of(&manifest, "radio.COMMAND_REJECTED").iter().map(|event| (event.payload["kind"].clone(), event.payload["action"].clone())).collect();
+    assert_eq!(rejected, [(json!("tx_burst"), json!(first_id)), (json!("update_parameter"), json!(early_id))], "{rejected:?} {:?}", device.calls());
+    assert_eq!(sent_before, 0, "the refused burst is not sent: {:?}", device.calls());
+    let (configured, sent) = (
+        device.calls().iter().position(|call| call.starts_with("apply tx 0 rate=- freq=3000000000")),
+        device.calls().iter().position(|call| call.starts_with("tx_send ") && !call.contains(" at=- sob=true eob=true")),
+    );
+    assert!(matches!((configured, sent), (Some(configured), Some(sent)) if sent > configured), "the next burst is configured with the corrected value, then sent: {:?}", device.calls());
+    assert_eq!(clocks_after, clocks, "the next burst is on the same clock");
+}
+
+#[test]
 fn ur_21_txburst_refusals() {
     let (mut run, _, _dir) = tx_session(FakeConfig::default());
     // Not a multiple of 8 · channels.
@@ -1948,8 +2000,7 @@ fn ur_21_late_policies_on_the_device_lead() {
     assert!(third.requested_target.is_none() || third.requested_target == Some(third_at), "{third:?} requested {third_at:?}");
 }
 
-// `ur_21_an_untimed_send_is_on_time_after_its_delivery` and `ur_21_an_untimed_burst_after_a_cold_change_is_on_time_at_its_clock_s_origin`
-// are unit tests in `src/provider/control.rs` on the controlled clock (design note 37): the Kernel stamps an untimed Action on the
+// `ur_21_an_untimed_send_is_on_time_after_its_delivery` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37): the Kernel stamps an untimed Action on the
 // test thread, so a fake test's own delay spends its slack. What the fake keeps is what no thread's timing can change.
 #[test]
 fn ur_21_untimed_sends_are_each_played_or_flagged() {
@@ -2114,6 +2165,24 @@ fn ur_25_tx_channels_from_zero_transmits_the_next_burst() {
 }
 
 #[test]
+fn ur_23_a_burst_after_a_stop_targets_the_one_clock() {
+    // UR-23, RM-25 (S11): a burst booked after a Stop is on the transmit stream's clock registered at arm; the Stop registers none.
+    let (mut run, _device, _dir) = tx_session(FakeConfig::default());
+    let _ = send(&mut run, "start_repeat", None, &tone(500));
+    wait(&mut run, ms(20));
+    let entry = run.submit(SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None).unwrap();
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(5));
+    let entry = send(&mut run, "send", Some(ms(10)), &tone(100));
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    let clocks = manifest.clocks.sample_clocks.iter().filter(|r| r.stream == ResourceId::parse("usrp/tx/s0").unwrap()).count();
+    assert_eq!(clocks, 1, "{:?}", manifest.clocks.sample_clocks);
+    assert!(rejections(&manifest).is_empty(), "{:?}", rejections(&manifest));
+}
+
+#[test]
 fn ur_26_stop_actions() {
     // UR-26: a `Stop` of the transmit stream ends its burst, of the receive stream cuts it at
     // its booking, of the device does both, and of another target is refused.
@@ -2144,7 +2213,7 @@ fn ur_26_an_unnumbered_key_is_refused_at_runtime() {
     direct.update("radio.rx.antenna", Value::from("TX/RX"), Cold, None);
     direct.until("the unknown-key refusal", |direct| !direct.of("radio.COMMAND_REJECTED").is_empty());
     let rejected = direct.of("radio.COMMAND_REJECTED");
-    assert_eq!(rejection_reason(&rejected), "UR-26: RM-21: only a receive channel's frequency, gain or antenna is staged");
+    assert_eq!(rejection_reason(&rejected), "UR-26: RM-21: only a channel's frequency, gain or antenna is staged");
     assert!(!direct.device.calls()[mark..].iter().any(|call| call.starts_with("apply")), "{:?}", direct.device.calls());
     let _ = direct.finish();
 }
@@ -4964,7 +5033,6 @@ fn ur_12_a_layout_an_antenna_read_back_that_differs_is_refused() {
 // ------------------------------------------------ 1b-4c: the cut, the floor and the targets
 
 // `ur_34_a_timed_update_crossing_the_move_reaches_each_streamer_channel_at_its_instant` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37).
-// `ur_34_a_cold_change_before_the_move_s_release_is_floored_at_the_move` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37).
 // `ur_34_two_moves_at_one_instant_swap_their_receive_channels_without_deadlock` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37).
 // `ur_34_two_moves_at_one_instant_swap_their_transmit_channels_without_deadlock` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37).
 // `ur_34_a_finite_middle_segment_releases_a_channel_along_a_move_chain` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37).
@@ -5261,7 +5329,6 @@ fn ur_30_the_device_section_records_the_rate_check() {
 
 // ---------------------------------- 1b-4c: the review's cases (round 1 findings)
 
-// `ur_25_a_layout_cold_change_of_a_linkless_receive_side_is_floored_at_t0` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37).
 #[test]
 fn ur_19_a_layout_receive_report_names_its_stream() {
     // UR-20, major 6: a receive report event comes from the stream's own node — with

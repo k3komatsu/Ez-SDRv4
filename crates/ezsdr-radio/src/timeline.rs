@@ -88,8 +88,7 @@ pub struct Stream {
     pub origin: i64,
     /// The configuration from the Run's start.
     pub config: Config,
-    /// The stream's own direction's `radio.timing.rx_start_lead_ns` or
-    /// `radio.timing.tx_start_lead_ns`, in root ticks.
+    /// `radio.timing.rx_start_lead_ns` in root ticks for a receive stream; 0 for a transmit line.
     pub lead: i64,
     /// One receive call, in samples: the longer of `block_len` and the device's packet; 0
     /// for a Provider whose ready instant is the receipt alone (VH-4).
@@ -352,13 +351,10 @@ pub fn late_policy_front_outcome<E>(policy: LatePolicy, target: i64, current: i6
     }))
 }
 
-/// RM-4, RM-25: a stream's start lead in nanoseconds, from the TimingEnvelope of its own
-/// direction. The one place the two directions' leads are told apart.
-pub fn start_lead_ns(timing: &crate::TimingEnvelope, direction: Direction) -> i64 {
-    match direction {
-        Direction::Rx => timing.rx_start_lead_ns,
-        Direction::Tx => timing.tx_start_lead_ns,
-    }
+/// RM-4, RM-25: a receive stream's start lead in nanoseconds. A transmit line carries 0: a
+/// transmit stream has no start lead (note 47 stage 4).
+pub fn start_lead_ns(timing: &crate::TimingEnvelope) -> i64 {
+    timing.rx_start_lead_ns
 }
 
 /// RM-25, RM-6: the time a receive start's configure left before the planned `origin`, when that

@@ -592,6 +592,26 @@ fn mr_09_each_transmit_stream_has_its_own_clock_and_line() {
 }
 
 #[test]
+fn mr_09_a_burst_after_a_stop_targets_the_arm_clock() {
+    // RM-25 (S11): a burst booked after a `Stop` of its transmit stream is on the clock registered at `arm`; the `Stop` registers none.
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0)))];
+    let mut harness = built(Layout { profile: "x3xx", id: "mock", rx: elements(&[]), tx: elements(&["0:A:ubx:0"]), selector: &[], constraints: &constraints, env: &[], ports: &[] });
+    harness.arm_start(T0).unwrap();
+    let s0 = harness.clocks_of("mock/tx/s0");
+    assert_eq!(s0.len(), 1);
+    harness.push(stop("mock/tx/s0"));
+    harness.step(T0 + 100_000_000).unwrap();
+    harness.push(burst("mock/tx/s0", s0[0].domain, 6_000_000, 10));
+    harness.step(T0 + 200_000_000).unwrap();
+    assert_eq!(harness.rejected(), Vec::<String>::new());
+    assert_eq!(harness.clocks_of("mock/tx/s0").len(), 1);
+    assert_eq!(harness.clocks_of("mock/tx/s0")[0].domain, s0[0].domain);
+    harness.push(stop("mock/tx/s0"));
+    harness.step(T0 + 300_000_000).unwrap();
+    assert_eq!(harness.clocks_of("mock/tx/s0").len(), 1, "a second Stop registers no clock either");
+}
+
+#[test]
 fn mr_12_d14_the_actions_of_a_layout_instance_name_a_stream() {
     let constraints = [("radio.rx.c1.stream", eq(Scalar::from(1))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut harness = built(Layout { profile: "ideal", id: "mock", rx: count(2), tx: count(1), selector: &[], constraints: &constraints, env: &[], ports: &["rx0", "rx1"] });

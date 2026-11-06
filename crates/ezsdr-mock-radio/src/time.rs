@@ -18,12 +18,17 @@ pub(crate) fn v_of(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i6
     i64::try_from(i128::from(o).checked_add(offset)?).ok()
 }
 
+/// Returns the last virtual-root tick at or before sample `k`'s instant: `floor(o + k · q)`.
+pub(crate) fn v_floor(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i64> {
+    let scaled = i128::from(k).checked_mul(i128::from(q.num()))?;
+    let offset = scaled.div_euclid(i128::from(q.den()));
+    i64::try_from(i128::from(o).checked_add(offset)?).ok()
+}
+
 /// Returns the first virtual-root tick strictly after sample `k`'s instant:
 /// `floor(o + k · q) + 1`, the earliest round at which sample `k` is in the past (MR-14).
 pub(crate) fn v_after(o: i64, q: ezsdr_kernel::time::Rational, k: i64) -> Option<i64> {
-    let scaled = i128::from(k).checked_mul(i128::from(q.num()))?;
-    let offset = scaled.div_euclid(i128::from(q.den()));
-    i64::try_from(i128::from(o).checked_add(offset)?.checked_add(1)?).ok()
+    v_floor(o, q, k)?.checked_add(1)
 }
 
 /// Returns the first nonnegative sample index at or after virtual tick `t` (MR-7).

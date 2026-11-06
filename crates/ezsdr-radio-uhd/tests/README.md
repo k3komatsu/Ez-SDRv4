@@ -6,7 +6,8 @@ Run the default regression suite without a USRP or libuhd:
 CARGO_TARGET_DIR="$HOME/.cache/cargo-target/Ez-SDRv4" cargo test --workspace
 ```
 
-The library's controlled-clock tests prove booking order, cold-change exclusion,
+The library's controlled-clock tests prove booking order, the exclusion of a
+configuration from a burst's device call,
 first-dispatch late policies, underflow recovery and RX stop idempotence without
 requiring millisecond host wake-ups. The deliberate starvation test primes an
 untimed fake burst before starving it, so its setup has no timed-start deadline.

@@ -1696,3 +1696,107 @@ fn s3_parity_booking_after_a_device_burst_s_short_tail_follows_d5() {
         }
     }
 }
+
+// ---------------------------------------------------------------- transmit values on an empty stream (S14)
+
+/// What each Provider refused among transmit values and bursts: the kind and the Action id, in order (RM-22). The samples are not compared.
+fn tx_decisions(events: &[Event]) -> Vec<(String, u64)> {
+    events
+        .iter()
+        .filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && matches!(event.payload["kind"].as_str(), Some("update_parameter" | "tx_burst")))
+        .map(|event| (event.payload["kind"].as_str().unwrap().to_owned(), event.payload["action"].as_u64().unwrap()))
+        .collect()
+}
+
+/// A burst of 40 samples on transmit stream 0, booked at `relative` ms from T0 on each Provider; repeated when `repeat`.
+fn s14_burst(pair: &CancellationPair, relative: i64, repeat: bool) -> (Action, Action) {
+    let action = |at: TimePoint| Action::TxBurst {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: "tx/s0".to_owned() },
+        waveform: pair.sized(40).clone(),
+        repeat,
+        at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
+        requested_at: None,
+        late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+        metadata: BTreeMap::new(),
+    };
+    (action(tx_sample_time(&pair.mock.clocks, 0, 0, pair.t0 + ms(relative))), action(tx_sample_time(&pair.uhd.clocks, 0, 0, pair.uhd_t0 + ms(relative))))
+}
+
+/// The transmit frequency, set on the radio as a value (RM-27: `cold`).
+fn s14_value(frequency: f64) -> (Action, Action) {
+    let action = || Action::UpdateParameter {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: String::new() },
+        key: key("radio.tx.c0.frequency_hz"),
+        value: Value::num(frequency).unwrap(),
+        class: ezsdr_kernel::module_api::UpdateClass::Cold,
+        at: None,
+    };
+    (action(), action())
+}
+
+/// Queues `actions` at the given root ticks on each Provider, then waits until each has judged them.
+fn s14_submit(pair: &mut CancellationPair, token: u64, mock_tick: i64, uhd_tick: i64, actions: (Action, Action)) {
+    pair.mock.step(mock_tick);
+    pair.uhd.wait_until(uhd_tick);
+    pair.mock.push(actions.0);
+    pair.uhd.push(actions.1);
+    pair.mock_barrier(token);
+    pair.mock.step(mock_tick);
+    pair.uhd_barrier(token);
+}
+
+fn s14_at(pair: &mut CancellationPair, token: u64, relative: i64, actions: (Action, Action)) {
+    let (mock_tick, uhd_tick) = (pair.t0 + ms(relative), pair.uhd_t0 + ms(relative));
+    s14_submit(pair, token, mock_tick, uhd_tick, actions);
+}
+
+/// S14 (R2–R4): transmit values on an empty stream decide alike on both Providers, by the kind of each refusal and its Action id.
+/// The bursts are 40 samples and each is booked at least the in-flight window after the one before (§5, P-6). The samples are not compared.
+/// S5's sample-exact boundary is not here: the UHD rig's device clock runs ahead of each submitted tick (up to about 1.2 ms), longer than a
+/// 40-sample burst, so the boundary is pinned per Provider (`ur_23_a_value_at_the_exclusive_end_of_a_burst_is_accepted`, `mr_16_a_transmit_value_at_the_exclusive_end_is_accepted`).
+#[test]
+fn s14_transmit_values_on_an_empty_stream_decide_the_same_on_both_providers() {
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap()))];
+    let new_pair = || CancellationPair::new(selector.clone(), &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    let decided = |pair: &mut CancellationPair| {
+        pair.mock.step(pair.t0 + ms(200));
+        pair.uhd.wait_until(pair.uhd_t0 + ms(200));
+        (tx_decisions(&pair.mock.events()), tx_decisions(&pair.uhd.events()))
+    };
+
+    // S2 and S1: A is booked for 100 ms; a value before it starts is refused; one after its end is accepted, and so is B.
+    let mut pair = new_pair();
+    let a = s14_burst(&pair, 100, false);
+    s14_at(&mut pair, 1, 20, a);
+    s14_at(&mut pair, 2, 50, s14_value(2.5e9));
+    s14_at(&mut pair, 3, 101, s14_value(2.6e9));
+    let b = s14_burst(&pair, 120, false);
+    s14_at(&mut pair, 4, 110, b);
+    let (mock, uhd) = decided(&mut pair);
+    assert_eq!(mock, uhd, "S1, S2: the Providers refuse the same");
+    assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["update_parameter"], "only the value before A's start is refused: {mock:?}");
+
+    // S4: two values before a burst are both taken, and the burst is booked after them; a value before its start is refused.
+    let mut pair = new_pair();
+    s14_at(&mut pair, 1, 20, s14_value(2.5e9));
+    s14_at(&mut pair, 2, 30, s14_value(2.55e9));
+    let a = s14_burst(&pair, 100, false);
+    s14_at(&mut pair, 3, 40, a);
+    s14_at(&mut pair, 4, 60, s14_value(2.7e9));
+    let (mock, uhd) = decided(&mut pair);
+    assert_eq!(mock, uhd, "S4: the Providers refuse the same");
+    assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["update_parameter"], "the value after the booking is refused, and the two before it are taken: {mock:?}");
+
+    // S3: a repeat plays, so a value is refused; after a Stop it is refused until the in-flight window ends, and taken after it.
+    let mut pair = new_pair();
+    let repeat = s14_burst(&pair, 20, true);
+    s14_at(&mut pair, 1, 20, repeat);
+    s14_at(&mut pair, 2, 50, s14_value(2.5e9));
+    s14_at(&mut pair, 3, 60, stop_both("tx/s0"));
+    s14_at(&mut pair, 4, 65, s14_value(2.6e9));
+    s14_at(&mut pair, 5, 71, s14_value(2.7e9));
+    let (mock, uhd) = decided(&mut pair);
+    assert_eq!(mock, uhd, "S3: the Providers refuse the same");
+    assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["update_parameter", "update_parameter"], "the value while the repeat plays and the one inside the window: {mock:?}");
+}

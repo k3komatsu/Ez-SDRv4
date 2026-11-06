@@ -487,10 +487,7 @@ impl Rx {
             RxRecv::LateCommand => {
                 // UR-17: the device missed the timed start; the origin stays. The new start
                 // waits the profile's start lead from now (spec 20, VF-6).
-                let restart = match ezsdr_radio::timeline::lattice(
-                    now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing, Direction::Rx))),
-                    stream.config.ratio,
-                ) {
+                let restart = match ezsdr_radio::timeline::lattice(now.saturating_add(self.core.ticks(ezsdr_radio::timeline::start_lead_ns(&self.core.description.timing))), stream.config.ratio) {
                     Ok(restart) => restart,
                     Err(error) => return self.core.command_rejected(None, "start", &format!("UR-17: {error}")),
                 };
@@ -773,7 +770,7 @@ mod tests {
                 direction: Direction::Rx,
                 origin: 0,
                 config,
-                lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx)),
+                lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing)),
                 call: core.block_len as i64,
                 allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
             }),
@@ -1274,7 +1271,7 @@ mod tests {
         let (mut rx, clock) = rx(&core, 1);
         time.advance_to(core.at(core.ticks(40_000_000))).unwrap();
         rx.receive(RxRecv::LateCommand);
-        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Rx));
+        let lead = core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing));
         let expected = ezsdr_radio::timeline::lattice(core.ticks(40_000_000) + lead, Rational::new(clock.n as u64, 1).unwrap()).unwrap();
         assert!(expected > clock.origin + lead, "the lead was measured from the origin, not the decision");
         let row = lock(&core.rec).timing.iter().find(|row| row["what"] == "rx_restart").expect("the restart row").clone();
@@ -2256,7 +2253,7 @@ mod tests {
             direction: Direction::Tx,
             origin: 0,
             config: Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() },
-            lead: core.ticks(ezsdr_radio::timeline::start_lead_ns(&core.description.timing, Direction::Tx)),
+            lead: 0,
             call: core.block_len as i64,
             allowance: core.ticks(DELIVERY_ALLOWANCE_NS),
         })

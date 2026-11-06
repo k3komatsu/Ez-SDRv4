@@ -349,7 +349,7 @@ impl Description {
     pub fn new(layout: &Layout, block_len: u32, terms: &ProviderTerms) -> Description {
         let timing = match layout {
             Layout::X3xx { .. } => x3xx::timing(terms),
-            Layout::Ideal { .. } => TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 0, tx_start_lead_ns: 0, tx_in_flight_ns: 0 },
+            Layout::Ideal { .. } => TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 0, tx_in_flight_ns: 0 },
         };
         Description::build(layout, block_len, terms, timing)
     }
@@ -454,7 +454,6 @@ impl Description {
             (keys::STARTUP_LATENCY_NS, Scalar::Int(self.timing.startup_latency_ns)),
             (keys::OVERFLOW_RESTART_GAP_NS, Scalar::Int(self.timing.overflow_restart_gap_ns)),
             (keys::RX_START_LEAD_NS, Scalar::Int(self.timing.rx_start_lead_ns)),
-            (keys::TX_START_LEAD_NS, Scalar::Int(self.timing.tx_start_lead_ns)),
             (keys::TX_IN_FLIGHT_NS, Scalar::Int(self.timing.tx_in_flight_ns)),
             (keys::RX_BYTES_PER_S, Scalar::Int(self.performance.rx_bytes_per_s)),
             (keys::TX_BYTES_PER_S, Scalar::Int(self.performance.tx_bytes_per_s)),

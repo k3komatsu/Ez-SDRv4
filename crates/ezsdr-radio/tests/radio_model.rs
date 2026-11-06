@@ -97,7 +97,7 @@ fn rm_01_register_twice_is_refused() {
     ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).unwrap();
     assert!(ezsdr_radio::register(&mut registry, &mut checks, &mut kinds).is_err());
 
-    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 32);
+    assert_eq!(registry.vocabulary(&Namespace::parse("radio").unwrap()).unwrap().keys.len(), 31);
     assert_eq!(kinds.kinds().len(), 9);
     assert_eq!(checks.run(&envelope_section(json!({"allowed_bands": "not a list"})), &BTreeMap::new(), &BTreeMap::new(), CheckStage::Validate,).len(), 1,);
 }
@@ -112,7 +112,7 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
     let int = ValueKind::Int;
     let str_ = ValueKind::Str;
     let bool_ = ValueKind::Bool;
-    // Note 47 stage 3: a receive channel's frequency, gain and antenna are `cold`; every other key is classless (RM-27).
+    // A channel's frequency, gain and antenna are `cold` in both directions; every other key is classless (RM-27).
     let expected = [
         ("radio.full_duplex", bool_, false, reject, none),
         ("radio.hardware_time", bool_, false, reject, none),
@@ -123,7 +123,6 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.timing.startup_latency_ns", int, false, reject, none),
         ("radio.timing.overflow_restart_gap_ns", int, false, reject, none),
         ("radio.timing.rx_start_lead_ns", int, false, reject, none),
-        ("radio.timing.tx_start_lead_ns", int, false, reject, none),
         ("radio.timing.tx_in_flight_ns", int, false, reject, none),
         ("radio.perf.rx_bytes_per_s", int, false, reject, none),
         ("radio.perf.tx_bytes_per_s", int, false, reject, none),
@@ -137,9 +136,9 @@ fn rm_04_the_key_table_is_exactly_the_declared_one() {
         ("radio.rx.c.phase_behavior_on_retune", str_, false, reject, none),
         ("radio.rx.c.path_delay_samples", int, false, reject, none),
         ("radio.rx.s.sample_rate_hz", num, true, reject, none),
-        ("radio.tx.c.frequency_hz", num, true, reject, none),
-        ("radio.tx.c.gain_db", num, true, warn, none),
-        ("radio.tx.c.antenna", str_, false, reject, none),
+        ("radio.tx.c.frequency_hz", num, true, reject, cold),
+        ("radio.tx.c.gain_db", num, true, warn, cold),
+        ("radio.tx.c.antenna", str_, false, reject, cold),
         ("radio.tx.c.stream", int, false, reject, none),
         ("radio.tx.c.frequency_step_hz", num, false, reject, none),
         ("radio.tx.c.gain_step_db", num, false, reject, none),
@@ -302,10 +301,9 @@ fn rm_20_a_timing_document_with_a_removed_key_is_refused() {
         "startup_latency_ns": 2_000_000_000i64,
         "overflow_restart_gap_ns": 50_000_000,
         "rx_start_lead_ns": 50_000_000,
-        "tx_start_lead_ns": 50_000_000,
         "tx_in_flight_ns": 10_000_000
     });
-    serde_json::from_value::<ezsdr_radio::TimingEnvelope>(timing.clone()).expect("the six remaining members");
+    serde_json::from_value::<ezsdr_radio::TimingEnvelope>(timing.clone()).expect("the five remaining members");
     for removed in ["command_queue_depth", "release_window_ns"] {
         let mut document = timing.clone();
         document[removed] = json!(16);

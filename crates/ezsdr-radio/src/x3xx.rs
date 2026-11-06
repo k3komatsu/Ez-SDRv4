@@ -383,7 +383,6 @@ pub fn timing(terms: &ProviderTerms) -> TimingEnvelope {
         startup_latency_ns: 2_000_000_000,
         overflow_restart_gap_ns: 50_000_000,
         rx_start_lead_ns: 50_000_000,
-        tx_start_lead_ns: 50_000_000,
         tx_in_flight_ns: 10_000_000,
     }
 }

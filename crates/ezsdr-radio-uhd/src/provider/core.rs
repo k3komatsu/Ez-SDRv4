@@ -14,6 +14,7 @@ use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, TimeAuthority, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::CommandRejectedPayload;
+use ezsdr_radio::staging::Busy;
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey};
 use serde_json::{Value as Json, json};
 
@@ -244,7 +245,7 @@ impl Clock {
 /// whichever learns an event (maintenance note 23): uhd-control the commands, uhd-rx and
 /// uhd-tx a configuration their device refused, the thread that finds the device lost the
 /// loss, and `Provider::stop` the streams' end. What belongs to the instance stays on
-/// [`Streams`] (`seq`, `ended`, `stop`, `version`); what belongs to a stream is in its
+/// [`Streams`] (`seq`, `ended`, `stop`); what belongs to a stream is in its
 /// [`StreamState`] (RM-29, design 33 D15). Lock order: this, then `rec`; never held across a
 /// device call.
 pub(crate) struct Streams {
@@ -265,8 +266,6 @@ pub(crate) struct Streams {
     /// The instant of the device's loss, once a thread found it (UR-29): the end's `S` when
     /// the loss comes first (design 38 D2 (4)).
     pub lost_at: Option<i64>,
-    /// Counts the changes of the plans, for uhd-tx to read its own again.
-    pub version: u64,
 }
 
 impl Default for Streams {
@@ -287,7 +286,6 @@ impl Streams {
             ended: false,
             stop: None,
             lost_at: None,
-            version: 0,
         }
     }
 }
@@ -363,7 +361,8 @@ pub(crate) struct StreamState {
     pub generation: u64,
     /// The command of the segment whose configuration the device was last given, `seq`; none
     /// after a failed configure or open. The owner configures again unless this is its own
-    /// segment's command and the record holds its set open (UR-36).
+    /// segment's command and the record holds its set open (UR-36). For a transmit stream it is
+    /// the generation of the values the device holds (RM-21): arm publishes 0, a loss clears it.
     pub configured: Option<u64>,
     /// Who may call the stream's device and whether uhd-tx's report read is in flight
     /// (UR-25).
@@ -372,7 +371,10 @@ pub(crate) struct StreamState {
     /// delivered (UR-17, RM-16); none while it delivers nothing.
     delivered: Option<(i64, Config, i64)>,
     /// The transmit clock registered at `arm` (RM-25): none or one.
-    pub clocks: Vec<Clock>,
+    pub clock: Option<Clock>,
+    /// The transmit value rule's record of the stream's bookings and Stops (RM-21): the one place
+    /// a receipt is judged by (never the hand-over state).
+    pub busy: Busy,
 }
 
 /// The key the instance's lines hold `dir`'s stream `k` under (RM-29).
@@ -559,10 +561,19 @@ impl Streams {
     /// the same instant and arrival order; a loss counts as received with the faults, at the
     /// Run's start (RM-25).
     pub fn end(&mut self, core: &Core, at: i64, abort: bool, lost: bool) {
+        // A loss clears every transmit mark, even when a Stop or `Provider::stop` ended the Run first (RM-21).
+        if lost {
+            for stream in &mut self.tx {
+                stream.configured = None;
+            }
+        }
         if std::mem::replace(&mut self.ended, true) {
             return;
         }
         let seq = if lost { 0 } else { self.next_seq() };
+        for stream in &mut self.tx {
+            stream.busy.stop(at, core.tx_in_flight());
+        }
         for dir in [Dir::Rx, Dir::Tx] {
             for k in 0..self.count(dir) {
                 self.book(core, stream_key(dir, k), Item { e: at, seq, ready: at, delivered: None, refused: false, kind: Kind::End { abort } }, None);
@@ -649,21 +660,20 @@ impl Streams {
         state.configured = None;
     }
 
-    /// The record of a configure of `stream`: its segment's command once it succeeded, none
-    /// when it failed (UR-36).
+    /// The record of a configure of `stream`: its segment's command, or a transmit value generation,
+    /// once it succeeded; none when it failed (UR-36).
     pub fn record_configured(&mut self, stream: StreamKey, mark: Option<u64>) {
         self.stream_mut(stream).configured = mark;
     }
 
-    /// A plan changed: uhd-tx reads its own again (UR-25), and a transmit clock whose segment
-    /// the plan now cuts ends at the cut (RM-25, VH-2).
+    /// A plan changed: a transmit clock whose segment the plan now cuts ends at the cut (RM-25,
+    /// VH-2). uhd-tx reads the cut on its next turn (UR-25).
     pub fn changed(&mut self, core: &Core, stream: StreamKey, id: Option<ActionId>) {
-        self.version += 1;
         // A loss or `Provider::stop` at or before the clock's origin cuts its segment there; a
         // clock the registry already ended is not ended again. Only a transmit stream holds a
         // clock here and a transmit line is booked only with Stop and end, so the failure is
         // always a `stop`'s.
-        let cut = self.stream(stream).clocks.first().copied().zip(self.lines.line(stream).and_then(|line| line.plan.first()).and_then(|segment| segment.cut));
+        let cut = self.stream(stream).clock.zip(self.lines.line(stream).and_then(|line| line.plan.first()).and_then(|segment| segment.cut));
         if let Some((clock, cut)) = cut.filter(|(clock, _)| !core.clocks.get(clock.domain).is_ok_and(|domain| domain.ended_at.is_some())) {
             if let Err(error) = core.clocks.end(clock.domain, core.at(clock.instant(cut))) {
                 core.command_rejected(id, "stop", &format!("UR-25: {error}"));
@@ -869,6 +879,11 @@ impl Core {
     /// The current instant on the primary root.
     pub fn now(&self) -> i64 {
         self.time.now(self.root).and_then(|t| t.ticks_in(self.root)).unwrap_or(i64::MIN)
+    }
+
+    /// The in-flight window of a transmit stream, in root ticks (RM-16): what a Stop leaves in the device.
+    pub fn tx_in_flight(&self) -> i64 {
+        self.ticks(self.description.timing.tx_in_flight_ns)
     }
 
     pub fn at(&self, ticks: i64) -> TimePoint {
@@ -2047,7 +2062,7 @@ mod tests {
         let clock = core.register_in(Dir::Tx, 0, 200, origin).unwrap();
         {
             let mut streams = lock(&core.streams);
-            streams.stream_mut(stream_key(Dir::Tx, 0)).clocks = vec![clock];
+            streams.stream_mut(stream_key(Dir::Tx, 0)).clock = Some(clock);
             streams.lines.insert(stream_key(Dir::Tx, 0), Line::new(timeline::Stream { direction: Direction::Tx, origin, config: cfg(1), lead: 0, call: 2_000, allowance: 0 }));
         }
         (core, clock)
@@ -2060,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn ur_23_a_transmit_clock_the_plan_cuts_at_its_origin_ends_there() {
+    fn ur_23_a_transmit_clock_cut_at_its_origin_ends_at_the_booking() {
         // RM-25, VH-2: a Provider::stop at or before the clock's origin (S <= O) cuts the
         // segment at sample 0 and ends the clock at O; after O the plan has no cut and the
         // clock stays open. A booking after the end does not end it again.

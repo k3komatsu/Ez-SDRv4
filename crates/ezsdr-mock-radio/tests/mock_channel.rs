@@ -10,7 +10,9 @@ use ezsdr_kernel::event::{Action, ActionId, Event, EventCollector, EventSource, 
 use ezsdr_kernel::hash::ContentHash;
 use ezsdr_kernel::id::{ClockDomainId, ModuleId, ResourceId, RunId};
 use ezsdr_kernel::manifest::ArtifactRef;
-use ezsdr_kernel::module_api::{ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleError, ModuleRef, Pacing, PrepareContext, ProfileRef, Provider, Requested, RfFidelity, Role, Version};
+use ezsdr_kernel::module_api::{
+    ActionReceiver, ActionSubmitter, AttachedPort, Endpoint, ModuleError, ModuleRef, Pacing, PrepareContext, ProfileRef, Provider, Requested, RfFidelity, Role, UpdateClass, Version,
+};
 use ezsdr_kernel::plan::Fragment;
 use ezsdr_kernel::policy::{EventKindRegistry, Policy};
 use ezsdr_kernel::spec::{Constraint, Ident, Key, Namespace, Value};
@@ -209,13 +211,23 @@ impl Radio {
 
     /// Every received sample of channel `channel`, by sample index, in arrival order.
     fn received(&self, channel: usize) -> Vec<(i64, f32, f32)> {
-        let mut out = Vec::new();
+        self.received_all().into_iter().nth(channel).unwrap_or_default()
+    }
+
+    /// Every received sample of every channel, drained from the link in one pass.
+    fn received_all(&self) -> Vec<Vec<(i64, f32, f32)>> {
+        let mut out: Vec<Vec<(i64, f32, f32)>> = Vec::new();
         while let Some((block, _)) = self.link.receive() {
             let header = block.header().clone();
             let bytes = block.host_bytes().unwrap();
-            for index in 0..header.len as usize {
-                let (re, im) = ezsdr_hostmem::read_cf32(bytes, header.len as usize, channel, index);
-                out.push((header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + index as i64, re, im));
+            let len = header.len as usize;
+            let channels = bytes.len() / (len * 8);
+            out.resize_with(out.len().max(channels), Vec::new);
+            for (channel, samples) in out.iter_mut().enumerate().take(channels) {
+                for index in 0..len {
+                    let (re, im) = ezsdr_hostmem::read_cf32(bytes, len, channel, index);
+                    samples.push((header.first_sample_time.ticks_in(header.first_sample_time.domain()).unwrap() + index as i64, re, im));
+                }
             }
         }
         out
@@ -738,6 +750,93 @@ fn mr_33_a_receiver_hears_only_its_own_frequency() {
     }
 }
 
+/// The root tick of sample `k` of the transmit clock `domain`.
+fn tx_root(world: &World, domain: ClockDomainId, k: i64) -> i64 {
+    match world.clocks.convert(TimePoint::new(domain, k), ROOT).unwrap() {
+        ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(ROOT).unwrap(),
+        ezsdr_kernel::time::Converted::Inexact { .. } => panic!("the transmit clock is on the root lattice"),
+    }
+}
+
+#[test]
+fn mr_33_a_transmit_value_takes_effect_at_the_next_burst_s_start() {
+    // RM-21, MR-33, S1: burst A radiates at f1; after A's exclusive end the value becomes f2; burst B radiates at f2.
+    // Receive channel 0 is tuned to f1 and channel 1 to f2, so each burst is heard on the channel of its frequency.
+    let world = World::new(json!({ "sim.channel": { "couplings": [
+        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
+        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
+    ] } }));
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap())),
+        ("radio.rx.c0.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap())),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.frequency_hz", eq(Scalar::try_from(1.0e9).unwrap())),
+    ];
+    let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
+    let domain = radio.tx_domain(&world);
+    let (a, b) = (ramp(40), ramp(40));
+    radio.push(burst(&radio, &world, world.waveform(&a), 0, false));
+    step(&world, &mut [&mut radio], 0);
+    let end_a = tx_root(&world, domain, 40);
+    run_to(&world, &mut [&mut radio], end_a - 1);
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.c0.frequency_hz"), value: Value::num(1.0e9).unwrap(), class: UpdateClass::Cold, at: None });
+    step(&world, &mut [&mut radio], end_a);
+    radio.push(burst(&radio, &world, world.waveform(&b), 1000, false));
+    step(&world, &mut [&mut radio], end_a);
+    run_to(&world, &mut [&mut radio], tx_root(&world, domain, 1040) + 6_000_000);
+    let mut channels = radio.received_all().into_iter();
+    let (heard_f1, heard_f2) = (channels.next().unwrap(), channels.next().unwrap());
+    assert!(!heard_f1.is_empty() && !heard_f2.is_empty());
+    for (k, re, im) in heard_f1 {
+        let expected = if (0..40).contains(&k) { a[k as usize] } else { (0.0, 0.0) };
+        assert_eq!((re, im), expected, "channel at f1, sample {k}");
+    }
+    for (k, re, im) in heard_f2 {
+        let expected = if (1000..1040).contains(&k) { b[(k - 1000) as usize] } else { (0.0, 0.0) };
+        assert_eq!((re, im), expected, "channel at f2, sample {k}");
+    }
+}
+
+#[test]
+fn mr_33_a_transmit_value_takes_effect_at_a_fractional_burst_start() {
+    // RM-21, MR-33, S1: at 3 MS/s on the 1 GHz root, sample 1999 falls at root tick 666333⅓. The value staged for an empty stream
+    // is in force at that exact instant, so a receiver tuned to f2 hears the burst's first sample and one tuned to f1 does not.
+    let world = World::new(json!({ "sim.channel": { "couplings": [
+        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
+        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
+    ] } }));
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.s0.sample_rate_hz", eq(Scalar::try_from(3.0e6).unwrap())),
+        ("radio.tx.c0.frequency_hz", eq(Scalar::try_from(1.0e9).unwrap())),
+        ("radio.rx.s0.sample_rate_hz", eq(Scalar::try_from(3.0e6).unwrap())),
+        ("radio.rx.c0.frequency_hz", eq(Scalar::try_from(1.0e9).unwrap())),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap())),
+    ];
+    let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
+    let burst_samples = ramp(10);
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.c0.frequency_hz"), value: Value::num(2.0e9).unwrap(), class: UpdateClass::Cold, at: None });
+    radio.push(burst(&radio, &world, world.waveform(&burst_samples), 1999, false));
+    step(&world, &mut [&mut radio], 0);
+    run_to(&world, &mut [&mut radio], 7_000_000);
+    let mut channels = radio.received_all().into_iter();
+    let (heard_f1, heard_f2) = (channels.next().unwrap(), channels.next().unwrap());
+    assert!(!heard_f2.is_empty());
+    for (k, re, im) in heard_f1 {
+        assert_eq!((re, im), (0.0, 0.0), "channel at f1, sample {k}");
+    }
+    for (k, re, im) in heard_f2 {
+        let expected = if (1999..2009).contains(&k) { burst_samples[(k - 1999) as usize] } else { (0.0, 0.0) };
+        assert_eq!((re, im), expected, "channel at f2, sample {k}");
+    }
+}
+
 /// The draws of MR-34 for a two-channel `x3xx` device: the receive and transmit phases.
 struct Phases {
     rx: Vec<f64>,
@@ -886,6 +985,48 @@ fn mr_17_a_target_whose_instant_has_passed_is_late_even_on_the_floor_sample() {
     assert_eq!(time_errors[0].payload["late_by_ns"], 1_000, "measured from the first transmit sample at or after the round");
     assert_eq!(time_errors[0].time, TimePoint::new(radio.tx_domain(&world), 1), "the event's time is the round's instant in the transmit clock, floored");
     assert_eq!(radio.section("rejected")[0]["reason"], "MR-17: the late policy dropped the burst");
+}
+
+#[test]
+fn mr_25_a_stop_before_the_burst_with_a_new_value_cancels_it_and_keeps_the_value_of_record() {
+    // S10 (R4, RM-21): a value taken on an empty stream, then a burst booked after it; a Stop before the burst's start cancels
+    // it. The value stays the value of record: a later burst radiates at that frequency, and the cancelled one radiates nothing.
+    let world = World::new(json!({ "sim.channel": { "couplings": [
+        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 0, "gain_db": 0.0 },
+        { "tx": "radio", "tx_channel": 0, "rx": "radio", "rx_channel": 1, "gain_db": 0.0 }
+    ] } }));
+    let constraints = [
+        ("radio.tx.c0.stream", eq(Scalar::from(0))),
+        ("radio.tx.c0.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap())),
+        ("radio.rx.c0.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap())),
+        ("radio.rx.c1.stream", eq(Scalar::from(0))),
+        ("radio.rx.c1.frequency_hz", eq(Scalar::try_from(2.4e9).unwrap())),
+    ];
+    let mut radio = prepare(&world, Options { constraints: &constraints, ..Options::default() }).unwrap();
+    radio.mock.arm().unwrap();
+    radio.mock.start(Some(TimePoint::new(ROOT, 0))).unwrap();
+    let domain = radio.tx_domain(&world);
+    let (cancelled, later) = (ramp(40), ramp(40));
+    radio.push(Action::UpdateParameter { target: tgt("mock"), key: key("radio.tx.c0.frequency_hz"), value: Value::num(2.4e9).unwrap(), class: UpdateClass::Cold, at: None });
+    step(&world, &mut [&mut radio], 0);
+    radio.push(burst(&radio, &world, world.waveform(&cancelled), 1000, false));
+    step(&world, &mut [&mut radio], 0);
+    let before_start = tx_root(&world, domain, 1000) - 1;
+    run_to(&world, &mut [&mut radio], before_start);
+    radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    step(&world, &mut [&mut radio], before_start);
+    radio.push(burst(&radio, &world, world.waveform(&later), 20_000, false));
+    step(&world, &mut [&mut radio], before_start);
+    run_to(&world, &mut [&mut radio], tx_root(&world, domain, 20_040) + 6_000_000);
+    let mut channels = radio.received_all().into_iter();
+    let (heard_connect, heard_value) = (channels.next().unwrap(), channels.next().unwrap());
+    assert!(heard_connect.iter().all(|(_, re, im)| (*re, *im) == (0.0, 0.0)), "nothing radiates at the connect frequency");
+    for (k, re, im) in heard_value {
+        let expected = if (20_000..20_040).contains(&k) { later[(k - 20_000) as usize] } else { (0.0, 0.0) };
+        assert_eq!((re, im), expected, "the cancelled burst is not sent, and the later one uses the value of record, sample {k}");
+    }
+    let rejected = radio.section("rejected");
+    assert!(rejected.as_array().unwrap().iter().any(|row| row["reason"].as_str().unwrap().contains("cancelled by stop")), "{rejected}");
 }
 
 #[test]

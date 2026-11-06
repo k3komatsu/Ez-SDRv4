@@ -663,9 +663,9 @@ fn ea_10_a_named_selector_connects_as_the_unnamed_one_and_the_record_holds_numbe
         let mut server = greeted(&temp.0);
         let initial = init_of("radio", vec![StreamInit { gain: BTreeMap::from([("1".to_owned(), 7.0)]), sample_rate: Some(2.0e6), ..numbered(0, &[0, 1]) }], vec![numbered(0, &[0])]);
         let connected = connect_profile(&mut server, profile_of(&temp.0), initial).expect("connects");
-        // A transmit value has no update class: refused, and still logged by its numbered key.
+        // A transmit gain on a stopped stream is admitted and logged by its numbered key.
         let entry = submit(&mut server, set("radio.tx.c0.gain_db", Value::num(9.0).unwrap()), Vec::new());
-        assert!(matches!(entry.outcome, Outcome::Rejected { .. }));
+        assert!(matches!(entry.outcome, Outcome::Admitted { .. }), "{:?}", entry.outcome);
         submit(&mut server, repeat(), Vec::new());
         let (manifest, _) = finish(&mut server);
         (connected.effective, manifest)

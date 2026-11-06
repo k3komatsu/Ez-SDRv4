@@ -128,13 +128,13 @@ class EasyApi(unittest.TestCase):
         self.assertEqual(outcomes, ["admitted", "rejected", "admitted"], "the rejected call is logged too")
 
     def test_v58_16_a_rejected_call_raises_and_is_logged(self) -> None:
-        # A radio value has no update class: the Kernel rejects a change during the Run (RM-27); the RF envelope is checked on the initial values.
+        # A transmit value outside the RF envelope is refused at admission, on the stream it is judged for (RM-19, RM-21).
         profile = self.default_profile()
         profile["environment"]["radio.rf_envelope"] = {"allowed_bands": [{"lo_hz": 2.4e9, "hi_hz": 2.5e9}]}
         with self.connect(profile, tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
             with self.assertRaises(ezsdr.Rejected) as raised:
                 sdr.set("radio", "radio.tx.c0.frequency_hz", 2.6e9)
-            self.assertTrue(any(v["check"] == "ezsdr.update_class" and v["key"] == "radio.tx.c0.frequency_hz" for v in raised.exception.violations), raised.exception.violations)
+            self.assertTrue(any(v["check"] == "radio.rf_envelope" and v["key"] == "radio.tx.c0.frequency_hz" for v in raised.exception.violations), raised.exception.violations)
             self.assertEqual(sdr.tx_channels[0].frequency, 2.45e9, "the rejected value was never applied")
         self.assertEqual(sdr.manifest["action_log"][-1], raised.exception.entry)
 
@@ -142,7 +142,7 @@ class EasyApi(unittest.TestCase):
 
     def test_v3_parameters_through_attributes(self) -> None:
         # A receive channel's frequency, gain and antenna are asked for at connect, read through the attributes, and set on a stopped stream
-        # (RM-21, EA-16); the rate waits for the bench and every transmit value for note 47's stage 4.
+        # (RM-21, EA-16); the rate waits for the bench, and a transmit value is taken while its bursts do not hold it (note 47 stage 4).
         stream = ezsdr.Stream([0], sample_rate=19.5e6, frequency={0: 2.45e9}, gain={0: 20}, antenna={0: "RX2"})
         with self.connect(rx={0: stream}, tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
             channel = sdr.rx_channels[0]
@@ -156,11 +156,10 @@ class EasyApi(unittest.TestCase):
             with self.assertRaises(ezsdr.Error) as refused:
                 sdr.rx.sample_rate = 10e6
             self.assertIn("held-open streamer", str(refused.exception))
-            with self.assertRaises(ezsdr.Error) as refused:
-                sdr.tx_channels[0].frequency = 2.4e9
-            self.assertIn("connect(tx=ezsdr.Stream(", str(refused.exception))
+            sdr.tx_channels[0].frequency = 2.4e9
+            self.assertEqual(sdr.tx_channels[0].frequency, 2.4e9, "a transmit value on an idle stream is taken")
             self.assertEqual(sdr.rx.sample_rate, 20e6, "nothing changed")
-        self.assertEqual([entry["action"]["kind"] for entry in sdr.manifest["action_log"]], ["set_parameter"] * 3, "the client refusals submit nothing")
+        self.assertEqual([entry["action"]["kind"] for entry in sdr.manifest["action_log"]], ["set_parameter"] * 4, "the client refusals submit nothing")
 
     def test_ea_16_channel_keys_and_stream_membership(self) -> None:
         # The channels' values and stream membership are asked for at connect; the setters refuse during the Run
@@ -173,7 +172,7 @@ class EasyApi(unittest.TestCase):
             self.assertEqual((sdr.rx_streams[0].channels, sdr.rx_streams[1].channels), ([], [0]))
             self.assertEqual((sdr.tx_streams[0].channels, sdr.tx_streams[1].channels), ([0], []))
             self.assertEqual(sdr.rx_streams[1].sample_rate, 20e6)
-            for setter in (lambda: setattr(rx, "stream", 0), lambda: setattr(tx, "gain", 0), lambda: setattr(sdr.rx_streams[1], "sample_rate", 10e6)):
+            for setter in (lambda: setattr(rx, "stream", 0), lambda: setattr(sdr.tx_streams[0], "sample_rate", 10e6), lambda: setattr(sdr.rx_streams[1], "sample_rate", 10e6)):
                 with self.assertRaises(ezsdr.Error):
                     setter()
             with self.assertRaises(ezsdr.Rejected) as raised:
@@ -182,6 +181,122 @@ class EasyApi(unittest.TestCase):
             self.assertEqual(rx.stream, 1, "the rejected value was never applied")
         self.assertEqual([entry["action"]["kind"] for entry in sdr.manifest["action_log"]], ["set_parameter"])
         self.assertEqual(sdr.manifest["action_log"][-1]["outcome"]["kind"], "rejected")
+
+    def test_ea_16_repeat_with_a_frequency_on_a_busy_stream_raises_and_sends_no_burst(self) -> None:
+        # S13 (EA-16, RM-21): the Provider refuses a transmit value for a stream that is playing, so the call raises before its burst; the
+        # playing burst is not stopped and no second burst is logged.
+        with self.connect(tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
+            sdr.tx.repeat(ramp())
+            sdr.sleep(0.01)
+            with self.assertRaises(ezsdr.Rejected) as raised:
+                sdr.tx.repeat(ramp(), frequency={0: 2.46e9})
+            self.assertEqual(raised.exception.event["kind"], "radio.COMMAND_REJECTED")
+        self.assertEqual([entry["action"].get("verb") for entry in sdr.manifest["action_log"]].count("start_repeat"), 1, "no second burst is logged")
+
+    def test_ea_16_a_transmit_value_on_an_empty_stream_is_used_by_the_next_repeat(self) -> None:
+        # S1 (EA-16, RM-21): after a repeat stops and its in-flight window passes, a transmit value is taken and the next repeat radiates it.
+        x = ramp()
+        with self.retune_session() as sdr:
+            sdr.tx.repeat(x)
+            sdr.sleep(0.01)
+            sdr.tx.stop()
+            sdr.sleep(0.02)  # past the 10 ms window (x3xx tx_in_flight_ns)
+            sdr.tx_channels[0].frequency = 2.0e9
+            sdr.tx.repeat(x)
+            sdr.sleep(0.01)
+            y = sdr.rx.capture(1000)
+        rotation(y, x)
+
+    def test_ea_16_a_transmit_value_for_a_booked_stream_is_rejected_and_the_burst_keeps_its_value(self) -> None:
+        # S2 (EA-16, RM-21): a repeat booked for the future holds the stream; a value before its start is refused, and the burst radiates the value it had.
+        x = ramp()
+        with self.connect(rx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}, tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
+            at = sdr.after(0.05)
+            sdr.tx.repeat(x, at=at)
+            with self.assertRaises(ezsdr.Rejected) as raised:
+                sdr.tx_channels[0].frequency = 2.0e9
+            self.assertEqual(raised.exception.event["kind"], "radio.COMMAND_REJECTED")
+            y = sdr.rx.capture(3000, at=dict(at, ticks=at["ticks"] - 1_000_000))
+        offset, _ = rotation(y[1000 + 45:], x)
+        self.assertEqual(offset, 0)
+
+    def test_ea_16_a_transmit_value_after_a_stop_waits_for_the_in_flight_window(self) -> None:
+        # S3 (EA-16, RM-16, RM-21): a value is refused while the repeat plays and within the in-flight window after its Stop, and taken after it.
+        with self.retune_session() as sdr:
+            sdr.tx.repeat(ramp())
+            sdr.sleep(0.01)
+            with self.assertRaises(ezsdr.Rejected):
+                sdr.tx_channels[0].frequency = 2.0e9
+            sdr.tx.stop()
+            sdr.sleep(0.001)
+            with self.assertRaises(ezsdr.Rejected):
+                sdr.tx_channels[0].frequency = 2.0e9
+            sdr.sleep(0.02)
+            sdr.tx_channels[0].frequency = 2.0e9
+            self.assertEqual(sdr.tx_channels[0].frequency, 2.0e9)
+
+    def test_ea_16_the_last_transmit_value_before_a_repeat_is_the_one_it_transmits(self) -> None:
+        # S4 (EA-16, RM-21): two values on an empty stream; the repeat radiates the last one, and the connect value is not heard.
+        x = ramp()
+        with self.retune_session(rx={0: ezsdr.Stream([0], frequency={0: 2.1e9})}) as sdr:
+            sdr.tx_channels[0].frequency = 2.2e9
+            sdr.tx_channels[0].frequency = 2.1e9
+            sdr.tx.repeat(x)
+            sdr.sleep(0.01)
+            y = sdr.rx.capture(1000)
+        rotation(y, x)
+
+    def test_ea_16_a_value_for_an_empty_transmit_stream_leaves_the_busy_one_undisturbed(self) -> None:
+        # S6 (EA-16, RM-21): stream 0 repeats while stream 1 is empty; a value for stream 1 is taken and the repeat on stream 0 radiates its own waveform.
+        x = ramp()
+        with self.connect(rx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}, tx={0: ezsdr.Stream([0], frequency={0: 2.45e9}), 1: [1]}) as sdr:
+            sdr.tx_streams[0].repeat(x)
+            sdr.sleep(0.01)
+            sdr.tx_channels[1].frequency = 2.0e9
+            self.assertEqual(sdr.tx_channels[1].frequency, 2.0e9)
+            y = sdr.rx.capture(1000)
+        rotation(y, x)
+
+    def test_ea_16_repeat_validates_every_channel_before_sending(self) -> None:
+        # Sol 8 (EA-16): every channel and value is checked before the first request, so a bad argument sends nothing.
+        bad = [
+            {"frequency": {0: 2.46e9, 5: 2.47e9}},  # channel 5 is not in the stream
+            {"frequency": {0: 2.46e9}, "gain": {0: "loud"}},  # a gain is a number
+            {"antenna": {0: 3}},  # an antenna is a string
+        ]
+        with self.connect(tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
+            for kwargs in bad:
+                with self.assertRaises(ezsdr.Error, msg=str(kwargs)):
+                    sdr.tx.repeat(ramp(), **kwargs)
+            with self.assertRaises(ezsdr.Error):
+                sdr.tx.repeat(np.zeros((2, 100), dtype=np.complex64), frequency={0: 2.46e9})
+        self.assertEqual(sdr.manifest["action_log"], [], "nothing was sent")
+
+    def test_ea_16_an_admitted_first_value_followed_by_a_refused_second_sends_no_burst(self) -> None:
+        # Sol 8 (EA-16, RM-19): the frequency is admitted and stays staged; the gain the envelope refuses stops the call before the burst.
+        profile = self.default_profile()
+        profile["environment"]["radio.rf_envelope"] = {"allowed_bands": [{"lo_hz": 2.4e9, "hi_hz": 2.5e9}], "max_gain_db": 10.0}
+        with self.connect(profile, tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
+            with self.assertRaises(ezsdr.Rejected) as raised:
+                sdr.tx.repeat(ramp(), frequency={0: 2.46e9}, gain={0: 20.0})
+            self.assertTrue(any(v["check"] == "radio.rf_envelope" for v in raised.exception.violations), raised.exception.violations)
+            self.assertEqual(sdr.tx_channels[0].frequency, 2.46e9, "the admitted value stays staged")
+        actions = [(entry["action"].get("key") or entry["action"].get("verb"), entry["outcome"]["kind"]) for entry in sdr.manifest["action_log"]]
+        self.assertEqual(actions, [("radio.tx.c0.frequency_hz", "admitted"), ("radio.tx.c0.gain_db", "rejected")], "no burst is sent")
+
+    def test_ea_16_a_channel_gain_on_an_empty_stream_is_accepted_before_a_repeat(self) -> None:
+        with self.connect(tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
+            sdr.tx_channels[0].gain = 5.0
+            self.assertEqual(sdr.tx_channels[0].gain, 5.0)
+            sdr.tx.repeat(ramp())
+        self.assertEqual([entry["outcome"]["kind"] for entry in sdr.manifest["action_log"]], ["admitted", "admitted"])
+
+    def test_ea_16_a_transmit_sample_rate_names_the_bench_condition(self) -> None:
+        with self.connect(tx={0: ezsdr.Stream([0], frequency={0: 2.45e9})}) as sdr:
+            with self.assertRaises(ezsdr.Error) as refused:
+                sdr.tx_streams[0].sample_rate = 10e6
+        self.assertIn("held-open streamer", str(refused.exception))
+        self.assertEqual(sdr.manifest["action_log"], [], "nothing was sent")
 
     def test_ea_16_stream_channels_are_read_only(self) -> None:
         with self.connect() as sdr:

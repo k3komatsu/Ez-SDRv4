@@ -233,8 +233,8 @@
   "id": "M24",
   "name": "MR-14 unit v_after is ceil",
   "file": "crates/ezsdr-mock-radio/src/time.rs",
-  "old": "    let offset = scaled.div_euclid(i128::from(q.den()));\n    i64::try_from(i128::from(o).checked_add(offset)?.checked_add(1)?).ok()",
-  "new": "    let offset = (scaled + i128::from(q.den()) - 1).div_euclid(i128::from(q.den()));\n    i64::try_from(i128::from(o).checked_add(offset)?).ok()",
+  "old": "    v_floor(o, q, k)?.checked_add(1)",
+  "new": "    v_of(o, q, k)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
   "filter": "mr_14"
@@ -293,8 +293,8 @@
   "id": "M30",
   "name": "MR-33 timeline ignores tick",
   "file": "crates/ezsdr-mock-radio/src/channel.rs",
-  "old": ".find(|(tick, _)| t.is_at_or_after(*tick))",
-  "new": ".find(|(_tick, _)| true)",
+  "old": ".find(|(from, _)| from.num * t.den <= t.num * from.den)",
+  "new": ".find(|(_from, _)| true)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "lib",
   "filter": "mr_33_a_timeline_keeps_the_value_in_force_at_each_instant"
@@ -424,8 +424,8 @@
   "id": "M45",
   "name": "MR-32 segment registered on a wrong origin",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "            shared.plan().segments.insert((origin, clock_order, k, index as u32 + 1, start), channel::Segment {\n                origin,\n",
-    "new": "            shared.plan().segments.insert((origin, clock_order, k, index as u32 + 1, start), channel::Segment {\n                origin: origin + 1_000_000_000_000,\n",
+    "old": "channel::Segment { origin, ratio, start, len: length,",
+    "new": "channel::Segment { origin: origin + 1_000_000_000_000, ratio, start, len: length,",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_32_a_loopback"
@@ -444,8 +444,8 @@
   "id": "M49",
   "name": "MR-32 a stop cuts no burst of the current clock",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "        for ((_, _, stream, g, _), segment) in plan.segments.iter_mut() {\n            if *stream == k && *g == generation {",
-    "new": "        for ((_, _, stream, g, _), segment) in plan.segments.iter_mut() {\n            if false && *stream == k && *g == generation {",
+    "old": "for ((_, _, stream, _), segment) in plan.segments.iter_mut() {\n            if *stream == k {",
+    "new": "for ((_, _, stream, _), segment) in plan.segments.iter_mut() {\n            if false && *stream == k {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stopped"
@@ -467,7 +467,7 @@
   "new": ".filter(|start| false && *start < cut) else { break };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
-  "filter": "ch_09_a_burst_starting",
+  "filter": "mr_25_a_stop_transmits_every_held_burst_before_it",
   "id": "M52"
  },
  {
@@ -483,8 +483,8 @@
  {
   "name": "MR-33 timeline takes first change not last",
   "file": "crates/ezsdr-mock-radio/src/channel.rs",
-  "old": "            .rev()\n            .find(|(tick, _)| t.is_at_or_after(*tick))",
-  "new": "            .find(|(tick, _)| t.is_at_or_after(*tick))",
+  "old": "            .rev()\n            .find(|(from, _)| from.num * t.den <= t.num * from.den)",
+  "new": "            .find(|(from, _)| from.num * t.den <= t.num * from.den)",
   "crate": "ezsdr-mock-radio",
   "test_bin": "lib",
   "filter": "mr_33_a_timeline_keeps_the_value_in_force_at_each_instant",
@@ -724,8 +724,8 @@
   "id": "M68",
   "name": "MR-32 a stop ends the segments of every clock",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "            if *stream == k && *g == generation {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
-  "new": "            if *stream == k && *g == generation || true {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
+  "old": "if *stream == k {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
+  "new": "if *stream == k || true {\n                segment.end = Some(segment.end.map_or(k_cut, |end| end.min(k_cut)));",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_25_a_stream_stop_leaves_another_transmit_stream_radiating"
@@ -734,8 +734,8 @@
   "id": "M69",
   "name": "MR-32 a stop withdraws the segments of every clock",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        plan.segments.retain(|(_, _, stream, g, start), _| *stream != k || *g != generation || *start < k_cut);",
-  "new": "        plan.segments.retain(|(_, _, _stream, _g, start), _| *start < k_cut);",
+  "old": "plan.segments.retain(|(_, _, stream, start), _| *stream != k || *start < k_cut);",
+  "new": "plan.segments.retain(|(_, _, _stream, start), _| *start < k_cut);",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_layout",
   "filter": "mr_25_a_stream_stop_leaves_another_transmit_stream_radiating"

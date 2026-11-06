@@ -223,7 +223,6 @@ fn unmeasured_reason(key: &str) -> &'static str {
             "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run."
         }
         "radio.timing.rx_start_lead_ns" => "Not measured in this record; note 47 stage 3 measures the start lead of `start_rx`.",
-        "radio.timing.tx_start_lead_ns" => "Not measured in this record; a transmit stream's start lead has no Run-time form (note 47 stage 2).",
         "radio.perf.tx_bytes_per_s" => "Not measured in this record; the Phase 8 stage 3c-1 hardware measurement has not been run.",
         "radio.timing.overflow_restart_gap_ns" => {
             "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision."
@@ -4402,7 +4401,6 @@ mod tests {
         let sample_rate_reason = reason("radio.rx.s0.sample_rate_hz");
         let lead_reason = reason("radio.timing.min_timed_command_lead_ns");
         let startup_reason = reason("radio.timing.startup_latency_ns");
-        let tx_start_reason = reason("radio.timing.tx_start_lead_ns");
         let overflow_reason = reason("radio.timing.overflow_restart_gap_ns");
         let tx_throughput_reason = reason("radio.perf.tx_bytes_per_s");
         assert!(gain_reason.contains("3c-2a") && gain_reason.contains("coercion read-back"), "{gain_reason}");
@@ -4410,7 +4408,7 @@ mod tests {
         assert!(sample_rate_reason.contains("3c-2a") && sample_rate_reason.contains("sample-rate read-back"), "{sample_rate_reason}");
         assert!(lead_reason.contains("has not been run"), "{lead_reason}");
         assert!(startup_reason.contains("3b-1"), "{startup_reason}");
-        assert!(tx_start_reason.contains("note 47") && overflow_reason.contains("3c-1") && tx_throughput_reason.contains("3c-1"));
+        assert!(overflow_reason.contains("3c-1") && tx_throughput_reason.contains("3c-1"));
         assert_ne!(lead_reason, startup_reason);
         let no_pass = BTreeMap::from([("tx-1msps".to_owned(), vec![CandidateStage { value: 1, trials: vec![TrialClass::ProviderFailure] }])]);
         let summary = summarize_candidates(SummaryMode::MinimumLead, &no_pass, 1).unwrap();

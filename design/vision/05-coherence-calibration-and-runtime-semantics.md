@@ -151,7 +151,7 @@ Consequences:
 
 - A component whose behaviour must change at run time (an adaptive-MCS demodulator) is one component with a parameter, not a family of components swapped in and out.
 - v3's practice of pausing every thread that touches a device before applying a change is the `cold` class, made explicit.
-- A sample-rate change is always `cold` (§15).
+- A channel's frequency, gain and antenna are `cold` in both directions and change only on a stream that takes them; a stream's sample rate is fixed for the Run ([design/07-radio-model.md](../07-radio-model.md), RM-21).
 
 GraphEpoch is deferred until a concrete experiment needs it; the prohibition is not.
 

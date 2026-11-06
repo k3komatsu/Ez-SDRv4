@@ -38,7 +38,7 @@ use ezsdr_radio::x3xx;
 use serde_json::{Value as Json, json};
 
 use self::control::Control;
-use self::core::{Clock, Core, lock};
+use self::core::{Clock, Core, lock, stream_key};
 use self::mode::DescriptionExt;
 use self::rx::{Rx, RxCmd};
 use self::tx::{Tx, TxCmd};
@@ -559,6 +559,8 @@ impl Provider for UhdRadio {
                 continue;
             }
             core.open_streamer(Dir::Tx, stream.k, stream.channels).map_err(|e| rejected(open_refusal(e)))?;
+            // RM-21: the open keeps the connect values the device was configured with, generation 0.
+            lock(&core.streams).record_configured(stream_key(Dir::Tx, stream.k), Some(0));
             // RM-25: the first lattice instant at or after the arm instant.
             let handle = stream.handle.clone().expect("a stream with channels declared its clock");
             let n = handle.root_ticks_per_tick().num() as i64;
@@ -877,7 +879,6 @@ mod tests {
             startup_latency_ns: 12_000_002,
             overflow_restart_gap_ns: 17_000_004,
             rx_start_lead_ns: 19_000_005,
-            tx_start_lead_ns: 23_000_006,
             tx_in_flight_ns: 29_000_007,
         };
         let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
@@ -893,7 +894,6 @@ mod tests {
             ("startup_latency_ns", candidate.startup_latency_ns),
             ("overflow_restart_gap_ns", candidate.overflow_restart_gap_ns),
             ("rx_start_lead_ns", candidate.rx_start_lead_ns),
-            ("tx_start_lead_ns", candidate.tx_start_lead_ns),
             ("tx_in_flight_ns", candidate.tx_in_flight_ns),
         ];
         let envelope = &radio.instance.sections[&section("envelope")];

@@ -8,11 +8,11 @@ use ezsdr_kernel::time::Rational;
 use ezsdr_sim::channel::{Radiated, RootInstant, Transmitter};
 
 /// A parameter's value over time: `initial` until its first change, and each change from
-/// its effective root tick on; changes are appended in application order (MR-33, UC-2).
+/// its effective instant on; changes are appended in application order (MR-33, UC-2).
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
     initial: f64,
-    changes: Vec<(i64, f64)>,
+    changes: Vec<(RootInstant, f64)>,
 }
 
 impl Timeline {
@@ -21,12 +21,16 @@ impl Timeline {
     }
 
     pub(crate) fn set(&mut self, tick: i64, value: f64) {
-        self.changes.push((tick, value));
+        self.set_at(RootInstant::tick(tick), value);
     }
 
-    /// The value in force at `t`: the last change whose tick is at or before `t`.
+    pub(crate) fn set_at(&mut self, at: RootInstant, value: f64) {
+        self.changes.push((at, value));
+    }
+
+    /// The value in force at `t`: the last change whose instant is at or before `t`.
     pub(crate) fn at(&self, t: RootInstant) -> f64 {
-        self.changes.iter().rev().find(|(tick, _)| t.is_at_or_after(*tick)).map_or(self.initial, |(_, value)| *value)
+        self.changes.iter().rev().find(|(from, _)| from.num * t.den <= t.num * from.den).map_or(self.initial, |(_, value)| *value)
     }
 }
 
@@ -49,7 +53,7 @@ pub(crate) struct Segment {
 /// The transmit side's plan: every admitted burst and its logical channels' radio model
 /// (MR-32, MR-33, MR-34).
 pub(crate) struct TxPlan {
-    pub segments: BTreeMap<(i64, Option<u64>, usize, u32, i64), Segment>,
+    pub segments: BTreeMap<(i64, Option<u64>, usize, i64), Segment>,
     pub channel_models: Vec<ChannelModel>,
 }
 
@@ -172,7 +176,7 @@ mod tests {
         let ratio = Rational::new(1_000, 1).unwrap();
         let segment = Segment { origin: 0, ratio, start: 0, len: 4, repeat: false, channels: 1, channel_numbers: vec![0], samples: [1.0f32, 0.0].repeat(4).into(), end: None };
         let model = ChannelModel { gain_db, frequency_hz, phase, phase_behavior: "deterministic".to_owned(), path_delay_samples: 2 };
-        let shared = TxShared::new(TxPlan { segments: BTreeMap::from([((0, None, 0, 0, 0), segment)]), channel_models: vec![model] });
+        let shared = TxShared::new(TxPlan { segments: BTreeMap::from([((0, None, 0, 0), segment)]), channel_models: vec![model] });
         // Antenna instant 4 900 (sample 4): the radiated sample is 2, at tick 2 000, before the change at 3 000.
         let before = shared.radiated(0, RootInstant::tick(4_900)).unwrap();
         assert_eq!((before.re, before.im, before.frequency_hz), (1.0, 0.0, 100.0), "the sample's own instant precedes the change");

@@ -154,8 +154,7 @@ fn rm_27_the_layout_builder_keys_are_declared() {
             assert_eq!(declaration.kind, kind, "{direction} {leaf}");
             assert_eq!(declaration.coercible, coercible, "{direction} {leaf}");
             assert_eq!(declaration.coercion_default, coercion_default, "{direction} {leaf}");
-            // Note 47 stage 3: only a receive channel's frequency, gain and antenna are `cold`.
-            assert_eq!(declaration.update_class, if direction == "rx" { update_class } else { None }, "{direction} {leaf}");
+            assert_eq!(declaration.update_class, update_class, "{direction} {leaf}");
         }
         let declaration = find(&format!("radio.{direction}.s.sample_rate_hz"));
         assert_eq!(declaration.indexed, Some(2), "{direction} sample rate");
@@ -436,7 +435,6 @@ fn rm_29_the_ideal_layout_builds_its_tree_and_defaults() {
     assert_eq!(description.timing.min_timed_command_lead_ns, 0);
     assert_eq!(description.timing.startup_latency_ns, 0);
     assert_eq!(description.timing.rx_start_lead_ns, 0);
-    assert_eq!(description.timing.tx_start_lead_ns, 0);
     assert_eq!(description.timing.tx_in_flight_ns, 0);
     assert_eq!(description.performance.rx_bytes_per_s, 1_i64 << 62);
     assert_eq!(description.performance.tx_bytes_per_s, 1_i64 << 62);

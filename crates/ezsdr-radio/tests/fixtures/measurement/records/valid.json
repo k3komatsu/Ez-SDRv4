@@ -27,7 +27,6 @@
     { "status": "measured", "key": "radio.timing.startup_latency_ns", "worst": 1000000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.overflow_restart_gap_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.rx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
-    { "status": "measured", "key": "radio.timing.tx_start_lead_ns", "worst": 40000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.timing.tx_in_flight_ns", "worst": 9000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.perf.rx_bytes_per_s", "worst": 100000000, "trials": 1, "condition": "baseline", "test": "fixture" },
     { "status": "measured", "key": "radio.perf.tx_bytes_per_s", "worst": 100000000, "trials": 1, "condition": "baseline", "test": "fixture" },

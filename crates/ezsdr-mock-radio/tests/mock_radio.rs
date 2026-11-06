@@ -535,7 +535,6 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(capabilities[&key("radio.timing.overflow_restart_gap_ns")], one(Scalar::from(gap)));
         assert!(!capabilities.contains_key(&key("radio.timing.stop_tail_ns")) && !capabilities.contains_key(&key("radio.timing.restart_lead_ns")));
         assert_eq!(capabilities[&key("radio.timing.rx_start_lead_ns")], one(Scalar::from(start_lead)));
-        assert_eq!(capabilities[&key("radio.timing.tx_start_lead_ns")], one(Scalar::from(start_lead)));
         assert_eq!(capabilities[&key("radio.timing.tx_in_flight_ns")], one(Scalar::from(in_flight)));
         assert!(!capabilities.contains_key(&key("radio.timing.start_lead_ns")));
         assert_eq!(capabilities[&key("radio.perf.rx_bytes_per_s")], one(Scalar::from(bytes_per_s)));
@@ -555,7 +554,6 @@ fn mr_03_profile_values_reach_the_capabilities_and_the_envelope_section() {
         assert_eq!(envelope["timing"]["overflow_restart_gap_ns"], gap);
         assert!(envelope["timing"].get("stop_tail_ns").is_none() && envelope["timing"].get("restart_lead_ns").is_none());
         assert_eq!(envelope["timing"]["rx_start_lead_ns"], start_lead);
-        assert_eq!(envelope["timing"]["tx_start_lead_ns"], start_lead);
         assert_eq!(envelope["timing"]["tx_in_flight_ns"], in_flight);
         assert_eq!(envelope["performance"]["rx_bytes_per_s"], bytes_per_s);
         assert_eq!(envelope["performance"]["tx_bytes_per_s"], bytes_per_s);
@@ -2185,6 +2183,20 @@ fn mr_25_a_stopped_stream_keeps_its_end() {
 }
 
 #[test]
+fn mr_25_a_transmit_clock_ends_at_its_origin_on_a_stop_at_arm() {
+    // RM-25 (M4): a `Stop` at or before a transmit clock's origin ends that clock at its origin, as the UHD Module's clock end does (`core.rs`).
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    harness.mock.stop(StopMode::Orderly).unwrap();
+    harness.step(2_000_000_000).unwrap();
+    let record = harness.clocks.sample_clock_records().into_iter().find(|record| record.stream == rid("mock/tx/s0")).unwrap();
+    assert_eq!(record.ended_at, Some(record.origin));
+    let rows = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.segments").unwrap()];
+    let row = rows.as_array().unwrap().iter().find(|row| row["direction"] == "tx" && row["stream"] == 0).unwrap();
+    assert_eq!(row["ended_at"]["ticks"], row["origin"]["ticks"], "MR-27: the layout row ends at the clock's origin");
+}
+
+#[test]
 fn mr_25_rx_stop_leaves_transmit_running_and_stop_records_an_unstarted_burst() {
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut harness = Harness::new("x3xx", &constraints, &[], &[], Some((BackPressure::DropOldest, 16)));
@@ -2243,16 +2255,15 @@ fn mr_29_other_actions_are_command_rejected() {
     harness.arm_start(0).unwrap();
     harness.actions.push(Action::SetTimer { target: tgt("mock"), at: ezsdr_kernel::time::AbsoluteDeadline::new(TimePoint::new(ROOT, 1)), token: 3 });
     harness.actions.push(Action::Command { target: tgt("mock"), verb: Ident::parse("start_repeat").unwrap(), params: BTreeMap::new(), at: None });
-    // MR-18: a transmit key has no update class, so the Kernel refuses its Run-time update before dispatch; the Provider's own
-    // guard refuses one that reaches it directly, as this harness does.
-    harness.actions.push(update_action("radio.tx.c0.frequency_hz", Value::num(2.0e9).unwrap(), UpdateClass::Cold, None));
+    // MR-18: an unnumbered key is no channel's, so the Provider's own guard refuses it when it reaches the Provider directly, as this harness does.
+    harness.actions.push(update_action("radio.tx.antenna", Value::from("TX/RX"), UpdateClass::Cold, None));
     harness.step(1).unwrap();
     let rejected = &harness.mock.instance().sections[&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()];
     assert_eq!(rejected.as_array().unwrap().len(), 3);
     assert_eq!(rejected[0]["kind"], "set_timer");
     assert_eq!(rejected[1]["kind"], "command");
     assert_eq!(rejected[2]["kind"], "update_parameter");
-    assert_eq!(rejected[2]["reason"], "MR-18: RM-21: only a receive channel's frequency, gain or antenna is staged");
+    assert_eq!(rejected[2]["reason"], "MR-18: RM-21: only a channel's frequency, gain or antenna is staged");
     let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
     let rejected_events: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED).collect();
     assert_eq!(rejected_events.len(), 3);
@@ -2548,4 +2559,77 @@ fn mr_18_a_staged_value_with_an_instant_a_channel_in_no_stream_and_another_strea
     harness.step(4_000_000).unwrap();
     let first = segment_values(&harness, 0)[0];
     assert_eq!(segment_values(&harness, 0), [first, first], "neither refused value was used");
+}
+
+// ------------------------------------------------------------ note 47 stage 4, part (b) b2: transmit values (RM-21, MR-18)
+
+const TX_FREQUENCY: &str = "radio.tx.c0.frequency_hz";
+
+/// The root tick of sample `k` of transmit stream 0's clock.
+fn tx_root(harness: &Harness, k: i64) -> i64 {
+    match harness.clocks.convert(TimePoint::new(tx_domain(harness), k), ROOT).unwrap() {
+        ezsdr_kernel::time::Converted::Exact { point } => point.ticks_in(ROOT).unwrap(),
+        ezsdr_kernel::time::Converted::Inexact { .. } => panic!("the transmit clock is on the root lattice"),
+    }
+}
+
+fn tx_value(frequency: f64) -> Action {
+    update_action(TX_FREQUENCY, Value::num(frequency).unwrap(), UpdateClass::Cold, None)
+}
+
+#[test]
+fn mr_21_a_transmit_value_while_a_burst_is_booked_is_refused_with_its_id() {
+    // RM-21, S2: a burst booked for the future keeps its stream busy to its end; the value is refused with its own Action id.
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_010_000, 4, false, LatePolicy::SendAsapAndFlag));
+    harness.step(2_000_000_000).unwrap();
+    harness.actions.push(tx_value(2.4e9));
+    harness.step(2_000_000_001).unwrap();
+    let refused = refusals(&harness);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!((refused[0].payload["kind"].as_str(), &refused[0].payload["action"]), (Some("update_parameter"), &serde_json::json!(2)));
+    assert!(refused[0].payload["reason"].as_str().unwrap().starts_with("MR-18: RM-21:"), "{refused:?}");
+}
+
+#[test]
+fn mr_16_a_transmit_value_at_the_exclusive_end_is_accepted() {
+    // RM-21, S5: one root tick before a burst's exclusive end the value is refused; at the end it is accepted.
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_010_000, 4, false, LatePolicy::SendAsapAndFlag));
+    harness.step(2_000_000_000).unwrap();
+    let end = tx_root(&harness, 2_010_004);
+    harness.actions.push(tx_value(2.4e9));
+    harness.step(end - 1).unwrap();
+    assert_eq!(refusals(&harness).len(), 1, "one tick before the end is refused");
+    harness.actions.push(tx_value(2.5e9));
+    harness.step(end).unwrap();
+    assert!(refusals(&harness).is_empty(), "at the exclusive end the value is accepted");
+}
+
+#[test]
+fn mr_25_a_transmit_value_after_a_stop_takes_effect_after_the_in_flight_window() {
+    // RM-21, S3: a repeat keeps the stream busy; a `Stop` at `s` bounds it to `s + tx_in_flight` (10 ms on x3xx), and the value at that instant is taken.
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(2_000_000_000).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_010_000, 4, true, LatePolicy::SendAsapAndFlag));
+    harness.step(2_000_000_000).unwrap();
+    let stop = tx_root(&harness, 2_010_000) + 5_000_000;
+    harness.step(stop - 1).unwrap();
+    harness.actions.push(tx_value(2.4e9));
+    harness.step(stop).unwrap();
+    assert_eq!(refusals(&harness).len(), 1, "while the repeat plays the value is refused");
+    harness.actions.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+    harness.step(stop).unwrap();
+    let window = 10_000_000;
+    harness.actions.push(tx_value(2.5e9));
+    harness.step(stop + window - 1).unwrap();
+    assert_eq!(refusals(&harness).len(), 1, "one tick before the window's end is refused");
+    harness.actions.push(tx_value(2.6e9));
+    harness.step(stop + window).unwrap();
+    assert!(refusals(&harness).is_empty(), "at the window's end the value is taken");
 }

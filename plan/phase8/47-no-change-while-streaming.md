@@ -120,6 +120,7 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 2. **channel の組を Run の間固定**：両 Provider，VH の生成（`crates/ezsdr-radio/tests/generator/mod.rs:16-78`），parity（`crates/ezsdr-acceptance/tests/parity.rs`），Python，spec 07・09・16・18．move，from none，`Release` の holder を消す．
 3. **受信の新しい設定と開始**：「流れていない」と staging，開始の snapshot．古い受信の仕組み（時刻つきの release，受け渡し，restore）をこの段階で消す．受信の rate の変更は，実機の確認まで拒む（受け入れの条件）．
 4. **送信の空の判断，設定を伴う burst，clock の規則**：送信の rate の変更は，実機の確認まで拒む．**未決（再レビュー 5）**：設定を伴う burst の booking で新しい clock C を登録し，装置が設定を拒んで C が origin で終わる（RM-25）と，送信の stream に流れている SampleClock がなくなり，直した値の次の burst が Kernel の admission で拒まれる（`admission.rs:150-162`，`state.rs:336-339`）．Kernel の admission を変えずに，再試行が Provider の booking に届く道を，この段階の設計（brief とテスト計画）で決める．「失敗 → 直す → 送り直す」の系列をテスト計画に必ず入れる．
+   **済**（2026-11-07．記録 `reviews/47s4-*`，扱いは `47s4-dispositions.md`）：送信の rate は拒んだままなので，値を伴う burst も新しい clock を登録しない（orchestrator R1．送信の clock は stream ごとに一つ，`arm` で登録．上の未決はこの段階では起きず，**送信の rate の変更を受け付ける段階で設計する**）．(a) B4（48）：送信の計画は一区間，cut は origin だけ．(b) 送信の `frequency_hz`・`gain_db`・`antenna` は `cold`．値は受付の時に stream が空いている時だけ（共有の `ezsdr_radio::staging::Busy`：予約の終わり，repeat は Stop まで，Stop の後は高々 in-flight window 一つ．引き渡しの進みでは決めない）．burst の予約が snapshot（値，generation，ActionId）を取る．UHD は uhd-tx の自分の turn で，開いた device burst がなく，自分の最後に閉じた device burst の終わりの後，recovery の外で，rate なしで時刻なしに設定し，その後 late policy で決め直す（実機 T5 の根拠）．装置の値は record の `configured`（generation）．設定の拒否はその burst を id つきで拒み，stream は止めない．MockRadio は最初の sample の時刻ちょうどから値を使う（B6）．`tx_start_lead_ns` は消した．Python の `repeat(…, frequency=, gain=, antenna=)`．Mock と Module が別の予約を受け付ける場合（#79）は `Busy` も分かれる：段階 5 で直す．
 5. **重なりの拒否と repeat の差し替え**（両 Provider，parity，Python．`python/tests/test_easy_api.py:623-630` の「repeat を二度呼ぶ」試験も新しい規則に）．
    - **この段階の設計で問うこと**（owner 2026-11-06）：preemption が消えた後，送信の in-flight window は有限の burst に要るか，repeat の差し替えだけに限れるか．限れれば有限の burst は v3 のように頭から大きな send で渡し，開いた最初の send の最小（48 S3），preemption の前線，send の刻みとその試験を減らす．v3 は一回の長い burst（SOB，波形の残りを丸ごと send，0 サンプルの EOB）で送り，送信の async を読まなかったので，この種の装置の角を踏まなかった（`v3/cpp/uhd_usrp/multiusrp.cpp:591-647`）．
 6. **使われなくなった共有の仕組みの整理**（`timed_instant`，`covering`，queue と release の能力，schema）．
@@ -188,3 +189,4 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 | 2026-11-05 | 段階 2 を済とした（§4） |
 | 2026-11-05 | 段階 3 を済とした（§4） |
 | 2026-11-05 | 段階 3 の実装を記録した（§4） |
+| 2026-11-07 | 段階 4 を済とした（§4） |

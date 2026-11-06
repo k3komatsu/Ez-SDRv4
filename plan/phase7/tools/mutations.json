@@ -597,8 +597,8 @@
    "id": "U17",
   "name": "the repeat not ended at the next burst's start",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "            let held_cut = self.held.keys().next().copied();\n            return self.send(clock, held_cut, cut_k, window_cut);\n        }\n        if let Some(c) = self.chain.next() {",
-   "new": "            let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            return self.send(clock, held_cut, cut_k, window_cut);\n        }\n        if let Some(c) = self.chain.next() {",
+   "old": "let held_cut = self.held.keys().next().copied();\n            return self.send(clock, held_cut, window_cut);\n        }\n        if let Some(c) = self.chain.next() {",
+   "new": "let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            return self.send(clock, held_cut, window_cut);\n        }\n        if let Some(c) = self.chain.next() {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
@@ -874,7 +874,7 @@
   "new": "if false {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_23_a_clock_ending_at_its_cut_cancels_a_held_burst_and_releases_its_reservation"
+  "filter": "ur_23_a_clock_end_cancels_a_held_burst_and_releases_its_reservation"
  },
  {
   "id": "R08",
@@ -1010,7 +1010,7 @@
   "id": "B03",
   "name": "end-of-burst at the next burst's start: a timed start at the tick the burst ended (§11 F3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "let device_eob = eob && (!ends_at_held || closes_at_cut) && !hold;",
+  "old": "let device_eob = eob && (!ends_at_held || short_first) && !hold;",
   "new": "let device_eob = eob && !hold;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",

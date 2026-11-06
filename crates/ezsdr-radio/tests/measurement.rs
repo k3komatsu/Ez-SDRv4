@@ -511,7 +511,6 @@ fn rm_35_rule_labels_match_the_declared_comparison_classes() {
         ("radio.timing.min_timed_command_lead_ns", measurement::Rule::LowerBound),
         ("radio.timing.overflow_restart_gap_ns", measurement::Rule::LowerBound),
         ("radio.timing.rx_start_lead_ns", measurement::Rule::LowerBound),
-        ("radio.timing.tx_start_lead_ns", measurement::Rule::LowerBound),
         ("radio.timing.tx_in_flight_ns", measurement::Rule::LowerBound),
         ("radio.timing.startup_latency_ns", measurement::Rule::LowerBound),
         ("radio.rx.c0.frequency_hz", measurement::Rule::Subset),

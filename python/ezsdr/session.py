@@ -191,10 +191,10 @@ _PARAMS = {
     "stream": "stream",
 }
 
-# What a receive channel's frequency, gain and antenna accept (RM-21, EA-16): the type check is the client's, before sending.
-_RX_VALUES = {"frequency": "frequency_hz", "gain": "gain_db", "antenna": "antenna"}
+# What a channel's frequency, gain and antenna accept (RM-21, EA-16): the type check is the client's, before sending.
+_CHANNEL_VALUES = {"frequency": "frequency_hz", "gain": "gain_db", "antenna": "antenna"}
 
-BENCH_RATE = "a receive rate cannot change during a Run until a held-open streamer is confirmed on the bench (note 47)"
+BENCH_RATE = "a stream's rate cannot change during a Run until a held-open streamer is confirmed on the bench (note 47)"
 
 
 def _value(name: str, value: Any) -> Any:
@@ -210,20 +210,13 @@ def _param(name: str) -> property:
         return _effective(self._session, self._radio, self._key(suffix))
 
     def set_(self: Any, value: Any) -> None:
-        if self._direction == "rx" and name in _RX_VALUES and isinstance(self, _Channel):
-            # RM-21: one UpdateParameter; the Provider takes it only on a stopped stream and refuses it otherwise.
+        if name in _CHANNEL_VALUES and isinstance(self, _Channel):
+            # RM-21: one UpdateParameter; the Provider takes it on a stopped stream and refuses it otherwise (a streaming receive stream, a booked or playing transmit one).
             self._session.set(self._radio, self._key(suffix), _value(name, value))
-        elif name == "sample_rate" and self._direction == "rx":
+        elif name == "sample_rate":
             raise Error(f"EA-16: {self._key(suffix)}: {BENCH_RATE}; ask for it at connect: connect({self._direction}=ezsdr.Stream(..., sample_rate=...))")
-        elif self._direction == "rx" and name == "stream":
-            raise Error(f"EA-16: {self._key(suffix)} cannot change during a Run; ask for it at connect: connect(rx=ezsdr.Stream(...))")
         else:
-            # A transmit value has no update class until note 47's stage 4: it is asked for at connect (RM-27, EA-16).
-            raise Error(
-                f"EA-16: {self._key(suffix)} cannot change during a Run yet; ask for it at connect: "
-                f"connect({self._direction}=ezsdr.Stream(...)) or connect({self._direction}=[ezsdr.Stream(...)]), "
-                f"and read the new value back from the connected Session"
-            )
+            raise Error(f"EA-16: {self._key(suffix)} cannot change during a Run; ask for it at connect: connect({self._direction}=ezsdr.Stream(...))")
 
     return property(
         get,
@@ -279,6 +272,33 @@ class _Stream:
         return f"radio.{self._direction}.s{self._number}.{suffix}"
 
     sample_rate = _param("sample_rate")
+
+    def _channel_values(self, given: Mapping[str, Optional[Mapping[Any, Any]]]) -> List[Tuple[str, Any]]:
+        """The ``(key, value)`` pairs to send, in sending order, each checked (EA-16)."""
+        channels = getattr(self._session.radio(self._radio), f"{self._direction}_channels")
+        members = set(self.channels)
+        pairs: List[Tuple[str, Any]] = []
+        for name, leaf in _CHANNEL_VALUES.items():
+            chosen = given[name]
+            if chosen is None:
+                continue
+            if not isinstance(chosen, Mapping):
+                raise Error(f"EA-16: {name} is a dict keyed by channel, not {type(chosen).__name__}")
+            numbered: Dict[int, Any] = {}
+            for key, value in chosen.items():
+                if isinstance(key, bool) or not isinstance(key, (int, str)) or (isinstance(key, int) and key < 0):
+                    raise Error(f"EA-16: a channel is a number or a name, not {key!r}")
+                try:
+                    number = channels[key]._number
+                except (KeyError, IndexError) as error:
+                    raise Error(f"EA-16: {self._direction} has no channel {key!r}") from error
+                if number not in members:
+                    raise Error(f"EA-16: {self._direction} channel {number} is not in stream s{self._number}, whose channels are {sorted(members)}")
+                if number in numbered:
+                    raise Error(f"EA-16: channel {number} is given twice in {name}")
+                numbered[number] = _value(name, value)
+            pairs.extend((f"radio.{self._direction}.c{number}.{leaf}", numbered[number]) for number in sorted(numbered))
+        return pairs
 
     def _need_channels(self) -> None:
         if not self.channels:
@@ -340,7 +360,7 @@ class Rx(_Stream):
         the order made (RM-12, RM-21; EA-16)."""
         if sample_rate is not None:
             raise Error(f"EA-16: {self._key('sample_rate_hz')}: {BENCH_RATE}")
-        values = self._start_values({"frequency": frequency, "gain": gain, "antenna": antenna})
+        values = self._channel_values({"frequency": frequency, "gain": gain, "antenna": antenna})
         for key, value in values:
             self._session.set(self._radio, key, value)
         action = {
@@ -353,32 +373,6 @@ class Rx(_Stream):
         }
         return _admitted(*self._session._submit(action))
 
-    def _start_values(self, given: Mapping[str, Optional[Mapping[Any, Any]]]) -> List[Tuple[str, Any]]:
-        """The ``(key, value)`` pairs to send, in sending order, each checked (EA-16)."""
-        channels = self._session.radio(self._radio).rx_channels
-        members = set(self.channels)
-        pairs: List[Tuple[str, Any]] = []
-        for name, leaf in _RX_VALUES.items():
-            chosen = given[name]
-            if chosen is None:
-                continue
-            if not isinstance(chosen, Mapping):
-                raise Error(f"EA-16: {name} is a dict keyed by channel, not {type(chosen).__name__}")
-            numbered: Dict[int, Any] = {}
-            for key, value in chosen.items():
-                if isinstance(key, bool) or not isinstance(key, (int, str)) or (isinstance(key, int) and key < 0):
-                    raise Error(f"EA-16: a channel is a number or a name, not {key!r}")
-                try:
-                    number = channels[key]._number
-                except (KeyError, IndexError) as error:
-                    raise Error(f"EA-16: {self._direction} has no channel {key!r}") from error
-                if number not in members:
-                    raise Error(f"EA-16: receive channel {number} is not in stream s{self._number}, whose channels are {sorted(members)}")
-                if number in numbered:
-                    raise Error(f"EA-16: channel {number} is given twice in {name}")
-                numbered[number] = _value(name, value)
-            pairs.extend((f"radio.rx.c{number}.{leaf}", numbered[number]) for number in sorted(numbered))
-        return pairs
 
     def next_at(self, start: dict, period: int, ahead: Any = 0.05) -> dict:
         """The first instant ``start`` plus a whole number of ``period`` receive samples that
@@ -466,16 +460,23 @@ class Tx(_Stream):
     def __init__(self, session: "Session", radio: str, number: int = 0):
         super().__init__(session, radio, "tx", number)
 
-    def repeat(self, x: Any, at: Optional[dict] = None) -> dict:
+    def repeat(self, x: Any, at: Optional[dict] = None, *, frequency: Any = None, gain: Any = None, antenna: Any = None) -> dict:
         """Transmits ``x`` repeatedly on this stream (EA-16). Its channel count must match
         this stream's membership. ``at`` is a ``TimePoint`` as ``capture`` takes, at which
         its first sample goes out — a whole second of a root whose epoch is ``pps`` is a PPS
         edge (UR-7, ``next_pps``); without one, ``aligned``'s instant inside its block, else
-        the next instant the radio allows."""
+        the next instant the radio allows. ``frequency``, ``gain`` and ``antenna`` are dicts
+        keyed by logical channel, sent as ``UpdateParameter``s before the burst (RM-21), as
+        ``Rx.start`` does. Everything is checked before the first request, so a bad argument
+        sends nothing; a value the Provider refuses (``Rejected``, a booked or playing stream)
+        stops the call before the burst."""
         channels, data = _cf32(x)
         assigned = len(self.channels)
         if assigned != channels:
             raise Error(f"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}")
+        values = self._channel_values({"frequency": frequency, "gain": gain, "antenna": antenna})
+        for key, value in values:
+            self._session.set(self._radio, key, value)
         action = {
             "kind": "vocabulary",
             "ns": "radio",

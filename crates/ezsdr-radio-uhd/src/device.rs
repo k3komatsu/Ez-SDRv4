@@ -355,6 +355,9 @@ pub enum FakeFault {
     /// The first receive `apply` is refused, once, whichever caller makes it: a configure after
     /// an open fails (UR-13).
     RxApplyFails,
+    /// Every transmit `apply` that sets this frequency on this channel is refused, until the
+    /// test stops the fake: a configure whose device refuses the value keeps refusing it (UR-21, M3).
+    TxApplyRefused(usize, f64),
 }
 
 /// How [`FakeDevice`] behaves (UR-33).
@@ -1344,6 +1347,9 @@ impl Device for FakeDevice {
                 st.fired[index] = true;
                 return Err(DeviceError::failed("fake: scripted refusal of the first receive apply"));
             }
+        }
+        if dir == Dir::Tx && s.freq.is_some_and(|freq| self.config.faults.contains(&FakeFault::TxApplyRefused(chan, freq))) {
+            return Err(DeviceError::failed("fake: scripted refusal of a transmit apply"));
         }
         if let Some(rate) = s.rate {
             let seen = st.rates_seen.iter().filter(|seen| **seen == rate).count();

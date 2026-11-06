@@ -69,18 +69,15 @@ fn prefix(stream: &Stream, items: &[Item], t: i64) -> Line {
 }
 
 #[test]
-fn rm_26_each_stream_takes_its_own_directions_start_lead() {
-    // RM-4, RM-25: the TimingEnvelope has one start lead per direction, and a stream's new
-    // segment uses its own (design 33 D5).
-    let timing =
-        ezsdr_radio::TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 50 * MS, tx_start_lead_ns: 20 * MS, tx_in_flight_ns: 0 };
-    assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Rx), 50 * MS);
-    assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing, Direction::Tx), 20 * MS);
+fn rm_26_a_receive_stream_takes_the_receive_start_lead_and_a_transmit_line_has_none() {
+    // RM-4, RM-25: a receive stream's new segment uses `radio.timing.rx_start_lead_ns`; a
+    // transmit stream has no start lead (note 47 stage 4).
+    let timing = ezsdr_radio::TimingEnvelope { min_timed_command_lead_ns: 0, startup_latency_ns: 0, overflow_restart_gap_ns: 0, rx_start_lead_ns: 50 * MS, tx_in_flight_ns: 0 };
+    assert_eq!(ezsdr_radio::timeline::start_lead_ns(&timing), 50 * MS);
 
-    // A `start_rx` after a `Stop` starts its direction's lead after that cut, at 1 MS/s; a
-    // transmit clock has no restart (its settings change only at the Run's start).
+    // A `start_rx` after a `Stop` starts its lead after that cut, at 1 MS/s.
     let direction = Direction::Rx;
-    let stream = Stream { direction, origin: 0, config: config(1, 1_000_000), lead: ezsdr_radio::timeline::start_lead_ns(&timing, direction), call: 0, allowance: 0 };
+    let stream = Stream { direction, origin: 0, config: config(1, 1_000_000), lead: ezsdr_radio::timeline::start_lead_ns(&timing), call: 0, allowance: 0 };
     assert_eq!(segments(&stream, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop), item(1_000 * MS, 1, 1_000 * MS, Kind::Start)]), [(0, Some(1_000 * MS)), (1_050 * MS, None)]);
 }
 
@@ -186,6 +183,8 @@ fn rm_26_the_timeline_cases() {
 
     // The transmit side: a Stop ends bursts, not the clock.
     case("a transmit Stop ends no clock", &tx, &[item(1_000 * MS, 0, 1_000 * MS, Kind::Stop)], &[(0, None)]);
+    // m10 (N47S4-36): a transmit End ends its clock at the origin whether or not it aborts.
+    case("a transmit abort before the origin ends the clock at it", &Stream { origin: 1_000 * MS, ..tx }, &[item(500 * MS, 0, 500 * MS, Kind::End { abort: true })], &[(1_000 * MS, Some(1_000 * MS))]);
 
     // VH-2, RM-25: a refused `start_rx` starts nothing and halts the stream until a Stop and the next start (a Provider refuses a start on a halted stream).
     case(
@@ -882,7 +881,7 @@ fn rm_26_the_staging_oracle_agrees_with_staging() {
                         Leaf::Frequency => "radio.rx.c0.frequency_hz",
                         Leaf::Gain => "radio.rx.c0.gain_db",
                     };
-                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, |_| line.streaming()).is_err() {
+                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Busy::default()).is_err() {
                         refused.push(index);
                     }
                 }

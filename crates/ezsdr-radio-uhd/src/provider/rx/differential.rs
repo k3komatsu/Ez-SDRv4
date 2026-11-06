@@ -92,7 +92,7 @@ fn terms(block: i64) -> Terms {
     let description = super::super::test_support::default_description(block as u32);
     let ticks = |ns: i64| (ns + 4) / 5;
     let config = Config { channels: Channels::first(1), ratio: Rational::new(200, 1).unwrap() };
-    let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing, Direction::Rx));
+    let lead = ticks(ezsdr_radio::timeline::start_lead_ns(&description.timing));
     let stream = Stream { direction: Direction::Rx, origin: T0, config, lead, call: block, allowance: ticks(DELIVERY_ALLOWANCE_NS) };
     Terms { t0: T0, root_hz: 200_000_000, stream }
 }
@@ -582,7 +582,7 @@ impl World {
                     Leaf::Gain => "radio.rx.c0.gain_db",
                 };
                 let value = ezsdr_kernel::spec::Value::num(leaf.value(v)).unwrap();
-                if self.staging.set(&super::super::core::key(name), value, false, |_| line.streaming()).is_err() {
+                if self.staging.set(&super::super::core::key(name), value, false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Busy::default()).is_err() {
                     self.set_refused += 1;
                 }
             }

@@ -298,7 +298,7 @@ pub fn rule(key: &str) -> Option<Rule> {
         keys::FULL_DUPLEX | keys::HARDWARE_TIME => return Some(TrueImplies),
         keys::TX_REPEAT_MAX_SAMPLES | keys::RX_BYTES_PER_S | keys::TX_BYTES_PER_S => return Some(UpperBound),
         keys::TX_REPEAT_ALIGN_SAMPLES => return Some(Multiple),
-        keys::MIN_TIMED_COMMAND_LEAD_NS | keys::STARTUP_LATENCY_NS | keys::OVERFLOW_RESTART_GAP_NS | keys::RX_START_LEAD_NS | keys::TX_START_LEAD_NS | keys::TX_IN_FLIGHT_NS => {
+        keys::MIN_TIMED_COMMAND_LEAD_NS | keys::STARTUP_LATENCY_NS | keys::OVERFLOW_RESTART_GAP_NS | keys::RX_START_LEAD_NS | keys::TX_IN_FLIGHT_NS => {
             return Some(LowerBound);
         }
         keys::WIRE_BYTES_PER_SAMPLE => return Some(Equal),
@@ -362,7 +362,6 @@ fn profile_value(description: &channels::Description, key: &Key) -> Option<Worst
         keys::STARTUP_LATENCY_NS => Worst::Number(description.timing.startup_latency_ns as f64),
         keys::OVERFLOW_RESTART_GAP_NS => Worst::Number(description.timing.overflow_restart_gap_ns as f64),
         keys::RX_START_LEAD_NS => Worst::Number(description.timing.rx_start_lead_ns as f64),
-        keys::TX_START_LEAD_NS => Worst::Number(description.timing.tx_start_lead_ns as f64),
         keys::TX_IN_FLIGHT_NS => Worst::Number(description.timing.tx_in_flight_ns as f64),
         keys::RX_BYTES_PER_S => Worst::Number(description.performance.rx_bytes_per_s as f64),
         keys::TX_BYTES_PER_S => Worst::Number(description.performance.tx_bytes_per_s as f64),

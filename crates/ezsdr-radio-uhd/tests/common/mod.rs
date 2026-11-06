@@ -855,8 +855,8 @@ pub fn rehearse_txrx_and_repeat(device: Arc<dyn Device>, exact: bool) -> (Manife
 }
 
 /// B7's shape from Rust: a Session that asks for transmit at connect, repeats a waveform,
-/// captures it ahead of the Run's time (EA-17), and is refused a retune during the Run (a
-/// radio value has no update class, §58 #16).
+/// captures it ahead of the Run's time (EA-17), and is refused a retune outside the envelope
+/// during the Run (§58 #16).
 pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manifest {
     let dir = TempDir::new();
     let hz = bench_hz(&*device);
@@ -873,7 +873,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     let horizon = after_ticks(&run, ms(3_000));
     let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
     let refused = run.submit(set("radio.tx.c0.frequency_hz", Value::num(hz + 100e6).unwrap()), None).unwrap();
-    assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class")), "{refused:?}");
+    assert!(matches!(&refused.outcome, Outcome::Rejected { violations } if violations.iter().any(|violation| violation.check.as_str() == "radio.rf_envelope")), "{refused:?}");
     if !exact {
         println!("B7 refused: {:?}", refused.outcome);
     }

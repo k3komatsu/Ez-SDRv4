@@ -181,9 +181,9 @@ fn uhd_59_a_scheduled_burst_is_recorded() {
 }
 
 #[test]
-fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_transmit_runtime_change_has_no_class() {
-    // Note 47 stage 3: the envelope is checked on the initial values; a transmit change during the Run is refused as a key with no update class
-    // until stage 4 (RM-27). The receive form is the next test.
+fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_at_runtime() {
+    // Note 47 stage 4: the envelope is checked on the initial values and on a transmit value during the Run (RM-19, RM-21, RM-27: `cold`). The
+    // receive form is the next test.
     let (_, refused) = session_on(&[("radio.tx.c0.stream", Scalar::Int(0)), ("radio.tx.c0.frequency_hz", num(2.4e9))], envelope(), 10);
     assert!(
         matches!(refused.state(), ezsdr_kernel::run::RunState::CleanedUp { termination: ezsdr_kernel::run::Termination::Failed { reason, .. } } if reason.contains("radio.rf_envelope")),
@@ -192,10 +192,10 @@ fn uhd_59_a_value_outside_the_rf_envelope_is_refused_at_connect_and_a_transmit_r
     );
     let _ = refused.finish();
     let temp = rig::TempDir::new("uhd-59-rf");
-    let mut run = uhd_session(&temp);
+    let mut run = uhd_loopback_session(&temp);
     let entry = run.submit(set("radio.tx.c0.frequency_hz", Value::num(2.4e9).unwrap()), None).unwrap();
     let Outcome::Rejected { violations } = &entry.outcome else { panic!("a runtime radio value change was admitted") };
-    assert!(violations.iter().any(|violation| violation.check.as_str() == "ezsdr.update_class" && violation.reason.contains("declares no update class")), "{violations:?}");
+    assert!(violations.iter().any(|violation| violation.check.as_str() == "radio.rf_envelope"), "{violations:?}");
     assert!(run.effective()[&Ident::parse("radio").unwrap()].get(&Key::parse("radio.tx.c0.frequency_hz").unwrap()) != Some(&Value::num(2.4e9).unwrap()));
     let manifest = run.finish();
     assert!(manifest.action_log.iter().any(|logged| logged.seq == entry.seq && matches!(logged.outcome, Outcome::Rejected { .. })), "the rejection is logged");

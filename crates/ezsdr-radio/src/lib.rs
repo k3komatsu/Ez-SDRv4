@@ -56,8 +56,6 @@ pub mod keys {
     /// Lead from a receive stream's previous cut, and from the instant its Provider is ready
     /// for it, to a new segment's first sample, in nanoseconds (RM-4, RM-25).
     pub const RX_START_LEAD_NS: &str = "radio.timing.rx_start_lead_ns";
-    /// The same for a transmit stream (RM-4, RM-25).
-    pub const TX_START_LEAD_NS: &str = "radio.timing.tx_start_lead_ns";
     /// Maximum time ahead of the device that transmit samples may be handed over (RM-4, RM-15).
     pub const TX_IN_FLIGHT_NS: &str = "radio.timing.tx_in_flight_ns";
     /// Receive throughput limit in bytes per second (RM-4).
@@ -169,18 +167,16 @@ pub(crate) fn radio_keys() -> Vec<KeyDecl> {
         key_decl(keys::STARTUP_LATENCY_NS, Int, false, Reject, None),
         key_decl(keys::OVERFLOW_RESTART_GAP_NS, Int, false, Reject, None),
         key_decl(keys::RX_START_LEAD_NS, Int, false, Reject, None),
-        key_decl(keys::TX_START_LEAD_NS, Int, false, Reject, None),
         key_decl(keys::TX_IN_FLIGHT_NS, Int, false, Reject, None),
         key_decl(keys::RX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::TX_BYTES_PER_S, Int, false, Reject, None),
         key_decl(keys::WIRE_BYTES_PER_SAMPLE, Int, false, Reject, None),
     ];
     for direction in ["rx", "tx"] {
-        // Note 47 stage 3: a receive channel's frequency, gain and antenna change on a stopped
-        // stream (RM-21, RM-27 `cold`); every transmit key and every rate stays classless until
-        // stage 4 and the bench.
+        // A channel's frequency, gain and antenna change on a stopped stream (RM-21, RM-27
+        // `cold`); a stream's rate stays classless.
         let declaration = |word: &str, leaf: &str| format!("radio.{direction}.{word}.{leaf}");
-        let cold = (direction == "rx").then_some(UpdateClass::Cold);
+        let cold = Some(UpdateClass::Cold);
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "frequency_hz"), Num, true, Reject, cold));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "gain_db"), Num, true, Warn, cold));
         declarations.push(indexed_key_decl(&declaration(keys::CHANNEL, "antenna"), Str, false, Reject, cold));
@@ -536,8 +532,6 @@ pub struct TimingEnvelope {
     /// From a receive stream's previous cut, and from the instant its Provider is ready for
     /// it, to a new segment's first sample (RM-20, RM-25).
     pub rx_start_lead_ns: i64,
-    /// The same for a transmit stream (RM-20, RM-25).
-    pub tx_start_lead_ns: i64,
     /// Maximum time ahead of the device that transmit samples may be handed over (RM-20).
     pub tx_in_flight_ns: i64,
 }
