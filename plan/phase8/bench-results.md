@@ -343,3 +343,10 @@ TXS（send は最大 20 000 sample，短い repeat は tile）の worktree で `
 - **(f) 200 MS/s の負荷**（各 600 s）：受信は #2 で PASS（1 200 億サンプル，overflow・drop 0），#1 は装置の側は完全だが Module の feed が受け手に渡す前に 46 block を落とした．送信は #2 が約 2.2 s，#1 が約 159 s で一度 Underflow（続く packet が late）．同時運転は #1 で両方向とも 600 s PASS，#2 は受信が完全で送信が約 1.5 s で Underflow．NIC の error・drop はどれも 0．200 MS/s の送信は 6 回中 3 回（TX200 の 2 回，#1 の同時運転）通り，3 回は時刻がばらばらの一度の Underflow：安定しない．
 - **(g) ssh 切断**：流せなかった（この PC の `ssh localhost` が接続を拒む：sshd が動いていない）．送信なし．
 - **その他**：#2 で C++ の 2 MS/s を開く時に一度 `Reference Clock PLL failed to lock to internal source`．直後の `uhd_usrp_probe` は正常．owner が電源を入れ直し，その後は正常．
+
+## 2026-11-06（続き）：note 48 S3 の後（#2＝X300 347D541＋UBX/CBX，#1＝X300 347D545＋OBX，commit `de7720c`）
+
+owner が電源を入れ直した後，att は三つの board とも 30 dB（owner 確認）．`uhd_usrp_probe` は二台とも正常．log は `~/.cache/ezsdr-bench/2026-11-06-s3/`．
+
+- **(b) Module の送信**：`hw_s1_short_first_sends` は二台とも 9 回ずつ流して 4 case すべて PASS（S3 の前は試行のおよそ 2 割で長い burst が Underflow していた）．`hw_p72`・`hw_b6`・`hw_b7`・`hw_b8_burst_at_a_sent_burst_s_end`・`hw_b8_burst_one_sample_after_a_burst`（end＋1 は late 1 つ，＋2 は 0）・`hw_b8_preemption`（20 と 10 ms は 0，5 と 3 ms は late 1 つ）・`hw_h5`・`hw_txp_b0` は二台とも PASS．`hw_p70` は「一緒に予約」が二台とも PASS（onset の差 0），「送った後に予約」は二台とも TIME_ERROR 1 つで FAIL：11-06 と同じ試験の形の欠陥（INFERRED，note 48 §4 の 3）．
+- #78 の Module の側の原因（最初の send の大きさ）は，この (b) で再び現れなかった．閉じるのは `hw_p70` の形を直して両盤で PASS になってから（bench.md の「#78 が閉じるのは」）．
