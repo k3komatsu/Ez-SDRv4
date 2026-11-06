@@ -2746,7 +2746,9 @@ fn one_sample_trial(device: Arc<dyn Device>, samples: usize, late: bool) -> OneS
     let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (tone, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));
-    let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + 5_000);
+    // Booked after A was sent (at 41 ms), B must still be past the in-flight window and the device lead, as `hw_b8_preemption`'s
+    // 20 ms case is: 25 ms after A (B booked about 24 ms ahead). Booked with A, B stays 5 ms after it.
+    let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + if late { 25_000 } else { 5_000 });
     let capture_at = after_ticks(&run, ms(10));
     assert!(admitted(&run.submit(verb("capture", output("rec"), Some(capture_at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(80_000))]), None).unwrap()));
     assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));

@@ -349,4 +349,4 @@ TXS（send は最大 20 000 sample，短い repeat は tile）の worktree で `
 owner が電源を入れ直した後，att は三つの board とも 30 dB（owner 確認）．`uhd_usrp_probe` は二台とも正常．log は `~/.cache/ezsdr-bench/2026-11-06-s3/`．
 
 - **(b) Module の送信**：`hw_s1_short_first_sends` は二台とも 9 回ずつ流して 4 case すべて PASS（S3 の前は試行のおよそ 2 割で長い burst が Underflow していた）．`hw_p72`・`hw_b6`・`hw_b7`・`hw_b8_burst_at_a_sent_burst_s_end`・`hw_b8_burst_one_sample_after_a_burst`（end＋1 は late 1 つ，＋2 は 0）・`hw_b8_preemption`（20 と 10 ms は 0，5 と 3 ms は late 1 つ）・`hw_h5`・`hw_txp_b0` は二台とも PASS．`hw_p70` は「一緒に予約」が二台とも PASS（onset の差 0），「送った後に予約」は二台とも TIME_ERROR 1 つで FAIL：11-06 と同じ試験の形の欠陥（INFERRED，note 48 §4 の 3）．
-- #78 の Module の側の原因（最初の send の大きさ）は，この (b) で再び現れなかった．閉じるのは `hw_p70` の形を直して両盤で PASS になってから（bench.md の「#78 が閉じるのは」）．
+- #78 の Module の側の原因（最初の send の大きさ）は，この (b) で再び現れなかった．`hw_p70` は B を A の 25 ms 後に置く形に直し（送った後の予約が装置の lead と in-flight の窓の外になる），二台とも 3 回ずつ両方の順で PASS（onset の差 0，対照も障害なし）．これで bench.md の「#78 が閉じるのは」「#70 が閉じるのは」を満たす．
