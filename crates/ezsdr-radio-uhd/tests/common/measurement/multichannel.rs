@@ -667,19 +667,24 @@ pub fn stage_class(streams: &[StreamEvidence]) -> TrialClass {
     streams.iter().map(|stream| stream.class).reduce(worse).unwrap_or(TrialClass::Incomplete)
 }
 
-/// The byte counters of `nics`: `[rx_bytes, tx_bytes]`, each `None` where the interface or counter is unreadable.
-fn nic_counters(nics: &[String]) -> BTreeMap<String, [Option<u64>; 2]> {
+/// The NIC counters a stage reads from `/sys/class/net/<nic>/statistics/`: the bytes, and the errors, drops and missed
+/// frames that a stage's load shows on the host side.
+const NIC_COUNTERS: [&str; 7] = ["rx_bytes", "tx_bytes", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped", "rx_missed_errors"];
+
+/// The counters of `nics`, each `None` where the interface or counter is unreadable.
+fn nic_counters(nics: &[String]) -> BTreeMap<String, [Option<u64>; 7]> {
     let read = |nic: &str, name: &str| std::fs::read_to_string(format!("/sys/class/net/{nic}/statistics/{name}")).ok().and_then(|text| text.trim().parse().ok());
-    nics.iter().map(|nic| (nic.clone(), [read(nic, "rx_bytes"), read(nic, "tx_bytes")])).collect()
+    nics.iter().map(|nic| (nic.clone(), NIC_COUNTERS.map(|name| read(nic, name)))).collect()
 }
 
-fn nic_delta(before: &BTreeMap<String, [Option<u64>; 2]>, after: &BTreeMap<String, [Option<u64>; 2]>) -> Json {
+fn nic_delta(before: &BTreeMap<String, [Option<u64>; 7]>, after: &BTreeMap<String, [Option<u64>; 7]>) -> Json {
     after
         .iter()
         .map(|(nic, now)| {
-            let was = before.get(nic).copied().unwrap_or([None, None]);
+            let was = before.get(nic).copied().unwrap_or([None; 7]);
             let diff = |index: usize| now[index].zip(was[index]).and_then(|(now, was)| now.checked_sub(was));
-            (nic.clone(), json!({ "rx_bytes": diff(0), "tx_bytes": diff(1) }))
+            let counters: serde_json::Map<String, Json> = NIC_COUNTERS.iter().enumerate().map(|(index, name)| ((*name).to_owned(), json!(diff(index)))).collect();
+            (nic.clone(), Json::Object(counters))
         })
         .collect::<serde_json::Map<_, _>>()
         .into()
@@ -907,6 +912,7 @@ pub fn run_stage(device: Arc<dyn Device>, plan: &MeasurementPlan, stage: &Stage,
     let observation = with_head(json!({
         "streams": streams.iter().map(|stream| stream.detail.clone()).collect::<Vec<_>>(),
         "run_ended_early": ended_early, "tx_underflow_events": underflow, "rx_overflow": overflow, "short_send_rejections": short_send_rejections, "streamers_left_open": open,
+        "link_drops": manifest.links.iter().map(|link| link.drops).collect::<Vec<_>>(),
         "streamers_opened_in_order": counted.open_order(), "nic_bytes": nics,
         "link_note": "UHD 4.10 picks a link per channel connection by the number of assignments per direction, not by bytes (graph_stream_manager.cpp:188-219,252-284); a stream's number is not a physical link",
         "stage": candidate_stage_json(&stage.id, stage.bytes(Direction::Rx, wire_bytes).or(stage.bytes(Direction::Tx, wire_bytes)).unwrap_or(0), &[class], &[None]),

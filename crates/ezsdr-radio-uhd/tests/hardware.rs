@@ -17,6 +17,7 @@ use ezsdr_radio_uhd::{Device, DeviceAuthority, Dir, Settings, UhdRadio};
 use serde_json::Value as Json;
 
 use common::probe_device::wait_for_rx_start_and_sample;
+use common::raw::*;
 use common::tone::{Verdict, classify_tone, continuation_in_loopback, median_freq, tone_verdict, window_power, window_power_at};
 use common::*;
 
@@ -166,6 +167,7 @@ fn hw_b5_overflow() {
 fn hw_b6_txrx_and_repeat() {
     let (heard, looped) = rehearse_txrx_and_repeat(usrp(), false);
     println!("B6 bursts: {} / {}", section(&heard, "bursts"), section(&looped, "bursts"));
+    verdict("B6 (#78): no TIME_ERROR and no TX_UNDERFLOW in the burst's Run or the repeat's", iii::faults_verdict(&[("burst", iii::run_faults(&heard), 0), ("repeat", iii::run_faults(&looped), 0)]));
 }
 
 #[test]
@@ -173,6 +175,7 @@ fn hw_b6_txrx_and_repeat() {
 fn hw_b7_session_loopback() {
     let manifest = rehearse_session_loopback(usrp(), false);
     println!("B7 time errors: {:?}", events_of(&manifest, "radio.TIME_ERROR"));
+    verdict("B7 (#78): no TIME_ERROR and no TX_UNDERFLOW in the Session loopback", iii::faults_verdict(&[("loopback", iii::run_faults(&manifest), 0)]));
 }
 
 #[test]
@@ -325,15 +328,6 @@ fn hw_b9_usrp2_probe() {
 // `SAFE_TX_HZ`, at most 2 Msps (so the emission stays inside the bench envelope's
 // 999–1001 MHz), 0 dB, amplitude ≤ 0.4, into the 30 dB loopback.
 
-const TICKS_PER_MS: i64 = 200_000;
-
-/// The device channel the raw probes open: 0 (slot A) unless `EZSDR_D9_CHANNEL` names another
-/// (1 = slot B on an X300 with two boards), so the D9 probes can run on either.
-fn d9_channel() -> usize {
-    static CHANNEL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CHANNEL.get_or_init(|| std::env::var("EZSDR_D9_CHANNEL").ok().map_or(0, |text| text.parse().expect("EZSDR_D9_CHANNEL names a device channel")))
-}
-
 /// The device with its time set to zero on the internal reference.
 fn raw() -> Arc<dyn Device> {
     let device = usrp();
@@ -341,85 +335,6 @@ fn raw() -> Arc<dyn Device> {
     device.set_time_zero(false).unwrap();
     std::thread::sleep(Wall::from_millis(100));
     device
-}
-
-fn raw_rx(device: &dyn Device, rate: f64, freq: f64) {
-    let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("RX2".to_owned()) };
-    device.apply(Dir::Rx, d9_channel(), &settings).unwrap();
-    device.rx_open(0, &[d9_channel()]).unwrap();
-}
-
-/// The transmitter inside bench.md's RF conditions, or a panic before anything is sent.
-fn raw_tx(device: &dyn Device, rate: f64, freq: f64) {
-    assert!(SAFE_TX_HZ.contains(&freq) && rate <= 2e6, "bench.md RF safety: {freq} Hz at {rate} S/s");
-    let settings = Settings { rate: Some(rate), freq: Some(freq), gain: Some(0.0), antenna: Some("TX/RX".to_owned()) };
-    let applied = device.apply(Dir::Tx, d9_channel(), &settings).unwrap();
-    assert!(applied.gain == 0.0 && SAFE_TX_HZ.contains(&applied.freq), "{applied:?}");
-    device.tx_open(0, &[d9_channel()]).unwrap();
-}
-
-fn iq(samples: &[(f32, f32)]) -> Vec<ezsdr_radio_uhd::Iq> {
-    samples.iter().map(|(re, im)| [*re, *im]).collect()
-}
-
-/// What `rx_recv` returned over a stretch: the blocks' (first tick, length), and every
-/// other outcome with the device time it was seen at.
-#[derive(Default, Debug)]
-struct Read {
-    blocks: Vec<(i64, usize)>,
-    samples: Vec<(i64, ezsdr_radio_uhd::Iq)>,
-    other: Vec<(i64, String)>,
-    /// Every outcome in order, samples as `"samples"`: the quiet interval is counted over this, not over `other`.
-    events: Vec<String>,
-}
-
-impl Read {
-    fn end(&self, per_sample: i64) -> Option<i64> {
-        self.blocks.last().map(|(t, n)| t + *n as i64 * per_sample)
-    }
-}
-
-/// Reads until `until(read)` holds or `limit` passes; `keep`, the ticks a sample, keeps
-/// the samples with their ticks.
-fn read(device: &dyn Device, limit: Wall, keep: Option<i64>, until: impl Fn(&Read) -> bool) -> Read {
-    read_on(device, 0, limit, keep, until)
-}
-
-/// `read` on stream `k`'s streamer.
-fn read_on(device: &dyn Device, k: usize, limit: Wall, keep: Option<i64>, until: impl Fn(&Read) -> bool) -> Read {
-    let mut out = Read::default();
-    let begun = Instant::now();
-    while begun.elapsed() < limit && !until(&out) {
-        match device.rx_recv(k, 2_000, Wall::from_millis(100), false) {
-            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
-                out.blocks.push((first_tick, samples[0].len()));
-                out.events.push("samples".to_owned());
-                if let Some(per) = keep {
-                    out.samples.extend(samples[0].iter().enumerate().map(|(i, s)| (first_tick + i as i64 * per, *s)));
-                }
-            }
-            other => {
-                out.events.push(format!("{other:?}"));
-                out.other.push((device.time_now().unwrap_or(-1), format!("{other:?}")));
-            }
-        }
-    }
-    out
-}
-
-/// A drain's result: what was read, and whether the stream reached a quiet interval (two timeouts in a row with no
-/// packet between them) before the limit. A drain that ran out of time is not quiet.
-#[derive(Default, Debug)]
-struct Drain {
-    read: Read,
-    quiet: bool,
-}
-
-/// Reads until two consecutive timeouts: the stream has stopped. The quiet count resets on every packet.
-fn drain(device: &dyn Device) -> Drain {
-    let read = read(device, Wall::from_secs(3), None, |r| n47::drain_quiet(&r.events));
-    let quiet = n47::drain_quiet(&read.events);
-    Drain { read, quiet }
 }
 
 #[test]
@@ -748,6 +663,18 @@ fn hw_b8_preemption() {
         let manifest = run.finish();
         println!("B8 preempt lead {lead_ms} ms: {:?}; TIME_ERROR {:?}", entry.outcome, events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
         println!("B8 preempt lead {lead_ms} ms: asked {}; bursts {}", at.ticks_in(at.domain()).unwrap(), section(&manifest, "bursts"));
+        // UR-21 decides against the first unhanded sample and the device lead, so a lead can be late. The lead's expectation: one late
+        // TIME_ERROR inside the 10 ms in-flight window, none beyond it; the 10 ms boundary is INFERRED, so either count there.
+        let expected_late = match lead_ms {
+            20 => Some(0),
+            10 => None,
+            _ => Some(1),
+        };
+        println!("B8 preempt lead {lead_ms} ms: the lead expects {expected_late:?} radio.TIME_ERROR");
+        verdict(
+            &format!("B8 preempt lead {lead_ms} ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault"),
+            iii::preemption_verdict(iii::run_faults(&manifest), &iii::time_error_causes(&manifest), expected_late),
+        );
     }
 }
 
@@ -1377,8 +1304,7 @@ fn hw_b8_burst_at_a_sent_burst_s_end() {
             section(&manifest, "async"),
             section(&manifest, "bursts")
         );
-        assert!(events_of(&manifest, "radio.TIME_ERROR").is_empty());
-        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
+        verdict(&format!("B8 burst at a sent burst's end, trial {trial} (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW"), iii::faults_verdict(&[("burst", iii::run_faults(&manifest), 0)]));
     }
 }
 
@@ -1437,10 +1363,11 @@ fn hw_b8_raw_empty_eob_gap() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_burst_one_sample_after_a_burst() {
-    // Review O, O-B1 on the bench: a burst at a burst's end + 2 samples, booked before the
-    // first's last buffer went out and after, is played (UR-22 R1: the held-tail close is
-    // unchanged, so end + 1 is late; an empty end-of-burst made it late too: hw_b8_raw_empty_eob_gap).
-    // End + 1 is the late trial: one late TIME_ERROR, and no send at that instant.
+    // Review O, O-B1 on the bench: a burst at a burst's end + 1 or + 2 samples, booked before the first's last buffer went out
+    // and after. The first burst's last sample is held back and closed with one zero, padded to two (UR-22: "a one-sample
+    // continuation that closes the device burst is padded to two"). The next safe start is the closing send's exclusive end,
+    // padding included, plus one sample: payload end + 2. So end + 1 falls inside the closing send and is one late TIME_ERROR
+    // (cause `late`), and end + 2 is played. The end sample itself is not booked here.
     for (late_booking, offset) in [(false, 30_002), (true, 30_002), (false, 30_001), (true, 30_001)] {
         let dir = TempDir::new();
         let mut run = tx_session(usrp(), &dir);
@@ -1468,23 +1395,22 @@ fn hw_b8_burst_one_sample_after_a_burst() {
             section(&manifest, "async"),
             section(&manifest, "bursts")
         );
-        let late = events_of(&manifest, "radio.TIME_ERROR");
-        if offset == 30_001 {
-            assert_eq!(late.len(), 1, "end + 1 is one late TIME_ERROR: {late:?}");
-            assert_eq!(late[0].payload["cause"], "late");
-        } else {
-            assert!(late.is_empty());
-        }
-        assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError" && r["code"] != "Underflow"));
+        let expected_late = usize::from(offset == 30_001);
+        verdict(
+            &format!("B8 burst at end + {} samples, booked late {late_booking} (UR-22, #78): {expected_late} TIME_ERROR (cause late), no TX_UNDERFLOW", offset - 30_000),
+            iii::late_control_verdict(iii::run_faults(&manifest), &iii::time_error_causes(&manifest), expected_late),
+        );
     }
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_s1_short_first_sends() {
-    // UR-22 (S1) on the bench, print only: a burst of 1, 2, 3 or 4 samples at 1 MS/s, then a 10 000-sample burst 10 000 samples later. Every async report and the bursts are printed for the design note.
+    // UR-22 (S1) on the bench: a burst of 1, 2, 3 or 4 samples at 1 MS/s, then a 10 000-sample burst 10 000 samples later.
+    // Every async report and the bursts are printed for the design note; each case's VERDICT is iii::short_first_send_verdict.
     let device = usrp();
     pin_slot_a(&*device);
+    let mut failures = Vec::new();
     for samples in [1usize, 2, 3, 4] {
         let dir = TempDir::new();
         let mut run = tx_session(device.clone(), &dir);
@@ -1495,7 +1421,11 @@ fn hw_s1_short_first_sends() {
         assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&short)).unwrap()));
         assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&long)).unwrap()));
         wait(&mut run, ms(200));
+        let long_root = transmit_root(&run, &b);
         let manifest = run.finish();
+        let acks: Vec<i64> =
+            section(&manifest, "async").as_array().into_iter().flatten().filter(|row| row["code"] == "BurstAck" && row["tx_flush"] != true).filter_map(|row| row["tick"].as_i64()).collect();
+        let (before, after) = (acks.iter().filter(|tick| **tick < long_root).count(), acks.iter().filter(|tick| **tick >= long_root).count());
         println!(
             "S1 first send of {samples} samples: TIME_ERROR {:?}; TX_UNDERFLOW {}; async {}; bursts {}",
             events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
@@ -1503,7 +1433,13 @@ fn hw_s1_short_first_sends() {
             section(&manifest, "async"),
             section(&manifest, "bursts")
         );
+        let outcome = iii::short_first_send_verdict(samples, iii::run_faults(&manifest), before, after);
+        print_verdict(&format!("S1 {samples}-sample first send (UR-22, #78)"), &outcome);
+        if matches!(outcome, Verdict::Fail(_)) {
+            failures.push(samples);
+        }
     }
+    assert!(failures.is_empty(), "S1 FAIL for first sends of {failures:?} samples");
 }
 
 /// Where a block sequence leaves a gap or an overlap: (expected first tick, got).
@@ -1940,7 +1876,7 @@ fn hw_txp_b0_send_sizes() {
         wait(&mut run, ms(5_000));
         let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
         wait(&mut run, ms(200));
-        let _ = run.finish();
+        let manifest = run.finish();
         let rows = tx_send_rows_since(&probe, baseline);
         let sizes: Vec<usize> =
             rows.iter().filter(|row| row["tx_flush"] != true && row["eob"] != true).filter_map(|row| row["sample_counts"][0].as_u64()).filter(|n| *n > 0).map(|n| n as usize).collect();
@@ -1958,6 +1894,7 @@ fn hw_txp_b0_send_sizes() {
             }
             offset = (offset + size) % 31_000;
         }
+        verdict(&format!("TXP B0 rate {rate} (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run"), iii::faults_verdict(&[("repeat", iii::run_faults(&manifest), 0)]));
     }
 }
 
@@ -2087,6 +2024,12 @@ fn hw_h5_held_last_sample() {
             "note": "Observation from an unladen bench with TX recording instrumentation; recorder overhead was not measured, so this is not a measurement of the held-sample deadline (INFERRED).",
         }),
     );
+    let faults = iii::faults_verdict(&[("held-sample run", iii::run_faults(&manifest), 0)]);
+    let outcome = match faults {
+        Verdict::Pass(_) if termination_reason != "all_bursts_submitted" => Verdict::Inconclusive(format!("the deadline run stopped early ({termination_reason}): it shows no closure")),
+        other => other,
+    };
+    verdict("H5 held last sample (UR-22, #78): no TIME_ERROR and no TX_UNDERFLOW in the prebooked and deadline runs", outcome);
 }
 
 fn session_event_rows(manifest: &ezsdr_kernel::manifest::Manifest, kind: &str) -> Vec<Json> {
@@ -2579,138 +2522,162 @@ fn tx200_lengths() -> Vec<usize> {
     }
 }
 
-/// The seconds each `hw_tx200_hot_path_probe` trial sends (`EZSDR_TX200_SECONDS`, 30).
-fn tx200_seconds() -> u64 {
-    let seconds = match std::env::var("EZSDR_TX200_SECONDS") {
-        Ok(text) => text.trim().parse::<u64>().unwrap_or_else(|error| panic!("EZSDR_TX200_SECONDS must be whole seconds, got {text:?}: {error}")),
-        Err(std::env::VarError::NotPresent) => 30,
-        Err(error) => panic!("EZSDR_TX200_SECONDS is not readable: {error}"),
+/// Whole seconds from the environment variable `name` (a positive count), `default` when it is unset.
+fn env_seconds(name: &str, default: u64) -> u64 {
+    let seconds = match std::env::var(name) {
+        Ok(text) => text.trim().parse::<u64>().unwrap_or_else(|error| panic!("{name} must be whole seconds, got {text:?}: {error}")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("{name} is not readable: {error}"),
     };
-    assert!(seconds > 0, "EZSDR_TX200_SECONDS must be positive, got {seconds}");
+    assert!(seconds > 0, "{name} must be positive, got {seconds}");
     seconds
 }
 
-/// One `TX200` line of the probe: what the stage's observation holds of the trial, plus that observation where the line
-/// cannot fill a field (a `-`) or where a stream failed (`first_failure` carries the code alone: the tick and channel of a
-/// failure are not in the observation).
-fn tx200_line(length: usize, shape: &str, rate_hz: u64, result: &measurement::StageResult) -> String {
+/// One line of a 200 MS/s stage: its class, each stream's samples and async failures, and the overflow, underflow, link drop
+/// and NIC counter observations `iii::stage_trial` judges.
+fn stage_line(result: &measurement::StageResult) -> String {
     let observation = &result.observation;
-    let tx: Vec<&Json> = observation["streams"].as_array().into_iter().flatten().filter(|row| row["direction"] == "tx").collect();
-    let present = !tx.is_empty();
-    let sum = |leaf: &str| tx.iter().map(|row| row[leaf].as_u64()).try_fold(0u64, |total, value| total.checked_add(value?));
-    // `burst_blocks` is one count for each burst row: how many device sends the Provider made in it.
-    let sends = if present {
-        tx.iter()
-            .map(|row| match row.get("burst_blocks") {
-                Some(Json::Array(blocks)) => blocks.iter().map(Json::as_u64).try_fold(0u64, |total, count| total.checked_add(count?)),
-                Some(value) => value.as_u64(),
-                None => None,
-            })
-            .try_fold(0u64, |total, count| total.checked_add(count?))
-    } else {
-        None
-    };
-    let samples: Option<Vec<u64>> = if present { tx.iter().map(|row| row["actual_samples"].as_u64()).collect() } else { None };
-    let underflows = observation["tx_underflow_events"].as_u64().or_else(|| if present { sum("tx_underflow_events") } else { None });
-    let failure = tx.iter().flat_map(|row| row["async_failures"].as_array().into_iter().flatten()).filter_map(Json::as_str).next();
-    let line = format!(
-        "TX200 len={length} shape={shape} rate={rate_hz} class={:?} underflows={} sends={} samples={} first_failure={}",
+    let streams: Vec<Json> = observation["streams"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| serde_json::json!({ "direction": row["direction"], "stream": row["stream"], "expected_samples": row["expected_samples"], "minimum_samples": row["minimum_samples"], "actual_samples": row["actual_samples"], "async_failures": row["async_failures"] }))
+        .collect();
+    format!(
+        "class {:?}; streams {}; rx_overflow {}; tx_underflow_events {}; link_drops {}; nic {}; left_open {}",
         result.class,
-        underflows.map_or_else(|| "-".to_owned(), |count| count.to_string()),
-        sends.map_or_else(|| "-".to_owned(), |count| count.to_string()),
-        samples.as_ref().map_or_else(|| "-".to_owned(), |samples| samples.iter().map(u64::to_string).collect::<Vec<_>>().join(",")),
-        failure.unwrap_or("none")
-    );
-    if failure.is_some() || sends.is_none() || samples.is_none() || underflows.is_none() { format!("{line} json={observation}") } else { line }
+        Json::Array(streams),
+        observation["rx_overflow"],
+        observation["tx_underflow_events"],
+        observation["link_drops"],
+        observation["nic_bytes"],
+        result.left_open
+    )
+}
+
+/// Runs one 200 MS/s stage through `run_stage` on the guarded handle and prints its line and VERDICT (`iii::stage_trial`). Returns
+/// false when the handle must not run another trial: `run_stage` returned Err, the stage left a streamer open, or the guard's latch
+/// holds (a control timeout or a device loss, `GuardedDevice::latched`). The device may be wedged then.
+fn run_200_stage(guard: &Arc<measurement::GuardedDevice>, plan: &measurement::MeasurementPlan, claim: &str, stage: &measurement::Stage, wire_bytes: u64, failures: &mut Vec<String>) -> bool {
+    let device: Arc<dyn Device> = guard.clone();
+    let result = match measurement::run_stage(device, plan, stage, wire_bytes) {
+        Ok(result) => result,
+        Err(error) => {
+            print_verdict(claim, &Verdict::Inconclusive(format!("run_stage returned an error: {error}; no later trial runs on this device: power-cycle the board and tell the owner")));
+            failures.push(format!("{claim}: {error}"));
+            return false;
+        }
+    };
+    println!("{claim}: {}", stage_line(&result));
+    let outcome = match iii::stage_trial(result.class, &result.observation) {
+        Ok(()) => Verdict::Pass("class Success; accepted samples; no overflow, underflow or async failure; no link drop".to_owned()),
+        Err(why) => Verdict::Fail(why),
+    };
+    print_verdict(claim, &outcome);
+    if let Verdict::Fail(why) = &outcome {
+        failures.push(format!("{claim}: {why}"));
+    }
+    if let Some(reason) = guard.latched() {
+        println!("{claim}: the device handle is latched ({reason}); no later trial runs on this device: power-cycle the board and tell the owner");
+        failures.push(format!("{claim}: the device handle is latched ({reason})"));
+        return false;
+    }
+    if result.left_open {
+        println!("{claim}: a streamer was left open; no later trial runs on this device: power-cycle the board and tell the owner");
+        failures.push(format!("{claim}: a streamer was left open"));
+        return false;
+    }
+    true
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_tx200_hot_path_probe() {
-    // Diagnostic (stage TX200; each trial's verdict is asserted by `tx200_trial`, and it writes no record): does the length of the repeat
-    // waveform remove the 200 MS/s transmit underflow? Each trial runs through the throughput group's own stage runner
-    // (`run_stage`: the same Spec and Run construction, the same waveform whose every magnitude is within 0.5), so the only
-    // difference between the lengths is the plan's `tx_waveform_samples`. The three shapes are single 200 MS/s, and, only when
-    // the selector names two transmit channels, grouped 40 MS/s a channel and split 100 MS/s a channel.
-    let selector = std::env::var(measurement::SELECTOR_ENV).ok().map(|text| parse_selector(&text).expect("EZSDR_MEASUREMENT_SELECTOR holds a selector"));
-    if let Some(selector) = &selector {
-        set_selector_override(Some(selector.clone()));
-    }
-    let device = usrp();
-    let (_, tx) = effective_layout(&*device);
-    let two = tx.as_array().map_or(0, Vec::len) >= 2;
+    // Diagnostic (stage TX200): does the length of the repeat waveform remove the 200 MS/s transmit underflow? Each trial runs through
+    // the throughput group's own stage runner (`run_stage`: the same Spec and Run construction, the same waveform whose every magnitude
+    // is within 0.5), so the only difference between the lengths is the plan's `tx_waveform_samples`. Slot A alone (`pin_to_slot_a`:
+    // a CBX in slot B is never transmitted on), so the grouped and split shapes do not arise. Each trial's VERDICT is `iii::stage_trial`'s.
+    let guard = measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"));
+    let device: Arc<dyn Device> = guard.clone();
+    iii::pin_to_slot_a(&*device).expect("slot A alone is the transmit channel");
     let dir = TempDir::new();
     let doc = bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
     let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
     let described = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).expect("the bound layout");
     let wire_bytes = u64::try_from(described.performance.wire_bytes_per_sample).expect("wire bytes per sample is positive");
-    // Only the three shapes the probe compares: single 200 MS/s, and with two transmit channels grouped 40 MS/s a channel
-    // and split 100 MS/s a channel. The plan carries only their rates (the whole sweep is the record's, not this probe's).
-    let mut stages: Vec<(&str, measurement::Stage)> =
-        vec![("single", measurement::Stage { id: "tx200-single".to_owned(), family: "tx200", rx: Vec::new(), tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 200_000_000 }] })];
-    if two {
-        stages
-            .push(("grouped", measurement::Stage { id: "tx200-grouped".to_owned(), family: "tx200", rx: Vec::new(), tx: vec![measurement::StreamPlan { channels: vec![0, 1], rate_hz: 40_000_000 }] }));
-        stages.push((
-            "split",
-            measurement::Stage {
-                id: "tx200-split".to_owned(),
-                family: "tx200",
-                rx: Vec::new(),
-                tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 100_000_000 }, measurement::StreamPlan { channels: vec![1], rate_hz: 100_000_000 }],
-            },
-        ));
-    }
+    let stage = measurement::Stage { id: "tx200-single".to_owned(), family: "tx200", rx: Vec::new(), tx: vec![measurement::StreamPlan { channels: vec![0], rate_hz: 200_000_000 }] };
     let lengths = tx200_lengths();
-    let mut rates: Vec<u64> = stages.iter().flat_map(|(_, stage)| stage.tx.iter().map(|stream| stream.rate_hz)).collect();
-    rates.sort_unstable();
-    rates.dedup();
-    let mut plan = measurement::MeasurementPlan { throughput_seconds: tx200_seconds(), tx_throughput_rates_hz: rates, ..measurement::MeasurementPlan::default() };
-    println!("TX200 probe: {} transmit channels, lengths {lengths:?}, {} s a trial, {} trials", tx.as_array().map_or(0, Vec::len), plan.throughput_seconds, lengths.len() * stages.len());
-    let mut ran = 0;
-    let mut failed = Vec::new();
+    let mut plan = measurement::MeasurementPlan {
+        throughput_seconds: env_seconds("EZSDR_TX200_SECONDS", 30),
+        tx_throughput_rates_hz: vec![200_000_000],
+        nics: iii::bench_nics(),
+        ..measurement::MeasurementPlan::default()
+    };
+    println!("TX200 probe: slot A, lengths {lengths:?}, {} s a trial", plan.throughput_seconds);
+    let mut failures = Vec::new();
     for length in &lengths {
         plan.tx_waveform_samples = *length;
-        for (shape, stage) in &stages {
-            let rate_hz = stage.tx.first().map_or(0, |stream| stream.rate_hz);
-            match measurement::run_stage(device.clone(), &plan, stage, wire_bytes) {
-                Ok(result) => {
-                    println!("{}", tx200_line(*length, shape, rate_hz, &result));
-                    if let Err(why) = tx200_trial(&result) {
-                        failed.push(format!("len={length} shape={shape}: {why}"));
-                    }
-                }
-                Err(error) => {
-                    println!("TX200 len={length} shape={shape} rate={rate_hz} class=Error error={error}");
-                    failed.push(format!("len={length} shape={shape}: {error}"));
-                }
-            }
-            ran += 1;
+        if !run_200_stage(&guard, &plan, &format!("TX200 len={length} shape=single rate=200000000"), &stage, wire_bytes, &mut failures) {
+            break;
         }
     }
-    assert_eq!(ran, lengths.len() * stages.len(), "every TX200 trial ran");
-    println!("TX200 verdict: {} of {ran} trials succeeded", ran - failed.len());
-    assert!(failed.is_empty(), "TX200 trials that did not succeed: {failed:?}");
+    assert!(failures.is_empty(), "TX200 trials that did not succeed: {failures:?}");
 }
 
-/// Whether one `hw_tx200_hot_path_probe` trial succeeded: class Success (the stage judges its burst and its acknowledgement),
-/// transmit samples accepted, no async failure and no transmit underflow.
-fn tx200_trial(result: &measurement::StageResult) -> Result<(), String> {
-    if result.class != measurement::TrialClass::Success {
-        return Err(format!("class {:?}", result.class));
+/// The 200 MS/s stages of `hw_iii_load_200msps`, from `EZSDR_LOAD200_STAGES` (`rx`, `tx`, `duplex`; all three by default). An unknown
+/// name panics here, before the device opens.
+fn load200_stages() -> Vec<&'static str> {
+    match std::env::var("EZSDR_LOAD200_STAGES") {
+        Ok(text) => text
+            .split(',')
+            .map(|part| match part.trim() {
+                "rx" => "rx",
+                "tx" => "tx",
+                "duplex" => "duplex",
+                other => panic!("EZSDR_LOAD200_STAGES names an unknown stage {other:?}: use rx, tx or duplex"),
+            })
+            .collect(),
+        Err(std::env::VarError::NotPresent) => vec!["rx", "tx", "duplex"],
+        Err(error) => panic!("EZSDR_LOAD200_STAGES is not readable: {error}"),
     }
-    let tx: Vec<&Json> = result.observation["streams"].as_array().into_iter().flatten().filter(|row| row["direction"] == "tx").collect();
-    if tx.is_empty() || !tx.iter().all(|row| row["actual_samples"].as_u64().is_some_and(|n| n > 0)) {
-        return Err("no accepted transmit samples in the observation".to_owned());
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_iii_load_200msps() {
+    // T4: 200 MS/s through the Module under load, on slot A alone: one receive channel, one transmit channel, and both in one Run, each
+    // for EZSDR_LOAD200_SECONDS (600) through `run_stage`, which writes no sample file (its sink.capture has no request). The transmit
+    // waveform is TX200's 20 000 samples. The stages run in order, on a guarded handle (`open_record_guard`), and each one runs unless
+    // an earlier one returned Err, left a streamer open, or latched the handle (a control timeout: `run_200_stage`). Every stage that
+    // ran must succeed.
+    let stages = load200_stages();
+    let seconds = env_seconds("EZSDR_LOAD200_SECONDS", 600);
+    let guard = measurement::open_record_guard(|| ezsdr_radio_uhd::open(&args()).expect("the USRP opens"));
+    let device: Arc<dyn Device> = guard.clone();
+    iii::pin_to_slot_a(&*device).expect("slot A alone is the receive and transmit channel");
+    let dir = TempDir::new();
+    let doc = bench_profile(&*device, &dir, Json::Object(Default::default()), Json::Object(Default::default()), false);
+    let binding = measurement::radio_binding(&doc).expect("the bench profile's radio binding");
+    let described = measurement::description(&binding, ezsdr_radio_uhd::profile::DEFAULT_BLOCK_LEN, &ezsdr_radio_uhd::profile::terms()).expect("the bound layout");
+    let wire_bytes = u64::try_from(described.performance.wire_bytes_per_sample).expect("wire bytes per sample is positive");
+    let channel = |rate_hz: u64| measurement::StreamPlan { channels: vec![0], rate_hz };
+    let rx = measurement::Stage { id: "load200-rx".to_owned(), family: "load200", rx: vec![channel(200_000_000)], tx: Vec::new() };
+    let tx = measurement::Stage { id: "load200-tx".to_owned(), family: "load200", rx: Vec::new(), tx: vec![channel(200_000_000)] };
+    let duplex = measurement::Stage { id: "load200-duplex".to_owned(), family: "load200", rx: vec![channel(200_000_000)], tx: vec![channel(200_000_000)] };
+    let plan = measurement::MeasurementPlan { throughput_seconds: seconds, tx_waveform_samples: 20_000, nics: iii::bench_nics(), ..measurement::MeasurementPlan::default() };
+    println!("T4 load probe: slot A, {seconds} s a stage, stages {stages:?}");
+    let mut failures = Vec::new();
+    for name in stages {
+        let stage = match name {
+            "rx" => &rx,
+            "tx" => &tx,
+            _ => &duplex,
+        };
+        if !run_200_stage(&guard, &plan, &format!("T4 {name} at 200 MS/s for {seconds} s"), stage, wire_bytes, &mut failures) {
+            break;
+        }
     }
-    if let Some(failure) = tx.iter().flat_map(|row| row["async_failures"].as_array().into_iter().flatten()).next() {
-        return Err(format!("an async failure: {failure}"));
-    }
-    let underflows = result.observation["tx_underflow_events"].as_u64().unwrap_or_else(|| tx.iter().filter_map(|row| row["tx_underflow_events"].as_u64()).sum());
-    if underflows != 0 {
-        return Err(format!("{underflows} transmit underflow(s)"));
-    }
-    Ok(())
+    assert!(failures.is_empty(), "T4 stages that did not succeed: {failures:?}");
 }
 
 // ---------------------------------------------------------------- bench 2026-11-01: production-path tests (#70, #72, P4, L1)
@@ -2720,37 +2687,20 @@ fn tx200_trial(result: &measurement::StageResult) -> Result<(), String> {
 
 /// Prints the verdict line of `claim` and fails the test on FAIL.
 fn verdict(claim: &str, outcome: Verdict) {
-    let (word, detail) = match &outcome {
-        Verdict::Pass(detail) => ("PASS", detail),
-        Verdict::Inconclusive(detail) => ("INCONCLUSIVE", detail),
-        Verdict::Fail(detail) => ("FAIL", detail),
-    };
-    println!("VERDICT {claim}: {word}: {detail}");
+    print_verdict(claim, &outcome);
     if let Verdict::Fail(detail) = outcome {
         panic!("{claim}: {detail}");
     }
 }
 
-/// A tone `offset_hz` from the carrier at `rate` S/s, amplitude 0.4, `n` samples; its magnitude bound is asserted.
-fn tone_wave(rate: f64, n: usize, offset_hz: f64) -> Vec<(f32, f32)> {
-    let wave: Vec<(f32, f32)> = (0..n)
-        .map(|i| {
-            let phase = 2.0 * std::f64::consts::PI * offset_hz * (i as f64 / rate);
-            ((0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32)
-        })
-        .collect();
-    assert!(wave.iter().all(|(re, im)| re.hypot(*im) <= 0.5), "bench RF safety: a transmit waveform's magnitude is at most 0.5");
-    wave
-}
-
-/// The bench frequency of slot A, refusing a CBX (its band starts at 1.2 GHz; the bench's attenuator is the OBX's and UBX's)
-/// and any frequency outside `SAFE_TX_HZ`.
-fn pin_slot_a(device: &dyn Device) -> f64 {
-    let board = board_of(device);
-    assert!(matches!(board, ezsdr_radio::x3xx::Board::Ubx | ezsdr_radio::x3xx::Board::Obx), "slot A holds a {}: these tests transmit on an OBX or UBX only", board.name());
-    let hz = bench_hz(device);
-    assert!(SAFE_TX_HZ.contains(&hz), "bench RF safety: {hz} Hz is outside SAFE_TX_HZ");
-    hz
+/// Prints the verdict line of `claim` without failing: the caller decides when the test ends.
+fn print_verdict(claim: &str, outcome: &Verdict) {
+    let (word, detail) = match outcome {
+        Verdict::Pass(detail) => ("PASS", detail),
+        Verdict::Inconclusive(detail) => ("INCONCLUSIVE", detail),
+        Verdict::Fail(detail) => ("FAIL", detail),
+    };
+    println!("VERDICT {claim}: {word}: {detail}");
 }
 
 /// The samples of a capture with their root ticks, `per` root ticks apart, from `first`.
@@ -2837,7 +2787,10 @@ fn hw_p72_timed_tx_chunks_are_timed_and_flushed() {
     let (acked, refused) = flush_evidence(&manifest);
     let flushes = probe.rows().iter().filter(|row| row["call"] == "tx_send" && row["tx_flush"] == true).count();
     println!("#72 1a: {payload} sends with samples; closing sends {closing:?}; flushes sent {flushes}, acknowledged {acked}, refused {refused:?}");
-    let outcome = if !refused.is_empty() {
+    let faults = iii::faults_verdict(&[("60 ms device burst", iii::run_faults(&manifest), 0)]);
+    let outcome = if !matches!(faults, Verdict::Pass(_)) {
+        faults
+    } else if !refused.is_empty() {
         Verdict::Fail(format!("T3: a flush was refused: {refused:?}"))
     } else if !untimed.is_empty() {
         Verdict::Fail(format!("T1: {} send(s) carry no time: {untimed:?}", untimed.len()))
@@ -2878,45 +2831,27 @@ fn hw_p70_one_sample_burst_then_timed_burst() {
                 events_of(&trial.manifest, "radio.TX_UNDERFLOW").len()
             );
         }
-        let events = events_of(&one.manifest, "radio.TIME_ERROR").len() + events_of(&one.manifest, "radio.TX_UNDERFLOW").len();
+        let faults = iii::faults_verdict(&[("one-sample trial", iii::run_faults(&one.manifest), 0), ("four-sample control", iii::run_faults(&control.manifest), 0)]);
         let gaps = [&one.manifest, &control.manifest].iter().map(|m| capture_of(m, "rec").continuity[0].gaps.len()).sum::<usize>();
-        let outcome = match (one.onset, control.onset) {
-            _ if events > 0 => Verdict::Fail(format!("the one-sample trial reported {events} TIME_ERROR or TX_UNDERFLOW event(s)")),
-            _ if gaps > 0 => Verdict::Inconclusive(format!("the receive timestamps have {gaps} continuity gap(s): the onset is not comparable")),
-            (Some(a), Some(b)) => {
-                let diff = ((a - one.burst) - (b - control.burst)) / 200;
-                if diff.abs() <= 50 {
-                    Verdict::Pass(format!("the onset differs from the control's by {diff} samples"))
-                } else {
-                    Verdict::Fail(format!("the one-sample burst moved the next burst's onset by {diff} samples"))
+        let outcome = if !matches!(faults, Verdict::Pass(_)) {
+            faults
+        } else if gaps > 0 {
+            Verdict::Inconclusive(format!("the receive timestamps have {gaps} continuity gap(s): the onset is not comparable"))
+        } else {
+            match (one.onset, control.onset) {
+                (Some(a), Some(b)) => {
+                    let diff = ((a - one.burst) - (b - control.burst)) / 200;
+                    if diff.abs() <= 50 {
+                        Verdict::Pass(format!("the onset differs from the control's by {diff} samples"))
+                    } else {
+                        Verdict::Fail(format!("the one-sample burst moved the next burst's onset by {diff} samples"))
+                    }
                 }
+                _ => Verdict::Inconclusive("no tone onset in one of the trials: the positive signal is missing".to_owned()),
             }
-            _ => Verdict::Inconclusive("no tone onset in one of the trials: the positive signal is missing".to_owned()),
         };
         verdict(&format!("#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's ({order})"), outcome);
     }
-}
-
-/// Aligns `tick` up to `per` ticks.
-fn align_to(tick: i64, per: i64) -> i64 {
-    tick.div_euclid(per) * per + if tick.rem_euclid(per) == 0 { 0 } else { per }
-}
-
-/// Sends `wave` as one device burst from `first_at`, in chunks, handling partial sends. The last two samples are kept
-/// for the closing send, which always carries the EOB with at least two samples (a one-sample tail is padded with a
-/// zero, as the Module's own end-of-burst path does). Returns the waveform samples accepted.
-fn send_burst(device: &dyn Device, wave: &[ezsdr_radio_uhd::Iq], first_at: Option<i64>) -> usize {
-    let mut accepted = 0usize;
-    let mut at = first_at;
-    while let Some(plan) = n47::burst_send(accepted, wave.len(), 20_000) {
-        let padded = [wave[plan.offset], ezsdr_radio_uhd::Iq::default()];
-        let slice: &[ezsdr_radio_uhd::Iq] = if plan.padded { &padded } else { &wave[plan.offset..plan.offset + plan.len] };
-        let sent = device.tx_send(0, &[slice], at, accepted == 0, plan.eob, Wall::from_millis(500)).expect("the device accepts the burst");
-        assert!(sent > 0, "the device accepted no samples of the burst");
-        accepted += sent.min(plan.len - usize::from(plan.padded));
-        at = None;
-    }
-    accepted
 }
 
 /// Drains the transmit reports that are already there, `None` when none.
@@ -2926,22 +2861,6 @@ fn drain_tx_reports(device: &dyn Device) -> Vec<ezsdr_radio_uhd::TxReport> {
         reports.push(report);
     }
     reports
-}
-
-/// Waits for the next burst ACK (or `timeout`) and returns it with every report read on the way.
-fn wait_burst_ack(device: &dyn Device, timeout: Wall) -> (Option<i64>, Vec<ezsdr_radio_uhd::TxReport>) {
-    let begun = Instant::now();
-    let mut reports = Vec::new();
-    while begun.elapsed() < timeout {
-        if let Some(report) = device.tx_async(0, Wall::from_millis(20)).expect("a transmit report") {
-            let ack = (report.code == ezsdr_radio_uhd::TxCode::BurstAck).then_some(report.tick).flatten();
-            reports.push(report);
-            if ack.is_some() {
-                return (ack, reports);
-            }
-        }
-    }
-    (None, reports)
 }
 
 /// The two-zero-sample untimed flush of a new transmit streamer, and the reports its ACK and a first control leave.
@@ -3449,7 +3368,8 @@ fn hw_n47_raw_tx_rate_on_an_open_streamer() {
     let mut reports = flush;
     let rx_start = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
     probe.rx_start(0, rx_start).unwrap();
-    let control_r1 = align_to(probe.time_now().unwrap() + 50 * TICKS_PER_MS, 200);
+    // 50 ms after the stream's start, so that the control's floor window (10 to 20 ms before it) lies inside the stream.
+    let control_r1 = rx_start + 50 * TICKS_PER_MS;
     send_burst(&*probe, &iq(&tone_wave(1e6, 5_000, 100e3)), Some(control_r1));
     let (_, control_reports) = wait_burst_ack(&*probe, Wall::from_secs(2));
     reports.extend(control_reports);
@@ -3489,9 +3409,11 @@ fn hw_n47_raw_tx_rate_on_an_open_streamer() {
     let delay2 = onset2.map(|two| two - control_r2);
     let b_expected = delay2.map(|delay| b + delay);
     let a_tail = common::tone::first_ms_frequency(&samples, e - TICKS_PER_MS, 200);
-    let b_tone = b_expected.and_then(|onset| common::tone::first_ms_frequency(&samples, onset, 200));
     let floor_b = window_power(&samples, b - 20 * TICKS_PER_MS, b - 10 * TICKS_PER_MS);
     let b_onset = floor_b.and_then(|floor| tone_start(&samples, b - 5 * TICKS_PER_MS, floor));
+    // The frequency is read where the tone starts (the window tone_start found), not at the predicted onset: the window that
+    // covers the prediction starts before the tone, so first_ms_tone finds it incoherent and reads no tone (INFERRED for B's rise).
+    let b_tone = b_onset.and_then(|onset| common::tone::first_ms_frequency(&samples, onset, 200));
     let count = |code: ezsdr_radio_uhd::TxCode| reports.iter().filter(|report| report.code == code).count();
     let opened = probe.control_log().iter().filter(|call| **call == "tx_open").count();
     verdict(
@@ -3527,6 +3449,27 @@ fn hw_n47_raw_tx_rate_on_an_open_streamer() {
         serde_json::json!({ "a": a, "e": e, "b": b, "a_ack": a_ack, "b_ack": b_ack, "control": [control_r1, control_r2], "onsets": [onset1, onset2],
             "delay": delay2, "a_tail": a_tail, "b_tone": b_tone, "applied_rate": applied.rate, "applied_freq": applied.freq, "reports": reports.len() }),
     );
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_iii_raw_rx_restart_fill() {
+    // The receive restart's leading fill per rate (2026-11-05: about 13 exact-zero samples, then a rise, at 1 MS/s; INFERRED DDC
+    // filter fill). The probe is `iii::restart_fill_probe`; each rate's verdict is iii::restart_rate_verdict, and FAIL only when a
+    // first block is off its planned tick.
+    let fills = iii::restart_fill_probe(Arc::new(probe_device::ProbeDevice::new(raw())), &iii::RESTART_RATES, iii::RESTARTS);
+    let mut failures = Vec::new();
+    let mut observations = Vec::new();
+    for fill in fills {
+        let outcome = iii::restart_rate_verdict(fill.rate, &fill.trials, iii::RESTART_TONE_HZ, n47::TONE_TOLERANCE_HZ);
+        print_verdict(&format!("n47 raw rx restart fill at {:.0} S/s (T2, note 48)", fill.rate), &outcome);
+        if matches!(outcome, Verdict::Fail(_)) {
+            failures.push(fill.rate);
+        }
+        observations.push(fill.observed);
+    }
+    measurement::push_raw_observation("hw_iii_raw_rx_restart_fill", (iii::RESTART_RATES.len() * iii::RESTARTS) as u32, serde_json::json!({ "rates": observations }));
+    assert!(failures.is_empty(), "restart FAIL at {failures:?} S/s");
 }
 
 /// T2: note 47 stage 3 on the production path. A receive stream runs at f1 with a 100 kHz tone repeated by the same

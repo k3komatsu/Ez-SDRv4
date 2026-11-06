@@ -13340,5 +13340,245 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+  },
+  {
+    "id": "N48III-01",
+    "name": "a fill with a steady magnitude of zero is no fill (restart_fill, its steady-magnitude decision)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if steady <= 0.0 {",
+    "new": "if steady < 0.0 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_span_whose_steady_magnitude_is_zero_has_no_fill"
+  },
+  {
+    "id": "N48III-02",
+    "name": "a gap in the fill's span is no fill (restart_fill's continuity check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "pair[1].0 - pair[0].0 != per",
+    "new": "pair[1].0 - pair[0].0 < 0",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_gap_in_the_span_has_no_fill"
+  },
+  {
+    "id": "N48III-03",
+    "name": "a receive rate with two complete trials passes (restart_rate_verdict's three-trial minimum)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if fills.len() < 3 {",
+    "new": "if fills.len() < 2 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "two_complete_trials_are_inconclusive"
+  },
+  {
+    "id": "N48III-04",
+    "name": "a first block after its planned tick passes the rate's FAIL test (restart_rate_verdict's planned-tick comparison)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "tick != trial.planned",
+    "new": "tick < trial.planned",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_first_block_off_its_planned_tick_fails_even_in_an_incomplete_trial"
+  },
+  {
+    "id": "N48III-05",
+    "name": "an uncovered span counts as a complete trial (incomplete_reason's coverage check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "} else if !trial.covered {",
+    "new": "} else if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "an_uncovered_span_is_not_complete"
+  },
+  {
+    "id": "N48III-06",
+    "name": "a TIME_ERROR count equal to the expected count is a FAIL (fault_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "faults.time_errors > expected_time_errors",
+    "new": "faults.time_errors >= expected_time_errors",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_fault_is_a_fail_and_a_missing_negative_control_is_inconclusive"
+  },
+  {
+    "id": "N48III-07",
+    "name": "an as-expected TIME_ERROR count is INCONCLUSIVE, not a PASS (fault_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "} else if faults.time_errors < expected_time_errors {",
+    "new": "} else if faults.time_errors <= expected_time_errors {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_fault_is_a_fail_and_a_missing_negative_control_is_inconclusive"
+  },
+  {
+    "id": "N48III-08",
+    "name": "an async device fault is no FAIL when no underflow was read (fault_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if faults.underflows > 0 || faults.async_faults > 0 {",
+    "new": "if faults.underflows > 0 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_fault_is_a_fail_and_a_missing_negative_control_is_inconclusive"
+  },
+  {
+    "id": "N48III-09",
+    "name": "a flush's report counts as a device fault (is_async_fault's tx_flush exclusion)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "row[\"tx_flush\"] != true && matches!(",
+    "new": "matches!(",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_flush_report_is_not_a_device_fault"
+  },
+  {
+    "id": "N48III-10",
+    "name": "a short first send's underflow does not FAIL (short_first_send_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "faults.time_errors > 0 || faults.underflows > 0 || faults.async_faults > 0 {",
+    "new": "faults.time_errors > 0 || faults.async_faults > 0 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_short_first_send_passes_with_one_ack_each_and_fails_on_a_fault"
+  },
+  {
+    "id": "N48III-11",
+    "name": "a short first send with two BurstAcks for the short burst passes (short_first_send_verdict's one-ack rule)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if acks_before == 1 && acks_after == 1 {",
+    "new": "if acks_before >= 1 && acks_after == 1 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_short_first_send_passes_with_one_ack_each_and_fails_on_a_fault"
+  },
+  {
+    "id": "N48III-12",
+    "name": "a receive overflow does not fail a stage (stage_trial's receive branch)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if observation[\"rx_overflow\"] == true {",
+    "new": "if observation[\"rx_overflow\"] == false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_receive_stage_with_an_overflow_or_a_drop_is_not_a_success"
+  },
+  {
+    "id": "N48III-13",
+    "name": "a link that dropped no blocks is treated as a drop (stage_trial's link-drop check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "drop.as_u64() != Some(0)",
+    "new": "drop.as_u64() == Some(0)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_receive_stage_passes_without_overflow_or_drops"
+  },
+  {
+    "id": "N48III-14",
+    "name": "a transmit stage with one or two underflows passes (stage_trial's underflow check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if underflows != 0 {",
+    "new": "if underflows > 2 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_transmit_stage_needs_accepted_samples_and_no_underflow"
+  },
+  {
+    "id": "N48III-15",
+    "name": "a transmit stage with no accepted samples passes (stage_trial's sample check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "row[\"actual_samples\"].as_u64().is_some_and(|n| n > 0)",
+    "new": "row[\"actual_samples\"].as_u64().is_some()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_transmit_stage_needs_accepted_samples_and_no_underflow"
+  },
+  {
+    "id": "N48III-16",
+    "name": "one incomplete trial among several does not stop several runs' faults from passing (faults_verdict's inconclusive flag)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "inconclusive = true;",
+    "new": "inconclusive = false;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "several_runs_fail_on_the_first_fault_and_name_the_run"
+  },
+  {
+    "id": "N48III-17",
+    "name": "a non-late radio.TIME_ERROR passes the end + 1 negative control (late_control_verdict's cause check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "find(|cause| cause.as_str() != \"late\")",
+    "new": "find(|cause| cause.as_str() == \"late\")",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_late_control_needs_its_expected_late_cause_and_no_fault"
+  },
+  {
+    "id": "N48III-18",
+    "name": "the end + 1 negative control expects no radio.TIME_ERROR (late_control_verdict's expected count)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "None => fault_verdict(faults, expected_late),",
+    "new": "None => fault_verdict(faults, 0),",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_late_control_needs_its_expected_late_cause_and_no_fault"
+  },
+  {
+    "id": "N48III-19",
+    "name": "a preemption whose radio.TIME_ERROR is not late passes (preemption_verdict's cause check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "causes.iter().any(|cause| cause.as_str() != \"late\")",
+    "new": "causes.iter().any(|cause| cause.as_str() == \"late\")",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
+  },
+  {
+    "id": "N48III-20",
+    "name": "two radio.TIME_ERRORs pass a preemption (preemption_verdict's at-most-one rule)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "causes.len() > 1 ||",
+    "new": "causes.len() > 2 ||",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
+  },
+  {
+    "id": "N48III-21",
+    "name": "a lead whose expected count differs from the radio.TIME_ERROR count passes (preemption_verdict's INCONCLUSIVE)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "Some(expected) if expected != causes.len()",
+    "new": "Some(expected) if expected == causes.len()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
+  },
+  {
+    "id": "N48III-22",
+    "name": "an underflow does not fail a preemption (preemption_verdict's underflow check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "faults.underflows > 0 || faults.async_faults > 0 || causes.len() > 1",
+    "new": "faults.async_faults > 0 || causes.len() > 1",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
+  },
+  {
+    "id": "N48III-23",
+    "name": "a trial with an uncovered span counts in the summary and the verdict (complete_fills' shared predicate)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "trials.iter().filter(|trial| incomplete_reason(trial, tone_hz, tolerance_hz).is_none())",
+    "new": "trials.iter().filter(|trial| trial.fill.is_some())",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_summary_counts_the_complete_trials_only"
+  },
+  {
+    "id": "N48III-24",
+    "name": "a rate read back different from the asked rate is complete (incomplete_reason's rate check)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "} else if (trial.applied - trial.asked).abs() > trial.asked.abs() * 1e-9 + 1e-6 {",
+    "new": "} else if (trial.applied - trial.asked).abs() < trial.asked.abs() * 1e-9 + 1e-6 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_rate_mismatch_never_passes"
   }
 ]

@@ -7607,3 +7607,38 @@ fn ur_26_a_scheduled_receive_value_is_refused_by_the_provider_for_its_instant() 
 fn receive_applies_of(device: &FakeDevice) -> Vec<String> {
     calls(device, "apply rx")
 }
+
+#[test]
+fn load200_duplex_stage_rehearses_on_the_fake() {
+    // T4's duplex stage through `run_stage` at 1 MS/s for one second, on slot A alone: the bench's judgement (`iii::stage_trial`) on the
+    // fake. The rate is low; the 200 MS/s bench run is `hw_iii_load_200msps`.
+    let (device, description, _) = raw_group_fixture(one_obx());
+    let wire_bytes = u64::try_from(description.performance.wire_bytes_per_sample).unwrap();
+    let plan = measurement::MeasurementPlan { throughput_seconds: 1, tx_waveform_samples: 2_000, ..measurement::MeasurementPlan::rehearsal() };
+    let channel = |rate_hz| measurement::StreamPlan { channels: vec![0], rate_hz };
+    let stage = measurement::Stage { id: "rehearse-duplex".to_owned(), family: "load200", rx: vec![channel(1_000_000)], tx: vec![channel(1_000_000)] };
+    common::iii::pin_to_slot_a(&*device).unwrap();
+    let result = measurement::run_stage(device, &plan, &stage, wire_bytes).unwrap();
+    assert!(!result.left_open, "{}", result.observation);
+    assert_eq!(common::iii::stage_trial(result.class, &result.observation), Ok(()), "{}", result.observation);
+}
+
+#[test]
+fn iii_restart_fill_probe_rehearses_on_the_fake() {
+    // T2's probe (`common::iii::restart_fill_probe`) on FakeDevice, on the host clock because the probe waits in real time. The fake
+    // returns the transmitted tone only when the transmit and receive rates are equal (device.rs `sample_at`); at any other rate it
+    // returns a ramp. So the tone and the verdict are checked at 1 MS/s alone. At every rate the rehearsal checks the calls, each first
+    // block at its planned tick and the rate read-back. The fake models no DDC fill, so the zeros and ramps are not checked.
+    let device = fake_real(one_obx());
+    device.set_time_zero(false).unwrap();
+    for fill in common::iii::restart_fill_probe(device, &common::iii::RESTART_RATES, 3) {
+        for trial in &fill.trials {
+            assert_eq!(trial.first_tick, Some(trial.planned), "{:.0} S/s", fill.rate);
+            assert!((trial.applied - fill.rate).abs() < 1.0, "{:.0} S/s read back {}", fill.rate, trial.applied);
+        }
+        if fill.rate == 1e6 {
+            let outcome = common::iii::restart_rate_verdict(fill.rate, &fill.trials, common::iii::RESTART_TONE_HZ, common::n47::TONE_TOLERANCE_HZ);
+            assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "{outcome:?}");
+        }
+    }
+}
