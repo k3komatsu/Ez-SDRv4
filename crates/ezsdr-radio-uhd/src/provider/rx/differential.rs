@@ -582,7 +582,7 @@ impl World {
                     Leaf::Gain => "radio.rx.c0.gain_db",
                 };
                 let value = ezsdr_kernel::spec::Value::num(leaf.value(v)).unwrap();
-                if self.staging.set(&super::super::core::key(name), value, false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Busy::default()).is_err() {
+                if self.staging.set(&super::super::core::key(name), value, false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Bookings::default()).is_err() {
                     self.set_refused += 1;
                 }
             }

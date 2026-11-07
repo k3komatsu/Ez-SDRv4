@@ -916,13 +916,22 @@ pub struct Dispatched {
     /// The node a `{resource}` target was resolved to, which is what a Provider
     /// matches on; absent for any other target (KC-23).
     pub node: Option<ResourceId>,
+    /// Whether the Kernel chose the Action's instant because its Session action had no
+    /// `at` (RS-19). A Vocabulary decides what the mark means; a radio burst reads it in RM-15.
+    pub untimed: bool,
 }
 
 impl Dispatched {
     /// An Action as the Kernel dispatches one; for a Module's own tests (MA-14).
     #[cfg(feature = "testing")]
     pub fn new(id: ActionId, action: Action, node: Option<ResourceId>) -> Dispatched {
-        Dispatched { id, action, node }
+        Dispatched { id, action, node, untimed: false }
+    }
+
+    /// An untimed Action as the Kernel dispatches one (RS-19); for a Module's own tests (MA-14).
+    #[cfg(feature = "testing")]
+    pub fn new_untimed(id: ActionId, action: Action, node: Option<ResourceId>) -> Dispatched {
+        Dispatched { id, action, node, untimed: true }
     }
 }
 

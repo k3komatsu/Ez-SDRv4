@@ -111,7 +111,7 @@ fn rm_25_a_receive_origin_with_a_fractional_call_rounds_once_to_the_grid() {
 }
 
 #[test]
-fn rm_15_preemption_front_applies_each_late_policy() {
+fn rm_15_late_front_applies_each_late_policy() {
     use ezsdr_kernel::id::ClockDomainId;
     use ezsdr_kernel::stream::{LateOutcome, LatePolicy};
     use ezsdr_kernel::time::Duration;
@@ -119,6 +119,11 @@ fn rm_15_preemption_front_applies_each_late_policy() {
 
     let late_by = Duration::new(ClockDomainId::HOST_MONOTONIC, 2);
     assert_eq!(late_policy_front_outcome(LatePolicy::RejectAtPlan, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), Some(LateOutcome::PlanViolation { late_by }));
+    assert_eq!(
+        late_policy_front_outcome(LatePolicy::SendAsapAndFlag, 9, 10, Some(11), |ticks| if ticks == 2 { Ok(late_by) } else { Err(()) }).unwrap(),
+        Some(LateOutcome::SendAsap { late_by }),
+        "late by the target to the front"
+    );
     assert_eq!(late_policy_front_outcome(LatePolicy::SendAsapAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), Some(LateOutcome::SendAsap { late_by }));
     assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 9, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), Some(LateOutcome::Drop { late_by }));
     assert_eq!(late_policy_front_outcome(LatePolicy::DropAndFlag, 11, 10, Some(11), |_| Ok::<_, ()>(late_by)).unwrap(), None, "equality with the front is on time");
@@ -881,7 +886,7 @@ fn rm_26_the_staging_oracle_agrees_with_staging() {
                         Leaf::Frequency => "radio.rx.c0.frequency_hz",
                         Leaf::Gain => "radio.rx.c0.gain_db",
                     };
-                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Busy::default()).is_err() {
+                    if staging.set(&key(name), Value::num(leaf.value(*v)).unwrap(), false, 0, |_| line.streaming(), |_| ezsdr_radio::staging::Bookings::default()).is_err() {
                         refused.push(index);
                     }
                 }

@@ -11,10 +11,10 @@ use ezsdr_kernel::module_api::{InputStore, ModuleError, StopMode};
 #[cfg(test)]
 use ezsdr_kernel::spec::Key;
 use ezsdr_kernel::stream::{DataLink, Direction};
-use ezsdr_kernel::time::{ClockRegistry, TimeAuthority, TimePoint};
+use ezsdr_kernel::time::{ClockRegistry, Duration, Rescaled, TimeAuthority, TimeError, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::staging::Busy;
+use ezsdr_radio::staging::{Bookings, stop_bound, stop_sample};
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey};
 use serde_json::{Value as Json, json};
 
@@ -23,9 +23,10 @@ use super::mode::{DescriptionExt, channel_list};
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 use crate::device::{Iq, TxCode, TxReport};
 use crate::host::{ClockGuard, ClockMutex};
+use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
 
 /// A guard of the instance's state (UR-25): a `MutexGuard`, except that the test build counts
-/// how many `core::lock` guards this thread holds — `streams`, `rec`, `held` and `rates` all
+/// how many `core::lock` guards this thread holds — `streams`, `rec` and `rates` all
 /// count — so that [`assert_line_free`] sees a lock order a `try_lock` cannot: another
 /// thread's line is not this caller's.
 pub(crate) struct Locked<'a, T> {
@@ -61,7 +62,7 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> Locked<'_, T> {
     Locked { guard: m.lock().unwrap_or_else(|e| e.into_inner()) }
 }
 
-/// UR-25: the caller holds no guard of the instance's state — `streams`, `rec`, `held` or
+/// UR-25: the caller holds no guard of the instance's state — `streams`, `rec` or
 /// `rates` —, so a publication that takes them may begin. The whole of the check: the
 /// other order (`rec` taken before `streams`) is not detected.
 pub(crate) fn assert_line_free(what: &str) {
@@ -230,9 +231,14 @@ impl RxChain {
 }
 
 impl Clock {
+    /// The root tick of sample `k`, or `None` when it does not fit in an `i64`.
+    pub fn try_instant(&self, k: i64) -> Option<i64> {
+        i64::try_from(i128::from(self.origin) + i128::from(k) * i128::from(self.n)).ok()
+    }
+
     /// The root tick of sample `k`.
     pub fn instant(&self, k: i64) -> i64 {
-        i64::try_from(i128::from(self.origin) + i128::from(k) * i128::from(self.n)).expect("a representable stream instant")
+        self.try_instant(k).expect("a representable stream instant")
     }
 
     /// The first sample at or after root tick `t`.
@@ -374,7 +380,28 @@ pub(crate) struct StreamState {
     pub clock: Option<Clock>,
     /// The transmit value rule's record of the stream's bookings and Stops (RM-21): the one place
     /// a receipt is judged by (never the hand-over state).
-    pub busy: Busy,
+    pub busy: Bookings,
+    /// The repeat a switch replaces (RM-37): the repeat booked last, or the switch the owner took (a refused switch changes nothing).
+    pub playing: Option<Playing>,
+}
+
+/// The repeat a switch replaces: the Action that booked it, the sample its waveform repeats from, and its period (RM-37).
+#[derive(Clone, Copy)]
+pub(crate) struct Playing {
+    pub id: ActionId,
+    pub origin: i64,
+    pub period: i64,
+}
+
+impl StreamState {
+    /// RM-16: a `Stop` taking effect at root tick `at` ends the stream's transmit bookings: the
+    /// value rule and the overlap rule are both bounded by the stream's clock. A stream with no clock has none.
+    pub fn stop_at(&mut self, at: i64, in_flight: i64) {
+        if let Some(clock) = self.clock {
+            self.busy.stop(stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k)));
+            self.busy.halt(clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t)));
+        }
+    }
 }
 
 /// The key the instance's lines hold `dir`'s stream `k` under (RM-29).
@@ -572,7 +599,7 @@ impl Streams {
         }
         let seq = if lost { 0 } else { self.next_seq() };
         for stream in &mut self.tx {
-            stream.busy.stop(at, core.tx_in_flight());
+            stream.stop_at(at, core.tx_in_flight());
         }
         for dir in [Dir::Rx, Dir::Tx] {
             for k in 0..self.count(dir) {
@@ -711,6 +738,7 @@ pub(crate) struct Records {
     pub bursts: Vec<Json>,
     pub device_async: Vec<Json>,
     pub rejected: Vec<Json>,
+    pub switches: Vec<Json>,
     pub timing: Vec<Json>,
     pub stats: BTreeMap<&'static str, i64>,
 }
@@ -721,7 +749,7 @@ impl Default for Records {
             .into_iter()
             .map(|name| (name, 0))
             .collect();
-        Records { applied: Vec::new(), bursts: Vec::new(), device_async: Vec::new(), rejected: Vec::new(), timing: Vec::new(), stats }
+        Records { applied: Vec::new(), bursts: Vec::new(), device_async: Vec::new(), rejected: Vec::new(), switches: Vec::new(), timing: Vec::new(), stats }
     }
 }
 
@@ -756,8 +784,6 @@ pub(crate) struct Core {
     pub block_len: usize,
     pub rec: Mutex<Records>,
     pub streams: Mutex<Streams>,
-    /// Held burst starts per transmit clock, for UR-21's duplicate refusal.
-    pub held: Mutex<BTreeSet<(ClockDomainId, i64)>>,
     /// UR-13's rate-set comparison, once per direction: `None` until the direction's
     /// first streamer opened, then the check's outcome (design 33 D5).
     rates: Mutex<[Option<Result<(), String>>; 2]>,
@@ -831,7 +857,6 @@ impl Core {
             description,
             rec: Mutex::new(Records::default()),
             streams: Mutex::new(Streams::with_streams(rx_count, tx_count)),
-            held: Mutex::new(BTreeSet::new()),
             rates: Mutex::new([None, None]),
             start_up: AtomicI64::new(i64::MIN),
             lost: AtomicBool::new(false),
@@ -884,6 +909,25 @@ impl Core {
     /// The in-flight window of a transmit stream, in root ticks (RM-16): what a Stop leaves in the device.
     pub fn tx_in_flight(&self) -> i64 {
         self.ticks(self.description.timing.tx_in_flight_ns)
+    }
+
+    /// RM-14, UR-21: a span of `ticks` on `clock` as the host's late duration, the one rescale a late verdict and its record share (a ceiling when inexact).
+    pub fn late_by(&self, clock: Clock, ticks: i64) -> Result<Duration, TimeError> {
+        match self.clocks.rescale(Duration::new(clock.domain, ticks), ClockDomainId::HOST_MONOTONIC)? {
+            Rescaled::Exact { duration } => Ok(duration),
+            Rescaled::Inexact { floor, .. } => floor.checked_add(Duration::new(ClockDomainId::HOST_MONOTONIC, 1)),
+        }
+    }
+
+    /// RM-15 (note 47 stage 5, §0): `J(e)`, the root tick by which a booking at sample `e` of `clock` must be received to
+    /// continue the chain that ends there. The one value `accept` and the owner's close both read.
+    pub fn join_by(&self, clock: Clock, e: i64) -> i64 {
+        clock.instant(e) - (self.device_lead() + self.ticks(DELIVERY_ALLOWANCE_NS))
+    }
+
+    /// RM-14, RM-15: the device lead in root ticks, the one value a booking's decision instant and its join deadline both read.
+    pub fn device_lead(&self) -> i64 {
+        self.ticks(DEVICE_LEAD_NS)
     }
 
     pub fn at(&self, ticks: i64) -> TimePoint {
@@ -1015,6 +1059,15 @@ impl Core {
     /// `device` section records it.
     pub fn rates_checked(&self, dir: Dir) -> bool {
         lock(&self.rates)[dir as usize].is_some()
+    }
+
+    /// RM-37, UR-30: writes the outcome of every switch the transmit records settled into its row of the `switches` section.
+    pub fn settle_switches(&self) {
+        let settled: Vec<ezsdr_radio::staging::Settled> = {
+            let mut streams = lock(&self.streams);
+            (0..self.description.stream_count(Dir::Tx)).flat_map(|k| streams.stream_mut(stream_key(Dir::Tx, k)).busy.take_settled()).collect()
+        };
+        ezsdr_radio::staging::write_settled(&mut lock(&self.rec).switches, settled);
     }
 
     /// **Configuring a direction** (UR-12): each given channel's own settings, untimed,

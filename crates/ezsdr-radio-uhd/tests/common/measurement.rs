@@ -219,9 +219,10 @@ fn unmeasured_reason(key: &str) -> &'static str {
         return "Not measured in this record; Phase 8 stage 3c-2a measures raw Device sample-rate read-back.";
     }
     match key {
-        "radio.timing.min_timed_command_lead_ns" | "radio.timing.tx_in_flight_ns" | "radio.perf.rx_bytes_per_s" | "radio.full_duplex" | "radio.hardware_time" => {
+        "radio.timing.min_timed_command_lead_ns" | "radio.perf.rx_bytes_per_s" | "radio.full_duplex" | "radio.hardware_time" => {
             "Not measured in this record; the Phase 8 stage 3b-2 measurement group has not been run."
         }
+        "radio.timing.tx_in_flight_ns" => "Not measured in this record; the Phase 8 stage 3b-2 group is deleted, and the value rests on the bench rows in `plan/phase8/bench-results.md`.",
         "radio.timing.rx_start_lead_ns" => "Not measured in this record; note 47 stage 3 measures the start lead of `start_rx`.",
         "radio.perf.tx_bytes_per_s" => "Not measured in this record; the Phase 8 stage 3c-1 hardware measurement has not been run.",
         "radio.timing.overflow_restart_gap_ns" => {
@@ -355,8 +356,6 @@ pub struct TrialEvidence {
     pub expected_samples: u64,
     pub expected_end_tick: i64,
     pub completion: TrialCompletion,
-    pub requires_preemption_evidence: bool,
-    pub repeat_ended_at_target: bool,
     pub record: Option<TrialRecord>,
     pub burst_ack_ticks: Vec<i64>,
     pub evidence: Vec<EvidenceKind>,
@@ -373,8 +372,6 @@ impl TrialEvidence {
             expected_samples,
             expected_end_tick,
             completion,
-            requires_preemption_evidence: false,
-            repeat_ended_at_target: false,
             record: None,
             burst_ack_ticks: Vec::new(),
             evidence: Vec::new(),
@@ -473,7 +470,6 @@ pub fn classify_trial(trial: &TrialEvidence) -> TrialClass {
     if record.samples != trial.expected_samples
         || (trial.completion == TrialCompletion::TransmitBurstAck && record.end_tick != trial.expected_end_tick)
         || missing_completion
-        || (trial.requires_preemption_evidence && !trial.repeat_ended_at_target)
         || trial.evidence.contains(&EvidenceKind::ShortSendRejected)
     {
         return TrialClass::Incomplete;
@@ -603,7 +599,6 @@ pub fn comparable_keys(description: &channels::Description) -> BTreeSet<Key> {
 #[derive(Clone, Debug)]
 pub struct MeasurementPlan {
     pub timed_command_leads_ns: Vec<u64>,
-    pub in_flight_windows_ns: Vec<u64>,
     /// The candidates of the `start_rx` start-lead group, which note 47 stage 3 adds.
     pub rx_start_leads_ns: Vec<u64>,
     pub rx_rates_hz: Vec<u64>,
@@ -630,7 +625,6 @@ impl Default for MeasurementPlan {
     fn default() -> Self {
         MeasurementPlan {
             timed_command_leads_ns: vec![500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
-            in_flight_windows_ns: vec![250_000, 500_000, 1_000_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000],
             rx_start_leads_ns: vec![3_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000],
             rx_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
             tx_throughput_rates_hz: vec![10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 100_000_000, 200_000_000],
@@ -662,7 +656,6 @@ impl MeasurementPlan {
     pub fn rehearsal() -> MeasurementPlan {
         MeasurementPlan {
             timed_command_leads_ns: vec![1_000_000, 2_000_000],
-            in_flight_windows_ns: vec![1_000_000, 2_000_000],
             rx_start_leads_ns: vec![3_000_000, 5_000_000],
             rx_rates_hz: vec![390_625],
             tx_throughput_rates_hz: vec![390_625],
@@ -685,7 +678,6 @@ impl MeasurementPlan {
     pub fn validate(&self) -> Result<(), String> {
         let candidates = [
             ("timed command lead", &self.timed_command_leads_ns),
-            ("in-flight window", &self.in_flight_windows_ns),
             ("receive start lead", &self.rx_start_leads_ns),
             ("receive rate", &self.rx_rates_hz),
             ("transmit throughput rate", &self.tx_throughput_rates_hz),
@@ -709,7 +701,7 @@ impl MeasurementPlan {
         {
             return Err("measurement counts, the raw group limit and the inter-trial interval must be positive, with at least 4 frequency points".to_owned());
         }
-        let step_observations = [self.timed_command_leads_ns.len(), self.in_flight_windows_ns.len(), self.rx_start_leads_ns.len().checked_mul(2).ok_or("receive-start stage count overflow")?];
+        let step_observations = [self.timed_command_leads_ns.len(), self.rx_start_leads_ns.len().checked_mul(2).ok_or("receive-start stage count overflow")?];
         for stages in step_observations {
             if stages.checked_mul(self.step_trials).is_none_or(|trials| trials > u32::MAX as usize) {
                 return Err("measurement observation exceeds the record's u32 trial limit".to_owned());
@@ -1398,10 +1390,9 @@ pub fn run_raw_group_leased(lease: &mut DeviceLease, groups: &mut GroupRun, desc
 pub type ProviderMeasure = fn(Arc<dyn Device>, &MeasurementPlan) -> Result<MeasurementGroup, String>;
 
 /// The Provider groups in the order the record runs them, each with the value keys it supplies.
-pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static str]); 9] {
+pub fn provider_groups() -> [(&'static str, ProviderMeasure, &'static [&'static str]); 8] {
     [
         ("min_timed_command_lead", measure_min_timed_command_lead, &["radio.timing.min_timed_command_lead_ns"]),
-        ("tx_in_flight", measure_tx_in_flight, &["radio.timing.tx_in_flight_ns"]),
         ("rx_start_lead", measure_rx_start_lead, &["radio.timing.rx_start_lead_ns"]),
         ("rx_throughput", measure_rx_throughput, &["radio.perf.rx_bytes_per_s"]),
         ("overflow_restart_gap", measure_overflow_restart_gap, &[]),
@@ -1881,7 +1872,6 @@ pub struct TrialPlan {
     pub expected_end_tick: i64,
     pub booked_tick: Option<i64>,
     pub completion: TrialCompletion,
-    pub requires_preemption_evidence: bool,
     pub capture_index: Option<usize>,
     pub capture_target: Option<TimePoint>,
     pub cold_capture: bool,
@@ -1896,7 +1886,6 @@ fn candidate_timing(field: &str, value: u64) -> Result<ezsdr_radio::TimingEnvelo
     let mut timing = default_timing();
     match field {
         "min_timed_command_lead_ns" => timing.min_timed_command_lead_ns = value,
-        "tx_in_flight_ns" => timing.tx_in_flight_ns = value,
         "rx_start_lead_ns" => timing.rx_start_lead_ns = value,
         _ => return Err(format!("unsupported candidate timing field `{field}`")),
     }
@@ -2026,7 +2015,6 @@ fn tx_trial(run: &mut RunHandle, device: &dyn Device, bytes: &[u8], samples: u64
             expected_end_tick,
             booked_tick: Some(receipt_tick),
             completion: TrialCompletion::TransmitBurstAck,
-            requires_preemption_evidence: false,
             capture_index: None,
             capture_target: None,
             cold_capture: false,
@@ -2092,62 +2080,6 @@ pub fn measure_min_timed_command_lead(device: Arc<dyn Device>, plan: &Measuremen
             Some(condition.to_owned()),
             observation_trials(total)?,
             json!({ "interval_ns": plan.interval_ns, "candidates": rows }),
-        )?],
-    })
-}
-
-/// Provider-path `radio.timing.tx_in_flight_ns` preemption sweep (UR-21, UR-23).
-pub fn measure_tx_in_flight(device: Arc<dyn Device>, plan: &MeasurementPlan) -> Result<MeasurementGroup, String> {
-    plan.validate()?;
-    let condition = "tx-1msps";
-    let (repeat, _) = super::waveform_of(&super::pn(1_000));
-    let (burst, _) = super::waveform_of(&super::pn(100));
-    let device_lead_ns = u64::try_from(ezsdr_radio_uhd::profile::DEVICE_LEAD_NS).map_err(|_| "negative device lead")?;
-    let delivery_allowance_ns = u64::try_from(ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS).map_err(|_| "negative delivery allowance")?;
-    let mut stages = Vec::new();
-    let mut rows = Vec::new();
-    let mut total = 0usize;
-    for value in &plan.in_flight_windows_ns {
-        let (mut run, _dir) = candidate_session_asking(device.clone(), candidate_timing("tx_in_flight_ns", *value)?, super::tx_only)?;
-        await_tx(&mut run);
-        start_repeat(&mut run, &repeat)?;
-        super::wait(&mut run, super::ms(100));
-        let mut trials: Vec<TrialPlan> = Vec::new();
-        let mut effective = Vec::new();
-        for index in 0..plan.step_trials {
-            if index > 0 {
-                start_repeat(&mut run, &repeat)?;
-            }
-            let lead = value.checked_add(device_lead_ns).and_then(|lead| lead.checked_add(delivery_allowance_ns)).and_then(|lead| lead.checked_add(1_000_000)).ok_or("preemption lead overflow")?;
-            let (mut trial, actual) = tx_trial(&mut run, &*device, &burst, 100, lead, plan.interval_ns)?;
-            trial.requires_preemption_evidence = true;
-            if let Some(previous) = trials.last_mut() {
-                previous.end_tick = trial.start_tick;
-            }
-            trials.push(trial);
-            effective.push(Some(actual));
-        }
-        let manifest = run.finish();
-        let evidence = evidence_from_manifest(&manifest, &trials)?;
-        let classes: Vec<_> = evidence.iter().map(classify_trial).collect();
-        rows.push(tx_candidate_stage_json(condition, *value, &classes, &effective, &evidence));
-        stages.push(CandidateStage { value: *value, trials: classes });
-        total += plan.step_trials;
-    }
-    let candidates = BTreeMap::from([(condition.to_owned(), stages)]);
-    let summary = summarize_candidates(SummaryMode::MinimumLead, &candidates, plan.step_trials)?;
-    let measured = numeric_value("radio.timing.tx_in_flight_ns", &summary, &candidates, plan.step_trials, "tests/hardware.rs::hw_measurements_record")?;
-    Ok(MeasurementGroup {
-        conditions: vec![tx_only_condition(condition)],
-        values: vec![measured],
-        observations: vec![observation(
-            "provider_tx_in_flight",
-            "tests/hardware.rs::hw_measurements_record",
-            Some(condition.to_owned()),
-            observation_trials(total)?,
-            json!({ "interval_ns": plan.interval_ns, "device_lead_ns": device_lead_ns,
-                "delivery_allowance_ns": delivery_allowance_ns,
-                "lead_extra_ns": 1_000_000, "lead_is_inferred": true, "candidates": rows }),
         )?],
     })
 }
@@ -3246,7 +3178,6 @@ pub fn measure_full_duplex(device: Arc<dyn Device>, plan: &MeasurementPlan) -> R
             expected_end_tick: 0,
             booked_tick: Some(now),
             completion: TrialCompletion::ReceiveCapture,
-            requires_preemption_evidence: false,
             capture_index: Some(0),
             capture_target: Some(capture_target),
             cold_capture: false,
@@ -3330,7 +3261,6 @@ pub fn extract_trial_evidence(
         .map(|plan| {
             let mut trial = TrialEvidence::new(plan.start_tick, plan.end_tick, plan.expected_samples, plan.expected_end_tick, plan.completion);
             trial.admitted = plan.admitted;
-            trial.requires_preemption_evidence = plan.requires_preemption_evidence;
             trial
         })
         .collect();
@@ -3356,37 +3286,6 @@ pub fn extract_trial_evidence(
                 } else {
                     trials[*index].record = Some(TrialRecord { samples, end_tick: plan.expected_end_tick.saturating_sub(1) });
                 }
-            }
-        }
-    }
-    if let Some(rows) = bursts.as_array() {
-        for (index, plan) in plans.iter().enumerate().filter(|(_, plan)| plan.requires_preemption_evidence) {
-            let Some(target) = plan.expected_target.and_then(|target| point_root_tick(target, clocks).ok()) else { continue };
-            let matching = rows
-                .iter()
-                .filter(|burst| {
-                    if serde_json::from_value::<BurstEnd>(burst["end"].clone()).ok() != Some(BurstEnd::Eob) {
-                        return false;
-                    }
-                    let Some(repeat_target) = serde_json::from_value::<TimePoint>(burst["target"].clone()).ok() else {
-                        return false;
-                    };
-                    if plan.expected_target == Some(repeat_target) {
-                        return false;
-                    }
-                    let Some(samples) = burst["samples"].as_u64().and_then(|samples| i64::try_from(samples).ok()) else {
-                        return false;
-                    };
-                    let Some(clock) = clocks.iter().find(|clock| clock.domain == repeat_target.domain()) else {
-                        return false;
-                    };
-                    repeat_target.ticks_in(repeat_target.domain()).ok().and_then(|start| start.checked_add(samples)).and_then(|end| sample_root_tick(clock, end).ok()) == Some(target)
-                })
-                .count();
-            if matching == 1 {
-                trials[index].repeat_ended_at_target = true;
-            } else if matching > 1 {
-                trials[index].unattributable = true;
             }
         }
     }
@@ -3627,7 +3526,6 @@ fn tx_candidate_stage_json(condition: &str, value: u64, trials: &[TrialClass], e
             row["expected_end_tick"] = json!(trial.expected_end_tick);
             row["burst_ack_ticks"] = json!(trial.burst_ack_ticks);
             row["burst_ack_offsets_from_expected_end_ticks"] = json!(trial.burst_ack_ticks.iter().map(|tick| tick.checked_sub(trial.expected_end_tick)).collect::<Vec<_>>());
-            row["repeat_ended_at_target"] = json!(trial.repeat_ended_at_target);
         }
     }
     stage
@@ -3765,7 +3663,6 @@ mod tests {
             expected_end_tick: target_tick + 4,
             booked_tick: Some(start_tick),
             completion: TrialCompletion::TransmitBurstAck,
-            requires_preemption_evidence: false,
             capture_index: None,
             capture_target: None,
             cold_capture: false,
@@ -3954,40 +3851,6 @@ mod tests {
     }
 
     #[test]
-    fn preemption_requires_the_repeat_record_to_reach_the_interrupt_target() {
-        let clock = synthetic_clock(ClockDomainId::local(21), "usrp/tx/s0", 0, None);
-        let clocks = [clock];
-        let mut plan = synthetic_tx_plan(90, 120, 100);
-        plan.requires_preemption_evidence = true;
-        let interrupt = synthetic_burst(plan.expected_target.unwrap(), 4, "eob");
-        let ack = json!([{ "code": "BurstAck", "tick": 102 }]);
-        let empty = json!([]);
-        let no_artifacts = json!({});
-        let no_repeat = extract_trial_evidence(&interrupt, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
-        assert_eq!(classify_trial(&no_repeat[0]), TrialClass::Incomplete, "a complete interrupting burst cannot prove that a repeat was running");
-
-        let repeat = json!([
-            { "target": TimePoint::new(ClockDomainId::local(21), 50), "samples": 50, "end": "eob" },
-            { "target": plan.expected_target.unwrap(), "samples": 4, "end": "eob" }
-        ]);
-        let complete = extract_trial_evidence(&repeat, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
-        assert!(complete[0].repeat_ended_at_target);
-        assert_eq!(classify_trial(&complete[0]), TrialClass::Success);
-
-        let early = json!([
-            { "target": TimePoint::new(ClockDomainId::local(21), 50), "samples": 49, "end": "eob" },
-            { "target": plan.expected_target.unwrap(), "samples": 4, "end": "eob" }
-        ]);
-        let ended_early = extract_trial_evidence(&early, &ack, &empty, &empty, &no_artifacts, &clocks, std::slice::from_ref(&plan)).unwrap();
-        assert!(!ended_early[0].repeat_ended_at_target);
-        assert_eq!(classify_trial(&ended_early[0]), TrialClass::Incomplete, "a repeat ending one sample before the interrupt proves no preemption");
-
-        let before = synthetic_radio_event("radio.TX_UNDERFLOW", 89, json!({}));
-        let failed_setup = extract_trial_evidence(&repeat, &ack, &empty, &before, &no_artifacts, &clocks, &[plan]).unwrap();
-        assert_eq!(classify_trial(&failed_setup[0]), TrialClass::Unattributable, "an underflow before the first trial is retained against that trial");
-    }
-
-    #[test]
     fn cold_capture_evidence_requires_two_contiguous_clock_segments() {
         let old_domain = ClockDomainId::local(21);
         let new_domain = ClockDomainId::local(22);
@@ -4003,7 +3866,6 @@ mod tests {
             expected_end_tick: 0,
             booked_tick: Some(150),
             completion: TrialCompletion::ReceiveCapture,
-            requires_preemption_evidence: false,
             capture_index: Some(0),
             capture_target: Some(target),
             cold_capture: true,

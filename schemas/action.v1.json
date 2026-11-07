@@ -864,7 +864,7 @@
   "oneOf": [
     {
       "additionalProperties": false,
-      "description": "One transmit burst. Carries no channel list: which channels a burst uses is\nthe Radio Model's (RS-49, RM-13), and deciding it here would put a radio\nfield in a frozen Kernel document. A radio burst's `metadata` is empty\n(RM-13).",
+      "description": "One transmit burst. Carries no channel list: which channels a burst uses is\nthe Radio Model's (RS-49, RM-13), and deciding it here would put a radio\nfield in a frozen Kernel document. A radio burst's `metadata` is empty or\nthe repeat-switch mark (RM-13, RM-37).",
       "properties": {
         "at": {
           "$ref": "#/$defs/AbsoluteDeadline",

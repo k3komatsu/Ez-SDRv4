@@ -3163,8 +3163,8 @@
   "id": "J315",
   "name": "the receipt site's SendAsap move is dropped, so the requested start is reserved instead of the moved one (UR-21)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                start = clock.at_or_after(clock.instant(now_k) + lead);\n",
-  "new": "",
+  "old": "else if send_asap.is_some() { match busy.place(ordinary, rec_len, receipt, join_by, horizon) { Some(free) => start = free,",
+  "new": "else if send_asap.is_some() { match busy.place(ordinary, rec_len, receipt, join_by, horizon) { Some(_) => {}",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_the_receipt_site_reserves_the_moved_start_before_any_hand_over"
@@ -4635,7 +4635,7 @@
    "new": "        for segment in plan.segments.values() {",
    "crate": "ezsdr-mock-radio",
    "test_bin": "mock_channel",
-   "filter": "mr_15_a_transmit_block_is_emitted_only_after_its_last_sample"
+   "filter": "ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order"
   },
   {
    "id": "P171",
@@ -6211,8 +6211,8 @@
    "id": "P542",
    "name": "start_repeat targets its transmit stream node (EA-16, RM-29)",
    "file": "python/ezsdr/session.py",
-   "old": "            \"target\": Target.resource(self._radio, f\"tx/s{self._number}\"),",
-   "new": "            \"target\": Target.resource(self._radio, \"tx\"),",
+   "old": "Target.resource(self._radio, f\"tx/s{self._number}\"),\n            \"at\": at if at is not None",
+   "new": "Target.resource(self._radio, \"tx\"),\n            \"at\": at if at is not None",
    "python": "test_easy_api.EasyApi.test_ea_16_stream_one_actions_target_their_nodes"
   },
   {
@@ -6854,18 +6854,18 @@
    "old": "    if order < before {",
    "new": "    if order.saturating_add(1) < before {",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_front"
+  "test_bin": "lib",
+  "filter": "mr_17_handed_front_reduction_cases"
  } ,
  {
   "id": "P630",
-  "name": "MockRadio counts a burst received before the preempting burst (MR-17)",
+  "name": "MockRadio counts a burst received before a later one (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
    "old": "    if order < before {",
    "new": "    if false && order < before {",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_front"
+  "test_bin": "lib",
+  "filter": "mr_17_handed_front_reduction_cases"
  } ,
  {
   "id": "P631",
@@ -6884,8 +6884,8 @@
   "old": "end.min(window_end)",
   "new": "end.max(window_end)",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_boundaries"
+  "test_bin": "lib",
+  "filter": "mr_17_handed_front_reduction_cases"
  } ,
  {
   "id": "P633",
@@ -6904,8 +6904,8 @@
   "old": "(!repeat).then_some(start.saturating_add(len))",
   "new": "Some(start.saturating_add(len))",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_front"
+  "test_bin": "mock_channel",
+  "filter": "mr_25_stop_hands_a_future_repeat_through_the_in_flight_window"
  } ,
  {
   "id": "P635",
@@ -6914,8 +6914,8 @@
   "old": "for held in self.tx[k].held.values() {",
   "new": "for held in self.tx[k].held.values().filter(|_| false) {",
   "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_boundaries"
+  "test_bin": "mock_channel",
+  "filter": "mr_25_stop_hands_a_future_repeat_through_the_in_flight_window"
  } ,
  {
   "id": "P636",
@@ -6965,7 +6965,7 @@
     "new": "                    self.chain.advance_front(clock.domain, close_start.saturating_add(2));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
+  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
  } ,
   {
    "id": "P642",
@@ -6975,7 +6975,7 @@
     "new": "                    self.chain.advance_front(clock.domain, close_start);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
+  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
  } ,
  {
   "id": "P643",
@@ -6991,11 +6991,11 @@
   "id": "P644",
   "name": "a moved UHD burst keeps its requested target (UR-21)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                    held.k = bound;\n                    held.open.late = Some(late);\n                    held.open.requested_target = held.open.requested_target.or(Some(held.target));",
-  "new": "                    held.k = bound;\n                    held.open.late = Some(late);\n                    held.open.requested_target = None;",
+  "old": "                held.open.late = Some(late);\n                held.open.requested_target = held.open.requested_target.or(Some(held.target));",
+  "new": "                held.open.late = Some(late);\n                held.open.requested_target = None;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_finite_burst_with_a_held_tail_keeps_its_front"
+  "filter": "ur_21_first_dispatch_rechecks_all_late_policies"
  } ,
  {
   "id": "P645",
@@ -7013,50 +7013,30 @@
   "file": "crates/ezsdr-radio/src/timeline.rs",
   "old": "    let late_by = late_by(front - target)?;",
   "new": "    let late_by = late_by(front - current)?;",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_front"
+  "crate": "ezsdr-radio",
+  "test_bin": "timeline",
+  "filter": "rm_15_late_front_applies_each_late_policy"
  } ,
  {
   "id": "P650",
   "name": "UHD reports the full late duration to its hand-over bound (UR-21)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "Duration::new(clock.domain, ticks)",
-  "new": "Duration::new(clock.domain, ticks.saturating_sub(1))",
+  "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+  "old": "rescale(Duration::new(clock.domain, ticks)",
+  "new": "rescale(Duration::new(clock.domain, ticks.saturating_sub(1))",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
+  "filter": "ur_23_stop_before_the_moved_boundary_cancels_the_switch"
  } ,
  {
   "id": "P651",
   "name": "Mock preserves the original target after a send_asap move (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                requested = requested.or(Some(at.time_point));",
-  "new": "                requested = None;",
+  "old": "Some(free) => start = free, None => unplaced = true, } requested = requested.or(Some(at.time_point));",
+  "new": "Some(free) => start = free, None => unplaced = true, } requested = None;",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_radio",
-  "filter": "mr_17_x3xx_tx_preemption_front"
- } ,
- {
-  "id": "P652",
-  "name": "Mock keeps its handed front after Stop (MR-25)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                    self.remember_tx_front(k, domain, cut.saturating_add(2));",
-  "new": "                    let _ = (k, domain, cut);",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_stop_preserves_front_until_expiry"
- } ,
- {
-  "id": "P653",
-  "name": "a stream's front includes no other stream's held burst (MR-17)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "for held in self.tx[k].held.values() {",
-  "new": "for held in self.tx[0].held.values() {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_radio",
-  "filter": "mr_17_tx_front_is_per_stream"
- } ,
+  "filter": "mr_16_s6_send_asap_moves_past_an_accepted_span"
+ }  ,
  {
   "id": "P655",
   "name": "device loss cuts at its instant, not its Stop hand-over horizon (MR-20)",
@@ -7096,27 +7076,7 @@
   "scope": "fn dispatch_start",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_post_eob_restart_uses_the_safe_sample"
- },
- {
-  "id": "P659",
-  "name": "cold change and device loss do not preserve a Stop hand-over front (MR-25)",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "                if handover {\n                    self.tx[k].stop_cut = Some(TxFront { domain, sample: cut });\n                    self.remember_tx_front(k, domain, cut.saturating_add(2));",
-  "new": "                if true {\n                    self.tx[k].stop_cut = Some(TxFront { domain, sample: cut });\n                    self.remember_tx_front(k, domain, cut.saturating_add(2));",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "lib",
-  "filter": "a_loss_does_not_remember_a_stop_front"
- },
- {
-  "id": "P660",
-  "name": "a late move past the cursor closes the prior device burst (UR-21)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "        if held.k == next && (self.chain.burst_is_open() || self.open.as_ref().is_some_and(|open| !open.first)) {",
-   "new": "        if held.k != next && (self.chain.burst_is_open() || self.open.as_ref().is_some_and(|open| !open.first)) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_21_a_late_move_past_the_cursor_closes_before_a_held_burst"
+  "filter": "ur_23_a_burst_at_the_end_of_a_closed_burst_is_late"
  },
  {
   "id": "P662",
@@ -7176,17 +7136,17 @@
    "new": "        self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_send_asap_move_is_reported_once_across_handovers"
+  "filter": "ur_21_a_send_asap_judged_again_at_dispatch_is_not_reported_again"
  },
   {
    "id": "P669",
-   "name": "a preemption front maps DropAndFlag to Drop (RM-15)",
+   "name": "a late front maps DropAndFlag to Drop (RM-15)",
    "file": "crates/ezsdr-radio/src/timeline.rs",
    "old": "        LatePolicy::DropAndFlag => LateOutcome::Drop { late_by },",
    "new": "        LatePolicy::DropAndFlag => LateOutcome::SendAsap { late_by },",
    "crate": "ezsdr-radio",
    "test_bin": "timeline",
-   "filter": "rm_15_preemption_front_applies_each_late_policy"
+   "filter": "rm_15_late_front_applies_each_late_policy"
   },
    {
     "id": "P670",
@@ -7196,49 +7156,9 @@
     "new": "                    let cut = timeline::later_bound(at_stop, merge_front(payload.map(|sample| sample.saturating_add(2)), previous));",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
-    "filter": "mr_25_stop_does_not_radiate_unhanded_window_edge_payload"
+    "filter": "mr_25_a_stopped_burst_transmits_every_sample_before_the_stop"
    },
-  {
-   "id": "P671",
-   "name": "preemption does not repeat a reported SendAsap error (UR-21)",
-   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "                    reservations.insert((held.domain, bound));\n                    drop(reservations);\n                    self.report_send_asap(&held, late_by);",
-   "new": "                    reservations.insert((held.domain, bound));\n                    drop(reservations);\n                    self.time_error(TimeErrorOutcome::SendAsap, late_by, held.target);",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "lib",
-   "filter": "ur_21_a_preempted_send_asap_move_keeps_one_error_and_its_requested_target"
-   },
-   {
-    "id": "P672",
-    "name": "Mock in-flight frontier keeps two samples after handed payload (MR-17, +1 mutant)",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor))",
-    "new": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(1)), device_floor))",
-    "crate": "ezsdr-mock-radio",
-    "test_bin": "mock_radio",
-    "filter": "mr_17_x3xx_tx_preemption_boundaries"
-   },
-   {
-    "id": "P673",
-    "name": "Mock in-flight frontier keeps two samples after handed payload (MR-17, +0 mutant)",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor))",
-    "new": "merge_front(previous, merge_front(handed, device_floor))",
-    "crate": "ezsdr-mock-radio",
-    "test_bin": "mock_radio",
-    "filter": "mr_17_x3xx_tx_preemption_boundaries"
-   },
-   {
-    "id": "P674",
-    "name": "Mock Stop retains the cut plus two samples for later bookings (MR-25)",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "                    self.remember_tx_front(k, domain, cut.saturating_add(2));",
-    "new": "                    self.remember_tx_front(k, domain, cut.saturating_add(1));",
-    "crate": "ezsdr-mock-radio",
-    "test_bin": "mock_radio",
-    "filter": "mr_17_stop_preserves_front_until_expiry"
-  },
-   {
+            {
     "id": "P675",
     "name": "measurement lower bound accepts equality",
     "file": "crates/ezsdr-radio/src/measurement.rs",
@@ -7574,8 +7494,8 @@
    "id": "P710",
    "name": "the measurement admission lead replaces the independent UHD device lead",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(DEVICE_LEAD_NS);",
-   "new": "    fn dispatch_start(&self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
+   "old": "    fn dispatch_start(&mut self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.device_lead();",
+   "new": "    fn dispatch_start(&mut self, clock: Clock, mut held: Held) -> Option<Held> {\n        let lead = self.core.ticks(self.core.description.timing.min_timed_command_lead_ns);",
    "old2": "policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS))",
    "new2": "policy.decide(&self.core.clocks, TimePoint::new(clock.domain, k), TimePoint::new(clock.domain, now), Duration::new(ClockDomainId::HOST_MONOTONIC, self.core.description.timing.min_timed_command_lead_ns))",
    "crate": "ezsdr-radio-uhd",
@@ -8096,26 +8016,6 @@
    "crate": "ezsdr-radio-uhd",
    "test_bin": "fake",
    "filter": "manifest_evidence_classifies_tx_ack_and_out_of_range_failure_evidence"
-  },
-  {
-   "id": "P765",
-   "name": "TX preemption does not require a running repeat",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": "|| (trial.requires_preemption_evidence && !trial.repeat_ended_at_target)",
-   "new": "|| false",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "preemption_requires_the_repeat_record_to_reach_the_interrupt_target"
-  },
-  {
-   "id": "P766",
-   "name": "preempted repeat may end away from the interrupt target",
-   "file": "crates/ezsdr-radio-uhd/tests/common/measurement.rs",
-   "old": ".and_then(|end| sample_root_tick(clock, end).ok()) == Some(target)",
-   "new": ".and_then(|end| sample_root_tick(clock, end).ok()) != Some(target)",
-   "crate": "ezsdr-radio-uhd",
-   "test_bin": "fake",
-   "filter": "preemption_requires_the_repeat_record_to_reach_the_interrupt_target"
   },
   {
    "id": "P767",
@@ -10546,16 +10446,6 @@
     "filter": "ur_23_txs_a_held_cut_splits_a_high_rate_repeat_at_the_target"
    },
    {
-    "id": "P1166",
-    "name": "preemption at the handed frontier is adjacent and on time",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "if h <= next {",
-    "new": "if h < next {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_23_txs_late_preemption_uses_the_handed_frontier"
-   },
-   {
     "id": "P1167",
     "name": "per-channel held tails retain their own sample",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -10793,7 +10683,7 @@
        "new": "let at = device_sob.then(|| clock.instant(open.next));",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "fake",
-       "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
+       "filter": "ur_23_a_repeat_holds_its_span_until_a_stop"
       },
       {
         "id": "P1197",
@@ -10819,8 +10709,8 @@
         "id": "P1199",
         "name": "ordinary TX Stop preserves pending recovery (D9b-1a fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "self.end_open(true); for held in std::mem::take(&mut self.held).into_values() {",
-        "new": "self.end_open(true); self.chain.provider_stop(); for held in std::mem::take(&mut self.held).into_values() {",
+        "old": "self.end_open(true); for _ in std::mem::take(&mut self.held).into_values() {",
+        "new": "self.end_open(true); self.chain.provider_stop(); for _ in std::mem::take(&mut self.held).into_values() {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_tx_stop_preserves_recovery_for_later_bursts"
@@ -10879,8 +10769,8 @@
         "id": "P1206",
         "name": "a failed reopen drains held initial bursts (D9b-1a fix 3)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if halted { for held in std::mem::take(&mut self.held).into_values() {",
-        "new": "if halted && false { for held in std::mem::take(&mut self.held).into_values() {",
+        "old": "if halted { for _ in std::mem::take(&mut self.held).into_values() {",
+        "new": "if halted && false { for _ in std::mem::take(&mut self.held).into_values() {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts"
@@ -10889,7 +10779,7 @@
        "id": "P1208",
        "name": "a failed reopen settles the open burst's reservation and cancellation (D9b-1a fix 4)",
        "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-       "old": "        if let Some(open) = self.open.take() {\n            self.forget(&open.held);\n            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ClockEnded);\n        }",
+       "old": "        if self.open.take().is_some() {\n            self.report_cancelled_burst(\"UR-22: cancelled because the TX streamer could not be reopened\", ezsdr_radio::CancelReason::ClockEnded);\n        }",
        "new": "        let _ = self.open.take();",
        "crate": "ezsdr-radio-uhd",
        "test_bin": "lib",
@@ -13061,17 +12951,7 @@
       "test_bin": "lib",
       "filter": "ur_22_t3_flush_requires_each_channel_ack_and_device_loss_stays_distinct"
     },
-    {
-      "id": "N48S1-10",
-      "name": "the Mock's front ignores a short burst's padded device floor (UR-22, TBD-m1)",
-      "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "merge_front(previous, merge_front(handed.map(|sample| sample.saturating_add(2)), device_floor))",
-      "new": "merge_front(previous, handed.map(|sample| sample.saturating_add(2)))",
-      "crate": "ezsdr-mock-radio",
-      "test_bin": "mock_channel",
-      "filter": "mr_17_a_one_sample_burst_uses_the_safe_sample"
-    },
-    {
+        {
       "id": "N48S1-12",
       "name": "a four-sample first send is held back as three and one (UR-22, FS-1, N1)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -13111,17 +12991,7 @@
       "test_bin": "lib",
       "filter": "ur_23_a_continuation_of_two_samples_is_sent_at_once_with_no_minimum"
     },
-    {
-      "id": "N48S1-16",
-      "name": "a Stop keeps only the payload front, not a short burst's padded floor (MR-17, MR-25, TBD-m2)",
-      "file": "crates/ezsdr-mock-radio/src/lib.rs",
-      "old": "self.remember_tx_front(k, domain, floor);",
-      "new": "let _ = (k, domain, floor);",
-      "crate": "ezsdr-acceptance",
-      "test_bin": "parity",
-      "filter": "s1_parity_stop_during_padded_device_burst"
-    },
-    {
+        {
       "id": "N48S1-17",
       "name": "a first send one tick inside its device lead is sent without its late policy (UR-21, FS-5, C2)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
@@ -13280,16 +13150,6 @@
     "crate": "ezsdr-radio",
     "test_bin": "timeline",
     "filter": "rm_25_a_refused_segment_runs_for_planning_until_the_next_start_cuts_it"
-  },
-  {
-    "id": "N48S2-01",
-    "name": "a burst cancelled before its start keeps its reservation after a failed reopen (UR-25, S2a-ii open question 1)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.forget(held);",
-    "new": "let _ = held;",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
   },
   {
     "id": "N48III-01",
@@ -13472,46 +13332,6 @@
     "filter": "a_late_control_needs_its_expected_late_cause_and_no_fault"
   },
   {
-    "id": "N48III-19",
-    "name": "a preemption whose radio.TIME_ERROR is not late passes (preemption_verdict's cause check)",
-    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
-    "old": "causes.iter().any(|cause| cause.as_str() != \"late\")",
-    "new": "causes.iter().any(|cause| cause.as_str() == \"late\")",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
-    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
-  },
-  {
-    "id": "N48III-20",
-    "name": "two radio.TIME_ERRORs pass a preemption (preemption_verdict's at-most-one rule)",
-    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
-    "old": "causes.len() > 1 ||",
-    "new": "causes.len() > 2 ||",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
-    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
-  },
-  {
-    "id": "N48III-21",
-    "name": "a lead whose expected count differs from the radio.TIME_ERROR count passes (preemption_verdict's INCONCLUSIVE)",
-    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
-    "old": "Some(expected) if expected != causes.len()",
-    "new": "Some(expected) if expected == causes.len()",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
-    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
-  },
-  {
-    "id": "N48III-22",
-    "name": "an underflow does not fail a preemption (preemption_verdict's underflow check)",
-    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
-    "old": "faults.underflows > 0 || faults.async_faults > 0 || causes.len() > 1",
-    "new": "faults.async_faults > 0 || causes.len() > 1",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "fake",
-    "filter": "a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch"
-  },
-  {
     "id": "N48III-23",
     "name": "a trial with an uncovered span counts in the summary and the verdict (complete_fills' shared predicate)",
     "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
@@ -13661,22 +13481,12 @@
     "test_bin": "lib",
     "filter": "ur_33_an_open_short_burst_reports_one_underflow_per_channel"
   },
-  {
-    "id": "N48S3-42",
-    "name": "the Mock's frontier after a handed burst is one sample past its end, not two (MR-17, note 40 D5)",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "handed.map(|sample| sample.saturating_add(2))",
-    "new": "handed.map(|sample| sample.saturating_add(1))",
-    "crate": "ezsdr-acceptance",
-    "test_bin": "parity",
-    "filter": "s3_parity_booking_after_a_closed_short_burst_follows_d5"
-  },
-  {
+    {
     "id": "N48S3-17",
     "name": "Mock repeat hand-over threshold 32 -> 4",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
     "old": "if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
-    "new": "if held.repeat { DEVICE_MIN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
+    "new": "if held.repeat { 4 } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) }",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
     "filter": "mr_25_a_repeat_first_send_is_judged_at_32_samples"
@@ -13716,7 +13526,7 @@
     "new": "let short_first = false;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_23_a_burst_booked_at_a_closed_short_burst_s_end_is_late"
+    "filter": "ur_23_a_burst_at_a_closed_short_burst_s_end_is_late_at_dispatch"
   },
   
   {
@@ -13767,7 +13577,7 @@
     "new": "self.cut = None; let _ = self.clock.and_then(",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_25_an_end_booked_after_the_first_read_cancels_the_held_burst_and_releases_its_reservation"
+    "filter": "ur_25_an_end_booked_after_the_first_read_cancels_the_held_burst_at_the_origin"
   },
   {
     "id": "N47S4-38",
@@ -13823,8 +13633,8 @@
     "id": "N47S4-17",
     "name": "a Stop bounds a repeat by its instant, not by the in-flight window after it (RM-16, RM-21)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "let bound = at.saturating_add(in_flight);",
-    "new": "let bound = at;",
+    "old": "at_or_after(at.saturating_add(in_flight))",
+    "new": "at_or_after(at)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_21_a_stop_bounds_an_open_repeat_by_the_in_flight_window"
@@ -13933,8 +13743,8 @@
     "id": "N47S4-08",
     "name": "the receipt answer ignores the stream's Busy, as if it read a hand-over (RM-21, F2, #79)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "map_or(Busy::default(), |stream| stream.busy)",
-    "new": "map_or(Busy::default(), |stream| Busy::default())",
+    "old": "map_or(Bookings::default(), |stream| stream.busy.clone())",
+    "new": "map_or(Bookings::default(), |stream| Bookings::default())",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_value_after_the_hand_over_and_before_the_end_is_refused"
@@ -13942,9 +13752,9 @@
   {
     "id": "N47S4-17c",
     "name": "a Stop does not bound the UHD stream's Busy (RM-16, RM-21, S3)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "streams.stream_mut(stream).busy.stop(now, self.core.tx_in_flight());",
-    "new": "let _ = (streams.stream_mut(stream), now, self.core.tx_in_flight());",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "self.busy.stop(stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k)));",
+    "new": "let _ = (at, in_flight, clock);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_is_taken_only_after_a_stopped_repeat_s_in_flight_window"
@@ -13973,8 +13783,8 @@
     "id": "N47S4-43",
     "name": "Provider::stop does not bound the transmit Busy (RM-16, VH-2)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "stream.busy.stop(at, core.tx_in_flight());",
-    "new": "let _ = (stream, at, core.tx_in_flight());",
+    "old": "stream.stop_at(at, core.tx_in_flight());",
+    "new": "let _ = (at, core.tx_in_flight());",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_provider_stop_ends_a_repeat_at_its_in_flight_window"
@@ -13993,7 +13803,7 @@
     "id": "N47S4-45",
     "name": "a finite burst is booked as open (RM-21, S5)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "busy.book(end);",
+    "old": "busy.book(end.flatten());",
     "new": "busy.book(None);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -14023,8 +13833,8 @@
     "id": "N47S4-18c",
     "name": "a MockRadio Stop does not bound the stream's Busy (RM-16, S3)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "self.tx[k].busy.stop(now, window);",
-    "new": "let _ = (now, window);",
+    "old": "self.tx[k].busy.stop(bound);",
+    "new": "let _ = (bound, now, window);",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_25_a_transmit_value_after_a_stop_takes_effect_after_the_in_flight_window"
@@ -14033,8 +13843,8 @@
     "id": "N47S4-48",
     "name": "MockRadio's receipt answer ignores the stream's Busy (RM-21, S2)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "map_or(Busy::default(), |stream| stream.busy)",
-    "new": "map_or(Busy::default(), |stream| Busy::default())",
+    "old": "map_or(Bookings::default(), |stream| stream.busy.clone())",
+    "new": "map_or(Bookings::default(), |stream| Bookings::default())",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_21_a_transmit_value_while_a_burst_is_booked_is_refused_with_its_id"
@@ -14091,10 +13901,10 @@
   },
   {
     "id": "N47S4-13b",
-    "name": "a refused burst is removed from its stream's Busy (P4, F9)",
+    "name": "a refused burst is removed from its stream's Bookings, end included (P4, F9, C6)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "core.device_failed(held.settings.action(), \"tx_burst\", &error);",
-    "new": "core.device_failed(held.settings.action(), \"tx_burst\", &error); lock(&core.streams).stream_mut(key).busy = Default::default();",
+    "old": "lock(&core.streams).stream_mut(key).busy.drop_piece(held.k, held.record_len());",
+    "new": "lock(&core.streams).stream_mut(key).busy = Default::default();",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_refused_burst_stays_counted_until_its_booked_end"
@@ -14103,8 +13913,8 @@
     "id": "N47S4-15",
     "name": "the apply guard ignores an underflow recovery (R4, S10)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "!recovering && previous_end",
-    "new": "previous_end",
+    "old": "!recovering && previous_end.is_none_or(|end| device_now >= end)",
+    "new": "previous_end.is_none_or(|end| device_now >= end)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_apply_is_due_only_between_bursts_and_only_for_a_new_generation"
@@ -14183,8 +13993,8 @@
     "id": "N47S4-09c",
     "name": "a Stop's closing two samples are not counted in the device end (owner guard (c), m9)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "close_start.saturating_add(3)",
-    "new": "close_start",
+    "old": "self.chain.advance_front(clock.domain, close_start.saturating_add(3));",
+    "new": "self.chain.advance_front(clock.domain, close_start);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_waits_for_a_stop_s_held_tail"
@@ -14323,8 +14133,8 @@
   "id": "N47S4-08b",
   "name": "a burst moved by SendAsap at booking books its requested end, not its moved one (R2, S2)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "let end = (!repeat).then(|| clock.instant(start.saturating_add(len as i64)));",
-  "new": "let end = (!repeat).then(|| clock.instant(at.time_point.ticks_in(clock.domain).unwrap_or(start).saturating_add(len as i64)));",
+  "old": "busy.book(end.flatten());",
+  "new": "busy.book((!repeat).then(|| clock.instant(at.time_point.ticks_in(clock.domain).unwrap_or(start).saturating_add(len as i64))));",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_21_a_value_is_judged_by_a_booking_time_move"
@@ -14366,5 +14176,1465 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_21_a_refused_configure_refuses_its_burst_through_the_kernel"
- }
+ },
+  {
+    "id": "N47S5-01",
+    "name": "5a: a transmit value received exactly at the last booked end is refused (RM-21, the value boundary)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(Until::At(end)) if end <= receipt => Ok(()),",
+    "new": "Some(Until::At(end)) if end < receipt => Ok(()),",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_21_busy_is_max_accepted_end"
+  },
+  {
+    "id": "N47S5-02",
+    "name": "5a: a closed burst of 4 to 32 samples fronts at its end, not one past it (RM-15)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "start.checked_add(len.max(4))?.checked_add(1)",
+    "new": "Some(start.checked_add(len.max(4))?)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_burst_front_is_end_plus_one"
+  },
+  {
+    "id": "N47S5-03",
+    "name": "5a: a burst of 1 to 3 samples fronts at start plus 4, not 5 (RM-15, the padded first send)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(len) => start.checked_add(len.max(4))?.checked_add(1),",
+    "new": "Some(len) => start.checked_add(len.max(3))?.checked_add(1),",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_1_to_3_sample_burst_front_is_start_plus_five"
+  },
+  {
+    "id": "N47S5-04",
+    "name": "5a: a held tail fronts at its end plus 1, not 2 (RM-15)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(2),",
+    "new": "Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(1),",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_held_tail_front_is_end_plus_two"
+  },
+  {
+    "id": "N47S5-05",
+    "name": "5a: a booking that continues a chain is tested against the chain's own region (no join excuse)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.meets(start, front, join)",
+    "new": "self.meets(start, front, None)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_contiguous_booking_joins_a_long_head"
+  },
+  {
+    "id": "N47S5-06",
+    "name": "5a: only a joining burst longer than 32 samples may join a chain (RM-15)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "len.and_then(|_| self.chains.iter().position(|c| c.join && c.end == start",
+    "new": "len.filter(|&len| len > 32).and_then(|_| self.chains.iter().position(|c| c.join && c.end == start",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_short_burst_joins_a_long_chain_with_the_chain_front"
+  },
+  {
+    "id": "N47S5-07",
+    "name": "5a: the overlap test is one-sided: a candidate that runs into a later booking is accepted (RM-15)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.start < front && start < c.front)",
+    "new": "start < c.front)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_candidate_running_into_a_later_booking_is_refused"
+  },
+  {
+    "id": "N47S5-08",
+    "name": "5a: back-to-back regions overlap at their shared sample (RM-15 half-open)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.start < front && start < c.front",
+    "new": "c.start <= front && start < c.front",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_back_to_back_bookings_are_accepted"
+  },
+  {
+    "id": "N47S5-09",
+    "name": "5a: a Stop that cancels a booking takes the earlier end of the region (RM-16, the hull's end)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "front.max(stop)",
+    "new": "front.min(stop)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_second_stop_that_drops_a_booking_extends_the_region_to_the_hull"
+  },
+  {
+    "id": "N47S5-10",
+    "name": "5a: a Stop that cancels only the booking at its own instant adds no region (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "let dropped = self.chains.iter().any(|c| c.start >= t && c.start < stop);",
+    "new": "let dropped = self.chains.iter().any(|c| c.start > t && c.start < stop);",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_cancels_bookings_starting_at_or_after_the_stop"
+  },
+  {
+    "id": "N47S5-11",
+    "name": "5a: a repeat's region ends at its first sample, not at infinity (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "None => Some(i64::MAX),",
+    "new": "None => Some(start),",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_repeat_occupies_until_a_stop"
+  },
+  {
+    "id": "N47S5-12",
+    "name": "5a: the first free sample ignores accepted regions (no skip)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.held_until(k, joins, now, &join_by, horizon) {",
+    "new": "self.held_until(k, joins, now, &join_by, horizon).filter(|_| false) {",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_first_free_skips_an_accepted_span"
+  },
+  {
+    "id": "N47S5-13",
+    "name": "5a: the repeat boundary is the floor of the first period at or after the bound, not its ceiling",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "(bound - origin).max(0) + period - 1",
+    "new": "(bound - origin).max(0)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_13_repeat_boundary_is_the_first_boundary_at_or_after_the_bound"
+  },
+  {
+    "id": "N47S5-14",
+    "name": "5a: a Stop leaves a chain joinable at its end",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.front = c.front.min(stop); c.join = false;",
+    "new": "c.front = c.front.min(stop); c.join = c.join;",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_truncates_the_front_and_ends_the_join"
+  },
+  {
+    "id": "N47S5-16",
+    "name": "5b-1: a Stop bound is the first sample at or after the window, without the three-sample margin (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "at_or_after(at.saturating_add(in_flight)).saturating_add(3)",
+    "new": "at_or_after(at.saturating_add(in_flight))",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_bound_is_at_or_after_plus_three"
+  },
+  {
+    "id": "N47S5-17",
+    "name": "5b-1: a Stop bound rounds the window's end down to a sample, not up (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "at_or_after(at.saturating_add(in_flight))",
+    "new": "at_or_after(at.saturating_add(in_flight).saturating_sub(1))",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_bound_rounds_up_on_a_fractional_window"
+  },
+  {
+    "id": "N47S5-18",
+    "name": "5b-2a: the Mock accepts an overlapping booking at receipt (no refusal, RM-15, MR-16)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].busy.accept(start, (!repeat).then_some(length), now, join_by, horizon).err()",
+    "new": "self.tx[k].busy.accept(start, (!repeat).then_some(length), now, join_by, horizon).err().filter(|_| false)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s1_a_booking_meeting_an_accepted_repeat_is_refused_at_receipt"
+  },
+  {
+    "id": "N47S5-19",
+    "name": "5b-2a: UHD accepts an overlapping booking at receipt (no refusal, UR-21)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "busy.accept(start, (!repeat).then_some(len as i64), receipt, join_by, horizon).err()",
+    "new": "busy.accept(start, (!repeat).then_some(len as i64), receipt, join_by, horizon).err().filter(|_| false)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s1_overlap_refused_at_receipt"
+  },
+  {
+    "id": "N47S5-20",
+    "name": "5b-2a: the Mock's SendAsap start is the ordinary sample, not the first free one (RM-15, S6)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].busy.place(ordinary, (!repeat).then_some(length), now, join_by, horizon)",
+    "new": "Some(ordinary)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s6_send_asap_moves_past_an_accepted_span"
+  },
+  {
+    "id": "N47S5-21",
+    "name": "5b-2a: UHD's SendAsap start is now plus the lead, not the first free sample (S6, control.rs today's form)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "busy.place(ordinary, rec_len, receipt, join_by, horizon)",
+    "new": "Some(clock.at_or_after(clock.instant(now_k).saturating_add(lead)))",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s6_send_asap_moves_past_an_accepted_span"
+  },
+  {
+    "id": "N47S5-23",
+    "name": "5b-2a: the Mock's Stop keeps the held bursts it would cancel (RM-25, S7)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "let held: Vec<i64> = self.tx[k].held.keys().copied().collect();",
+    "new": "let held: Vec<i64> = Vec::new();",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_25_stop_does_not_radiate_unhanded_window_edge_payload"
+  },
+  {
+    "id": "N47S5-24",
+    "name": "5b-2a: UHD's Stop does not end the transmit bookings at the Stop (RM-16, S7)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight());",
+    "new": "let _ = (now, self.core.tx_in_flight());",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
+  },
+  {
+    "id": "N47S5-27",
+    "name": "5b-2a: the Mock records a booking the late policy drops, so it occupies its span (RM-15)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "LateOutcome::Drop { late_by } => {",
+    "new": "LateOutcome::Drop { late_by } => { let _ = self.tx[k].busy.accept(target, (!repeat).then_some(length), now, |_| i64::MIN, horizon);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_dropped_booking_occupies_nothing"
+  },
+  {
+    "id": "N47S5-28",
+    "name": "5b-2a: UHD records a booking the late policy drops, so it occupies its span (RM-15)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "LateOutcome::Drop { late_by } => {",
+    "new": "LateOutcome::Drop { late_by } => { let _ = lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, k)).busy.accept(start, Some(len as i64), receipt, |_| i64::MIN, handover_horizon(receipt, self.core.ticks(self.core.description.timing.tx_in_flight_ns), |t| clock.at_or_after(t)));",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_a_burst_dropped_at_booking_is_not_booked"
+  },
+  {
+    "id": "N47S5-29",
+    "name": "5b-2a: the Mock's Stop adds no stop tail to the overlap record (RM-16, S7)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].busy.halt(at_stop, stop);",
+    "new": "let _ = (at_stop, stop);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_25_s7_stop_tail_refuses_until_bound"
+  },
+  {
+    "id": "N47S5-30",
+    "name": "5b-2a: UHD's Stop adds no stop tail to the overlap record (RM-16, S7)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "self.busy.halt(clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t)));",
+    "new": "let _ = in_flight;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_stop_preserves_handed_cursor_after_stop"
+  },
+  {
+    "id": "N47S5-31",
+    "name": "5b-3: UHD's dispatch-time move takes no collision check (RM-14, UR-21, Sol 3)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if moved.is_err() { self.refuse(&held, late_by, \"UR-21: the moved start overlaps an accepted booking\");",
+    "new": "if false { self.refuse(&held, late_by, \"UR-21: the moved start overlaps an accepted booking\");",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_s3_dispatch_move_into_a_later_booking_is_refused"
+  },
+  {
+    "id": "N47S5-32",
+    "name": "5b-3: a refused dispatch move keeps its region in the record (C6, UR-23)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.remove_head(i, start, len);",
+    "new": "let _ = (i, len);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_s3_refused_move_frees_its_front"
+  },
+  {
+    "id": "N47S5-59",
+    "name": "5b-3: a dispatch move drops its head's joined pieces from the record, so no later booking is tested against them (M4; retargeted in rev 29, F49)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(len) if self.chains[i].last() != old => {",
+    "new": "Some(len) if false => {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_s3_dispatch_move_into_a_later_booking_is_refused"
+  },
+  {
+    "id": "N47S5-54",
+    "name": "5a: a join is accepted at any receipt, with no deadline J(e) (RM-15, M1)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.join && c.end == start && now <= join_by(start)",
+    "new": "c.join && c.end == start && true",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_join_is_accepted_up_to_the_deadline_and_refused_after"
+  },
+  {
+    "id": "N47S5-55",
+    "name": "5a: a Stop adds a region even when it cancels no booking (RM-16, rev 4)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if dropped {",
+    "new": "if true {",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_that_drops_nothing_adds_no_region"
+  },
+  {
+    "id": "N47S5-62",
+    "name": "5a: a Stop never lowers a finite front (the superseded M2 rule; a kept chain is capped at the Stop's bound, rev 4)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.front = c.front.min(stop);",
+    "new": "c.front = c.front;",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_lowers_a_finite_front_to_its_bound"
+  },
+  {
+    "id": "N47S5-63",
+    "name": "5a: a booking that meets the Stop's region is accepted (RM-16, the region term of accept)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.region.filter(|&(s, f)| s < front && start < f).map(|(_, f)| f)",
+    "new": "self.region.filter(|_| false).map(|(_, f)| f)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_region_refuses_the_span_the_stop_cut"
+  },
+  {
+    "id": "N47S5-64",
+    "name": "5a: first_free ignores the Stop's region (RM-16, the region term of held_until)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": ".chain(self.region.filter(|&(start, front)| start <= k && k < front).map(|(_, front)| front))",
+    "new": ".chain(std::iter::empty())",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_region_refuses_the_span_the_stop_cut"
+  },
+  {
+    "id": "N47S5-65",
+    "name": "5a: a Stop that cancels a booking adds no region (RM-16, the region's creation)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if dropped {",
+    "new": "if false {",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_stop_region_refuses_the_span_the_stop_cut"
+  },
+  {
+    "id": "N47S5-67",
+    "name": "5a: a Stop that cancels a booking after an earlier region starts the region at its own instant (RM-16, the hull's start)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some((start, front)) => (start.min(t), front.max(stop)),",
+    "new": "Some((start, front)) => (t, front.max(stop)),",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_second_stop_that_drops_a_booking_extends_the_region_to_the_hull"
+  },
+  {
+    "id": "N47S5-68",
+    "name": "5a: first_free takes a join point on a chain end after its join deadline (RM-15, m3)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "!(joins && c.join && c.end == k && now <= join_by(k))",
+    "new": "!(joins && c.join && c.end == k)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_first_free_skips_an_accepted_span"
+  },
+  {
+    "id": "N47S5-69",
+    "name": "5a: a Stop cancels a booking that starts at or after its bound and still adds a region (RM-16, major A: never handed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.start >= t && c.start < stop",
+    "new": "c.start >= t",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_that_cancels_a_booking_past_its_bound_adds_no_region"
+  },
+  {
+    "id": "N47S5-25",
+    "name": "5b-2b: the owner closes a held tail at once, without waiting for a booking that can still continue the chain (UR-23, RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if busy.continuation_open(e, self.core.now(), |k| self.core.join_by(clock, k)) {",
+    "new": "if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4b_three_bookings_b_continues_a_and_c_plays_on_time"
+  },
+  {
+    "id": "N47S5-56",
+    "name": "5b-2b: the owner's close deadline is the device lead deadline instead of J(e) (UR-23, M1, R4-m2)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "|k| self.core.join_by(clock, k)) {",
+    "new": "|k| clock.instant(k) - self.core.ticks(DEVICE_LEAD_NS)) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_m1_148us_booked_early_at_the_chain_front_plays_on_time"
+  },
+  {
+    "id": "N47S5-57",
+    "name": "5b-2b: a held tail closes while a booking received before its TxCmd is drained still joins its last piece (RM-16, M1, R4-m2)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.joined.contains(&e) || (c.end == e",
+    "new": "(c.end == e",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_m1_held_tail_waits_for_a_join_received_before_its_txcmd_is_drained"
+  },
+  {
+    "id": "N47S5-58",
+    "name": "5b-2b: a join received exactly at J(e) is refused (RM-15, M1, R4-5)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "now <= join_by(start)",
+    "new": "now < join_by(start)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_m1_receipt_at_the_deadline_is_decided_by_the_record"
+  },
+  {
+    "id": "N47S5-60",
+    "name": "5b-2b: an owner close past the record's front is not counted (Q-6)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.core.stat(\"tx_close_past_record_front\", 1);",
+    "new": "let _ = 1;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_stat_counts_owner_closes_past_the_record_front"
+  },
+  {
+    "id": "N47S5-61",
+    "name": "5c (D24): a late joined burst that cannot move is refused, not sent",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.refuse(&held, late_by, \"UR-21: the moved start overlaps an accepted booking\"); return None;",
+    "new": "self.refuse(&held, late_by, \"UR-21: the moved start overlaps an accepted booking\"); return Some(held);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_a_late_joined_burst_cannot_move_and_is_refused"
+  },
+  {
+    "id": "N47S5-72",
+    "name": "5c: a late burst reports its SendAsap TIME_ERROR twice",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.report_send_asap(&held, late_by);",
+    "new": "self.report_send_asap(&held, late_by);\n                self.report_send_asap(&held, late_by);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_first_dispatch_rechecks_all_late_policies"
+  },
+  {
+    "id": "N47S5-33",
+    "name": "5d-M: a switch's boundary is the first period boundary at or before its receipt bound (the earliest choice is min, not max)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "bound.max(target)",
+    "new": "bound.min(target)",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s8_switch_same_length_starts_on_the_boundary"
+  },
+  {
+    "id": "N47S5-34",
+    "name": "5d-M: a second switch is accepted while one is pending (RM-13, one pending switch per repeat)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if self.pending.is_some() || !playing {",
+    "new": "if !playing {",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s10_second_pending_switch_refused"
+  },
+  {
+    "id": "N47S5-35",
+    "name": "5d-M: a pending switch is applied one sample early (pending until device time reaches the boundary, not past it)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "s.installed && s.boundary <= now_k)",
+    "new": "s.installed && s.boundary < now_k)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_switch_pending_until_the_boundary_is_reached"
+  },
+  {
+    "id": "N47S5-36",
+    "name": "5d-M: a Stop before a pending switch's boundary does not cancel it (RM-16, S11)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(switch) => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, moved_to: switch.moved_to }),",
+    "new": "Some(_) => {}",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_25_s11_stop_cancels_pending_switch"
+  },
+  {
+    "id": "N47S5-37",
+    "name": "5d-M: a switch is accepted on a stopped or not-yet-started repeat (the playing test drops its front and start terms)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "let playing = self.chains.iter().any(|c| c.end == i64::MAX && c.front == i64::MAX && c.start <= now_k);",
+    "new": "let playing = self.chains.iter().any(|c| c.end == i64::MAX);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s10_switch_on_stopped_or_finite_or_not_started_refused"
+  },
+  {
+    "id": "N47S5-38",
+    "name": "5d-M: a switch's new period is derived from its boundary instead of its waveform length",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.record_switch(from, id, length, start, now);",
+    "new": "self.record_switch(from, id, start - from.origin, start, now);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s8_switch_same_length_starts_on_the_boundary"
+  },
+  {
+    "id": "N47S5-39",
+    "name": "5d-M: any metadata is accepted on a repeat (RM-13: empty or the switch mark only)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "let metadata_ok = metadata.is_empty() || switch;",
+    "new": "let metadata_ok = true;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_metadata_is_empty_or_the_mark_only"
+  },
+  {
+    "id": "N47S5-40",
+    "name": "5d-M: a switch's boundary ignores the profile's device lead",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "now.saturating_add(window).saturating_add(lead)).unwrap_or(i64::MAX);",
+    "new": "now.saturating_add(window)).unwrap_or(i64::MAX);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_switch_boundary_uses_the_profile_device_lead"
+  },
+  {
+    "id": "N47S5-51",
+    "name": "5d-M: a switch's record names the new Action as its predecessor",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "predecessor: from.id,",
+    "new": "predecessor: id,",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s8_record_fields"
+  },
+  {
+    "id": "N47S5-70",
+    "name": "5d-M: the record's receipt does not apply a pending switch whose boundary has passed (advance in prune)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.advance(now_k); self.chains.retain(|c| c.front > now_k);",
+    "new": "self.chains.retain(|c| c.front > now_k);",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_advance_runs_inside_every_call"
+  },
+  {
+    "id": "N47S5-71",
+    "name": "5d-M: a switch does not apply a pending switch whose boundary has passed (advance in switch)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.advance(now_k); let playing",
+    "new": "let playing",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_advance_runs_inside_every_call"
+  },
+  {
+    "id": "N47S5-41",
+    "name": "5d-U: install takes a switch only while the cursor is before its boundary (S8: cursor == boundary installs; the rule is `<=`)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if cursor_k <= switch.boundary {",
+    "new": "if cursor_k < switch.boundary {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s8_switch_at_the_exact_handed_cursor_installs"
+  },
+  {
+    "id": "N47S5-42",
+    "name": "5d-U: install takes a switch whose cursor is past its boundary (S12 under DropAndFlag: the refusal is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if cursor_k <= switch.boundary {",
+    "new": "if true {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s12_drop_and_flag_switch_handed_past_is_refused"
+  },
+  {
+    "id": "N47S5-43",
+    "name": "5d-U: a pending switch is applied at the owner's first step, not at device time b (Sol 5)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "busy.advance(clock.at_or_after(now));",
+    "new": "busy.advance(i64::MAX);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s5_second_switch_refused_while_device_time_is_before_the_boundary"
+  },
+  {
+    "id": "N47S5-44",
+    "name": "5d-U: a failed reopen that ends the repeat keeps the pending switch (the F8 cancellation is removed)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "streams.stream_mut(key).busy.cancel_switch();",
+    "new": "streams.stream_mut(key);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_22_f8_recovery_that_ends_the_repeat_cancels_the_pending_switch"
+  },
+  {
+    "id": "N47S5-45",
+    "name": "5d-U: UHD accepts any metadata on a repeat (RM-13: empty or the switch mark only)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "if !(metadata.is_empty() || switch) {",
+    "new": "if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_metadata_is_empty_or_the_mark_only"
+  },
+  {
+    "id": "N47S5-46",
+    "name": "5d-U: the owner never takes a switch (its install is skipped at the hand-over)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if held.switch && !self.install(&mut held) {",
+    "new": "if held.switch && false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s8_switch_installed_before_the_boundary_sample"
+  },
+  {
+    "id": "N47S5-52",
+    "name": "5d-U: a held cut at a switch's boundary sends end-of-burst where the switch continues the device burst (m9)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let device_eob = eob && (!ends_at_held || short_first) && !hold;",
+    "new": "let device_eob = eob && (!ends_at_held || short_first || open.held.repeat) && !hold;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_switch_cut_reuses_held_cut_path"
+  },
+  {
+    "id": "N47S5-53",
+    "name": "5d-U: a switch's new repeat keeps the period of the one it replaces (the playing record takes the old period)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "stream.playing = Some(Playing { id, origin: start, period: len as i64 });",
+    "new": "stream.playing = Some(Playing { id, origin: start, period: playing.map_or(len as i64, |from| from.period) });",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s10_a_repeat_after_a_stop_keeps_its_own_period"
+  },
+  {
+    "id": "N47S5-47",
+    "name": "5e: Tx.switch sends no repeat mark (start_repeat without the mark is a plain repeat, which a playing stream refuses)",
+    "file": "python/ezsdr/session.py",
+    "old": "{\"radio.repeat_operation\": \"switch\"}",
+    "new": "{}",
+    "python": "test_easy_api.StartValues.test_ea_16_switch_sends_a_marked_repeat"
+  },
+  {
+    "id": "N47S5-48",
+    "name": "5e: a second plain repeat on a playing stream is not raised as Rejected from the submit reply (_admitted ignores refused)",
+    "file": "python/ezsdr/session.py",
+    "old": "if refused:",
+    "new": "if False:",
+    "python": "test_easy_api.StartValues.test_ea_16_second_plain_repeat_on_a_playing_stream_raises_rejected"
+  },
+  {
+    "id": "N47S5-49",
+    "name": "5e: the Session compiles a start_repeat's params without them (the switch mark never reaches the Provider)",
+    "file": "crates/ezsdr-kernel/src/session.rs",
+    "old": "metadata: params.clone(),",
+    "new": "metadata: Default::default(),",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "repeat_switch",
+    "filter": "ea_16_a_marked_start_repeat_switches_and_an_unmarked_one_is_refused"
+  },
+  {
+    "id": "N47S5-50",
+    "name": "5e: Tx.switch sends a waveform of the wrong channel count (the channel check is removed)",
+    "file": "python/ezsdr/session.py",
+    "old": "self._check_channels(channels)\n        action = {",
+    "new": "action = {",
+    "python": "test_easy_api.StartValues.test_ea_16_switch_refuses_non_finite_and_wrong_channels_before_sending"
+  },
+  {
+    "id": "N47S5-73",
+    "name": "5e: a waveform with a non-finite sample is sent (the finite check in _cf32 is removed)",
+    "file": "python/ezsdr/session.py",
+    "old": "    if not np.isfinite(array).all():",
+    "new": "    if False:",
+    "python": "test_easy_api.StartValues.test_ea_16_switch_refuses_non_finite_and_wrong_channels_before_sending"
+  },
+  {
+    "id": "N47S5-74",
+    "name": "5g: a late switch keeps its chosen boundary (the owner's cursor past it moves nothing)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "let moved = repeat_boundary(switch.grid.0, switch.grid.1, cursor_k);",
+    "new": "let moved = switch.boundary;",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one"
+  },
+  {
+    "id": "N47S5-75",
+    "name": "5g: a late switch moves to the first boundary after its cursor, not to the one at or after it",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "repeat_boundary(switch.grid.0, switch.grid.1, cursor_k)",
+    "new": "repeat_boundary(switch.grid.0, switch.grid.1, cursor_k + 1)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one"
+  },
+  {
+    "id": "N47S5-76",
+    "name": "5g: a DropAndFlag switch handed past its boundary is moved anyway (the policy branch is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "} else if moves {",
+    "new": "} else if true {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s12_drop_and_flag_switch_handed_past_is_refused"
+  },
+  {
+    "id": "N47S5-77",
+    "name": "5g: an installed late switch keeps its chosen boundary, so a Stop reads that one (the move is not stored)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.pending = Some(Switch { boundary, installed: true, moved_to, ..switch });",
+    "new": "self.pending = Some(Switch { installed: true, moved_to, ..switch });",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_stop_before_the_moved_boundary_cancels_the_switch"
+  },
+  {
+    "id": "N47S5-78",
+    "name": "5g: the TIME_ERROR of a moved switch does not name its action",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "target: held.target, action: Some(id) })",
+    "new": "target: held.target, action: None })",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s12_send_asap_switch_handed_past_is_installed_at_the_next_boundary"
+  },
+  {
+    "id": "N47S5-79",
+    "name": "5g: the switch row records no moved boundary",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "row[\"moved_to\"] = serde_json::json!(settled.moved_to);",
+    "new": "row[\"moved_to\"] = serde_json::json!(null);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s12_send_asap_switch_handed_past_is_installed_at_the_next_boundary"
+  },
+  {
+    "id": "N47S5-80",
+    "name": "5g: the owner keeps the chosen boundary of a moved switch (its held burst is not moved)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "held.k = boundary;",
+    "new": "let _ = boundary;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s12_send_asap_switch_handed_past_is_installed_at_the_next_boundary"
+  },
+  {
+    "id": "N47S5-81",
+    "name": "5h: the hand-over horizon is inclusive (a chain starting exactly at it counts as handable)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.start < horizon && !self.chains.iter()",
+    "new": "c.start <= horizon && !self.chains.iter()",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_booking_before_a_chain_inside_the_hand_over_horizon_is_refused"
+  },
+  {
+    "id": "N47S5-82",
+    "name": "5h: the receipt rule refuses a booking that starts after a handable chain (the 'starts before' predicate is reversed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "start < c.start && self.may_be_handed(c, now, horizon, &join_by)",
+    "new": "c.start < start && self.may_be_handed(c, now, horizon, &join_by)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_booking_before_a_chain_inside_the_hand_over_horizon_is_refused"
+  },
+  {
+    "id": "N47S5-83",
+    "name": "5h: first_free does not skip a handable chain that starts after the instant (the skip term is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "filter(|c| k < c.start && self.may_be_handed(c, now, horizon, join_by))",
+    "new": "filter(|_| false)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_first_free_moves_past_a_chain_inside_the_hand_over_horizon"
+  },
+  {
+    "id": "N47S5-84",
+    "name": "5h: a chain behind an open join is treated as handable (the joinable-blocker term is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.start < horizon && !self.chains.iter().any(|x| x.join && x.end <= c.start && now <= join_by(x.end))",
+    "new": "c.start < horizon",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_chain_behind_an_open_join_is_not_yet_handed"
+  },
+  {
+    "id": "N47S5-85",
+    "name": "5i (F3): a repeat at a join point is held there (held_until's joins term is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "!(joins && c.join && c.end == k && now <= join_by(k))",
+    "new": "!(c.join && c.end == k && now <= join_by(k))",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_repeat_at_a_join_point_skips_it_to_the_front"
+  },
+  {
+    "id": "N47S5-86",
+    "name": "5i (F4): ordinary_k places a booking one sample before decide's threshold (the sample of the decision is not taken first)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "at_or_after(instant(at_or_after(decided)).saturating_add(lead))",
+    "new": "at_or_after(decided.saturating_add(lead))",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_ordinary_k_is_decide_s_threshold"
+  },
+  {
+    "id": "N47S5-87",
+    "name": "5i (F5): prune drops a chain whose front is one sample past the receipt",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.chains.retain(|c| c.front > now_k);",
+    "new": "self.chains.retain(|c| c.front > now_k + 1);",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_prune_keeps_a_chain_whose_front_is_past_the_receipt"
+  },
+  {
+    "id": "N47S5-88",
+    "name": "5i (F10): a dispatch move is accepted without the clash test, so a pruned head moved into a later booking is not refused (retargeted in rev 29, F49)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "(!bookings.meets(new, front(new, len, false)?, None)).then_some(new)",
+    "new": "Some(new)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_s3_a_pruned_head_moved_into_a_later_booking_is_refused"
+  },
+  {
+    "id": "N47S5-89",
+    "name": "5i (F11): a burst the configure turn refuses stays booked (the drop of its span in the refused branch is removed)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "lock(&core.streams).stream_mut(key).busy.drop_piece(held.k, held.record_len());",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_a_refused_burst_stays_counted_until_its_booked_end"
+  },
+  {
+    "id": "N47S5-90",
+    "name": "5i (F21): a refused switch sets the repeat it would replace as playing (the owner's refusal is not checked)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "if repeat && !switch {",
+    "new": "if repeat {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_a_refused_switch_leaves_the_repeat_it_replaces_playing"
+  },
+  {
+    "id": "N47S5-91",
+    "name": "5i (F21): the owner's install does not set the repeat it takes as playing (the switch's period is not recorded)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "stream.playing = Some(Playing { id, origin: boundary, period: held.waveform_len as i64 });",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s9_switch_different_length_sets_the_new_period"
+  },
+  {
+    "id": "N47S5-92",
+    "name": "5i (F24): a mark on a finite burst is taken as a switch (the repeat term of the switch test is removed)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "let switch = repeat && ezsdr_radio::staging::is_switch(metadata);",
+    "new": "let switch = ezsdr_radio::staging::is_switch(metadata);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_metadata_is_empty_or_the_mark_only"
+  },
+  {
+    "id": "N47S5-93",
+    "name": "5i (F24, Mock): a mark on a finite burst is taken as a switch (the repeat term of the switch test is removed)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "let switch = repeat && is_switch(&metadata);",
+    "new": "let switch = is_switch(&metadata);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_metadata_is_empty_or_the_mark_only"
+  },
+  {
+    "id": "N47S5-94",
+    "name": "5j (F30): the Mock's record never settles a switch at device time (the record's advance at device time is removed)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].busy.advance(now_k);",
+    "new": "let _ = now_k;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_s8_applied_switch_settles_at_device_time_without_a_stop"
+  },
+  {
+    "id": "N47S5-95",
+    "name": "5j (F34): Tx.switch returns a Provider refusal as an entry instead of raising Rejected",
+    "file": "python/ezsdr/session.py",
+    "old": "\"params\": {\"radio.repeat_operation\": \"switch\"},\n        }\n        return _admitted(*self._session._submit(action, data))",
+    "new": "\"params\": {\"radio.repeat_operation\": \"switch\"},\n        }\n        return self._session._submit(action, data)[0]",
+    "python": "test_easy_api.StartValues.test_ea_16_a_switch_the_provider_refuses_raises_rejected"
+  },
+ {
+   "id": "N47S5-96",
+   "name": "fix3 (F39): a switch moved by its late policy leaves its burst record on time (the install does not set the burst's late outcome)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_21_s12_send_asap_switch_handed_past_is_installed_at_the_next_boundary",
+   "old": "held.open.late = Some(LateOutcome::SendAsap { late_by });",
+   "new": ""
+ },
+ {
+   "id": "N47S5-97",
+   "name": "fix3 (F40): a moved switch's late amount is measured from the boundary it was moved to (boundary - held.k, not cursor - held.k)",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_stop_before_the_moved_boundary_cancels_the_switch",
+   "old": "self.core.late_by(clock, cursor - held.k)",
+   "new": "self.core.late_by(clock, boundary - held.k)"
+ },
+ {
+   "id": "N47S5-98",
+   "name": "fix3 (F40): a moved switch's late amount is the cursor itself, not how far it passed the chosen boundary",
+   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_23_stop_before_the_moved_boundary_cancels_the_switch",
+   "old": "self.core.late_by(clock, cursor - held.k)",
+   "new": "self.core.late_by(clock, cursor)"
+ },
+ {
+   "id": "N47S5-99",
+   "name": "fix3 (F42): the switch row's moved_to is never written at settlement (the move is in the install only, not in the row)",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_21_s12_send_asap_switch_handed_past_is_installed_at_the_next_boundary",
+   "old": "row[\"moved_to\"] = serde_json::json!(settled.moved_to);",
+   "new": ""
+ },
+ {
+   "id": "N47S5-100",
+   "name": "fix3 (F42): the owner's install does not keep the boundary it moved to on the pending switch (the settlement reports no move)",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio",
+   "test_bin": "staging",
+   "filter": "rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one",
+   "old": "self.pending = Some(Switch { boundary, installed: true, moved_to, ..switch });",
+   "new": "self.pending = Some(Switch { boundary, installed: true, moved_to: None, ..switch });"
+ },
+ {
+   "id": "N47S5-101",
+   "name": "fix3 (F42): an applied switch's settlement drops the boundary it moved to",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio",
+   "test_bin": "staging",
+   "filter": "rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one",
+   "old": "self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Applied, moved_to: switch.moved_to });",
+   "new": "self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Applied, moved_to: None });"
+ },
+ {
+   "id": "N47S5-102",
+   "name": "fix3 (F43): a booking that starts before a booking the owner may hold is refused with the overlap reason on UHD",
+   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_21_s5_b_handed_before_an_earlier_a_is_refused_at_receipt",
+   "old": "Overlap::Handed => \"UR-21: the burst starts before a booking that may already be handed\",",
+   "new": "Overlap::Handed => \"UR-21: the burst overlaps an accepted booking\","
+ },
+ {
+   "id": "N47S5-103",
+   "name": "fix3 (F43): a booking that starts before a booking the owner may hold is refused with the overlap reason on MockRadio",
+   "file": "crates/ezsdr-mock-radio/src/lib.rs",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "parity",
+   "filter": "s15_parity_b_first_accepted_booking_rule",
+   "old": "Overlap::Handed => \"MR-16: burst starts before a booking that may already be handed\",",
+   "new": "Overlap::Handed => \"MR-16: burst overlaps an accepted booking\","
+ },
+ {
+   "id": "N47S5-104",
+   "name": "fix3 (F43): the parity helper counts a handed refusal as an overlap (the two classes are not told apart)",
+   "file": "crates/ezsdr-acceptance/tests/parity.rs",
+   "crate": "ezsdr-acceptance",
+   "test_bin": "parity",
+   "filter": "s15_parity_b_first_accepted_booking_rule",
+   "old": "reason.contains(\"may already be handed\")",
+   "new": "reason.contains(\"overlaps an accepted booking\")"
+ },
+ {
+   "id": "N47S5-105",
+   "name": "fix3 (F45): the hand-over horizon ignores the in-flight window (it is the receipt's own sample)",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_21_s5_b_handed_before_an_earlier_a_is_refused_at_receipt",
+   "old": "at_or_after(now.saturating_add(in_flight))",
+   "new": "at_or_after(now)"
+ },
+ {
+   "id": "N47S5-106",
+   "name": "fix3 (F45): the hand-over horizon is taken in root ticks, not converted to a sample",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio-uhd",
+   "test_bin": "lib",
+   "filter": "ur_21_s5_c_a_booking_before_a_chain_beyond_the_horizon_is_accepted",
+   "old": "at_or_after(now.saturating_add(in_flight))",
+   "new": "now.saturating_add(in_flight)"
+ },
+ {
+   "id": "N47S5-107",
+   "name": "5j-1 (rev 23): a Session action with no at is not marked untimed (the None branch of Vocabulary)",
+   "file": "crates/ezsdr-kernel/src/session.rs",
+   "crate": "ezsdr-kernel",
+   "test_bin": "coordinator",
+   "filter": "rs_19_an_untimed_session_action_is_dispatched_untimed",
+   "old": "out.untimed = true;",
+   "new": "out.untimed = false;"
+ },
+ {
+   "id": "N47S5-108",
+   "name": "5j-1 (rev 23): a Session action with an at is marked untimed (the Some branch of Vocabulary)",
+   "file": "crates/ezsdr-kernel/src/session.rs",
+   "crate": "ezsdr-kernel",
+   "test_bin": "coordinator",
+   "filter": "rs_19_a_timed_session_action_is_not_untimed",
+   "old": "Some(t) => *t,",
+   "new": "Some(t) => { out.untimed = true; *t }"
+ },
+ {
+   "id": "N47S5-109",
+   "name": "5j-1 (rev 23): submit passes false to admission for every item, so the mark is lost",
+   "file": "crates/ezsdr-kernel/src/coordinator/pipeline.rs",
+   "crate": "ezsdr-kernel",
+   "test_bin": "coordinator",
+   "filter": "rs_19_an_untimed_session_action_is_dispatched_untimed",
+   "old": "incoming, &configuration, compiled.untimed)",
+   "new": "incoming, &configuration, false)"
+ },
+ {
+   "id": "N47S5-110",
+   "name": "5j-1 (rev 23): dispatch does not copy the admitted mark into the Dispatched record",
+   "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+   "crate": "ezsdr-kernel",
+   "test_bin": "coordinator",
+   "filter": "rs_19_an_untimed_session_action_is_dispatched_untimed",
+   "old": "node: admitted.node, untimed: admitted.untimed }",
+   "new": "node: admitted.node, untimed: false }"
+ },
+ {
+   "id": "N47S5-111",
+   "name": "5j-5 (rev 26): admission keeps requested_at for an untimed burst (M2: the Kernel chose the instant, so an off-grid one is not a request)",
+   "file": "crates/ezsdr-kernel/src/coordinator/admission.rs",
+   "crate": "ezsdr-kernel",
+   "test_bin": "coordinator",
+   "filter": "rs_19_an_untimed_session_action_has_no_requested_instant",
+   "old": "*requested_at = if untimed { None } else { admitted.requested_target.map(AbsoluteDeadline::new) };",
+   "new": "*requested_at = admitted.requested_target.map(AbsoluteDeadline::new);"
+ },
+ {
+   "id": "N47S5-112",
+   "name": "5j-2 (rev 23): place tests only the candidate's start, not its full front (first_free only)",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio",
+   "test_bin": "staging",
+   "filter": "rm_15_place_tests_the_full_front",
+   "old": "front(k, len, join.is_some())?",
+   "new": "k + 1"
+ },
+ {
+   "id": "N47S5-113",
+   "name": "5j-2 (rev 23): first_free ignores the Stop region (held_until's region term)",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio",
+   "test_bin": "staging",
+   "filter": "rm_16_untimed_booking_skips_the_stop_region",
+   "old": ".chain(self.region.filter(|&(start, front)| start <= k && k < front).map(|(_, front)| front))",
+   "new": ".chain(std::iter::empty::<i64>())"
+ },
+ {
+   "id": "N47S5-114",
+   "name": "5j-2 (rev 23): move_untimed places the head before removing its own span, so the head blocks itself",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio",
+   "test_bin": "staging",
+   "filter": "rm_16_a_moved_untimed_head_does_not_block_itself",
+   "old": "self.remove_head(i, old, len);",
+   "new": "let _ = (i, len);"
+ },
+ {
+   "id": "N47S5-115",
+   "name": "5j-2 (rev 23): region_move moves a timed booking past a chain at its start as well as the Stop region (F36)",
+   "file": "crates/ezsdr-radio/src/staging.rs",
+   "crate": "ezsdr-radio",
+   "test_bin": "staging",
+   "filter": "rm_16_a_timed_send_asap_meeting_a_chain_is_refused",
+   "old": "if self.chain_front(at, front, join).is_some() || self.region_met(at, front).is_none()",
+   "new": "if self.region_met(at, front).is_none()"
+ },
+  {
+    "id": "N47S5-116",
+    "name": "5j-3 (rev 24): an untimed refusal also emits TIME_ERROR{refused} (RM-15: an untimed booking has no late path)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_untimed_repeat_on_a_playing_stream_is_refused_without_time_error",
+    "old": "if let Some(reason) = refusal {",
+    "new": "if let Some(reason) = refusal { if untimed { self.emit_late_burst(k, Duration::new(ClockDomainId::HOST_MONOTONIC, 0), at.time_point, now_tx, ezsdr_radio::payloads::TimeErrorOutcome::Refused)?; }"
+  },
+  {
+    "id": "N47S5-117",
+    "name": "5j-3 (rev 24): a timed SendAsap booking meeting only the Stop region is refused, not moved (F36)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_timed_send_asap_in_the_stop_region_moves_with_time_error",
+    "old": "Ok(moved) if moved != target => {",
+    "new": "Ok(moved) if moved != target && false => {"
+  },
+  {
+    "id": "N47S5-118",
+    "name": "5j-3 (rev 24): a timed DropAndFlag booking meeting only the Stop region moves like SendAsap (F36)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_timed_drop_in_the_stop_region_is_refused",
+    "old": "LateOutcome::OnTime {} if late_policy == LatePolicy::SendAsapAndFlag && !switch && !untimed => {",
+    "new": "LateOutcome::OnTime {} if !switch && !untimed => {"
+  },
+  {
+    "id": "N47S5-119",
+    "name": "5j-3 (rev 24): the untimed placement also applies to a repeat switch (RM-37: a switch is not placed)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_an_untimed_switch_before_synchronization_is_refused_as_its_timed_twin",
+    "old": "if untimed && !switch {",
+    "new": "if untimed {"
+  },
+  {
+    "id": "N47S5-120",
+    "name": "5j-3 (rev 24): an untimed burst consults the late policy (DropAndFlag drops it, Q1)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_an_untimed_burst_is_not_judged_late",
+    "old": "let mut policy = if switch || untimed {",
+    "new": "let mut policy = if switch {"
+  },
+  {
+    "id": "N47S5-121",
+    "name": "5j-4 (rev 25): the untimed placement is skipped at receipt (RM-15, UHD)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "if untimed && !switch {",
+    "new": "if false && !switch {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_an_untimed_send_is_placed_after_its_delivery"
+  },
+  {
+    "id": "N47S5-122",
+    "name": "5j-4 (rev 25): an untimed burst consults the late policy at receipt, so a late one gets SendAsap (UHD)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "let decided = if switch || untimed {",
+    "new": "let decided = if switch {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_an_untimed_send_is_placed_after_its_delivery"
+  },
+  {
+    "id": "N47S5-123",
+    "name": "5j-4 (rev 25): a late untimed head moves to the bound without placement (M3)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "streams.stream_mut(stream_key(Dir::Tx, self.k)).busy.move_untimed(held.k, bound, held.record_len())",
+    "new": "Some(bound)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s15_c_untimed_head_moved_past_its_joined_piece_goes_after_the_piece"
+  },
+  {
+    "id": "N47S5-124",
+    "name": "5j-4 (rev 25): an untimed dispatch move emits TIME_ERROR{send_asap} (RM-15: no late path)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "held.k = start; Some(held)",
+    "new": "held.k = start; self.report_send_asap(&held, Duration::new(ClockDomainId::HOST_MONOTONIC, 0)); Some(held)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s15_host_lateness_moves_an_untimed_burst_silently"
+  },
+  {
+    "id": "N47S5-125",
+    "name": "5j-4 (rev 25): the Held literal drops the untimed flag (the owner dispatches it as timed)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "switch, untimed, open, policy: late_policy",
+    "new": "switch, untimed: false, open, policy: late_policy",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s15_host_lateness_moves_an_untimed_burst_silently"
+  },
+  {
+    "id": "N47S5-126",
+    "name": "5j-4 (rev 25): UHD's timed SendAsap never moves past the Stop region (F36)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "busy.region_move(start, rec_len, receipt, join_by, horizon)",
+    "new": "Ok::<i64, Overlap>(start)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s16_timed_send_asap_in_the_stop_region_moves_with_time_error"
+  },
+  {
+    "id": "N47S5-127",
+    "name": "5j-4 (rev 25): UHD's timed DropAndFlag moves past the Stop region like SendAsap (F36)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "late_policy == ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag && !switch && matches!(outcome, LateOutcome::OnTime {})",
+    "new": "late_policy != ezsdr_kernel::stream::LatePolicy::RejectAtPlan && !switch && matches!(outcome, LateOutcome::OnTime {})",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s16_timed_drop_in_the_stop_region_is_refused"
+  },
+  {
+    "id": "N47S5-129",
+    "name": "5j-4 (rev 25): an untimed head's DropAndFlag outcome is not overridden (dropped at dispatch)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let policy = if held.untimed { LatePolicy::SendAsapAndFlag } else { held.policy };",
+    "new": "let policy = held.policy;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s15_host_lateness_moves_an_untimed_burst_silently"
+  },
+  {
+    "id": "N47S5-130",
+    "name": "5j-4 (rev 25): move_untimed places with a hand-over horizon (M3)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "bookings.place(from, len, i64::MAX, |_| i64::MIN, i64::MIN)",
+    "new": "bookings.place(from, len, i64::MAX, |_| i64::MIN, i64::MAX)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s15_d_untimed_head_moved_before_a_later_booking_keeps_the_bound"
+  },
+  {
+    "id": "N47S5-132",
+    "name": "rev 28 (S3): the Mock settles a taken switch before it replays the step's earlier faults (the record advances to the step's end first; RM-37, MR-20)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "fn advance(&mut self, u: i64) -> Result<bool, ModuleError> {",
+    "new": "fn advance(&mut self, u: i64) -> Result<bool, ModuleError> { self.settle_switches_to(u);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_25_s11_loss_before_the_boundary_in_one_step_cancels_the_switch"
+  },
+  {
+    "id": "N47S5-133",
+    "name": "rev 28 (S1): a head alone is not open at its own start once a piece joins it (the head term of continuation_open)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "(c.joined.is_empty() && c.start == e) || c.joined.contains(&e)",
+    "new": "c.joined.contains(&e)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_every_joined_piece_keeps_its_join_point_open"
+  },
+  {
+    "id": "N47S5-136",
+    "name": "rev 28 (S4): an abandoned repeat is not ended in the record, so a switch is accepted for a repeat that is gone",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "stream.stop_at(clock.instant(cursor), 0);",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_an_underflow_ends_the_repeat_so_a_later_switch_is_refused_at_receipt"
+  },
+  {
+    "id": "N47S5-137",
+    "name": "rev 29 (F50): a booking whose front overflows the clock panics (debug) instead of being refused: the checked front is replaced by a plain sum",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(2),",
+    "new": "Some(len) if joined || len > 32 => Some(start + len + 2),",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change"
+  },
+  {
+    "id": "N47S5-138",
+    "name": "rev 29 (F49): a dispatch move that finds no sample leaves its head out of the record: move_head does not restore the saved chains",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.chains = saved;",
+    "new": "",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change"
+  },
+  {
+    "id": "N47S5-139",
+    "name": "rev 30 (S4): an abandoned repeat is stopped one in-flight window late (the record's stop at the cursor plus the window, not the cursor plus 3)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "stream.stop_at(clock.instant(cursor), 0);",
+    "new": "stream.stop_at(clock.instant(cursor), self.core.tx_in_flight());",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_burst_past_the_abandoned_repeat_s_cursor_is_accepted_on_time"
+  },
+  {
+    "id": "N47S5-140",
+    "name": "rev 30 (S2): a surviving head of at most 32 samples keeps its join (the closing threshold of remove_head is zero)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if own <= 32 {",
+    "new": "if own <= 0 {",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_short_head_left_alone_is_closed_and_takes_no_join"
+  },
+  {
+    "id": "N47S5-141",
+    "name": "rev 30 (S2): a surviving short head keeps its joined front, not its standalone one (remove_head does not set the front)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.front = front(c.start, Some(own), false).unwrap_or(c.front);",
+    "new": "let _ = own;",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_moved_untimed_head_goes_after_its_joined_pieces"
+  },
+  {
+    "id": "N47S5-142",
+    "name": "rev 30 (S1): prune keeps every join point, including those device time has passed (the bound is dropped)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.joined.retain(|&j| j > now_k || Some(j) == last);",
+    "new": "let _ = (now_k, last);",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_passed_join_point_is_dropped_and_the_newest_is_kept"
+  },
+  {
+    "id": "N47S5-143",
+    "name": "rev 30 (F57): an untimed switch takes its receipt's bound, not the first boundary of the replaced repeat's grid at or after it",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "start = ezsdr_radio::staging::repeat_boundary(playing.origin, playing.period, bound.max(start));",
+    "new": "start = bound.max(start);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "ur_21_s19_untimed_switch_takes_the_first_grid_boundary_after_its_receipt_window"
+  },
+  {
+    "id": "N47S5-144",
+    "name": "rev 30 (S4): a switch with no handed cursor to take it at is left pending, not settled refused (the no-cursor refusal of install)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "stream.busy.refuse(id);",
+    "new": "let _ = id;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_switch_whose_repeat_the_host_dispatched_late_is_refused_without_a_cursor"
+  },
+  {
+    "id": "N47S5-145",
+    "name": "rev 31 (S2, Opus re-check): a piece left behind a head that leaves keeps its own front, as a standalone head (the last piece of 1–3 samples ends at start + 5)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.front = c.front.max(pieces);",
+    "new": "let _ = pieces;",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_short_piece_left_behind_keeps_its_own_front"
+  },
+  {
+    "id": "N47S5-146",
+    "name": "rev 31 (S2, Opus re-check): a chain whose head leaves with pieces behind it clears its join flag",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.join = false;\n                    let starts",
+    "new": "let starts",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_head_left_alone_with_joined_pieces_keeps_their_regions"
+  },
+  {
+    "id": "N47S5-147",
+    "name": "rev 31 (S4, Opus re-check): a pending switch whose boundary equals the abandoned cursor is not cancelled",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "switch.boundary >= cursor_k",
+    "new": "switch.boundary > cursor_k",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled"
+  },
+  {
+    "id": "N47S5-151",
+    "name": "rev 32 (S4 neighbour, fix round 7): an abandon with no open burst does not end the repeat a switch joined at the cursor continues",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "None => self.held.get(&cursor).is_some_and(|held| held.switch),",
+    "new": "None => false,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_report_between_the_join_and_the_switch_s_open_cancels_it"
+  },
+  {
+    "id": "N47S5-152",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): a switch the record applied is never settled cancelled after the owner abandons its repeat",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if let Some(settled) = self.settled.iter_mut().find(|s| s.id == id && s.outcome == SwitchOutcome::Applied) {",
+    "new": "if let Some(settled) = self.settled.iter_mut().find(|s| s.id == id && s.outcome == SwitchOutcome::Refused) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_switch_joined_then_abandoned_late_is_cancelled_not_applied"
+  },
+  {
+    "id": "N47S5-153",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): a finite burst's abandon cancels the pending switch of a repeat it has not started",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if repeat { stream.busy.cancel_switch_from(cursor); }",
+    "new": "stream.busy.cancel_switch_from(cursor);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_finite_abandon_keeps_the_switch_of_the_repeat_it_has_not_started"
+  },
+  {
+    "id": "N47S5-154",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): an abandoned repeat leaves its held switch at or after the cursor to be sent late",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.cancel_held_switches(cursor);",
+    "new": "let _ = cursor;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_switch_joined_then_abandoned_late_is_cancelled_not_applied"
+  },
+  {
+    "id": "N47S5-155",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): the held switches cancelled with a repeat exclude the switch at the cursor itself",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "held.switch && **k >= from",
+    "new": "held.switch && **k > from",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_switch_joined_then_abandoned_late_is_cancelled_not_applied"
+  },
+  {
+    "id": "N47S5-156",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): a repeat dropped at dispatch keeps its endless region in the record",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "busy.drop_piece(held.k, held.record_len()); held.repeat && !held.switch",
+    "new": "held.repeat && !held.switch",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_late_repeat_dropped_at_dispatch_leaves_the_record"
+  },
+  {
+    "id": "N47S5-157",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): a repeat dropped at dispatch leaves its pending switch pending",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "held.repeat && !held.switch && busy.cancel_switch()",
+    "new": "held.repeat && !held.switch && false",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_finite_abandon_keeps_the_switch_of_the_repeat_it_has_not_started"
+  },
+  {
+    "id": "N47S5-158",
+    "name": "rev 33 (S4 minors and the unverified drop, fix round 8): a repeat dropped at dispatch does not send its cancelled switch's held burst",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "if cancelled { self.cancel_held_switches(held.k); }",
+    "new": "if cancelled {}",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_s4_a_finite_abandon_keeps_the_switch_of_the_repeat_it_has_not_started"
+  }
 ]

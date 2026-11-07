@@ -607,6 +607,8 @@ class EasyApi(unittest.TestCase):
                     with sdr.aligned(at):
                         pass
             y = sdr.rx.result(request)
+            # The stream is still playing `sent`; `later` is untimed, so it starts after the Stop's region (RM-15, F36).
+            sdr.tx.stop()
             later = sdr.tx.repeat(x)
         self.assertEqual((sent["action"]["at"], request.entry["action"]["at"]), (at, at))
         self.assertIsNone(later["action"]["at"], "the block's instant ends with it")
@@ -614,6 +616,43 @@ class EasyApi(unittest.TestCase):
         np.testing.assert_allclose(y[:45], 0, atol=1e-6)
         offset, _ = rotation(y[45:], x)
         self.assertEqual(offset, 0)
+
+    def test_ea_16_switch_inside_aligned_takes_the_block_instant(self) -> None:
+        # F35 (EA-16, RM-37): `switch` takes the block's instant like `repeat`, and the Provider accepts it on a playing repeat.
+        x = ramp()
+        with self.connect(tx={0: [0]}) as sdr:
+            sdr.tx.repeat(x)
+            sdr.sleep(0.01)
+            at = sdr.after(0.1)
+            with sdr.aligned(at):
+                switched = sdr.tx.switch(ramp(channel=1))
+        self.assertEqual(switched["action"]["at"], at)
+        self.assertEqual(switched["outcome"]["kind"], "admitted")
+
+    def test_ea_16_a_repeat_right_after_stop_transmits(self) -> None:
+        # F36 (EA-16, RM-15, RM-16): after `stop()` the next `repeat` is untimed. It starts at the end of the Stop's region, with no
+        # TIME_ERROR, so it transmits and is not refused.
+        x = ramp()
+        with self.connect(tx={0: [0]}) as sdr:
+            sdr.tx.repeat(x)
+            sdr.tx.stop()
+            later = sdr.tx.repeat(x)
+            sdr.sleep(0.06)
+            y = sdr.rx.capture(3000)
+        self.assertIsNone(later["action"]["at"])
+        self.assertEqual([e for e in sdr.manifest["events"]["delivered"] if e["kind"] == "radio.TIME_ERROR"], [])
+        _, phasor = rotation(y, x)
+        self.assertAlmostEqual(abs(phasor), 1.0, places=5)
+
+    def test_ea_16_second_repeat_on_a_playing_stream_raises_rejected(self) -> None:
+        # RM-15 (sequence 2): an untimed repeat on a playing repeat is refused with the overlap reason, and no TIME_ERROR.
+        x = ramp()
+        with self.connect(tx={0: [0]}) as sdr:
+            sdr.tx.repeat(x)
+            with self.assertRaises(ezsdr.Rejected) as raised:
+                sdr.tx.repeat(x)
+        self.assertIn("overlaps an accepted booking", str(raised.exception))
+        self.assertEqual([e for e in sdr.manifest["events"]["delivered"] if e["kind"] == "radio.TIME_ERROR"], [])
 
     def test_ea_16_next_at_finds_the_waveform_s_start_again(self) -> None:
         x = ramp()
@@ -728,11 +767,14 @@ class EasyApi(unittest.TestCase):
     def test_ea_16_repeat_uses_stream_membership_without_setting_it(self) -> None:
         with self.connect(tx={0: [0]}) as sdr:
             sdr.tx.repeat(ramp())
-            sdr.tx.repeat(ramp(500))
+            sdr.sleep(0.01)
+            sdr.tx.switch(ramp(500))
         actions = [entry["action"] for entry in sdr.manifest["action_log"]]
         self.assertEqual([action["kind"] for action in actions], ["vocabulary", "vocabulary"])
+        self.assertEqual([action.get("verb") for action in actions], ["start_repeat", "start_repeat"])
         self.assertEqual([action.get("key") for action in actions], [None, None])
         self.assertEqual(actions[0]["target"], {"kind": "resource", "resource": "radio", "path": "tx/s0"})
+        self.assertEqual(actions[1]["params"], {"radio.repeat_operation": "switch"}, "the switch's only parameter is its mark")
 
     # -- connect's initial streams (EA-10, EA-16, RM-30)
 
@@ -1467,6 +1509,44 @@ class StartValues(unittest.TestCase):
         self.assertEqual(raised.exception.event["kind"], "radio.COMMAND_REJECTED")
         self.assertEqual(raised.exception.event["payload"]["action"], 2)
         self.assertEqual([a["key"] for a in self.submits(sent)], ["radio.rx.c0.frequency_hz", "radio.rx.c1.frequency_hz"], "no gain and no start_rx after the refusal")
+
+    def test_ea_16_switch_sends_a_marked_repeat(self) -> None:
+        sdr, sent = self.session()
+        ezsdr.session.Tx(sdr, "radio", 0).switch(np.ones(100, dtype=np.complex64))
+        (action,) = self.submits(sent)
+        self.assertEqual((action["kind"], action["ns"], action["verb"]), ("vocabulary", "radio", "start_repeat"))
+        self.assertEqual(action["target"], ezsdr.Target.resource("radio", "tx/s0"))
+        self.assertEqual(action["params"], {"radio.repeat_operation": "switch"}, "the mark, and no value")
+
+    def test_ea_16_switch_refuses_non_finite_and_wrong_channels_before_sending(self) -> None:
+        for what, x in {
+            "a NaN sample": np.array([1.0, np.nan], dtype=np.complex64),
+            "an infinite sample": np.array([1.0, np.inf], dtype=np.complex64),
+            "two channels for one channel": np.ones((2, 100), dtype=np.complex64),
+        }.items():
+            with self.subTest(what):
+                sdr, sent = self.session()
+                with self.assertRaises(ezsdr.Error) as raised:
+                    ezsdr.session.Tx(sdr, "radio", 0).switch(x)
+                self.assertNotIsInstance(raised.exception, ezsdr.Rejected)
+                self.assertEqual(self.submits(sent), [], "nothing was sent")
+
+    def test_ea_16_a_switch_the_provider_refuses_raises_rejected(self) -> None:
+        # F34 (EA-16, RM-37): a switch the Provider refuses at booking raises `Rejected` with its event, as a repeat does.
+        sdr, sent = self.session(refused_on=1)
+        with self.assertRaises(ezsdr.Rejected) as raised:
+            ezsdr.session.Tx(sdr, "radio", 0).switch(np.ones(100, dtype=np.complex64))
+        self.assertEqual(raised.exception.event["kind"], "radio.COMMAND_REJECTED")
+        self.assertEqual([a["verb"] for a in self.submits(sent)], ["start_repeat"])
+
+    def test_ea_16_second_plain_repeat_on_a_playing_stream_raises_rejected(self) -> None:
+        sdr, sent = self.session(refused_on=2)
+        tx = ezsdr.session.Tx(sdr, "radio", 0)
+        tx.repeat(np.ones(100, dtype=np.complex64))
+        with self.assertRaises(ezsdr.Rejected) as raised:
+            tx.repeat(np.ones(100, dtype=np.complex64))
+        self.assertEqual(raised.exception.event["kind"], "radio.COMMAND_REJECTED")
+        self.assertEqual([a["verb"] for a in self.submits(sent)], ["start_repeat", "start_repeat"])
 
     def test_ea_16_a_provider_refusal_raises_rejected_with_its_event_and_the_entry_is_the_admitted_one(self) -> None:
         sdr, _ = self.session(refused_on=1)

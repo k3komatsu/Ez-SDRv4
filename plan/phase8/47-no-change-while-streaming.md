@@ -45,7 +45,7 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
    - **重なりの判断は区間で行う**（Sol 8）：開いている burst，owner へ移している途中の burst，予約済みの burst のそれぞれの区間 `[start, end)` と，新しい burst の区間が重なれば `radio.COMMAND_REJECTED`．repeat の区間は終わりがない（差し替えだけが例外）．有限の burst の終わり（exclusive end）にちょうど続く burst は受け付け，一つの device burst として続ける．
    - **LatePolicy で開始が動いた後も同じ判断をする**（`SendAsap` の移動先が別の予約と重なる場合は拒む）．
    - 隙間のある後の burst は今のまま．
-   - **repeat の差し替え**（Q1）：`TxBurst { repeat: true }` に Vocabulary の metadata の印 `radio.repeat_operation = "switch"` を付けたもの（RM-13 の「metadata は空」を「空か，この印だけ」に改める）．新しい Session の verb（例 `switch_repeat`）がこれに compile する．印のない repeat は通常の repeat（重なれば拒む）．
+   - **repeat の差し替え**（Q1）：`TxBurst { repeat: true }` に Vocabulary の metadata の印 `radio.repeat_operation = "switch"` を付けたもの（RM-13 の「metadata は空」を「空か，この印だけ」に改める）．Session の verb は増やさず，`start_repeat` に印を付ける（owner 2026-11-07，段階 5：Kernel の compile 規則は metadata を持たない）．印のない repeat は通常の repeat（重なれば拒む）．
      - 流れている repeat に対してだけ．Provider は，Kernel が入れた `at`（RS-19）を下限として扱い，受け付けた時の「今 + in-flight window + device lead」以後で最初の，その repeat の周期の境目（origin + k·N）を選ぶ．
      - **境目の選び方と，装置に渡した sample の境（handed cursor）を進めることを，送信の owner の中で直列にする**（Sol 9）．選んだ境目は後で動かさない．
      - 同じ repeat への保留中の差し替えは一つだけ（二つ目は拒む）．
@@ -124,6 +124,9 @@ Status: 第 3 版（2026-11-04，orchestrator Opus）．Sol の下書きのレ�
 5. **重なりの拒否と repeat の差し替え**（両 Provider，parity，Python．`python/tests/test_easy_api.py:623-630` の「repeat を二度呼ぶ」試験も新しい規則に）．
    - **この段階の設計で問うこと**（owner 2026-11-06）：preemption が消えた後，送信の in-flight window は有限の burst に要るか，repeat の差し替えだけに限れるか．限れれば有限の burst は v3 のように頭から大きな send で渡し，開いた最初の send の最小（48 S3），preemption の前線，send の刻みとその試験を減らす．v3 は一回の長い burst（SOB，波形の残りを丸ごと send，0 サンプルの EOB）で送り，送信の async を読まなかったので，この種の装置の角を踏まなかった（`v3/cpp/uhd_usrp/multiusrp.cpp:591-647`）．
    - **決定（owner 2026-11-07）：有限の burst にも window を残す．** Stop で止まるまでの遅れの上限（RM-16，高々 `tx_in_flight_ns`）と，送り出しの時の late policy の判定し直しを保つ．window の仕組みは repeat の差し替えにも要る．消えるのは段階 5 が消す割り込みの前線だけ．退けた案：repeat の差し替えだけに限る（Stop の遅れが装置のバッファの深さ〈未測定〉まで延び RM-16 を改める），実機で測ってから決める．
+   **済**（2026-11-07．記録 `reviews/47s5-*`，扱いは `47s5-dispositions.md`）：受付で決める予約の記録を一つ（`ezsdr_radio::staging::Bookings`，段階 4 の `Busy` を置き換え）にし，MockRadio と Module は呼ぶだけ．約束（RM-15）：受け付けた予約は，ホストの遅れか前の burst の configure の拒否（KL-38）がない限り，（late policy で動いた）開始で Module で鳴る．重なりは受付の順によらず拒む．装置の burst の区切り（頭が 32 サンプルを超える chain，前線 `start+5`／`end+1`／`end+2`），`J(e)` での閉じ（UHD の owner が streams の lock の下で），Stop の区間，渡した後の予約より前の予約の拒否（KL-37），置き場所の規則 `place`，差し替えの境目も記録が決める．preemption と `core.held` は消え，送り出しでの移動が他の予約に当たれば拒む．repeat の差し替え（RM-37，MR-42，UR-38）は `start_repeat` に印 `radio.repeat_operation = "switch"`（Python `Tx.switch`）．流れている stream への二つ目の repeat は拒む．#79 の違いはすべて parity の試験で両 Provider が同じ答え．
+   - **実装中の owner の決定（2026-11-07）**：(i) 差し替えは別の verb を作らず印だけ（Kernel の compile 規則に metadata がないため）．(ii) 境目をもう渡した差し替えは拒まず late policy に従う（SendAsap は次の境目へ，`TIME_ERROR{send_asap}`）．(iii) 後の時刻の予約を先に受け付けて渡した後に来た，それより前の予約は受付で拒む（KL-37）．(iv) **時刻を指定しない burst** はその stream が取れる最初のサンプルから始め，`TIME_ERROR` を出さない（Kernel が `Dispatched.untimed` を Provider に渡す．時刻つきの SendAsap が Stop の区間だけに当たれば `TIME_ERROR{send_asap}` で動く）．原則（RM-15）：装置の都合で頼まれた開始に始められなければ late policy が決め，受け付けた別の予約とぶつかれば拒み，時刻なしは最初の空きに置く．
+   - **この段階の後に**（owner 2026-11-07）：時刻と予約のモデルの棚卸し（各規則の約束・実機の証拠・なくすと壊れるもの・簡単な代案，利用者がほとんど使わない機能を削る候補は owner が一つずつ決める．controller が可変の予定を持ち確定したものだけを一方向の FIFO の executor に流す分け方を，速さではなく簡素化と責務の分離のために比べる）．
 6. **使われなくなった共有の仕組みの整理**（`timed_instant`，`covering`，queue と release の能力，schema）．
 
 **段階 2 以降の組み替え（orchestrator 2026-11-04．Sol が確かめて推した：`reviews/47s2-sol-restage.md`）**：段階 2 の試験計画で，組の変更をきっかけに使っていた残す道のテストが約 113 本，殺し役を失う mutation の行が 63 行あると分かった（`reviews/47s2-*`）．その多くは，段階 3・4 で消える仕組み（流れている stream や空の stream への `cold` の変更が開く from none，時刻つきの release，restore，instance の floor）を守っている．消える仕組みのためにテストを作り直すのは無駄なので，**消す段階を先に，足す段階を後に**並べ替える：
@@ -192,3 +195,4 @@ Sol の一覧（規則と名のあるテスト，本体の区間，mutation の�
 | 2026-11-05 | 段階 3 の実装を記録した（§4） |
 | 2026-11-07 | 段階 4 を済とした（§4） |
 | 2026-11-07 | 段階 5 の問い（window）を owner が決めた（§4） |
+| 2026-11-07 | 段階 5 済（§4）．実装中の owner の決定 4 件と，段階の後の棚卸しを記録 |

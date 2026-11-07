@@ -805,7 +805,7 @@ impl RunHandle {
         let mut configuration = lock(&self.shared.configuration).clone();
         let mut admitted = Vec::with_capacity(batch.len());
         for (index, _instance, _fragment, input) in batch {
-            match super::admission::admit_with(&self.shared, input, super::state::Origin::Schedule, &[], &configuration) {
+            match super::admission::admit_with(&self.shared, input, super::state::Origin::Schedule, &[], &configuration, false) {
                 Ok(action) => {
                     if let Action::UpdateParameter { key, value, .. } = &action.action {
                         configuration.entry(action.fragment.clone()).or_default().insert(key.clone(), value.clone());
@@ -1003,7 +1003,7 @@ pub(super) fn submit(run: &mut RunHandle, action: SessionAction, waveform: Optio
     let mut all_warnings = Vec::new();
     for (index, item) in compiled.items.into_iter().enumerate() {
         let incoming = if index == 0 { compiled.coercions.as_slice() } else { &[] };
-        match super::admission::admit_with(&run.shared, item, super::state::Origin::Session, incoming, &configuration) {
+        match super::admission::admit_with(&run.shared, item, super::state::Origin::Session, incoming, &configuration, compiled.untimed) {
             Ok(action) => {
                 if let Action::UpdateParameter { key, value, .. } = &action.action {
                     configuration.entry(action.fragment.clone()).or_default().insert(key.clone(), value.clone());

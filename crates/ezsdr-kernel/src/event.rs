@@ -696,8 +696,8 @@ pub struct ActionId(pub u64);
 pub enum Action {
     /// One transmit burst. Carries no channel list: which channels a burst uses is
     /// the Radio Model's (RS-49, RM-13), and deciding it here would put a radio
-    /// field in a frozen Kernel document. A radio burst's `metadata` is empty
-    /// (RM-13).
+    /// field in a frozen Kernel document. A radio burst's `metadata` is empty or
+    /// the repeat-switch mark (RM-13, RM-37).
     TxBurst {
         /// The transmit stream (RS-49).
         target: Target,

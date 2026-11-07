@@ -1354,6 +1354,68 @@ fn kc_28_an_untimed_burst_is_admitted_at_now_plus_lead() {
 }
 
 #[test]
+fn rs_19_an_untimed_session_action_is_dispatched_untimed() {
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx")));
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&[0u8; 80]))
+        .unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let _ = run.finish();
+    assert!(probe.lines().iter().any(|line| line == "p:burst_untimed:true"));
+}
+
+#[test]
+fn rs_19_an_untimed_session_action_has_no_requested_instant() {
+    // RM-15 (sequence 8, M2): the Kernel chose an untimed burst's instant, so an instant off the transmit grid is not a request.
+    let probe = Probe::new();
+    let mut assembly = rig(ezsdr_kernel::module_api::Pacing::FreeRunning).assembly;
+    assembly.providers.insert(
+        Ident::parse("radio").unwrap(),
+        Box::new(
+            SteppedProvider::new("p", TestProvider::new("radio", 2).with_min_command_lead(Duration::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 2_000_001)), &probe)
+                .declaring("radio/tx", 1_000, 1)
+                .registering_at_arm("radio/tx"),
+        ),
+    );
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(SessionAction::Vocabulary { ns: ns("test"), verb: Ident::parse("start_repeat").unwrap(), target: support::target("radio/tx"), at: None, params: BTreeMap::new() }, Some(&[0u8; 80]))
+        .unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let _ = run.finish();
+    assert!(probe.lines().iter().any(|line| line == "p:burst_untimed:true"), "{:?}", probe.lines());
+    assert!(probe.lines().iter().any(|line| line == "p:burst_requested:false"), "{:?}", probe.lines());
+}
+
+#[test]
+fn rs_19_a_timed_session_action_is_not_untimed() {
+    let probe = Probe::new();
+    let rig = rig(ezsdr_kernel::module_api::Pacing::FreeRunning);
+    let root = rig.root;
+    let mut assembly = rig.assembly;
+    assembly.providers.insert(Ident::parse("radio").unwrap(), Box::new(SteppedProvider::new("p", TestProvider::new("radio", 2), &probe).declaring("radio/tx", 1, 1).registering_at_arm("radio/tx")));
+    let mut run = connect(&profile_one(), &Default::default(), assembly, Lease::attached()).unwrap();
+    let entry = run
+        .submit(
+            SessionAction::Vocabulary {
+                ns: ns("test"),
+                verb: Ident::parse("start_repeat").unwrap(),
+                target: support::target("radio/tx"),
+                at: Some(TimePoint::new(root, 5_000_000)),
+                params: BTreeMap::new(),
+            },
+            Some(&[0u8; 80]),
+        )
+        .unwrap();
+    assert!(matches!(entry.outcome, Outcome::Admitted { .. }));
+    let _ = run.finish();
+    assert!(probe.lines().iter().any(|line| line == "p:burst_untimed:false"));
+}
+
+#[test]
 fn kc_28_an_untimed_update_verb_to_a_resource_waits_for_the_provider_lead() {
     // #54: a verb compiles to the target it names, so an `UpdateParameter` verb naming a
     // resource is admitted no earlier than its Provider's lead, as `SetParameter` is.

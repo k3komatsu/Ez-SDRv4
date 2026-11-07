@@ -114,20 +114,20 @@ fn fragment(module: ModuleRef, constraints: &[(&str, Constraint)]) -> Fragment {
 // ---------------------------------------------------------------- the Mock's rig
 
 struct Queue {
-    actions: Mutex<VecDeque<Action>>,
+    actions: Mutex<VecDeque<(Action, bool)>>,
     given: AtomicU64,
 }
 
 impl ActionReceiver for Queue {
     fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
-        self.actions.lock().unwrap().pop_front().map(|action| {
+        self.actions.lock().unwrap().pop_front().map(|(action, untimed)| {
             let node = action.target().and_then(|target| match target {
                 Target::Resource { resource, path } if path.is_empty() => rid(resource.as_str()).into(),
                 Target::Resource { resource, path } => Some(rid(&format!("{resource}/{path}"))),
                 _ => None,
             });
             let id = ActionId(self.given.fetch_add(1, Ordering::SeqCst) + 1);
-            ezsdr_kernel::module_api::Dispatched::new(id, action, node)
+            if untimed { ezsdr_kernel::module_api::Dispatched::new_untimed(id, action, node) } else { ezsdr_kernel::module_api::Dispatched::new(id, action, node) }
         })
     }
 }
@@ -259,7 +259,11 @@ impl MockRig {
     }
 
     fn push(&self, action: Action) {
-        self.actions.actions.lock().unwrap().push_back(action);
+        self.actions.actions.lock().unwrap().push_back((action, false));
+    }
+
+    fn push_untimed(&self, action: Action) {
+        self.actions.actions.lock().unwrap().push_back((action, true));
     }
 
     fn stop_at(&self, node: &str) {
@@ -371,7 +375,11 @@ impl UhdRig {
     }
 
     fn push(&self, action: Action) {
-        self.actions.actions.lock().unwrap().push_back(action);
+        self.actions.actions.lock().unwrap().push_back((action, false));
+    }
+
+    fn push_untimed(&self, action: Action) {
+        self.actions.actions.lock().unwrap().push_back((action, true));
     }
 
     fn stop_at(&self, node: &str) {
@@ -600,7 +608,7 @@ fn vh_8_a_channel_less_stream_is_the_same_on_both() {
     };
     mock.push(start("rx/s1"));
     mock.step(t0 + ms(20));
-    uhd.actions.actions.lock().unwrap().push_back(start("rx/s1"));
+    uhd.actions.actions.lock().unwrap().push_back((start("rx/s1"), false));
     uhd.wait_until(uhd_t0 + ms(20));
     uhd.settle(Wall::from_millis(5));
     // A burst at the channel-less transmit stream: refused, no transmit channel named.
@@ -625,7 +633,7 @@ fn vh_8_a_channel_less_stream_is_the_same_on_both() {
     };
     mock.push(burst("tx/s1"));
     mock.step(t0 + ms(30));
-    uhd.actions.actions.lock().unwrap().push_back(burst("tx/s1"));
+    uhd.actions.actions.lock().unwrap().push_back((burst("tx/s1"), false));
     uhd.wait_until(uhd_t0 + ms(30));
     uhd.settle(Wall::from_millis(5));
     let mock_rejected = rejected_reasons(&mock.events());
@@ -948,6 +956,15 @@ fn tx_sample_time(clocks: &ClockRegistry, stream: usize, segment: usize, root_ti
     TimePoint::new(record.domain, i64::try_from(sample).unwrap())
 }
 
+/// The device tick at which transmit sample `sample` of the stream's first clock segment is sent: the segment's origin plus `sample` root
+/// ticks per sample, the exact inverse of `tx_sample_time` on the device's grid.
+fn tx_device_tick(clocks: &ClockRegistry, stream: usize, sample: i64) -> i64 {
+    let node = format!("radio/tx/s{stream}");
+    let record = clocks.sample_clock_records().into_iter().filter(|record| record.stream.path() == node).min_by_key(|record| record.origin.ticks_in(record.root).unwrap()).unwrap();
+    let ratio = record.root_ticks_per_tick;
+    record.origin.ticks_in(record.root).unwrap() + i64::try_from(i128::from(sample) * i128::from(ratio.num()) / i128::from(ratio.den())).unwrap()
+}
+
 fn tx_burst_action(node: &str, waveform: &ezsdr_kernel::manifest::ArtifactRef, at: TimePoint) -> Action {
     tx_burst_action_with(node, waveform, at, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag)
 }
@@ -974,6 +991,10 @@ struct CancellationPair {
     waveform: ezsdr_kernel::manifest::ArtifactRef,
     single: ezsdr_kernel::manifest::ArtifactRef,
     sized: Vec<(usize, ezsdr_kernel::manifest::ArtifactRef)>,
+    /// Two-channel waveforms: `stereo(n)` holds `n` samples on each of two channels (for a two-channel stream).
+    stereo: Vec<(usize, ezsdr_kernel::manifest::ArtifactRef)>,
+    /// A 500-sample waveform of samples other than the repeats' (for a switch whose new samples are told apart on the device).
+    tone: ezsdr_kernel::manifest::ArtifactRef,
     t0: i64,
     uhd_t0: i64,
     uhd_barriers: std::cell::Cell<usize>,
@@ -985,11 +1006,19 @@ impl CancellationPair {
         let (single, extra) = waveform_of(&[[0.25f32, 0.0f32]]);
         inputs.extend(extra);
         let mut sized = Vec::new();
-        for samples in [4usize, 10, 31, 32, 40] {
+        for samples in [4usize, 10, 31, 32, 40, 100, 500, 1_000] {
             let (artifact, extra) = waveform_of(&vec![[0.25f32, 0.0f32]; samples]);
             inputs.extend(extra);
             sized.push((samples, artifact));
         }
+        let mut stereo = Vec::new();
+        for samples in [1usize, 2, 4, 10, 32, 40] {
+            let (artifact, extra) = waveform_of(&vec![[0.25f32, 0.0f32]; 2 * samples]);
+            inputs.extend(extra);
+            stereo.push((samples, artifact));
+        }
+        let (tone, extra) = waveform_of(&[[0.75f32, -0.25f32]; 500]);
+        inputs.extend(extra);
         let t0 = ms(2_001);
         let mut mock = MockRig::with_run(selector.clone(), constraints, ports, inputs.clone(), environment);
         mock.arm_start(t0);
@@ -1001,12 +1030,17 @@ impl CancellationPair {
         uhd.wait_until(uhd_t0 + ms(5));
         uhd.settle(Wall::from_millis(1));
         mock.step(t0 + ms(5));
-        CancellationPair { mock, uhd, waveform, single, sized, t0, uhd_t0, uhd_barriers: std::cell::Cell::new(0) }
+        CancellationPair { mock, uhd, waveform, single, sized, stereo, tone, t0, uhd_t0, uhd_barriers: std::cell::Cell::new(0) }
     }
 
     /// A waveform of `samples` samples, one of the four lengths `new` prepares.
     fn sized(&self, samples: usize) -> &ezsdr_kernel::manifest::ArtifactRef {
         &self.sized.iter().find(|(length, _)| *length == samples).expect("a prepared length").1
+    }
+
+    /// A two-channel waveform of `samples` samples on each channel (for a stream with two channels).
+    fn stereo(&self, samples: usize) -> &ezsdr_kernel::manifest::ArtifactRef {
+        &self.stereo.iter().find(|(length, _)| *length == samples).expect("a prepared length").1
     }
 
     fn burst(&self, node: &str, stream: usize, segment: usize, relative_ms: i64) -> Action {
@@ -1027,6 +1061,18 @@ impl CancellationPair {
         self.uhd_barriers.set(self.uhd_barriers.get() + 1);
         self.uhd.wait_for_events("Action booking barrier", self.uhd_barriers.get(), |event| event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "set_timer");
     }
+}
+
+/// `submit` for untimed Actions: each Provider books them as the Kernel's untimed Actions (RM-15), with the late policy not consulted.
+fn submit_untimed(pair: &mut CancellationPair, token: u64, relative_ms: i64, actions: impl FnOnce(&CancellationPair) -> Vec<(Action, Action)>) {
+    pair.mock.step(pair.t0 + ms(relative_ms));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(relative_ms));
+    for (mock, uhd) in actions(pair) {
+        pair.mock.push_untimed(mock);
+        pair.uhd.push_untimed(uhd);
+    }
+    pair.mock.step(pair.t0 + ms(relative_ms));
+    pair.uhd_barrier(token);
 }
 
 /// The sample `samples` after the transmit sample at or after `root_tick`, in its own domain (S1's short bursts, UR-22).
@@ -1061,6 +1107,18 @@ fn submit(pair: &mut CancellationPair, token: u64, relative_ms: i64, actions: im
     pair.uhd_barrier(token);
 }
 
+/// How many bookings a Provider refused at receipt because they overlap an accepted booking (RM-15, MR-16, UR-21). A refused row names no booking,
+/// so the tests say which booking survived through the accepted bursts' sample counts.
+fn overlap_refusals(rows: &[serde_json::Value]) -> usize {
+    rows.iter().filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("overlaps an accepted booking"))).count()
+}
+
+/// How many bookings a Provider refused at receipt because they start before an accepted booking it may already have handed (RM-15): a
+/// different refusal from an overlap, with its own reason on both Providers.
+fn handed_refusals(rows: &[serde_json::Value]) -> usize {
+    rows.iter().filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("may already be handed"))).count()
+}
+
 /// The late-policy drops of a run: the `rejected` rows that name one, and the targets (in their own sample domain's ticks) of the TIME_ERROR drops.
 fn late_drops(rejected: &[serde_json::Value], events: &[ezsdr_kernel::event::Event]) -> (usize, Vec<i64>) {
     let rows = rejected.iter().filter(|row| row["reason"].as_str().is_some_and(|reason| reason.contains("the late policy dropped"))).count();
@@ -1070,11 +1128,6 @@ fn late_drops(rejected: &[serde_json::Value], events: &[ezsdr_kernel::event::Eve
         .map(|event| event.payload["target"]["ticks"].as_i64().unwrap())
         .collect();
     (rows, targets)
-}
-
-/// The sample `samples` after the one at `relative_ms` from T0, in the sample domain's ticks, as a drop's target names it.
-fn booked_ticks(clocks: &ClockRegistry, stream: usize, t0: i64, relative_ms: i64, samples: i64) -> i64 {
-    tx_samples_after(clocks, stream, t0 + ms(relative_ms), samples).ticks_in(tx_samples_after(clocks, stream, t0 + ms(relative_ms), 0).domain()).unwrap()
 }
 
 fn manifest_rows(instance: &ProviderInstance, namespace: &str) -> Vec<serde_json::Value> {
@@ -1447,7 +1500,7 @@ fn vh_8_tx_stream_stop_leaves_the_other_stream_held() {
 
 #[test]
 fn s1_parity_short_burst_front_s_s3_s5() {
-    // UR-22 (S1): a one-sample burst at `s` is sent padded to four, so the front is `s + 5` on both Providers (the Mock's device floor, TBD-m1): `s + 3` is late, `s + 5` on time.
+    // UR-22, RM-15 (S1): a one-sample burst at `s` is sent padded to four, so its front is `s + 5` on both Providers (the Mock's device floor, TBD-m1). A booking at `s + 3` is refused at receipt; `s + 5` is accepted and plays on time.
     let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
@@ -1463,15 +1516,17 @@ fn s1_parity_short_burst_front_s_s3_s5() {
     let uhd_events = pair.uhd.events();
     let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
     let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
-    assert_eq!(late_drops(&mock_rejected, &mock_events), (1, vec![booked_ticks(&pair.mock.clocks, 0, pair.t0, 100, 3)]), "the Mock drops `s + 3` only: {mock_rejected:?}");
-    assert_eq!(late_drops(&uhd_rejected, &uhd_events), (1, vec![booked_ticks(&pair.uhd.clocks, 0, pair.uhd_t0, 100, 3)]), "UHD drops `s + 3` only: {uhd_rejected:?}");
+    assert_eq!(overlap_refusals(&mock_rejected), 1, "the Mock refuses `s + 3`: {mock_rejected:?}");
+    assert_eq!(overlap_refusals(&uhd_rejected), 1, "UHD refuses `s + 3`: {uhd_rejected:?}");
+    assert_eq!(late_drops(&mock_rejected, &mock_events), (0, Vec::new()), "nothing is late on the Mock");
+    assert_eq!(late_drops(&uhd_rejected, &uhd_events), (0, Vec::new()), "nothing is late on UHD");
     assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 2, "the one-sample burst and `s + 5`");
     assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 2, "the one-sample burst and `s + 5`");
 }
 
 #[test]
 fn s1_parity_stop_during_padded_device_burst() {
-    // UR-22 (S1, TBD-m2): after a one-sample burst at `s` is dispatched and then stopped, the padded front `s + 5` survives the Stop: `s + 3` is late on both, `s + 5` on time.
+    // UR-22 (S1, TBD-m2): after a one-sample burst at `s` is dispatched and then stopped, the padded front `s + 5` survives the Stop: a booking at `s + 3` is refused at receipt on both.
     let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
@@ -1479,24 +1534,22 @@ fn s1_parity_stop_during_padded_device_burst() {
     submit(&mut pair, 204, 91, |pair| vec![short_booking(pair, &single, 0, 100, 0)]);
     submit(&mut pair, 205, 92, |_| vec![]);
     assert!(!tx_send_calls(&pair.uhd.device, 0).is_empty(), "UHD dispatched A's padded packet before the Stop: {:?}", pair.uhd.device.calls());
-    submit(&mut pair, 206, 92, |pair| vec![stop_both("tx/s0"), short_booking(pair, &single, 0, 100, 3), short_booking(pair, &single, 0, 100, 5)]);
+    submit(&mut pair, 206, 92, |pair| vec![stop_both("tx/s0"), short_booking(pair, &single, 0, 100, 3)]);
     pair.uhd.wait_until(pair.uhd_t0 + ms(140));
     pair.mock.step(pair.t0 + ms(140));
     let mock = pair.mock.finish_in_place();
-    let mock_events = pair.mock.events();
     let uhd = pair.uhd.finish_in_place();
-    let uhd_events = pair.uhd.events();
     let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
     let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
-    assert_eq!(late_drops(&mock_rejected, &mock_events), (1, vec![booked_ticks(&pair.mock.clocks, 0, pair.t0, 100, 3)]), "the Mock drops `s + 3` only: {mock_rejected:?}");
-    assert_eq!(late_drops(&uhd_rejected, &uhd_events), (1, vec![booked_ticks(&pair.uhd.clocks, 0, pair.uhd_t0, 100, 3)]), "UHD drops `s + 3` only: {uhd_rejected:?}");
-    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 2, "A and `s + 5`");
-    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 2, "A and `s + 5`");
+    assert_eq!(overlap_refusals(&mock_rejected), 1, "the Mock refuses `s + 3`: {mock_rejected:?}");
+    assert_eq!(overlap_refusals(&uhd_rejected), 1, "UHD refuses `s + 3`: {uhd_rejected:?}");
+    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 1, "A only");
+    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 1, "A only");
 }
 
 #[test]
 fn s1_parity_padded_front_survives_normal_close() {
-    // UR-22 (S1, TBD-m2): with no Stop, the padded device burst that closed at once still sets its front at `s + 5`: `s + 3` is late on both, `s + 5` on time.
+    // UR-22 (S1, TBD-m2): with no Stop, the padded device burst that closed at once still sets its front at `s + 5`: a booking at `s + 3` is refused at receipt on both, `s + 5` is on time.
     let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
     let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))];
     let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
@@ -1513,15 +1566,17 @@ fn s1_parity_padded_front_survives_normal_close() {
     let uhd_events = pair.uhd.events();
     let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
     let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
-    assert_eq!(late_drops(&mock_rejected, &mock_events), (1, vec![booked_ticks(&pair.mock.clocks, 0, pair.t0, 100, 3)]), "the Mock drops `s + 3` only: {mock_rejected:?}");
-    assert_eq!(late_drops(&uhd_rejected, &uhd_events), (1, vec![booked_ticks(&pair.uhd.clocks, 0, pair.uhd_t0, 100, 3)]), "UHD drops `s + 3` only: {uhd_rejected:?}");
+    assert_eq!(overlap_refusals(&mock_rejected), 1, "the Mock refuses `s + 3`: {mock_rejected:?}");
+    assert_eq!(overlap_refusals(&uhd_rejected), 1, "UHD refuses `s + 3`: {uhd_rejected:?}");
+    assert_eq!(late_drops(&mock_rejected, &mock_events), (0, Vec::new()), "nothing is late on the Mock");
+    assert_eq!(late_drops(&uhd_rejected, &uhd_events), (0, Vec::new()), "nothing is late on UHD");
     assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 2, "A and `s + 5`");
     assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 2, "A and `s + 5`");
 }
 
 #[test]
 fn s1_parity_grouped_and_split_fronts() {
-    // UR-22 (S1): a front is per stream. Stream 1's one-sample burst sets its front at `s + 5`; stream 0 has none, so its booking at `s + 3` is on time, and stream 1's is late.
+    // UR-22 (S1): a front is per stream. Stream 1's one-sample burst sets its front at `s + 5`: its booking at `s + 3` is refused at receipt; stream 0 has no front, so its booking at `s + 3` is on time.
     let selector = selector(&["0:A:ubx:0", "0:B:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]);
     let mut constraints = rx_two();
     constraints.extend(tx_two());
@@ -1532,13 +1587,11 @@ fn s1_parity_grouped_and_split_fronts() {
     pair.uhd.wait_until(pair.uhd_t0 + ms(140));
     pair.mock.step(pair.t0 + ms(140));
     let mock = pair.mock.finish_in_place();
-    let mock_events = pair.mock.events();
     let uhd = pair.uhd.finish_in_place();
-    let uhd_events = pair.uhd.events();
     let mock_rejected = tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected");
     let uhd_rejected = tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected");
-    assert_eq!(late_drops(&mock_rejected, &mock_events), (1, vec![booked_ticks(&pair.mock.clocks, 1, pair.t0, 100, 3)]), "{mock_rejected:?}");
-    assert_eq!(late_drops(&uhd_rejected, &uhd_events), (1, vec![booked_ticks(&pair.uhd.clocks, 1, pair.uhd_t0, 100, 3)]), "{uhd_rejected:?}");
+    assert_eq!(overlap_refusals(&mock_rejected), 1, "{mock_rejected:?}");
+    assert_eq!(overlap_refusals(&uhd_rejected), 1, "{uhd_rejected:?}");
     assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), 2, "stream 1's burst and stream 0's booking");
     assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), 2, "stream 1's burst and stream 0's booking");
 }
@@ -1567,7 +1620,7 @@ fn s1_parity_payload_cut_separate_from_padding() {
 
 #[test]
 fn s1_parity_short_burst_then_adjacent_burst_before_and_after_dispatch() {
-    // UR-22 (S1, N3): a one-sample burst at `s` is padded and closed; an adjacent burst at `s + 1` gets the same late verdict on both Providers, booked before the dispatch or after it.
+    // UR-22 (S1, N3): a one-sample burst at `s` is padded and closed; an adjacent burst at `s + 1` is refused at receipt on both Providers, whether it is booked before the dispatch or after it.
     let mut before = CancellationPair::new(
         selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
         &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
@@ -1597,15 +1650,17 @@ fn s1_parity_short_burst_then_adjacent_burst_before_and_after_dispatch() {
         let mock_events = rig.mock.events();
         let uhd = rig.uhd.finish_in_place();
         let uhd_events = rig.uhd.events();
-        assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), (1, vec![booked_ticks(&rig.mock.clocks, 0, rig.t0, 100, 1)]), "{name}: the Mock");
-        assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), (1, vec![booked_ticks(&rig.uhd.clocks, 0, rig.uhd_t0, 100, 1)]), "{name}: UHD");
+        assert_eq!(overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), 1, "{name}: the Mock");
+        assert_eq!(overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")), 1, "{name}: UHD");
+        assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), (0, Vec::new()), "{name}: the Mock is not late");
+        assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), (0, Vec::new()), "{name}: UHD is not late");
         assert_eq!(tx_send_calls(&rig.uhd.device, 0).iter().filter(|call| call.contains("sob=true")).count(), 1, "{name}: nothing sent at `s + 1`: {:?}", rig.uhd.device.calls());
     }
 }
 
 #[test]
 fn s3_parity_booking_after_a_closed_short_burst_follows_d5() {
-    // UR-22, MR-17 (S3, note 40 D5): after a closed short burst of 4 to 32 samples booked inside the window, a burst at its end is late on both Providers; one sample later it is late on the Mock only (its frontier is two samples past the handed end), two samples later both play it. One or two Stops hand the burst over first.
+    // UR-22, RM-15 (S3(a)): a closed standalone burst of 4 to 32 samples at `s` holds `[s, e + 1)`. A booking at its end `e` is refused at receipt on both Providers; one at `e + 1` is accepted and on time, with none, one or two Stops between.
     for samples in [4usize, 10, 31, 32] {
         for stops in 0..=2usize {
             for offset in 0..=2usize {
@@ -1635,13 +1690,20 @@ fn s3_parity_booking_after_a_closed_short_burst_follows_d5() {
                 let mock_events = pair.mock.events();
                 let uhd = pair.uhd.finish_in_place();
                 let uhd_events = pair.uhd.events();
-                let (mock_late, uhd_late) = (offset < 2, offset == 0);
-                let mock_expected = if mock_late { (1, vec![booked_ticks(&pair.mock.clocks, 0, pair.t0, 100, at)]) } else { (0, Vec::new()) };
-                assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), mock_expected, "{case}: the Mock");
-                let uhd_expected = if uhd_late { (1, vec![booked_ticks(&pair.uhd.clocks, 0, pair.uhd_t0, 100, at)]) } else { (0, Vec::new()) };
-                assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), uhd_expected, "{case}: UHD");
-                assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), if mock_late { 1 } else { 2 }, "{case}: the Mock's bursts");
-                assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), if uhd_late { 1 } else { 2 }, "{case}: UHD's bursts");
+                let refused = offset == 0;
+                let (mock_refusals, uhd_refusals) = (overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")));
+                assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), (0, Vec::new()), "{case}: the Mock is not late");
+                assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), (0, Vec::new()), "{case}: UHD is not late");
+                // With a Stop before B the Stop tail decides (S7), so only the agreement is pinned there.
+                if stops == 0 {
+                    assert_eq!((mock_refusals, uhd_refusals), (usize::from(refused), usize::from(refused)), "{case}: the refusal");
+                    let bursts = if refused { 1 } else { 2 };
+                    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), bursts, "{case}: the Mock's bursts");
+                    assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), bursts, "{case}: UHD's bursts");
+                } else {
+                    assert_eq!(mock_refusals, uhd_refusals, "{case}: the Providers refuse alike");
+                    assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), "{case}: the Providers play alike");
+                }
             }
         }
     }
@@ -1649,55 +1711,495 @@ fn s3_parity_booking_after_a_closed_short_burst_follows_d5() {
 
 #[test]
 fn s3_parity_booking_after_a_device_burst_s_short_tail_follows_d5() {
-    // UR-22, MR-17 (S3, R1, note 40 D5): a 10-sample burst booked at a 40-sample burst's end continues its device burst, which closes two samples after the short burst's end. A burst at that end + 1 is late on both Providers, at end + 2 on time on both, in either receipt order, with none, one or two Stops between.
-    for short_first in [false, true] {
-        for stops in 0..=2usize {
-            for offset in [1i64, 2] {
-                let case = format!("{} first, {stops} Stop(s), B at the short burst's end + {offset}", if short_first { "short" } else { "long" });
-                let mut pair = CancellationPair::new(
-                    selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
-                    &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
-                    &["rx0"],
-                    FakeConfig::default(),
-                    BTreeMap::new(),
-                );
-                let long = pair.sized(40).clone();
-                let short = pair.sized(10).clone();
-                let single = pair.single.clone();
-                let at = 50 + offset;
-                submit(&mut pair, 201, 50, |pair| {
-                    let long_booking = short_booking(pair, &long, 0, 100, 0);
-                    let short_booking = short_booking(pair, &short, 0, 100, 40);
-                    if short_first { vec![short_booking, long_booking] } else { vec![long_booking, short_booking] }
-                });
-                if stops == 0 {
-                    submit(&mut pair, 202, 91, |pair| vec![short_booking(pair, &single, 0, 100, at)]);
-                } else {
-                    for stop in 0..stops {
-                        submit(&mut pair, 202 + stop as u64, 91 + stop as i64, |_| vec![stop_both("tx/s0")]);
-                    }
-                    submit(&mut pair, 205, 91 + stops as i64, |pair| vec![short_booking(pair, &single, 0, 100, at)]);
+    // UR-22, RM-15 (S3(b), R1): a 10-sample burst booked at a 40-sample burst's end joins it (S4), so the joined piece holds `[e, e + 2)` and its chain front is `e + 2`. A booking at `e + 1` is refused at receipt on both Providers; one at `e + 2` is on time, with none, one or two Stops between.
+    for stops in 0..=2usize {
+        for offset in [1i64, 2] {
+            let case = format!("long first, {stops} Stop(s), B at the short burst's end + {offset}");
+            let mut pair = CancellationPair::new(
+                selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+                &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+                &["rx0"],
+                FakeConfig::default(),
+                BTreeMap::new(),
+            );
+            let long = pair.sized(40).clone();
+            let short = pair.sized(10).clone();
+            let single = pair.single.clone();
+            let at = 50 + offset;
+            submit(&mut pair, 201, 50, |pair| vec![short_booking(pair, &long, 0, 100, 0), short_booking(pair, &short, 0, 100, 40)]);
+            if stops == 0 {
+                submit(&mut pair, 202, 91, |pair| vec![short_booking(pair, &single, 0, 100, at)]);
+            } else {
+                for stop in 0..stops {
+                    submit(&mut pair, 202 + stop as u64, 91 + stop as i64, |_| vec![stop_both("tx/s0")]);
                 }
-                pair.uhd.wait_until(pair.uhd_t0 + ms(140));
-                pair.mock.step(pair.t0 + ms(140));
-                let mock = pair.mock.finish_in_place();
-                let mock_events = pair.mock.events();
-                let uhd = pair.uhd.finish_in_place();
-                let uhd_events = pair.uhd.events();
-                let late = offset == 1;
-                let mock_expected = if late { (1, vec![booked_ticks(&pair.mock.clocks, 0, pair.t0, 100, at)]) } else { (0, Vec::new()) };
-                assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), mock_expected, "{case}: the Mock");
-                let uhd_expected = if late { (1, vec![booked_ticks(&pair.uhd.clocks, 0, pair.uhd_t0, 100, at)]) } else { (0, Vec::new()) };
-                assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), uhd_expected, "{case}: UHD");
-                let bursts = if late { 2 } else { 3 };
+                submit(&mut pair, 205, 91 + stops as i64, |pair| vec![short_booking(pair, &single, 0, 100, at)]);
+            }
+            pair.uhd.wait_until(pair.uhd_t0 + ms(140));
+            pair.mock.step(pair.t0 + ms(140));
+            let mock = pair.mock.finish_in_place();
+            let mock_events = pair.mock.events();
+            let uhd = pair.uhd.finish_in_place();
+            let uhd_events = pair.uhd.events();
+            let refused = offset == 1;
+            let (mock_refusals, uhd_refusals) = (overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")));
+            assert_eq!(late_drops(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), &mock_events), (0, Vec::new()), "{case}: the Mock is not late");
+            assert_eq!(late_drops(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"), &uhd_events), (0, Vec::new()), "{case}: UHD is not late");
+            // With a Stop before B the Stop tail decides (S7), so only the agreement is pinned there.
+            if stops == 0 {
+                assert_eq!((mock_refusals, uhd_refusals), (usize::from(refused), usize::from(refused)), "{case}: the refusal");
+                let bursts = if refused { 2 } else { 3 };
                 assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), bursts, "{case}: the Mock's bursts");
                 assert_eq!(manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), bursts, "{case}: UHD's bursts");
+            } else {
+                assert_eq!(mock_refusals, uhd_refusals, "{case}: the Providers refuse alike");
+                assert_eq!(manifest_rows(&mock, "ezsdr.radio.mock.bursts").len(), manifest_rows(&uhd, "ezsdr.radio.uhd.bursts").len(), "{case}: the Providers play alike");
             }
         }
     }
 }
 
+#[test]
+fn s5_parity_b_received_before_a_refuses_a() {
+    // UR-21, RM-15 (S5): a 40-sample burst at `s` and a 10-sample burst at `s + 40` overlap. The one received second is refused: received in the order B, A, A is refused; received in the order A, B, B joins A (S4).
+    for b_first in [true, false] {
+        let case = if b_first { "B received first" } else { "A received first" };
+        let mut pair = CancellationPair::new(
+            selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+            &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+            &["rx0"],
+            FakeConfig::default(),
+            BTreeMap::new(),
+        );
+        let long = pair.sized(40).clone();
+        let short = pair.sized(10).clone();
+        if b_first {
+            submit(&mut pair, 201, 91, |pair| vec![short_booking(pair, &short, 0, 100, 40)]);
+            submit(&mut pair, 202, 91, |pair| vec![short_booking(pair, &long, 0, 100, 0)]);
+        } else {
+            submit(&mut pair, 201, 91, |pair| vec![short_booking(pair, &long, 0, 100, 0)]);
+            submit(&mut pair, 202, 91, |pair| vec![short_booking(pair, &short, 0, 100, 40)]);
+        }
+        pair.uhd.wait_until(pair.uhd_t0 + ms(140));
+        pair.mock.step(pair.t0 + ms(140));
+        let mock = pair.mock.finish_in_place();
+        let uhd = pair.uhd.finish_in_place();
+        let mock_expected = usize::from(b_first);
+        assert_eq!(overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), mock_expected, "{case}: the Mock");
+        let uhd_expected = usize::from(b_first);
+        assert_eq!(overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")), uhd_expected, "{case}: UHD");
+        // The refused booking is the 40-sample one when B came first; the 10-sample burst is kept either way.
+        let kept: Vec<u64> = if b_first { vec![10] } else { vec![40, 10] };
+        let sizes = |instance: &ProviderInstance, namespace: &str| manifest_rows(instance, namespace).iter().map(|row| row["samples"].as_u64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(sizes(&mock, "ezsdr.radio.mock.bursts"), kept, "{case}: the Mock's bursts");
+        assert_eq!(sizes(&uhd, "ezsdr.radio.uhd.bursts"), kept, "{case}: UHD's bursts");
+    }
+}
+
+/// One receipt-order case: its name, its bookings as `(samples, offset from s)`, the receipt order (booking indices), and whether each
+/// booking is refused, by index.
+type Case = (String, Vec<(usize, i64)>, Vec<usize>, Vec<bool>);
+
+/// The receipt-order cases of RM-15 and UR-21 (S1–S5, S4c): each is booked in both receipt orders.
+fn receipt_order_cases() -> Vec<Case> {
+    // The lengths of a case differ, so the kept lengths name the refused bookings.
+    let mut cases: Vec<Case> = Vec::new();
+    // Two bookings, `[A, B]`: `ab` and `ba` say whether B refused when A came first, and whether A refused when B came first.
+    let mut pair_case = |name: String, bookings: Vec<(usize, i64)>, ab: bool, ba: bool| {
+        cases.push((name.clone(), bookings.clone(), vec![0, 1], vec![false, ab]));
+        cases.push((name, bookings, vec![1, 0], vec![ba, false]));
+    };
+    // S1: a one-sample A at `s`; B of two samples at `s + k`. Inside A's padded front (`s + 5`) B is refused in either order; `s + 5` is not.
+    // B received first, A (earlier) is refused at receipt: a booking before a chain inside the hand-over horizon (RM-15).
+    for k in 1..=5 {
+        pair_case(format!("S1 k={k}"), vec![(1, 0), (2, k)], k <= 4, true);
+    }
+    // S2: A of 4, 10 or 32 samples at `s`; B of one sample at its end `s + L` is refused, at `s + L + 1` it is accepted.
+    for length in [4usize, 10, 32] {
+        pair_case(format!("S2 L={length}, B at the end"), vec![(length, 0), (1, length as i64)], true, true);
+        pair_case(format!("S2 L={length}, B at the end + 1"), vec![(length, 0), (1, length as i64 + 1)], false, true);
+    }
+    // S3: A of 40 at `s`; B of one sample inside it is refused, whichever comes first.
+    for n in [1i64, 20, 39] {
+        pair_case(format!("S3 n={n}"), vec![(40, 0), (1, n)], true, true);
+    }
+    // S4, S5: A of 40 at `s`; B of 10 at `s + 40` joins A when A came first (S4), and is refused when it came first (S5: A's region meets B's).
+    // One sample later the gap refuses it in either order; from `s + 42` (the held tail's front) B is accepted in either order.
+    pair_case("S4 B joins at s + 40".to_owned(), vec![(40, 0), (10, 40)], false, true);
+    pair_case("S4 B at s + 41, the gap".to_owned(), vec![(40, 0), (10, 41)], true, true);
+    pair_case("S4 B at s + 42, past the gap".to_owned(), vec![(40, 0), (10, 42)], false, true);
+    // S4c: B joins A, so C at B's end + 1 (`s + 51`) is refused; at `s + 52` it is accepted. A came first, or B did (A is then refused).
+    for offset in [51i64, 52] {
+        let bookings = vec![(40, 0), (10, 40), (1, offset)];
+        let refused_c = offset == 51;
+        cases.push((format!("S4c C at s + {offset}, A first"), bookings.clone(), vec![0, 1, 2], vec![false, false, refused_c]));
+        cases.push((format!("S4c C at s + {offset}, B first"), bookings, vec![1, 0, 2], vec![true, false, false]));
+    }
+    cases
+}
+
+/// B received first (#79): the earlier-starting booking is refused at receipt when B is inside the hand-over horizon (RM-15).
+fn b_first(case: &Case) -> bool {
+    case.2[0] == 1
+}
+
+/// Runs each case on both Providers in its receipt order and returns one line per case where they disagree with each other or with the
+/// expected refusals and plays.
+fn receipt_order_mismatches<'a>(cases: impl IntoIterator<Item = &'a Case>) -> Vec<String> {
+    let mut mismatches = Vec::new();
+    for (case, bookings, order, refused) in cases {
+        let mut pair = CancellationPair::new(
+            selector(&["0:A:ubx:0"], &["0:A:ubx:0", "0:B:ubx:0"]),
+            &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c1.stream", eq(Scalar::from(0)))],
+            &["rx0"],
+            FakeConfig::default(),
+            BTreeMap::new(),
+        );
+        for (position, index) in order.iter().enumerate() {
+            let (samples, offset) = bookings[*index];
+            let waveform = pair.stereo(samples).clone();
+            submit(&mut pair, 300 + position as u64, 91, |pair| vec![short_booking(pair, &waveform, 0, 100, offset)]);
+        }
+        pair.uhd.wait_until(pair.uhd_t0 + ms(140));
+        pair.mock.step(pair.t0 + ms(140));
+        let mock = pair.mock.finish_in_place();
+        let mock_events = pair.mock.events();
+        let uhd = pair.uhd.finish_in_place();
+        let uhd_events = pair.uhd.events();
+        let mut kept: Vec<u64> = bookings.iter().zip(refused.iter()).filter(|(_, refused)| !**refused).map(|((samples, _), _)| *samples as u64).collect();
+        kept.sort_unstable();
+        let refusals = refused.iter().filter(|refused| **refused).count();
+        let sizes = |instance: &ProviderInstance, namespace: &str| {
+            let mut sizes: Vec<u64> = manifest_rows(instance, namespace).iter().map(|row| row["samples"].as_u64().unwrap()).collect();
+            sizes.sort_unstable();
+            sizes
+        };
+        let (mock_rejected, uhd_rejected) = (tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected"), tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected"));
+        let mock_plays = sizes(&mock, "ezsdr.radio.mock.bursts");
+        let uhd_plays = sizes(&uhd, "ezsdr.radio.uhd.bursts");
+        let late = |rejected: &[serde_json::Value], events: &[ezsdr_kernel::event::Event]| {
+            late_drops(rejected, events) == (0, Vec::new()) && events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR)
+        };
+        let ok = overlap_refusals(&mock_rejected) + handed_refusals(&mock_rejected) == refusals
+            && overlap_refusals(&uhd_rejected) + handed_refusals(&uhd_rejected) == refusals
+            && overlap_refusals(&mock_rejected) == overlap_refusals(&uhd_rejected)
+            && handed_refusals(&mock_rejected) == handed_refusals(&uhd_rejected)
+            && mock_plays == kept
+            && uhd_plays == kept
+            && late(&mock_rejected, &mock_events)
+            && late(&uhd_rejected, &uhd_events);
+        if !ok {
+            mismatches.push(format!(
+                "{case} (receipt order {order:?}): refused Mock {} overlap + {} handed, UHD {} overlap + {} handed; played Mock {mock_plays:?}, UHD {uhd_plays:?}; expected refused {refusals}, played {kept:?}",
+                overlap_refusals(&mock_rejected),
+                handed_refusals(&mock_rejected),
+                overlap_refusals(&uhd_rejected),
+                handed_refusals(&uhd_rejected)
+            ));
+        }
+    }
+    mismatches
+}
+
+#[test]
+fn s15_parity_booking_rule_both_receipt_orders() {
+    // RM-15, UR-21 (S1–S5, S4c) on one two-channel transmit stream, the earlier-starting booking received first: each Provider refuses the
+    // same bookings and plays the rest, on time. A booking is `(samples, offset from s)`. The later-starting-first orders are the next test.
+    let cases = receipt_order_cases();
+    let mismatches = receipt_order_mismatches(cases.iter().filter(|case| !b_first(case)));
+    assert!(mismatches.is_empty(), "the Providers disagree:\n{}", mismatches.join("\n"));
+}
+
+#[test]
+fn s15_parity_b_first_accepted_booking_rule() {
+    // #79 (RM-15): the later-starting booking received first; the earlier-starting one is refused at receipt on both Providers, whenever the
+    // later one is inside the hand-over horizon.
+    let cases = receipt_order_cases();
+    let mismatches = receipt_order_mismatches(cases.iter().filter(|case| b_first(case)));
+    assert!(mismatches.is_empty(), "the Providers disagree:\n{}", mismatches.join("\n"));
+}
+
+/// The first root tick at which transmit stream `stream`'s sample clock is `samples` samples past the sample at `root_tick` (S13's value at `s + 5`).
+fn tx_root_after(clocks: &ClockRegistry, stream: usize, root_tick: i64, samples: i64) -> i64 {
+    let target = tx_samples_after(clocks, stream, root_tick, samples);
+    let domain = target.domain();
+    let want = target.ticks_in(domain).unwrap();
+    (root_tick..).find(|&root| tx_sample_time(clocks, stream, 0, root).ticks_in(domain).unwrap() >= want).unwrap()
+}
+
+#[test]
+fn s13_parity_b_refused_at_receipt_and_the_value_answers() {
+    // S13 (#79's value case): a one-sample A at `s` (padded front `s + 5`); B of 100 samples at `s + 1` under DropAndFlag, booked before its start (the UHD rig's clock runs ahead of a submitted tick, so `s + 1` itself cannot be pinned); a value at `s + 5` samples is taken on both, and B is the only refusal.
+    let selector = selector(&["0:A:ubx:0"], &["0:A:ubx:0"]);
+    let constraints = [("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.frequency_hz", eq(Scalar::try_from(2.0e9).unwrap()))];
+    let mut pair = CancellationPair::new(selector, &constraints, &["rx0"], FakeConfig::default(), BTreeMap::new());
+    let single = pair.single.clone();
+    let hundred = pair.sized(100).clone();
+    submit(&mut pair, 201, 91, |pair| vec![short_booking(pair, &single, 0, 100, 0), short_booking(pair, &hundred, 0, 100, 1)]);
+    let (mock_at, uhd_at) = (tx_root_after(&pair.mock.clocks, 0, pair.t0 + ms(100), 5), tx_root_after(&pair.uhd.clocks, 0, pair.uhd_t0 + ms(100), 5));
+    s14_submit(&mut pair, 202, mock_at, uhd_at, s14_value(2.5e9));
+    pair.uhd.wait_until(pair.uhd_t0 + ms(140));
+    pair.mock.step(pair.t0 + ms(140));
+    let (mock, uhd) = (tx_decisions(&pair.mock.events()), tx_decisions(&pair.uhd.events()));
+    assert_eq!(mock, uhd, "the Providers answer alike");
+    assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["tx_burst"], "only B is refused; the value at `s + 5` is taken: {mock:?}");
+}
+
+#[test]
+fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
+    // S4b (R4-5): A(40) at 20 ms is handed, C(10) is booked early at 100 samples past it, then B(10) joins A at 40 samples, received
+    // before the join deadline (15.04 ms). B continues A with no end-of-burst between, and C plays on time on both Providers.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(40).clone();
+    let short = pair.sized(10).clone();
+    submit(&mut pair, 201, 6, |pair| vec![short_booking(pair, &long, 0, 20, 0)]);
+    submit(&mut pair, 202, 11, |pair| vec![short_booking(pair, &short, 0, 20, 100)]);
+    submit(&mut pair, 203, 12, |pair| vec![short_booking(pair, &short, 0, 20, 40)]);
+    submit(&mut pair, 204, 16, |_| Vec::new());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(30));
+    pair.mock.step(pair.t0 + ms(30));
+    let mock = pair.mock.finish_in_place();
+    let mock_events = pair.mock.events();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_events = pair.uhd.events();
+    let uhd_sends = tx_send_calls(&pair.uhd.device, 0);
+    for (case, events) in [("Mock", &mock_events), ("UHD", &uhd_events)] {
+        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{case}: C plays on time: {events:?}");
+    }
+    assert_eq!(overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), 0, "the Mock refuses nothing");
+    assert_eq!(overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")), 0, "UHD refuses nothing");
+    let sizes = |instance: &ProviderInstance, namespace: &str| {
+        let mut sizes: Vec<u64> = manifest_rows(instance, namespace).iter().map(|row| row["samples"].as_u64().unwrap()).collect();
+        sizes.sort_unstable();
+        sizes
+    };
+    assert_eq!(sizes(&mock, "ezsdr.radio.mock.bursts"), [10, 10, 40], "the Mock's bursts");
+    assert_eq!(sizes(&uhd, "ezsdr.radio.uhd.bursts"), [10, 10, 40], "UHD's bursts");
+    assert_eq!(uhd_sends.iter().filter(|call| call.contains("sob=true")).count(), 2, "A and B are one device burst, C another: {uhd_sends:?}");
+}
+
+/// A repeat of `waveform` on transmit stream 0, at `samples` after T0 + `relative` ms on each Provider; with the switch mark when
+/// `switch` (RM-37).
+fn repeat_action(pair: &CancellationPair, waveform: &ezsdr_kernel::manifest::ArtifactRef, relative: i64, samples: i64, switch: bool) -> (Action, Action) {
+    let action = |at: TimePoint| Action::TxBurst {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: "tx/s0".to_owned() },
+        waveform: waveform.clone(),
+        repeat: true,
+        at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
+        requested_at: None,
+        late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+        metadata: if switch { BTreeMap::from([(key("radio.repeat_operation"), Value::Scalar(Scalar::from("switch")))]) } else { BTreeMap::new() },
+    };
+    (action(tx_samples_after(&pair.mock.clocks, 0, pair.t0 + ms(relative), samples)), action(tx_samples_after(&pair.uhd.clocks, 0, pair.uhd_t0 + ms(relative), samples)))
+}
+
+/// A Provider's `switches` rows as (predecessor, old period, new period, outcome). The action id is left out: UHD's barrier takes
+/// action ids the Mock never sees, so the two Providers number the same switch differently.
+fn switch_rows(instance: &ProviderInstance, namespace: &str) -> Vec<(u64, i64, i64, String)> {
+    manifest_rows(instance, namespace)
+        .iter()
+        .map(|row| (row["predecessor"].as_u64().unwrap(), row["old_period"].as_i64().unwrap(), row["new_period"].as_i64().unwrap(), row["outcome"].as_str().unwrap().to_owned()))
+        .collect()
+}
+
+#[test]
+fn s15_parity_switch_to_a_new_length() {
+    // S8, S9 (RM-37): a 1 000-sample repeat from 20 ms, switched at 26 ms to a 500-sample waveform: both Providers record one applied
+    // switch from the repeat's period to the new one.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    let short = pair.sized(500).clone();
+    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
+    submit(&mut pair, 202, 24, |pair| vec![repeat_action(pair, &short, 26, 0, true)]);
+    submit(&mut pair, 203, 28, |_| Vec::new());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let (mock_rows, uhd_rows) = (switch_rows(&mock, "ezsdr.radio.mock.switches"), switch_rows(&uhd, "ezsdr.radio.uhd.switches"));
+    assert_eq!(mock_rows, uhd_rows, "the Providers record alike");
+    assert_eq!(mock_rows, [(1, 1_000, 500, "applied".to_owned())], "{mock_rows:?}");
+}
+
+#[test]
+fn s15_parity_second_pending_switch_is_refused() {
+    // S10 (RM-37): a second switch while the first is pending is refused with its id on both Providers, and the first still applies.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    let short = pair.sized(500).clone();
+    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
+    submit(&mut pair, 202, 24, |pair| vec![repeat_action(pair, &short, 26, 0, true), repeat_action(pair, &long, 26, 0, true)]);
+    submit(&mut pair, 203, 28, |_| Vec::new());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let (mock, uhd) = (tx_decisions(&pair.mock.events()), tx_decisions(&pair.uhd.events()));
+    let kinds = |decisions: &[(String, u64)]| decisions.iter().map(|(kind, _)| kind.clone()).collect::<Vec<_>>();
+    assert_eq!(kinds(&mock), ["tx_burst"], "only the second switch is refused: {mock:?}");
+    assert_eq!(kinds(&uhd), ["tx_burst"], "only the second switch is refused: {uhd:?}");
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let (mock_rows, uhd_rows) = (switch_rows(&mock, "ezsdr.radio.mock.switches"), switch_rows(&uhd, "ezsdr.radio.uhd.switches"));
+    assert_eq!(mock_rows, uhd_rows, "the Providers record alike");
+    assert_eq!(mock_rows, [(1, 1_000, 500, "applied".to_owned())], "the first switch still applies: {mock_rows:?}");
+}
+
+#[test]
+fn s15_parity_switch_starts_on_the_old_repeats_end() {
+    // S8 (RM-37, D57): a 1 000-sample repeat switched at 26 ms to a 500-sample waveform of other samples. Both Providers start the new
+    // burst where the old one ends. On UHD the device sends the old samples up to that boundary and the new ones from it.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    let tone = pair.tone.clone();
+    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
+    submit(&mut pair, 202, 24, |pair| vec![repeat_action(pair, &tone, 26, 0, true)]);
+    submit(&mut pair, 203, 28, |_| Vec::new());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    // The old repeat's burst, then the switched one: (start, samples) on each Provider's own sample grid.
+    let bursts = |instance: &ProviderInstance, namespace: &str| {
+        let rows = manifest_rows(instance, namespace);
+        assert_eq!(rows.len(), 2, "{namespace}: the old repeat and the switched burst: {rows:?}");
+        rows.iter().map(|row| (row["target"]["ticks"].as_i64().unwrap(), row["samples"].as_i64().unwrap())).collect::<Vec<_>>()
+    };
+    let (mock_bursts, uhd_bursts) = (bursts(&mock, "ezsdr.radio.mock.bursts"), bursts(&uhd, "ezsdr.radio.uhd.bursts"));
+    // Each Provider's boundary is its own (RM-37), so the two may end the old repeat at different samples.
+    for (case, bursts) in [("Mock", &mock_bursts), ("UHD", &uhd_bursts)] {
+        let ((old_start, old_samples), (new_start, _)) = (bursts[0], bursts[1]);
+        assert_eq!(new_start, old_start + old_samples, "{case}: the switched burst starts where the old repeat ends: {bursts:?}");
+    }
+    // UHD's device samples at the boundary: the old repeat's last sample, then the first of the new waveform.
+    let boundary = uhd_bursts[1].0;
+    assert_eq!(pair.uhd.device.transmitted(tx_device_tick(&pair.uhd.clocks, 0, boundary - 1), 2), vec![Some([0.25, 0.0]), Some([0.75, -0.25])], "{:?}", pair.uhd.device.calls());
+}
+
+#[test]
+fn s15_parity_provider_stop_cancels_a_pending_switch() {
+    // S11, D58 (RM-37, UR-26, UR-38): a switch received at 22 ms is still pending when Provider::stop ends the Run at 23 ms, before its
+    // boundary. Both Providers cancel it, and the new waveform is never sent: the old repeat is the only burst.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    let tone = pair.tone.clone();
+    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
+    submit(&mut pair, 202, 22, |pair| vec![repeat_action(pair, &tone, 26, 0, true)]);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(23));
+    pair.mock.step(pair.t0 + ms(23));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    for (case, instance, namespace) in [("Mock", &mock, "ezsdr.radio.mock"), ("UHD", &uhd, "ezsdr.radio.uhd")] {
+        let outcomes: Vec<String> = switch_rows(instance, &format!("{namespace}.switches")).into_iter().map(|row| row.3).collect();
+        assert_eq!(outcomes, ["cancelled"], "{case}: the switch is cancelled");
+        assert_eq!(manifest_rows(instance, &format!("{namespace}.bursts")).len(), 1, "{case}: the old repeat is the only burst");
+    }
+    let origin = manifest_rows(&uhd, "ezsdr.radio.uhd.bursts")[0]["target"]["ticks"].as_i64().unwrap();
+    assert!(!pair.uhd.device.transmitted(tx_device_tick(&pair.uhd.clocks, 0, origin), 30_000).contains(&Some([0.75, -0.25])), "{:?}", pair.uhd.device.calls());
+}
+
 // ---------------------------------------------------------------- transmit values on an empty stream (S14)
+
+#[test]
+fn s15_parity_untimed_booking_after_stop() {
+    // RM-15, RM-16 (sequence 1): an untimed repeat after a Stop starts past the Stop region, at the same sample after the Stop on both
+    // Providers, with no TIME_ERROR. The second repeat is booked inside the region, so the placement, not the lead, moves it.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    submit_untimed(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 6, 0, false)]);
+    submit(&mut pair, 202, 20, |_| vec![stop_both("tx/s0")]);
+    submit_untimed(&mut pair, 203, 21, |pair| vec![repeat_action(pair, &long, 21, 0, false)]);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    assert!(mock_events.iter().chain(&uhd_events).all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "an untimed repeat has no TIME_ERROR");
+    let stop = |clocks: &ClockRegistry, root: i64| {
+        let at = tx_sample_time(clocks, 0, 0, root);
+        at.ticks_in(at.domain()).unwrap()
+    };
+    let (mock_stop, uhd_stop) = (stop(&pair.mock.clocks, pair.t0 + ms(20)), stop(&pair.uhd.clocks, pair.uhd_t0 + ms(20)));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    // The repeat after the Stop, in samples after the Stop's sample on each Provider.
+    let after = |instance: &ProviderInstance, namespace: &str, stop: i64| {
+        let rows = manifest_rows(instance, namespace);
+        assert_eq!(rows.len(), 2, "{namespace}: the repeat and the one after the Stop: {rows:?}");
+        assert!(rows[1]["late_by"].is_null(), "{namespace}: an untimed repeat reports no lateness: {rows:?}");
+        rows[1]["target"]["ticks"].as_i64().unwrap() - stop
+    };
+    let (mock_gap, uhd_gap) = (after(&mock, "ezsdr.radio.mock.bursts", mock_stop), after(&uhd, "ezsdr.radio.uhd.bursts", uhd_stop));
+    // The Stop region is the 10 ms window (KL-13, KL-15) past the Stop's sample, to within its rounding onto the sample grid. UHD's Stop
+    // lands a little later than the Mock's, as its device clock runs ahead of the submitted tick, so the band allows for that.
+    for (case, gap) in [("Mock", mock_gap), ("UHD", uhd_gap)] {
+        assert!((9_900..10_100).contains(&gap), "{case}: the repeat starts at the Stop region's end, {gap} samples after the Stop");
+    }
+}
+
+#[test]
+fn s15_parity_untimed_queue_behind_a_booking() {
+    // RM-15 (sequence 3): a timed burst B of 10 samples at s = 30 ms, then an untimed burst of 10 samples at s + 3, booked in that order.
+    // The untimed one queues behind B's front (s + 11) on both Providers, with no refusal and no TIME_ERROR. Both are booked at 17 ms, so
+    // the instant (s + 3) binds, not the lead.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let ten = pair.sized(10).clone();
+    submit(&mut pair, 201, 17, |pair| vec![short_booking(pair, &ten, 0, 30, 0)]);
+    submit_untimed(&mut pair, 202, 17, |pair| vec![short_booking(pair, &ten, 0, 30, 3)]);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
+    assert!(tx_decisions(&mock_events).is_empty() && tx_decisions(&uhd_events).is_empty(), "both bursts are accepted: {mock_events:?}");
+    assert!(mock_events.iter().chain(&uhd_events).all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "an untimed burst has no TIME_ERROR");
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let gap = |instance: &ProviderInstance, namespace: &str| {
+        let mut starts: Vec<i64> = manifest_rows(instance, namespace).iter().map(|row| row["target"]["ticks"].as_i64().unwrap()).collect();
+        starts.sort_unstable();
+        assert_eq!(starts.len(), 2, "{namespace}: B and the untimed burst: {starts:?}");
+        starts[1] - starts[0]
+    };
+    let (mock_gap, uhd_gap) = (gap(&mock, "ezsdr.radio.mock.bursts"), gap(&uhd, "ezsdr.radio.uhd.bursts"));
+    assert_eq!((mock_gap, uhd_gap), (11, 11), "the untimed burst starts at B's front, s + max(10, 4) + 1");
+}
 
 /// What each Provider refused among transmit values and bursts: the kind and the Action id, in order (RM-22). The samples are not compared.
 fn tx_decisions(events: &[Event]) -> Vec<(String, u64)> {

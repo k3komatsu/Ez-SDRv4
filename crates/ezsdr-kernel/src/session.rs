@@ -289,6 +289,8 @@ pub(crate) struct Compiled {
     pub(crate) control: Option<ControlOp>,
     /// RS-19's record of an "as soon as possible" that was resolved (RS-19).
     pub(crate) coercions: Vec<Coercion>,
+    /// Whether the Action has no `at` and the Kernel chose its instant (RS-19): every item it compiles to is untimed.
+    pub(crate) untimed: bool,
 }
 
 /// A Session Action that is a Lease or Run operation rather than a Kernel Action
@@ -365,6 +367,7 @@ pub(crate) fn compile(action: &SessionAction, registry: &ModuleRegistry, earlies
             let at = match at {
                 Some(t) => *t,
                 None => {
+                    out.untimed = true;
                     // RS-19: the applied time is recorded as a coercion of the
                     // requested "as soon as possible", in the caller's own domain.
                     let ticks = earliest.ticks_in(earliest.domain()).unwrap_or_default(); // own domain: RS-19 records the caller's instant

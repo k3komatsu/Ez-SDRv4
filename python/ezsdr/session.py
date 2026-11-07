@@ -142,11 +142,13 @@ def waveform(x: Any, id: str = "waveform") -> Tuple[dict, bytes]:
 def _cf32(x: Any) -> Tuple[int, bytes]:
     """The channel count and the little-endian, channel-interleaved cf32 bytes (EA-17)."""
     array = np.asarray(x)
+    if array.ndim not in (1, 2):
+        raise Error("a waveform is a 1-D array or a (channels, n) array")
+    if not np.isfinite(array).all():
+        raise Error("EA-16: a waveform's samples must be finite")
     if array.ndim == 1:
         return 1, array.astype("<c8").tobytes()
-    if array.ndim == 2:
-        return array.shape[0], np.ascontiguousarray(array.T).astype("<c8").tobytes()
-    raise Error("a waveform is a 1-D array or a (channels, n) array")
+    return array.shape[0], np.ascontiguousarray(array.T).astype("<c8").tobytes()
 
 
 def samples(data: bytes, artifact: dict) -> np.ndarray:
@@ -460,6 +462,11 @@ class Tx(_Stream):
     def __init__(self, session: "Session", radio: str, number: int = 0):
         super().__init__(session, radio, "tx", number)
 
+    def _check_channels(self, channels: int) -> None:
+        assigned = len(self.channels)
+        if assigned != channels:
+            raise Error(f"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}")
+
     def repeat(self, x: Any, at: Optional[dict] = None, *, frequency: Any = None, gain: Any = None, antenna: Any = None) -> dict:
         """Transmits ``x`` repeatedly on this stream (EA-16). Its channel count must match
         this stream's membership. ``at`` is a ``TimePoint`` as ``capture`` takes, at which
@@ -469,11 +476,10 @@ class Tx(_Stream):
         keyed by logical channel, sent as ``UpdateParameter``s before the burst (RM-21), as
         ``Rx.start`` does. Everything is checked before the first request, so a bad argument
         sends nothing; a value the Provider refuses (``Rejected``, a booked or playing stream)
-        stops the call before the burst."""
+        stops the call before the burst. A second ``repeat`` on a playing stream is refused the same way:
+        ``switch`` replaces the waveform instead."""
         channels, data = _cf32(x)
-        assigned = len(self.channels)
-        if assigned != channels:
-            raise Error(f"EA-16: transmit stream s{self._number} has {assigned} channels, waveform has {channels}")
+        self._check_channels(channels)
         values = self._channel_values({"frequency": frequency, "gain": gain, "antenna": antenna})
         for key, value in values:
             self._session.set(self._radio, key, value)
@@ -484,6 +490,24 @@ class Tx(_Stream):
             "target": Target.resource(self._radio, f"tx/s{self._number}"),
             "at": at if at is not None else self._session._aligned,
             "params": {},
+        }
+        return _admitted(*self._session._submit(action, data))
+
+    def switch(self, x: Any) -> dict:
+        """Replaces the repeat playing on this stream with ``x`` (EA-16, RM-37): the new waveform starts at the
+        next boundary of the playing repeat's period after the Provider's lead, and the old one stops there. ``x``
+        must have this stream's channel count, and nothing else is sent: the stream keeps its values. Raises
+        ``Rejected`` when the Provider refuses it at booking: no repeat plays on this stream (none, a stopped one, a
+        finite burst) or a switch is already pending."""
+        channels, data = _cf32(x)
+        self._check_channels(channels)
+        action = {
+            "kind": "vocabulary",
+            "ns": "radio",
+            "verb": "start_repeat",
+            "target": Target.resource(self._radio, f"tx/s{self._number}"),
+            "at": self._session._aligned,
+            "params": {"radio.repeat_operation": "switch"},
         }
         return _admitted(*self._session._submit(action, data))
 

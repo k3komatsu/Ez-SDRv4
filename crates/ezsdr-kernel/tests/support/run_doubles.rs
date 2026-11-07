@@ -546,7 +546,7 @@ impl SteppedProvider {
             }
         }
         let progressed = !pending.is_empty();
-        for Dispatched { action, node, .. } in pending {
+        for Dispatched { action, node, untimed, .. } in pending {
             // A Provider's resolved node, else the authored target (KC-23).
             let target = match (&node, action.target()) {
                 (Some(node), _) => node.path().to_owned(),
@@ -568,9 +568,11 @@ impl SteppedProvider {
                     let value = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
                     self.record(format!("update:{key}={value}"));
                 }
-                Action::TxBurst { at, waveform, .. } => {
+                Action::TxBurst { at, waveform, requested_at, .. } => {
                     let t = at.time_point;
                     self.record(format!("burst_at:{}", t.ticks_in(t.domain()).unwrap()));
+                    self.record(format!("burst_untimed:{untimed}"));
+                    self.record(format!("burst_requested:{}", requested_at.is_some()));
                     let found = self.inputs.as_ref().and_then(|inputs| inputs.get(&waveform.hash)).map_or_else(|| "missing".to_owned(), |bytes| bytes.len().to_string());
                     self.record(format!("burst_input:{found}"));
                 }

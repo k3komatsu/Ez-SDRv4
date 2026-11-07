@@ -488,8 +488,8 @@ fn mr_25_a_stopped_burst_transmits_every_sample_before_the_stop() {
         assert_eq!(records[0].end, BurstEnd::Stop);
         assert_eq!(records[0].samples, 2_501, "the samples before the stop instant 2 500 500 are 0 … 2 500");
         let rejected = radio.section("rejected");
-        assert_eq!(rejected.as_array().unwrap().len(), 1, "the held burst is cancelled by the stop");
-        assert!(rejected[0]["reason"].as_str().unwrap().contains("cancelled by stop"));
+        assert_eq!(rejected.as_array().unwrap().len(), 1, "the held burst starts inside the open repeat: refused at receipt");
+        assert!(rejected[0]["reason"].as_str().unwrap().contains("overlaps an accepted booking"));
         if channelled {
             for (k, re, im) in radio.received(0) {
                 let expected = if k <= 2_500 { samples[(k % 1_000) as usize] } else { (0.0, 0.0) };
@@ -539,7 +539,7 @@ fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     let domain = radio.tx_domain(&world);
-    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_000, false));
+    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_005, false));
     radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0)]), 2_009_999, false));
     radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], t0);
@@ -548,40 +548,40 @@ fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
     assert_eq!(initial_records.len(), 1, "only the one-sample A was handed over: {initial_records:?}");
     assert_eq!((initial_records[0].target, initial_records[0].samples), (TimePoint::new(domain, 2_009_999), 1));
     let rejected = radio.section("rejected");
-    assert_eq!(rejected.as_array().unwrap().len(), 1, "B at the window edge was cancelled");
+    assert_eq!(rejected.as_array().unwrap().len(), 1, "the booking after the Stop's cut was cancelled");
     assert!(rejected[0]["reason"].as_str().unwrap().contains("cancelled by stop"), "{rejected:?}");
 
+    // C at H+1 starts inside A's window: refused at receipt, not late (RM-15). Its policy is DropAndFlag: a SendAsap one
+    // meeting only the Stop's region is moved past it (F36), which is tested in mock_radio.rs.
     let mut c = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_001, false);
     if let Action::TxBurst { late_policy, .. } = &mut c {
         *late_policy = LatePolicy::DropAndFlag;
     }
     radio.push(c);
     step(&world, &mut [&mut radio], t0);
-    let errors: Vec<_> = radio.drain_events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
-    assert_eq!(errors.len(), 1, "C at H+1 is late: {errors:?}");
-    assert_eq!((errors[0].payload["outcome"].as_str(), errors[0].payload["late_by_ns"].as_i64()), (Some("drop"), Some(3_000)));
+    let rejected = radio.section("rejected");
+    assert_eq!(rejected.as_array().unwrap().len(), 2);
+    assert!(rejected[1]["reason"].as_str().unwrap().contains("overlaps an accepted booking"), "{rejected:?}");
+    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "a refused C is not late");
 
-    let mut c = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_004, false);
-    if let Action::TxBurst { late_policy, .. } = &mut c {
-        *late_policy = LatePolicy::DropAndFlag;
-    }
-    radio.push(c);
+    // D at H+4 is the first sample after A's window: on time.
+    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_004, false));
     step(&world, &mut [&mut radio], t0);
-    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "C at H+4 is on time");
+    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "D at H+4 is on time");
 
     step(&world, &mut [&mut radio], t0 + 12_006_001);
     let final_records = records(&radio);
-    assert_eq!(final_records.len(), 2, "only A and on-time C have records: {final_records:?}");
+    assert_eq!(final_records.len(), 2, "only A and on-time D have records: {final_records:?}");
     assert_eq!((final_records[1].target, final_records[1].samples), (TimePoint::new(domain, 2_010_004), 1));
     let received = radio.received(0);
     let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im)).unwrap_or((0.0, 0.0));
     let handed = sample(10_044);
     assert!((f32::hypot(handed.0, handed.1) - 0.5).abs() < 1e-6, "A's payload through its exclusive end is radiated: {handed:?}");
     assert_eq!(sample(10_045), (0.0, 0.0), "the safe restart gap is not payload handed at Stop");
-    assert_eq!(sample(10_046), (0.0, 0.0), "late C at H+1 was dropped");
-    let c_sample = sample(10_049);
-    assert!((f32::hypot(c_sample.0, c_sample.1) - 0.5).abs() < 1e-6, "on-time C at H+4 radiates: {c_sample:?}");
-    assert_eq!(sample(10_050), (0.0, 0.0), "radiation ends after C");
+    assert_eq!(sample(10_046), (0.0, 0.0), "refused C radiated nothing");
+    let d_sample = sample(10_049);
+    assert!((f32::hypot(d_sample.0, d_sample.1) - 0.5).abs() < 1e-6, "on-time D at H+4 radiates: {d_sample:?}");
+    assert_eq!(sample(10_050), (0.0, 0.0), "radiation ends after D");
 }
 
 #[test]
@@ -618,8 +618,9 @@ fn mr_25_a_repeat_first_send_is_judged_at_32_samples() {
 
 #[test]
 fn mr_17_a_one_sample_burst_uses_the_safe_sample() {
+    // A one-sample burst holds its own sample and the next four (RM-15): a booking at 4003 or 4004 is refused at receipt, 4005 is the first free sample.
     let t0 = 2_000_000_000;
-    for (target, expect_late, late_by) in [(2_004_003, true, 2_000), (2_004_004, true, 1_000), (2_004_005, false, 0)] {
+    for (target, refused) in [(2_004_003, true), (2_004_004, true), (2_004_005, false)] {
         let case = format!("B at sample {target}");
         let world = World::new(loopback(None));
         let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
@@ -628,34 +629,24 @@ fn mr_17_a_one_sample_burst_uses_the_safe_sample() {
         let domain = radio.tx_domain(&world);
         let a = world.waveform(&[(0.5, 0.0)]);
         let b = world.waveform(&[(0.0, 0.5)]);
-        let mut a = burst(&radio, &world, a, 2_004_000, false);
-        let mut b = burst(&radio, &world, b, target, false);
-        if let Action::TxBurst { late_policy, .. } = &mut a {
-            *late_policy = LatePolicy::DropAndFlag;
-        }
-        if let Action::TxBurst { late_policy, .. } = &mut b {
-            *late_policy = LatePolicy::DropAndFlag;
-        }
-        radio.push(a);
-        radio.push(b);
+        radio.push(burst(&radio, &world, a, 2_004_000, false));
+        radio.push(burst(&radio, &world, b, target, false));
         step(&world, &mut [&mut radio], t0);
 
-        let errors: Vec<_> = radio.drain_events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
-        if expect_late {
-            assert_eq!(errors.len(), 1, "{case}: {errors:?}");
-            assert_eq!(errors[0].payload["outcome"], "drop", "{case}");
-            assert_eq!(errors[0].payload["late_by_ns"], late_by, "{case}");
-            assert_eq!(errors[0].payload["target"]["ticks"], target, "{case}");
-        } else {
-            assert!(errors.is_empty(), "{case}: {errors:?}");
+        let rejected = radio.mock.instance().sections.get(&Namespace::parse("ezsdr.radio.mock.rejected").unwrap()).map_or(0, |rows| rows.as_array().unwrap().len());
+        assert_eq!(rejected, usize::from(refused), "{case}");
+        if refused {
+            assert!(radio.section("rejected")[0]["reason"].as_str().unwrap().contains("overlaps an accepted booking"), "{case}");
         }
+        let errors: Vec<_> = radio.drain_events().into_iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert!(errors.is_empty(), "{case}: {errors:?}");
 
         step(&world, &mut [&mut radio], t0 + 6_100_001);
         let records = records(&radio);
-        assert_eq!(records.len(), if expect_late { 1 } else { 2 }, "{case}: {records:?}");
+        assert_eq!(records.len(), if refused { 1 } else { 2 }, "{case}: {records:?}");
         assert_eq!(records[0].target, TimePoint::new(domain, 2_004_000));
         assert_eq!(records[0].samples, 1);
-        if !expect_late {
+        if !refused {
             assert_eq!(records[1].target, TimePoint::new(domain, target), "{case}: actual B start");
             assert_eq!(records[1].samples, 1);
         }
@@ -663,8 +654,8 @@ fn mr_17_a_one_sample_burst_uses_the_safe_sample() {
         let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im)).unwrap_or((0.0, 0.0));
         assert!((f32::hypot(sample(4_045).0, sample(4_045).1) - 0.5).abs() < 1e-6, "{case}: A's sample; records={records:?}");
         let b_sample = sample(target - 2_004_000 + 4_045);
-        if expect_late {
-            assert_eq!(b_sample, (0.0, 0.0), "{case}: dropped B radiated");
+        if refused {
+            assert_eq!(b_sample, (0.0, 0.0), "{case}: refused B radiated");
         } else {
             assert!((f32::hypot(b_sample.0, b_sample.1) - 0.5).abs() < 1e-6, "{case}: B's actual loopback start {b_sample:?}");
         }
@@ -1049,12 +1040,12 @@ fn mr_25_a_stop_at_a_held_burst_s_start_silences_the_transmitter() {
             End::StopBefore => {
                 run_to(&world, &mut [&mut radio], 3_999_499);
                 radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
-                (3_999_500, "cancelled by stop")
+                (3_999_500, "overlaps an accepted booking")
             }
             End::StopInTheRound => {
                 run_to(&world, &mut [&mut radio], 3_999_999);
                 radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
-                (4_000_000, "cancelled by stop")
+                (4_000_000, "overlaps an accepted booking")
             }
         };
         step(&world, &mut [&mut radio], tick);
@@ -1065,9 +1056,9 @@ fn mr_25_a_stop_at_a_held_burst_s_start_silences_the_transmitter() {
         assert_eq!(heard.last(), Some(&3_999));
         let records = records(&radio);
         assert_eq!(records.len(), 1);
-        assert_eq!((records[0].samples, records[0].end), (4_000, BurstEnd::Eob), "the first burst ended at the held burst's start");
+        assert_eq!((records[0].samples, records[0].end), (4_000, BurstEnd::Stop), "the repeat is cut by the Stop at the held burst's start");
         let rejected = radio.section("rejected");
-        assert_eq!(rejected.as_array().unwrap().len(), 1, "the held burst never started");
+        assert_eq!(rejected.as_array().unwrap().len(), 1, "the held burst starts inside the open repeat: refused at receipt");
         assert!(rejected[0]["reason"].as_str().unwrap().contains(reason));
     }
 
@@ -1143,7 +1134,7 @@ fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
         let (world, mut a, mut b) = two(a_into_b(), 3_000_000.0, 3_000_000.0);
         let first = world.waveform(&ramp(999));
         let second = world.waveform(&[(0.0, 0.5)]);
-        a.push(burst(&a, &world, first, 0, true));
+        a.push(burst(&a, &world, first, 0, false));
         a.push(burst(&a, &world, second, 1_999, true));
         ordered(&world, &mut a, &mut b, 0, a_first);
         while let Some(due) = world.auth.next_due() {
@@ -1171,7 +1162,7 @@ fn ch_09_a_burst_starting_between_rounds_survives_a_stop_in_either_order() {
     assert_eq!(at(1_999), (0.0, 0.5), "sample 1 999 (666 333⅓ ns) is before the stop's round and belongs to the second burst");
     assert_eq!(at(2_000), (0.0, 0.0));
     assert_eq!(records_a_first.len(), 2);
-    assert_eq!((records_a_first[0].samples, records_a_first[0].end), (1_999, BurstEnd::Eob));
+    assert_eq!((records_a_first[0].samples, records_a_first[0].end), (999, BurstEnd::Eob));
     assert_eq!((records_a_first[1].samples, records_a_first[1].end), (1, BurstEnd::Stop), "the second burst transmitted its one sample before the stop");
 }
 
@@ -1273,7 +1264,7 @@ fn mr_35_the_receive_gain_scales_the_noise_with_the_signal() {
 
 #[test]
 fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
-    let refused = "MR-16: burst begins at or before the open burst's next sample";
+    let refused = "MR-16: burst overlaps an accepted booking";
     let started = |environment: serde_json::Value, medium: bool, waveform: &[(f32, f32)]| {
         let world = World::new(environment);
         let mut radio = prepare(&world, Options { medium, ..Options::default() }).unwrap();
@@ -1322,13 +1313,13 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
     radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], 1_500_500);
     run_to(&world, &mut [&mut radio], 3_000_001);
-    assert_eq!(radio.section("rejected").as_array().unwrap().len(), 1);
-    assert_eq!(radio.section("rejected")[0]["reason"], refused);
-    assert_eq!(summary(&radio), vec![(2, BurstEnd::Eob), (499, BurstEnd::Stop)]);
+    // Both bookings start inside the open repeat's span, which holds every sample until its Stop (RM-15): both are refused at receipt.
+    assert_eq!(radio.section("rejected").as_array().unwrap().len(), 2);
+    assert!(radio.section("rejected").as_array().unwrap().iter().all(|row| row["reason"] == refused));
+    assert_eq!(summary(&radio), vec![(501, BurstEnd::Stop)]);
     for (k, re, im) in radio.received(0) {
         let want = match k {
-            1_000..=1_001 => (0.5, 0.0),
-            1_002..=1_500 => (0.25, 0.25),
+            1_000..=1_500 => (0.5, 0.0),
             _ => (0.0, 0.0),
         };
         assert_eq!((re, im), want, "sample {k}");
@@ -1336,7 +1327,7 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
 
     // a late burst for sample 500, judged where MR-17's SendAsap moves it (no lead on `ideal`):
     // onto the open burst's start in the round at 1 000 000 ns, refused with TIME_ERROR { refused };
-    // one sample past it in the round at 1 000 500 ns, admitted, and the open burst ends there
+    // in the round at 1 000 500 ns, refused at receipt too: the open repeat holds its span until its Stop
     let (world, mut radio) = started(loopback(None), true, &samples);
     step(&world, &mut [&mut radio], 1_000_000);
     radio.drain_events();
@@ -1356,12 +1347,12 @@ fn mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused() {
     radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], 3_000_500);
     step(&world, &mut [&mut radio], 6_000_001);
-    assert_eq!(radio.section("rejected"), json!([]));
-    assert_eq!(summary(&radio), vec![(1, BurstEnd::Eob), (2_000, BurstEnd::Stop)]);
+    assert_eq!(radio.section("rejected").as_array().unwrap().len(), 1);
+    assert_eq!(radio.section("rejected")[0]["reason"], refused);
+    assert_eq!(summary(&radio), vec![(2_001, BurstEnd::Stop)]);
     for (k, re, im) in radio.received(0) {
         let want = match k {
-            1_000 => samples[0],
-            1_001..=3_000 => (0.0, 0.5),
+            1_000..=3_000 => samples[((k - 1_000) % 1_000) as usize],
             _ => (0.0, 0.0),
         };
         assert_eq!((re, im), want, "sample {k}");
@@ -1403,8 +1394,8 @@ fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
             }
         }
 
-        // a burst at sample 999, the last of a burst that has not ended: it takes over there, and
-        // no two records hold one sample
+        // a burst at sample 999, inside a finite burst that has not ended (its span runs to 1 001): it is refused at
+        // receipt, so the first burst keeps sample 999 and no two records hold one sample
         let (world, mut radio) = first_pass(environment, medium, &samples, false);
         let second = world.waveform(&[(0.0, 0.5)]);
         radio.push(burst(&radio, &world, second, 999, true));
@@ -1414,13 +1405,13 @@ fn mr_15_a_transmit_block_is_emitted_only_after_its_last_sample() {
         step(&world, &mut [&mut radio], 1_500_500);
         run_to(&world, &mut [&mut radio], 3_000_001);
         step(&world, &mut [&mut radio], 3_000_001);
-        assert_eq!(radio.section("rejected"), json!([]));
-        assert_eq!(summary(&radio), vec![(999, BurstEnd::Eob), (502, BurstEnd::Stop)]);
+        assert_eq!(radio.section("rejected").as_array().unwrap().len(), 1);
+        assert!(radio.section("rejected")[0]["reason"].as_str().unwrap().contains("overlaps an accepted booking"));
+        assert_eq!(summary(&radio), vec![(1_000, BurstEnd::Eob)]);
         if medium {
             for (k, re, im) in radio.received(0) {
                 let want = match k {
-                    0..=998 => samples[k as usize],
-                    999..=1_500 => (0.0, 0.5),
+                    0..=999 => samples[k as usize],
                     _ => (0.0, 0.0),
                 };
                 assert_eq!((re, im), want, "sample {k}");
@@ -1438,8 +1429,8 @@ fn mr_25_a_stop_transmits_every_held_burst_before_it() {
         let second = world.waveform(&[(0.0, 0.5)]);
         let third = world.waveform(&ramp(100));
         let fourth = world.waveform(&[(0.25, 0.25)]);
-        a.push(burst(&a, &world, first, 0, true));
-        a.push(burst(&a, &world, second, 1_500, true));
+        a.push(burst(&a, &world, first, 0, false));
+        a.push(burst(&a, &world, second, 1_500, false));
         a.push(burst(&a, &world, third, 2_500, false));
         a.push(burst(&a, &world, fourth, 3_000, true));
         ordered(&world, &mut a, &mut b, 0, a_first);
@@ -1452,13 +1443,13 @@ fn mr_25_a_stop_transmits_every_held_burst_before_it() {
     };
     let (received, summary, rejected) = run(true);
     assert_eq!((received.clone(), summary.clone(), rejected.clone()), run(false));
-    assert_eq!(summary, vec![(1_500, BurstEnd::Eob), (1_000, BurstEnd::Eob), (100, BurstEnd::Eob), (201, BurstEnd::Stop)]);
+    assert_eq!(summary, vec![(1_000, BurstEnd::Eob), (1, BurstEnd::Eob), (100, BurstEnd::Eob), (201, BurstEnd::Stop)]);
     assert_eq!(rejected, json!([]));
     let (first, third) = (ramp(1_000), ramp(100));
     for (k, re, im) in received {
         let want = match k {
-            0..=1_499 => first[(k % 1_000) as usize],
-            1_500..=2_499 => (0.0, 0.5),
+            0..=999 => first[k as usize],
+            1_500 => (0.0, 0.5),
             2_500..=2_599 => third[(k - 2_500) as usize],
             3_000..=3_200 => (0.25, 0.25),
             _ => (0.0, 0.0),

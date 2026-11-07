@@ -647,39 +647,6 @@ fn hw_b8_stop_end() {
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
-fn hw_b8_preemption() {
-    // bench.md B8: a burst preempting a running repeat at leads of 20, 10, 5, 3 ms (UR-21:
-    // the in-flight window bounds it, 10 ms).
-    for lead_ms in [20, 10, 5, 3] {
-        let dir = TempDir::new();
-        let mut run = tx_session(usrp(), &dir);
-        let (repeat, _) = waveform_of(&pn(1_000));
-        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&repeat)).unwrap()));
-        wait(&mut run, ms(100));
-        let (burst, _) = waveform_of(&pn(100));
-        let at = tx_at(&run, ms(lead_ms));
-        let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(at), &[]), Some(&burst)).unwrap();
-        wait(&mut run, ms(100));
-        let manifest = run.finish();
-        println!("B8 preempt lead {lead_ms} ms: {:?}; TIME_ERROR {:?}", entry.outcome, events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>());
-        println!("B8 preempt lead {lead_ms} ms: asked {}; bursts {}", at.ticks_in(at.domain()).unwrap(), section(&manifest, "bursts"));
-        // UR-21 decides against the first unhanded sample and the device lead, so a lead can be late. The lead's expectation: one late
-        // TIME_ERROR inside the 10 ms in-flight window, none beyond it; the 10 ms boundary is INFERRED, so either count there.
-        let expected_late = match lead_ms {
-            20 => Some(0),
-            10 => None,
-            _ => Some(1),
-        };
-        println!("B8 preempt lead {lead_ms} ms: the lead expects {expected_late:?} radio.TIME_ERROR");
-        verdict(
-            &format!("B8 preempt lead {lead_ms} ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault"),
-            iii::preemption_verdict(iii::run_faults(&manifest), &iii::time_error_causes(&manifest), expected_late),
-        );
-    }
-}
-
-#[test]
-#[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_ma1_phase_after_a_pre_start_tune() {
     // MA-1 (UR-24's Ceiling, KL-32): the receive frequency a Session asks for at connect is applied untimed, so the loopback's phase
     // has no timed tune's guarantee. `EZSDR_MA1_SESSIONS` Sessions (5 by default), each with its own device open; the spread of their
@@ -1246,7 +1213,7 @@ fn hw_b2_drift_60s() {
 fn hw_b8_raw_burst_gap() {
     // UR-23's back-to-back bursts: a burst ends with end-of-burst at tick T and the next
     // starts with a timed start-of-burst at T + gap samples. Which gap does the device take
-    // without a late report (hw_b8_preemption saw late_at_device at gap 0)?
+    // without a late report (the preemption sweep that note 47 stage 5 removed saw late_at_device at gap 0)?
     let device = raw();
     raw_tx(&*device, 1e6, 1e9);
     while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
@@ -2746,7 +2713,7 @@ fn one_sample_trial(device: Arc<dyn Device>, samples: usize, late: bool) -> OneS
     let (first, _) = waveform_of(&[(0.4f32, 0.0f32); 4][..samples]);
     let (tone, _) = waveform_of(&tone_wave(1e6, 10_000, 100e3));
     let a = tx_at(&run, ms(40));
-    // Booked after A was sent (at 41 ms), B must still be past the in-flight window and the device lead, as `hw_b8_preemption`'s
+    // Booked after A was sent (at 41 ms), B must still be past the in-flight window and the device lead, as the removed preemption sweep's
     // 20 ms case is: 25 ms after A (B booked about 24 ms ahead). Booked with A, B stays 5 ms after it.
     let b = TimePoint::new(a.domain(), a.ticks_in(a.domain()).unwrap() + if late { 25_000 } else { 5_000 });
     let capture_at = after_ticks(&run, ms(10));

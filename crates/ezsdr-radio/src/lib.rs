@@ -738,6 +738,9 @@ pub mod payloads {
         pub late_by_ns: i64,
         /// The requested burst target (RM-22).
         pub target: TimePoint,
+        /// The Action the event is about, where the Provider names it (UR-38: a repeat switch's `send_asap`); absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub action: Option<ezsdr_kernel::event::ActionId>,
     }
 
     /// Timed control-command lateness data (RM-22).

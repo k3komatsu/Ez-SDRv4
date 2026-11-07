@@ -1,5 +1,11 @@
 {
   "$defs": {
+    "ActionId": {
+      "description": "Identifies one dispatched Action inside a Run (RS-15).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "ClockDomainId": {
       "additionalProperties": false,
       "description": "Identifies a `ClockDomain`.\n\nRule: TM-11 (`01-time-model.md`), X7.",
@@ -97,6 +103,17 @@
   "additionalProperties": false,
   "description": "Timed burst error data (RM-22).",
   "properties": {
+    "action": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The Action the event is about, where the Provider names it (UR-38: a repeat switch's `send_asap`); absent otherwise."
+    },
     "cause": {
       "$ref": "#/$defs/TimeErrorCause",
       "description": "Why the time error occurred (RM-22)."

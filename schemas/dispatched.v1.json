@@ -19,7 +19,7 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "One transmit burst. Carries no channel list: which channels a burst uses is\nthe Radio Model's (RS-49, RM-13), and deciding it here would put a radio\nfield in a frozen Kernel document. A radio burst's `metadata` is empty\n(RM-13).",
+          "description": "One transmit burst. Carries no channel list: which channels a burst uses is\nthe Radio Model's (RS-49, RM-13), and deciding it here would put a radio\nfield in a frozen Kernel document. A radio burst's `metadata` is empty or\nthe repeat-switch mark (RM-13, RM-37).",
           "properties": {
             "at": {
               "$ref": "#/$defs/AbsoluteDeadline",
@@ -1137,11 +1137,16 @@
         }
       ],
       "description": "The node a `{resource}` target was resolved to, which is what a Provider\nmatches on; absent for any other target (KC-23)."
+    },
+    "untimed": {
+      "description": "Whether the Kernel chose the Action's instant because its Session action had no\n`at` (RS-19). A Vocabulary decides what the mark means; a radio burst reads it in RM-15.",
+      "type": "boolean"
     }
   },
   "required": [
     "id",
-    "action"
+    "action",
+    "untimed"
   ],
   "title": "Dispatched",
   "type": "object"

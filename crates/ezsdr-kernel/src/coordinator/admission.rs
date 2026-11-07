@@ -18,11 +18,13 @@ pub(super) struct AdmittedAction {
     pub(super) fragment: Ident,
     pub(super) coercions: Vec<Coercion>,
     pub(super) warnings: Vec<Warning>,
+    /// RS-19: the Kernel chose the instant, so the Action carries no requested instant.
+    pub(super) untimed: bool,
 }
 
 pub(super) fn admit(shared: &Shared, action: Action, origin: Origin) -> Result<AdmittedAction, Vec<Violation>> {
     let configuration = lock(&shared.configuration).clone();
-    admit_with(shared, PendingAction::Action(action), origin, &[], &configuration)
+    admit_with(shared, PendingAction::Action(action), origin, &[], &configuration, false)
 }
 
 pub(super) fn admit_with(
@@ -31,6 +33,7 @@ pub(super) fn admit_with(
     origin: Origin,
     incoming: &[Coercion],
     configuration: &BTreeMap<Ident, BTreeMap<Key, Value>>,
+    untimed: bool,
 ) -> Result<AdmittedAction, Vec<Violation>> {
     // 1. dispatch is not frozen (RS-6 step 1)
     if shared.frozen.load(Ordering::Acquire) {
@@ -155,7 +158,7 @@ pub(super) fn admit_with(
         };
         match crate::stream::admit_burst_target(&shared.ctx.clocks, at.time_point, record.domain) {
             Ok(admitted) => {
-                *requested_at = admitted.requested_target.map(AbsoluteDeadline::new);
+                *requested_at = if untimed { None } else { admitted.requested_target.map(AbsoluteDeadline::new) };
                 *at = AbsoluteDeadline::new(admitted.target);
             }
             Err(error) => {
@@ -197,7 +200,7 @@ pub(super) fn admit_with(
     }
     // 13. the registered checks and the coercion policy (SB-30, SB-45).
     let admitted = shared.admitter().admit(configuration, &proposed, &coercions, CheckStage::Runtime)?;
-    Ok(AdmittedAction { action, node, inst, fragment, coercions: admitted.coercions, warnings: admitted.warnings })
+    Ok(AdmittedAction { action, node, inst, fragment, coercions: admitted.coercions, warnings: admitted.warnings, untimed })
 }
 
 /// KC-24 steps 8–11 for an `UpdateParameter` to a Provider fragment from the
@@ -283,7 +286,7 @@ pub(super) fn dispatch(shared: &Shared, admitted: AdmittedAction) -> (ActionId, 
     if let Action::UpdateParameter { key, value, .. } = &admitted.action {
         lock(&shared.configuration).entry(admitted.fragment).or_default().insert(key.clone(), value.clone());
     }
-    let pushed = shared.queue(admitted.inst).push(crate::module_api::Dispatched { id, action: admitted.action, node: admitted.node });
+    let pushed = shared.queue(admitted.inst).push(crate::module_api::Dispatched { id, action: admitted.action, node: admitted.node, untimed: admitted.untimed });
     (id, (admitted.inst, pushed))
 }
 

@@ -891,7 +891,7 @@ pub fn rehearse_session_loopback(device: Arc<dyn Device>, exact: bool) -> Manife
     if exact {
         // On the fake, under a test binary's parallel load, the untimed repeat can miss
         // the delivery allowance and move (Review L, P1-8; Review M's runs saw 2.09 ms).
-        // K6 itself is `ur_21_an_untimed_send_is_on_time_after_its_delivery`'s; here a
+        // K6 itself is `ur_21_an_untimed_send_is_placed_after_its_delivery`'s; here a
         // device-late burst, or a move beyond the whole 5 ms lead, fails.
         let payloads: Vec<TimeErrorPayload> = errors.iter().map(|e| serde_json::from_value(e.payload.clone()).unwrap()).collect();
         let lead = ezsdr_radio_uhd::profile::DEVICE_LEAD_NS + ezsdr_radio_uhd::profile::DELIVERY_ALLOWANCE_NS;

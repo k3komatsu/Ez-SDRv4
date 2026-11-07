@@ -103,20 +103,6 @@ pub fn late_control_verdict(faults: Faults, causes: &[String], expected_late: us
     }
 }
 
-/// `hw_b8_preemption`'s #78 claim for one lead: no TX_UNDERFLOW, no device fault, and at most one `radio.TIME_ERROR`, whose
-/// cause is `late`. UR-21 decides a preemption against the first unhanded sample and the device lead, not the requested
-/// lead alone, so any lead can be late. The lead's expected count (`None` at 10 ms, where the boundary is INFERRED) is
-/// compared: a mismatch is INCONCLUSIVE, never a FAIL.
-pub fn preemption_verdict(faults: Faults, causes: &[String], expected_late: Option<usize>) -> Verdict {
-    if faults.underflows > 0 || faults.async_faults > 0 || causes.len() > 1 || causes.iter().any(|cause| cause.as_str() != "late") {
-        return Verdict::Fail(format!("{} radio.TX_UNDERFLOW, {} device fault report(s), radio.TIME_ERROR causes {causes:?} (at most one, \"late\")", faults.underflows, faults.async_faults));
-    }
-    match expected_late {
-        Some(expected) if expected != causes.len() => Verdict::Inconclusive(format!("{} radio.TIME_ERROR, the lead expects {expected}: the boundary differs from the expectation", causes.len())),
-        _ => Verdict::Pass(format!("{} radio.TIME_ERROR {causes:?}; the lead expects {expected_late:?}; no TX_UNDERFLOW; no device fault report", causes.len())),
-    }
-}
-
 /// The receive restart's leading fill, measured on one trial's analysed span: `zeros` samples that are exactly zero
 /// in fc32 at its start (the wire's zeros, since an all-zero sc16 word converts to exactly 0.0), and the samples from
 /// the first non-zero sample to the first sample at 10 % and at 90 % of the steady magnitude.
@@ -550,22 +536,6 @@ mod tests {
         assert!(matches!(late_control_verdict(clean, &["unclosed_burst".to_owned()], 1), Verdict::Fail(_)));
         assert!(matches!(late_control_verdict(clean, &late, 0), Verdict::Fail(_)));
         assert!(matches!(late_control_verdict(Faults { async_faults: 1, ..clean }, &late, 1), Verdict::Fail(_)));
-    }
-
-    #[test]
-    fn a_preemption_is_judged_by_its_causes_and_its_lead_expectation_is_inconclusive_on_a_mismatch() {
-        let clean = Faults { time_errors: 0, underflows: 0, async_faults: 0 };
-        let late = vec!["late".to_owned()];
-        assert!(matches!(preemption_verdict(clean, &[], Some(0)), Verdict::Pass(_)));
-        assert!(matches!(preemption_verdict(clean, &[], None), Verdict::Pass(_)));
-        assert!(matches!(preemption_verdict(Faults { time_errors: 1, ..clean }, &late, None), Verdict::Pass(_)));
-        assert!(matches!(preemption_verdict(Faults { time_errors: 1, ..clean }, &late, Some(1)), Verdict::Pass(_)));
-        assert!(matches!(preemption_verdict(clean, &[], Some(1)), Verdict::Inconclusive(_)), "a lead that expects a late burst, on time");
-        assert!(matches!(preemption_verdict(Faults { time_errors: 1, ..clean }, &late, Some(0)), Verdict::Inconclusive(_)));
-        assert!(matches!(preemption_verdict(Faults { time_errors: 1, ..clean }, &["unclosed_burst".to_owned()], Some(1)), Verdict::Fail(_)));
-        assert!(matches!(preemption_verdict(Faults { time_errors: 2, ..clean }, &[late.clone(), late].concat(), None), Verdict::Fail(_)));
-        assert!(matches!(preemption_verdict(Faults { underflows: 1, ..clean }, &[], Some(0)), Verdict::Fail(_)));
-        assert!(matches!(preemption_verdict(Faults { async_faults: 1, ..clean }, &[], Some(0)), Verdict::Fail(_)));
     }
 
     #[test]

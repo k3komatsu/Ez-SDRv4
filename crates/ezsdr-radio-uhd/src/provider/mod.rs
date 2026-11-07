@@ -406,6 +406,7 @@ impl UhdRadio {
     }
 
     fn write_sections(&mut self, core: &Core) {
+        core.settle_switches();
         let rec = lock(&core.rec);
         let sections = &mut self.instance.sections;
         let mut put = |suffix: &str, value: Json| {
@@ -415,6 +416,7 @@ impl UhdRadio {
         put("bursts", Json::Array(rec.bursts.clone()));
         put("async", Json::Array(rec.device_async.clone()));
         put("rejected", Json::Array(rec.rejected.clone()));
+        put("switches", Json::Array(rec.switches.clone()));
         put("timing", Json::Array(rec.timing.clone()));
         put("stats", json!(rec.stats));
         // UR-13, UR-30: whether each direction's rate set was compared; the section keeps
@@ -831,7 +833,8 @@ mod tests {
         active_rx_chain(&core, 0);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| radio.cleanup()));
-        assert!(result.is_err(), "cleanup cannot close streams while an RX chain is active");
+        let message = result.err().and_then(|panic| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+        assert!(message.contains("RX close_streams requires an idle device chain"), "cleanup cannot close streams while an RX chain is active: {message}");
         assert!(radio.prepared.is_none(), "cleanup reached its guarded close_streams boundary");
     }
 

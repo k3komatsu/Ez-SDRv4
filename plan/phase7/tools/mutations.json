@@ -571,7 +571,7 @@
   "scope": "fn book_burst",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_an_untimed_send_is_on_time_after_its_delivery"
+  "filter": "ur_21_a_burst_dropped_at_booking_is_not_booked"
  },
  {
   "id": "U15",
@@ -592,16 +592,6 @@
   "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_22_repeat_wrap_is_not_a_new_burst_start"
- },
-  {
-   "id": "U17",
-  "name": "the repeat not ended at the next burst's start",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "let held_cut = self.held.keys().next().copied();\n            return self.send(clock, held_cut, window_cut);\n        }\n        if let Some(c) = self.chain.next() {",
-   "new": "let held_cut = self.held.keys().next().copied().filter(|_| !self.open.as_ref().is_some_and(|o| o.held.repeat));\n            return self.send(clock, held_cut, window_cut);\n        }\n        if let Some(c) = self.chain.next() {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "fake",
-  "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
  },
  {
   "id": "U18",
@@ -777,16 +767,6 @@
   "filter": "ur_07_uhd_clock_re_anchors_follow_a_drifting_device"
  },
  {
-  "id": "U36",
-  "name": "the preemption late-policy check does not use the computed boundary",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "TimePoint::new(clock.domain, bound - lead_k),",
-  "new": "TimePoint::new(clock.domain, clock.at_or_after(self.core.now()) + 0 * lead_k),",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
- },
- {
   "id": "U40",
   "name": "an RX owner accepts a rate mismatch at the switch",
   "file": "crates/ezsdr-radio-uhd/src/provider/rx.rs",
@@ -815,16 +795,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_29_a_lost_device_is_found_while_idle"
- },
- {
-  "id": "U44",
-  "name": "the preemption not decided again on uhd-tx (uhd-control's booking stands)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        if h < bound {",
-  "new": "        if false {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
  },
  {
   "id": "U46",
@@ -864,7 +834,7 @@
    "new": "let device_sob = first;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
+  "filter": "ur_23_a_burst_at_the_handed_frontier_continues_the_open_burst"
  },
  {
   "id": "R07",
@@ -874,7 +844,7 @@
   "new": "if false {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_23_a_clock_end_cancels_a_held_burst_and_releases_its_reservation"
+  "filter": "ur_23_a_clock_end_cancels_every_held_burst"
  },
  {
   "id": "R08",
@@ -1014,17 +984,17 @@
   "new": "let device_eob = eob && !hold;",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
-  "filter": "ur_23_a_burst_ends_at_the_next_bursts_start"
+  "filter": "ur_23_a_burst_at_e_while_the_held_sample_waits_continues_the_device_burst"
  },
   {
    "id": "B04",
   "name": "a preempted burst ended with end-of-burst before the burst at its next sample (§11 F3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-   "old": "            self.end_open(false);\n            self.chain.continue_device_burst(held.k, self.chain.tail());",
+   "old": "            self.end_open(false);\n            self.chain.continue_device_burst(next, self.chain.tail());",
   "new": "            self.end_open(true);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_21_a_burst_inside_the_in_flight_window_is_late"
+  "filter": "ur_23_a_burst_at_the_handed_frontier_continues_the_open_burst"
  },
  {
   "id": "B05",
@@ -1050,8 +1020,8 @@
   "id": "B09",
   "name": "a device burst held open past its end, with nothing booked (Review N, B3)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "                None if clock.instant(c) - now <= self.core.ticks(DEVICE_LEAD_NS) => {",
-  "new": "                None if false => {",
+  "old": "Some(_) | None => return self.close_unjoined(clock, c),",
+  "new": "Some(_) => return self.close_unjoined(clock, c), None => {}",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_23_a_burst_alone_is_ended_before_it_runs_dry"
@@ -1437,16 +1407,6 @@
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_07_callbacks_run_outside_the_schedule_lock"
- },
- {
-  "id": "C03",
-  "name": "a move onto a held burst's start not refused (the exit review's UR-21 clause)",
-  "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "if reservations.contains(&(held.domain, bound)) {",
-  "new": "if false && reservations.contains(&(held.domain, bound)) {",
-  "crate": "ezsdr-radio-uhd",
-  "test_bin": "lib",
-  "filter": "ur_21_a_moved_start_on_a_held_burst_s_is_refused"
  },
  {
   "id": "D01",

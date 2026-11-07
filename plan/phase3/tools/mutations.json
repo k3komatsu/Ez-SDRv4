@@ -600,17 +600,7 @@
   "test_bin": "mock_channel",
   "filter": "mr_31_the_medium_takes_the_run_s_seed"
  },
- {
-  "id": "M72",
-  "name": "MR-16 a burst at the open burst's next sample is admitted",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| start < open.next) {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
- },
- {
+  {
   "id": "M73",
   "name": "CH-4 the frequency gate tolerates 1 kHz",
   "file": "crates/ezsdr-sim/src/channel.rs",
@@ -661,16 +651,6 @@
   "filter": "ch_04_the_field"
  },
  {
-  "id": "M78",
-  "name": "MR-16 a SendAsap move onto the open burst emits no refused TIME_ERROR",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        if let Some(reason) = refusal {\n            if let Some(late_by) = send_asap_late_by {",
-  "new": "        if let Some(reason) = refusal {\n            if let Some(late_by) = send_asap_late_by.filter(|_| reason != \"MR-16: burst begins at or before the open burst's next sample\") {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before"
- },
- {
   "id": "M79",
   "name": "MR-15 a transmit block is emitted at its last sample's instant",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
@@ -680,37 +660,7 @@
   "test_bin": "mock_channel",
   "filter": "mr_15_a_transmit_block"
  },
- {
-  "id": "M80",
-  "name": "MR-16 the open-burst refusal is judged on the target before MR-17 moves it",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| at.time_point.ticks_in(tx_domain).is_ok_and(|at_tx| at_tx <= open.next)) {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
- },
- {
-  "id": "M81",
-  "name": "MR-16 a burst one sample after the open burst's next sample is refused",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next.saturating_add(1)) {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
- },
- {
-  "id": "M82",
-  "name": "MR-16 the open-burst refusal at the next sample only in channel mode",
-  "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "} else if self.tx[k].open.as_ref().is_some_and(|open| start <= open.next) {",
-  "new": "} else if self.tx[k].open.as_ref().is_some_and(|open| start < open.next || (start == open.next && self.channel.is_some())) {",
-  "crate": "ezsdr-mock-radio",
-  "test_bin": "mock_channel",
-  "filter": "mr_16_a_burst_at_or_before_the_open_burst_s_next_sample_is_refused"
- },
- {
+    {
   "id": "M83",
   "name": "MR-15 strict transmit emission only in channel mode",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",

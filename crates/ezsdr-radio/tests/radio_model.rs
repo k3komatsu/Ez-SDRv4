@@ -370,7 +370,7 @@ fn rm_22_payloads_round_trip() {
     let target_json = serde_json::to_value(target).unwrap();
     assert_payload_round_trip(RxOverflowPayload { cause: RxOverflowCause::Overrun, lost: 3 }, json!({"cause": "overrun", "lost": 3}));
     assert_payload_round_trip(
-        TimeErrorPayload { cause: TimeErrorCause::UnclosedBurst, outcome: TimeErrorOutcome::PlanViolation, late_by_ns: 7, target },
+        TimeErrorPayload { cause: TimeErrorCause::UnclosedBurst, outcome: TimeErrorOutcome::PlanViolation, late_by_ns: 7, target, action: None },
         json!({
             "cause": "unclosed_burst",
             "outcome": "plan_violation",
@@ -406,7 +406,7 @@ fn rm_22_payloads_round_trip() {
     assert_payload_round_trip(AlignmentErrorPayload { lost: 12 }, json!({"lost": 12}));
     assert_payload_round_trip(ClockLostPayload { reference: ClockReference::Frequency }, json!({"reference": "frequency"}));
     assert_payload_round_trip(
-        TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::LateAtDevice, late_by_ns: 0, target },
+        TimeErrorPayload { cause: TimeErrorCause::Late, outcome: TimeErrorOutcome::LateAtDevice, late_by_ns: 0, target, action: None },
         json!({"cause": "late", "outcome": "late_at_device", "late_by_ns": 0, "target": target_json}),
     );
 }

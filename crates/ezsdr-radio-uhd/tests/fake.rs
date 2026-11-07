@@ -653,7 +653,6 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
     assert_eq!(guard.latched(), None, "no group of the list makes the guard latch");
     assert_eq!(result("provider_overflow_restart_gap_with_tx")["observation_only"], true);
     assert_stages(&result("provider_min_timed_command_lead")["candidates"], plan.timed_command_leads_ns.len(), plan.step_trials);
-    assert_stages(&result("provider_tx_in_flight")["candidates"], plan.in_flight_windows_ns.len(), plan.step_trials);
     let one_channel_row = |prefix: &str, row: &&ezsdr_radio::measurement::Observation| row.name.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
     let throughput: Vec<_> = group.observations.iter().filter(|row| one_channel_row("provider_rx_throughput_", row)).collect();
     assert_eq!(throughput.len(), plan.rx_rates_hz.len());
@@ -758,7 +757,6 @@ fn provider_measurement_groups_fake_rehearsal_round_trips_without_claiming_measu
             "radio.perf.tx_bytes_per_s",
             "radio.timing.min_timed_command_lead_ns",
             "radio.timing.rx_start_lead_ns",
-            "radio.timing.tx_in_flight_ns",
             "radio.rx.c0.gain_db",
             "radio.rx.c0.gain_step_db",
             "radio.rx.c0.antenna",
@@ -1095,7 +1093,7 @@ fn group_run_keeps_the_other_groups_after_an_error_or_a_panic() {
     let output = dir.0.join("record.json");
     let mut groups = measurement::GroupRun::new(Some(&output));
     let keys = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
-    groups.run("fine", &keys(&["radio.timing.tx_in_flight_ns"]), || measurement::measure_tx_in_flight(device.clone(), &plan));
+    groups.run("fine", &keys(&["radio.timing.min_timed_command_lead_ns"]), || measurement::measure_min_timed_command_lead(device.clone(), &plan));
     groups.run("errors", &keys(&["radio.perf.rx_bytes_per_s"]), || Err("the device refused".to_owned()));
     groups.run("panics", &keys(&["radio.full_duplex", "radio.hardware_time"]), || -> Result<_, String> {
         let seven = std::hint::black_box(7);
@@ -1116,11 +1114,11 @@ fn group_run_keeps_the_other_groups_after_an_error_or_a_panic() {
     assert!(reason("radio.perf.rx_bytes_per_s").contains("the device refused"));
     assert!(reason("radio.full_duplex").contains("panic: boom 7") && reason("radio.hardware_time").contains("panic: boom 7"));
     assert!(
-        measured.values.iter().any(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Measured { key, .. } if key.as_str() == "radio.timing.tx_in_flight_ns")
-            || matches!(row, ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } if key.as_str() == "radio.timing.tx_in_flight_ns")),
+        measured.values.iter().any(|row| matches!(row, ezsdr_radio::measurement::ValueRecord::Measured { key, .. } if key.as_str() == "radio.timing.min_timed_command_lead_ns")
+            || matches!(row, ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } if key.as_str() == "radio.timing.min_timed_command_lead_ns")),
         "the fine group's row stays"
     );
-    for name in ["group_failure_errors", "group_failure_panics", "group_failure_probe_panics", "provider_tx_in_flight", "probe_fine"] {
+    for name in ["group_failure_errors", "group_failure_panics", "group_failure_probe_panics", "provider_min_timed_command_lead", "probe_fine"] {
         assert!(measured.observations.iter().any(|row| row.name == name), "{name}");
     }
     let binding = measurement::radio_binding(&bench_profile(&*device, &dir, json!({}), bench_envelope(&*device), false)).unwrap();
@@ -1951,7 +1949,7 @@ fn ur_21_txburst_refusals() {
     let _ = run.advance_to(TimePoint::new(t0.domain(), t0.ticks_in(t0.domain()).unwrap() + ms(20)));
     let manifest = run.finish();
     let reasons = rejections(&manifest);
-    assert!(reasons.iter().any(|r| r.starts_with("UR-21: a held burst already has this start")), "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.starts_with("UR-21: the burst overlaps an accepted booking")), "{reasons:?}");
     let rejected = events_of(&manifest, "radio.COMMAND_REJECTED");
     assert_eq!(rejected.len(), 1, "{rejected:?}");
     assert!(rejected.iter().all(|e| e.payload["action"].is_u64()), "{rejected:?}");
@@ -2000,13 +1998,13 @@ fn ur_21_late_policies_on_the_device_lead() {
     assert!(third.requested_target.is_none() || third.requested_target == Some(third_at), "{third:?} requested {third_at:?}");
 }
 
-// `ur_21_an_untimed_send_is_on_time_after_its_delivery` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37): the Kernel stamps an untimed Action on the
+// `ur_21_an_untimed_send_is_placed_after_its_delivery` is a unit test in `src/provider/control.rs` on the controlled clock (design note 37): the Kernel stamps an untimed Action on the
 // test thread, so a fake test's own delay spends its slack. What the fake keeps is what no thread's timing can change.
 #[test]
-fn ur_21_untimed_sends_are_each_played_or_flagged() {
-    // KG-8 end to end: 20 untimed sends, each admitted; a send the test thread's delay made late is dropped with its TIME_ERROR
-    // under `drop_and_flag`, never lost, so each is a burst or a drop.
-    let (mut run, _, _dir) = tx_session(FakeConfig::default());
+fn ur_21_untimed_sends_are_each_played() {
+    // KG-8 end to end, on the manual clock: 20 untimed sends, each admitted, are each played. A send the test thread's delay leaves
+    // late is placed after its delivery (RM-15): no send is dropped, and none carries a TIME_ERROR.
+    let (mut run, _, _dir) = tx_session(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
     for _ in 0..20 {
         let entry = send(&mut run, "send", None, &tone(100));
         assert!(admitted(&entry), "{entry:?}");
@@ -2014,8 +2012,51 @@ fn ur_21_untimed_sends_are_each_played_or_flagged() {
     }
     wait(&mut run, ms(30));
     let manifest = run.finish();
-    let dropped = time_errors(&manifest).iter().filter(|payload| payload.outcome == TimeErrorOutcome::Drop).count();
-    assert_eq!(bursts(&manifest).len() + dropped, 20, "{:?}", time_errors(&manifest));
+    assert_eq!(bursts(&manifest).len(), 20, "{:?}", time_errors(&manifest));
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+}
+
+/// RM-15, RM-16 (sequence 2, UHD): an untimed repeat received while a repeat plays is refused as an overlap, with no `TIME_ERROR`;
+/// the first repeat keeps playing.
+#[test]
+fn ur_21_s18_an_untimed_repeat_on_a_playing_repeat_is_refused_without_time_error() {
+    let (mut run, device, _dir) = tx_session(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
+    assert!(admitted(&send(&mut run, "start_repeat", Some(ms(10)), &tone(1_000))));
+    assert!(admitted(&send(&mut run, "start_repeat", None, &tone(500))));
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    let rejected = rejections(&manifest);
+    assert!(rejected.iter().any(|r| r.starts_with("UR-21: the burst overlaps an accepted booking")), "{rejected:?}");
+    assert!(time_errors(&manifest).is_empty(), "{:?}", time_errors(&manifest));
+    let sends = tx_experiment_sends(&device, "tx_send");
+    assert_eq!(sends.iter().filter(|c| c.contains("sob=true")).count(), 1, "{sends:?}");
+}
+
+/// RM-37, RM-15 (sequence 7, UHD): an untimed switch takes the first boundary of the replaced repeat's grid at or after its receipt's
+/// window and device lead (`repeat_boundary`, the record's function), as a timed switch does (S8).
+#[test]
+fn ur_21_s19_untimed_switch_takes_the_first_grid_boundary_after_its_receipt_window() {
+    let (mut run, _device, _dir) = tx_session(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() });
+    // A 1 024-sample period: the receipt's bound lands about 400 samples into the period. On a 1 000-sample grid it lands
+    // about 40 samples short of a boundary, and load can carry it onto one, where the mutant gives the same boundary.
+    assert!(admitted(&send(&mut run, "start_repeat", Some(ms(10)), &tone(1_024))));
+    wait(&mut run, ms(20));
+    let (bytes, _) = waveform_of(&tone(500));
+    let mark = [("radio.repeat_operation", Value::Scalar(Scalar::from("switch")))];
+    let entry = run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &mark), Some(&bytes)).unwrap();
+    assert!(admitted(&entry), "{entry:?}");
+    wait(&mut run, ms(40));
+    let manifest = run.finish();
+    assert!(rejections(&manifest).is_empty(), "{:?}", rejections(&manifest));
+    let rows = section(&manifest, "switches").as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    // 200 root ticks per transmit sample at 1 MS/s, as `ur_23_a_stop_ends_the_burst_within_the_in_flight_window`. The window is 10 ms
+    // and the lead 2 ms (`DEVICE_LEAD_NS`): the bound is the receipt's sample plus 12 000 samples, rounded up to a sample.
+    let origin_ticks = tx_clock_origin(&manifest, 0);
+    let grid = serde_json::to_value(bursts(&manifest)[0].target).unwrap()["ticks"].as_i64().unwrap();
+    let receipt = rows[0]["selected_at"]["ticks"].as_i64().unwrap() - origin_ticks;
+    let bound = (receipt + 12_000 * 200 + 199).div_euclid(200);
+    assert_eq!(rows[0]["boundary"].as_i64().unwrap(), ezsdr_radio::staging::repeat_boundary(grid, 1_024, bound));
 }
 
 #[test]
@@ -2079,9 +2120,9 @@ fn timing_precondition_failure_reports_evidence_and_still_fails() {
 }
 
 #[test]
-fn ur_23_a_burst_ends_at_the_next_bursts_start() {
-    // Both bursts are booked in the Spec, before the Run starts (rule (1)): a repeat at
-    // 10 ms, cut by a burst at 20 ms.
+fn ur_23_a_repeat_holds_its_span_until_a_stop() {
+    // All three are booked in the Spec, before the Run starts (rule (1)): a repeat at 10 ms, a
+    // burst at 20 ms inside the repeat's open span (refused at receipt, S5), and a Stop at 40 ms.
     let dir = TempDir::new();
     let device = fake(FakeConfig::default());
     let (one, a) = waveform_of(&tone(1_000));
@@ -2092,24 +2133,21 @@ fn ur_23_a_burst_ends_at_the_next_bursts_start() {
     spec["schedule"] = json!([
         { "at": { "clock": "radio", "offset_ticks": 10_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
             "waveform": a, "repeat": true, "late_policy": "send_asap_and_flag", "metadata": {} } },
-        { "at": { "clock": "radio", "offset_ticks": 20_000 }, "action": { "kind": "tx_burst", "target": target,
-            "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } }
+        { "at": { "clock": "radio", "offset_ticks": 20_000 }, "action": { "kind": "tx_burst", "target": target.clone(),
+            "waveform": b, "repeat": false, "late_policy": "drop_and_flag", "metadata": {} } },
+        { "at": { "clock": "radio", "offset_ticks": 40_000 }, "action": { "kind": "stop", "target": target } }
     ]);
     let manifest = finish_spec(spec_run(&spec, &profile(&dir, json!({}), json!({}), false), device.clone(), BTreeMap::from([(ha, one), (hb, two)])), ms(60));
+    let rejected = rejections(&manifest);
+    assert!(rejected.iter().any(|r| r.starts_with("UR-21: the burst overlaps an accepted booking")), "{rejected:?}");
     let records = bursts(&manifest);
-    assert_eq!(records.len(), 2, "{records:?}");
-    // The repeat ends at the second's start with end-of-burst, not as a stopped burst: the
-    // block that ends it carries END_OF_BURST (`ends_at_held`, SC-24/SC-28).
-    assert_eq!(records[0].end, BurstEnd::Eob, "{records:?}");
-    assert_eq!(records[0].target.ticks_in(records[0].target.domain()).unwrap() + records[0].samples as i64, records[1].target.ticks_in(records[1].target.domain()).unwrap());
-    assert!(records[1].late_by.is_none());
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].end, BurstEnd::Stop, "{records:?}");
     assert!(time_errors(&manifest).is_empty());
     assert!(section(&manifest, "async").as_array().unwrap().iter().all(|r| r["code"] != "TimeError"), "{:?}", device.calls());
-    // Two Kernel bursts, one device burst: the second continues the first without
-    // end-of-burst or a timed start at the tick the first ended (design-notes §11 F3).
+    // One device burst, one start-of-burst, and no timed start inside the open burst.
     let sends = tx_experiment_sends(&device, "tx_send");
     assert_eq!(sends.iter().filter(|c| c.contains("sob=true")).count(), 1, "{sends:?}");
-    assert_eq!(sends.iter().filter(|c| c.ends_with("eob=true")).count(), 1, "{sends:?}");
     assert!(sends.iter().all(|call| !call.contains(" at=- ")), "every payload send is timed: {sends:?}");
     assert_eq!(device.unended_bursts(), 0, "a burst started inside one without end-of-burst: {:?}", device.calls());
 }
@@ -2500,7 +2538,7 @@ fn ur_29_a_lost_device_is_found_while_idle() {
 #[test]
 fn ur_30_the_sections_are_written() {
     let (manifest, _dir) = receive_run(FakeConfig::default(), 1, 1_000);
-    for suffix in ["device", "envelope", "applied", "bursts", "async", "rejected", "timing", "stats"] {
+    for suffix in ["device", "envelope", "applied", "bursts", "async", "rejected", "switches", "timing", "stats"] {
         assert!(manifest.section(&usrp(), &format!("ezsdr.radio.uhd.{suffix}")).is_some(), "{suffix}");
     }
     let stats = section(&manifest, "stats");
@@ -6761,8 +6799,8 @@ fn a_companion_that_fails_after_a_solo_measurement_keeps_the_solo_value() {
     let device: Arc<dyn Device> = guard.clone();
     let plan = measurement::MeasurementPlan::rehearsal();
     let mut groups = measurement::GroupRun::new(None);
-    let solo_keys = vec!["radio.timing.tx_in_flight_ns".to_owned()];
-    groups.run("tx_in_flight", &solo_keys, || measurement::measure_tx_in_flight(device.clone(), &plan));
+    let solo_keys = vec!["radio.timing.min_timed_command_lead_ns".to_owned()];
+    groups.run("min_timed_command_lead", &solo_keys, || measurement::measure_min_timed_command_lead(device.clone(), &plan));
     let _ = guard.note(Err::<(), _>(ezsdr_radio_uhd::DeviceError::failed("Control operation timed out")), false);
     groups.run("overflow_restart_gap_with_tx", &[], || measurement::measure_overflow_restart_gap_with_tx(device.clone(), &plan));
     let failed: Vec<_> = groups.failed().iter().map(|(name, _)| name.as_str()).collect();
@@ -6772,7 +6810,7 @@ fn a_companion_that_fails_after_a_solo_measurement_keeps_the_solo_value() {
         .values
         .iter()
         .find(|row| match row {
-            ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str() == "radio.timing.tx_in_flight_ns",
+            ezsdr_radio::measurement::ValueRecord::Measured { key, .. } | ezsdr_radio::measurement::ValueRecord::Unmeasured { key, .. } => key.as_str() == "radio.timing.min_timed_command_lead_ns",
         })
         .expect("the solo group's row is kept");
     assert!(!matches!(solo, ezsdr_radio::measurement::ValueRecord::Unmeasured { reason, .. } if reason.contains("failed")), "{solo:?}");

@@ -464,3 +464,33 @@ fn uhd_61_03_timed_start_of_tx_and_capture() {
     assert_eq!(capture.continuity[0].valid[0][0].start.ticks_in(capture.continuity[0].valid[0][0].start.domain()).unwrap(), 5_000);
     assert_eq!(samples(capture), wave);
 }
+
+#[test]
+fn ea_16_untimed_repeat_after_stop_starts_at_the_stop_region_end() {
+    // RM-15, RM-16 (sequence 1) on UHD: an untimed repeat submitted right after a transmit stream's Stop is placed past the Stop region, with
+    // no TIME_ERROR and no refusal (the same test as the Mock's, in repeat_switch.rs).
+    let temp = rig::TempDir::new("ea-16-untimed-after-stop-uhd");
+    let mut run = uhd_loopback_session(&temp);
+    let wave = pn(1_000);
+    let (bytes, _) = experiments::waveform_of(&wave);
+    let repeat = SessionAction::Vocabulary { ns: Namespace::parse("radio").unwrap(), verb: Ident::parse("start_repeat").unwrap(), target: resource("radio/tx/s0"), at: None, params: BTreeMap::new() };
+    admitted(&mut run, repeat.clone(), Some(&bytes));
+    let now = run.now();
+    run.advance_to(TimePoint::new(now.domain(), now.ticks_in(now.domain()).unwrap() + 20 * MS)).unwrap();
+    admitted(&mut run, SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
+    let now = run.now();
+    let stop_root = now.ticks_in(now.domain()).unwrap();
+    let record = run.sample_clocks().into_iter().find(|r| r.stream.path().ends_with("tx/s0")).expect("the transmit SampleClock");
+    let origin = record.origin.ticks_in(record.origin.domain()).unwrap();
+    let stop = (stop_root - origin) / record.root_ticks_per_tick.num() as i64;
+    admitted(&mut run, repeat, Some(&bytes));
+    let _ = run.run_until_end(TimePoint::new(now.domain(), stop_root + 50 * MS));
+    let manifest = run.finish();
+    let rows = section(&manifest, "usrp", "ezsdr.radio.uhd.bursts").as_array().unwrap();
+    assert_eq!(rows.len(), 2, "the repeat and the one after the Stop: {rows:?}");
+    let gap = rows[1]["target"]["ticks"].as_i64().unwrap() - stop;
+    // The window is 10 ms to within its rounding onto the sample grid (KL-13, KL-15): 9 988 samples here, 10 003 on the Mock.
+    assert!(gap >= 9_900, "the repeat starts past the Stop region, {gap} samples after the Stop: {rows:?}");
+    assert!(rows[1]["late_by"].is_null(), "an untimed repeat reports no lateness: {rows:?}");
+    assert!(manifest.events.delivered.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR && event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED));
+}
