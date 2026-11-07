@@ -135,3 +135,12 @@ Mechanisms (`plan/maintenance/failure-mechanisms.md`):
 - **New, `refusal-where-late-policy-decides`:** the orchestrator's rulings refused a booking that device state, not a conflict, kept from its start. Instances: S12 (owner) and the Stop region (F36, self-review then owner). Answered by RM-15's principle sentence and the design phase (AGENTS §9 step 0).
 - **`wall-clock-test-oracle`:** the S4b parity margin (F28) and the repeat-after-stop Python test (bounded assertions).
 - **Tooling:** the watchdog misread rows whose `new` text is a bare literal as applied mutants whenever their anchor moved. Fixed by making those rows specific (fix round 4).
+
+## Retrospective (owner, 2026-11-07)
+
+The first use of per-sub-step cheap reviews with Sol once at the end.
+
+- **Kept.** The ten cheap reviews found 57 findings, 5 of them real behaviour defects (F10, F21, F30, F36, F39), and ran beside the implementer at little wall-clock cost. Sol (about 20 minutes) found S1–S4, all cross-component state sequences that no cheap review caught.
+- **Adopted 1:** the full mutation lists run once before Sol's code review (AGENTS §9 step 6 and §7), because 19 rows first failed at the gate.
+- **Adopted 2:** no process change for the record-versus-owner state drift (S1–S4 and the three FAIL re-check rounds). It is the first question of the time and booking inventory, which removes the second copy of the state.
+- **Orchestrator's own:** before the gate, commit the records and always pass `--renames` (gate run 1).
