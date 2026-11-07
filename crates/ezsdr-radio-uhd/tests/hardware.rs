@@ -16,6 +16,7 @@ use ezsdr_kernel::time::{ClockRegistry, TimePoint};
 use ezsdr_radio_uhd::{Device, DeviceAuthority, Dir, Settings, UhdRadio};
 use serde_json::Value as Json;
 
+use common::n47s5::*;
 use common::probe_device::wait_for_rx_start_and_sample;
 use common::raw::*;
 use common::tone::{Verdict, classify_tone, continuation_in_loopback, median_freq, tone_verdict, window_power, window_power_at};
@@ -581,68 +582,59 @@ fn tx_only_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coor
 }
 
 fn tx_session(device: Arc<dyn Device>, dir: &TempDir) -> ezsdr_kernel::coordinator::RunHandle {
-    let envelope = bench_envelope(&*device);
-    let profile = bench_profile(&*device, dir, serde_json::json!({}), envelope, true);
-    let mut run = session_with(&profile, device, &rx0_tx0(&profile));
-    past_t0(&mut run, ms(1));
-    past_tx_origin(&mut run);
-    run
+    tx_session_at(device, dir, None)
 }
 
-/// The receive SampleClock's origin (root ticks) and root ticks a sample.
-fn rx_clock(manifest: &ezsdr_kernel::manifest::Manifest) -> (i64, i64) {
-    let clock = manifest.clocks.sample_clocks.iter().find(|r| r.stream.to_string().ends_with("usrp/rx/s0")).unwrap();
-    (clock.origin.ticks_in(clock.root).unwrap(), clock.root_ticks_per_tick.num() as i64)
+/// A transmit Session whose transmit sample rate is asked at connect (`None`: the profile's own rate).
+fn tx_session_at(device: Arc<dyn Device>, dir: &TempDir, rate: Option<f64>) -> ezsdr_kernel::coordinator::RunHandle {
+    let envelope = bench_envelope(&*device);
+    let profile = bench_profile(&*device, dir, serde_json::json!({}), envelope, true);
+    n47s5::transmit_run(&profile, device, rate)
 }
 
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_stop_end() {
-    // bench.md B8: a repeat stopped by `Stop`; where its record ends and where the loop
-    // stops hearing it, against the instant the Stop was submitted (UR-23: by s + 10 ms).
+    // bench.md B8: a repeat stopped by `Stop`; where its record ends and where the loop stops hearing it. T6 (stage 5): the loop's stop is
+    // judged against the repeat's recorded end (the `bursts` row: its target and transmitted samples), not the caller's instant (S1), with
+    // the loop delay measured in the trial (S5) and the edge found only with signal, then quiet windows (`n47s5::heard_until`). INCONCLUSIVE
+    // when no edge or no delay is shown; a FAIL is reported and the test asserts (bench.md: a FAIL is the owner's, not a closed issue). The
+    // submit-to-silence time and the in-flight window (UR-23) are printed, not judged.
+    let in_flight = ns_ticks(ezsdr_radio::x3xx::timing(&ezsdr_radio_uhd::profile::terms()).tx_in_flight_ns);
     let mut observations = Vec::new();
+    let mut failures = Vec::new();
     for trial in 0..3 {
         let dir = TempDir::new();
-        let mut run = tx_session(usrp(), &dir);
-        let (bytes, _) = waveform_of(&pn(1_000));
-        assert!(admitted(&run.submit(verb("start_repeat", resource("radio/tx/s0"), None, &[]), Some(&bytes)).unwrap()));
-        let at = after_ticks(&run, ms(20));
-        assert!(admitted(&run.submit(verb("capture", output("rec"), Some(at), &[("sink.capture_samples", ezsdr_kernel::spec::Value::from(100_000))]), None).unwrap()));
-        let _ = run.advance_to(TimePoint::new(at.domain(), at.ticks_in(at.domain()).unwrap() + ms(50)));
-        let s = run.now();
-        let _ = run.submit(ezsdr_kernel::session::SessionAction::Stop { target: Some(resource("radio/tx/s0")) }, None);
-        let horizon = after_ticks(&run, ms(3_000));
-        let _ = run.wait_for(&[kind("sink.CAPTURE_WRITTEN")], 0, horizon);
-        let manifest = run.finish();
-        let artifact = capture_of(&manifest, "rec");
-        let first = artifact.continuity[0].first.ticks_in(artifact.continuity[0].domain).unwrap();
-        let samples = read_capture(&artifact, 1).remove(0);
-        let power: Vec<f32> = samples.chunks(100).map(|c| c.iter().map(|(re, im)| re * re + im * im).sum::<f32>() / c.len() as f32).collect();
-        let steady = power[..20].iter().sum::<f32>() / 20.0;
-        let last = power.iter().rposition(|p| *p > steady / 4.0).unwrap();
-        let (origin, per) = rx_clock(&manifest);
-        // The received sample's instant less the loop's 44-sample delay (B6).
-        let heard_until = origin + (first + (last as i64 + 1) * 100 - 44) * per;
+        let stop_end = n47s5::stop_end_trial(tx_session(usrp(), &dir), dir);
+        let manifest = &stop_end.manifest;
+        let heard = heard_until(manifest);
+        let recorded_end = n47s5::recorded_end(manifest);
+        let (stop_root, s_root) = (stop_end.stop_root, stop_end.submit_root);
+        let (tx_origin, tx_per) = stream_clock(manifest, "usrp/tx/s0");
         println!(
-            "B8 stop end, trial {trial}: Stop submitted at root {}; the loop heard the repeat until root {heard_until} ({:+.3} ms from the Stop); steady power {steady:.2e}, after {:.2e}; bursts {}",
-            s.ticks_in(s.domain()).unwrap(),
-            (heard_until - s.ticks_in(s.domain()).unwrap()) as f64 / TICKS_PER_MS as f64,
-            power[last + 2..].iter().sum::<f32>() / (power.len() - last - 2).max(1) as f32,
-            section(&manifest, "bursts")
+            "B8 stop end, trial {trial}: Stop submitted at root {s_root}, its instant {stop_root}; the loop heard the repeat until {heard:?} ({:?} ms from the Stop); bursts {}",
+            heard.map(|heard| (heard - stop_root) as f64 / TICKS_PER_MS as f64),
+            section(manifest, "bursts")
         );
-        let tx_clocks: Vec<_> =
-            manifest.clocks.sample_clocks.iter().filter(|r| r.stream.to_string().ends_with("usrp/tx/s0")).map(|r| (r.origin.ticks_in(r.root).unwrap(), r.root_ticks_per_tick.num())).collect();
-        println!("B8 stop end, trial {trial}: tx clocks {tx_clocks:?}");
+        println!("B8 stop end, trial {trial}: {}", iii::stop_bound_text(recorded_end, stop_root, in_flight, (stop_root - s_root).max(0)));
+        let claim = format!("T6 stop end, trial {trial} (UR-23, RM-16): the loop stops hearing the repeat at its recorded end, within {} ticks (S1, S5, S7)", n47s5::stop_end_tolerance(manifest));
+        let outcome = n47s5::stop_end_outcome(&stop_end);
+        print_verdict(&claim, &outcome);
+        if matches!(outcome, Verdict::Fail(_)) {
+            failures.push(claim);
+        }
         observations.push(serde_json::json!({
             "trial": trial,
-            "stop_tick": s.ticks_in(s.domain()).unwrap(),
-            "heard_until_tick": heard_until,
-            "offset_ms": (heard_until - s.ticks_in(s.domain()).unwrap()) as f64 / TICKS_PER_MS as f64,
-            "bursts": section(&manifest, "bursts"),
-            "tx_clocks": tx_clocks,
+            "stop_tick": stop_root,
+            "heard_until_tick": heard,
+            "recorded_end_tick": recorded_end,
+            "offset_ms": heard.map(|heard| (heard - stop_root) as f64 / TICKS_PER_MS as f64),
+            "bursts": section(manifest, "bursts"),
+            "tx_clocks": [(tx_origin, tx_per)],
         }));
     }
     measurement::push_raw_observation("hw_b8_stop_end", 3, serde_json::json!({ "trials": observations }));
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]
@@ -1214,31 +1206,109 @@ fn hw_b8_raw_burst_gap() {
     // UR-23's back-to-back bursts: a burst ends with end-of-burst at tick T and the next
     // starts with a timed start-of-burst at T + gap samples. Which gap does the device take
     // without a late report (the preemption sweep that note 47 stage 5 removed saw late_at_device at gap 0)?
+    // Stage 5: the first burst's length is a parameter (`raw_burst_gap_rows`); this call keeps its 1 000-sample burst.
     let device = raw();
-    raw_tx(&*device, 1e6, 1e9);
-    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
-    let (a, b) = (iq(&pn(1_000)), iq(&pn(100)));
+    raw_tx_ready(&*device, 1e6);
     let mut observations = Vec::new();
     for gap in [0i64, 1, 2, 3, 5, 10, 20, 50, 100, 1_000] {
-        let mut outcomes = Vec::new();
-        for _ in 0..4 {
-            let t0 = (device.time_now().unwrap() / 200 + 20_000) * 200;
-            device.tx_send(0, &[&a], Some(t0), true, true, Wall::from_millis(100)).unwrap();
-            device.tx_send(0, &[&b], Some(t0 + (1_000 + gap) * 200), true, true, Wall::from_millis(100)).unwrap();
-            let mut codes = Vec::new();
-            let waited = Instant::now();
-            while waited.elapsed() < Wall::from_millis(150) {
-                if let Some(report) = device.tx_async(0, Wall::from_millis(20)).unwrap() {
-                    codes.push(format!("{:?}", report.code));
-                }
-            }
-            codes.dedup();
-            outcomes.push(codes.join("+"));
-        }
+        let outcomes: Vec<String> = raw_burst_gap_rows(&*device, 1e6, 1_000, &[gap], 4)
+            .iter()
+            .map(|trial| {
+                let mut codes = trial.codes.clone();
+                codes.dedup();
+                codes.join("+")
+            })
+            .collect();
         println!("B8 burst gap {gap} samples: {outcomes:?}");
         observations.push(serde_json::json!({ "gap_samples": gap, "outcomes": outcomes }));
     }
     measurement::push_raw_observation("hw_b8_raw_burst_gap", 40, serde_json::json!({ "gaps": observations }));
+}
+
+/// The transmit streamer at `rate` on the raw device, with the reports of earlier bursts drained, then the Module's open-time flush: four
+/// untimed zeros with start and end of burst, acknowledged before any timed send (`core.rs` `tx_flush_locked`, reached from the streamer's
+/// open, `open_tx_device_locked`; UR-22). The flush's acknowledgement is printed and counted in no pair.
+fn raw_tx_ready(device: &dyn Device, rate: f64) {
+    raw_tx(device, rate, 1e9);
+    while device.tx_async(0, Wall::from_millis(10)).unwrap().is_some() {}
+    let zeros: Vec<ezsdr_radio_uhd::Iq> = vec![ezsdr_radio_uhd::Iq::default(); 4];
+    let accepted = device.tx_send(0, &[&zeros], None, true, true, Wall::from_millis(100)).unwrap();
+    let codes = async_codes(device, Wall::from_millis(150));
+    println!("T2 raw startup flush at {rate} S/s (the Module's, core.rs tx_flush_locked): accepted {accepted} of 4; acknowledgement {codes:?} (not counted in the pairs)");
+}
+
+/// The async reports of the raw device during `wait`, as their codes in order.
+fn async_codes(device: &dyn Device, wait: Wall) -> Vec<String> {
+    let mut codes = Vec::new();
+    let waited = Instant::now();
+    while waited.elapsed() < wait {
+        if let Some(report) = device.tx_async(0, Wall::from_millis(20)).unwrap() {
+            codes.push(format!("{:?}", report.code));
+        }
+    }
+    codes
+}
+
+/// One raw trial (T2's raw side): a first burst of `samples` samples, sent as the Module sends a standalone head (one send with
+/// start and end of burst, zero-padded to `MIN_FIRST_SEND` when shorter, `tx.rs:684–703`), and a 100-sample burst `gap` samples
+/// after the first's device end (`padded`, the exclusive end). `codes` are the async reports in order, `accepted` the two sends' counts.
+struct RawTrial {
+    samples: usize,
+    padded: usize,
+    gap: i64,
+    codes: Vec<String>,
+    accepted: [usize; 2],
+}
+
+impl RawTrial {
+    fn json(&self) -> Json {
+        serde_json::json!({ "samples": self.samples, "transmitted": self.padded, "gap_from_device_end": self.gap, "accepted": self.accepted, "codes": self.codes })
+    }
+}
+
+/// `trials` raw trials of each gap in `gaps` after a first burst of `samples` samples, at a streamer already set up at `rate`. Both
+/// waveforms are `transmit_samples` (the bench's 0.5 magnitude bound, asserted there).
+fn raw_burst_gap_rows(device: &dyn Device, rate: f64, samples: usize, gaps: &[i64], trials: usize) -> Vec<RawTrial> {
+    let per = (MCR as f64 / rate).round() as i64;
+    let padded = samples.max(ezsdr_radio_uhd::device::MIN_FIRST_SEND);
+    let mut first = iq(&transmit_samples(samples));
+    first.resize(padded, ezsdr_radio_uhd::Iq::default());
+    let second = iq(&transmit_samples(100));
+    let mut rows = Vec::new();
+    for &gap in gaps {
+        for _ in 0..trials {
+            let t0 = (device.time_now().unwrap() / per + 20_000) * per;
+            let a = device.tx_send(0, &[&first], Some(t0), true, true, Wall::from_millis(100)).unwrap();
+            let end = t0 + padded as i64 * per;
+            let b = device.tx_send(0, &[&second], Some(end + gap * per), true, true, Wall::from_millis(100)).unwrap();
+            let codes = async_codes(device, Wall::from_millis(150));
+            rows.push(RawTrial { samples, padded, gap, codes, accepted: [a, b] });
+        }
+    }
+    rows
+}
+
+/// T3 (b)'s raw case: a 1 000-sample burst at `t0` with start of burst and no end, closed by the Module's two explicit zeros at its
+/// cursor `c` (end of burst, no tail: `tx.rs` `close_device_burst`, which sends two zeros at the cursor), then a 100-sample burst at
+/// `c + offset` (`offset` 3 is the record's front after a no-tail close, `staging`: the closing send's exclusive end plus one, UR-22).
+/// Returns `(offset, async codes)` per trial. The streamer must be open and ready (`raw_tx_ready`).
+fn raw_close_rows(device: &dyn Device, rate: f64, offsets: &[i64], trials: usize) -> Vec<(i64, Vec<String>)> {
+    let per = (MCR as f64 / rate).round() as i64;
+    let first = iq(&transmit_samples(1_000));
+    let second = iq(&transmit_samples(100));
+    let zeros: Vec<ezsdr_radio_uhd::Iq> = vec![ezsdr_radio_uhd::Iq::default(); 2];
+    let mut rows = Vec::new();
+    for &offset in offsets {
+        for _ in 0..trials {
+            let t0 = (device.time_now().unwrap() / per + 20_000) * per;
+            let c = t0 + first.len() as i64 * per;
+            device.tx_send(0, &[&first], Some(t0), true, false, Wall::from_millis(100)).unwrap();
+            device.tx_send(0, &[&zeros], Some(c), false, true, Wall::from_millis(100)).unwrap();
+            device.tx_send(0, &[&second], Some(c + offset * per), true, true, Wall::from_millis(100)).unwrap();
+            rows.push((offset, async_codes(device, Wall::from_millis(150))));
+        }
+    }
+    rows
 }
 
 #[test]
@@ -1330,44 +1400,21 @@ fn hw_b8_raw_empty_eob_gap() {
 #[test]
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_b8_burst_one_sample_after_a_burst() {
-    // Review O, O-B1 on the bench: a burst at a burst's end + 1 or + 2 samples, booked before the first's last buffer went out
-    // and after. The first burst's last sample is held back and closed with one zero, padded to two (UR-22: "a one-sample
-    // continuation that closes the device burst is padded to two"). The next safe start is the closing send's exclusive end,
-    // padding included, plus one sample: payload end + 2. So end + 1 falls inside the closing send and is one late TIME_ERROR
-    // (cause `late`), and end + 2 is played. The end sample itself is not booked here.
+    // Review O, O-B1 on the bench: a burst at a burst's end + 1 or + 2 samples, booked before the first's last buffer went out and after.
+    // Stage 5 (RM-15, `staging.rs` `front`): a booking at the end of a burst longer than 32 samples is held until its front, end + 2, so
+    // end + 1 lies in the accepted region and the Provider refuses it at receipt: a `radio.COMMAND_REJECTED` naming its Action (judged from
+    // that event, `n47s5::refusals_of`). End + 2 is played with no TIME_ERROR. The end sample itself is not booked here.
+    let mut failures = Vec::new();
     for (late_booking, offset) in [(false, 30_002), (true, 30_002), (false, 30_001), (true, 30_001)] {
         let dir = TempDir::new();
-        let mut run = tx_session(usrp(), &dir);
-        wait(&mut run, ms(1));
-        let a = tx_at(&run, ms(40));
-        let (first, _) = waveform_of(&pn(30_000));
-        assert!(admitted(&run.submit(verb("send", resource("radio/tx/s0"), Some(a), &[]), Some(&first)).unwrap()));
-        let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
-        let a_end = clock.origin.ticks_in(clock.root).unwrap() + (a.ticks_in(clock.domain).unwrap() + 30_000) * clock.root_ticks_per_tick.num() as i64;
-        if late_booking {
-            while run.now().ticks_in(clock.root).unwrap() < a_end - ms(8) {
-                wait(&mut run, ms(1) / 4);
-            }
-        }
-        let b = TimePoint::new(a.domain(), a.ticks_in(clock.domain).unwrap() + offset);
-        let (second, _) = waveform_of(&pn(1_000));
-        let entry = run.submit(verb("send", resource("radio/tx/s0"), Some(b), &[]), Some(&second)).unwrap();
-        wait(&mut run, ms(80));
-        let manifest = run.finish();
-        println!(
-            "B8 burst at end + {} samples, booked late {late_booking}: {:?}; TIME_ERROR {:?}; async {}; bursts {}",
-            offset - 30_000,
-            entry.outcome,
-            events_of(&manifest, "radio.TIME_ERROR").iter().map(|e| e.payload.clone()).collect::<Vec<_>>(),
-            section(&manifest, "async"),
-            section(&manifest, "bursts")
-        );
-        let expected_late = usize::from(offset == 30_001);
-        verdict(
-            &format!("B8 burst at end + {} samples, booked late {late_booking} (UR-22, #78): {expected_late} TIME_ERROR (cause late), no TX_UNDERFLOW", offset - 30_000),
-            iii::late_control_verdict(iii::run_faults(&manifest), &iii::time_error_causes(&manifest), expected_late),
+        let outcome = n47s5::one_sample_after_a_burst(tx_session(usrp(), &dir), offset, late_booking);
+        record(
+            &mut failures,
+            &format!("B8 burst at end + {} samples, booked late {late_booking} (RM-15, stage 5): end + 1 refused at receipt, end + 2 plays, no TIME_ERROR, no TX_UNDERFLOW", offset - 30_000),
+            outcome,
         );
     }
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]
@@ -1523,7 +1570,6 @@ fn hw_m2_tx_front_end_moves_between_streamers() {
 
 // ----------------------------------------------------------- stage 3c-2b observations
 
-const LOOPBACK_DELAY_SAMPLES: i64 = 44;
 const SIGNAL_THRESHOLD: f64 = 0.001;
 
 fn ticks_for_wall(ticks: i64, master_clock_hz: u64) -> Wall {
@@ -1849,19 +1895,8 @@ fn hw_txp_b0_send_sizes() {
             rows.iter().filter(|row| row["tx_flush"] != true && row["eob"] != true).filter_map(|row| row["sample_counts"][0].as_u64()).filter(|n| *n > 0).map(|n| n as usize).collect();
         let closing: Vec<usize> = rows.iter().filter(|row| row["tx_flush"] != true && row["eob"] == true).filter_map(|row| row["sample_counts"][0].as_u64()).map(|n| n as usize).collect();
         println!("B0 sizes rate {rate}: {} payload sends, sizes {sizes:?}; closing sends {closing:?}", sizes.len());
-        assert!(!sizes.is_empty(), "the repeat sent nothing at {rate}");
-        assert!(closing.iter().all(|n| *n >= 2), "T2: a closing send has fewer than two samples at {rate}: {closing:?}");
-        let mut offset = 0;
-        for (index, size) in sizes.iter().copied().enumerate() {
-            let expected = chunk.min(31_000 - offset);
-            if index == 0 {
-                assert!((1..=expected).contains(&size), "the first timed SOB takes at most the window-allowed buffer: {sizes:?}");
-            } else {
-                assert_eq!(size, expected, "continuation/wrap sizing at rate {rate}, waveform offset {offset}: {sizes:?}");
-            }
-            offset = (offset + size) % 31_000;
-        }
-        verdict(&format!("TXP B0 rate {rate} (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run"), iii::faults_verdict(&[("repeat", iii::run_faults(&manifest), 0)]));
+        let outcome = iii::all_of(vec![iii::repeat_sizes_verdict(&sizes, &closing, chunk, 31_000), iii::faults_verdict(&[("repeat", iii::run_faults(&manifest), 0)])]);
+        verdict(&format!("TXP B0 rate {rate} (#78): sizes as the window allows, closing sends of two samples or more, no TIME_ERROR and no TX_UNDERFLOW"), outcome);
     }
 }
 
@@ -2680,22 +2715,11 @@ fn device_samples(blocks: &[(i64, Vec<ezsdr_radio_uhd::Iq>)]) -> Vec<(i64, ezsdr
     blocks.iter().flat_map(|(first, samples)| samples.iter().enumerate().map(move |(i, sample)| (first + i as i64 * 200, *sample))).collect()
 }
 
-/// The root tick of a transmit instant on the running transmit clock.
-fn transmit_root(run: &ezsdr_kernel::coordinator::RunHandle, at: &TimePoint) -> i64 {
-    let clock = run.sample_clocks().into_iter().rev().find(|r| r.stream.to_string().ends_with("usrp/tx/s0") && r.ended_at.is_none()).unwrap();
-    clock.origin.ticks_in(clock.root).unwrap() + at.ticks_in(clock.domain).unwrap() * clock.root_ticks_per_tick.num() as i64
-}
-
 /// T3's evidence in a Manifest: how many flushes were acknowledged (the async section), and the flushes refused.
 fn flush_evidence(manifest: &ezsdr_kernel::manifest::Manifest) -> (usize, Vec<Json>) {
     let acked = section(manifest, "async").as_array().unwrap().iter().filter(|row| row["tx_flush"] == true && row["code"] == "BurstAck").count();
     let refused = section(manifest, "rejected").as_array().unwrap().iter().filter(|row| row["call"] == "tx_flush").cloned().collect();
     (acked, refused)
-}
-
-/// The transmit sends of a probe, flushes left out. Zero-length sends stay in: a closing one is judged by its count (T2).
-fn data_sends(probe: &probe_device::ProbeDevice) -> Vec<Json> {
-    probe.rows().into_iter().filter(|row| row["call"] == "tx_send" && row["tx_flush"] != true).collect()
 }
 
 /// One trial of `hw_p70_…`: the tone's onset (root ticks, `None` when there is no tone) and the burst's booked instant.
@@ -2757,25 +2781,8 @@ fn hw_p72_timed_tx_chunks_are_timed_and_flushed() {
     let flushes = probe.rows().iter().filter(|row| row["call"] == "tx_send" && row["tx_flush"] == true).count();
     println!("#72 1a: {payload} sends with samples; closing sends {closing:?}; flushes sent {flushes}, acknowledged {acked}, refused {refused:?}");
     let faults = iii::faults_verdict(&[("60 ms device burst", iii::run_faults(&manifest), 0)]);
-    let outcome = if !matches!(faults, Verdict::Pass(_)) {
-        faults
-    } else if !refused.is_empty() {
-        Verdict::Fail(format!("T3: a flush was refused: {refused:?}"))
-    } else if !untimed.is_empty() {
-        Verdict::Fail(format!("T1: {} send(s) carry no time: {untimed:?}", untimed.len()))
-    } else if !short.is_empty() {
-        Verdict::Fail(format!("T2: a closing send has fewer than two samples: {short:?}"))
-    } else if payload < 2 {
-        Verdict::Inconclusive(format!("only {payload} send(s) carried samples: no multi-chunk evidence"))
-    } else if closing.is_empty() {
-        Verdict::Inconclusive("no closing send was recorded: T2 not shown".to_owned())
-    } else if flushes == 0 {
-        Verdict::Inconclusive("no flush was sent: T3 not shown".to_owned())
-    } else if acked < flushes {
-        Verdict::Inconclusive(format!("{acked} of {flushes} flushes acknowledged: T3 not shown"))
-    } else {
-        Verdict::Pass(format!("{payload} sends, each timed; {} closing send(s) with two or more samples; {acked} flush(es) acknowledged", closing.len()))
-    };
+    let sends = iii::TimedSends { refused: refused.len(), untimed: untimed.len(), short_closing: short.len(), payload_sends: payload, closing: closing.len(), flushes, acked };
+    let outcome = iii::timed_sends_verdict(faults, &sends);
     verdict("#72 1a (T1, T2, T3 on the production path): every send is timed, closing sends have two samples, the flush is acknowledged", outcome);
 }
 
@@ -2807,17 +2814,7 @@ fn hw_p70_one_sample_burst_then_timed_burst() {
         } else if gaps > 0 {
             Verdict::Inconclusive(format!("the receive timestamps have {gaps} continuity gap(s): the onset is not comparable"))
         } else {
-            match (one.onset, control.onset) {
-                (Some(a), Some(b)) => {
-                    let diff = ((a - one.burst) - (b - control.burst)) / 200;
-                    if diff.abs() <= 50 {
-                        Verdict::Pass(format!("the onset differs from the control's by {diff} samples"))
-                    } else {
-                        Verdict::Fail(format!("the one-sample burst moved the next burst's onset by {diff} samples"))
-                    }
-                }
-                _ => Verdict::Inconclusive("no tone onset in one of the trials: the positive signal is missing".to_owned()),
-            }
+            iii::onset_control_verdict(one.onset.map(|t| (t - one.burst) / 200), control.onset.map(|t| (t - control.burst) / 200), ONSET_TOLERANCE)
         };
         verdict(&format!("#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's ({order})"), outcome);
     }
@@ -3601,4 +3598,160 @@ fn hw_noise_floor_receive() {
         Verdict::Fail(format!("{coherent} of {windows} windows hold a coherent tone"))
     };
     verdict("noise floor: a quiet receive holds no coherent tone (under 1 % of windows)", outcome);
+}
+
+// ---------------------------------------------------------------- note 47 stage 5 (bench 2026-11-07)
+//
+// The record's values come from `ezsdr_radio::staging` (`iii::head_front`, `stop_sample`) and the profile's constants. The loop's delay is
+// B6's 44 samples unless a trial calibrates it from the onset of its first repeat or burst (S5). Each VERDICT is a pure function in `iii.rs`.
+
+/// Prints the verdict of `claim` and records a FAIL in `failures`.
+fn record(failures: &mut Vec<String>, claim: &str, outcome: Verdict) {
+    print_verdict(claim, &outcome);
+    if matches!(outcome, Verdict::Fail(_)) {
+        failures.push(claim.to_owned());
+    }
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47s5_front_after_a_short_burst() {
+    // T2 (stage 5, UR-22, RM-15, S9): a booking at the record's front after a head of n samples plays on time, on the Module at 1 and 2 MS/s.
+    // The front is `iii::head_front` (n ≤ 3: start + 5; 4 ≤ n ≤ 32: end + 1). S7: "on time" needs the tone's onset in the capture.
+    let device = usrp();
+    pin_slot_a(&*device);
+    let mut failures = Vec::new();
+    for rate in [1e6, 2e6] {
+        for samples in [1usize, 2, 3, 4, 10, 32] {
+            let dir = TempDir::new();
+            let trial = n47s5::front_trial(tx_session_at(device.clone(), &dir, Some(rate)), samples, rate);
+            let claim = format!("T2 front after a {samples}-sample head at {rate} S/s, booked at +{} samples (RM-15, UR-22)", iii::head_front(0, samples as i64));
+            record(&mut failures, &claim, n47s5::front_outcome(&trial));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47s5_raw_front_gaps() {
+    // T2's raw side (an observation, no VERDICT beyond complete or incomplete): the device's own gaps after a first burst of n samples,
+    // each sent as the Module sends it (padded to four for n ≤ 3), at 1 and 2 MS/s. The record's front is one sample past the device's end
+    // (`iii::head_front` − padded length = 1, unit-tested), so gap 1 is the front.
+    let device = raw();
+    let mut rows = Vec::new();
+    for rate in [1e6, 2e6] {
+        raw_tx_ready(&*device, rate);
+        for samples in [1usize, 2, 3, 4, 10, 32] {
+            for trial in raw_burst_gap_rows(&*device, rate, samples, &[0, 1, 2, 3, 4, 5], 4) {
+                let acks = trial.codes.iter().filter(|code| code.as_str() == "BurstAck").count();
+                let late = trial.codes.iter().filter(|code| code.as_str() == "TimeError").count();
+                println!(
+                    "T2 raw, {rate} S/s, {samples} samples (transmitted {}), gap {} from the device end: {} (late {late}); accepted {:?}; codes {:?}",
+                    trial.padded,
+                    trial.gap,
+                    iii::gap_trial_outcome(acks),
+                    trial.accepted,
+                    trial.codes
+                );
+                let mut row = trial.json();
+                row["rate_hz"] = serde_json::json!(rate);
+                row["outcome"] = serde_json::json!(iii::gap_trial_outcome(acks));
+                rows.push(row);
+            }
+        }
+    }
+    measurement::push_raw_observation("hw_n47s5_raw_front_gaps", 288, serde_json::json!({ "trials": rows }));
+}
+
+/// One T3 (f) trial on the USRP: its own probe and directory, kept until its verdict is read (`n47s5::held_tail_trial`).
+fn held_tail(device: Arc<dyn Device>, c_offset: i64, after_join: Option<i64>) -> HeldTrial {
+    let dir = TempDir::new();
+    let probe = Arc::new(probe_device::ProbeDevice::new(device));
+    let run = tx_session(probe.clone(), &dir);
+    n47s5::held_tail_trial(run, probe, dir, c_offset, after_join)
+}
+
+/// One T3 (b) Session trial on the USRP.
+fn stop_next(device: Arc<dyn Device>) -> StopTrial {
+    let dir = TempDir::new();
+    let probe = Arc::new(probe_device::ProbeDevice::new(device));
+    let run = tx_session(probe.clone(), &dir);
+    n47s5::stop_next_trial(run, probe, dir)
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47s5_held_tail_and_stop() {
+    // T3 (stage 5, Q-4 (b), (f); R5-m5 (h)). (f): A's held tail closes at J(e); C at e+2 after J(e) is a separate device burst; C at e joins
+    // A; C at e+1 after J(e) is refused at receipt by the Provider (its COMMAND_REJECTED names C). (b): the Session's next burst at the
+    // record's first sample after a Stop, and the raw case of a burst closed by the Module's two zeros at cursor c, the next at c+3 and c+4
+    // on time, c+2 printed only. (h): a 1–3-sample head at c−1, padded to c+3, and a booking at c+3, sent raw (the Session cannot place a
+    // Stop to the sample; the record's admission of that booking is unit-tested in `iii.rs`).
+    let device = usrp();
+    pin_slot_a(&*device);
+    let mut failures = Vec::new();
+    record(&mut failures, "T3 (f) C at e, booked before J(e): one device burst, no end-of-burst at e (the continuation)", n47s5::held_played_verdict(&held_tail(device.clone(), 0, None), 1));
+    record(&mut failures, "T3 (f) C at e+2, booked after J(e): A's held tail closes at J(e); C is a separate device burst", n47s5::held_played_verdict(&held_tail(device.clone(), 2, Some(0)), 2));
+    record(&mut failures, "T3 (f) C at e+1, booked after J(e): refused at receipt (RM-15); A plays alone", n47s5::held_refused_verdict(&held_tail(device.clone(), 1, Some(0))));
+    let stop = stop_next(device.clone());
+    let closes: Vec<Json> = n47s5::data_sends(&stop.probe).into_iter().filter(|row| row["eob"] == true).collect();
+    println!("T3 (b) Session: the Stop at root {}; the next burst at root {}; the device's end-of-burst sends {closes:?}", stop.stop_root, stop.next_root);
+    record(&mut failures, "Session: next burst at the record's stop sample (RM-16, the first sample after the Stop with the in-flight window)", n47s5::stop_next_verdict(&stop));
+    raw_tx_ready(&*device, 1e6);
+    let close_rows = raw_close_rows(&*device, 1e6, &[2, 3, 4], 4);
+    for offset in [2i64, 3, 4] {
+        let late: usize = close_rows.iter().filter(|(o, _)| *o == offset).map(|(_, codes)| codes.iter().filter(|code| code.as_str() == "TimeError").count()).sum();
+        println!("T3 (b) raw, next burst at c+{offset} after a two-zero close: late {late} over {} trial(s)", close_rows.iter().filter(|(o, _)| *o == offset).count());
+    }
+    let close_json: Vec<Json> = close_rows.iter().map(|(offset, codes)| serde_json::json!({ "offset": offset, "codes": codes })).collect();
+    measurement::push_raw_observation("hw_n47s5_held_tail_and_stop", 12, serde_json::json!({ "raw_close": close_json }));
+    record(
+        &mut failures,
+        "T3 (b) raw: after a burst closed by the Module's two zeros at c, the next burst at c+3 and c+4 is on time (c+2 printed only; the record's front after a no-tail close)",
+        iii::close_pair_verdict(&close_rows),
+    );
+    let mut raw_trials = Vec::new();
+    for samples in [1usize, 2, 3] {
+        raw_trials.extend(raw_burst_gap_rows(&*device, 1e6, samples, &[0], 4).into_iter().map(|trial| trial.codes));
+    }
+    record(&mut failures, "T3 (h) R5-m5: a 1–3-sample head padded to c+3, and a booking at c+3, raw (the device's geometry)", iii::raw_pair_verdict(&raw_trials));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47s5_repeat_switch() {
+    // T4 (stage 5, Q-4 (d), (g)): the switch's boundary on the Module, untimed and timed. The tone is 100 kHz before the boundary and
+    // 200 kHz after it, the power holds across it, and the device sends no end-of-burst or start-of-burst at it (S4, from the ProbeDevice).
+    let device = usrp();
+    pin_slot_a(&*device);
+    let mut failures = Vec::new();
+    for timed in [false, true] {
+        let probe = Arc::new(probe_device::ProbeDevice::new(device.clone()));
+        let dir = TempDir::new();
+        let trial = n47s5::repeat_switch_trial(tx_session(probe.clone(), &dir), probe, timed);
+        let claim = format!("T4 repeat switch, {} (RM-37, UR-38, stage 5)", if timed { "timed at a future instant" } else { "untimed" });
+        record(&mut failures, &claim, n47s5::repeat_switch_verdict(&trial));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47s5_untimed() {
+    // T5 (stage 5, RM-15 `place_untimed`): (1) an untimed repeat after a Stop is admitted and transmits; (2) an untimed burst booked while a
+    // timed one plays is placed after it and plays on time (S7: the onset of its tone, against its applied target).
+    let device = usrp();
+    pin_slot_a(&*device);
+    let mut failures = Vec::new();
+    let dir = TempDir::new();
+    record(&mut failures, "T5 (1) an untimed repeat after a Stop is admitted and transmits (RM-15, stage 5)", n47s5::untimed_repeat_outcome(tx_session(device.clone(), &dir)));
+    let dir = TempDir::new();
+    record(
+        &mut failures,
+        "T5 (2) an untimed burst booked while a timed one plays is placed after it and plays on time (RM-15, stage 5)",
+        n47s5::untimed_burst_outcome(tx_session(device.clone(), &dir)),
+    );
+    assert!(failures.is_empty(), "{failures:?}");
 }

@@ -37,6 +37,7 @@ pub mod d9;
 pub mod iii;
 pub mod measurement;
 pub mod n47;
+pub mod n47s5;
 pub mod observations;
 pub mod probe_device;
 pub mod raw;

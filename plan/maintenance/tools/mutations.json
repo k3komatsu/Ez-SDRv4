@@ -15636,5 +15636,394 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_s4_a_finite_abandon_keeps_the_switch_of_the_repeat_it_has_not_started"
+  },
+  {
+    "id": "N47S5-159",
+    "name": "stage 5 bench (T2): the record's front after a head is one past its end (iii::head_front, through Bookings::accept)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "bookings.accept(start, Some(len), 0, |_| 0, i64::MIN)",
+    "new": "bookings.accept(start, Some(len + 1), 0, |_| 0, i64::MIN)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "the_record_front_is_one_sample_past_the_device_end_of_a_head"
+  },
+  {
+    "id": "N47S5-160",
+    "name": "stage 5 bench (S4): the first send's start of burst is a seam (iii::seam_count)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(*sob && *i > 0)",
+    "new": "(*sob && *i >= 0)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_seam_is_a_start_or_an_end_other_than_the_first_start_and_the_last_end"
+  },
+  {
+    "id": "N47S5-161",
+    "name": "stage 5 bench (S4): the final Stop's end-of-burst is a seam (iii::seam_count)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(*eob && *i < last)",
+    "new": "(*eob && *i <= last)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_seam_is_a_start_or_an_end_other_than_the_first_start_and_the_last_end"
+  },
+  {
+    "id": "N47S5-162",
+    "name": "stage 5 bench (S7): a tone onset is searched from its instant, not from the capture's start (iii::tone_onset)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "w.start >= from && (w.hz - hz).abs() <= tolerance_hz",
+    "new": "w.start >= 0 && (w.hz - hz).abs() <= tolerance_hz",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "an_onset_is_the_first_coherent_window_at_the_frequency"
+  },
+  {
+    "id": "N47S5-163",
+    "name": "stage 5 bench (S7): a tone onset needs a coherent window, not any window at the frequency (iii::tone_onset)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "w.tone && w.power > 4.0 * floor",
+    "new": "w.power > 4.0 * floor",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "an_onset_is_the_first_coherent_window_at_the_frequency"
+  },
+  {
+    "id": "N47S5-164",
+    "name": "stage 5 bench (S7): a window carries a tone only above coherence one half (iii::windows)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "tone: coherence > 0.5",
+    "new": "tone: coherence > 1.5",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "the_windows_of_a_capture_carry_their_tone_and_power"
+  },
+  {
+    "id": "N47S5-165",
+    "name": "stage 5 bench (T3, T5): a FAIL among a claim's verdicts is the claim's FAIL (iii::all_of)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if verdicts.iter().any(|verdict| matches!(verdict, Verdict::Fail(_)))",
+    "new": "if verdicts.iter().any(|verdict| matches!(verdict, Verdict::Inconclusive(_)))",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "several_verdicts_of_one_claim_fail_first_then_are_inconclusive"
+  },
+  {
+    "id": "N47S5-166",
+    "name": "stage 5 bench (T2 raw): a raw trial with one missing acknowledgement is incomplete (iii::raw_pair_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if incomplete > 0 {",
+    "new": "if incomplete > 1 {",
+    "scope": "pub fn raw_pair_verdict",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_raw_pair_passes_only_with_two_acknowledgements_and_no_late_report"
+  },
+  {
+    "id": "N47S5-167",
+    "name": "stage 5 bench (T2 raw): an underflow inside a packet is a fault (iii::raw_pair_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "code.as_str(), \"TimeError\" | \"Underflow\" | \"UnderflowInPacket\")",
+    "new": "code.as_str(), \"TimeError\" | \"Underflow\")",
+    "scope": "pub fn raw_pair_verdict",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_raw_pair_passes_only_with_two_acknowledgements_and_no_late_report"
+  },
+  {
+    "id": "N47S5-168",
+    "name": "stage 5 bench (T2 raw): a trial with one acknowledgement counts as complete (iii::raw_pair_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "code.as_str() == \"BurstAck\").count() != 2",
+    "new": "code.as_str() == \"BurstAck\").count() < 1",
+    "scope": "pub fn raw_pair_verdict",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_raw_pair_passes_only_with_two_acknowledgements_and_no_late_report"
+  },
+  {
+    "id": "N47S5-169",
+    "name": "stage 5 bench (T4): a power dip is one at a quarter of the steady power, not four times it (iii::switch_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if dip <= steady / 4.0 {",
+    "new": "if dip <= steady * 4.0 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_clean_switch_passes_and_a_phase_transition_at_the_boundary_is_not_a_seam"
+  },
+  {
+    "id": "N47S5-170",
+    "name": "stage 5 bench (T4, S4): any seam at a repeat switch fails, even one (iii::switch_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "Some(seams) if seams > 0",
+    "new": "Some(seams) if seams > 1",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_short_gap_the_windows_miss_fails_on_the_send_seam"
+  },
+  {
+    "id": "N47S5-171",
+    "name": "stage 5 bench (T6, S1): the loop's stop is within the tolerance inclusive (iii::stop_end_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(heard - end).abs() <= tolerance",
+    "new": "(heard - end).abs() < tolerance",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_stop_end_is_judged_against_the_recorded_end_within_its_tolerance"
+  },
+  {
+    "id": "N47S5-172",
+    "name": "stage 5 bench (T5): an untimed burst placed at the playing burst's front is a fault (iii::untimed_burst_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "Some(at) if at < earlier_front",
+    "new": "Some(at) if at <= earlier_front",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "an_untimed_repeat_and_burst_pass_only_where_the_record_places_them"
+  },
+  {
+    "id": "N47S5-173",
+    "name": "stage 5 bench (T2): a front case with two acknowledgements for its three bursts passes (iii::front_case_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "Verdict::Pass(text) if acks != bursts",
+    "new": "Verdict::Pass(text) if acks + 1 != bursts",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_front_case_needs_two_acknowledgements"
+  },
+  {
+    "id": "N47S5-174",
+    "name": "stage 5 bench (T1 hw_p72): a run with two payload sends passes as multi-chunk evidence (iii::timed_sends_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "sends.payload_sends < 2",
+    "new": "sends.payload_sends < 4",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_timed_send_run_passes_only_with_all_its_sends_timed_and_acknowledged"
+  },
+  {
+    "id": "N47S5-175",
+    "name": "stage 5 bench (T1 hw_txp_b0): the first timed send's size is a window-allowed chunk, not a full one (iii::repeat_sizes_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "let fits = if index == 0 { (1..=expected).contains(&size) }",
+    "new": "let fits = if index == 0 { (1..expected).contains(&size) }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_repeat_sends_its_window_sized_chunks_and_closing_sends_have_two_samples"
+  },
+  {
+    "id": "N47S5-176",
+    "name": "stage 5 bench (T4 and the Module's onsets): a coherent window at the quiet floor is a tone (iii::tone_windows)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "w.tone && w.power > 4.0 * floor",
+    "new": "w.tone",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_coherent_window_in_the_quiet_floor_is_not_a_tone"
+  },
+  {
+    "id": "N47S5-177",
+    "name": "stage 5 bench (T3 (f)): a refusal is taken from a radio.COMMAND_REJECTED that names a dispatched Action, and the reverse is not (n47s5::refusals_of)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/n47s5.rs",
+    "old": "payload.kind == \"tx_burst\" && payload.action.is_some_and(|action| dispatched.contains(&action))",
+    "new": "payload.kind == \"tx_burst\" && payload.action.is_some_and(|action| !dispatched.contains(&action))",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "n47s5_one_sample_after_a_burst_refusal_rehearsal_on_the_fake"
+  },
+  {
+    "id": "N47S5-178",
+    "name": "stage 5 bench (T3 (f)): no refusal event is judged as a Pass of the refusal (iii::refusal_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "[] => Verdict::Fail(",
+    "new": "[] => Verdict::Pass(",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_held_tail_closes_once_per_device_burst_and_a_refusal_names_the_overlap"
+  },
+  {
+    "id": "N47S5-179",
+    "name": "stage 5 bench (T3 (f)): a refusal for another reason is taken as the overlap refusal (iii::refusal_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "scope": "pub fn refusal_verdict",
+    "old": "[reason] if reason.contains(\"overlaps an accepted booking\")",
+    "new": "[reason] if !reason.is_empty()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_held_tail_closes_once_per_device_burst_and_a_refusal_names_the_overlap"
+  },
+  {
+    "id": "N47S5-180",
+    "name": "stage 5 bench (S7): a window's last instant is not covered (iii::covered)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "at < **start + WINDOW_TICKS",
+    "new": "at < **start + WINDOW_TICKS - 1",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_span_covers_only_the_instants_its_windows_hold"
+  },
+  {
+    "id": "N47S5-181",
+    "name": "stage 5 bench (S7): an onset across a hole is taken without the coverage check (iii::tone_onset)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "covered(&starts, from, onset).then_some(onset)",
+    "new": "Some(onset)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_hole_between_the_instant_and_the_onset_is_not_an_onset"
+  },
+  {
+    "id": "N47S5-182",
+    "name": "stage 5 bench (SC-30): a span's samples take the first instant of the capture, not their own (iii::span_samples)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(first + k as i64 * per, samples[taken + k])",
+    "new": "(spans[0].0 + (taken + k) as i64 * per, samples[taken + k])",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "samples_of_separate_spans_keep_their_own_first_ticks"
+  },
+  {
+    "id": "N47S5-183",
+    "name": "stage 5 bench (T6, S1): a stop edge with exactly the quiet windows after it is not judged (iii::stop_edge)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if tail.len() < quiet || power",
+    "new": "if tail.len() < quiet + 1 || power",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_stop_edge_needs_signal_then_quiet_windows_before_the_capture_ends"
+  },
+  {
+    "id": "N47S5-184",
+    "name": "stage 5 bench (T3 (b) raw): a late report after the close at c+3 or c+4 does not fail (iii::close_pair_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if !late.is_empty() {",
+    "new": "if false {",
+    "scope": "pub fn close_pair_verdict",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_close_is_judged_at_c_plus_three_and_four_and_c_plus_two_is_only_printed"
+  },
+  {
+    "id": "N47S5-185",
+    "name": "stage 5 bench (T2, T3): a booking whose loop delay is not measured passes (iii::booking_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(Some(_), None) => Verdict::Inconclusive(",
+    "new": "(Some(_), None) => Verdict::Pass(",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_booking_without_a_measured_delay_is_not_on_time"
+  },
+  {
+    "id": "N47S5-186",
+    "name": "stage 5 bench (T3 (f)): a refusal naming the booking does not stop the late-arrival branch (iii::late_arrival_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(refusals.is_empty() && faults.time_errors == late_by_ns.len()",
+    "new": "(faults.time_errors == late_by_ns.len()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_late_arrival_is_inconclusive_only_when_nothing_else_is_wrong"
+  },
+  {
+    "id": "N47S5-187",
+    "name": "stage 5 bench (T3 (f)): another TIME_ERROR beside the late drop is read as host latency (iii::late_arrival_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "faults.time_errors == late_by_ns.len()",
+    "new": "faults.time_errors >= late_by_ns.len()",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_late_arrival_is_inconclusive_only_when_nothing_else_is_wrong"
+  },
+  {
+    "id": "N47S5-188",
+    "name": "stage 5 bench (T3 (f)): an underflow beside the late drop is read as host latency (iii::late_arrival_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "faults.underflows == 0 && faults.async_faults == 0",
+    "new": "faults.async_faults == 0",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_late_arrival_is_inconclusive_only_when_nothing_else_is_wrong"
+  },
+  {
+    "id": "N47S5-189",
+    "name": "stage 5 bench (should-play): a single Provider refusal of an admitted booking is not a FAIL (iii::admission_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "} else if !refusals.is_empty() {",
+    "new": "} else if refusals.len() > 1 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_provider_refusal_of_a_booking_that_should_play_is_a_fail"
+  },
+  {
+    "id": "N47S5-190",
+    "name": "stage 5 bench (T3 (b), S3): a single refusal at the Kernel's stop sample for another reason is INCONCLUSIVE, not a FAIL (iii::stop_booking_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "[reason] if reason.contains(\"overlaps an accepted booking\") => {",
+    "new": "[_reason] => {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_refusal_at_the_kernels_stop_sample_is_inconclusive_and_a_refusal_elsewhere_is_a_fail"
+  },
+  {
+    "id": "N47S5-191",
+    "name": "stage 5 bench (should-play): a single Provider refusal of a switch is not a FAIL (iii::switch_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "if !trial.refusals.is_empty() {",
+    "new": "if trial.refusals.len() > 1 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_provider_refusal_of_a_booking_that_should_play_is_a_fail"
+  },
+  {
+    "id": "N47S5-192",
+    "name": "stage 5 bench (T3 (f)): the late drops of C are read from other targets (n47s5::late_arrivals)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/n47s5.rs",
+    "old": "as_i64() == Some(sample)",
+    "new": "as_i64() != Some(sample)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "n47s5_held_tail_and_stop_rehearsal_on_the_fake"
+  },
+  {
+    "id": "N47S5-193",
+    "name": "stage 5 bench (T3 (f)): a refused C at e+1 never takes the late-arrival branch (n47s5::held_refused_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/n47s5.rs",
+    "scope": "pub fn held_refused_verdict",
+    "old": "iii::late_arrival_verdict(&trial.late, &trial.refusals, faults)",
+    "new": "iii::late_arrival_verdict(&[], &trial.refusals, faults)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "n47s5_held_tail_and_stop_rehearsal_on_the_fake"
+  },
+  {
+    "id": "N47S5-194",
+    "name": "stage 5 bench (T3 (f)): a played C never takes the late-arrival branch (n47s5::held_played_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/n47s5.rs",
+    "scope": "pub fn held_played_verdict",
+    "old": "iii::late_arrival_verdict(&trial.late, &trial.refusals, faults)",
+    "new": "iii::late_arrival_verdict(&[], &trial.refusals, faults)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "n47s5_held_tail_and_stop_rehearsal_on_the_fake"
+  },
+  {
+    "id": "N47S5-195",
+    "name": "stage 5 bench (should-play): a single Provider refusal of an untimed repeat is not a FAIL (iii::untimed_repeat_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "scope": "pub fn untimed_repeat_verdict",
+    "old": "if !refusals.is_empty() {",
+    "new": "if refusals.len() > 1 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_provider_refusal_of_a_booking_that_should_play_is_a_fail"
+  },
+  {
+    "id": "N47S5-196",
+    "name": "stage 5 bench (should-play): a single Provider refusal of an untimed burst is not a FAIL (iii::untimed_burst_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "scope": "pub fn untimed_burst_verdict",
+    "old": "if !refusals.is_empty() {",
+    "new": "if refusals.len() > 1 {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "a_provider_refusal_of_a_booking_that_should_play_is_a_fail"
   }
 ]

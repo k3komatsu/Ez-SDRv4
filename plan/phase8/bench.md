@@ -794,3 +794,203 @@ EZSDR_DROP_RX_CHECK='<独立の受信機に tone か quiet を最後の行に出
 
 - orchestrator に返すもの：commit，各ブロックの VERDICT 行（log の path），(b) の表の TIME_ERROR の数（case ごと），(c)1 の rate ごとの fill（最小・中央値・最大）と T2 の VERDICT と `III fill observation` の行，(c)3・(c)4 の最小の `lead_left_ns`，(d) の 1 行と ACK の e からの差，(e) の行，(f) の stage ごとの行（`link_drops`，NIC の byte と counter），(g) の 3 行と使った受信機（または NOT DONE），電源 cycle の有無．
 - repo へ写すのは，owner が確認したものだけ．log は `~/.cache/ezsdr-bench/<日付>/` に残す．
+
+## <DATE> の手順（note 47 段階 5 の後）
+
+`<COMMIT>` は段階 5 の試験（`hardware.rs` の「note 47 stage 5」の節，`common/n47s5.rs`，`common/iii.rs`）が入った commit．結果は bench-results.md に書く（orchestrator）．書いていないことは「未確認」．出典：この文書の上の 2026-11-06 の節，[47 の段階 5](47-no-change-while-streaming.md) §4 の 5．[test plan](reviews/47s5-test-plan.md) §10 Q-4・§11 R5-m5，[design/07](../../design/07-radio-model.md) RM-15・RM-16・RM-37，[design/18](../../design/18-uhd-radio.md) UR-21・UR-22・UR-23・UR-38，`crates/ezsdr-radio/src/staging.rs`．
+
+### 構成と順番
+
+| | 機材 | 接続 | att |
+|---|---|---|---|
+| #1 | X300＋OBX（slot A） | `addr=192.168.40.36`，NIC `enp1s0f1np1`，`--subnet 40`，`BOARD=36` | 30 dB |
+| #2 | X300＋UBX（slot A）・CBX（slot B） | `addr=192.168.47.37`，NIC `enp1s0f0np0`，`--subnet 47`，`BOARD=37` | 各 30 dB |
+
+- att は三つの board とも 30 dB（2026-11-06 と同じ）．
+- 2 台は同時につながない（owner）．順は **#2 → #1**．
+- 試験はすべて slot A（OBX／UBX）．CBX（slot B）は流さない（`iii::pin_to_slot_a` が，試験ごとに slot A だけの layout を組む）．
+- 基準は内部（`internal`）．PPS と 10 MHz は使わない．
+- 時間は各ブロックの estimate．初回の build（volume が冷たい）は数分から十数分の追加（estimate）．
+
+### 共通の準備（送信しない）
+
+```sh
+cd <COMMIT の tree>                      # main tree で commit を checkout した状態．git status が clean であること
+mkdir -p ~/.cache/ezsdr-bench/$(date +%F)
+hw() { # $1 = 試験名．EZSDR_UHD_ARGS と BOARD（36 か 37）と EZSDR_BENCH_NIC は呼ぶ前に機材ごとに export する．失敗なら非 0 を返す
+  local dir=~/.cache/ezsdr-bench/$(date +%F) log status=0 n=1
+  log="$dir/$1.$BOARD.log"
+  while [[ -e $log ]]; do n=$((n + 1)); log="$dir/$1.$BOARD.$n.log"; done # 既存の log は上書きしない（.2，.3）
+  docker run --rm --network=host --cap-add=SYS_NICE --ulimit rtprio=99 --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,size=4g \
+    -v "$PWD:/work" -v ezsdr-v4-cargo-target:/cargo-target -w /work \
+    -e CARGO_HOME=/cargo-target/.cargo-home -e EZSDR_UHD_ARGS -e EZSDR_BENCH_NIC \
+    ezsdr-v4-dev:uhd4.10 cargo test -q --release -p ezsdr-radio-uhd --features uhd --test hardware "$1" -- --exact --ignored --nocapture --test-threads=1 \
+    >"$log" 2>&1 || status=$?
+  grep -h 'VERDICT\|test result\|panicked' "$log"
+  ((status == 0)) && [[ $(grep -c '^test result:' "$log") == 1 ]] && grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"
+}
+run_all() { for t in "$@"; do hw "$t" || return 1; done; } # 最初の失敗で止まる
+```
+
+- log は `~/.cache/ezsdr-bench/<日付>/<試験名>.<BOARD>.log` に残る．同じ試験を同じ盤でもう一度流すと `.2.log`，`.3.log` になる．
+- `hw` は docker／cargo の終了 status と，`test result:` の行がちょうど 1 つで `ok. 1 passed; 0 failed; 0 ignored;` であることの両方を見る．**`VERDICT` は読む．** 多くの試験は FAIL で panic して `hw` が非 0 を返すが，`hw_b8_stop_end`（(g)）は段階 5 から FAIL の試行で assert する．INCONCLUSIVE の行は閉じる根拠に数えない．
+- この節の試験が読む環境変数は `EZSDR_UHD_ARGS`（盤）だけ．`hw` は 2026-11-06 と同じく `EZSDR_BENCH_NIC`（盤の NIC：#2 `enp1s0f0np0`，#1 `enp1s0f1np1`）も渡す．読むのは NIC の counter を取る試験（`iii::bench_nics`）で，この節にはない．計測の record（`EZSDR_MEASUREMENT_*`，`EZSDR_MEASURE_*`）は使わない．
+- 2026-11-06 の節の (b) にあった試験のうち，段階 5c で削除されたもの（先行 burst の preemption の掃引）は今日の節にない（test plan Q-3）．
+- `push_raw_observation` の結果は計測の record（`EZSDR_MEASUREMENT_*`）を指定したときだけファイルになる．この節は指定しない．raw の表は試験が出す行（`T2 raw …`）から読む．
+
+stop の規則：`Control operation timed out waiting for space in command buffer`，`Reference Clock PLL failed to lock`，装置が応答しない → **電源を切って入れ直す**．panic を読んで owner に報告してから再開する．handle の latch（control timeout・device 喪失）が出た盤の以降の試行は流れない（`VERDICT` の行に「power-cycle the board」と出る）→ 電源を入れ直し，owner に伝える．
+
+### (a) ホスト確認と装置確認（送信なし，#2 → #1，約 10 分，estimate）
+
+PC の再起動の後は，まず owner が `sudo bash ~/ezsdr-bench/usrp-net.sh`（tree の外．NIC ごとに subnet を一つだけ付け，各 X300 が自分の NIC で答えるかを確かめる．ケーブルが逆なら `CABLES SWAPPED` で exit 1）を流す．
+
+```sh
+ping -c2 -W1 -I enp1s0f0np0 192.168.47.37 && ping -c2 -W1 -I enp1s0f1np1 192.168.40.36   # 各 X300 が自分の NIC で答える．答えなければ止める（ケーブルの取り違え）
+plan/phase8/tools/bench-host.sh --nic enp1s0f0np0 --subnet 47            # #2．read-only．不足があれば exit 1
+docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.47.37
+# 盤を替えて #1
+plan/phase8/tools/bench-host.sh --nic enp1s0f1np1 --subnet 40
+docker run --rm --network=host ezsdr-v4-dev:uhd4.10 uhd_usrp_probe --args addr=192.168.40.36
+# NIC の counter が読めるか
+cat /sys/class/net/enp1s0f0np0/statistics/rx_bytes /sys/class/net/enp1s0f1np1/statistics/rx_bytes
+```
+
+確認：serial（#2 は 347D541，#1 は 347D545），FPGA 39.3，slot A の board（UBX／OBX），master clock 200 MHz，`ref_locked` が true，10 GbE link．stop：NIC の不足が残る，find されない，`ref_locked` が false → 止めて owner へ．
+
+### (b) 回帰：T1 の 9 試験（#2 UBX → #1 OBX，TX あり，約 40 分，estimate）
+
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && run_all \
+  hw_s1_short_first_sends hw_p70_one_sample_burst_then_timed_burst hw_p72_timed_tx_chunks_are_timed_and_flushed \
+  hw_b6_txrx_and_repeat hw_b7_session_loopback hw_b8_burst_at_a_sent_burst_s_end hw_b8_burst_one_sample_after_a_burst \
+  hw_h5_held_last_sample hw_txp_b0_send_sizes                                           # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && run_all \
+  hw_s1_short_first_sends hw_p70_one_sample_burst_then_timed_burst hw_p72_timed_tx_chunks_are_timed_and_flushed \
+  hw_b6_txrx_and_repeat hw_b7_session_loopback hw_b8_burst_at_a_sent_burst_s_end hw_b8_burst_one_sample_after_a_burst \
+  hw_h5_held_last_sample hw_txp_b0_send_sizes                                           # 盤を替えて #1 OBX（#2 が止まったら流さない）
+```
+
+各試験の VERDICT と，その行が出す TIME_ERROR と TX_UNDERFLOW の数（`iii::faults_verdict`，`hw_b8_burst_one_sample_after_a_burst` は `iii::late_control_verdict` と `iii::refusal_verdict`）．期待は次のとおり．それ以外の `radio.TIME_ERROR` は**想定外**．
+
+| 試験 | 期待する `radio.TIME_ERROR` | TX_UNDERFLOW | 根拠 |
+|---|---|---|---|
+| `hw_s1_short_first_sends`（1，2，3，4 サンプル） | 0（case ごとに `BurstAck` が 1 つ） | 0 | UR-22（note 48 S1） |
+| `hw_p70_…`（1 サンプルの burst と 4 サンプルの対照，booking の 2 通り） | 0（両方） | 0 | UR-22，UR-23 |
+| `hw_p72_…` | 0 | 0 | UR-22，UR-28 |
+| `hw_b6_txrx_and_repeat`（burst と repeat） | 0 | 0 | UR-22，UR-23 |
+| `hw_b7_session_loopback` | 0 | 0 | UR-22 |
+| `hw_b8_burst_at_a_sent_burst_s_end`（3 試行） | 0 | 0 | UR-23（B3） |
+| `hw_b8_burst_one_sample_after_a_burst`（end + 1，end + 2，各 2 通り） | end + 1 は **0 で，booking は receipt で refuse される**（`radio.COMMAND_REJECTED` の理由 「UR-21: the burst overlaps an accepted booking」）．end + 2 は 0 で流れる | 0 | RM-15，staging.rs の `front`（長い burst の end の後の front は end + 2）．2026-11-06 では end + 1 が 1 の late だった |
+| `hw_h5_held_last_sample`（隣接・3 000 sample の間隔・締切の run） | 0 | 0 | UR-22 |
+| `hw_txp_b0_send_sizes`（1 と 5 MS/s） | 0 | 0 | UR-22，TXP |
+
+- 「booking は refuse される」は 2026-11-06 と違う期待．refusal は `radio.COMMAND_REJECTED` のうち，その booking の Action を名指すものから判定する（`n47s5::refusals_of`）．それがなければ end + 1 の VERDICT は FAIL（`iii::refusal_verdict`）．
+- **#78 と #70 は 2026-11-06 に閉じた**（handoff §1）．この節の (b) の FAIL は回帰である：止めて owner へ報告する．issue を開き直すのは orchestrator．この節は閉じる条件を持たない．
+- stop：想定外の `radio.TIME_ERROR` や `radio.TX_UNDERFLOW`，装置の詰まり → 電源を切って入れ直す（同じ盤で次の試験を流さない）．
+
+### (c) 送信の前線：T2（#2 UBX → #1 OBX，TX あり，約 25 分，estimate）
+
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && run_all \
+  hw_n47s5_front_after_a_short_burst hw_n47s5_raw_front_gaps                             # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && run_all \
+  hw_n47s5_front_after_a_short_burst hw_n47s5_raw_front_gaps                             # 盤を替えて #1 OBX
+```
+
+- (c)1 `hw_n47s5_front_after_a_short_burst`：n ∈ {1, 2, 3, 4, 10, 32} × 1 MS/s と 2 MS/s，12 行の VERDICT（行の text は「T2 front after a N-sample head at R S/s, booked at +K samples」）．K は `iii::head_front`（n ≤ 3 は 5，4 ≤ n ≤ 32 は n + 1）．PASS：admitted，TIME_ERROR と underflow なし，BurstAck が 3 つ（calibration，head，tone），tone の onset が booking から，その試行の遅れ（A の最初の burst の onset，S5）± 50 sample（S7）．INCONCLUSIVE：capture に onset がない，遅れが測れない，または BurstAck が 3 つでない．FAIL：refuse，TIME_ERROR，underflow，onset が許容の外．
+- (c)2 `hw_n47s5_raw_front_gaps`：観測だけ（VERDICT の行はない）．2 rate × 6 n × 6 gap（0〜5）× 4 試行 = 288 行．開始時の flush の ACK は `raw_tx_ready` が別に印字し，各行の codes には入らない．各行は `T2 raw, <rate> S/s, <n> samples (transmitted <padded>), gap <g> from the device end: complete|incomplete`，late の数，accepted の数，codes．gap は device の排他的な終わりからの距離（一つ後の sample が gap 1，record の front と同じ）．
+- stop：(c)1 の FAIL，TIME_ERROR，装置の詰まり → 電源を切って入れ直す．(c)2 が途中で止まったら owner へ．
+
+### (d) 保留の尾と Stop の領域：T3（#2 UBX → #1 OBX，TX あり，約 20 分，estimate）
+
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_n47s5_held_tail_and_stop   # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_n47s5_held_tail_and_stop   # 盤を替えて #1 OBX
+```
+
+6 行の VERDICT（各盤）．
+
+1. (f) C を e に，J(e) の前に booking：PASS は device の burst が 1 つ，end-of-burst はその終わり（C の末尾）に 1 つだけ（e には送らない），ACK も 1 つ，onset が，その試行の遅れ（A の最初の burst の onset，S5）± 50 sample．
+2. (f) C を e + 2 に，J(e) の後に booking（J(e) = e − 5 ms）：submit は J(e) の後の最初の wait の step．PASS は device の burst が 2 つ（A の保留の尾が J(e) で閉じ，C は別の burst），EOB と ACK が各 2 つ，C の onset が，その試行の遅れ ± 50 sample．C が遅れて届いた（下の 3 の判定）なら INCONCLUSIVE．その場合，同じ盤の 3 が PASS（時刻どおりに届いて refuse）なら，遅れは owner の dispatch の疑いがある：流し直さず owner へ報告（owner 不具合の疑い）．
+3. (f) C を e + 1 に，J(e) の後に booking．submit は J(e) の後の最初の wait の step，表示は submit − J(e) と遅れの量（late_by）．判定は次の順（最初に当たったもので決まる，`iii::late_arrival_verdict`，`n47s5::held_refused_verdict`）：(i) `COMMAND_REJECTED` が C を名指す → 時刻どおりに届いて refuse．PASS（reason 「UR-21: the burst overlaps an accepted booking」），A だけが流れる（EOB と ACK が各 1 つ）．(ii) C が受理され TIME_ERROR がない → 時刻どおりに届いたのに refuse されなかった：FAIL．(iii) C を target とする late の drop（`TIME_ERROR`，cause late，outcome drop）があり，C を名指す refuse がない → 受信か dispatch で遅れた（同じ `TIME_ERROR`）：INCONCLUSIVE「late at receipt or at dispatch」（host latency か owner の dispatch の遅れ）．(iv) それ以外の `TIME_ERROR` → FAIL．e + 1 は，時刻どおりに届けば J(e) の前でも後でも refuse される．refuse の窓は (J(e), e + off·1 µs − 2 ms]（off は C の e からの offset，サンプル単位，1 MS/s で +1 sample；J(e) = e − 5 ms なので約 (e − 5 ms, e − 2 ms]；`join_by`，`decide`）．窓の外へ出ると late として drop される（(iii)）．INCONCLUSIVE は試験を 1 回だけ流し直す．もう一度 INCONCLUSIVE なら owner へ．FAIL は遅れを測ってから owner へ．
+4. (b) Session（観察．判定される geometry は 5 の raw の close）：次の burst を Stop の後の最初の sample に（`staging::stop_sample`，RM-16；表示名は「Session: next burst at the record's stop sample」）．repeat の最初の burst は時刻つき（開始の 15 ms 後）で，capture はその target − 2 ms を覆う（方法は時刻つき，30 ms 待って Stop）．PASS は admitted，faults なし，onset が，repeat の遅れ（その試行の onset，S5）± 50 sample．overlap の refuse だけなら INCONCLUSIVE（「refused at the Kernel's stop sample」）：Provider の bound は Stop の受信から決まり，Manifest に記録がないので host latency を示せない（`iii::stop_booking_verdict`，S3）．overlap 以外の理由の refuse，二つ以上の refuse，admitted でない，faults，onset の外れは FAIL．
+5. (b) raw：two zeros で閉じた burst（cursor c）の後，次の burst を c+3 と c+4 に（c+2 は印字だけ，各 4 試行）．PASS は c+3 と c+4 の全試行で ACK が 2 つ，late も underflow もない．FAIL は c+3 か c+4 で TIME_ERROR か underflow．
+6. (h) R5-m5 の raw 対（1–3 sample の頭を c − 1 に，c + 3 へ詰め，c + 3 に booking）：PASS は全試行で ACK が 2 つ，late も underflow もない．**これが記録が違っているかもしれない唯一の場合**．FAIL なら止めて owner へ．すべて print する．
+
+- 注意：(h) は Session では組めない（Stop を sample 単位で置けない）．raw と timed で device の形を再現する．記録が c + 3 の booking を受け入れること自体は単体試験（`iii.rs` `a_booking_at_the_stop_is_admitted_after_a_head_the_stop_cuts`）で確かめた．
+- stop：FAIL（(f)，(b)，(h) とも），TIME_ERROR，underflow，装置の詰まり → 電源を切って入れ直す．
+
+### (e) 反復の切り替え：T4（#2 UBX → #1 OBX，TX あり，約 15 分，estimate）
+
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_n47s5_repeat_switch   # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_n47s5_repeat_switch   # 盤を替えて #1 OBX
+```
+
+- 2 行の VERDICT（untimed，timed：未来の境界）．100 kHz の repeat（1 100 sample）から 200 kHz の repeat（1 100 sample）へ切り替える．capture は switch の前に始める（S5）．
+- 試験は `switches` の行（境界，state）と `T4 switch: …` の行（行，境界，seams，device の sends）を出す．
+- PASS：row が `applied`，境界 b の前 5 ms から b − 500 µs まで 100 kHz，b + 500 µs から後の 5 ms まで 200 kHz（±10 kHz），b をまたぐ power が定常の 1/4 を超える，device の sends に切り替えの EOB と SOB がない（S4），TIME_ERROR と underflow なし．
+- INCONCLUSIVE：境界の両側に tone がない．FAIL：row が applied でない，tone が境界の外で変わる，power が落ちる，seams が 1 以上，faults．
+- 注意：loop の遅れは試行ごとに最初の repeat の onset から求める（遅れが測れなければ INCONCLUSIVE，S5）．margin 500 µs は INFERRED（loop の遅れの散らばりと DUC の立ち上がり）．
+- stop：FAIL，TIME_ERROR，underflow → 電源を切って入れ直す．
+
+### (f) 未指定の送信：T5（#2 UBX → #1 OBX，TX あり，約 10 分，estimate）
+
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_n47s5_untimed   # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_n47s5_untimed   # 盤を替えて #1 OBX
+```
+
+2 行の VERDICT（各盤）．
+
+1. (1) untimed の repeat，Stop，untimed の repeat．二つ目は admitted で，200 kHz の tone が capture に出る．PASS：admitted，tone あり，faults なし．INCONCLUSIVE：admitted だが tone がない．FAIL：refuse．
+2. (2) timed の 30 000 sample の burst A が流れている間（A の開始から 5 ms 後）に，untimed の 1 000 sample の burst．PASS：admitted，A の front（A の開始 + 30 002 sample）以降に配置，onset が applied target から，A の遅れ（A の最初の burst の onset，S5）± 50 sample．FAIL：refuse，front より前に配置，TIME_ERROR，underflow．
+
+- stop：FAIL，TIME_ERROR，underflow → 電源を切って入れ直す．
+
+### (g) Stop の終わり：T6（#2 UBX → #1 OBX，TX あり，約 10 分，estimate）
+
+**送信の前に owner に att を確認する（三つの board とも 30 dB）**．
+
+```sh
+export EZSDR_UHD_ARGS=addr=192.168.47.37 BOARD=37 EZSDR_BENCH_NIC=enp1s0f0np0 && hw hw_b8_stop_end   # #2 UBX slot A
+export EZSDR_UHD_ARGS=addr=192.168.40.36 BOARD=36 EZSDR_BENCH_NIC=enp1s0f1np1 && hw hw_b8_stop_end   # 盤を替えて #1 OBX
+```
+
+- 3 試行，各 1 行の VERDICT．repeat は 100 kHz の 1 000 sample，時刻つき（提出の 15 ms 後．capture は提出の 5 ms 後に始まるので，最初の burst の target − 2 ms は capture に入る），Stop は capture の開始の 70 ms 後．loop が聞かなくなった点（`heard_until`）は，repeat の最後の 100-sample window の終わりから，その試行の遅れ（最初の burst の onset，S5）を引いた root tick．edge の探索は最初の burst の onset + 1 ms から（その前の window は使わない）．edge は，最初の 20 window の平均 power の 1/4 を超える最後の window で，その後に 5 window（0.5 ms）の静かな区間が capture 内にあり，定常の power が雑音の 4 倍を超えるときだけ（雑音だけ，capture が信号で終わる，edge の前に穴がある，のときは edge なし）．PASS：repeat が admitted で refuse されず，`heard_until` が，repeat の記録上の終わり（`bursts` の行の target と sample 数）から (100 + 50) sample 以内．FAIL：refuse，または (100 + 50) sample の外（`hw_b8_stop_end` は assert して test が失敗する）．INCONCLUSIVE：edge がない，遅れが測れない，または記録上の終わりがない．FakeDevice の rehearsal は INCONCLUSIVE になる（fake の受信は平均 power が tone より大きい ramp を返すため，edge が立たない；`device.rs`）．
+- 印字だけで判定しない行：submit から沈黙までの時間，`stop_bound_text`（in-flight 10 ms と記録上の終わりの比較．`radio.timing.tx_in_flight_ns` は profile の値で，INFERRED）．
+- `hw` の戻り値は 0 のままでも，VERDICT の FAIL を読む．
+- stop：FAIL の行は owner へ．装置の詰まり → 電源を切って入れ直す．
+
+### 時間の合計（estimate）
+
+| ブロック | 内容 | 機材 | 時間 |
+|---|---|---|---|
+| (a) | host と装置の確認（TX なし） | #2 → #1 | 約 10 分 |
+| (b) | 回帰（T1 の 9 試験） | #2 UBX，#1 OBX | 約 40 分 |
+| (c) | 前線（T2：front 12 行と raw 288 行） | #2 UBX，#1 OBX | 約 25 分 |
+| (d) | 保留の尾と Stop の領域（T3，6 行） | #2 UBX，#1 OBX | 約 20 分 |
+| (e) | 反復の切り替え（T4，2 行） | #2 UBX，#1 OBX | 約 15 分 |
+| (f) | 未指定の送信（T5，2 行） | #2 UBX，#1 OBX | 約 10 分 |
+| (g) | Stop の終わり（T6，3 行） | #2 UBX，#1 OBX | 約 10 分 |
+| **合計** | 盤の交換と電源 cycle，初回の build を含まない | | **約 130 分（約 2 時間 10 分）** |
+
+### 閉じ方と記録
+
+- **#78 と #70**：2026-11-06 に閉じた（handoff §1）．この節の (b) の FAIL は回帰として owner へ報告する．issue の開き直しは orchestrator．
+- **段階 5 の検証**：(c)，(d)，(e)，(f) の VERDICT と (g) の VERDICT は，この節の結果として記録する．閉じる判断は orchestrator．
+
+### 流した後
+
+- orchestrator に返すもの：commit，各ブロックの VERDICT 行（log の path），(b) の表の TIME_ERROR の数（case ごと），(c)1 の 12 行，(c)2 の raw 表（288 行，rate・n・gap・complete／incomplete・late の数），(d) の 6 行，(e) の 2 行と `switches` の行，(f) の 2 行，(g) の 3 行と `heard_until` − 記録上の終わり，使った受信機と電源 cycle の有無．
+- repo へ写すのは，owner が確認したものだけ．log は `~/.cache/ezsdr-bench/<日付>/` に残す．

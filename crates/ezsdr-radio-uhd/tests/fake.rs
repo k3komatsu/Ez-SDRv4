@@ -7766,3 +7766,123 @@ fn iii_restart_fill_probe_rehearses_on_the_fake() {
         }
     }
 }
+
+/// Note 47 stage 5's Module sequences (T2's front, T4, T5) on `FakeDevice`: the functions `hardware.rs` runs on the USRP, from
+/// `common::n47s5`, so the rehearsal runs the code the bench runs. The fake cannot show the tones: before a transmit its receive samples
+/// are a ramp (`device.rs` `sample_at`), above the tone's power, so every tone verdict is INCONCLUSIVE there, and at 2 MS/s it loops back
+/// nothing (the rates differ). A rehearsal asserts that no verdict FAILs: admission, faults, the switch row and seams, and placement are
+/// judged by the same pure functions as on the bench. The tone verdicts are unit-tested in `iii.rs`.
+#[test]
+fn n47s5_front_rehearsal_on_the_fake() {
+    for rate in [1e6, 2e6] {
+        for samples in [1usize, 2, 3, 4, 10, 32] {
+            let dir = TempDir::new();
+            let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()), Some(rate));
+            let outcome = common::n47s5::front_outcome(&common::n47s5::front_trial(run, samples, rate));
+            println!("rehearsal T2 {samples} samples at {rate} S/s: {outcome:?}");
+            assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{samples} samples at {rate} S/s: {outcome:?}");
+        }
+    }
+}
+
+#[test]
+fn n47s5_repeat_switch_rehearsal_on_the_fake() {
+    for timed in [false, true] {
+        let dir = TempDir::new();
+        let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+        let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+        let outcome = common::n47s5::repeat_switch_verdict(&common::n47s5::repeat_switch_trial(run, probe, timed));
+        println!("rehearsal T4 timed {timed}: {outcome:?}");
+        assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "timed {timed}: {outcome:?}");
+    }
+}
+
+#[test]
+fn n47s5_untimed_rehearsal_on_the_fake() {
+    let device = fake(FakeConfig::default());
+    let dir = TempDir::new();
+    let outcome = common::n47s5::untimed_repeat_outcome(common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), device.clone(), None));
+    println!("rehearsal T5 (1): {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "repeat: {outcome:?}");
+    let dir = TempDir::new();
+    let outcome = common::n47s5::untimed_burst_outcome(common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), device, None));
+    println!("rehearsal T5 (2): {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "burst: {outcome:?}");
+}
+
+/// T3 (f) and (b) on `FakeDevice`, the functions `hardware.rs` runs on the USRP: each trial's directory is kept until its verdict is read.
+/// Every case must be PASS or INCONCLUSIVE, never FAIL: on FakeDevice no tone is shown (`n47s5_front_rehearsal_on_the_fake`), so the played
+/// cases are INCONCLUSIVE at best. C at e+1 after J(e) is submitted in the window (J(e), e + off·1 µs − 2 ms] (off = +1 sample at 1 MS/s, so about
+/// (e − 5 ms, e − 2 ms] with J(e) = e − 5 ms): its receipt is on time and refused (PASS), or late and dropped (INCONCLUSIVE, late at receipt or at dispatch). The late case is rehearsed too: C at e+1 submitted at e − 0.5 ms, after the
+/// window, must reach the late-arrival branch (`iii::late_arrival_verdict`), not a FAIL.
+#[test]
+fn n47s5_held_tail_and_stop_rehearsal_on_the_fake() {
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+    let continuation = common::n47s5::held_tail_trial(run, probe, dir, 0, None);
+    let outcome = common::n47s5::held_played_verdict(&continuation, 1);
+    println!("rehearsal T3 (f) C at e, booked before J(e): {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+    let separate = common::n47s5::held_tail_trial(run, probe, dir, 2, Some(0));
+    let outcome = common::n47s5::held_played_verdict(&separate, 2);
+    println!("rehearsal T3 (f) C at e+2 after J(e): {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+    let refused = common::n47s5::held_tail_trial(run, probe, dir, 1, Some(0));
+    let outcome = common::n47s5::held_refused_verdict(&refused);
+    println!("rehearsal T3 (f) C at e+1 after J(e): {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+    let late = common::n47s5::held_tail_trial(run, probe, dir, 1, Some(ms(9) / 2));
+    let outcome = common::n47s5::held_refused_verdict(&late);
+    println!("rehearsal T3 (f) C at e+1 submitted at e − 0.5 ms: {outcome:?}");
+    assert!(matches!(outcome, common::tone::Verdict::Inconclusive(ref text) if text.contains("host latency")), "{outcome:?}");
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+    let late = common::n47s5::held_tail_trial(run, probe, dir, 2, Some(ms(9) / 2));
+    let outcome = common::n47s5::held_played_verdict(&late, 2);
+    println!("rehearsal T3 (f) C at e+2 submitted at e − 0.5 ms: {outcome:?}");
+    assert!(matches!(outcome, common::tone::Verdict::Inconclusive(ref text) if text.contains("host latency")), "{outcome:?}");
+    let dir = TempDir::new();
+    let probe = Arc::new(common::probe_device::ProbeDevice::new(fake(FakeConfig::default())));
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), probe.clone(), None);
+    let stop = common::n47s5::stop_next_trial(run, probe, dir);
+    let outcome = common::n47s5::stop_next_verdict(&stop);
+    println!("rehearsal T3 (b) Session: {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
+}
+
+/// T6 (`hw_b8_stop_end`) on FakeDevice: the bench's trial and verdict. The fake shows no edge: before a transmit its receive samples are a
+/// ramp of mean power about 1/3 (`device.rs` `sample_at`), above the tone's 0.16 (amplitude 0.4), so no tone floor and no quiet power follow
+/// the repeat. The verdict is INCONCLUSIVE there; the rehearsal asserts that it is not a FAIL.
+#[test]
+fn n47s5_stop_end_rehearsal_on_the_fake() {
+    let dir = TempDir::new();
+    let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()), None);
+    let stop_end = common::n47s5::stop_end_trial(run, dir);
+    let outcome = common::n47s5::stop_end_outcome(&stop_end);
+    println!("rehearsal T6 stop end: {outcome:?}");
+    assert!(!matches!(outcome, common::tone::Verdict::Fail(_)), "{outcome:?}");
+}
+
+/// T3 (f)'s refusal and `hw_b8_burst_one_sample_after_a_burst`'s end + 1 on `FakeDevice`: the Provider refuses the booking at receipt
+/// (its event names the Action the Kernel admitted), and nothing plays late. Both cases must PASS.
+#[test]
+fn n47s5_one_sample_after_a_burst_refusal_rehearsal_on_the_fake() {
+    for late_booking in [false, true] {
+        let dir = TempDir::new();
+        let run = common::n47s5::transmit_run(&profile(&dir, json!({}), json!({}), true), fake(FakeConfig::default()), None);
+        let outcome = common::n47s5::one_sample_after_a_burst(run, 30_001, late_booking);
+        println!("rehearsal B8 end + 1, booked late {late_booking}: {outcome:?}");
+        assert!(matches!(outcome, common::tone::Verdict::Pass(_)), "booked late {late_booking}: {outcome:?}");
+    }
+}
