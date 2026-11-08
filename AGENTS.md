@@ -106,7 +106,7 @@ The rules below are defaults, not a lookup table (owner, 2026-10-08). Deviate wh
 
 **Fact or judgment picks the tier**, not the topic or the tool. A fact (where X is defined, every caller of Y, whether §N exists) can go to a cheap tier; a conclusion (is this sound, VERIFIED or INFERRED, what should we do) goes to Opus.
 
-**Evidence.** A delegated investigation returns `path:line` or a URL for every finding. A negative result ("not found") carries the exact search it ran, so the main session can rerun it; a missed hit is the cheap tiers' typical failure.
+**Evidence.** A delegated investigation returns `path:line` or a URL for every finding. A negative result ("not found") carries the exact search it ran, so the main session can rerun it; a missed hit is the cheap tiers' typical failure. The same holds for the orchestrator's own answers (owner, 2026-11-08): a claim about what was measured or verified reads the summary's whole section and the raw records it points to, and a "not found" names the search.
 
 | Tier | Character | Use it for (examples here) | Launch |
 |---|---|---|---|

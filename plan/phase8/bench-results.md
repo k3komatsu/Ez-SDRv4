@@ -226,6 +226,24 @@ log は `~/.cache/ezsdr-bench/2026-10-28/rerun2/`．3 本とも test は成功�
 - 前回 P5 C・P6・P7 で tone が見えなかったのは，1 サンプルの burst（EOB だけの send）で次の burst の時刻が失われたためと読める（P5 C と P6 は今回見えた）．P7 は tone が見えたうえで動かないので，前回とは別の結果．
 - P7 の原因は，時刻なしの packet しか来ない間は DUC の時刻つき command が実行されない，と読む（INFERRED：P6 との違いは続きの send の時刻の有無だけ）．本番の uhd-tx は P7 の形なので，送信中の時刻つきの送信周波数の変更は，次の時刻つき burst まで効かない（issue #72，D9b で直す）．
 
+### 3 回の記録の送信の時刻の値（2026-11-08 に `measurement.json` から書き足し）
+
+上の 3 回の記録（#1 `afbb125`，#2 `afbb125`，#2 `98b0d9a`）の `measurement.json` から，この節に書いていなかった値を写した．ファイルは `~/ezsdr-bench/2026-10-28/<commit>-<時刻>/`（repo の外）．どれも TXS・#78 の直し・note 47 の段階 5 より前の Module．
+
+- **送信中の窓**（`provider_tx_in_flight`，`tx-1msps`，候補ごとに 100 試行）：repeat を予約した時刻で終わらせて測る群（preemption に頼る．段階 5 で消えた）．
+
+  | 候補 | #1 `afbb125` | #2 `afbb125` | #2 `98b0d9a` |
+  |---|---|---|---|
+  | 0.25，0.5，1，2 ms | ProviderFailure 99，Unattributable 1 | 同じ | 同じ |
+  | 3 ms | 成功 99，DeviceFailure 1 | 成功 99，DeviceFailure 1 | 成功 94，DeviceFailure 6 |
+  | 5，10 ms | 成功 100 | 成功 100 | 成功 100 |
+
+  記録の値（`radio.timing.tx_in_flight_ns`）は 3 回とも 5 ms．profile は 10 ms．2 ms 以下の ProviderFailure の理由は記録の欄になく，未確認．
+- **raw の窓**（`hw_b8_raw_in_flight_window`，窓ごとに 1 試行）：10，5，3，2，1，0.5，0.25 ms のすべてで TimeError・Underflow 0，BurstAck 1（3 回とも）．装置そのものは 0.25 ms の窓でも困らない．
+- **burst の gap**（`hw_b8_raw_burst_gap`・`hw_b8_raw_empty_eob_gap`，最初の burst は 1 000 サンプル，1 MS/s，各 4 試行）：3 回とも 10-27 の shake-out の行と同じ．普通の burst は gap 0 が 4/4 late，1 以上は 0/4．空の EOB（UHD の 0 一つ，終わりの 2 ms 前）で閉じると gap 0・1 が 4/4 late，2 以上は 0/4．最後の data buffer に EOB なら gap 0 が 4/4 late，1 以上は 0/4．
+- **Stop の終わり**（`hw_b8_stop_end`，各 3 試行）：Stop の提出（`stop_tick`）から音が止むまで，#1 `afbb125` 10.28〜10.49 ms，#2 `afbb125` 10.36〜10.39 ms，#2 `98b0d9a` 9.28〜9.59 ms．
+- **H5**（`hw_h5_held_last_sample`，600 burst）：late と underflow はどれも 3 つ目の case で出た（単独の 100 サンプルの burst を 15 ms 先に，前の burst の EOB が受け付けられてから次を出す．最後のサンプルを保持して期限で閉じる形）．Module の `radio.TIME_ERROR`（`late_at_device`，0.2〜1 µs）は #1 3，#2 `afbb125` 2，#2 `98b0d9a` 4．`radio.TX_UNDERFLOW` は同じ順に 3，2，8．UHD の async の TimeError は 88，49，121．前の 2 つの case（隣接と 3 000 サンプルの gap，どちらも先に予約）では event なし．late はどれも同じ tick の underflow と対で（`98b0d9a` はほかに underflow だけが 4 つ），#78 と同じ形と読む（INFERRED：#78 は 2026-11-06 に直った）．記録の note は「記録の overhead を測っていないので，保持したサンプルの期限の測定ではない」．
+
 ## 2026-10-29：2 台を同時に接続（#1＝X300 347D545＋OBX，192.168.40.36，`enp1s0f1np1`；#2＝X300 347D541＋UBX/CBX，`ip-addr3` を 192.168.47.37 に変更，`enp1s0f0np0`）
 
 両方とも FPGA 39.3，frame 8000 byte．att は #1 OBX 40 dB，#2 UBX・CBX 各 30 dB（owner が確認）．#1 から #2 へ PPS と 10 MHz を配線済み（今日の測定はすべて `internal`）．log は `~/.cache/ezsdr-bench/2026-10-29/`．commit は `e10afa5`．
