@@ -324,6 +324,111 @@ pub fn continuation_in_loopback(samples: &[(i64, ezsdr_radio_uhd::Iq)], start: i
     Ok(samples.iter().filter(|(t, s)| *t >= next + 100 * 200 && *t < next + 2_000 * 200 && s[0].abs() + s[1].abs() > median / 2.0).count())
 }
 
+/// One receive sample as the monitor keeps it: its tick and value, or `None` where the receive lost time (an overflow, a timeout,
+/// a failed call). A gap is never filled.
+pub type Slot = Option<(i64, ezsdr_radio_uhd::Iq)>;
+
+/// The ssh drop's tone at the receiver: 100 kHz at 1 MS/s (ssh-drop-driver.py's wave). A window further off is another signal.
+const DROP_TONE_HZ: f64 = 100e3;
+
+/// The mean power of one window.
+fn mean_power(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> f64 {
+    w.iter().map(|(_, s)| f64::from(s[0]).powi(2) + f64::from(s[1]).powi(2)).sum::<f64>() / w.len() as f64
+}
+
+/// A window's coherence the monitor takes for a tone. 0.9, not `tone.rs`'s 0.5: white noise is over 0.5 in about 1.7 % of its
+/// 25-sample windows (simulated, 2026-11-08), which is over the 1 % bar; a 100 kHz tone at the loopback's level is over 0.9999.
+const MONITOR_COHERENCE: f64 = 0.9;
+
+/// Whether a window has the drop's shape: coherent over `MONITOR_COHERENCE` and at 100 kHz within 20 kHz, as the monitor reads a tone. Sub-LSB
+/// quantized noise has the shape in under 1 % of its windows (simulated, 2026-11-08), and its coherent windows pile up at 125 kHz, where a lag
+/// product lands on a multiple of 45° (the lattice); the bound stays under that point. C3 (`hw_noise_floor_receive`) and the monitor both use this.
+pub fn is_drop_tone_window(w: &[(i64, ezsdr_radio_uhd::Iq)]) -> bool {
+    let (coherence, hz) = window_tone(w);
+    coherence > MONITOR_COHERENCE && (hz - DROP_TONE_HZ).abs() <= 20e3
+}
+
+/// C3's amplitude floor, 4 LSB as a mean power (sc16 counts are 1/32768 of full scale). The loopback tone is about −49 dBFS, roughly 30 dB
+/// above it (INFERRED from bench-results.md:27-28); noise at 1 LSB has about 2 LSB² of window power.
+const QUIET_CHECK_MIN_POWER: f64 = (4.0 / 32768.0) * (4.0 / 32768.0);
+
+/// What C3 (`hw_noise_floor_receive`) reads of a quiet receive: its 25-sample windows, how many carry the drop's tone above the amplitude floor,
+/// and the largest amplitude in LSB of a window with the drop's shape (0 when there is none).
+#[derive(Debug, PartialEq)]
+pub struct QuietCheck {
+    pub windows: usize,
+    pub tone: usize,
+    pub largest_lsb: f64,
+}
+
+/// C3's decision over `samples`: a window counts as tone only when it has the drop's shape and its mean power exceeds `QUIET_CHECK_MIN_POWER`,
+/// so sub-LSB quantized noise cannot reach the 1 % bar through its lattice windows.
+pub fn quiet_check(samples: &[(i64, ezsdr_radio_uhd::Iq)]) -> QuietCheck {
+    let windows: Vec<&[(i64, ezsdr_radio_uhd::Iq)]> = samples.chunks_exact(25).collect();
+    QuietCheck {
+        windows: windows.len(),
+        tone: windows.iter().filter(|w| is_drop_tone_window(w) && mean_power(w) > QUIET_CHECK_MIN_POWER).count(),
+        largest_lsb: windows.iter().filter(|w| is_drop_tone_window(w)).map(|w| mean_power(w).sqrt() * 32768.0).fold(0.0, f64::max),
+    }
+}
+
+/// Whether a window carries the drop's tone at a power above `4 × floor`: the monitor's test for one window.
+fn carries_drop_tone(w: &[(i64, ezsdr_radio_uhd::Iq)], floor: f64) -> bool {
+    is_drop_tone_window(w) && mean_power(w) > 4.0 * floor
+}
+
+/// The noise floor of a receive stretch from its first second: the mean power of its windows without the drop's shape. Refused (with
+/// the reason) when the second has a gap, or when the drop's tone fills half its windows: a sustained tone, not the sparse coherent
+/// windows of quantized noise. The 1 % bar of `monitor_reading` applies to the readings after the start.
+pub fn monitor_floor(second: &[Slot]) -> Result<f64, String> {
+    if second.iter().any(Option::is_none) {
+        return Err("the first second has a gap: the receive did not start clean".to_owned());
+    }
+    let samples: Vec<(i64, ezsdr_radio_uhd::Iq)> = second.iter().flatten().copied().collect();
+    let windows: Vec<&[(i64, ezsdr_radio_uhd::Iq)]> = contiguous_windows(&samples).collect();
+    if windows.is_empty() {
+        return Err("the first second holds no 25-sample window".to_owned());
+    }
+    let tone = windows.iter().filter(|w| is_drop_tone_window(w)).count();
+    if tone * 2 >= windows.len() {
+        return Err(format!("the drop's tone fills {tone} of the first second's {} windows: the transmitter must be silent for the first second", windows.len()));
+    }
+    let quiet: Vec<f64> = windows.iter().filter(|w| !is_drop_tone_window(w)).map(|w| mean_power(w)).collect();
+    Ok(quiet.iter().sum::<f64>() / quiet.len() as f64)
+}
+
+/// The newest a reading may be: a block whose last sample is more than 300 ms behind the device's clock when its line is written
+/// describes the air too late (the receive fell behind).
+pub const MONITOR_MAX_LAG_TICKS: i64 = 300 * MS;
+
+/// A block's reading as its line gives it: `reading` when its last sample (`last`) is within `MONITOR_MAX_LAG_TICKS` of the device's
+/// clock `now`, `unknown` otherwise.
+pub fn dated_reading(reading: &'static str, last: Option<i64>, now: i64) -> &'static str {
+    match last {
+        Some(tick) if now - tick <= MONITOR_MAX_LAG_TICKS => reading,
+        _ => "unknown",
+    }
+}
+
+/// The monitor's reading of one stretch of receive, given the noise floor: `"tone"` when at least 1 % of its windows carry the
+/// drop's tone (`carries_drop_tone`), `"quiet"` otherwise, and `"unknown"` when a sample is missing, the ticks break, or no
+/// window is left.
+pub fn monitor_reading(block: &[Slot], floor: f64) -> &'static str {
+    if block.iter().any(Option::is_none) {
+        return "unknown";
+    }
+    let samples: Vec<(i64, ezsdr_radio_uhd::Iq)> = block.iter().flatten().copied().collect();
+    if samples.windows(2).any(|p| p[1].0 - p[0].0 != PER_1MSPS) {
+        return "unknown";
+    }
+    let windows: Vec<&[(i64, ezsdr_radio_uhd::Iq)]> = contiguous_windows(&samples).collect();
+    if windows.is_empty() {
+        return "unknown";
+    }
+    let tone = windows.iter().filter(|w| carries_drop_tone(w, floor)).count();
+    if tone * 100 >= windows.len() { "tone" } else { "quiet" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +484,197 @@ mod tests {
             })
             .collect();
         assert!(matches!(first_window_verdict(&wrong_start, origin, PER_1MSPS, 50e3, 10e3, floor), Verdict::Fail(_)), "a wrong initial tone");
+    }
+
+    /// `n` samples from tick 0 at 1 MS/s, sample `i` = `signal(i)`, in the form the monitor keeps.
+    fn stretch(n: usize, signal: impl Fn(usize) -> [f32; 2]) -> Vec<Slot> {
+        (0..n).map(|i| Some((i as i64 * PER_1MSPS, signal(i)))).collect()
+    }
+
+    /// A tone at `hz`, amplitude 0.4, at 1 MS/s.
+    fn tone_at(hz: f64) -> impl Fn(usize) -> [f32; 2] {
+        move |i| {
+            let phase = 2.0 * std::f64::consts::PI * hz * i as f64 / 1e6;
+            [(0.4 * phase.cos()) as f32, (0.4 * phase.sin()) as f32]
+        }
+    }
+
+    /// White noise of amplitude about 1e-4 from a hash of the sample index: no coherent window.
+    fn hiss(i: usize) -> [f32; 2] {
+        let uniform = |k: u64| {
+            let mut z = (i as u64 * 2 + k).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        [uniform(0) * 2e-4, uniform(1) * 2e-4]
+    }
+
+    #[test]
+    fn the_monitor_reads_the_drop_tone_and_quiet_and_says_unknown_for_a_gap() {
+        let floor = monitor_floor(&stretch(50_000, hiss)).expect("a quiet second");
+        let block = 200_000;
+        assert_eq!(monitor_reading(&stretch(block, tone_at(100e3)), floor), "tone");
+        assert_eq!(monitor_reading(&stretch(block, hiss), floor), "quiet");
+        let mut gap = stretch(block, tone_at(100e3));
+        gap[1000] = None;
+        assert_eq!(monitor_reading(&gap, floor), "unknown", "a gap inside the block");
+        let mut first = stretch(block, tone_at(100e3));
+        first[0] = None;
+        assert_eq!(monitor_reading(&first, floor), "unknown", "a gap at the block's first sample");
+        let mut skipped = stretch(block, tone_at(100e3));
+        skipped.remove(1000);
+        assert_eq!(monitor_reading(&skipped, floor), "unknown", "a sample taken away: the ticks skip one");
+    }
+
+    #[test]
+    fn a_tone_in_one_window_of_a_hundred_is_the_bar_and_noise_is_quiet() {
+        let floor = 1e-8;
+        let tone = tone_at(100e3);
+        assert_eq!(monitor_reading(&stretch(2_500, move |i| if i < 25 { tone(i) } else { hiss(i) }), floor), "tone", "1 % of the windows");
+        assert_eq!(monitor_reading(&stretch(2_500, hiss), floor), "quiet");
+    }
+
+    #[test]
+    fn loud_noise_with_no_coherent_window_reads_quiet() {
+        let floor = monitor_floor(&stretch(50_000, hiss)).expect("a quiet second");
+        assert_eq!(monitor_reading(&stretch(20_000, |i| hiss(i).map(|x| 100.0 * x)), floor), "quiet");
+    }
+
+    #[test]
+    fn a_tone_under_four_times_the_floor_reads_quiet() {
+        assert_eq!(monitor_reading(&stretch(2_500, tone_at(100e3)), 1.0), "quiet");
+    }
+
+    #[test]
+    fn a_coherent_signal_off_the_drop_frequency_reads_quiet() {
+        assert_eq!(monitor_reading(&stretch(2_500, tone_at(300e3)), 1e-8), "quiet");
+    }
+
+    /// The drop's tone in the first `samples` samples of a 5 000-sample stretch (5 ms; the monitor takes 1 000 000 samples, and its rule
+    /// is a share of the windows, so the length only sets the resolution), hiss after it: `samples / 25` of the 200 windows.
+    fn tone_for(samples: usize) -> Vec<Slot> {
+        let tone = tone_at(100e3);
+        stretch(5_000, move |i| if i < samples { tone(i) } else { hiss(i) })
+    }
+
+    #[test]
+    fn the_start_refuses_a_sustained_tone_or_a_gap_and_takes_the_floor_of_a_quiet_second() {
+        let whole = monitor_floor(&stretch(50_000, tone_at(100e3))).unwrap_err();
+        assert!(whole.contains("fills"), "{whole}");
+        let half = monitor_floor(&tone_for(2_500)).unwrap_err();
+        assert!(half.contains("fills"), "100 of 200 windows is half: {half}");
+        let mut gapped = stretch(50_000, hiss);
+        gapped[7] = None;
+        assert!(monitor_floor(&gapped).unwrap_err().contains("gap"));
+        let floor = monitor_floor(&stretch(50_000, hiss)).expect("a quiet second");
+        assert!(floor > 5e-9 && floor < 9e-9, "the mean power of the hiss: {floor}");
+    }
+
+    #[test]
+    fn sparse_tone_windows_do_not_refuse_the_start() {
+        assert!(monitor_floor(&tone_for(50)).is_ok(), "2 of 200 windows");
+        assert!(monitor_floor(&tone_for(100)).is_ok(), "4 of 200 windows");
+        assert!(monitor_floor(&tone_for(2_400)).is_ok(), "96 of 200 windows is under half");
+    }
+
+    /// Standard normal draws for sample `i`: Box–Muller over a hash of the index, so the tests are deterministic.
+    fn gaussian(i: usize) -> (f64, f64) {
+        let uniform = |k: u64| {
+            let mut z = (i as u64 * 2 + k).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (((z ^ (z >> 31)) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let (radius, angle) = ((-2.0 * uniform(0).ln()).sqrt(), 2.0 * std::f64::consts::PI * uniform(1));
+        (radius * angle.cos(), radius * angle.sin())
+    }
+
+    /// Ordinary noise of about 3 LSB of standard deviation (1e-4 of full scale).
+    fn ordinary(i: usize) -> [f32; 2] {
+        let (re, im) = gaussian(i);
+        [(re * 1e-4) as f32, (im * 1e-4) as f32]
+    }
+
+    /// Gaussian noise of `sigma_lsb` standard deviation, rounded to whole sc16 counts (1 LSB = 2^-15): at 0.5 most samples are 0 or ±1.
+    fn quantized(i: usize, sigma_lsb: f64) -> [f32; 2] {
+        let (re, im) = gaussian(i);
+        [((re * sigma_lsb).round() / 32768.0) as f32, ((im * sigma_lsb).round() / 32768.0) as f32]
+    }
+
+    #[test]
+    fn ordinary_and_quantized_noise_start_the_monitor_and_read_quiet() {
+        assert!(monitor_floor(&stretch(50_000, ordinary)).is_ok(), "ordinary noise starts the monitor");
+        let quantized_half = |i: usize| quantized(i, 0.5);
+        let floor = monitor_floor(&stretch(50_000, quantized_half)).expect("noise at 0.5 LSB starts the monitor");
+        assert_eq!(monitor_reading(&stretch(200_000, quantized_half), floor), "quiet", "noise at 0.5 LSB reads quiet");
+        assert_eq!(monitor_reading(&stretch(200_000, ordinary), monitor_floor(&stretch(50_000, ordinary)).unwrap()), "quiet", "ordinary noise reads quiet");
+    }
+
+    #[test]
+    fn c3_quiet_noise_stays_under_its_bar_at_its_sample_size() {
+        // hw_noise_floor_receive's capture: 20 000 samples, 800 windows, fewer than 8 (1 %) counted as tone. Before the amplitude floor and the
+        // 20 kHz bound, seed 0 at 0.3 LSB and seed 4 at 0.4 LSB reach 8 windows (of 200 seeds, 54 and 59 reach it: simulated 2026-11-08).
+        let counted = |signal: &dyn Fn(usize) -> [f32; 2]| quiet_check(&stretch(20_000, signal).into_iter().flatten().collect::<Vec<_>>()).tone;
+        for (sigma, seed) in [(0.3, 0), (0.4, 4), (0.5, 0)] {
+            let noise = counted(&|i: usize| quantized(i + seed * 1_000_000, sigma));
+            assert!(noise * 100 < 800, "noise at {sigma} LSB, seed {seed}: {noise} of 800 windows count as tone");
+        }
+        assert_eq!(counted(&tone_at(100e3)), 800, "a tone has the drop's shape in every window");
+        let loopback = |i: usize| {
+            let phase = 2.0 * std::f64::consts::PI * 100e3 * i as f64 / 1e6;
+            [(120.0 / 32768.0 * phase.cos()) as f32, (120.0 / 32768.0 * phase.sin()) as f32]
+        };
+        assert_eq!(counted(&loopback), 800, "a tone at the loopback's 120 LSB counts in every window");
+    }
+
+    #[test]
+    fn a_window_on_the_45_degree_lattice_is_not_the_drop_tone() {
+        // Each lag product is at 45°, so the window reads coherence 1 at exactly 125 kHz, outside the 20 kHz bound.
+        const CYCLE: [[f32; 2]; 8] = [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [-1.0, 1.0], [-1.0, 0.0], [-1.0, -1.0], [0.0, -1.0], [1.0, -1.0]];
+        let window: Vec<(i64, ezsdr_radio_uhd::Iq)> = (0..25).map(|i| (i as i64 * PER_1MSPS, CYCLE[i % 8])).collect();
+        let (coherence, hz) = window_tone(&window);
+        assert!(coherence > 0.99 && (hz - 125e3).abs() < 1.0, "coherence {coherence}, {hz} Hz");
+        assert!(!is_drop_tone_window(&window));
+    }
+
+    /// A 25-sample window at 100 kHz of `amplitude`, whose phase steps alternate between 0.2π + θ and 0.2π − θ, so its coherence is exactly cos θ.
+    fn window_at_coherence(coherence: f64, amplitude: f64) -> Vec<(i64, ezsdr_radio_uhd::Iq)> {
+        let (phi, theta) = (2.0 * std::f64::consts::PI * 0.1, coherence.acos());
+        let mut psi = 0.0f64;
+        (0..25)
+            .map(|k| {
+                let sample = [(amplitude * psi.cos()) as f32, (amplitude * psi.sin()) as f32];
+                psi += if k % 2 == 0 { phi + theta } else { phi - theta };
+                (k as i64 * PER_1MSPS, sample)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_coherent_window_below_0_9_is_not_the_drop_tone() {
+        let (coherence, hz) = window_tone(&window_at_coherence(0.7, 1.0));
+        assert!((coherence - 0.7).abs() < 1e-3 && (hz - 100e3).abs() < 1.0, "coherence {coherence}, {hz} Hz");
+        assert!(!is_drop_tone_window(&window_at_coherence(0.7, 1.0)), "coherence 0.7 at 100 kHz is under the monitor's 0.9");
+        assert!(is_drop_tone_window(&window_at_coherence(0.95, 1.0)), "coherence 0.95 at 100 kHz");
+    }
+
+    #[test]
+    fn c3_counts_a_drop_shape_window_only_above_4_lsb() {
+        let lsb = 1.0 / 32768.0;
+        let below = quiet_check(&window_at_coherence(0.95, 3.0 * lsb));
+        assert_eq!(below.tone, 0, "3 LSB of the drop's shape is under the floor");
+        let above = quiet_check(&window_at_coherence(0.95, 5.0 * lsb));
+        assert_eq!(above.tone, 1, "5 LSB counts");
+        assert!((above.largest_lsb - 5.0).abs() < 1e-3, "largest {}", above.largest_lsb);
+    }
+
+    #[test]
+    fn a_reading_is_dated_by_its_last_sample_against_the_device_clock() {
+        let now = 1_000 * MS;
+        assert_eq!(dated_reading("tone", Some(now - 10 * MS), now), "tone", "on time");
+        assert_eq!(dated_reading("tone", Some(now - 300 * MS), now), "tone", "300 ms is the bound");
+        assert_eq!(dated_reading("tone", Some(now - 400 * MS), now), "unknown", "a block read 400 ms late is not fresh");
+        assert_eq!(dated_reading("quiet", None, now), "unknown", "a block with no sample");
     }
 }

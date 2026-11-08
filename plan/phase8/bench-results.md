@@ -15,7 +15,7 @@
 | 配線 | OBX の TX/RX → 30 dB → RX2 | UBX の TX/RX → 30 dB → RX2（CBX は未配線） |
 | ホストの port | `enp1s0f0np0` | `enp1s0f1np1` |
 
-- 2 台は同時につながない（owner）．同じ 192.168.40.x なので，同時につなぐならホストに `/32` の経路を足す．
+- この日は 2 台を同時につながなかった（同じ 192.168.40.x だったため）．2026-10-29 に #2 を 192.168.47.37 に移して NIC ごとに subnet を一つにし，二台を同時につなげるようになった（owner は 2026-11-08 に「同時につながない」の制約を外した）．
 - ホストの設定は tree の外の `~/ezsdr-bench/usrp-net.sh`（ibfd の `set_addr.sh` を縮めたもの．owner が sudo で流す．再起動で戻る）：リンクのある `enp1s0f*` を NetworkManager から外し，MTU 9000，使ったことのある subnet（192.168.10/30/38/40/44）に `.10`，リングを上限，PCIe ASPM を切り，`wmem_max` 32 MiB・`netdev_max_backlog` 30000．リンクの無い port のアドレスは外す．段階 3 でこのリポジトリの script にする．`Maximum frame size: 8000 bytes` は 2 台とも．
 
 ### BP0：ループバック

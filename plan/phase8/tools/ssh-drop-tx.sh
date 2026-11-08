@@ -38,7 +38,7 @@ Verdict lines (C1 and C2 share one deadline, 15 s after the drop, and are judged
   C2 the receiver first reads quiet before the deadline
      (INCONCLUSIVE when there was no tone before the drop, or the last reading failed; FAIL when the
      tone is still there at the deadline, or quiet is first read only after it)
-  C3 a new Session on the same device sees no coherent tone (hw_noise_floor_receive)
+  C3 a new Session on the same device sees no drop tone: under 1 % of its windows have the drop's shape, coherent at 100 kHz (hw_noise_floor_receive)
 
 A stopped tone does not separate a clean end of burst from FPGA starvation, and it does not show
 zero RF output (LO leakage). Exit status 0 only when C1, C2 and C3 all PASS.

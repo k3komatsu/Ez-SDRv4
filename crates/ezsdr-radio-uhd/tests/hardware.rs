@@ -8,6 +8,7 @@
 
 mod common;
 
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration as Wall, Instant};
 
@@ -19,7 +20,7 @@ use serde_json::Value as Json;
 use common::n47s5::*;
 use common::probe_device::wait_for_rx_start_and_sample;
 use common::raw::*;
-use common::tone::{Verdict, classify_tone, continuation_in_loopback, median_freq, tone_verdict, window_power, window_power_at};
+use common::tone::{PER_1MSPS, Verdict, classify_tone, continuation_in_loopback, dated_reading, median_freq, monitor_floor, monitor_reading, quiet_check, tone_verdict, window_power, window_power_at};
 use common::*;
 
 fn args() -> String {
@@ -3356,7 +3357,8 @@ fn hw_n47_raw_tx_rate_on_an_open_streamer() {
     let (_, control_reports) = wait_burst_ack(&*probe, Wall::from_secs(2));
     reports.extend(control_reports);
     reports.extend(drain_tx_reports(&*probe));
-    let b = align_to((e + 5 * TICKS_PER_MS + 50 * TICKS_PER_MS).max(probe.time_now().unwrap() + 52 * TICKS_PER_MS), 200);
+    // B takes control_r2's window phase: `tone_start` quantizes both onsets alike, so the control's delay cancels (n47::same_window_phase).
+    let b = n47::same_window_phase(align_to((e + 5 * TICKS_PER_MS + 50 * TICKS_PER_MS).max(probe.time_now().unwrap() + 52 * TICKS_PER_MS), 200), control_r2);
     let wave_b = iq(&tone_wave(2e6, 100_000, 100e3));
     send_burst(&*probe, &wave_b, Some(b));
     let (b_ack, b_reports) = wait_burst_ack(&*probe, Wall::from_secs(5));
@@ -3581,7 +3583,8 @@ fn probe_block_lengths(probe: &probe_device::ProbeDevice) -> Vec<(i64, usize)> {
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_noise_floor_receive() {
     // The quiet check after the ssh drop (plan/phase8/tools/ssh-drop-tx.sh): nothing transmitted, 20 000 receive samples; fewer than
-    // 1 % of the 25-sample windows may hold a coherent tone (coherence over 0.5). This test's own usrp() call is the reopen.
+    // 1 % of the 25-sample windows may count as the drop's tone (`quiet_check`: the drop's shape above 4 LSB amplitude). This test's own usrp()
+    // call is the reopen. It relies on the Session's default receive gain of 0 dB (`receive_spec` does not pin it; INFERRED).
     let device = usrp();
     let hz = pin_slot_a(&*device);
     let dir = TempDir::new();
@@ -3590,14 +3593,75 @@ fn hw_noise_floor_receive() {
     let artifact = capture_of(&manifest, "rec");
     let first = origin + artifact.continuity[0].first.ticks_in(artifact.continuity[0].domain).unwrap() * per;
     let blocks = ticked(&read_capture(&artifact, 1).remove(0), first, per);
-    let windows = blocks.chunks_exact(25).count();
-    let coherent = blocks.chunks_exact(25).filter(|w| common::tone::window_tone(w).0 > 0.5).count();
-    let outcome = if coherent * 100 < windows {
-        Verdict::Pass(format!("{coherent} of {windows} windows hold a coherent tone"))
-    } else {
-        Verdict::Fail(format!("{coherent} of {windows} windows hold a coherent tone"))
-    };
-    verdict("noise floor: a quiet receive holds no coherent tone (under 1 % of windows)", outcome);
+    let check = quiet_check(&blocks);
+    let text = format!("{} of {} windows have the drop's tone; largest tone-shaped window {:.1} LSB", check.tone, check.windows, check.largest_lsb);
+    let outcome = if check.tone * 100 < check.windows { Verdict::Pass(text) } else { Verdict::Fail(text) };
+    verdict("noise floor: a quiet receive holds no drop tone (under 1 % of windows)", outcome);
+}
+
+/// The drop's carrier (ssh-drop-driver.py: `frequency={0: 1e9}`), and the monitor's block and start stretch at 1 MS/s.
+const DROP_CARRIER_HZ: f64 = 1e9;
+const MONITOR_BLOCK_SAMPLES: usize = 200_000;
+const MONITOR_START_SAMPLES: usize = 1_000_000;
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_rx_tone_monitor() {
+    // The ssh drop's independent receiver (plan/phase8/tools/rx-monitor.sh): slot A receives at 1 MS/s, continuously, and every 200 ms
+    // appends `<unix ms> <tone|quiet|unknown>` to EZSDR_MONITOR_OUT, flushed. Nothing is transmitted. The first second is the noise
+    // floor: a sustained drop tone there refuses the start. EZSDR_MONITOR_HZ overrides the carrier; EZSDR_MONITOR_SECONDS (default 180)
+    // sets the run. The loop ends at the deadline or when EZSDR_MONITOR_STOP (the stop file) exists, and then stops and closes the receive.
+    let device = raw();
+    pin_slot_a(&*device);
+    let hz = std::env::var("EZSDR_MONITOR_HZ").map_or(DROP_CARRIER_HZ, |text| text.parse().expect("EZSDR_MONITOR_HZ is a frequency in hertz"));
+    let out = std::env::var("EZSDR_MONITOR_OUT").expect("EZSDR_MONITOR_OUT names the state file");
+    let stop = std::env::var("EZSDR_MONITOR_STOP").expect("EZSDR_MONITOR_STOP names the stop file");
+    let mut file = std::fs::File::create(&out).unwrap_or_else(|error| panic!("{out}: {error}"));
+    raw_rx(&*device, 1e6, hz);
+    device.rx_start(0, align_to(device.time_now().unwrap() + 200 * TICKS_PER_MS, 200)).unwrap();
+    let deadline = Instant::now() + Wall::from_secs(env_seconds("EZSDR_MONITOR_SECONDS", 180));
+    let mut pending: Vec<common::tone::Slot> = Vec::new();
+    let mut started = false;
+    let mut noise = None;
+    let mut written: std::io::Result<()> = Ok(());
+    'run: while Instant::now() < deadline && !std::path::Path::new(&stop).exists() {
+        match device.rx_recv(0, 10_000, Wall::from_millis(100), false) {
+            ezsdr_radio_uhd::RxRecv::Samples { first_tick, samples } => {
+                started = true;
+                pending.extend(samples[0].iter().enumerate().map(|(i, s)| Some((first_tick + i as i64 * PER_1MSPS, *s))));
+            }
+            // One gap marker per gap: a block that holds one reads `unknown`.
+            _ if started && pending.last() != Some(&None) => pending.push(None),
+            _ => {}
+        }
+        if noise.is_none() && pending.len() >= MONITOR_START_SAMPLES {
+            let second: Vec<_> = pending.drain(..MONITOR_START_SAMPLES).collect();
+            let floor = match monitor_floor(&second) {
+                Ok(floor) => floor,
+                Err(why) => {
+                    device.rx_stop(0).unwrap();
+                    device.rx_close(0);
+                    panic!("the monitor does not start: {why}");
+                }
+            };
+            println!("rx monitor: {hz} Hz, noise floor {floor:e}, writing {out}");
+            noise = Some(floor);
+        }
+        let Some(floor) = noise else { continue };
+        while pending.len() >= MONITOR_BLOCK_SAMPLES {
+            let block: Vec<_> = pending.drain(..MONITOR_BLOCK_SAMPLES).collect();
+            let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+            let last = block.last().copied().flatten().map(|(tick, _)| tick);
+            let line = writeln!(file, "{at} {}", dated_reading(monitor_reading(&block, floor), last, device.time_now().unwrap())).and_then(|()| file.flush());
+            if let Err(error) = line {
+                written = Err(error);
+                break 'run;
+            }
+        }
+    }
+    device.rx_stop(0).unwrap();
+    device.rx_close(0);
+    written.unwrap_or_else(|error| panic!("{out}: {error}"));
 }
 
 // ---------------------------------------------------------------- note 47 stage 5 (bench 2026-11-07)

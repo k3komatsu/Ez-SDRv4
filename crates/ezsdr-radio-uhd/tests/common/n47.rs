@@ -64,6 +64,17 @@ pub fn rx_rate_verdict(asked: f64, applied: f64, planned: i64, blocks: &[(i64, u
     }
 }
 
+/// The window `hardware.rs`'s `tone_start` cuts a read into: 25 samples at 1 MS/s, 200 ticks a sample (its literals must agree).
+pub const TONE_WINDOW_TICKS: i64 = 25 * 200;
+
+/// The earliest tick at or after `instant` on the window phase of `like`. `tone_start` reads an onset as the start of the
+/// first of three consecutive tone windows, so two instants on one phase are quantized alike from any grid origin (the first
+/// sample read, which need not be the receive start): the quantization cancels in a difference of two onsets. The resolution
+/// is one window, so a PASS shows the onset in the predicted window, not within the 1 000-tick tolerance.
+pub fn same_window_phase(instant: i64, like: i64) -> i64 {
+    instant + (like - instant).rem_euclid(TONE_WINDOW_TICKS)
+}
+
 /// One transmit rate change of `hw_n47_raw_tx_rate_on_an_open_streamer`: `a_ack` is A's correlated burst ACK and
 /// `a_end` its exclusive end, `per` ticks a sample at A's rate; `a_tail` the tone of A's last millisecond; `b_onset`
 /// the receive tick where B's tone starts and `b_expected_onset` the same after the control burst's loopback delay.
@@ -530,6 +541,20 @@ mod tests {
         assert_eq!(burst_send(20_001, 20_001, 20_000), None);
         let padded = burst_send(20_000, 20_001, 20_000).expect("a one-sample tail");
         assert_eq!((padded.len, padded.eob, padded.padded), (2, true, true), "a one-sample tail is padded to two samples");
+    }
+
+    #[test]
+    fn two_instants_on_one_window_phase_are_quantized_alike_from_any_origin() {
+        let control = 7_011_200; // phase 1 200 of the 5 000-tick window
+        let b = same_window_phase(7_013_000, control);
+        assert_eq!(b, 7_016_200, "the earliest tick at or after 7 013 000 on control's phase");
+        assert_eq!(same_window_phase(control, control), control);
+        // The grid's origin is the first sample read, which can be off the receive start (here 9 samples): both instants
+        // keep one offset from either origin.
+        let rx_start = 7_000_000;
+        for origin in [rx_start, rx_start + 1_800] {
+            assert_eq!((b - origin).rem_euclid(TONE_WINDOW_TICKS), (control - origin).rem_euclid(TONE_WINDOW_TICKS));
+        }
     }
 
     #[test]

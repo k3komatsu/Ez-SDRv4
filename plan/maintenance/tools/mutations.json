@@ -12862,6 +12862,156 @@
       "filter": "a_receive_restart_rises_at_the_new_tone_after_the_device_fill"
     },
     {
+      "id": "N47B-43",
+      "name": "transmit rate probe: B's start is put on the window phase of the control's burst (n47::same_window_phase)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/n47.rs",
+      "old": "(like - instant).rem_euclid(TONE_WINDOW_TICKS)",
+      "new": "(like - instant).rem_euclid(TONE_WINDOW_TICKS / 2)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "two_instants_on_one_window_phase_are_quantized_alike_from_any_origin"
+    },
+    {
+      "id": "N47B-44",
+      "name": "rx monitor: a window has the drop's shape only above coherence 0.9 (is_drop_tone_window); 0.0 counts every window at 100 kHz",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "coherence > MONITOR_COHERENCE",
+      "new": "coherence > 0.0",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "loud_noise_with_no_coherent_window_reads_quiet"
+    },
+    {
+      "id": "N47B-45",
+      "name": "rx monitor: a tone window must be over 4 times the floor in power (carries_drop_tone)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "mean_power(w) > 4.0 * floor",
+      "new": "mean_power(w) > 0.0 * floor",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_tone_under_four_times_the_floor_reads_quiet"
+    },
+    {
+      "id": "N47B-46",
+      "name": "rx monitor: a window with the drop's shape lies within 20 kHz of 100 kHz (is_drop_tone_window)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "(hz - DROP_TONE_HZ).abs() <= 20e3",
+      "new": "(hz - DROP_TONE_HZ).abs() <= 1e9",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_coherent_signal_off_the_drop_frequency_reads_quiet"
+    },
+    {
+      "id": "N47B-56",
+      "name": "rx monitor: C3 counts a window with the drop's shape only above 4 LSB of amplitude (quiet_check); 0.0 counts every such window",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "is_drop_tone_window(w) && mean_power(w) > QUIET_CHECK_MIN_POWER",
+      "new": "is_drop_tone_window(w) && mean_power(w) > 0.0",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "c3_counts_a_drop_shape_window_only_above_4_lsb"
+    },
+    {
+      "id": "N47B-57",
+      "name": "rx monitor: the drop's shape excludes the 125 kHz lattice point of 45° lag products (is_drop_tone_window; bound 25 kHz admits it)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "(hz - DROP_TONE_HZ).abs() <= 20e3",
+      "new": "(hz - DROP_TONE_HZ).abs() <= 25e3",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_window_on_the_45_degree_lattice_is_not_the_drop_tone"
+    },
+    {
+      "id": "N47B-47",
+      "name": "rx monitor: a block reads tone from 1 % of its windows (monitor_reading); the bar is inclusive",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "if tone * 100 >= windows.len()",
+      "new": "if tone * 100 > windows.len()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_tone_in_one_window_of_a_hundred_is_the_bar_and_noise_is_quiet"
+    },
+    {
+      "id": "N47B-48",
+      "name": "rx monitor: a block whose ticks step other than one sample is unknown (monitor_reading)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "p[1].0 - p[0].0 != PER_1MSPS",
+      "new": "p[1].0 - p[0].0 > 2 * PER_1MSPS",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_monitor_reads_the_drop_tone_and_quiet_and_says_unknown_for_a_gap"
+    },
+    {
+      "id": "N47B-49",
+      "name": "rx monitor: a block with a missing sample is unknown, also at its first sample (monitor_reading)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "block.iter().any(Option::is_none)",
+      "new": "block.iter().all(Option::is_none)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_monitor_reads_the_drop_tone_and_quiet_and_says_unknown_for_a_gap"
+    },
+    {
+      "id": "N47B-50",
+      "name": "rx monitor: a gap in the first second refuses the start (monitor_floor)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "second.iter().any(Option::is_none)",
+      "new": "second.iter().all(Option::is_none)",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_start_refuses_a_sustained_tone_or_a_gap_and_takes_the_floor_of_a_quiet_second"
+    },
+    {
+      "id": "N47B-51",
+      "name": "rx monitor: the start refuses from 1 % of the first second's windows, not from half (monitor_floor)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "if tone * 2 >= windows.len()",
+      "new": "if tone * 100 >= windows.len()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "sparse_tone_windows_do_not_refuse_the_start"
+    },
+    {
+      "id": "N47B-52",
+      "name": "rx monitor: the start refuses only above half of the first second's windows, not at half (monitor_floor, inclusive bar)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "if tone * 2 >= windows.len()",
+      "new": "if tone * 2 > windows.len()",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "the_start_refuses_a_sustained_tone_or_a_gap_and_takes_the_floor_of_a_quiet_second"
+    },
+    {
+      "id": "N47B-53",
+      "name": "rx monitor: a line is fresh while its last sample is within 300 ms of the device clock (dated_reading); 600 ms still reads fresh",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "now - tick <= MONITOR_MAX_LAG_TICKS",
+      "new": "now - tick <= 2 * MONITOR_MAX_LAG_TICKS",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_reading_is_dated_by_its_last_sample_against_the_device_clock"
+    },
+    {
+      "id": "N47B-55",
+      "name": "rx monitor: a window at 100 kHz with coherence 0.7 is not the drop's shape (is_drop_tone_window); 0.5 counts it",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "const MONITOR_COHERENCE: f64 = 0.9;",
+      "new": "const MONITOR_COHERENCE: f64 = 0.5;",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_coherent_window_below_0_9_is_not_the_drop_tone"
+    },
+    {
+      "id": "N47B-54",
+      "name": "rx monitor: a line exactly 300 ms behind the device clock reads unknown (dated_reading, bound is exclusive)",
+      "file": "crates/ezsdr-radio-uhd/tests/common/tone.rs",
+      "old": "now - tick <= MONITOR_MAX_LAG_TICKS",
+      "new": "now - tick < MONITOR_MAX_LAG_TICKS",
+      "crate": "ezsdr-radio-uhd",
+      "test_bin": "fake",
+      "filter": "a_reading_is_dated_by_its_last_sample_against_the_device_clock"
+    },
+    {
       "id": "N48S1-01",
       "name": "a BurstAck retires a burst whose first instant is at its tick (UR-28, N4)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
