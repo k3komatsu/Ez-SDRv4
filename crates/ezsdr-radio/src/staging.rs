@@ -74,6 +74,12 @@ pub enum Overlap {
     Handed,
 }
 
+/// RM-15: the longest standalone head that is one closed device burst (its front is then its padded end plus ten).
+pub const CLOSED_SHORT_MAX: i64 = 32;
+
+/// RM-15 and UR-22: the samples past a closed short device burst's padded end that its front and the owner's guard keep.
+pub const CLOSED_SHORT_GAP: i64 = 10;
+
 /// One accepted booking's span on the stream's sample clock, and what may continue it (RM-15).
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Chain {
@@ -95,6 +101,30 @@ impl Chain {
     /// The last piece's first sample: the head's, or the newest joined piece's.
     fn last(&self) -> i64 {
         self.joined.last().copied().unwrap_or(self.start)
+    }
+
+    /// The head's exclusive end: the first joined piece's start, or the head's own end when no piece is joined.
+    fn head_end(&self) -> i64 {
+        self.joined.first().copied().unwrap_or(self.end)
+    }
+
+    /// A head of at most 32 samples before its first joined piece (RM-15). A repeat is never one (its end is `i64::MAX`). Pieces
+    /// joined behind it do not lengthen it: the owner may have sent it as one closed device burst.
+    fn short_head(&self) -> bool {
+        self.head_end().checked_sub(self.start).is_some_and(|len| len <= CLOSED_SHORT_MAX)
+    }
+
+    /// The front a short head's region keeps at a Stop (RM-16): each piece of at most 32 samples that starts below `handed` fronts at its
+    /// own standalone front, and a longer piece behind the head, which the owner never sends, does not extend it.
+    fn own_fronts(&self, handed: i64) -> i64 {
+        let starts = std::iter::once(self.start).chain(self.joined.iter().copied());
+        let ends = self.joined.iter().copied().chain(std::iter::once(self.end));
+        starts.zip(ends).filter(|&(s, e)| s < handed && e.checked_sub(s).is_some_and(|len| len <= CLOSED_SHORT_MAX)).filter_map(|(s, e)| front(s, Some(e - s), false)).max().unwrap_or(i64::MIN)
+    }
+
+    /// A standalone short head: one closed device burst (RM-15), with no piece joined behind it.
+    fn closed_short(&self) -> bool {
+        self.joined.is_empty() && self.short_head()
     }
 }
 
@@ -241,7 +271,7 @@ impl Bookings {
                 chain.front = front;
                 chain.joined.push(start);
             }
-            None => self.chains.push(Chain { start, end, joined: Vec::new(), front, join: len.is_some_and(|len| len > 32) }),
+            None => self.chains.push(Chain { start, end, joined: Vec::new(), front, join: len.is_some_and(|len| len > CLOSED_SHORT_MAX) }),
         }
         Ok(())
     }
@@ -338,17 +368,24 @@ impl Bookings {
     }
 
     /// RM-16 (a Stop taking effect at the sample `t`, with `stop` the first sample a booking may
-    /// start at after it): every kept chain's front is capped at `stop`, no chain joins any more,
-    /// and bookings starting at or after `t` are cancelled. A cancelled booking may already be
-    /// handed, so a Stop that cancels one starting before `stop` adds the region `[t, stop)` (hulled
-    /// with an earlier region); a Stop that cancels nothing adds no region. A booking starting at or
-    /// after `stop` was never handed (the handed cursor is at most `stop - 3`), so it adds nothing.
+    /// start at after it): every kept chain's front is capped at `stop` unless it is a short head
+    /// (at most 32 samples before its first joined piece), which is capped at `stop` or its pieces' own
+    /// fronts ([`Chain::own_fronts`]), whichever is later; no chain joins
+    /// any more, and bookings starting at or after `t` are cancelled. A cancelled booking may already
+    /// be handed, so a Stop that cancels one starting before `stop` adds the region `[t, stop)` (hulled
+    /// with an earlier region), and a cancelled short head that starts below the handed cursor's bound
+    /// (`stop - 3`) reaches the own fronts of its short pieces that start below that bound. A Stop that cancels nothing adds no region. A booking starting at or after
+    /// `stop` was never handed (the handed cursor is at most `stop - 3`), so it adds nothing.
     pub fn halt(&mut self, t: i64, stop: i64) {
         let pending = self.pending.take();
-        let dropped = self.chains.iter().any(|c| c.start >= t && c.start < stop);
+        // The handed cursor is at most `handed` (RM-16): a cancelled short head that starts below it may have been handed
+        // as one send, so the region reaches the own fronts of its short pieces below it (`own_fronts`), not only `stop`.
+        let handed = stop - 3;
+        let cut = self.chains.iter().filter(|c| c.start >= t && c.start < stop).map(|c| if c.start < handed && c.short_head() { c.own_fronts(handed).max(stop) } else { stop }).max();
         self.chains.retain(|c| c.start < t);
         for c in &mut self.chains {
-            c.front = c.front.min(stop);
+            // A kept short head was handed as one send, which a Stop does not recall: it keeps its own front, not a longer piece's.
+            c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop });
             c.join = false;
         }
         match pending {
@@ -359,10 +396,10 @@ impl Bookings {
             Some(switch) => self.settled.push(Settled { id: switch.id, outcome: SwitchOutcome::Cancelled, moved_to: switch.moved_to }),
             None => {}
         }
-        if dropped {
+        if let Some(front) = cut {
             self.region = Some(match self.region {
-                Some((start, front)) => (start.min(t), front.max(stop)),
-                None => (t, stop),
+                Some((start, region_front)) => (start.min(t), region_front.max(front)),
+                None => (t, front),
             });
         }
     }
@@ -512,13 +549,10 @@ impl Bookings {
                 let c = &mut self.chains[i];
                 c.start = old + len;
                 c.joined.retain(|&j| j > c.start);
-                if c.joined.is_empty() {
-                    let own = c.end - c.start;
-                    if own <= 32 {
-                        c.join = false;
-                        c.front = front(c.start, Some(own), false).unwrap_or(c.front);
-                    }
-                } else {
+                if c.closed_short() {
+                    c.join = false;
+                    c.front = front(c.start, Some(c.end - c.start), false).unwrap_or(c.front);
+                } else if !c.joined.is_empty() {
                     c.join = false;
                     let starts = std::iter::once(c.start).chain(c.joined.iter().copied());
                     let ends = c.joined.iter().copied().chain(std::iter::once(c.end));
@@ -580,14 +614,15 @@ impl Bookings {
 }
 
 /// RM-15: the exclusive front of a booking's region. A standalone head of at most 32 samples is
-/// one closed device burst (`start + 5` for 1–3 samples, `end + 1` for 4–32); a head longer than
-/// 32 and a joined piece end in a held tail, `end + 2`; a repeat never ends. `None` when the front
-/// does not fit in an `i64`: the booking is refused, not wrapped.
+/// one closed device burst, and its front is its transmitted end (padded to four) plus ten, the
+/// owner's safe start after it (UR-22); a head longer than 32 and a joined piece end in a held
+/// tail, `end + 2`; a repeat never ends. `None` when the front does not fit in an `i64`: the
+/// booking is refused, not wrapped.
 fn front(start: i64, len: Option<i64>, joined: bool) -> Option<i64> {
     match len {
         None => Some(i64::MAX),
-        Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(2),
-        Some(len) => start.checked_add(len.max(4))?.checked_add(1),
+        Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(2),
+        Some(len) => start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP),
     }
 }
 

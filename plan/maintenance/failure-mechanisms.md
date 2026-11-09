@@ -88,3 +88,5 @@ AGENTS.md §6 の three strikes は，症状や領域ではなく設計上の失
 Review findings in Phase 8 stage 1b-4b (2026-10-19; not issues):
 - No finding counts toward a mechanism. Sol's test-plan review, the first under the revised AGENTS.md §9, found 4 majors before any code. Each was a test without power or a missing test: an expectation the correct behaviour cannot meet, mutation rows that do not break what they name, no per-stream prune test, and a lock spy blind to `apply`.
 - The code reviews found 3 minors (Opus 1, Sol 2) and no major. Record: [plan/phase8/reviews/1b4b-opus.md](../phase8/reviews/1b4b-opus.md).
+
+Review findings in step B after the 2026-11-09 bench (not issues; [reviews/stepB-dispositions.md](../phase8/reviews/stepB-dispositions.md)): Sol's code review found a short head left by a configure refusal losing its front at a Stop, and the re-check found the fix over-holding the long pieces behind it — both the receipt-time record disagreeing with uhd-tx's sends, `planned-state-read-as-actual`, the drift design note [49](../phase8/49-time-and-booking-inventory.md) (D′) removes.

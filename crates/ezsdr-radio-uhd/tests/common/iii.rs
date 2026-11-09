@@ -1265,27 +1265,30 @@ mod stage5_tests {
     }
 
     #[test]
-    fn the_record_front_is_one_sample_past_the_device_end_of_a_head() {
-        assert_eq!(head_front(0, 1), 5);
-        assert_eq!(head_front(0, 3), 5);
-        assert_eq!(head_front(0, 4), 5);
-        assert_eq!(head_front(0, 10), 11);
-        assert_eq!(head_front(0, 32), 33);
+    fn the_record_front_is_ten_samples_past_the_transmitted_end_of_a_head() {
+        assert_eq!(head_front(0, 1), 14);
+        assert_eq!(head_front(0, 3), 14);
+        assert_eq!(head_front(0, 4), 14);
+        assert_eq!(head_front(0, 10), 20);
+        assert_eq!(head_front(0, 32), 42);
         assert_eq!(head_front(0, 30_000), 30_002);
         for (n, padded) in [(1i64, 4i64), (2, 4), (3, 4), (4, 4), (10, 10), (32, 32)] {
-            assert_eq!(head_front(0, n) - padded, 1, "a standalone head of {n} samples");
+            assert_eq!(head_front(0, n) - padded, 10, "a standalone head of {n} samples");
         }
     }
 
     #[test]
-    fn a_booking_at_the_stop_is_admitted_after_a_head_the_stop_cuts() {
-        // R5-m5 (h): the head at c−1 starts at the Stop's cut t and is dropped; the region [t, stop) holds it, and c+3 = stop is free.
+    fn a_booking_after_a_head_the_stop_cuts_waits_for_its_front() {
+        // R5-m5 (h): the head at c−1 starts at the Stop's cut t and is dropped; the region holds it to its own front (RM-16), not to c+3 = stop.
         let (c, stop) = (1_000, 1_003);
         let mut bookings = Bookings::default();
         bookings.accept(c - 1, Some(1), 0, |_| 0, i64::MIN).unwrap();
         bookings.halt(c - 1, stop);
-        assert!(bookings.accept(stop, Some(3), 0, |_| 0, i64::MIN).is_ok());
-        assert!(bookings.accept(stop - 1, Some(3), 0, |_| 0, i64::MIN).is_err(), "a booking inside the cut is refused");
+        // The head is handed over (start c − 1 < stop − 3), so the region reaches its own front, c + 13 (RM-16).
+        for k in 3..13 {
+            assert!(bookings.accept(c + k, Some(3), 0, |_| 0, i64::MIN).is_err(), "a booking at c + {k} is inside the head's front");
+        }
+        assert!(bookings.accept(c + 13, Some(3), 0, |_| 0, i64::MIN).is_ok(), "c + 13 is the front");
     }
 
     #[test]

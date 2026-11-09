@@ -3666,7 +3666,8 @@ fn hw_rx_tone_monitor() {
 
 // ---------------------------------------------------------------- note 47 stage 5 (bench 2026-11-07)
 //
-// The record's values come from `ezsdr_radio::staging` (`iii::head_front`, `stop_sample`) and the profile's constants. The loop's delay is
+// The record's values come from `ezsdr_radio::staging` (`iii::head_front`, `stop_sample`) and the profile's constants: a closed head of at
+// most 32 transmitted samples fronts at its padded end plus ten (RM-15, UR-22). The loop's delay is
 // B6's 44 samples unless a trial calibrates it from the onset of its first repeat or burst (S5). Each VERDICT is a pure function in `iii.rs`.
 
 /// Prints the verdict of `claim` and records a FAIL in `failures`.
@@ -3681,7 +3682,7 @@ fn record(failures: &mut Vec<String>, claim: &str, outcome: Verdict) {
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_n47s5_front_after_a_short_burst() {
     // T2 (stage 5, UR-22, RM-15, S9): a booking at the record's front after a head of n samples plays on time, on the Module at 1 and 2 MS/s.
-    // The front is `iii::head_front` (n ≤ 3: start + 5; 4 ≤ n ≤ 32: end + 1). S7: "on time" needs the tone's onset in the capture.
+    // The front is `iii::head_front` (n ≤ 3: start + 14, padded to four and then ten more; 4 ≤ n ≤ 32: end + 10). S7: "on time" needs the tone's onset in the capture.
     let device = usrp();
     pin_slot_a(&*device);
     let mut failures = Vec::new();
@@ -3707,14 +3708,16 @@ fn hw_n47s5_front_after_a_short_burst() {
 #[ignore = "needs a USRP: see plan/phase7/bench.md"]
 fn hw_n47s5_raw_front_gaps() {
     // T2's raw side (an observation, no VERDICT beyond complete or incomplete): the device's own gaps after a first burst of n samples,
-    // each sent as the Module sends it (padded to four for n ≤ 3), at 1 and 2 MS/s. The record's front is one sample past the device's end
-    // (`iii::head_front` − padded length = 1, unit-tested), so gap 1 is the front.
+    // each sent as the Module sends it (padded to four for n ≤ 3), at 1 and 2 MS/s. The record's front is ten samples past the device's
+    // padded end (`iii::head_front` − padded length = 10, unit-tested), so gap 10 is the front. The second burst is 100 samples, one closed
+    // send: a short-B observation, which plays at gap 1 after any short head (VERIFIED 2026-11-09), so it does not test the front. The long
+    // burst of `hw_n47s5_long_b_after_a_short_head_gap_9_and_10` does.
     let device = raw();
     let mut rows = Vec::new();
     for rate in [1e6, 2e6] {
         raw_tx_ready(&*device, rate);
         for samples in [1usize, 2, 3, 4, 10, 32] {
-            for trial in raw_burst_gap_rows(&*device, rate, samples, &[0, 1, 2, 3, 4, 5], 4) {
+            for trial in raw_burst_gap_rows(&*device, rate, samples, &[0, 1, 4, 5, 6, 7, 9, 10], 4) {
                 let acks = trial.codes.iter().filter(|code| code.as_str() == "BurstAck").count();
                 let late = trial.codes.iter().filter(|code| code.as_str() == "TimeError").count();
                 println!(
@@ -3732,7 +3735,7 @@ fn hw_n47s5_raw_front_gaps() {
             }
         }
     }
-    measurement::push_raw_observation("hw_n47s5_raw_front_gaps", 288, serde_json::json!({ "trials": rows }));
+    measurement::push_raw_observation("hw_n47s5_raw_front_gaps", 384, serde_json::json!({ "trials": rows }));
 }
 
 /// One T3 (f) trial on the USRP: its own probe and directory, kept until its verdict is read (`n47s5::held_tail_trial`).
@@ -3757,8 +3760,8 @@ fn hw_n47s5_held_tail_and_stop() {
     // T3 (stage 5, Q-4 (b), (f); R5-m5 (h)). (f): A's held tail closes at J(e); C at e+2 after J(e) is a separate device burst; C at e joins
     // A; C at e+1 after J(e) is refused at receipt by the Provider (its COMMAND_REJECTED names C). (b): the Session's next burst at the
     // record's first sample after a Stop, and the raw case of a burst closed by the Module's two zeros at cursor c, the next at c+3 and c+4
-    // on time, c+2 printed only. (h): a 1–3-sample head at c−1, padded to c+3, and a booking at c+3, sent raw (the Session cannot place a
-    // Stop to the sample; the record's admission of that booking is unit-tested in `iii.rs`).
+    // on time, c+2 printed only. (h): a 1–3-sample head at c−1, padded to c+3, its front at c+13, and a booking at c+13, sent raw (the Session
+    // cannot place a Stop to the sample; the record's refusal of c+3 … c+12 and admission of c+13 are unit-tested in `iii.rs`).
     let device = usrp();
     pin_slot_a(&*device);
     let mut failures = Vec::new();
@@ -3784,9 +3787,65 @@ fn hw_n47s5_held_tail_and_stop() {
     );
     let mut raw_trials = Vec::new();
     for samples in [1usize, 2, 3] {
-        raw_trials.extend(raw_burst_gap_rows(&*device, 1e6, samples, &[0], 4).into_iter().map(|trial| trial.codes));
+        raw_trials.extend(raw_burst_gap_rows(&*device, 1e6, samples, &[10], 4).into_iter().map(|trial| trial.codes));
     }
-    record(&mut failures, "T3 (h) R5-m5: a 1–3-sample head padded to c+3, and a booking at c+3, raw (the device's geometry)", iii::raw_pair_verdict(&raw_trials));
+    record(&mut failures, "T3 (h) R5-m5: a 1–3-sample head padded to c+3, and a booking at its front c+13, raw (the device's geometry, RM-15)", iii::raw_pair_verdict(&raw_trials));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// N-H1's trial: a closed head of `samples` (padded to four for 1 to 3), then a 10 000-sample burst `gap` samples after the head's padded end,
+/// sent in the form of the reproduction's `sweep` case (a timed first send of 1 996 samples, timed sends of 1 996, and a timed close of the
+/// last sample and a zero). Returns the async codes.
+fn long_b_after_head(device: &dyn Device, rate: f64, samples: usize, gap: i64) -> Vec<String> {
+    let per = (MCR as f64 / rate).round() as i64;
+    let padded = samples.max(ezsdr_radio_uhd::device::MIN_FIRST_SEND);
+    let mut head = iq(&transmit_samples(samples));
+    head.resize(padded, ezsdr_radio_uhd::Iq::default());
+    let body = iq(&transmit_samples(10_000));
+    let (tone, last) = body.split_at(body.len() - 1);
+    let t0 = (device.time_now().unwrap() / per + 20_000) * per;
+    device.tx_send(0, &[&head], Some(t0), true, true, Wall::from_millis(100)).unwrap();
+    let b_start = t0 + (padded as i64 + gap) * per;
+    let mut off = 0;
+    while off < tone.len() {
+        let k = 1_996.min(tone.len() - off);
+        device.tx_send(0, &[&tone[off..off + k]], Some(b_start + off as i64 * per), off == 0, false, Wall::from_millis(100)).unwrap();
+        off += k;
+    }
+    device.tx_send(0, &[&[last[0], ezsdr_radio_uhd::Iq::default()]], Some(b_start + tone.len() as i64 * per), false, true, Wall::from_millis(100)).unwrap();
+    async_codes(device, Wall::from_millis(150))
+}
+
+#[test]
+#[ignore = "needs a USRP: see plan/phase7/bench.md"]
+fn hw_n47s5_long_b_after_a_short_head_gap_9_and_10() {
+    // N-H1 (B2, sequence 10, m5): the front after a closed head of 1, 4, 10 and 16 samples, judged on a long burst. The 100-sample closed
+    // burst of `hw_n47s5_raw_front_gaps` plays at gap 1 after any short head (VERIFIED 2026-11-09), so only this one separates the rule.
+    // Gap 10 (the record's front) must give two acknowledgements and no late report. Gap 9 is printed: VERIFIED for a padded four-sample
+    // head at 1 MS/s, the long burst is late (the table of design/18 UR-22, #2).
+    let device = raw();
+    raw_tx_ready(&*device, 1e6);
+    let mut failures = Vec::new();
+    let mut at_front = Vec::new();
+    let mut rows = Vec::new();
+    for samples in [1usize, 4, 10, 16] {
+        for gap in [9i64, 10] {
+            for _ in 0..4 {
+                let codes = long_b_after_head(&*device, 1e6, samples, gap);
+                println!("N-H1 long B after a {samples}-sample head, gap {gap} from the padded end: codes {codes:?}");
+                if gap == 10 {
+                    at_front.push(codes.clone());
+                }
+                rows.push(serde_json::json!({ "samples": samples, "gap": gap, "codes": codes }));
+            }
+        }
+    }
+    record(
+        &mut failures,
+        "N-H1 long B at the front (gap 10) after a head of 1, 4, 10 and 16 samples: two acknowledgements, no late or underflow report (RM-15, UR-22)",
+        iii::raw_pair_verdict(&at_front),
+    );
+    measurement::push_raw_observation("hw_n47s5_long_b_after_a_short_head", 32, serde_json::json!({ "trials": rows }));
     assert!(failures.is_empty(), "{failures:?}");
 }
 

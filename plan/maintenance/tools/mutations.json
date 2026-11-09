@@ -7059,10 +7059,10 @@
   },
   {
    "id": "P657",
-   "name": "an abandoned send keeps two safe samples after its accepted cursor (UR-23)",
+   "name": "an abandoned send's front is its padded end plus the gap, not its padded end (UR-22, UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "                    self.chain.advance_front(clock.domain, cursor.saturating_add(3));",
-    "new": "                    self.chain.advance_front(clock.domain, cursor.saturating_add(2));",
+    "old": "cursor.saturating_add(2).saturating_add(CLOSED_SHORT_GAP)",
+    "new": "cursor.saturating_add(2)",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_abandoned_send_preserves_the_accepted_cursor"
@@ -11119,8 +11119,8 @@
         "id": "P1312",
         "name": "only a fully acknowledged T3 advances the front (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if flush.acknowledged {\n                self.chain.advance_front(clock.domain, clock.at_or_after(tick));\n            }",
-        "new": "self.chain.advance_front(clock.domain, clock.at_or_after(tick));",
+        "old": "if flush.acknowledged {",
+        "new": "if true {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_owner_keeps_clean_recovery_after_an_unacknowledged_t3"
@@ -13023,10 +13023,10 @@
     },
     {
       "id": "N48S1-02",
-      "name": "the reopen front is the acknowledged tick plus two (UR-22, TBD-d2)",
+      "name": "the reopen front is the flush end plus the gap, plus two (UR-22, TBD-d2)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "self.chain.advance_front(clock.domain, clock.at_or_after(tick));",
-      "new": "self.chain.advance_front(clock.domain, clock.at_or_after(tick).saturating_add(2));",
+      "old": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(CLOSED_SHORT_GAP)",
+      "new": "clock.at_or_after(tick.saturating_sub(1)).saturating_add(CLOSED_SHORT_GAP).saturating_add(2)",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
       "filter": "ur_22_a_failed_one_sample_padded_eob_is_not_safe_until_flush_recovery"
@@ -13085,7 +13085,7 @@
       "id": "N48S1-08",
       "name": "the restart after a padded close is one sample after its payload (UR-23, D9b-1a)",
       "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-      "old": "self.chain.advance_front(clock.domain, open.next.saturating_add(pad as i64 + 1));",
+      "old": "self.chain.advance_front(clock.domain, open.next.saturating_add(pad as i64 + gap));",
       "new": "self.chain.advance_front(clock.domain, open.next.saturating_add(1));",
       "crate": "ezsdr-radio-uhd",
       "test_bin": "lib",
@@ -13613,10 +13613,10 @@
   },
   {
     "id": "N48S3-24",
-    "name": "FakeDevice a new SOB does not clear the short-burst state",
+    "name": "FakeDevice a new SOB does not restore the clean burst state (UR-33)",
     "file": "crates/ezsdr-radio-uhd/src/device.rs",
-    "old": "self.burst = Burst::Clean;\n        } else if self.faulted(packet, now, channel_count) {",
-    "new": "} else if self.faulted(packet, now, channel_count) {",
+    "old": "if packet.sob {\n            self.burst = Burst::Clean;",
+    "new": "if packet.sob {",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_33_a_new_burst_s_sob_clears_the_short_rule"
@@ -14133,7 +14133,7 @@
     "id": "N47S4-09b",
     "name": "a one-sample padded burst's device end is its payload end (owner guard (b))",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "open.next.saturating_add(pad as i64 + 1)",
+    "old": "open.next.saturating_add(pad as i64 + gap)",
     "new": "open.next.saturating_add(1)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -14339,30 +14339,30 @@
   },
   {
     "id": "N47S5-02",
-    "name": "5a: a closed burst of 4 to 32 samples fronts at its end, not one past it (RM-15)",
+    "name": "5a: a closed burst of 4 to 32 samples fronts at its transmitted end, not ten past it (RM-15)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "start.checked_add(len.max(4))?.checked_add(1)",
+    "old": "start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP)",
     "new": "Some(start.checked_add(len.max(4))?)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_closed_burst_front_is_end_plus_one"
+    "filter": "rm_15_closed_burst_front_is_end_plus_ten"
   },
   {
     "id": "N47S5-03",
-    "name": "5a: a burst of 1 to 3 samples fronts at start plus 4, not 5 (RM-15, the padded first send)",
+    "name": "5a: a burst of 1 to 3 samples fronts ten past start plus 3, not past start plus 4 (RM-15, the padded first send)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) => start.checked_add(len.max(4))?.checked_add(1),",
-    "new": "Some(len) => start.checked_add(len.max(3))?.checked_add(1),",
+    "old": "start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP)",
+    "new": "start.checked_add(len.max(3))?.checked_add(CLOSED_SHORT_GAP)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
-    "filter": "rm_15_1_to_3_sample_burst_front_is_start_plus_five"
+    "filter": "rm_15_1_to_3_sample_burst_front_is_transmitted_end_plus_ten"
   },
   {
     "id": "N47S5-04",
     "name": "5a: a held tail fronts at its end plus 1, not 2 (RM-15)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(2),",
-    "new": "Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(1),",
+    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(2),",
+    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(1),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_held_tail_front_is_end_plus_two"
@@ -14411,8 +14411,8 @@
     "id": "N47S5-09",
     "name": "5a: a Stop that cancels a booking takes the earlier end of the region (RM-16, the hull's end)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "front.max(stop)",
-    "new": "front.min(stop)",
+    "old": "region_front.max(front)",
+    "new": "region_front.min(front)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_second_stop_that_drops_a_booking_extends_the_region_to_the_hull"
@@ -14421,8 +14421,8 @@
     "id": "N47S5-10",
     "name": "5a: a Stop that cancels only the booking at its own instant adds no region (RM-16)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "let dropped = self.chains.iter().any(|c| c.start >= t && c.start < stop);",
-    "new": "let dropped = self.chains.iter().any(|c| c.start > t && c.start < stop);",
+    "old": ".filter(|c| c.start >= t && c.start < stop)",
+    "new": ".filter(|c| c.start > t && c.start < stop)",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_stop_cancels_bookings_starting_at_or_after_the_stop"
@@ -14461,8 +14461,8 @@
     "id": "N47S5-14",
     "name": "5a: a Stop leaves a chain joinable at its end",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = c.front.min(stop); c.join = false;",
-    "new": "c.front = c.front.min(stop); c.join = c.join;",
+    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }); c.join = false;",
+    "new": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }); c.join = c.join;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_stop_truncates_the_front_and_ends_the_join"
@@ -14631,8 +14631,8 @@
     "id": "N47S5-55",
     "name": "5a: a Stop adds a region even when it cancels no booking (RM-16, rev 4)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "if dropped {",
-    "new": "if true {",
+    "old": "if let Some(front) = cut {",
+    "new": "if let Some(front) = cut.or(Some(stop)) {",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_a_stop_that_drops_nothing_adds_no_region"
@@ -14641,7 +14641,7 @@
     "id": "N47S5-62",
     "name": "5a: a Stop never lowers a finite front (the superseded M2 rule; a kept chain is capped at the Stop's bound, rev 4)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = c.front.min(stop);",
+    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop });",
     "new": "c.front = c.front;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
@@ -14671,8 +14671,8 @@
     "id": "N47S5-65",
     "name": "5a: a Stop that cancels a booking adds no region (RM-16, the region's creation)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "if dropped {",
-    "new": "if false {",
+    "old": "if let Some(front) = cut {",
+    "new": "if let Some(front) = cut.filter(|_| false) {",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_stop_region_refuses_the_span_the_stop_cut"
@@ -14681,8 +14681,8 @@
     "id": "N47S5-67",
     "name": "5a: a Stop that cancels a booking after an earlier region starts the region at its own instant (RM-16, the hull's start)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some((start, front)) => (start.min(t), front.max(stop)),",
-    "new": "Some((start, front)) => (t, front.max(stop)),",
+    "old": "Some((start, region_front)) => (start.min(t), region_front.max(front)),",
+    "new": "Some((start, region_front)) => (t, region_front.max(front)),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_second_stop_that_drops_a_booking_extends_the_region_to_the_hull"
@@ -15601,8 +15601,8 @@
     "id": "N47S5-137",
     "name": "rev 29 (F50): a booking whose front overflows the clock panics (debug) instead of being refused: the checked front is replaced by a plain sum",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "Some(len) if joined || len > 32 => start.checked_add(len)?.checked_add(2),",
-    "new": "Some(len) if joined || len > 32 => Some(start + len + 2),",
+    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX => start.checked_add(len)?.checked_add(2),",
+    "new": "Some(len) if joined || len > CLOSED_SHORT_MAX => Some(start + len + 2),",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_front_past_the_clock_is_refused_without_a_panic_or_a_change"
@@ -15631,8 +15631,8 @@
     "id": "N47S5-140",
     "name": "rev 30 (S2): a surviving head of at most 32 samples keeps its join (the closing threshold of remove_head is zero)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "if own <= 32 {",
-    "new": "if own <= 0 {",
+    "old": "if c.closed_short() {",
+    "new": "if c.closed_short() && c.end - c.start <= 0 {",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_15_a_short_head_left_alone_is_closed_and_takes_no_join"
@@ -15641,8 +15641,8 @@
     "id": "N47S5-141",
     "name": "rev 30 (S2): a surviving short head keeps its joined front, not its standalone one (remove_head does not set the front)",
     "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "c.front = front(c.start, Some(own), false).unwrap_or(c.front);",
-    "new": "let _ = own;",
+    "old": "c.front = front(c.start, Some(c.end - c.start), false).unwrap_or(c.front);",
+    "new": "let _ = c.end - c.start;",
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_a_moved_untimed_head_goes_after_its_joined_pieces"
@@ -15789,13 +15789,13 @@
   },
   {
     "id": "N47S5-159",
-    "name": "stage 5 bench (T2): the record's front after a head is one past its end (iii::head_front, through Bookings::accept)",
+    "name": "stage 5 bench (T2): the record's front after a head is ten past its transmitted end (iii::head_front, through Bookings::accept)",
     "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
     "old": "bookings.accept(start, Some(len), 0, |_| 0, i64::MIN)",
     "new": "bookings.accept(start, Some(len + 1), 0, |_| 0, i64::MIN)",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
-    "filter": "the_record_front_is_one_sample_past_the_device_end_of_a_head"
+    "filter": "the_record_front_is_ten_samples_past_the_transmitted_end_of_a_head"
   },
   {
     "id": "N47S5-160",
@@ -16185,5 +16185,235 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "windows_far_from_the_boundary_do_not_fail_the_switch"
+  },
+  {
+    "id": "N49B-01",
+    "name": "5a (B1): a closed short burst of 1 to 32 samples fronts nine past its transmitted end, not ten (RM-15)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "start.checked_add(len.max(4))?.checked_add(CLOSED_SHORT_GAP)",
+    "new": "start.checked_add(len.max(4))?.checked_add(9)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_burst_front_is_end_plus_ten"
+  },
+  {
+    "id": "N49B-02",
+    "name": "5a (B1): a 32-sample closed head is not short (its front is its end plus two)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "Some(len) if joined || len > CLOSED_SHORT_MAX =>",
+    "new": "Some(len) if joined || len >= CLOSED_SHORT_MAX =>",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_closed_burst_front_is_end_plus_ten"
+  },
+  {
+    "id": "N49B-03",
+    "name": "5a (B1): a Stop caps a kept closed short head at its bound (RM-16, #82: the kept head keeps its own front)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }",
+    "new": "stop",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_keeps_an_uncut_short_head_s_front"
+  },
+  {
+    "id": "N49B-04",
+    "name": "5a (B1): a Stop's region of a dropped short head reaches only the Stop's bound, not the head's own front (RM-16, Q1)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.own_fronts(handed).max(stop) } else { stop }",
+    "new": "stop } else { stop }",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_that_cuts_a_short_head_adds_its_front_to_the_region"
+  },
+  {
+    "id": "N49B-11",
+    "name": "5a (B1): a closed short burst is up to 33 samples (the bound is one too wide)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.head_end().checked_sub(self.start).is_some_and(|len| len <= CLOSED_SHORT_MAX)",
+    "new": "self.head_end().checked_sub(self.start).is_some_and(|len| len <= 33)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_caps_a_33_sample_head_with_a_short_piece_at_the_bound"
+  },
+  {
+    "id": "N49B-12",
+    "name": "5a (B1): a closed short head with joined pieces is treated as short (the joined-pieces guard is dropped)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.joined.is_empty() && self.short_head()",
+    "new": "self.short_head()",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_15_a_short_piece_left_behind_keeps_its_own_front"
+  },
+  {
+    "id": "N49B-05",
+    "name": "B2: the owner's short-burst discriminator is dropped, so a closed first send of at most 32 samples fronts at +1 (UR-22)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { CLOSED_SHORT_GAP } else { 1 };",
+    "new": "let gap = 1;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_closed_short_burst_s_owner_front_is_ten_past_its_end"
+  },
+  {
+    "id": "N49B-06",
+    "name": "B2: the FakeDevice's short-burst guard is nine samples, not ten (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "end + 10 * ratio",
+    "new": "end + 9 * ratio",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_timed_sob_within_ten_of_a_closed_short_burst_is_refused"
+  },
+  {
+    "id": "N49B-07",
+    "name": "B2: the FakeDevice sets the short-burst guard after every closed burst, not only one of at most 32 samples (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "(self.burst_samples <= SHORT_BURST_MAX)",
+    "new": "(true)",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_closed_burst_over_32_keeps_the_gap_of_one"
+  },
+  {
+    "id": "N49B-08",
+    "name": "B2: a refused open SOB does not hold its device burst to its EOB (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "if !packet.eob {\n                self.burst = Burst::Timed;",
+    "new": "if !packet.eob {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_refused_open_sob_refuses_its_device_burst_through_its_eob"
+  },
+  {
+    "id": "N49B-09",
+    "name": "B2: the FakeDevice's device-burst count keeps only the last packet (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "self.burst_samples += packet.n as i64;",
+    "new": "self.burst_samples = packet.n as i64;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_the_short_guard_counts_the_device_burst_not_its_last_packet"
+  },
+  {
+    "id": "N49B-10",
+    "name": "B2: the owner's short-burst test ignores the SOB framing, so a continuation closing a 32-sample burst fronts at +10 (UR-22, Q5)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let gap = if device_sob && device_count as i64 <= CLOSED_SHORT_MAX { CLOSED_SHORT_GAP } else { 1 };",
+    "new": "let gap = if device_count as i64 <= CLOSED_SHORT_MAX { CLOSED_SHORT_GAP } else { 1 };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_23_a_continuation_that_closes_a_burst_keeps_the_front_one_past_its_end"
+  },
+  {
+    "id": "N49B-13",
+    "name": "B2: the FakeDevice's device-burst count is not reset by a new SOB, so an earlier burst's samples count toward the next short-burst test (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "self.burst_samples = 0;",
+    "new": "self.burst_samples = self.burst_samples;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_new_sob_restarts_the_short_burst_count"
+  },
+  {
+    "id": "N49B-14",
+    "name": "B (Sol finding 1): a Stop cuts a cancelled short head with joined pieces at the Stop, not at its own front (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.start < handed && c.short_head()",
+    "new": "c.start < handed && c.closed_short()",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_keeps_a_short_head_s_own_front_past_its_joined_pieces"
+  },
+  {
+    "id": "N49B-15",
+    "name": "B (Sol finding 1): a Stop caps a kept short head with joined pieces at the Stop (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.short_head() { stop.max(c.own_fronts(handed)) } else { stop }",
+    "new": "c.closed_short() { stop.max(c.own_fronts(handed)) } else { stop }",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_keeps_a_short_head_s_front_with_joined_pieces"
+  },
+  {
+    "id": "N49B-16",
+    "name": "B (Sol finding 2): a refused open SOB's dropped close arms the short guard (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "if packet.eob && !packet.lost_eob && self.accepted {",
+    "new": "if packet.eob && !packet.lost_eob {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_refused_open_sob_s_dropped_close_leaves_the_short_guard"
+  },
+  {
+    "id": "N49B-17",
+    "name": "B (Sol finding 2): a new SOB does not clear the accepted flag, so a refused SOB inherits the previous burst's (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "self.accepted = false;",
+    "new": "self.accepted = self.accepted;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_a_refused_open_sob_s_dropped_close_leaves_the_short_guard"
+  },
+  {
+    "id": "N49B-18",
+    "name": "B (Sol finding 2): an accepted SOB does not set the accepted flag, so an armed burst's dropped close arms no guard (UR-33)",
+    "file": "crates/ezsdr-radio-uhd/src/device.rs",
+    "old": "self.accepted = true;",
+    "new": "self.accepted = self.accepted;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_33_an_armed_burst_s_dropped_close_arms_the_short_guard"
+  },
+  {
+    "id": "N49B-19",
+    "name": "Sol fix round, item 1: a Stop cuts a cancelled short head at the front of its long piece, not its own front (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.own_fronts(handed).max(stop)",
+    "new": "c.front.max(stop)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_cutting_a_dropped_short_head_stops_at_its_own_front_not_a_long_piece"
+  },
+  {
+    "id": "N49B-20",
+    "name": "Sol fix round, item 1: a Stop keeps a short head's front past its own front, through a long piece behind it (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "c.front = c.front.min(if c.short_head() { stop.max(c.own_fronts(handed)) } else { stop });",
+    "new": "c.front = if c.short_head() { c.front } else { c.front.min(stop) };",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_keeping_a_short_head_keeps_its_own_front_not_a_long_piece"
+  },
+  {
+    "id": "N49B-21",
+    "name": "Sol fix round, item 1: a piece joined behind a short head that starts above the handed bound extends its own front (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "s < handed && e.checked_sub(s)",
+    "new": "e.checked_sub(s)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_keeps_a_short_head_s_front_with_joined_pieces"
+  },
+  {
+    "id": "N49B-22",
+    "name": "Sol fix round, item 1: a short head's own front is taken from its end, not its first joined piece (a long piece makes it long)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.joined.first().copied().unwrap_or(self.end)",
+    "new": "self.end",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_stop_cutting_a_dropped_short_head_stops_at_its_own_front_not_a_long_piece"
+  },
+  {
+    "id": "N49B-23",
+    "name": "Sol fix round, item 1: a long piece behind a short head counts toward its own front at a Stop (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "s < handed && e.checked_sub(s).is_some_and(|len| len <= CLOSED_SHORT_MAX)",
+    "new": "s < handed",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_16_a_long_piece_handed_before_the_bound_does_not_extend_a_short_head"
   }
 ]

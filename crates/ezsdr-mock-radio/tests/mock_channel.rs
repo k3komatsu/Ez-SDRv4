@@ -533,13 +533,15 @@ fn mr_25_stop_hands_a_future_repeat_through_the_in_flight_window() {
 
 #[test]
 fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
+    // The Stop cuts at t = 2_000_000 (H = t + W = 2_010_000, stop = H + 3). A (2_009_999) starts before H, so it may have been handed:
+    // the region reaches its own front, 2_009_999 + 4 + 10 = 2_010_013 (RM-16). B at 2_010_020 is past that front and is cancelled.
     let t0 = 2_000_000_000;
     let world = World::new(loopback(None));
     let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
     radio.mock.arm().unwrap();
     radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
     let domain = radio.tx_domain(&world);
-    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_005, false));
+    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_020, false));
     radio.push(burst(&radio, &world, world.waveform(&[(0.5, 0.0)]), 2_009_999, false));
     radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
     step(&world, &mut [&mut radio], t0);
@@ -564,24 +566,71 @@ fn mr_25_stop_does_not_radiate_unhanded_window_edge_payload() {
     assert!(rejected[1]["reason"].as_str().unwrap().contains("overlaps an accepted booking"), "{rejected:?}");
     assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "a refused C is not late");
 
-    // D at H+4 is the first sample after A's window: on time.
-    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_004, false));
+    // D at 2_010_013 is the first sample after A's region: on time.
+    radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_013, false));
     step(&world, &mut [&mut radio], t0);
-    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "D at H+4 is on time");
+    assert!(radio.drain_events().iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "D at 2_010_013 is on time");
 
     step(&world, &mut [&mut radio], t0 + 12_006_001);
     let final_records = records(&radio);
     assert_eq!(final_records.len(), 2, "only A and on-time D have records: {final_records:?}");
-    assert_eq!((final_records[1].target, final_records[1].samples), (TimePoint::new(domain, 2_010_004), 1));
+    assert_eq!((final_records[1].target, final_records[1].samples), (TimePoint::new(domain, 2_010_013), 1));
     let received = radio.received(0);
     let sample = |k: i64| received.iter().find(|(at, _, _)| *at == k).map(|(_, re, im)| (*re, *im)).unwrap_or((0.0, 0.0));
     let handed = sample(10_044);
     assert!((f32::hypot(handed.0, handed.1) - 0.5).abs() < 1e-6, "A's payload through its exclusive end is radiated: {handed:?}");
     assert_eq!(sample(10_045), (0.0, 0.0), "the safe restart gap is not payload handed at Stop");
     assert_eq!(sample(10_046), (0.0, 0.0), "refused C radiated nothing");
-    let d_sample = sample(10_049);
-    assert!((f32::hypot(d_sample.0, d_sample.1) - 0.5).abs() < 1e-6, "on-time D at H+4 radiates: {d_sample:?}");
-    assert_eq!(sample(10_050), (0.0, 0.0), "radiation ends after D");
+    let d_sample = sample(10_058);
+    assert!((f32::hypot(d_sample.0, d_sample.1) - 0.5).abs() < 1e-6, "on-time D at 2_010_013 radiates: {d_sample:?}");
+    assert_eq!(sample(10_059), (0.0, 0.0), "radiation ends after D");
+    assert_eq!(sample(10_065), (0.0, 0.0), "B, cancelled by the Stop, radiated nothing");
+}
+
+/// RM-16 (Mock, window edge): a booking inside a dropped short head's region, `[stop, 2_010_013)`, follows its late policy. DropAndFlag
+/// refuses it at receipt; SendAsapAndFlag moves it to the region's end, 2_010_013, with `TIME_ERROR { send_asap }`. Each policy runs on its
+/// own world. Untimed placement after the region is in mock_radio.rs.
+#[test]
+fn mr_25_a_booking_in_a_dropped_head_s_region_follows_its_late_policy() {
+    let t0 = 2_000_000_000;
+    for policy in [LatePolicy::DropAndFlag, LatePolicy::SendAsapAndFlag] {
+        let case = format!("{policy:?}");
+        let world = World::new(loopback(None));
+        let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
+        radio.mock.arm().unwrap();
+        radio.mock.start(Some(TimePoint::new(ROOT, t0))).unwrap();
+        let domain = radio.tx_domain(&world);
+        radio.push(burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_009_999, false));
+        radio.push(Action::Stop { target: Some(tgt("mock/tx/s0")) });
+        step(&world, &mut [&mut radio], t0);
+        assert_eq!(records(&radio).len(), 1, "{case}: only A was handed over");
+
+        let mut d = burst(&radio, &world, world.waveform(&[(0.0, 0.5)]), 2_010_004, false);
+        if let Action::TxBurst { late_policy, .. } = &mut d {
+            *late_policy = policy;
+        }
+        radio.push(d);
+        step(&world, &mut [&mut radio], t0);
+        let events = radio.drain_events();
+        let errors: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        let refused = radio.section("rejected").as_array().unwrap().iter().any(|row| row["reason"].as_str().unwrap().contains("overlaps an accepted booking"));
+        step(&world, &mut [&mut radio], t0 + 12_006_001);
+        let records = records(&radio);
+        match policy {
+            LatePolicy::DropAndFlag => {
+                assert!(refused, "{case}: {events:?}");
+                assert!(errors.is_empty(), "{case}: a refused booking is not late: {errors:?}");
+                assert_eq!(records.len(), 1, "{case}: {records:?}");
+            }
+            _ => {
+                assert!(!refused, "{case}: {events:?}");
+                assert_eq!(errors.len(), 1, "{case}: {events:?}");
+                assert_eq!(errors[0].payload["outcome"], "send_asap", "{case}");
+                assert_eq!(records.len(), 2, "{case}: {records:?}");
+                assert_eq!((records[1].target, records[1].samples), (TimePoint::new(domain, 2_010_013), 1), "{case}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -618,9 +667,9 @@ fn mr_25_a_repeat_first_send_is_judged_at_32_samples() {
 
 #[test]
 fn mr_17_a_one_sample_burst_uses_the_safe_sample() {
-    // A one-sample burst holds its own sample and the next four (RM-15): a booking at 4003 or 4004 is refused at receipt, 4005 is the first free sample.
+    // A one-sample burst holds its own sample and the next thirteen (RM-15, padded to four, then ten): a booking at 4003 or 4013 is refused at receipt, 4014 is the first free sample.
     let t0 = 2_000_000_000;
-    for (target, refused) in [(2_004_003, true), (2_004_004, true), (2_004_005, false)] {
+    for (target, refused) in [(2_004_003, true), (2_004_013, true), (2_004_014, false)] {
         let case = format!("B at sample {target}");
         let world = World::new(loopback(None));
         let mut radio = prepare(&world, Options { profile: "x3xx", ..Options::default() }).unwrap();
