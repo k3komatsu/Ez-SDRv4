@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::Sender;
 
 use std::time::Duration as Wall;
 
@@ -26,7 +25,7 @@ use serde_json::json;
 use super::core::booked_stream;
 use super::core::{Clock, Core, Playing, lock, stream_key};
 use super::mode::DescriptionExt;
-use super::tx::{Held, TxCmd};
+use super::tx::Held;
 use crate::device::{DeviceError, Dir, Iq, Settings, decimation};
 use crate::host::HostClock;
 use crate::profile::{DELIVERY_ALLOWANCE_NS, DEVICE_LEAD_NS};
@@ -141,8 +140,6 @@ impl Planned {
 pub(crate) struct Control {
     pub core: Arc<Core>,
     pub actions: Arc<dyn ActionReceiver>,
-    /// One sender per transmit stream (RM-29).
-    pub to_tx: Vec<Sender<TxCmd>>,
     /// The receive values of record: the Run's configuration and the values a stopped stream accepted,
     /// which a `start_rx` snapshots at its booking (RM-21, UR-26).
     pub staging: Staging,
@@ -172,7 +169,7 @@ pub(crate) struct Start {
 
 impl Control {
     /// uhd-control, with the streams' timelines shared from the Run's start.
-    pub fn new(core: Arc<Core>, actions: Arc<dyn ActionReceiver>, to_tx: Vec<Sender<TxCmd>>, config: BTreeMap<Key, Value>, reference_monitored: bool, start: Start) -> Control {
+    pub fn new(core: Arc<Core>, actions: Arc<dyn ActionReceiver>, config: BTreeMap<Key, Value>, reference_monitored: bool, start: Start) -> Control {
         let host = core.device.host();
         // RM-25, VH-4: this Module's terms — each direction's start lead, and, for a receive
         // segment after a cut, the receive call in progress there and the delivery
@@ -226,7 +223,7 @@ impl Control {
                 streams.lines.insert(stream_key(Dir::Tx, k), line.clone());
             }
         }
-        Control { core, actions, to_tx, staging: Staging::new(config), reference_monitored, clock_lost: false, failing_since: None, host }
+        Control { core, actions, staging: Staging::new(config), reference_monitored, clock_lost: false, failing_since: None, host }
     }
 
     pub fn run(mut self) {
@@ -317,10 +314,8 @@ impl Control {
                             self.core.timing(json!({ "what": "tx_stop_applied", "stream": k, "at": now, "bound": bound }));
                         }
                     }
-                    drop(streams);
-                    if let Some(to_tx) = self.to_tx.get(k) {
-                        let _ = to_tx.send(TxCmd::Stop);
-                    }
+                    // The Stop reaches uhd-tx whether or not the line booked it, in receipt order with the bookings (UR-26).
+                    streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);
                 }
                 if !rx.is_empty() {
                     let mut streams = lock(&self.core.streams);
@@ -452,27 +447,10 @@ impl Control {
         if !(metadata.is_empty() || switch) {
             return reject("UR-21: TxBurst.metadata must be empty or the repeat-switch mark");
         }
-        // RM-14 on the device lead, RM-15's origin bound (VE-2; N-P0-1).
-        let lead = self.core.device_lead();
-        let receipt = self.core.now();
-        let now = timeline::decided_at(receipt, clock.origin, lead);
-        let now_k = clock.at_or_after(now);
-        // RM-37: a switch's boundary is not judged late at receipt; the owner moves a late one at its install (UR-38).
-        // RM-15: an untimed burst's late policy is not consulted; it is placed (below).
-        let decided = if switch || untimed {
-            Ok(LateOutcome::OnTime {})
-        } else {
-            late_policy.decide(&self.core.clocks, at.time_point, TimePoint::new(clock.domain, now_k), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS))
-        };
-        let mut outcome = match decided {
-            Ok(outcome) => outcome,
-            Err(error) => return reject(&format!("UR-21: {error}")),
-        };
-        let mut start = match at.time_point.ticks_in(clock.domain) {
-            Ok(k) => k,
-            Err(error) => return reject(&format!("UR-21: {error}")),
-        };
-        let mut requested = requested_at.map(|d| d.time_point);
+        let (generation, values) = self.staging.tx_snapshot(k as u32);
+        let settings = Arc::new(ColdConfig::of_tx(values, id, generation));
+        self.core.probe("tx_book_cut_checked", None);
+        // One critical section from the instant read to the booking on the list: what a later Stop or `Provider::stop` finds is exactly what was accepted before it (UR-21, UR-26).
         let time_error = |outcome: TimeErrorOutcome, late_by: Duration| {
             let payload = serde_json::to_value(TimeErrorPayload {
                 cause: TimeErrorCause::Late,
@@ -485,91 +463,155 @@ impl Control {
             // The burst's own stream (RM-29).
             self.core.emit(&self.core.stream_node(Dir::Tx, k), kinds::TIME_ERROR, Severity::Error, payload);
         };
+        // An early refusal or drop is decided inside the section and emitted after the guard is released (an emit may block on the collector).
         let mut send_asap = None;
-        match outcome {
-            LateOutcome::OnTime {} => {}
-            LateOutcome::SendAsap { late_by } => {
-                requested = requested.or(Some(at.time_point));
-                send_asap = Some(late_by);
-            }
-            LateOutcome::Drop { late_by } => {
-                time_error(TimeErrorOutcome::Drop, late_by);
-                return self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the late policy dropped the burst" }));
-            }
-            LateOutcome::PlanViolation { late_by } => {
-                time_error(TimeErrorOutcome::PlanViolation, late_by);
-                return self.core.reject_note(json!({ "kind": "tx_burst", "reason": "UR-21: the planned burst arrived late" }));
-            }
-        }
-        let join_by = |e: i64| self.core.join_by(clock, e);
-        let ordinary = ordinary_k(now, lead, |t| clock.at_or_after(t), |k| clock.instant(k));
-        let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);
-        let horizon = handover_horizon(receipt, window, |t| clock.at_or_after(t));
-        let (refusal, playing) = {
+        let early: Result<Option<&str>, Early> = 'section: {
             let mut streams = lock(&self.core.streams);
-            let stream = streams.stream_mut(stream_key(Dir::Tx, k));
-            let playing = stream.playing;
-            let busy = &mut stream.busy;
-            busy.prune(clock.at_or_after(receipt));
-            let rec_len = (!repeat).then_some(len as i64);
-            let mut unplaced = false;
-            if untimed && !switch {
-                match busy.place_untimed(start, ordinary, rec_len, receipt, join_by, horizon) {
-                    Some(free) => start = free,
-                    None => unplaced = true,
-                }
-            } else if send_asap.is_some() {
-                match busy.place(ordinary, rec_len, receipt, join_by, horizon) {
-                    Some(free) => start = free,
-                    None => unplaced = true,
-                }
-            } else if late_policy == ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag && !switch && matches!(outcome, LateOutcome::OnTime {}) {
-                // RM-16 (F36): a timed SendAsap burst that meets only the Stop region moves past it, with TIME_ERROR{send_asap}.
-                match busy.region_move(start, rec_len, receipt, join_by, horizon) {
-                    Ok(moved) if moved != start => {
-                        let late_by = match self.core.late_by(clock, moved - start) {
-                            Ok(late_by) => late_by,
-                            Err(error) => return reject(&format!("UR-21: {error}")),
-                        };
-                        start = moved;
-                        outcome = LateOutcome::SendAsap { late_by };
-                        send_asap = Some(late_by);
-                        requested = requested.or(Some(at.time_point));
-                    }
-                    Ok(_) => {}
-                    Err(_) => unplaced = true,
-                }
+            // The cut was checked above in another section: a `Provider::stop` cut may have come in between, and a booking after a cut is refused.
+            if streams.line(stream_key(Dir::Tx, k)).and_then(|line| line.plan.last()).is_none_or(|segment| segment.cut.is_some()) {
+                break 'section Err(Early::Reject("UR-21: no transmit channel is configured".into()));
             }
-            if switch {
-                if let Some(playing) = playing {
-                    let bound = clock.at_or_after(receipt.saturating_add(window).saturating_add(lead));
-                    start = ezsdr_radio::staging::repeat_boundary(playing.origin, playing.period, bound.max(start));
-                }
-            }
-            // The instants are computed before anything is booked: one that does not fit is a refusal, not a booked chain.
-            let end = (!repeat).then(|| clock.try_instant(start.saturating_add(len as i64)));
-            let refusal = if clock.try_instant(start).is_none() || end.is_some_and(|end| end.is_none()) {
-                Some("UR-21: the burst time overflows the transmit clock")
-            } else if clock.instant(start) < self.core.start_up.load(Ordering::Acquire) {
-                Some("UR-21: the burst begins before the device's start-up")
-            } else if switch {
-                (!playing.is_some_and(|from| busy.switch(id, (from.origin, from.period), start, clock.at_or_after(receipt))))
-                    .then_some("UR-21: a repeat switch needs a playing repeat and no pending switch")
-            } else if unplaced {
-                Some("UR-21: the burst overlaps an accepted booking")
+            // RM-14 on the device lead, RM-15's origin bound (VE-2; N-P0-1).
+            let lead = self.core.device_lead();
+            let receipt = self.core.now();
+            let now = timeline::decided_at(receipt, clock.origin, lead);
+            let now_k = clock.at_or_after(now);
+            // RM-37: a switch's boundary is not judged late at receipt; the owner moves a late one at its install (UR-38).
+            // RM-15: an untimed burst's late policy is not consulted; it is placed (below).
+            let decided = if switch || untimed {
+                Ok(LateOutcome::OnTime {})
             } else {
-                busy.accept(start, (!repeat).then_some(len as i64), receipt, join_by, horizon).err().map(|overlap| match overlap {
-                    Overlap::Booking => "UR-21: the burst overlaps an accepted booking",
-                    Overlap::Handed => "UR-21: the burst starts before a booking that may already be handed",
-                })
+                late_policy.decide(&self.core.clocks, at.time_point, TimePoint::new(clock.domain, now_k), Duration::new(ClockDomainId::HOST_MONOTONIC, DEVICE_LEAD_NS))
             };
-            if refusal.is_none() {
-                busy.book(end.flatten());
-                if repeat && !switch {
-                    stream.playing = Some(Playing { id, origin: start, period: len as i64 });
+            let mut outcome = match decided {
+                Ok(outcome) => outcome,
+                Err(error) => break 'section Err(Early::Reject(format!("UR-21: {error}"))),
+            };
+            let mut start = match at.time_point.ticks_in(clock.domain) {
+                Ok(k) => k,
+                Err(error) => break 'section Err(Early::Reject(format!("UR-21: {error}"))),
+            };
+            let mut requested = requested_at.map(|d| d.time_point);
+            match outcome {
+                LateOutcome::OnTime {} => {}
+                LateOutcome::SendAsap { late_by } => {
+                    requested = requested.or(Some(at.time_point));
+                    send_asap = Some(late_by);
+                }
+                LateOutcome::Drop { late_by } => {
+                    break 'section Err(Early::Dropped(TimeErrorOutcome::Drop, late_by, "UR-21: the late policy dropped the burst"));
+                }
+                LateOutcome::PlanViolation { late_by } => {
+                    break 'section Err(Early::Dropped(TimeErrorOutcome::PlanViolation, late_by, "UR-21: the planned burst arrived late"));
                 }
             }
-            (refusal, playing)
+            let join_by = |e: i64| self.core.join_by(clock, e);
+            let ordinary = ordinary_k(now, lead, |t| clock.at_or_after(t), |k| clock.instant(k));
+            let window = self.core.ticks(self.core.description.timing.tx_in_flight_ns);
+            let horizon = handover_horizon(receipt, window, |t| clock.at_or_after(t));
+            let refusal = {
+                let stream = streams.stream_mut(stream_key(Dir::Tx, k));
+                let playing = stream.playing;
+                let busy = &mut stream.busy;
+                busy.prune(clock.at_or_after(receipt));
+                let rec_len = (!repeat).then_some(len as i64);
+                let mut unplaced = false;
+                if untimed && !switch {
+                    match busy.place_untimed(start, ordinary, rec_len, receipt, join_by, horizon) {
+                        Some(free) => start = free,
+                        None => unplaced = true,
+                    }
+                } else if send_asap.is_some() {
+                    match busy.place(ordinary, rec_len, receipt, join_by, horizon) {
+                        Some(free) => start = free,
+                        None => unplaced = true,
+                    }
+                } else if late_policy == ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag && !switch && matches!(outcome, LateOutcome::OnTime {}) {
+                    // RM-16 (F36): a timed SendAsap burst that meets only the Stop region moves past it, with TIME_ERROR{send_asap}.
+                    match busy.region_move(start, rec_len, receipt, join_by, horizon) {
+                        Ok(moved) if moved != start => {
+                            let late_by = match self.core.late_by(clock, moved - start) {
+                                Ok(late_by) => late_by,
+                                Err(error) => break 'section Err(Early::Reject(format!("UR-21: {error}"))),
+                            };
+                            start = moved;
+                            outcome = LateOutcome::SendAsap { late_by };
+                            send_asap = Some(late_by);
+                            requested = requested.or(Some(at.time_point));
+                        }
+                        Ok(_) => {}
+                        Err(_) => unplaced = true,
+                    }
+                }
+                if switch {
+                    if let Some(playing) = playing {
+                        let bound = clock.at_or_after(receipt.saturating_add(window).saturating_add(lead));
+                        start = ezsdr_radio::staging::repeat_boundary(playing.origin, playing.period, bound.max(start));
+                    }
+                }
+                // The instants are computed before anything is booked: one that does not fit is a refusal, not a booked chain.
+                let end = (!repeat).then(|| clock.try_instant(start.saturating_add(len as i64)));
+                let refusal = if clock.try_instant(start).is_none() || end.is_some_and(|end| end.is_none()) {
+                    Some("UR-21: the burst time overflows the transmit clock")
+                } else if clock.instant(start) < self.core.start_up.load(Ordering::Acquire) {
+                    Some("UR-21: the burst begins before the device's start-up")
+                } else if switch {
+                    (!playing.is_some_and(|from| busy.switch(id, (from.origin, from.period), start, clock.at_or_after(receipt))))
+                        .then_some("UR-21: a repeat switch needs a playing repeat and no pending switch")
+                } else if unplaced {
+                    Some("UR-21: the burst overlaps an accepted booking")
+                } else {
+                    busy.accept(start, (!repeat).then_some(len as i64), receipt, join_by, horizon).err().map(|overlap| match overlap {
+                        Overlap::Booking => "UR-21: the burst overlaps an accepted booking",
+                        Overlap::Handed => "UR-21: the burst starts before a booking that may already be handed",
+                    })
+                };
+                if refusal.is_none() {
+                    busy.book(end.flatten());
+                    if repeat && !switch {
+                        stream.playing = Some(Playing { id, origin: start, period: len as i64 });
+                    }
+                    // The row exists before uhd-tx can read the switch and settle it.
+                    if let (true, Some(from)) = (switch, playing) {
+                        let row = ezsdr_radio::staging::SwitchRecord {
+                            action_id: id,
+                            predecessor: from.id,
+                            selected_at: self.core.at(receipt),
+                            old_period: from.period,
+                            new_period: len as i64,
+                            boundary: start,
+                            moved_to: None,
+                            outcome: "pending",
+                        };
+                        lock(&self.core.rec).switches.push(serde_json::to_value(row).expect("a switch row"));
+                    }
+                    let open = BurstOpen { waveform_len: u32::try_from(len).ok(), late: (!matches!(outcome, LateOutcome::OnTime {})).then_some(outcome), requested_target: requested };
+                    stream.list.book(Held {
+                        k: start,
+                        domain: clock.domain,
+                        samples: Arc::new(samples),
+                        waveform_len: len,
+                        repeat,
+                        switch,
+                        untimed,
+                        open,
+                        policy: late_policy,
+                        target: at.time_point,
+                        settings,
+                    });
+                }
+                refusal
+            };
+            drop(streams);
+            Ok(refusal)
+        };
+        let refusal = match early {
+            Ok(refusal) => refusal,
+            Err(Early::Reject(reason)) => return reject(&reason),
+            Err(Early::Dropped(outcome, late_by, reason)) => {
+                time_error(outcome, late_by);
+                return self.core.reject_note(json!({ "kind": "tx_burst", "reason": reason }));
+            }
         };
         if let Some(reason) = refusal {
             if let Some(late_by) = send_asap {
@@ -577,40 +619,9 @@ impl Control {
             }
             return reject(reason);
         }
-        if let (true, Some(from)) = (switch, playing) {
-            let row = ezsdr_radio::staging::SwitchRecord {
-                action_id: id,
-                predecessor: from.id,
-                selected_at: self.core.at(receipt),
-                old_period: from.period,
-                new_period: len as i64,
-                boundary: start,
-                moved_to: None,
-                outcome: "pending",
-            };
-            lock(&self.core.rec).switches.push(serde_json::to_value(row).expect("a switch row"));
-        }
         if let Some(late_by) = send_asap {
             time_error(TimeErrorOutcome::SendAsap, late_by);
         }
-        let (generation, values) = self.staging.tx_snapshot(k as u32);
-        let settings = Arc::new(ColdConfig::of_tx(values, id, generation));
-        let open = BurstOpen { waveform_len: u32::try_from(len).ok(), late: (!matches!(outcome, LateOutcome::OnTime {})).then_some(outcome), requested_target: requested };
-        let _ = self.to_tx.get(k).map(|to_tx| {
-            to_tx.send(TxCmd::Burst(Held {
-                k: start,
-                domain: clock.domain,
-                samples: Arc::new(samples),
-                waveform_len: len,
-                repeat,
-                switch,
-                untimed,
-                open,
-                policy: late_policy,
-                target: at.time_point,
-                settings,
-            }))
-        });
     }
 
     // ------------------------------------------------------------ UR-27, UR-29
@@ -647,19 +658,25 @@ impl Control {
     }
 }
 
+/// An early exit of `book_burst`, decided under the `streams` guard and emitted after it is released.
+enum Early {
+    Reject(String),
+    Dropped(TimeErrorOutcome, Duration, &'static str),
+}
+
 #[cfg(test)]
 mod differential;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::{Receiver, channel};
+    use std::sync::mpsc::channel;
 
     use super::super::core::key;
     use super::*;
     use crate::provider::test_support::device_at;
     use ezsdr_kernel::spec::Scalar;
     use ezsdr_kernel::stream::{BackPressure, BlockRef, DataLink, DropCarry, PublishOutcome};
-    use ezsdr_radio::staging::{Refusal, Until};
+    use ezsdr_radio::staging::{Read, Refusal, Until};
 
     struct NoActions;
     impl ActionReceiver for NoActions {
@@ -694,8 +711,26 @@ mod tests {
     }
 
     /// uhd-control with one channel at 1 MS/s on each direction in `on` from 0.
-    fn control(core: &Arc<Core>, on: &[Dir]) -> (Control, Receiver<TxCmd>) {
-        let (to_tx, tx) = channel();
+    /// The booking uhd-control put on transmit stream 0's list, if the next receipt is one (UR-21).
+    fn next_booking(core: &Core) -> Option<Held> {
+        match lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).list.read() {
+            Some(Read::Booking(held)) => Some(held),
+            _ => None,
+        }
+    }
+
+    /// Every booking left on transmit stream 0's list, Stops skipped, in receipt order.
+    fn booked(core: &Core) -> Vec<Held> {
+        let mut streams = lock(&core.streams);
+        std::iter::from_fn(|| streams.stream_mut(stream_key(Dir::Tx, 0)).list.read()).filter_map(|read| if let Read::Booking(held) = read { Some(held) } else { None }).collect()
+    }
+
+    /// Whether the next receipt on transmit stream 0's list is a Stop (UR-26).
+    fn stop_halted(core: &Core) -> bool {
+        matches!(lock(&core.streams).stream_mut(stream_key(Dir::Tx, 0)).list.read(), Some(Read::Halt { reason: ezsdr_radio::CancelReason::Stop, .. }))
+    }
+
+    fn control(core: &Arc<Core>, on: &[Dir]) -> Control {
         let mut config = core.description.defaults();
         let mut start = Start { t0: 0, rx: vec![None; core.description.stream_count(Dir::Rx)], tx: vec![None; core.description.stream_count(Dir::Tx)] };
         config.insert(key("radio.rx.c0.stream"), Value::from(if on.contains(&Dir::Rx) { 0 } else { -1 }));
@@ -710,7 +745,7 @@ mod tests {
                 }
             }
         }
-        (Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start), tx)
+        Control::new(core.clone(), Arc::new(NoActions), config, false, start)
     }
 
     /// The plan of `dir`'s stream as its owner reads it.
@@ -744,11 +779,11 @@ mod tests {
     #[test]
     fn ur_34_a_transmit_stop_books_the_wait_exit_and_queues_the_owner_stop() {
         let (core, _device, _time) = rig();
-        let (mut control, owner) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         control.book(Dispatched::new(ActionId(1), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
         let stream = booked_stream(Dir::Tx);
         let stop = lock(&core.streams).line(stream).unwrap().items.iter().find(|item| item.kind == Kind::Stop).copied().unwrap();
-        assert!(matches!(owner.try_recv().unwrap(), TxCmd::Stop));
+        assert!(stop_halted(&core));
         assert_eq!(stop.e, core.now());
     }
 
@@ -756,7 +791,7 @@ mod tests {
     fn ur_30_a_transmit_stop_records_the_bound_its_bookings_end_at() {
         // RM-16 (#83): the `tx_stop_applied` row holds the Stop's root instant and the bound the bookings end at, the values the
         // parity test compares the repeat with. The bound is the first sample at or after `at + tx_in_flight`, plus three (as S3 states).
-        let (core, mut control, _to_tx, time, _events) = tx_rig();
+        let (core, mut control, time, _events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         let stop = core.ticks(5_000_000);
         time.advance_to(core.at(stop)).unwrap();
@@ -773,7 +808,7 @@ mod tests {
         // 15 ms here). An untimed repeat received inside that region (7 ms) starts at the bound; one received after it (20 ms) starts at
         // its ordinary start, which the device lead after its receipt sets. The test sets the instants, so no thread timing moves either.
         for (receipt_ms, inside) in [(7, true), (20, false)] {
-            let (core, mut control, to_tx, time, _events) = tx_rig();
+            let (core, mut control, time, _events) = tx_rig();
             book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
             let stop = core.ticks(5_000_000);
             time.advance_to(core.at(stop)).unwrap();
@@ -784,10 +819,10 @@ mod tests {
             time.advance_to(core.at(receipt)).unwrap();
             let ordinary =
                 ezsdr_radio::staging::ordinary_k(ezsdr_radio::timeline::decided_at(receipt, clock.origin, core.device_lead()), core.device_lead(), |t| clock.at_or_after(t), |k| clock.instant(k));
-            let _ = to_tx.try_iter().count();
+            while next_booking(&core).is_some() {}
             // The Kernel stamps an untimed burst at its receipt; the Provider takes the later of that and the ordinary start.
             control.book(tx_burst_dispatch(&core, 3, clock.at_or_after(receipt), true, ezsdr_kernel::stream::LatePolicy::DropAndFlag, true));
-            let TxCmd::Burst(held) = to_tx.try_recv().expect("the untimed repeat is handed to uhd-tx") else { panic!("not a burst") };
+            let held = next_booking(&core).expect("the untimed repeat is handed to uhd-tx");
             let expected = if inside { bound } else { ordinary };
             assert_eq!(held.k, expected, "received at {receipt_ms} ms: the bound is {bound}, the ordinary start {ordinary}");
         }
@@ -805,7 +840,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         let clock = tx_clock(&core);
         // Booking 10 ms in: the requested start (sample 0) is far behind the 2 ms device lead.
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
@@ -828,7 +863,7 @@ mod tests {
         assert_eq!(verdict.payload["outcome"], "send_asap", "{verdict:?}");
         // Still between the booking and uhd-tx's first hand-over: what uhd-control hands over
         // is the moved start, and the moved start is what its reservation holds.
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("the receipt site handed the burst to uhd-tx");
         let moved = held.k;
         assert_ne!(moved, requested.ticks_in(clock.domain).unwrap(), "the receipt move was not applied");
         assert!(clock.instant(moved) >= core.ticks(10_000_000) + core.ticks(DEVICE_LEAD_NS), "the moved start is not the device lead past the booking instant: {}", clock.instant(moved));
@@ -844,7 +879,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, _) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         let clock = tx_clock(&core);
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
         control.book(Dispatched::new(
@@ -860,7 +895,7 @@ mod tests {
             },
             Some(core.tx_id.clone()),
         ));
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("production booking hands the repeat to uhd-tx") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("production booking hands the repeat to uhd-tx");
         assert_eq!(held.waveform_len, 997);
         assert_eq!(held.open.waveform_len, Some(997));
         assert_eq!(held.samples[0].len(), 997, "booking stores the untiled waveform");
@@ -878,7 +913,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, _events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         let clock = tx_clock(&core);
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
         // On time at 20 ms, asked for at 5 ms.
@@ -896,7 +931,7 @@ mod tests {
             },
             Some(core.tx_id.clone()),
         ));
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("the receipt site handed the burst to uhd-tx");
         assert_eq!(held.k, 20_000, "an on-time burst starts at its `at`");
         assert_eq!(held.open.requested_target, Some(requested), "the on-time burst's requested target is the `requested_at`");
         // Late: its `at` is behind the booking, asked for at 2 ms; `SendAsap` moves the start.
@@ -914,7 +949,7 @@ mod tests {
             },
             Some(core.tx_id.clone()),
         ));
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the moved burst to uhd-tx") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("the receipt site handed the moved burst to uhd-tx");
         assert_eq!(held.k, 12_000, "the moved start is the device lead past the booking");
         assert_eq!(held.open.requested_target, Some(requested), "the moved burst's requested target is its `requested_at`, not its moved start");
     }
@@ -931,7 +966,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         core.start_up.store(core.ticks(1_000_000_000), std::sync::atomic::Ordering::Release);
         let clock = tx_clock(&core);
         // 20 ms ahead: past the device lead, so the late policy is not what refuses it, and
@@ -952,7 +987,7 @@ mod tests {
         ));
         let rejected = lock(&core.rec).rejected.clone();
         assert!(rejected.iter().any(|row| row["reason"].as_str().unwrap_or("").starts_with("UR-21: the burst begins before the device's start-up")), "{rejected:?}");
-        assert!(to_tx.try_recv().is_err(), "a refused burst was handed to uhd-tx");
+        assert!(next_booking(&core).is_none(), "a refused burst was handed to uhd-tx");
         // The refusal reaches the caller as `COMMAND_REJECTED`, naming the Action it answers.
         let event = events.drain(TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|event| event.kind.as_str() == kinds::COMMAND_REJECTED).expect("COMMAND_REJECTED");
         assert_eq!(event.payload["reason"], "UR-21: the burst begins before the device's start-up", "{event:?}");
@@ -968,7 +1003,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, _time, _events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         let clock = tx_clock(&core);
         for (id, at) in [(1, 20_000), (2, 40_000)] {
             control.book(Dispatched::new(
@@ -985,21 +1020,20 @@ mod tests {
                 Some(core.tx_id.clone()),
             ));
             assert!(lock(&core.rec).rejected.is_empty(), "{:?}", lock(&core.rec).rejected);
-            let TxCmd::Burst(held) = to_tx.try_recv().expect("the burst is handed to uhd-tx") else { panic!("not a burst") };
+            let held = next_booking(&core).expect("the burst is handed to uhd-tx");
             assert_eq!(held.domain, clock.domain);
             assert_eq!(lock(&core.streams).stream(booked_stream(Dir::Tx)).clock.map(|c| c.domain), Some(clock.domain));
         }
     }
 
     /// uhd-control with a transmit clock at 2 MS/s (100 root ticks a sample) whose origin is `origin` root ticks (RM-25).
-    fn control_with_tx_origin(core: &Arc<Core>, origin: i64) -> (Control, Receiver<TxCmd>) {
-        let (to_tx, tx) = channel();
+    fn control_with_tx_origin(core: &Arc<Core>, origin: i64) -> Control {
         let mut config = core.description.defaults();
         config.insert(key("radio.rx.c0.stream"), Value::from(-1));
         config.insert(key("radio.tx.c0.stream"), Value::from(0));
         let mut start = Start { t0: 0, rx: vec![None; core.description.stream_count(Dir::Rx)], tx: vec![None; core.description.stream_count(Dir::Tx)] };
         start.tx[0] = Some((core.register(Dir::Tx, 100, origin).unwrap(), Channels::first(1)));
-        (Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start), tx)
+        Control::new(core.clone(), Arc::new(NoActions), config, false, start)
     }
 
     #[test]
@@ -1014,7 +1048,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control_with_tx_origin(&core, core.ticks(50_000_000));
+        let mut control = control_with_tx_origin(&core, core.ticks(50_000_000));
         let plan = plan_of(&core, Dir::Tx);
         assert_eq!(plan.len(), 1, "the clock's segment is planned");
         let clock = tx_clock(&core);
@@ -1039,7 +1073,7 @@ mod tests {
             events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().find(|e| e.kind.as_str() == kinds::TIME_ERROR).expect("the SendAsap verdict at booking");
         assert_eq!(verdict.payload["outcome"], "send_asap", "{verdict:?}");
         assert_eq!(verdict.payload["target"], serde_json::to_value(target).unwrap(), "{verdict:?}");
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("the receipt site handed the burst to uhd-tx") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("the receipt site handed the burst to uhd-tx");
         assert_eq!(held.k, 0, "the moved start is not the clock's origin");
         assert_eq!(clock.instant(held.k), plan[0].segment.origin);
         let booked = lock(&core.streams).stream(stream_key(Dir::Tx, 0)).busy.stageable(core.now()).err();
@@ -1058,7 +1092,7 @@ mod tests {
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         let clock = tx_clock(&core);
         let lead = core.ticks(crate::profile::DEVICE_LEAD_NS + crate::profile::DELIVERY_ALLOWANCE_NS);
         let ms = |n: i64| core.ticks(n * 1_000_000);
@@ -1084,7 +1118,7 @@ mod tests {
             ));
             let errors = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).count();
             assert_eq!(errors, 0, "read {read_after} ms after receipt: an untimed burst has no TIME_ERROR");
-            let TxCmd::Burst(held) = to_tx.try_recv().expect("the untimed burst is handed to uhd-tx") else { panic!("not a burst") };
+            let held = next_booking(&core).expect("the untimed burst is handed to uhd-tx");
             let ordinary =
                 ezsdr_radio::staging::ordinary_k(ezsdr_radio::timeline::decided_at(read, clock.origin, core.device_lead()), core.device_lead(), |t| clock.at_or_after(t), |k| clock.instant(k));
             assert_eq!(held.k, target.max(ordinary), "read {read_after} ms after receipt");
@@ -1103,7 +1137,7 @@ mod tests {
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         for read_after_ms in [1, 49] {
             let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash.clone(), Arc::<[u8]>::from(bytes.clone()))]));
-            let (mut control, to_tx) = control_with_tx_origin(&core, core.ticks(50_000_000));
+            let mut control = control_with_tx_origin(&core, core.ticks(50_000_000));
             let plan = plan_of(&core, Dir::Tx);
             let clock = tx_clock(&core);
             assert_eq!(plan[0].segment.origin, core.ticks(50_000_000), "the clock's origin");
@@ -1125,7 +1159,7 @@ mod tests {
             ));
             let errors = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).count();
             assert_eq!(errors, 0, "read {read_after_ms} ms after the change");
-            let TxCmd::Burst(held) = to_tx.try_recv().expect("the untimed burst is handed to uhd-tx") else { panic!("not a burst") };
+            let held = next_booking(&core).expect("the untimed burst is handed to uhd-tx");
             let ordinary =
                 ezsdr_radio::staging::ordinary_k(ezsdr_radio::timeline::decided_at(read, clock.origin, core.device_lead()), core.device_lead(), |t| clock.at_or_after(t), |k| clock.instant(k));
             assert_eq!(held.k, ordinary.max(0), "read {read_after_ms} ms after the change");
@@ -1135,14 +1169,14 @@ mod tests {
     /// The Stop-region rig: a repeat at sample 2 500 booked at device time 0, then a `Stop` there that cancels it, so the Stop region
     /// is `[0, stop)`. Returns the Provider's control, the handed bursts, the transmit clock, the waveform's reference and the events.
     #[allow(clippy::type_complexity)]
-    fn stopped_repeat(late_policy: ezsdr_kernel::stream::LatePolicy) -> (Control, Receiver<TxCmd>, Clock, ezsdr_kernel::manifest::ArtifactRef, Arc<ezsdr_kernel::event::EventCollector>, Arc<Core>) {
+    fn stopped_repeat(late_policy: ezsdr_kernel::stream::LatePolicy) -> (Control, Clock, ezsdr_kernel::manifest::ArtifactRef, Arc<ezsdr_kernel::event::EventCollector>, Arc<Core>) {
         let samples: Vec<(f32, f32)> = vec![(0.25, 0.0), (0.5, 0.0)];
         let bytes: Vec<u8> = samples.iter().flat_map(|(re, im)| [re.to_le_bytes(), im.to_le_bytes()].concat()).collect();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let (core, _device, _time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (mut control, to_tx) = control(&core, &[Dir::Tx]);
+        let mut control = control(&core, &[Dir::Tx]);
         let clock = tx_clock(&core);
         control.book(Dispatched::new(
             ActionId(1),
@@ -1158,14 +1192,14 @@ mod tests {
             Some(core.tx_id.clone()),
         ));
         control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(super::super::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
-        (control, to_tx, clock, waveform, events, core)
+        (control, clock, waveform, events, core)
     }
 
     #[test]
     fn ur_21_s16_timed_send_asap_in_the_stop_region_moves_with_time_error() {
         // RM-16 (F36, UHD): a timed `SendAsap` burst on time at receipt whose start is in the Stop region moves past it, with one
         // `TIME_ERROR { send_asap }`, and its record is late by the same amount and reports its `at` as the requested target.
-        let (mut control, to_tx, clock, waveform, events, core) = stopped_repeat(ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
+        let (mut control, clock, waveform, events, core) = stopped_repeat(ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         let at = TimePoint::new(clock.domain, 2_010);
         control.book(Dispatched::new(
             ActionId(3),
@@ -1183,7 +1217,7 @@ mod tests {
         let verdicts: Vec<_> = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).into_iter().filter(|e| e.kind.as_str() == kinds::TIME_ERROR).collect();
         assert_eq!(verdicts.len(), 1, "{verdicts:?}");
         assert_eq!(verdicts[0].payload["outcome"], "send_asap", "{verdicts:?}");
-        let bursts: Vec<_> = to_tx.try_iter().filter_map(|cmd| if let TxCmd::Burst(held) = cmd { Some(held) } else { None }).collect();
+        let bursts: Vec<_> = booked(&core);
         let moved = bursts.iter().find(|held| !held.repeat).expect("the moved burst is handed to uhd-tx");
         assert!(moved.k > 2_010, "the burst starts after its `at`, past the Stop region: {}", moved.k);
         assert_eq!(moved.open.requested_target, Some(at), "the record reports the instant the caller asked for");
@@ -1193,7 +1227,7 @@ mod tests {
     #[test]
     fn ur_21_s16_timed_drop_in_the_stop_region_is_refused() {
         // RM-16 (F36, UHD): a timed `DropAndFlag` burst whose start is in the Stop region is refused, with no `TIME_ERROR`.
-        let (mut control, to_tx, clock, waveform, events, core) = stopped_repeat(ezsdr_kernel::stream::LatePolicy::DropAndFlag);
+        let (mut control, clock, waveform, events, core) = stopped_repeat(ezsdr_kernel::stream::LatePolicy::DropAndFlag);
         control.book(Dispatched::new(
             ActionId(3),
             Action::TxBurst {
@@ -1210,7 +1244,7 @@ mod tests {
         let events = events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
         assert!(events.iter().all(|e| e.kind.as_str() != kinds::TIME_ERROR), "{events:?}");
         assert_eq!(events.iter().filter(|e| e.kind.as_str() == kinds::COMMAND_REJECTED).count(), 1, "{events:?}");
-        assert!(to_tx.try_iter().all(|cmd| !matches!(cmd, TxCmd::Burst(held) if !held.repeat)), "a refused burst is not handed to uhd-tx");
+        assert!(booked(&core).iter().all(|held| held.repeat), "a refused burst is not handed to uhd-tx");
     }
 
     #[test]
@@ -1220,7 +1254,7 @@ mod tests {
         // it, the first sample it has not delivered.
         for (delivered, cut) in [(None, 5_000), (Some(6_000), 6_000)] {
             let (core, _, time) = rig();
-            let (_control, _tx) = control(&core, &[Dir::Rx]);
+            let _control = control(&core, &[Dir::Rx]);
             time.advance_to(core.at(core.ticks(8_000_000))).unwrap();
             let config = plan_of(&core, Dir::Rx)[0].segment.config;
             if let Some(k) = delivered {
@@ -1239,7 +1273,7 @@ mod tests {
         // stream's line, each with the same instant and arrival order, and a second end
         // books nothing: `ended` is the instance's, not a stream's.
         let (core, _, _) = rig();
-        let (_control, _tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let _control = control(&core, &[Dir::Rx, Dir::Tx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let (rx, tx) = (booked_stream(Dir::Rx), booked_stream(Dir::Tx));
         lock(&core.streams).end(&core, ms(5), false, false);
@@ -1275,7 +1309,7 @@ mod tests {
         let description = ezsdr_radio::channels::Description::new(&layout, 2_000, &crate::profile::terms());
         let (core, _time, _) =
             crate::provider::test_support::rig_on_description(Arc::new(crate::device::FakeDevice::new(crate::device::FakeConfig::default())), vec![Arc::new(NoLink)], BTreeMap::new(), description);
-        let (mut control, _tx) = control(&core, &[Dir::Rx]);
+        let mut control = control(&core, &[Dir::Rx]);
         let streams = std::ptr::from_ref(&core.streams) as usize;
         let instant = core.ticks(300_000_000);
         let at = Some(AbsoluteDeadline::new(core.at(instant)));
@@ -1342,7 +1376,7 @@ mod tests {
                 }
             });
         }
-        let (_control, _tx) = control(&core, &[]);
+        let _control = control(&core, &[]);
         lock(&core.streams).record_open(booked_stream(Dir::Rx), None);
         core.open_streamer(Dir::Rx, 0, Channels::first(1)).expect("the owner's open");
         let seen = during.lock().unwrap().clone();
@@ -1372,7 +1406,7 @@ mod tests {
         let links = vec![vec![Arc::new(NoLink) as Arc<dyn DataLink>]];
         let (core, time, events) = crate::provider::test_support::rig_on_description_links(device.clone(), links, BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]), layout_description());
         let _frozen = hold(&core, &time, &device);
-        let (mut control, to_tx) = control(&core, &[Dir::Rx, Dir::Tx]);
+        let mut control = control(&core, &[Dir::Rx, Dir::Tx]);
         let ms = |n: i64| core.ticks(n * 1_000_000);
         let clock = tx_clock(&core);
         let k = (ms(30) - clock.origin) / clock.n;
@@ -1390,7 +1424,7 @@ mod tests {
             },
             Some(ResourceId::parse("usrp/tx/s0").unwrap()),
         ));
-        assert!(matches!(to_tx.try_recv(), Ok(TxCmd::Burst(_))), "the burst was not handed to uhd-tx");
+        assert!(next_booking(&core).is_some(), "the burst was not booked on the list");
         let booked = lock(&core.streams).stream(stream_key(Dir::Tx, 0)).busy.stageable(core.now()).err();
         assert!(booked.is_some(), "the burst is not booked ahead of its instant");
         control.book(Dispatched::new(
@@ -1398,7 +1432,7 @@ mod tests {
             Action::Stop { target: Some(super::super::test_support::target_of(&ResourceId::parse("usrp/rx/s0").unwrap())) },
             Some(ResourceId::parse("usrp/rx/s0").unwrap()),
         ));
-        assert!(to_tx.try_recv().is_err(), "the receive stream's Stop reached uhd-tx");
+        assert!(!stop_halted(&core), "the receive stream's Stop reached uhd-tx");
         assert_eq!(lock(&core.streams).stream(stream_key(Dir::Tx, 0)).busy.stageable(core.now()).err(), booked, "the receive stream's Stop cancelled the transmit burst");
         assert_eq!(
             lock(&core.streams).line(stream_key(Dir::Tx, 0)).map_or(0, |line| line.items.iter().filter(|item| item.kind == Kind::Stop).count()),
@@ -1441,9 +1475,8 @@ mod tests {
             core: core.clone(),
             early: std::sync::Mutex::new(Vec::new()),
         });
-        let (to_tx, _tx) = channel();
         let start = Start { t0: 0, rx: vec![None; core.description.stream_count(Dir::Rx)], tx: vec![None; core.description.stream_count(Dir::Tx)] };
-        let control = Control::new(core.clone(), receiver.clone(), vec![to_tx], core.description.defaults(), false, start);
+        let control = Control::new(core.clone(), receiver.clone(), core.description.defaults(), false, start);
         let handle = std::thread::spawn(move || control.run());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while lock(&core.rec).rejected.len() < 2 && std::time::Instant::now() < deadline {
@@ -1462,7 +1495,7 @@ mod tests {
         let config = crate::device::FakeConfig { clock: crate::ClockMode::Manual, ..crate::device::FakeConfig::default() };
         let (core, device, time, events) = crate::provider::test_support::rig_with(config, vec![Arc::new(NoLink)]);
         let frozen = hold(&core, &time, &device);
-        let (control, _owner) = control(&core, &[Dir::Rx]);
+        let control = control(&core, &[Dir::Rx]);
         (core, control, device, events, frozen)
     }
 
@@ -1691,8 +1724,7 @@ mod tests {
         config.insert(key("radio.rx.c0.stream"), Value::from(0));
         config.insert(key("radio.rx.c1.stream"), Value::from(1));
         let start = Start { t0: 0, rx: vec![Some((Channels::first(0).with(0), 200)), Some((Channels::first(0).with(1), 200))], tx: vec![None; core.description.stream_count(Dir::Tx)] };
-        let (to_tx, _tx) = channel();
-        let mut control = Control::new(core.clone(), Arc::new(NoActions), vec![to_tx], config, false, start);
+        let mut control = Control::new(core.clone(), Arc::new(NoActions), config, false, start);
         let calls = device.calls().len();
         control.book(Dispatched::new(
             ActionId(1),
@@ -1719,12 +1751,12 @@ mod tests {
     }
 
     /// Transmit stream 0's clock and its input (the four samples), with `control` on transmit only.
-    fn tx_rig() -> (Arc<Core>, Control, Receiver<TxCmd>, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>) {
+    fn tx_rig() -> (Arc<Core>, Control, Arc<ezsdr_kernel::time::ManualTimeAuthority>, Arc<ezsdr_kernel::event::EventCollector>) {
         let bytes = four_samples();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
         let (core, _device, time, events) = crate::provider::test_support::rig_with_inputs(BTreeMap::from([(hash, Arc::<[u8]>::from(bytes))]));
-        let (control, to_tx) = control(&core, &[Dir::Tx]);
-        (core, control, to_tx, time, events)
+        let control = control(&core, &[Dir::Tx]);
+        (core, control, time, events)
     }
 
     /// Books a burst of the four samples at sample `start` of transmit stream 0's clock.
@@ -1756,7 +1788,7 @@ mod tests {
     #[test]
     fn ur_21_a_value_while_a_burst_is_booked_is_refused_with_its_action_id() {
         // S2: a burst booked for the future keeps its stream busy to its end; the value is refused with its own Action id.
-        let (core, mut control, _to_tx, _time, events) = tx_rig();
+        let (core, mut control, _time, events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, false, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         book_value(&mut control, &core, 2, TX_FREQUENCY, frequency(2.4e9), None);
         let refused = events_of(&events, kinds::COMMAND_REJECTED);
@@ -1768,9 +1800,9 @@ mod tests {
     #[test]
     fn ur_21_a_value_after_the_hand_over_and_before_the_end_is_refused() {
         // F2 (#79): the burst's reservation and hand-over do not free the stream; only its booked end does.
-        let (core, mut control, to_tx, _time, events) = tx_rig();
+        let (core, mut control, _time, events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, false, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
-        let TxCmd::Burst(_) = to_tx.try_recv().expect("the burst is handed over at booking") else { panic!("not a burst") };
+        next_booking(&core).expect("the burst is handed over at booking");
         book_value(&mut control, &core, 2, TX_FREQUENCY, frequency(2.4e9), None);
         assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 1, "a value after the hand-over is refused until the burst's end");
     }
@@ -1778,7 +1810,7 @@ mod tests {
     #[test]
     fn ur_23_a_value_at_the_exclusive_end_of_a_burst_is_accepted() {
         // S5: one sample before the exclusive end is refused, the end itself is accepted.
-        let (core, mut control, _to_tx, time, events) = tx_rig();
+        let (core, mut control, time, events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, false, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         let end = tx_clock(&core).instant(10_004);
         time.advance_to(core.at(end - 1)).unwrap();
@@ -1792,14 +1824,14 @@ mod tests {
     #[test]
     fn ur_25_the_last_value_before_a_burst_is_the_one_it_plays() {
         // S4: the last value before the burst is the one it snapshots, with the stream's generation; a value after the booking is refused.
-        let (core, mut control, to_tx, _time, events) = tx_rig();
+        let (core, mut control, _time, events) = tx_rig();
         book_value(&mut control, &core, 1, TX_FREQUENCY, frequency(2.0e9), None);
         book_value(&mut control, &core, 2, TX_FREQUENCY, frequency(3.0e9), None);
         book_tx_burst(&mut control, &core, 3, 10_000, false, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         book_value(&mut control, &core, 4, TX_FREQUENCY, frequency(4.0e9), None);
         let refused = events_of(&events, kinds::COMMAND_REJECTED);
         assert_eq!(refused.iter().map(|event| event.payload["action"].clone()).collect::<Vec<_>>(), [serde_json::json!(4)]);
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("the burst is handed over") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("the burst is handed over");
         assert_eq!(tx_frequency(&held.settings), 3.0e9);
         assert_eq!(held.settings.generation, Some(2), "two accepted values, the burst takes the generation of its booking");
     }
@@ -1807,7 +1839,7 @@ mod tests {
     #[test]
     fn ur_23_a_value_is_taken_only_after_a_stopped_repeat_s_in_flight_window() {
         // S3: a repeat keeps the stream busy; a `Stop` at `s` leaves it busy until the first sample at or after `s + tx_in_flight`, plus three (RM-16), and a value at that bound is taken.
-        let (core, mut control, _to_tx, time, events) = tx_rig();
+        let (core, mut control, time, events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         book_value(&mut control, &core, 2, TX_FREQUENCY, frequency(2.4e9), None);
         assert_eq!(events_of(&events, kinds::COMMAND_REJECTED).len(), 1, "a value while the repeat plays is refused");
@@ -1827,7 +1859,7 @@ mod tests {
     #[test]
     fn ur_23_a_provider_stop_ends_a_repeat_at_its_in_flight_window() {
         // RM-16, VH-2: `Provider::stop` (the stream ends at `at`) bounds the repeat as a `Stop` does.
-        let (core, mut control, _to_tx, time, events) = tx_rig();
+        let (core, mut control, time, events) = tx_rig();
         book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
         let stop = core.ticks(5_000_000);
         time.advance_to(core.at(stop)).unwrap();
@@ -1847,24 +1879,24 @@ mod tests {
         // S-book (P4): a booking its late policy drops occupies no span. At 10 ms the device lead
         // ends at 12 000: the burst at 11 999 is late and would span [11 999, 12 004), so the
         // burst at 12 002, on time at receipt, is accepted.
-        let (core, mut control, to_tx, time, events) = tx_rig();
+        let (core, mut control, time, events) = tx_rig();
         time.advance_to(core.at(core.ticks(10_000_000))).unwrap();
         book_tx_burst(&mut control, &core, 1, 11_999, false, ezsdr_kernel::stream::LatePolicy::DropAndFlag);
-        assert!(to_tx.try_recv().is_err(), "the dropped burst is not handed over");
+        assert!(next_booking(&core).is_none(), "the dropped burst is not handed over");
         book_value(&mut control, &core, 3, TX_FREQUENCY, frequency(2.5e9), None);
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "a dropped burst leaves the stream unbooked: the value is taken");
         book_tx_burst(&mut control, &core, 2, 12_002, false, ezsdr_kernel::stream::LatePolicy::DropAndFlag);
         assert!(events_of(&events, kinds::COMMAND_REJECTED).is_empty(), "a dropped burst occupies no span");
-        assert!(to_tx.try_recv().is_ok(), "the on-time burst is handed over");
+        assert!(next_booking(&core).is_some(), "the on-time burst is handed over");
     }
 
     #[test]
     fn ur_21_a_value_is_judged_by_a_booking_time_move() {
         // R2, S2: a burst the booking moves (SendAsap, the device is late at 15 ms) keeps the stream busy to its moved end, not its requested one.
-        let (core, mut control, to_tx, time, events) = tx_rig();
+        let (core, mut control, time, events) = tx_rig();
         time.advance_to(core.at(core.ticks(15_000_000))).unwrap();
         book_tx_burst(&mut control, &core, 1, 10_000, false, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
-        let TxCmd::Burst(held) = to_tx.try_recv().expect("the moved burst is handed over at booking") else { panic!("not a burst") };
+        let held = next_booking(&core).expect("the moved burst is handed over at booking");
         assert!(held.k > 10_004, "the booking moved the burst past its requested end: {}", held.k);
         let end = tx_clock(&core).instant(held.k + 4);
         time.advance_to(core.at(end - 1)).unwrap();

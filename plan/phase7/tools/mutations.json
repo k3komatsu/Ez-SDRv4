@@ -597,8 +597,8 @@
   "id": "U18",
   "name": "bursts sent in arrival order (the later target booked first goes first)",
   "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-  "old": "        if let Some(&k) = self.held.keys().next() {",
-  "new": "        if let Some(&k) = self.held.keys().next_back() {",
+  "old": "if let Some(k) = self.held_first() {",
+  "new": "if let Some(k) = self.with_held(|map| map.keys().next_back().copied()) {",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
   "filter": "ur_23_bursts_go_out_in_target_order"
@@ -844,7 +844,7 @@
   "new": "if false {\n            self.core.command_rejected(None, \"tx_burst\", reason);\n        } else {\n            self.core.reject_note(json!({ \"kind\": \"tx_burst\", \"reason\": reason }));\n        }",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "lib",
-  "filter": "ur_23_a_clock_end_cancels_every_held_burst"
+  "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
  },
  {
   "id": "R08",

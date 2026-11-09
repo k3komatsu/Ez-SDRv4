@@ -672,7 +672,7 @@ fn o1_uhd_t6b2_an_unhanded_open_booking_at_a_stop_is_cancelled_known_divergence_
     // The normal assertions hold today: no sample of H2 and no burst record of 300 samples.
     assert_eq!(r.heard(3, 0, 60_000), spec.samples);
     assert_eq!(r.rows().iter().filter(|row| row["samples"] == 300).count(), spec.records);
-    // KNOWN DIVERGENCE #85: today's UHD leaves no cancellation note. E1/E2a delete only this block and assert `notes == spec.notes`.
+    // KNOWN DIVERGENCE #85: today's UHD leaves no cancellation note. E2a deletes only this block and asserts `notes == spec.notes`.
     let notes = r.cancellations();
     assert_eq!(notes, 0, "#85 fixed? delete this block and assert notes == spec.notes");
     assert_ne!(notes, spec.notes);

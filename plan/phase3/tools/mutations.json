@@ -634,8 +634,8 @@
   "id": "M76",
   "name": "MR-25 a stop opens at most one held burst before the cut",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "        loop {\n            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }\n            let Some(start) = self.tx[k].held.keys().next().copied().filter(|start| *start < cut) else { break };",
-  "new": "        let mut opened = 0;\n        loop {\n            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }\n            opened += 1;\n            let Some(start) = self.tx[k].held.keys().next().copied().filter(|start| *start < cut && opened <= 1) else { break };",
+  "old": "        loop {\n            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }\n            let Some(start) = self.tx[k].list.held.keys().next().copied().filter(|start| *start < cut) else { break };",
+  "new": "        let mut opened = 0;\n        loop {\n            if self.tx[k].open.is_some() {\n                self.emit_tx_until(k, now, Some(cut))?;\n            }\n            if self.tx[k].open.is_some() { break; }\n            opened += 1;\n            let Some(start) = self.tx[k].list.held.keys().next().copied().filter(|start| *start < cut && opened <= 1) else { break };",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_a_stop_transmits_every_held"

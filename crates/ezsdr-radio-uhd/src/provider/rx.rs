@@ -1040,11 +1040,9 @@ mod tests {
 
         let mut config = core.description.defaults();
         config.insert(super::super::core::key("radio.rx.c0.stream"), ezsdr_kernel::spec::Value::from(0));
-        let (to_tx, _) = std::sync::mpsc::channel();
         let _control = super::super::control::Control::new(
             core.clone(),
             Arc::new(NoActions),
-            vec![to_tx],
             config,
             false,
             super::super::control::Start { t0: 0, rx: vec![Some((Channels::first(1), 200)); core.description.stream_count(Dir::Rx)], tx: vec![None; core.description.stream_count(Dir::Tx)] },

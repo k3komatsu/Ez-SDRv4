@@ -5771,8 +5771,8 @@
   "id": "P453",
   "name": "a transmit `Stop` goes to stream 0 (UR-26, RM-29)",
   "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-  "old": "                    if let Some(to_tx) = self.to_tx.get(k) {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }",
-  "new": "                    if let Some(to_tx) = self.to_tx.first() {\n                        let _ = to_tx.send(TxCmd::Stop);\n                    }",
+  "old": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);",
+  "new": "streams.stream_mut(stream_key(Dir::Tx, 0)).list.halt(ezsdr_radio::CancelReason::Stop);",
   "crate": "ezsdr-radio-uhd",
   "test_bin": "fake",
   "filter": "ur_26_a_stop_of_a_later_transmit_stream_ends_only_its_burst"
@@ -6638,9 +6638,9 @@
   {
     "id": "P569",
     "name": "UHD TX Stop uses the cold-change report policy",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::Stop),",
-    "new": "TxCmd::Stop => self.stop_now(\"UR-26: cancelled by Stop\", ezsdr_radio::CancelReason::ClockEnded),",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);",
+    "new": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::ClockEnded);",
     "crate": "ezsdr-acceptance",
     "test_bin": "parity",
     "filter": "vh_8_tx_stream_stop_cancels_held_bursts"
@@ -6649,8 +6649,8 @@
     "id": "P570",
     "name": "UHD Provider::stop uses the cold-change report policy",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);",
-    "new": "self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ClockEnded);",
+    "old": "self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled);",
+    "new": "self.stop_now(ezsdr_radio::CancelReason::ClockEnded, cancelled);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_26_shutdown_after_loss_cancels_held_bursts_record_only"
@@ -6911,8 +6911,8 @@
   "id": "P635",
   "name": "a prior held burst contributes to MockRadio's front (MR-17)",
   "file": "crates/ezsdr-mock-radio/src/lib.rs",
-  "old": "for held in self.tx[k].held.values() {",
-  "new": "for held in self.tx[k].held.values().filter(|_| false) {",
+  "old": "for held in self.tx[k].list.held.values() {",
+  "new": "for held in self.tx[k].list.held.values().filter(|_| false) {",
   "crate": "ezsdr-mock-radio",
   "test_bin": "mock_channel",
   "filter": "mr_25_stop_hands_a_future_repeat_through_the_in_flight_window"
@@ -10069,8 +10069,8 @@
    "name": "a held burst opened for the first time reports a wait as work (UR-23)",
    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
    "scope": "if k < window_cut",
-   "old": "                self.open = Some(Open { held, next, first: true });\n                let held_cut = self.held.keys().next().copied();\n                return self.send(clock, held_cut, window_cut);",
-   "new": "                self.open = Some(Open { held, next, first: true });\n                let held_cut = self.held.keys().next().copied();\n                self.send(clock, held_cut, window_cut);\n                return true;",
+   "old": "self.open = Some(Open { held, next, first: true }); let held_cut = self.held_first(); return self.send(clock, held_cut, window_cut);",
+   "new": "self.open = Some(Open { held, next, first: true }); let held_cut = self.held_first(); self.send(clock, held_cut, window_cut); return true;",
    "crate": "ezsdr-radio-uhd",
    "test_bin": "lib",
    "filter": "ur_23_m4_a_continuation_waits_without_a_device_call"
@@ -10709,8 +10709,8 @@
         "id": "P1199",
         "name": "ordinary TX Stop preserves pending recovery (D9b-1a fix 2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "self.end_open(true); for _ in std::mem::take(&mut self.held).into_values() {",
-        "new": "self.end_open(true); self.chain.provider_stop(); for _ in std::mem::take(&mut self.held).into_values() {",
+        "old": "self.end_open(true); let reason = match cancel_reason {",
+        "new": "self.end_open(true); self.chain.provider_stop(); let reason = match cancel_reason {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_tx_stop_preserves_recovery_for_later_bursts"
@@ -10769,8 +10769,8 @@
         "id": "P1206",
         "name": "a failed reopen drains held initial bursts (D9b-1a fix 3)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "if halted { for _ in std::mem::take(&mut self.held).into_values() {",
-        "new": "if halted && false { for _ in std::mem::take(&mut self.held).into_values() {",
+        "old": "if halted { for _ in self.take_all_held().into_values() {",
+        "new": "if halted && false { for _ in self.take_all_held().into_values() {",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_22_nonterminal_reopen_failures_cancel_held_initial_bursts"
@@ -11049,8 +11049,8 @@
         "id": "P1302",
         "name": "Provider::stop clears recovery only after ending the open burst (L2)",
         "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-        "old": "        self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);\n        self.chain.provider_stop();",
-        "new": "        self.chain.provider_stop();\n        self.stop_now(\"UR-26: cancelled by Provider::stop\", ezsdr_radio::CancelReason::ProviderStop);",
+        "old": "let cancelled = self.take_all_held(); self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled); self.chain.provider_stop();",
+        "new": "self.chain.provider_stop(); let cancelled = self.take_all_held(); self.stop_now(ezsdr_radio::CancelReason::ProviderStop, cancelled);",
         "crate": "ezsdr-radio-uhd",
         "test_bin": "lib",
         "filter": "ur_26_provider_stop_ends_recovery_after_stop_and_keeps_shutdown_report_reads"
@@ -13833,8 +13833,8 @@
     "id": "N47S4-41",
     "name": "a transmit Stop drops the stream's one clock (UR-23, RM-25: a burst after a Stop targets the arm clock)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "let _ = to_tx.send(TxCmd::Stop);",
-    "new": "lock(&self.core.streams).stream_mut(stream).clock = None; let _ = to_tx.send(TxCmd::Stop);",
+    "old": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);",
+    "new": "streams.stream_mut(stream).clock = None; streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "ur_23_a_burst_after_a_stop_targets_the_one_clock"
@@ -13943,8 +13943,8 @@
     "id": "N47S4-44",
     "name": "a burst dropped at booking still counts as booked (RM-21, P4)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "time_error(TimeErrorOutcome::Drop, late_by);",
-    "new": "time_error(TimeErrorOutcome::Drop, late_by); lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, k)).busy.book(Some(i64::MAX));",
+    "old": "Err(Early::Dropped(outcome, late_by, reason)) => { time_error(outcome, late_by);",
+    "new": "Err(Early::Dropped(outcome, late_by, reason)) => { time_error(outcome, late_by); lock(&self.core.streams).stream_mut(stream_key(Dir::Tx, k)).busy.book(Some(i64::MAX));",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_a_burst_dropped_at_booking_is_not_booked"
@@ -14113,8 +14113,8 @@
     "id": "N47S4-50",
     "name": "a burst continues the open device burst whatever its generation (R4, S1)",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "Some(&k) if k == c && self.device_holds(k) => {}",
-    "new": "Some(&k) if k == c => {}",
+    "old": "Some(k) if k == c && self.device_holds(k) => {}",
+    "new": "Some(k) if k == c => {}",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_burst_at_a_held_tail_with_a_new_generation_is_configured_before_it"
@@ -14178,16 +14178,6 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_22_a_reopen_keeps_the_mark_and_a_loss_clears_it"
-  },
-  {
-    "id": "N47S4-33",
-    "name": "the configure turn continues into the dispatch without draining the commands (M2)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "Values::Configure(generation) => return self.configure_turn(clock, held, generation),",
-    "new": "Values::Configure(generation) => { self.configure_turn(clock, held, generation); return self.step(); }",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_22_a_stop_during_the_configure_leaves_no_payload_after_it"
   },
  {
    "id": "N47S4-19",
@@ -14531,8 +14521,8 @@
     "id": "N47S5-23",
     "name": "5b-2a: the Mock's Stop keeps the held bursts it would cancel (RM-25, S7)",
     "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "let held: Vec<i64> = self.tx[k].held.keys().copied().collect();",
-    "new": "let held: Vec<i64> = Vec::new();",
+    "old": "for _ in cancelled {",
+    "new": "for _ in cancelled.into_iter().filter(|_| false) {",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_channel",
     "filter": "mr_25_stop_does_not_radiate_unhanded_window_edge_payload"
@@ -14755,7 +14745,7 @@
     "new": "(c.end == e",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_21_m1_held_tail_waits_for_a_join_received_before_its_txcmd_is_drained"
+    "filter": "e1_q14_a_continuation_accepted_after_the_unread_check_keeps_the_burst_open"
   },
   {
     "id": "N47S5-58",
@@ -15721,7 +15711,7 @@
     "id": "N47S5-151",
     "name": "rev 32 (S4 neighbour, fix round 7): an abandon with no open burst does not end the repeat a switch joined at the cursor continues",
     "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
-    "old": "None => self.held.get(&cursor).is_some_and(|held| held.switch),",
+    "old": "None => self.with_held(|map| map.get(&cursor).is_some_and(|held| held.switch)),",
     "new": "None => false,",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
@@ -16545,5 +16535,175 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "o1_uhd_t4a_a_switch_takes_the_first_grid_point"
+  },
+  {
+    "id": "P569b",
+    "name": "UHD TX Stop is cancelled as the Run's end (UR-26 reason)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);",
+    "new": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::ProviderStop);",
+    "crate": "ezsdr-acceptance",
+    "test_bin": "parity",
+    "filter": "vh_8_tx_stream_stop_cancels_held_bursts"
+  },
+  {
+    "id": "E1-U1",
+    "name": "E1: Streams::end queues no halt for the Run's end (UR-26)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "if !lost { stream.list.halt(ezsdr_radio::CancelReason::ProviderStop); }",
+    "new": "if !lost { }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q3_a_pre_origin_provider_stop_cancels_a_booking_with_its_own_note"
+  },
+  {
+    "id": "E1-U2",
+    "name": "E1: the Run end's halt carries the Stop's reason (UR-26)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "stream.list.halt(ezsdr_radio::CancelReason::ProviderStop);",
+    "new": "stream.list.halt(ezsdr_radio::CancelReason::Stop);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q3_a_pre_origin_provider_stop_cancels_a_booking_with_its_own_note"
+  },
+  {
+    "id": "E1-U3",
+    "name": "E1: the step's guard ignores an unread halt (RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "(!stream.list.halt_unread()).then(|| {",
+    "new": "(true).then(|| {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q2_the_step_reads_a_stop_it_has_not_read_before_it_hands"
+  },
+  {
+    "id": "E1-U3b",
+    "name": "E1: TxList::halt_unread sees no halt",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.unread.iter().any(|arrival| matches!(arrival, Arrival::Halt(_)))",
+    "new": "self.unread.iter().any(|arrival| matches!(arrival, Arrival::Halt(_)) && false)",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "txlist_halt_unread_ignores_bookings"
+  },
+  {
+    "id": "E1-U4",
+    "name": "E1: the step reads `now` after the section that checked the list (RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.core.probe(\"tx_step_guarded\", None); let Some(now) = now else {",
+    "new": "self.core.probe(\"tx_step_guarded\", None); let now = now.map(|_| self.core.now()); let Some(now) = now else {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q2b_now_is_read_under_the_lock_that_checked_the_list"
+  },
+  {
+    "id": "E1-U5",
+    "name": "E1: receipt does not re-check the uncut segment in its main section (UR-21)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "if streams.line(stream_key(Dir::Tx, k)).and_then(|line| line.plan.last()).is_none_or(|segment| segment.cut.is_some()) {",
+    "new": "if false {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q12_a_booking_racing_a_provider_stop_cut_is_refused_at_receipt"
+  },
+  {
+    "id": "E1-U6",
+    "name": "E1: the list is read newest first (RM-15, RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "self.unread.pop_front()?",
+    "new": "self.unread.pop_back()?",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "txlist_reads_in_receipt_order"
+  },
+  {
+    "id": "E1-U7",
+    "name": "E1: a Stop queues no halt (UR-26)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "streams.stream_mut(stream).list.halt(ezsdr_radio::CancelReason::Stop);",
+    "new": "let _ = ();",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q1_a_stop_is_read_between_the_booking_before_it_and_the_one_after_it"
+  },
+  {
+    "id": "E1-U9",
+    "name": "E1: a halt cancels nothing it read (RM-16)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "cancelled: std::mem::take(&mut self.held)",
+    "new": "cancelled: BTreeMap::new()",
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "txlist_a_halt_cancels_exactly_what_was_read_before_it"
+  },
+  {
+    "id": "E1-U10",
+    "name": "E1: a refused booking is put on the list (UR-21)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "if refusal.is_none() {",
+    "new": "if true {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q13_a_refused_booking_is_not_on_the_list"
+  },
+  {
+    "id": "E1-U11",
+    "name": "E1: the shutdown cancels without reading the list first (UR-26)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.read_list(); let cancelled = self.take_all_held();",
+    "new": "let cancelled = self.take_all_held();",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q6b_shutdown_reads_the_list_before_it_cancels"
+  },
+  {
+    "id": "E1-U13",
+    "name": "E1: an abandon queues the Run end's halt (UR-26)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
+    "old": "self.busy.stop(bound);",
+    "new": "self.busy.stop(bound); self.list.halt(ezsdr_radio::CancelReason::ProviderStop);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "e1_q5_a_booking_waiting_when_the_repeat_is_abandoned_still_plays"
+  },
+  {
+    "id": "E1-U14",
+    "name": "E1: a booking read with no clock is held (UR-25)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "return self.cancel_unstarted();",
+    "new": "return self.hold(held);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_22_underflow_close_failure_reopens_before_the_next_payload"
+  },
+  {
+    "id": "E1-K1",
+    "name": "E1: the Mock reads the halt before the MR-25 cut (RM-16)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].list.halt(cancel_reason);",
+    "new": "self.tx[k].list.halt(cancel_reason); self.read_tx(k, now, reason)?;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_25_a_stop_transmits_every_held_burst_before_it"
+  },
+  {
+    "id": "E1-K2",
+    "name": "E1: the Mock's Stop queues no halt (RM-16, MR-25)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].list.halt(cancel_reason);",
+    "new": "",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "mr_25_a_stop_before_the_burst_with_a_new_value_cancels_it_and_keeps_the_value_of_record"
+  },
+  {
+    "id": "E1-K3",
+    "name": "E1: the Mock reads a booking before it is queued (RM-15)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "self.tx[k].list.book(held); self.read_tx(k, now, \"\")?;",
+    "new": "self.read_tx(k, now, \"\")?; self.tx[k].list.book(held);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "e1_mock_q10_a_booking_a_stop_and_a_booking_in_one_step"
   }
 ]

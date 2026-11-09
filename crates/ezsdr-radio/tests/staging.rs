@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::spec::{Key, Value};
-use ezsdr_radio::staging::{Bookings, Overlap, Refusal, Settled, Staging, SwitchOutcome, Until, ordinary_k, repeat_boundary, stop_bound};
+use ezsdr_radio::CancelReason;
+use ezsdr_radio::staging::{Bookings, Overlap, Read, Refusal, Settled, Staging, SwitchOutcome, TxList, Until, ordinary_k, repeat_boundary, stop_bound};
 
 fn key(name: &str) -> Key {
     Key::parse(name).unwrap()
@@ -1171,4 +1172,106 @@ fn rm_15_place_honours_a_join_point() {
     let mut bookings = Bookings::default();
     bookings.accept(0, Some(40), 0, ON_TIME, UNHANDED).unwrap();
     assert_eq!(bookings.place(40, Some(5), 0, ON_TIME, UNHANDED), Some(40));
+}
+
+fn txlist_read(list: &mut TxList<u32>) -> String {
+    match list.read() {
+        None => "none".into(),
+        Some(Read::Booking(p)) => format!("book {p}"),
+        Some(Read::Halt { reason, cancelled }) => format!("halt {reason:?} {:?}", cancelled.keys().collect::<Vec<_>>()),
+    }
+}
+
+#[test]
+fn txlist_reads_in_receipt_order() {
+    let mut list = TxList::<u32>::default();
+    list.book(1);
+    list.halt(CancelReason::Stop);
+    list.book(2);
+    assert_eq!([txlist_read(&mut list), txlist_read(&mut list), txlist_read(&mut list), txlist_read(&mut list)], ["book 1", "halt Stop []", "book 2", "none"]);
+}
+
+#[test]
+fn txlist_a_halt_cancels_exactly_what_was_read_before_it() {
+    let mut list = TxList::<u32>::default();
+    list.book(1);
+    list.book(2);
+    for _ in 0..2 {
+        let Some(Read::Booking(p)) = list.read() else { panic!("a booking") };
+        list.held.insert(i64::from(p), p);
+    }
+    list.halt(CancelReason::Stop);
+    list.book(3);
+    let Some(Read::Halt { cancelled, .. }) = list.read() else { panic!("a halt") };
+    assert_eq!(cancelled.keys().copied().collect::<Vec<_>>(), [1, 2]);
+    assert!(list.held.is_empty());
+    assert!(matches!(list.read(), Some(Read::Booking(3))));
+    assert!(list.held.is_empty());
+}
+
+#[test]
+fn txlist_a_booking_read_after_a_halt_survives_it() {
+    let mut list = TxList::<u32>::default();
+    list.halt(CancelReason::Stop);
+    list.book(9);
+    assert!(matches!(list.read(), Some(Read::Halt { .. })));
+    let Some(Read::Booking(p)) = list.read() else { panic!("a booking") };
+    list.held.insert(9, p);
+    assert_eq!(list.held.keys().copied().collect::<Vec<_>>(), [9]);
+}
+
+#[test]
+fn txlist_unread_tells_what_is_waiting() {
+    let mut list = TxList::<u32>::default();
+    assert!(!list.unread());
+    list.book(1);
+    assert!(list.unread());
+    list.read();
+    assert!(!list.unread());
+    list.halt(CancelReason::Loss);
+    assert!(list.unread());
+    list.read();
+    assert!(!list.unread());
+}
+
+#[test]
+fn txlist_carries_the_reason() {
+    let mut list = TxList::<u32>::default();
+    for reason in [CancelReason::Stop, CancelReason::ProviderStop, CancelReason::Loss] {
+        list.halt(reason);
+    }
+    assert_eq!([txlist_read(&mut list), txlist_read(&mut list), txlist_read(&mut list)], ["halt Stop []", "halt ProviderStop []", "halt Loss []"]);
+}
+
+#[test]
+fn txlist_default_needs_no_payload_default() {
+    struct NoDefault;
+    let list = TxList::<NoDefault>::default();
+    assert!(!list.unread() && list.held.is_empty());
+}
+
+#[test]
+fn txlist_held_is_by_first_sample() {
+    let mut list = TxList::<u32>::default();
+    for k in [30, 10, 20] {
+        list.held.insert(k, 0);
+    }
+    assert_eq!(list.held.keys().copied().collect::<Vec<_>>(), [10, 20, 30]);
+}
+
+#[test]
+fn txlist_halt_unread_ignores_bookings() {
+    let mut list = TxList::<u32>::default();
+    assert!(!list.halt_unread());
+    list.book(1);
+    assert!(!list.halt_unread());
+    list.halt(CancelReason::Stop);
+    list.book(2);
+    assert!(list.halt_unread());
+    list.read();
+    assert!(list.halt_unread(), "the halt is still unread after the booking before it");
+    list.read();
+    assert!(!list.halt_unread() && list.unread(), "a booking after the halt waits, the halt is read");
+    list.read();
+    assert!(!list.halt_unread() && !list.unread());
 }

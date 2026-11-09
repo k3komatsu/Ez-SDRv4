@@ -617,9 +617,9 @@ impl Provider for UhdRadio {
         let (to_rx, from_control_rx): (Vec<_>, Vec<_>) = (0..rx_streams.len()).map(|_| mpsc::channel()).unzip();
         let mut from_control_tx: Vec<Option<_>> = from_control_tx.into_iter().map(Some).collect();
         let mut from_control_rx: Vec<Option<_>> = from_control_rx.into_iter().map(Some).collect();
-        self.running = Some(Running { to_tx: to_tx.clone(), to_rx: to_rx.clone(), threads: Vec::new() });
+        self.running = Some(Running { to_tx, to_rx: to_rx.clone(), threads: Vec::new() });
         // The streams' timelines first, which uhd-rx and uhd-tx read from their first turn.
-        let control = Control::new(core.clone(), actions, to_tx, config, self.clock_source != "internal", start);
+        let control = Control::new(core.clone(), actions, config, self.clock_source != "internal", start);
         let mut failed = None;
         for stream in &rx_streams {
             // UR-29, UR-15: a loss an earlier stream's owner has published stops the start

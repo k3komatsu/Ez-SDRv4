@@ -25,7 +25,7 @@ use ezsdr_kernel::stream::{
     BackPressure, BlockFlags, BlockHeader, BurstOpen, BurstRecord, BurstStep, BurstTracker, ChannelMask, DataLink, Direction, LateOutcome, LatePolicy, PublishOutcome, SampleBlock,
 };
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rational, SampleClockHandle, ScheduleHandle, TimeAuthority, TimePoint};
-use ezsdr_radio::staging::{Bookings, Overlap, Staging, SwitchRecord, handover_horizon, is_switch, ordinary_k, repeat_boundary, stop_bound, stop_sample, write_settled};
+use ezsdr_radio::staging::{Bookings, Overlap, Read, Staging, SwitchRecord, TxList, handover_horizon, is_switch, ordinary_k, repeat_boundary, stop_bound, stop_sample, write_settled};
 use ezsdr_radio::timeline::{self, Item, Kind, Line, Segment, StreamKey};
 use ezsdr_radio::{Addressed, channels, x3xx};
 use ezsdr_sim::channel::{Medium, RootInstant};
@@ -204,8 +204,8 @@ struct TxStream {
     tracker: Option<BurstTracker>,
     /// The current clock's device framing model (MR-15, MR-24).
     device: DeviceModel,
-    /// The bursts booked on the current clock, by their first sample (RM-15).
-    held: BTreeMap<i64, HeldBurst>,
+    /// The bookings and Stops of this stream in receipt order; `list.held` is the bursts booked on the current clock, by their first sample (RM-15).
+    list: TxList<HeldBurst>,
     /// The burst being transmitted (MR-15).
     open: Option<OpenBurst>,
     /// The payload cut made by the last Stop on this SampleClock (MR-25).
@@ -227,7 +227,7 @@ impl TxStream {
             registered: None,
             tracker: None,
             device: DeviceModel::new(),
-            held: BTreeMap::new(),
+            list: TxList::default(),
             open: None,
             stop_cut: None,
             plan: None,
@@ -849,7 +849,7 @@ impl MockRadio {
                 let (handle, origin) = (&clock.handle, clock.origin);
                 let block_end = open.next.saturating_add(i64::from(self.profile.block_len()));
                 let waveform_end = if open.repeat { open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len)) } else { open.start.saturating_add(open.len) };
-                let held_cut = self.tx[k].held.keys().next().copied().unwrap_or(i64::MAX);
+                let held_cut = self.tx[k].list.held.keys().next().copied().unwrap_or(i64::MAX);
                 let cut = held_cut.min(self.tx_cut(k).unwrap_or(i64::MAX));
                 let stop = block_end.min(waveform_end).min(cut);
                 if stop > open.next {
@@ -860,7 +860,7 @@ impl MockRadio {
             }
             if let Some(clock) = self.tx_now(k) {
                 let (handle, origin) = (&clock.handle, clock.origin);
-                if let Some(start) = self.tx[k].held.keys().next().copied() {
+                if let Some(start) = self.tx[k].list.held.keys().next().copied() {
                     if let Some(tick) = time::v_floor(origin, handle.root_ticks_per_tick(), start) {
                         wake(tick);
                     }
@@ -962,8 +962,8 @@ impl MockRadio {
             if self.tx[k].open.is_some() {
                 break;
             }
-            let Some(start) = self.tx[k].held.keys().next().copied().filter(|start| *start < cut) else { break };
-            let held = self.tx[k].held.remove(&start).expect("the first held burst");
+            let Some(start) = self.tx[k].list.held.keys().next().copied().filter(|start| *start < cut) else { break };
+            let held = self.tx[k].list.held.remove(&start).expect("the first held burst");
             self.open_held(k, held);
         }
         Ok(())
@@ -1156,7 +1156,25 @@ impl MockRadio {
         }
     }
 
+    /// Reads the stream's list in receipt order: a booking is held by its start, a halt cancels what was read before it, with `reason`.
+    fn read_tx(&mut self, k: usize, now: i64, reason: &str) -> Result<(), ModuleError> {
+        while let Some(read) = self.tx[k].list.read() {
+            match read {
+                Read::Booking(held) => {
+                    self.tx[k].list.held.insert(held.start, held);
+                }
+                Read::Halt { reason: cancel_reason, cancelled } => {
+                    for _ in cancelled {
+                        self.record_cancelled_burst(reason, now, cancel_reason)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn stop_tx(&mut self, k: usize, now: i64, reason: &str, cancel_reason: ezsdr_radio::CancelReason) -> Result<(), ModuleError> {
+        self.tx[k].list.halt(cancel_reason);
         if let Some(clock) = self.tx_now(k) {
             let (ratio, origin, domain) = (clock.handle.root_ticks_per_tick(), clock.origin, clock.domain);
             let window = time::ns_to_v(self.clocks.as_ref().expect("prepared clocks"), self.root.expect("prepared root"), self.profile.timing().tx_in_flight_ns)
@@ -1197,12 +1215,7 @@ impl MockRadio {
             self.record_cancelled_burst(reason, now, cancel_reason)?;
         }
         self.tx[k].open = None;
-        let held: Vec<i64> = self.tx[k].held.keys().copied().collect();
-        for start in held {
-            self.tx[k].held.remove(&start);
-            self.record_cancelled_burst(reason, now, cancel_reason)?;
-        }
-        Ok(())
+        self.read_tx(k, now, reason)
     }
 
     /// MR-25's `stop` at `now`, its cancellations recorded with `reason`; a loss runs its
@@ -1407,7 +1420,7 @@ impl MockRadio {
         if let Some(open) = self.tx[k].open.as_ref() {
             include(open.order, open.start, open.len, open.repeat, 1);
         }
-        for held in self.tx[k].held.values() {
+        for held in self.tx[k].list.held.values() {
             include(held.order, held.start, held.len, held.repeat, if held.repeat { DEVICE_MIN_OPEN_FIRST_SEND } else { held.len.min(DEVICE_MIN_OPEN_FIRST_SEND) });
         }
         Ok(payload)
@@ -1758,7 +1771,8 @@ impl MockRadio {
             values,
         };
         self.tx[k].busy.book(end);
-        self.tx[k].held.insert(start, held);
+        self.tx[k].list.book(held);
+        self.read_tx(k, now, "")?;
         self.next_order = self.next_order.saturating_add(1);
         if let Some(from) = switched_from {
             self.record_switch(from, id, length, start, now);
@@ -1815,7 +1829,7 @@ impl MockRadio {
             };
             let mut stop = open.next.saturating_add(i64::from(self.profile.block_len()));
             let repeat_end = if open.repeat { open.start.saturating_add(((open.next - open.start) / open.len + 1).saturating_mul(open.len)) } else { open.start.saturating_add(open.len) };
-            let held_cut = self.tx[k].held.keys().next().copied().unwrap_or(i64::MAX);
+            let held_cut = self.tx[k].list.held.keys().next().copied().unwrap_or(i64::MAX);
             let cut = held_cut.min(self.tx_cut(k).unwrap_or(i64::MAX)).min(extra_cut.unwrap_or(i64::MAX));
             stop = stop.min(repeat_end).min(cut);
             if stop <= open.next {
@@ -1925,6 +1939,7 @@ impl MockRadio {
     /// beginnings, then faults and held bursts by instant and arrival, then the untimed tunes of
     /// the instant (MR-34), the streams emitted up to each.
     fn advance(&mut self, u: i64) -> Result<bool, ModuleError> {
+        debug_assert!(self.tx.iter().all(|stream| !stream.list.unread()), "advance runs with every receipt read");
         let mut progressed = false;
         loop {
             let mut candidates: Vec<(i64, u8, u64, WorkKind)> = Vec::new();
@@ -1949,7 +1964,7 @@ impl MockRadio {
                 }
             }
             for k in 0..self.tx.len() {
-                candidates.extend(self.tx[k].held.iter().filter_map(|(start, burst)| {
+                candidates.extend(self.tx[k].list.held.iter().filter_map(|(start, burst)| {
                     let clock = self.tx_now(k)?;
                     // shortcut: a held burst opens at the last root tick at or before its first sample, which comes after the previous sample only while a sample spans a whole root tick (true on the 1 GHz root for every rate the Mock accepts), upgrade by opening on the sample's rational instant when a slower root is declared.
                     let tick = time::v_floor(clock.origin, clock.handle.root_ticks_per_tick(), *start)?;
@@ -1995,7 +2010,7 @@ impl MockRadio {
                     }
                 },
                 WorkKind::HeldBurst { stream, start } => {
-                    if let Some(held) = self.tx[stream].held.remove(&start) {
+                    if let Some(held) = self.tx[stream].list.held.remove(&start) {
                         self.open_held(stream, held);
                     }
                 }
@@ -2496,7 +2511,7 @@ mod cancellation_tests {
         radio.tx[0].tracker = Some(BurstTracker::new(registered.domain));
         radio.tx[0].registered = Some(registered);
         radio.tx[0].plan = Some(shared.clone());
-        radio.tx[0].held.insert(20, held(20));
+        radio.tx[0].list.held.insert(20, held(20));
         (radio, shared, events)
     }
 
@@ -2504,7 +2519,7 @@ mod cancellation_tests {
     fn a_cancelled_held_burst_releases_the_shared_reservation() {
         let (mut radio, shared, events) = radio_with_reservations();
         radio.stop_tx(0, 0, "MR-25: cancelled by stop", ezsdr_radio::CancelReason::Stop).unwrap();
-        assert!(radio.tx[0].held.is_empty());
+        assert!(radio.tx[0].list.held.is_empty());
         assert!(shared.plan().segments.is_empty());
         let rows = radio.instance.sections[&section("rejected")].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");

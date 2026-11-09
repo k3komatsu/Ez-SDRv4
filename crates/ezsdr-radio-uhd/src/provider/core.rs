@@ -14,12 +14,13 @@ use ezsdr_kernel::stream::{DataLink, Direction};
 use ezsdr_kernel::time::{ClockRegistry, Duration, Rescaled, TimeAuthority, TimeError, TimePoint};
 use ezsdr_radio::kinds;
 use ezsdr_radio::payloads::CommandRejectedPayload;
-use ezsdr_radio::staging::{Bookings, stop_bound, stop_sample};
+use ezsdr_radio::staging::{Bookings, TxList, stop_bound, stop_sample};
 use ezsdr_radio::timeline::{self, Channels, Config, Item, Kind, Line, StreamKey};
 use serde_json::{Value as Json, json};
 
 use super::control::{ColdConfig, Planned};
 use super::mode::{DescriptionExt, channel_list};
+use super::tx::Held;
 use crate::device::{Device, DeviceError, Dir, Settings, decimation};
 use crate::device::{Iq, TxCode, TxReport};
 use crate::host::{ClockGuard, ClockMutex};
@@ -381,6 +382,8 @@ pub(crate) struct StreamState {
     /// The transmit value rule's record of the stream's bookings and Stops (RM-21): the one place
     /// a receipt is judged by (never the hand-over state).
     pub busy: Bookings,
+    /// The stream's accepted bookings and halts in receipt order, written under the same lock as `busy`; uhd-tx reads it (UR-21, UR-26).
+    pub list: TxList<Held>,
     /// The repeat a switch replaces (RM-37): the repeat booked last, or the switch the owner took (a refused switch changes nothing).
     pub playing: Option<Playing>,
 }
@@ -602,6 +605,10 @@ impl Streams {
         let seq = if lost { 0 } else { self.next_seq() };
         for stream in &mut self.tx {
             stream.stop_at(at, core.tx_in_flight());
+            // A loss pushes nothing: the owner idles and its shutdown cancels with ProviderStop (UR-26).
+            if !lost {
+                stream.list.halt(ezsdr_radio::CancelReason::ProviderStop);
+            }
         }
         for dir in [Dir::Rx, Dir::Tx] {
             for k in 0..self.count(dir) {

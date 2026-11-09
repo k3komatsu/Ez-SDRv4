@@ -677,3 +677,21 @@ fn o1_mock_t9f_with_a_zero_window_the_stop_cuts_at_its_own_sample() {
     m.check(&o::Slots { segs: vec![o::Seg { end: cut, ..o::Seg::once(1, 4_990, 100) }], cut: None }, 4_980, 5_100);
     assert_eq!(m.pairs(), [(4_990, 10)]);
 }
+
+#[test]
+fn e1_mock_q10_a_booking_a_stop_and_a_booking_in_one_step() {
+    // RM-15, RM-16, MR-25 (note 49 E1, Q10): A booked, a Stop, then R booked, all queued and received in one step. The list is read in receipt
+    // order, so the Stop cancels A (one note, no event) and not R, which plays from its start.
+    let mut m = ideal(&[(1, 100), (2, 100)]);
+    m.go(1_000);
+    let (a, r) = (m.action(0, 10_000, false, LatePolicy::DropAndFlag, false), m.action(1, 20_000, false, LatePolicy::DropAndFlag, false));
+    m.radio.push(a);
+    m.radio.push(Action::Stop { target: Some(tgt(&format!("{}/tx/s0", m.radio.id))) });
+    m.radio.push(r);
+    m.go(1_000);
+    m.go(30_000);
+    assert_eq!(m.all_refusals(), 0, "no refusal event");
+    assert_eq!(m.cancellations(), 1, "A is cancelled by the Stop with one note");
+    assert_eq!(m.pairs(), [(20_000, 100)], "R plays from its start");
+    m.check(&o::Slots { segs: vec![o::Seg::once(2, 20_000, 100)], cut: None }, 9_990, 20_100);
+}

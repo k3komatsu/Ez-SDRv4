@@ -115,8 +115,7 @@ pub enum CancelReason {
     ProviderStop,
     /// Device loss cancelled the burst.
     Loss,
-    /// The burst's transmit clock ended before the burst could start: the clock ended at its
-    /// origin, or a failed streamer reopen ended it.
+    /// A failed streamer reopen ended the burst's transmit clock (UR-22).
     ClockEnded,
 }
 

@@ -6,14 +6,14 @@
 //! "Streaming" is not kept here. It is the stream's line after replay ([`crate::timeline::Line::streaming`]),
 //! which each Provider passes in as a closure, so the fact has one representation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::spec::{Key, Scalar, Value};
 use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 
-use crate::{Concrete, concrete};
+use crate::{CancelReason, Concrete, concrete};
 
 /// Why a receive value is not staged (RM-21). Each cause has its own text.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -200,6 +200,72 @@ pub struct SwitchRecord {
     pub moved_to: Option<i64>,
     /// `pending` until the record settles it: [`SwitchOutcome::label`].
     pub outcome: &'static str,
+}
+
+/// One receipt on a transmit stream's list, not yet read by the executor.
+enum Arrival<P> {
+    Booking(P),
+    Halt(CancelReason),
+}
+
+/// What the executor reads next from a [`TxList`].
+pub enum Read<P> {
+    /// An accepted booking: the executor holds it in [`TxList::held`], or refuses it.
+    Booking(P),
+    /// A `Stop`, `Provider::stop` or a loss: `cancelled` is what `held` held when the halt was read, taken whole.
+    Halt {
+        /// Why the bookings are cancelled.
+        reason: CancelReason,
+        /// The bookings read before the halt and not yet taken, by first sample.
+        cancelled: BTreeMap<i64, P>,
+    },
+}
+
+/// The accepted bookings and halts of one transmit stream in receipt order (RM-15, RM-16), beside
+/// [`Bookings`] and under the same lock. Receipt appends in the critical section that decides; the
+/// executor reads one entry at a time, so a halt cancels exactly the bookings read before it and a booking
+/// received after it survives.
+pub struct TxList<P> {
+    unread: VecDeque<Arrival<P>>,
+    /// Bookings the executor has read and not yet taken, by first sample. Only the executor writes it.
+    pub held: BTreeMap<i64, P>,
+}
+
+// By hand: a derive would require `P: Default`.
+impl<P> Default for TxList<P> {
+    fn default() -> Self {
+        TxList { unread: VecDeque::new(), held: BTreeMap::new() }
+    }
+}
+
+impl<P> TxList<P> {
+    /// Receipt: an accepted booking, in the critical section that accepted it.
+    pub fn book(&mut self, booking: P) {
+        self.unread.push_back(Arrival::Booking(booking));
+    }
+
+    /// Receipt: a halt, in the critical section that decided it.
+    pub fn halt(&mut self, reason: CancelReason) {
+        self.unread.push_back(Arrival::Halt(reason));
+    }
+
+    /// The executor: the oldest receipt it has not read.
+    pub fn read(&mut self) -> Option<Read<P>> {
+        Some(match self.unread.pop_front()? {
+            Arrival::Booking(booking) => Read::Booking(booking),
+            Arrival::Halt(reason) => Read::Halt { reason, cancelled: std::mem::take(&mut self.held) },
+        })
+    }
+
+    /// Whether a receipt waits to be read.
+    pub fn unread(&self) -> bool {
+        !self.unread.is_empty()
+    }
+
+    /// Whether a halt waits to be read: the executor must read it before it hands anything further.
+    pub fn halt_unread(&self) -> bool {
+        self.unread.iter().any(|arrival| matches!(arrival, Arrival::Halt(_)))
+    }
 }
 
 /// The transmit bookings of one stream (RM-15, RM-16, RM-21), written once here; each Provider
