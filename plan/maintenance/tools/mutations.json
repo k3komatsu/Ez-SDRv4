@@ -13903,8 +13903,8 @@
     "id": "N47S4-17c",
     "name": "a Stop does not bound the UHD stream's Busy (RM-16, RM-21, S3)",
     "file": "crates/ezsdr-radio-uhd/src/provider/core.rs",
-    "old": "self.busy.stop(stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k)));",
-    "new": "let _ = (at, in_flight, clock);",
+    "old": "self.busy.stop(bound);",
+    "new": "let _ = bound;",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_a_value_is_taken_only_after_a_stopped_repeat_s_in_flight_window"
@@ -14538,11 +14538,31 @@
     "filter": "mr_25_stop_does_not_radiate_unhanded_window_edge_payload"
   },
   {
+    "id": "C83-1",
+    "name": "the tx_stop_applied row records the Stop's instant as its bound (UR-30, RM-16, parity s15)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "\"bound\": bound",
+    "new": "\"bound\": now",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_30_a_transmit_stop_records_the_bound_its_bookings_end_at"
+  },
+  {
+    "id": "C83-2",
+    "name": "an untimed burst received inside a Stop region starts at its ordinary start, not the region's end (RM-15, RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "busy.place_untimed(start, ordinary, rec_len, receipt, join_by, horizon) {",
+    "new": "busy.place_untimed(start, ordinary, rec_len, receipt, join_by, horizon).map(|free| free.min(ordinary)) {",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_an_untimed_repeat_after_a_stop_starts_at_the_bound_or_its_ordinary_start"
+  },
+  {
     "id": "N47S5-24",
     "name": "5b-2a: UHD's Stop does not end the transmit bookings at the Stop (RM-16, S7)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight());",
-    "new": "let _ = (now, self.core.tx_in_flight());",
+    "old": "streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight())",
+    "new": "None::<i64>",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_23_stop_preserves_handed_cursor_after_stop"

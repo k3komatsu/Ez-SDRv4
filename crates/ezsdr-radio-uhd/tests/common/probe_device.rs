@@ -72,16 +72,20 @@ pub fn receive_sample_follows_start(start: &Json, sample: &Json) -> bool {
         && start["at"].as_i64().zip(sample["outcome"]["first_tick"].as_i64()).is_some_and(|(at, first)| first >= at)
 }
 
+/// The `start_index`th (0-based) `rx_start` and the first sample after it, if the probe has both now.
+pub fn rx_start_and_sample(probe: &ProbeDevice, start_index: usize) -> Option<Json> {
+    let rows = probe.rows();
+    let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index).cloned()?;
+    let sample = rows.iter().find(|row| receive_sample_follows_start(&start, row)).cloned()?;
+    Some(json!({ "rx_start": start, "rx_sample": sample }))
+}
+
 /// Waits for the `start_index`th (0-based) `rx_start` and the first sample after it; `None` at `timeout`.
 pub fn wait_for_rx_start_and_sample(probe: &ProbeDevice, start_index: usize, timeout: Wall) -> Option<Json> {
     let deadline = Instant::now() + timeout;
     loop {
-        let rows = probe.rows();
-        let start = rows.iter().filter(|row| row["call"] == "rx_start").nth(start_index).cloned();
-        if let Some(start) = start {
-            if let Some(sample) = rows.iter().find(|row| receive_sample_follows_start(&start, row)).cloned() {
-                return Some(json!({ "rx_start": start, "rx_sample": sample }));
-            }
+        if let Some(found) = rx_start_and_sample(probe, start_index) {
+            return Some(found);
         }
         if Instant::now() >= deadline {
             return None;

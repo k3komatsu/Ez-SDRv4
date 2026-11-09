@@ -313,7 +313,9 @@ impl Control {
                     let now = self.core.now();
                     let seq = streams.next_seq();
                     if streams.book(&self.core, stream, Item { e: now, seq, ready: now, delivered: None, refused: false, kind: Kind::Stop }, Some(id)) {
-                        streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight());
+                        if let Some(bound) = streams.stream_mut(stream).stop_at(now, self.core.tx_in_flight()) {
+                            self.core.timing(json!({ "what": "tx_stop_applied", "stream": k, "at": now, "bound": bound }));
+                        }
                     }
                     drop(streams);
                     if let Some(to_tx) = self.to_tx.get(k) {
@@ -748,6 +750,47 @@ mod tests {
         let stop = lock(&core.streams).line(stream).unwrap().items.iter().find(|item| item.kind == Kind::Stop).copied().unwrap();
         assert!(matches!(owner.try_recv().unwrap(), TxCmd::Stop));
         assert_eq!(stop.e, core.now());
+    }
+
+    #[test]
+    fn ur_30_a_transmit_stop_records_the_bound_its_bookings_end_at() {
+        // RM-16 (#83): the `tx_stop_applied` row holds the Stop's root instant and the bound the bookings end at, the values the
+        // parity test compares the repeat with. The bound is the first sample at or after `at + tx_in_flight`, plus three (as S3 states).
+        let (core, mut control, _to_tx, time, _events) = tx_rig();
+        book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
+        let stop = core.ticks(5_000_000);
+        time.advance_to(core.at(stop)).unwrap();
+        control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
+        let clock = tx_clock(&core);
+        let bound = clock.instant(clock.at_or_after(stop + core.tx_in_flight()) + 3);
+        let row = lock(&core.rec).timing.iter().find(|row| row["what"] == "tx_stop_applied").cloned().expect("the Stop row");
+        assert_eq!((row["stream"].as_u64(), row["at"].as_i64(), row["bound"].as_i64()), (Some(0), Some(stop), Some(bound)));
+    }
+
+    #[test]
+    fn ur_21_an_untimed_repeat_after_a_stop_starts_at_the_bound_or_its_ordinary_start() {
+        // RM-15, RM-16 (#83), on the controlled clock: a Stop at 5 ms bounds the stream at 10 ms of samples past it, plus three (the bound,
+        // 15 ms here). An untimed repeat received inside that region (7 ms) starts at the bound; one received after it (20 ms) starts at
+        // its ordinary start, which the device lead after its receipt sets. The test sets the instants, so no thread timing moves either.
+        for (receipt_ms, inside) in [(7, true), (20, false)] {
+            let (core, mut control, to_tx, time, _events) = tx_rig();
+            book_tx_burst(&mut control, &core, 1, 10_000, true, ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag);
+            let stop = core.ticks(5_000_000);
+            time.advance_to(core.at(stop)).unwrap();
+            control.book(Dispatched::new(ActionId(2), Action::Stop { target: Some(crate::provider::test_support::target_of(&core.tx_id)) }, Some(core.tx_id.clone())));
+            let clock = tx_clock(&core);
+            let bound = clock.at_or_after(stop + core.tx_in_flight()) + 3;
+            let receipt = core.ticks(receipt_ms * 1_000_000);
+            time.advance_to(core.at(receipt)).unwrap();
+            let ordinary =
+                ezsdr_radio::staging::ordinary_k(ezsdr_radio::timeline::decided_at(receipt, clock.origin, core.device_lead()), core.device_lead(), |t| clock.at_or_after(t), |k| clock.instant(k));
+            let _ = to_tx.try_iter().count();
+            // The Kernel stamps an untimed burst at its receipt; the Provider takes the later of that and the ordinary start.
+            control.book(tx_burst_dispatch(&core, 3, clock.at_or_after(receipt), true, ezsdr_kernel::stream::LatePolicy::DropAndFlag, true));
+            let TxCmd::Burst(held) = to_tx.try_recv().expect("the untimed repeat is handed to uhd-tx") else { panic!("not a burst") };
+            let expected = if inside { bound } else { ordinary };
+            assert_eq!(held.k, expected, "received at {receipt_ms} ms: the bound is {bound}, the ordinary start {ordinary}");
+        }
     }
 
     #[test]
@@ -1686,17 +1729,19 @@ mod tests {
 
     /// Books a burst of the four samples at sample `start` of transmit stream 0's clock.
     fn book_tx_burst(control: &mut Control, core: &Core, id: u64, start: i64, repeat: bool, late_policy: ezsdr_kernel::stream::LatePolicy) {
+        control.book(tx_burst_dispatch(core, id, start, repeat, late_policy, false));
+    }
+
+    /// The burst of `book_tx_burst` as the Kernel dispatches it: untimed (RS-19) when `untimed`.
+    fn tx_burst_dispatch(core: &Core, id: u64, start: i64, repeat: bool, late_policy: ezsdr_kernel::stream::LatePolicy, untimed: bool) -> Dispatched {
         let bytes = four_samples();
         let hash = ezsdr_kernel::hash::ContentHash::of_bytes(&bytes);
         let waveform =
             ezsdr_kernel::manifest::ingest_input(ezsdr_kernel::spec::Ident::parse("waveform").unwrap(), ezsdr_kernel::spec::Namespace::parse("ezsdr.input").unwrap(), format!("mem:{hash}"), &bytes);
         let clock = tx_clock(core);
         let at = AbsoluteDeadline::new(TimePoint::new(clock.domain, start));
-        control.book(Dispatched::new(
-            ActionId(id),
-            Action::TxBurst { target: crate::provider::test_support::target_of(&core.tx_id), waveform, repeat, at, requested_at: None, late_policy, metadata: BTreeMap::new() },
-            Some(core.tx_id.clone()),
-        ));
+        let action = Action::TxBurst { target: crate::provider::test_support::target_of(&core.tx_id), waveform, repeat, at, requested_at: None, late_policy, metadata: BTreeMap::new() };
+        if untimed { Dispatched::new_untimed(ActionId(id), action, Some(core.tx_id.clone())) } else { Dispatched::new(ActionId(id), action, Some(core.tx_id.clone())) }
     }
 
     fn tx_frequency(settings: &ColdConfig) -> f64 {

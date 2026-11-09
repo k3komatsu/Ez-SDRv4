@@ -2120,8 +2120,29 @@ fn rx_start_trial_class(trial: &RxStartTrial) -> TrialClass {
     }
 }
 
+/// The device time a restart or a loopback waits for its first sample or its SampleClock (#83: the bound is the device's, not the host's).
+const DEVICE_WAIT_MS: i64 = 2_000;
+
+/// Advances the Run one millisecond of device time at a time until `done` answers true, or until `limit_ms` of device time has
+/// passed since the call (an absolute deadline, fixed at the start), or once the Run has ended (`advance_to` would fail and time
+/// would stop); whether `done` did. A host that runs the device's threads late delays the answer, not the bound (#83, plan 30 §4.5).
+fn advance_until(run: &mut RunHandle, limit_ms: i64, mut done: impl FnMut(&RunHandle) -> bool) -> bool {
+    let deadline = super::after(run, super::ms(limit_ms));
+    let domain = deadline.domain();
+    let end = deadline.ticks_in(domain).unwrap();
+    loop {
+        if done(run) {
+            return true;
+        }
+        if run.now().ticks_in(domain).unwrap() >= end || matches!(run.state(), RunState::CleanedUp { .. }) {
+            return false;
+        }
+        super::wait(run, super::ms(1));
+    }
+}
+
 /// One restart: a stream-scoped `Stop`, the condition's values (when `set_values`), then an untimed `start_rx`; waits
-/// until the start's first sample or the timeout, then for the SampleClock the Module registered for the restart.
+/// until the start's first sample or the device time bound, then for the SampleClock the Module registered for the restart.
 fn restart_trial(run: &mut RunHandle, probe: &super::probe_device::ProbeDevice, lead_ns: u64, values: Option<(f64, f64)>) -> Result<RxStartTrial, String> {
     let stop = run.submit(SessionAction::Stop { target: Some(super::resource("radio/rx/s0")) }, None).map_err(|error| error.to_string())?;
     if !super::admitted(&stop) {
@@ -2142,21 +2163,20 @@ fn restart_trial(run: &mut RunHandle, probe: &super::probe_device::ProbeDevice, 
         return Ok(RxStartTrial { expected: None, origin: None, first_tick: None, started: false, late: false, short: false, lead_left_ns: None });
     }
     super::wait(run, super::ms(i64::try_from(lead_ns / 1_000_000).map_err(|_| "receive lead exceeds i64 ms".to_owned())? + 60));
-    let got = super::probe_device::wait_for_rx_start_and_sample(probe, start_index, Wall::from_secs(2));
+    let mut got = None;
+    advance_until(run, DEVICE_WAIT_MS, |_| {
+        got = super::probe_device::rx_start_and_sample(probe, start_index);
+        got.is_some()
+    });
     let (origin, first_tick) = match &got {
         Some(row) => (row["rx_start"]["at"].as_i64(), row["rx_sample"]["outcome"]["first_tick"].as_i64()),
         None => (None, None),
     };
     // The Module registers the restart's SampleClock at its first block (UR-17); its origin is the booked instant.
     let mut expected = None;
-    let deadline = Instant::now() + Wall::from_secs(2);
-    while Instant::now() < deadline {
+    if advance_until(run, DEVICE_WAIT_MS, |run| run.sample_clocks().len() > clocks_before) {
         let clocks = run.sample_clocks();
-        if clocks.len() > clocks_before {
-            expected = clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()).and_then(|clock| clock.origin.ticks_in(clock.root).ok());
-            break;
-        }
-        std::thread::sleep(Wall::from_millis(1));
+        expected = clocks.iter().rev().find(|clock| clock.stream.to_string().ends_with("usrp/rx/s0") && clock.ended_at.is_none()).and_then(|clock| clock.origin.ticks_in(clock.root).ok());
     }
     Ok(RxStartTrial { expected, origin, first_tick, started: origin.is_some(), late: false, short: false, lead_left_ns: None })
 }
@@ -3147,6 +3167,8 @@ pub fn measure_full_duplex(device: Arc<dyn Device>, plan: &MeasurementPlan) -> R
         let trial_start = t0.ticks_in(root).map_err(|error| error.to_string())?;
         await_tx(&mut run);
         start_repeat(&mut run, &bytes)?;
+        // uhd-rx registers the receive SampleClock at its first block, which a loaded host can run after this call (#83).
+        advance_until(&mut run, DEVICE_WAIT_MS, |run| stream_clock(run, Direction::Rx).is_ok());
         let active = stream_clock(&run, Direction::Rx)?;
         let (_, now) = root_now(&run)?;
         let capture_target = sample_at_or_after(&active, now.checked_add(ticks_for_ns(50_000_000, device.master_clock_rate())?).ok_or("loopback capture target overflow")?)?.0;
@@ -4093,10 +4115,11 @@ mod tests {
     fn rx_start_lead_group_runs_on_the_fake() {
         // One configure delay, three candidates: the rehearsal holds a LATE candidate and a SHORT one as well as
         // successful ones (the two conditions configure different amounts), and every trial records its remaining
-        // lead from the configure record, warning or not.
+        // lead from the configure record, warning or not. The manual clock (#83) makes the 5 ms configure a device-time delay,
+        // so a loaded host cannot turn the 10 ms candidate into a late or short one.
         let mut plan = MeasurementPlan::rehearsal();
         plan.rx_start_leads_ns = vec![3_000_000, 5_000_000, 10_000_000];
-        let device = super::super::fake_real(ezsdr_radio_uhd::FakeConfig { apply_delay: Wall::from_millis(5), ..ezsdr_radio_uhd::FakeConfig::default() });
+        let device = super::super::fake(ezsdr_radio_uhd::FakeConfig { apply_delay: Wall::from_millis(5), ..ezsdr_radio_uhd::FakeConfig::default() });
         let group = measure_rx_start_lead(device, &plan).unwrap();
         let row = group.observations.iter().find(|row| row.name == "provider_rx_start_lead").expect("the group's observation");
         let stages = row.result["candidates"].as_array().expect("the candidate stages");

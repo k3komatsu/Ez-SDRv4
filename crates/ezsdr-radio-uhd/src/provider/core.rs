@@ -396,11 +396,13 @@ pub(crate) struct Playing {
 impl StreamState {
     /// RM-16: a `Stop` taking effect at root tick `at` ends the stream's transmit bookings: the
     /// value rule and the overlap rule are both bounded by the stream's clock. A stream with no clock has none.
-    pub fn stop_at(&mut self, at: i64, in_flight: i64) {
-        if let Some(clock) = self.clock {
-            self.busy.stop(stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k)));
-            self.busy.halt(clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t)));
-        }
+    /// Returns the root tick the bookings end at (the `tx_stop_applied` timing row).
+    pub fn stop_at(&mut self, at: i64, in_flight: i64) -> Option<i64> {
+        let clock = self.clock?;
+        let bound = stop_bound(at, in_flight, |t| clock.at_or_after(t), |k| clock.instant(k));
+        self.busy.stop(bound);
+        self.busy.halt(clock.at_or_after(at), stop_sample(at, in_flight, |t| clock.at_or_after(t)));
+        Some(bound)
     }
 }
 

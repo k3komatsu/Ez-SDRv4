@@ -2181,8 +2181,13 @@ fn s15_parity_provider_stop_cancels_a_pending_switch() {
 
 #[test]
 fn s15_parity_untimed_booking_after_stop() {
-    // RM-15, RM-16 (sequence 1): an untimed repeat after a Stop starts past the Stop region, at the same sample after the Stop on both
-    // Providers, with no TIME_ERROR. The second repeat is booked inside the region, so the placement, not the lead, moves it.
+    // RM-15, RM-16 (sequence 1): an untimed repeat after a Stop starts past the Stop region, on both Providers, with no TIME_ERROR. The
+    // second repeat is booked inside the region, so the placement, not the lead, moves it. This test's threads set when each repeat is
+    // received, so it compares only what that timing cannot move: the Stop region's length on UHD (from the record the Provider keeps)
+    // and that no repeat starts before its region's end. The exact start is pinned by manual-clock tests: for a repeat received inside
+    // the region, by `ur_21_an_untimed_repeat_after_a_stop_starts_at_the_bound_or_its_ordinary_start` (UHD, control.rs) and
+    // `mr_16_untimed_repeat_after_stop_starts_at_the_stop_region_end` (Mock, mock_radio.rs); for one received after it, by the UHD test
+    // above and the pure `place_untimed` and `prune` tests in crates/ezsdr-radio/tests/staging.rs, which the Mock's placement calls.
     let mut pair = CancellationPair::new(
         selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
         &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
@@ -2202,9 +2207,14 @@ fn s15_parity_untimed_booking_after_stop() {
         let at = tx_sample_time(clocks, 0, 0, root);
         at.ticks_in(at.domain()).unwrap()
     };
-    let (mock_stop, uhd_stop) = (stop(&pair.mock.clocks, pair.t0 + ms(20)), stop(&pair.uhd.clocks, pair.uhd_t0 + ms(20)));
+    let mock_stop = stop(&pair.mock.clocks, pair.t0 + ms(20));
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
+    // The UHD's Stop as its Provider applied it (`tx_stop_applied`, #83): the sample it was applied at and the sample its bookings end at.
+    let applied: Vec<_> = manifest_rows(&uhd, "ezsdr.radio.uhd.timing").into_iter().filter(|row| row["what"] == "tx_stop_applied").collect();
+    assert_eq!(applied.len(), 1, "one transmit Stop is applied: {applied:?}");
+    let uhd_at = stop(&pair.uhd.clocks, applied[0]["at"].as_i64().unwrap());
+    let uhd_end = stop(&pair.uhd.clocks, applied[0]["bound"].as_i64().unwrap());
     // The repeat after the Stop, in samples after the Stop's sample on each Provider.
     let after = |instance: &ProviderInstance, namespace: &str, stop: i64| {
         let rows = manifest_rows(instance, namespace);
@@ -2212,12 +2222,13 @@ fn s15_parity_untimed_booking_after_stop() {
         assert!(rows[1]["late_by"].is_null(), "{namespace}: an untimed repeat reports no lateness: {rows:?}");
         rows[1]["target"]["ticks"].as_i64().unwrap() - stop
     };
-    let (mock_gap, uhd_gap) = (after(&mock, "ezsdr.radio.mock.bursts", mock_stop), after(&uhd, "ezsdr.radio.uhd.bursts", uhd_stop));
-    // The Stop region is the 10 ms window (KL-13, KL-15) past the Stop's sample, to within its rounding onto the sample grid. UHD's Stop
-    // lands a little later than the Mock's, as its device clock runs ahead of the submitted tick, so the band allows for that.
-    for (case, gap) in [("Mock", mock_gap), ("UHD", uhd_gap)] {
-        assert!((9_900..10_100).contains(&gap), "{case}: the repeat starts at the Stop region's end, {gap} samples after the Stop");
-    }
+    let (mock_gap, uhd_gap) = (after(&mock, "ezsdr.radio.mock.bursts", mock_stop), after(&uhd, "ezsdr.radio.uhd.bursts", uhd_end));
+    // The Stop region is 10 ms (KL-13, KL-15) and three samples (RM-16) past the Stop's sample, to one sample of rounding onto the grid.
+    // The UHD's region comes from its record, so a record that is not 10 ms fails here. The Mock's region is exact on its own
+    // deterministic step: its bound is 10 003 samples past the Stop's sample.
+    assert!((10_003..=10_004).contains(&(uhd_end - uhd_at)), "UHD: the Stop region is {} samples past the Stop, not 10 ms", uhd_end - uhd_at);
+    assert!(uhd_gap >= 0, "UHD: the repeat starts {uhd_gap} samples before the Stop region's end");
+    assert!((10_003..=10_004).contains(&mock_gap), "Mock: the repeat starts {mock_gap} samples after the Stop, not at the region's end (10 003 samples)");
 }
 
 #[test]
