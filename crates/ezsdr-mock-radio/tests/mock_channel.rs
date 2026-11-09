@@ -26,6 +26,13 @@ use serde_json::json;
 #[path = "../../ezsdr-acceptance/src/layout.rs"]
 mod layout_support;
 
+/// The O1 spec oracle (design note 49 §5.4.11): one source shared with the UHD and acceptance tests; it names no Provider type.
+#[path = "../../ezsdr-acceptance/tests/oracle/mod.rs"]
+mod oracle;
+
+#[path = "mock_channel/o1.rs"]
+mod o1;
+
 const ROOT: ClockDomainId = ClockDomainId::local(7);
 
 fn rid(name: &str) -> ResourceId {
@@ -58,13 +65,15 @@ fn module_ref() -> ModuleRef {
     ModuleRef { id: ModuleId::parse("ezsdr.radio.mock").unwrap(), version: Version::new(2, 0, 0) }
 }
 
+/// The queued Actions; the second field marks the next one taken as untimed (RS-19), and the third counts the ids it gives, for the O1 tests.
 #[derive(Default)]
-struct Queue(Mutex<VecDeque<Action>>);
+struct Queue(Mutex<VecDeque<Action>>, std::sync::atomic::AtomicBool, AtomicU64);
 impl ActionReceiver for Queue {
     fn recv(&self) -> Option<ezsdr_kernel::module_api::Dispatched> {
         self.0.lock().unwrap().pop_front().map(|action| {
             let node = node_of(&action);
-            ezsdr_kernel::module_api::Dispatched::new(ActionId(1), action, node)
+            let id = ActionId(self.2.fetch_add(1, Ordering::SeqCst) + 1);
+            if self.1.swap(false, Ordering::SeqCst) { ezsdr_kernel::module_api::Dispatched::new_untimed(id, action, node) } else { ezsdr_kernel::module_api::Dispatched::new(id, action, node) }
         })
     }
 }

@@ -16445,5 +16445,105 @@
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_16_metadata_is_empty_or_the_mark_only"
+  },
+  {
+    "id": "O1-M1",
+    "name": "O1a: every send after the first plays the waveform one sample early (RM-13, UR-22; the oracle's sample positions)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "*slice = &channel[offset as usize..(offset + count) as usize];",
+    "new": "{ let o = if offset > 0 { offset - 1 } else { offset }; *slice = &channel[o as usize..(o + count) as usize]; }",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "o1_uhd_t1_short_and_long_heads_front_table"
+  },
+  {
+    "id": "O1-M2",
+    "name": "O1a: the repeat phase drifts one sample per wrap (RM-13; a send that starts after a wrap)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let offset = if open.held.repeat { (open.next - start).rem_euclid(len) } else { open.next - start };",
+    "new": "let offset = if open.held.repeat { (open.next - start - (open.next - start) / len).rem_euclid(len) } else { open.next - start };",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "o1_uhd_t3_a_repeat_keeps_its_phase"
+  },
+  {
+    "id": "O1-M3a",
+    "name": "O1a: the UHD's switch boundary is one grid point late (RM-37, UR-38)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "start = ezsdr_radio::staging::repeat_boundary(playing.origin, playing.period, bound.max(start));",
+    "new": "start = ezsdr_radio::staging::repeat_boundary(playing.origin, playing.period, bound.max(start) + playing.period);",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "o1_uhd_t4a_a_switch_takes_the_first_grid_point"
+  },
+  {
+    "id": "O1-M5",
+    "name": "O1a: the owner's window is four samples wider, so it hands payload past the Stop bound (RM-16)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "let window_cut = clock.at_or_after(now.saturating_add(window));",
+    "new": "let window_cut = clock.at_or_after(now.saturating_add(window)) + 4;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "o1_uhd_t3b_a_stop_cannot_find_payload_past_its_bound"
+  },
+  {
+    "id": "O1-M6",
+    "name": "O1a: a switch held at or after an abandoned repeat's cursor survives it (RM-37; the held switch is cancelled with the repeat)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/tx.rs",
+    "old": "self.cancel_held_switches(cursor);",
+    "new": "let _ = cursor;",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "o1_uhd_t7a_a_failed_send_ends_a_repeat"
+  },
+  {
+    "id": "O1-M3b",
+    "name": "O1b: the Mock's switch boundary is one grid point late (RM-37, MR-42)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "start = repeat_boundary(playing.origin, playing.period, bound.max(target));",
+    "new": "start = repeat_boundary(playing.origin, playing.period, bound.max(target) + playing.period);",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "o1_mock_t4a_a_switch_takes_the_first_grid_point"
+  },
+  {
+    "id": "O1-M4",
+    "name": "O1b: the Mock's Stop cut is one sample late (MR-25)",
+    "file": "crates/ezsdr-mock-radio/src/lib.rs",
+    "old": "let cut = timeline::later_bound(at_stop, merge_front(payload, previous));",
+    "new": "let cut = timeline::later_bound(at_stop, merge_front(payload, previous)) + 1;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "o1_mock_t9_the_stop_cut_follows_mr_25_in_full"
+  },
+  {
+    "id": "O1-M7a",
+    "name": "O1b: the Mock radiates the wrong sample position, one sample late (MR-32)",
+    "file": "crates/ezsdr-mock-radio/src/channel.rs",
+    "old": "let n = usize::try_from((j - segment.start) % segment.len).ok()?;",
+    "new": "let n = usize::try_from((j - segment.start + 1) % segment.len).ok()?;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "o1_mock_t1_short_and_long_heads_front_table"
+  },
+  {
+    "id": "O1-M7b",
+    "name": "O1b: the Mock's repeat phase drifts one sample per wrap (MR-32)",
+    "file": "crates/ezsdr-mock-radio/src/channel.rs",
+    "old": "let n = usize::try_from((j - segment.start) % segment.len).ok()?;",
+    "new": "let n = usize::try_from((j - segment.start - (j - segment.start) / segment.len) % segment.len).ok()?;",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_channel",
+    "filter": "o1_mock_t3_a_repeat_keeps_its_phase"
+  },
+  {
+    "id": "O1-M8",
+    "name": "O1a: the switch row names the switch itself as its predecessor, not the repeat it replaces (RM-37, MR-42, UR-38)",
+    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
+    "old": "predecessor: from.id,",
+    "new": "predecessor: id,",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "o1_uhd_t4a_a_switch_takes_the_first_grid_point"
   }
 ]

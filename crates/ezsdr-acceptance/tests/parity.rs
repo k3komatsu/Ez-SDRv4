@@ -39,6 +39,9 @@ use ezsdr_radio::payloads::{RxOverflowCause, RxOverflowPayload};
 use ezsdr_radio_uhd::{Device, DeviceAuthority, FakeConfig, FakeDevice, FakeFault, UhdRadio};
 use serde_json::json;
 
+/// The O1 spec oracle (design note 49 §5.4.11): one source shared with the UHD and Mock tests; it names no Provider type.
+mod oracle;
+
 const ROOT_HZ: i64 = 200_000_000;
 
 fn ms(n: i64) -> i64 {
@@ -995,6 +998,8 @@ struct CancellationPair {
     stereo: Vec<(usize, ezsdr_kernel::manifest::ArtifactRef)>,
     /// A 500-sample waveform of samples other than the repeats' (for a switch whose new samples are told apart on the device).
     tone: ezsdr_kernel::manifest::ArtifactRef,
+    /// The oracle's `ramp(tag, len)` waveforms `new_with` prepared.
+    ramps: Vec<((u8, usize), ezsdr_kernel::manifest::ArtifactRef)>,
     t0: i64,
     uhd_t0: i64,
     uhd_barriers: std::cell::Cell<usize>,
@@ -1002,6 +1007,18 @@ struct CancellationPair {
 
 impl CancellationPair {
     fn new(selector: BTreeMap<Ident, Value>, constraints: &[(&str, Constraint)], ports: &[&str], fake: FakeConfig, environment: BTreeMap<Namespace, serde_json::Value>) -> CancellationPair {
+        CancellationPair::new_with(selector, constraints, ports, fake, environment, &[])
+    }
+
+    /// As `new`, and with the oracle's `ramp(tag, len)` waveforms of `ramps` prepared too (O1: a distinct value per sample).
+    fn new_with(
+        selector: BTreeMap<Ident, Value>,
+        constraints: &[(&str, Constraint)],
+        ports: &[&str],
+        fake: FakeConfig,
+        environment: BTreeMap<Namespace, serde_json::Value>,
+        ramps: &[(u8, usize)],
+    ) -> CancellationPair {
         let (waveform, mut inputs) = cancellation_waveform();
         let (single, extra) = waveform_of(&[[0.25f32, 0.0f32]]);
         inputs.extend(extra);
@@ -1019,6 +1036,12 @@ impl CancellationPair {
         }
         let (tone, extra) = waveform_of(&[[0.75f32, -0.25f32]; 500]);
         inputs.extend(extra);
+        let mut prepared_ramps = Vec::new();
+        for (tag, len) in ramps {
+            let (artifact, extra) = waveform_of(&oracle::ramp(*tag, *len));
+            inputs.extend(extra);
+            prepared_ramps.push(((*tag, *len), artifact));
+        }
         let t0 = ms(2_001);
         let mut mock = MockRig::with_run(selector.clone(), constraints, ports, inputs.clone(), environment);
         mock.arm_start(t0);
@@ -1030,7 +1053,12 @@ impl CancellationPair {
         uhd.wait_until(uhd_t0 + ms(5));
         uhd.settle(Wall::from_millis(1));
         mock.step(t0 + ms(5));
-        CancellationPair { mock, uhd, waveform, single, sized, stereo, tone, t0, uhd_t0, uhd_barriers: std::cell::Cell::new(0) }
+        CancellationPair { mock, uhd, waveform, single, sized, stereo, tone, ramps: prepared_ramps, t0, uhd_t0, uhd_barriers: std::cell::Cell::new(0) }
+    }
+
+    /// The oracle's `ramp(tag, len)`, one `new_with` prepared.
+    fn ramp(&self, tag: u8, len: usize) -> &ezsdr_kernel::manifest::ArtifactRef {
+        &self.ramps.iter().find(|(key, _)| *key == (tag, len)).expect("a prepared ramp").1
     }
 
     /// A waveform of `samples` samples, one of the four lengths `new` prepares.
@@ -2000,6 +2028,11 @@ fn s13_parity_b_refused_at_receipt_and_the_value_answers() {
 fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
     // S4b (R4-5): A(40) at 20 ms is handed, C(10) is booked early at 100 samples past it, then B(10) joins A at 40 samples, received
     // before the join deadline (15.04 ms). B continues A with no end-of-burst between, and C plays on time on both Providers.
+    // The scenario needs the test thread to reach 6, 11 and 12 ms before the device does (the device clock runs in real time while its threads
+    // are idle), so the comparison is made only when the UHD received and played everything on time; under load a late booking is correctly
+    // dropped or refused and the scenario is not established (the test says so and returns). The property itself, with exact receipt instants, is
+    // pinned on the frozen rigs: `o1_uhd_t2c_a_booking_joined_at_a_heads_end_…` (UHD) and `o1_mock_t2c_…` (Mock), and the join deadline's
+    // equality by `o1_uhd_t2_a_join_is_inclusive_at_its_deadline` and `o1_mock_t2_a_join_is_inclusive_at_its_deadline`.
     let mut pair = CancellationPair::new(
         selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
         &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
@@ -2020,9 +2053,14 @@ fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
     let uhd = pair.uhd.finish_in_place();
     let uhd_events = pair.uhd.events();
     let uhd_sends = tx_send_calls(&pair.uhd.device, 0);
-    for (case, events) in [("Mock", &mock_events), ("UHD", &uhd_events)] {
-        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{case}: C plays on time: {events:?}");
+    let late = |events: &[Event]| {
+        events.iter().any(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR || (event.kind.as_str() == ezsdr_radio::kinds::COMMAND_REJECTED && event.payload["kind"] == "tx_burst"))
+    };
+    if late(&uhd_events) {
+        eprintln!("s4b: the test thread was late for the UHD's instants, so the scenario is not established here; the frozen rigs own it: {uhd_events:?}");
+        return;
     }
+    assert!(!late(&mock_events), "the Mock (stepped by the test) is on time: {mock_events:?}");
     assert_eq!(overlap_refusals(&tx_rejected_rows(&mock, "ezsdr.radio.mock.rejected")), 0, "the Mock refuses nothing");
     assert_eq!(overlap_refusals(&tx_rejected_rows(&uhd, "ezsdr.radio.uhd.rejected")), 0, "UHD refuses nothing");
     let sizes = |instance: &ProviderInstance, namespace: &str| {
@@ -2273,8 +2311,11 @@ fn s15_parity_untimed_booking_after_stop() {
 #[test]
 fn s15_parity_untimed_queue_behind_a_booking() {
     // RM-15 (sequence 3): a timed burst B of 10 samples at s = 30 ms, then an untimed burst of 10 samples at s + 3, booked in that order.
-    // The untimed one queues behind B's front (s + 20) on both Providers, with no refusal and no TIME_ERROR. Both are booked at 17 ms, so
-    // the instant (s + 3) binds, not the lead.
+    // The untimed one queues behind B's front (s + 20) on both Providers, with no refusal and no TIME_ERROR. B is SendAsapAndFlag (a late
+    // host moves it, never drops it), so the comparison is made from B's observed start: the Mock's untimed burst starts exactly at B's front,
+    // s + max(10, 4) + 10 (it is stepped by the test); the UHD's no earlier than that front (a late receipt can only move it later, RM-15:
+    // the first free sample at or after the ordinary bound). The UHD's exact start, with receipt instants fixed, is pinned by
+    // `o1_uhd_t5_a_late_send_asap_and_an_untimed_booking_are_placed_exactly` and `o1_mock_t5_…` (untimed rows (d) and (e)).
     let mut pair = CancellationPair::new(
         selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
         &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
@@ -2283,13 +2324,18 @@ fn s15_parity_untimed_queue_behind_a_booking() {
         BTreeMap::new(),
     );
     let ten = pair.sized(10).clone();
-    submit(&mut pair, 201, 17, |pair| vec![short_booking(pair, &ten, 0, 30, 0)]);
+    submit(&mut pair, 201, 17, |pair| vec![o1_asap(pair, &ten, 30, false, false)]);
     submit_untimed(&mut pair, 202, 17, |pair| vec![short_booking(pair, &ten, 0, 30, 3)]);
     pair.uhd.wait_until(pair.uhd_t0 + ms(60));
     pair.mock.step(pair.t0 + ms(60));
     let (mock_events, uhd_events) = (pair.mock.events(), pair.uhd.events());
     assert!(tx_decisions(&mock_events).is_empty() && tx_decisions(&uhd_events).is_empty(), "both bursts are accepted: {mock_events:?}");
-    assert!(mock_events.iter().chain(&uhd_events).all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "an untimed burst has no TIME_ERROR");
+    // A late B reports its own TIME_ERROR (send_asap); the untimed burst never does: no TIME_ERROR names it (its action is the second booked).
+    assert!(mock_events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "the Mock is stepped by the test: no TIME_ERROR");
+    assert!(
+        uhd_events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).all(|event| event.payload["outcome"] == "send_asap" && event.payload["action"].as_u64() == Some(1)),
+        "only B may be late: {uhd_events:?}"
+    );
     let mock = pair.mock.finish_in_place();
     let uhd = pair.uhd.finish_in_place();
     let gap = |instance: &ProviderInstance, namespace: &str| {
@@ -2299,7 +2345,8 @@ fn s15_parity_untimed_queue_behind_a_booking() {
         starts[1] - starts[0]
     };
     let (mock_gap, uhd_gap) = (gap(&mock, "ezsdr.radio.mock.bursts"), gap(&uhd, "ezsdr.radio.uhd.bursts"));
-    assert_eq!((mock_gap, uhd_gap), (20, 20), "the untimed burst starts at B's front, s + max(10, 4) + 10");
+    assert_eq!(mock_gap, 20, "the Mock's untimed burst starts at B's front, s + max(10, 4) + 10");
+    assert!(uhd_gap >= 20, "the UHD's untimed burst starts no earlier than B's front: {uhd_gap}");
 }
 
 /// What each Provider refused among transmit values and bursts: the kind and the Action id, in order (RM-22). The samples are not compared.
@@ -2402,4 +2449,255 @@ fn s14_transmit_values_on_an_empty_stream_decide_the_same_on_both_providers() {
     let (mock, uhd) = decided(&mut pair);
     assert_eq!(mock, uhd, "S3: the Providers refuse the same");
     assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["update_parameter", "update_parameter"], "the value while the repeat plays and the one inside the window: {mock:?}");
+}
+
+// ---------------------------------------------------------------- O1c: the spec oracle on both Providers, under any scheduling
+//
+// The paired rig's UHD owner runs on a thread against a manual clock, so the SCENARIO is established independently of scheduling and only
+// what no scheduling can move is asserted: bookings are SendAsapAndFlag (a late host moves a start, which the records report, it never drops
+// it), and a Stop or a switch is received only after the device is observed to have started the burst (`o1_wait_playing`: the wait's length
+// changes when the Stop is received, never what is asserted). The Mock is stepped by the test and keeps its planned instants. The waveform's
+// identity and phase against the burst's OBSERVED start (its record's `target`), the samples the device played against what the record
+// counts, a Stop's cut against the Stop the Provider says it applied (`tx_stop_applied`), and a switch's new waveform against the boundary
+// the row records. The Mock's side is deterministic (stepped by the test), so its records are compared with the oracle exactly. Receipt
+// instants, admission, placement and lateness, and the switch row's outcome, are the frozen rigs' (`o1_uhd_*` in `tx.rs`, `o1_mock_*` in
+// `mock_channel.rs`); this file asserts no cross-Provider switch row. Observation limit: `transmitted` is channel 0, and the Mock has no
+// sample view in this rig.
+
+fn o1_pair(ramps: &[(u8, usize)]) -> CancellationPair {
+    CancellationPair::new_with(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+        ramps,
+    )
+}
+
+/// The oracle's parameters for a Provider's transmit clock: window 10 ms, device lead 2 ms, allowance 3 ms (profile values, 1 MS/s on a 200 MHz root).
+fn o1_params(clocks: &ClockRegistry) -> oracle::Params {
+    let record = clocks.sample_clock_records().into_iter().filter(|record| record.stream.path() == "radio/tx/s0").min_by_key(|record| record.origin.ticks_in(record.root).unwrap()).unwrap();
+    assert_eq!(record.root_ticks_per_tick.den(), 1);
+    oracle::Params { clock: oracle::Clock { origin: record.origin.ticks_in(record.root).unwrap(), n: record.root_ticks_per_tick.num() as i64 }, window: ms(10), lead: ms(2), allowance: ms(3) }
+}
+
+/// The UHD device's samples `[from, to)` on channel 0.
+fn o1_uhd_samples(pair: &CancellationPair, from: i64, to: i64) -> Vec<Option<[f32; 2]>> {
+    pair.uhd.device.transmitted(tx_device_tick(&pair.uhd.clocks, 0, from), (to - from) as usize)
+}
+
+/// Checks the oracle's `slots` against the UHD device over `[from, to)`; the cut found, if the slots allow one.
+fn o1_check_uhd(pair: &CancellationPair, slots: &oracle::Slots, from: i64, to: i64) -> Option<i64> {
+    let seen = o1_uhd_samples(pair, from, to);
+    slots.check(from, to, &|k| seen[(k - from) as usize]).unwrap_or_else(|error| panic!("{error}: {:?}", pair.uhd.device.calls()))
+}
+
+fn o1_records(instance: &ProviderInstance, namespace: &str) -> Vec<(i64, i64, i64, String)> {
+    manifest_rows(instance, namespace)
+        .iter()
+        .map(|row| (row["target"]["ticks"].as_i64().unwrap(), row["samples"].as_i64().unwrap(), row["wraps"].as_i64().unwrap(), row["end"].as_str().unwrap().to_owned()))
+        .collect()
+}
+
+/// A transmit burst on stream 0 for both Providers at `relative` ms from T0 under SendAsapAndFlag (a late host moves its start, which its
+/// record reports; it is never dropped), repeating when `repeat`, as a switch when `switch`.
+fn o1_asap(pair: &CancellationPair, wave: &ezsdr_kernel::manifest::ArtifactRef, relative: i64, repeat: bool, switch: bool) -> (Action, Action) {
+    let action = |clocks: &ClockRegistry, root: i64| Action::TxBurst {
+        target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: "tx/s0".to_owned() },
+        waveform: wave.clone(),
+        repeat,
+        at: ezsdr_kernel::time::AbsoluteDeadline::new(tx_samples_after(clocks, 0, root + ms(relative), 0)),
+        requested_at: None,
+        late_policy: ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag,
+        metadata: if switch { BTreeMap::from([(key("radio.repeat_operation"), Value::Scalar(Scalar::from("switch")))]) } else { BTreeMap::new() },
+    };
+    (action(&pair.mock.clocks, pair.t0), action(&pair.uhd.clocks, pair.uhd_t0))
+}
+
+/// The Mock receives `action` at `relative` ms from its T0 (it is stepped by the test: its instants are its plan).
+fn o1_mock_at(pair: &mut CancellationPair, relative: i64, action: Action) {
+    pair.mock.step(pair.t0 + ms(relative));
+    pair.mock.push(action);
+    pair.mock.step(pair.t0 + ms(relative));
+}
+
+/// The UHD receives `action` once its device clock is at `relative` ms from its T0 (or later, if a descheduled test thread let it pass).
+fn o1_uhd_at(pair: &mut CancellationPair, token: u64, relative: i64, action: Action) {
+    pair.uhd.wait_until(pair.uhd_t0 + ms(relative));
+    pair.uhd.push(action);
+    pair.uhd_barrier(token);
+}
+
+/// Advances the UHD's device clock a millisecond at a time from `from` ms until the owner has issued its first timed payload send (the first
+/// send that names an instant: the burst's start), and returns the first ms, relative to T0, at which a Stop or a switch is received after the
+/// device has passed that start. A wait is fine; the instant a Stop is received is not what the tests assert.
+fn o1_wait_playing(pair: &mut CancellationPair, from: i64) -> i64 {
+    for relative in from..from + 400 {
+        pair.uhd.wait_until(pair.uhd_t0 + ms(relative));
+        pair.uhd.settle(Wall::from_millis(1));
+        let start = pair.uhd.device.calls().iter().find_map(|call| {
+            let parts: Vec<&str> = call.split_whitespace().collect();
+            let numbered = parts.first() == Some(&"tx_send") && parts.get(1).is_some_and(|s| s.parse::<usize>().is_ok());
+            let at = parts.iter().find_map(|p| p.strip_prefix("at=")).filter(|at| *at != "-")?.parse::<i64>().ok()?;
+            numbered.then_some(at)
+        });
+        if let Some(start) = start {
+            return (start - pair.uhd_t0 + ms(1) - 1) / ms(1) + 3;
+        }
+    }
+    panic!("the UHD never issued a timed payload send: {:?}", pair.uhd.device.calls());
+}
+
+#[test]
+fn o1_parity_a_repeat_keeps_its_phase_across_wraps_from_its_observed_start() {
+    // RM-13 (seq 3): a 1 000-sample repeat is `R[(k - target) mod 1000]` over every wrap the device played, from the start its record names; the
+    // record counts exactly the samples the device played (a Stop ends it), `wraps = samples / 1000`; the Mock's record is its planned start
+    // and its exact MR-25 cut for the Stop it received at 50 ms.
+    let mut pair = o1_pair(&[(7, 1_000)]);
+    let wave = pair.ramp(7, 1_000).clone();
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &wave, 40, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7).max(50);
+    let (mock_stop, uhd_stop) = (o1_asap_stop(), o1_asap_stop());
+    o1_mock_at(&mut pair, 50, mock_stop);
+    o1_uhd_at(&mut pair, 202, rel, uhd_stop);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(rel + 70));
+    pair.mock.step(pair.t0 + ms(120));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let uhd_rows = o1_records(&uhd, "ezsdr.radio.uhd.bursts");
+    assert_eq!(uhd_rows.len(), 1, "{uhd_rows:?}");
+    let (target, samples, wraps, end) = uhd_rows[0].clone();
+    assert_eq!((end.as_str(), wraps), ("stop", samples / 1_000));
+    let slots = oracle::Slots { segs: vec![oracle::Seg::repeating(7, target, 1_000, i64::MAX).cuttable()], cut: Some((target + samples, target + samples + 1)) };
+    let cut = o1_check_uhd(&pair, &slots, target - 10, target + samples + 100).expect("the Stop cuts the repeat");
+    assert_eq!(cut - target, samples, "the device played exactly what the record counts");
+    let p = o1_params(&pair.mock.clocks);
+    let mock_rows = o1_records(&mock, "ezsdr.radio.mock.bursts");
+    assert_eq!(mock_rows.len(), 1, "{mock_rows:?}");
+    let cut = oracle::mock_cut(&p, pair.t0 + ms(50), &[oracle::MBurst { start: mock_rows[0].0, len: None, started: true, before_stop: true }], None);
+    assert_eq!((mock_rows[0].1, mock_rows[0].2, mock_rows[0].3.as_str()), (cut - mock_rows[0].0, (cut - mock_rows[0].0) / 1_000, "stop"));
+}
+
+fn o1_asap_stop() -> Action {
+    stop_both("tx/s0").0
+}
+
+#[test]
+fn o1_parity_a_long_finite_burst_is_what_its_record_counts() {
+    // RM-13, RM-15 (seq 1): a 3 000-sample burst, longer than one send, plays `F[k - target]` for every sample from the start its record names,
+    // silence after; both Providers record exactly 3 000 payload samples ending at the waveform's end. The booking is SendAsapAndFlag: a host
+    // that is late moves the start, which the record reports.
+    let mut pair = o1_pair(&[(5, 3_000)]);
+    let wave = pair.ramp(5, 3_000).clone();
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &wave, 40, false, false)]);
+    let rel = o1_wait_playing(&mut pair, 7);
+    pair.uhd.wait_until(pair.uhd_t0 + ms(rel + 60));
+    pair.mock.step(pair.t0 + ms(120));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    for (case, rows) in [("UHD", o1_records(&uhd, "ezsdr.radio.uhd.bursts")), ("Mock", o1_records(&mock, "ezsdr.radio.mock.bursts"))] {
+        assert_eq!(rows.iter().map(|row| (row.1, row.3.as_str())).collect::<Vec<_>>(), [(3_000, "eob")], "{case}: {rows:?}");
+    }
+    let target = o1_records(&uhd, "ezsdr.radio.uhd.bursts")[0].0;
+    o1_check_uhd(&pair, &oracle::Slots { segs: vec![oracle::Seg::once(5, target, 3_000)], cut: None }, target - 10, target + 3_100);
+    let played = o1_uhd_samples(&pair, target - 10, target + 3_100).into_iter().flatten().filter(|sample| *sample != [0.0, 0.0]).count();
+    assert_eq!(played, 3_000, "the device played exactly the 3 000 samples the record counts");
+}
+
+#[test]
+fn o1_parity_a_stop_cuts_a_playing_burst_inside_the_applied_range() {
+    // RM-16, MR-25 (seq 3, 6): a 24 000-sample burst (longer than the 10 ms window) from 40 ms. The Mock receives a Stop at 41 ms; the UHD one
+    // once the burst is observed started. The UHD's cut lies in [t_k, B], read from the Stop the Provider says it applied (`tx_stop_applied`,
+    // #83); its record counts the samples the device played and ends `stop`, or ends with the waveform when a late-applied Stop found it
+    // handed whole (which the Stop's bound allows only if it ended by `B`). The Mock's cut is MR-25's point and its record the same.
+    let mut pair = o1_pair(&[(5, 24_000)]);
+    let wave = pair.ramp(5, 24_000).clone();
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &wave, 40, false, false)]);
+    let rel = o1_wait_playing(&mut pair, 7).max(41);
+    o1_mock_at(&mut pair, 41, o1_asap_stop());
+    o1_uhd_at(&mut pair, 202, rel, o1_asap_stop());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(rel + 70));
+    pair.mock.step(pair.t0 + ms(120));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let applied: Vec<_> = manifest_rows(&uhd, "ezsdr.radio.uhd.timing").into_iter().filter(|row| row["what"] == "tx_stop_applied").collect();
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    let up = o1_params(&pair.uhd.clocks);
+    let (t_k, bound) = (up.clock.at_or_after(applied[0]["at"].as_i64().unwrap()), up.clock.at_or_after(applied[0]["bound"].as_i64().unwrap()));
+    assert!((10_003..=10_004).contains(&(bound - t_k)), "the applied Stop bound is the window plus three: {t_k} {bound}");
+    let (target, samples, _, end) = o1_records(&uhd, "ezsdr.radio.uhd.bursts")[0].clone();
+    let slots = oracle::Slots { segs: vec![oracle::Seg::once(5, target, 24_000).cuttable()], cut: Some((t_k, bound)) };
+    let cut = o1_check_uhd(&pair, &slots, target - 10, target + 24_100);
+    match end.as_str() {
+        "stop" => {
+            let cut = cut.expect("the Stop cuts the burst");
+            assert!((t_k..=bound).contains(&cut), "the cut {cut} is outside [{t_k}, {bound}]");
+            assert_eq!(samples, cut - target, "the record counts the samples the device played");
+        }
+        "eob" => assert!(samples == 24_000 && target + 24_000 <= bound, "a burst that ended by itself ended by the Stop's bound: {target} {bound} {samples}"),
+        other => panic!("the burst ended {other}"),
+    }
+    let mp = o1_params(&pair.mock.clocks);
+    let mock_rows = o1_records(&mock, "ezsdr.radio.mock.bursts");
+    let mock_cut = oracle::mock_cut(&mp, pair.t0 + ms(41), &[oracle::MBurst { start: mock_rows[0].0, len: Some(24_000), started: true, before_stop: true }], None);
+    assert_eq!((mock_rows[0].1, mock_rows[0].3.as_str()), (mock_cut - mock_rows[0].0, "stop"));
+}
+
+#[test]
+fn o1_parity_a_switched_repeat_changes_waveform_at_its_recorded_boundary_on_its_grid() {
+    // RM-37 (seq 4): R (700 samples, from 40 ms) switched to a 400-sample waveform, then a Stop closes the new repeat. The UHD receives the
+    // switch once R is observed started; its new waveform starts at the boundary its `switches` row records (the moved one if the host was
+    // late), which lies on R's grid from R's observed start; the old repeat is `R[(k - target) mod 700]` to it and the new one `N[(k - b) mod
+    // 400]` from it to the Stop's cut (in the applied range), the old record ends there and the successor's record is its own: target `b`, the
+    // samples played, wraps, end stop. The switch row names the switch (its action id) and R (the predecessor). The Mock's boundary is the
+    // oracle's for its own receipt at 43 ms. No row outcome is compared between the Providers.
+    let mut pair = o1_pair(&[(8, 700), (9, 400)]);
+    let (old, new) = (pair.ramp(8, 700).clone(), pair.ramp(9, 400).clone());
+    submit(&mut pair, 201, 6, |pair| vec![o1_asap(pair, &old, 40, true, false)]);
+    let rel = o1_wait_playing(&mut pair, 7).max(43);
+    let (mock_switch, _) = o1_asap(&pair, &new, 44, true, true);
+    let (_, uhd_switch) = o1_asap(&pair, &new, rel, true, true);
+    o1_mock_at(&mut pair, 43, mock_switch);
+    o1_uhd_at(&mut pair, 202, rel, uhd_switch);
+    // The Stop that ends the new repeat: the Mock at 70 ms; the UHD 30 ms after the device time at which it actually received the switch (so
+    // the Stop's bound can never come before the switch's boundary, however late the test thread was).
+    let received = pair.uhd.time.now(pair.uhd.root).unwrap().ticks_in(pair.uhd.root).unwrap();
+    let stop_rel = (rel + 30).max((received - pair.uhd_t0 + ms(1) - 1) / ms(1) + 30);
+    o1_mock_at(&mut pair, 70, o1_asap_stop());
+    o1_uhd_at(&mut pair, 203, stop_rel, o1_asap_stop());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(stop_rel + 70));
+    pair.mock.step(pair.t0 + ms(stop_rel + 70));
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    let rows = manifest_rows(&uhd, "ezsdr.radio.uhd.switches");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    // The queue gives the UHD's ids in order, its barriers included: R is 1, its barrier 2, the switch 3.
+    assert_eq!((rows[0]["action_id"].as_u64(), rows[0]["predecessor"].as_u64()), (Some(3), Some(1)), "{rows:?}");
+    let b = rows[0]["moved_to"].as_i64().or(rows[0]["boundary"].as_i64()).unwrap();
+    let uhd_recs = o1_records(&uhd, "ezsdr.radio.uhd.bursts");
+    let target = uhd_recs[0].0;
+    assert_eq!((b - target) % 700, 0, "the boundary {b} is on the repeat's grid from {target}");
+    let applied: Vec<_> = manifest_rows(&uhd, "ezsdr.radio.uhd.timing").into_iter().filter(|row| row["what"] == "tx_stop_applied").collect();
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    let up = o1_params(&pair.uhd.clocks);
+    let (t_k, bound) = (up.clock.at_or_after(applied[0]["at"].as_i64().unwrap()), up.clock.at_or_after(applied[0]["bound"].as_i64().unwrap()));
+    let slots = oracle::Slots { segs: vec![oracle::Seg::repeating(8, target, 700, b), oracle::Seg::repeating(9, b, 400, i64::MAX).cuttable()], cut: Some((t_k, bound)) };
+    let cut = o1_check_uhd(&pair, &slots, target - 10, bound + 100).expect("the Stop cuts the new repeat");
+    assert_eq!(uhd_recs.len(), 2, "{uhd_recs:?}");
+    assert_eq!(uhd_recs[0].1, b - target, "the old repeat's record ends at the boundary");
+    assert_eq!((uhd_recs[1].0, uhd_recs[1].1, uhd_recs[1].2, uhd_recs[1].3.as_str()), (b, cut - b, (cut - b) / 400, "stop"), "the successor's record");
+    // The Mock: its boundary is the oracle's for its receipt at 43 ms and `at` of 44 ms; the repeat and its successor both record.
+    let mp = o1_params(&pair.mock.clocks);
+    let mock_rows = o1_records(&mock, "ezsdr.radio.mock.bursts");
+    let at = tx_samples_after(&pair.mock.clocks, 0, pair.t0 + ms(44), 0);
+    let at = at.ticks_in(at.domain()).unwrap();
+    let mb = oracle::switch_boundary(&mp, mock_rows[0].0, 700, pair.t0 + ms(43), Some(at));
+    let rows = manifest_rows(&mock, "ezsdr.radio.mock.switches");
+    assert_eq!((rows.len(), rows[0]["boundary"].as_i64(), rows[0]["moved_to"].is_null()), (1, Some(mb), true), "{rows:?}");
+    assert_eq!((rows[0]["action_id"].as_u64(), rows[0]["predecessor"].as_u64()), (Some(2), Some(1)), "the Mock's queue gives the repeat 1 and the switch 2: {rows:?}");
+    let mock_cut = oracle::mock_cut(&mp, pair.t0 + ms(70), &[oracle::MBurst { start: mb, len: None, started: true, before_stop: true }], None);
+    assert_eq!(mock_rows.len(), 2, "{mock_rows:?}");
+    assert_eq!(mock_rows[0].1, mb - mock_rows[0].0, "the Mock's old repeat ends at the boundary");
+    assert_eq!((mock_rows[1].0, mock_rows[1].1, mock_rows[1].2, mock_rows[1].3.as_str()), (mb, mock_cut - mb, (mock_cut - mb) / 400, "stop"), "the Mock's successor record");
 }

@@ -29,7 +29,7 @@ Spec text (same change):
 - `design/07-radio-model.md` RM-13's refusal list item "`metadata` is neither empty nor the switch mark (RM-37), or the mark is on a burst that does not repeat" → also "or whose late policy is not `send_asap_and_flag`". Check RM-12 and RM-37 for a sentence that still allows a DropAndFlag switch.
 - `design/18-uhd-radio.md` UR-38 (about line 299): remove "Under DropAndFlag it is refused with its id, as `COMMAND_REJECTED`, and the old repeat plays on." and any other DropAndFlag-switch wording; the *Test:* lines (UR-38 about line 301, and line 295) drop the removed test and name the new one.
 - `design/09-mock-radio.md` MR-16 / MR-42 if they state the switch's late policy.
-- Each spec's closing *Changes* table: one row for N0 (date 2026-11-09, the rules touched, one line, "[note 49](../plan/phase8/49-time-and-booking-inventory.md) §11.3, N0").
+- Each spec's closing *Changes* table: one row for N0 (date 2026-11-09, the rules touched, one line, "`[note 49](../plan/phase8/49-time-and-booking-inventory.md) §11.3, N0`").
 
 ## Part 2 — RM-15: the footprint sentence (owner, 2026-11-08, note 49 §11.2 (a), §6 principle 4)
 

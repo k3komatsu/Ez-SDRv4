@@ -1,0 +1,27 @@
+# O1 (2026-11-09/10): a spec oracle for transmit, passing on today's code
+
+Second stage of direction D′ (design note [49](../49-time-and-booking-inventory.md) §5.4.11, §12): the safety net for E1–E3. Tests only; production unchanged except a `#[cfg(test)]` `#[path]` line in `tx.rs`. Implementer: a Claude Sonnet subagent (owner, 2026-11-09; self-review waived). Reviews: Sol on the test plan (FAIL), an Opus re-check of the amended plan (FAIL), the orchestrator's check of its fixes, Sol on the code (FAIL), two Opus re-checks of the fixes (FAIL, then PASS WITH MINORS). Implemented in three sub-steps (O1a UHD frozen rigs, O1b Mock loopback, O1c paired parity) on a local work branch. Brief: [o1-brief.md](o1-brief.md); test plan: [o1-test-plan.md](o1-test-plan.md); gate: `o1-gate.json` (added after the gate).
+
+## What it adds
+- `crates/ezsdr-acceptance/tests/oracle/mod.rs`: a std-only oracle written from RM-13–RM-16, RM-37, UR-22, UR-38, MR-25, MR-42; it names no Provider type and calls no `ezsdr_radio::staging` decision. One source, included by `#[path]` from the three drivers. Self-tests in `tests/o1_oracle.rs`.
+- UHD frozen-rig tests (`crates/ezsdr-radio-uhd/src/provider/tx/tests/o1.rs`, 21): fronts of 1–3000-sample heads, the join at J(e) ± 1 tick, repeat phase and the Stop cut range, switch boundary tables (period 700), moved, cancelled and Stop-after-boundary switches with successor records and row identities, late SendAsap and untimed placement, Stop cancellation and the region `[t, B)`, abandon with the attempted, accepted and recorded ranges, T6d (Stop → B → failed close).
+- Mock tests through the SimulationChannel loopback (`crates/ezsdr-mock-radio/tests/mock_channel/o1.rs`, 13): the same sequences, every sample compared (exact on `ideal`; rotation and the 45-sample delay undone on `x3xx`), MR-25's full cut formula including W = 0.
+- Paired parity (`o1_parity_*`, 4): assertions that hold under any scheduling, with oracle inputs from observations (record target, switch row boundary, `tx_stop_applied`). 25/25 runs.
+- Known divergences pinned so that they go red when fixed: #84 (a repeat dropped at dispatch leaves its switch refused, not cancelled), #85 (a Stop drops a dispatched but unsent burst with no cancellation note), #86 (a moved switch's record has no `requested_target`; which value the spec means is open, settled in E2a).
+- Spec text, written to the code (no behaviour change): RM-16 and MR-25 — a `Stop` that cancels a booking starting before `B` leaves `[t, B)`; MR-3 and RM-15 — the Mock's join deadline uses the emulated UHD Module's delivery allowance, so the Mock is never looser than the UHD Module.
+- Mutation rows O1-M1 … O1-M8 (one-sample shift, repeat phase, switch grid on both Providers, Mock Stop cut, Stop bound, abandon cancelling the held switch, Mock sample position and phase, switch predecessor): all killed.
+
+## Findings
+| Source | Findings | Disposition |
+|---|---|---|
+| Sol, test plan | FAIL: 6 majors (paired rig not deterministic; T6 made no Stop region; T7 conflated three cursors; Mock samples excluded although observable; boundary equalities not discriminated; today's applied-switch/Stop outcome left unpinned), 2 minors | all adopted; plan amended, split into O1a–c |
+| Opus re-check, plan | FAIL: 4 majors (a cross-Provider switch row depended on scheduling; T6b's H2 counted as handed; `calls()` logs the halved count; RM-16's unconditional region), minors | all adopted; RM-16/MR-25 text follows the code (orchestrator) |
+| Implementer, O1a | today's UHD drops a dispatched unsent burst at a Stop with no note | #85 |
+| Implementer, O1b | the Mock's J(e) uses the emulated 3 ms allowance; MR-3 named only RM-25's use | code stands (never looser than UHD); MR-3/RM-15 text |
+| Sol, code | FAIL: 2 majors (parity scenario setup depended on scheduling; successor records and switch identities unchecked), 2 minors (oracle cut range excluded its upper end; O1-M5 died before the Stop), T6d missing | all adopted |
+| Implementer, fix round | a moved switch's record has `requested_target = None` | #86 |
+| Opus re-check, fixes | FAIL: 2 majors (switch parity's Stop scheduled from the wait, not the receipt; T6d booked B after the failed close), minor (dead Stop arm), notes | all adopted |
+| Gate run 2 | two pre-existing parity tests (`s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time`, `s15_parity_untimed_queue_behind_a_booking`) failed under load: DropAndFlag/untimed bookings set up at instants the test thread must reach in time (#87; the four new o1_parity tests in the same binary may add load, INFERRED) | fixed in O1: the untimed test books B SendAsapAndFlag and compares from its observed target (exact placement stays with `o1_*_t5`); s4b checks only when the UHD scenario was established (a vacuous pass otherwise, accepted because its exact timing moved to the new frozen `o1_uhd_t2c_…` and `o1_mock_t2c_…`); parity binary 25/25 |
+| Opus re-check, narrow | PASS WITH MINORS: a > 70 ms stall between the wait and the Stop's push relies on orderly stop handling the queued Stop (INFERRED, predates the round) | accepted as a note |
+
+Mechanism: Sol's plan and code majors 1 are `mech:wall-clock-test-oracle` caught in review; #87 is a sixth bug of that mechanism (tests written outside note 37's cleanup; the design stands, the tests did not follow its rule). #85 counts for `mech:planned-state-read-as-actual`; #84 was counted at N0; #86 has no mechanism yet.

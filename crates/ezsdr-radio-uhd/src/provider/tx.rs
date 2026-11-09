@@ -1310,6 +1310,11 @@ impl Tx {
     }
 }
 
+/// The O1 spec oracle (design note 49 §5.4.11), one source shared with the acceptance and Mock tests: it names no Provider type.
+#[cfg(test)]
+#[path = "../../../ezsdr-acceptance/tests/oracle/mod.rs"]
+mod oracle;
+
 #[cfg(test)]
 mod tests {
     //! uhd-tx driven directly, where the order of its commands and steps matters and the
@@ -1336,6 +1341,8 @@ mod tests {
     use crate::provider::core::{Clock, Core, Holder, lock, stream_key};
     use crate::provider::test_support::{Frozen, device_at};
     use ezsdr_radio::timeline::Channels;
+
+    mod o1;
 
     fn held(clock: &super::Clock, k: i64, len: usize, policy: LatePolicy) -> Held {
         Held {
