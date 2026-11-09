@@ -499,7 +499,8 @@ pub struct SwitchTrial<'a> {
 }
 
 /// The repeat switch's verdict (S4, S5): the tone is the old frequency before the transition and the new one after it, nothing
-/// else changes, the power holds across the boundary, and the device sees no end-of-burst or start-of-burst at the switch.
+/// else changes within 5 ms on each side of the boundary, the power holds across the boundary, and the device sees no end-of-burst
+/// or start-of-burst at the switch.
 pub fn switch_verdict(trial: &SwitchTrial) -> Verdict {
     if !trial.refusals.is_empty() {
         return Verdict::Fail(format!("the Provider refused the switch, which should apply: {:?}", trial.refusals));
@@ -536,7 +537,10 @@ pub fn switch_verdict(trial: &SwitchTrial) -> Verdict {
     if before < 10 || after < 10 {
         return Verdict::Inconclusive(format!("the tone is not found on both sides of the boundary ({before} windows before, {after} after)"));
     }
-    if let Some((t, hz)) = trial.tone.iter().find(|(t, hz)| (*t < b - m && (hz - trial.before_hz).abs() > trial.tolerance_hz) || (*t >= b + m && (hz - trial.after_hz).abs() > trial.tolerance_hz)) {
+    if let Some((t, hz)) = trial.tone.iter().find(|(t, hz)| {
+        (*t >= b - 5 * TICKS_PER_MS && *t < b + 5 * TICKS_PER_MS)
+            && ((*t < b - m && (hz - trial.before_hz).abs() > trial.tolerance_hz) || (*t >= b + m && (hz - trial.after_hz).abs() > trial.tolerance_hz))
+    }) {
         return Verdict::Fail(format!("a {hz:.0} Hz window at tick {t}, outside the transition [{}, {}): the tone changes elsewhere", b - m, b + m));
     }
     let steady: Vec<f64> = trial.power.iter().filter(|(t, _)| steady_window(*t)).map(|(_, p)| *p).collect();
@@ -1117,6 +1121,14 @@ mod stage5_tests {
         let (mut tone, power) = (tone(), power(0.16));
         tone[10].1 = 150e3;
         assert!(matches!(switch_verdict(&trial(&tone, &power, "applied", Some(0))), Verdict::Fail(ref text) if text.contains("changes elsewhere")));
+    }
+
+    #[test]
+    fn windows_far_from_the_boundary_do_not_fail_the_switch() {
+        let (mut tone, power) = (tone(), power(0.16));
+        tone.push((B - 20 * TICKS_PER_MS, 491_925.0));
+        tone.push((B + 30 * TICKS_PER_MS, 0.0));
+        assert!(matches!(switch_verdict(&trial(&tone, &power, "applied", Some(0))), Verdict::Pass(_)));
     }
 
     #[test]

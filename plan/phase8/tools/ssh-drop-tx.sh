@@ -57,7 +57,7 @@ case ${EZSDR_DROP_BOARD:-} in
 esac
 command -v docker >/dev/null 2>&1 || { printf '%s\n' 'ssh-drop-tx: docker is not installed' >&2; exit 2; }
 command -v flock >/dev/null 2>&1 || { printf '%s\n' 'ssh-drop-tx: flock is required to protect the shared Cargo target volume' >&2; exit 2; }
-ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none localhost true >/dev/null 2>&1 || {
+ssh -n -o BatchMode=yes -o ControlMaster=no -o ControlPath=none localhost true >/dev/null 2>&1 || {
     printf '%s\n' 'ssh-drop-tx: ssh to localhost must work without a password (BatchMode); the server runs through it' >&2
     exit 2
 }

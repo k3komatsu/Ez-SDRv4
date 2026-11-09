@@ -16175,5 +16175,15 @@
     "crate": "ezsdr-radio-uhd",
     "test_bin": "fake",
     "filter": "a_provider_refusal_of_a_booking_that_should_play_is_a_fail"
+  },
+  {
+    "id": "N49A-01",
+    "name": "the switch's changes-elsewhere scan looks at every tone window, not only within 5 ms of the boundary (iii::switch_verdict)",
+    "file": "crates/ezsdr-radio-uhd/tests/common/iii.rs",
+    "old": "(*t >= b - 5 * TICKS_PER_MS && *t < b + 5 * TICKS_PER_MS) &&",
+    "new": "",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "fake",
+    "filter": "windows_far_from_the_boundary_do_not_fail_the_switch"
   }
 ]

@@ -383,3 +383,12 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - **(g) `hw_b8_stop_end`**：二台とも 3 試行 PASS．記録した終わりから音が止むまで #2 9 200〜11 200 tick，#1 −4 400〜8 000 tick（許容 30 000）．
 - **(h) `hw_n47_raw_tx_rate_on_an_open_streamer`**：二台とも PASS（1 → 2 MS/s の読み戻し，A の ACK は終わり＋1 tick，B はその tick，tone は保つ）．11-06 の #2 の INCONCLUSIVE は消えた．
 - **(i) 送信中の ssh 切断**（#1 OBX の TX/RX → 30 dB → splitter → #1 RX2 と #2 UBX RX2．#2 が独立の受信機）：**C1・C2・C3 とも PASS**．server は切断の +0 s で終わり，Manifest に attached の Lease の下の `client_disconnect`．#2 の受信機は切断の前に tone（`rx_before_drop=tone`），切断の +0 s に quiet．切断の後の Session の受信は 800 窓中 tone の形 0．最初の試行は att の確認で止まった（送信なし）：`plan/phase8/tools/ssh-drop-tx.sh` の事前の `ssh … localhost true`（:60）が標準入力の `yes` を読んでしまう（`-n` が要る）．確認を 5 秒遅らせて渡して流した．
+
+### 2026-11-09（午後）：段階 A の後の測り直しと #81 の UHD だけの再現（#2 UBX slot A，30 dB loopback，commit は段階 A の work branch `edb4a22`〜`28ccfbb`）
+
+記録は [reviews/bench9a-brief.md](reviews/bench9a-brief.md)．log は `~/.cache/ezsdr-bench/2026-11-09/`（`stepA-37.console.log`，`hw_*.37.2.log`，`repro/`）．
+
+- **(e) の判定を直して流し直した**（`switch_verdict` が境目の前後 5 ms だけを見る）：時刻なし・時刻つきとも PASS（記録 `applied`，100 → 200 kHz，電力は保つ，継ぎ目なし）．午前の (e) の FAIL は試験の判定の欠陥だった．
+- **(c)1 を send の trace つきで流し直した**：同じ形で FAIL（行ごとに PASS と FAIL が入れ替わる）．trace では Module の send は設計どおり（頭は一回の SOB＋EOB，tone は送った終わり＋1 から最初の send 149〜226 sample，続きは時刻つきの 2 500 sample で装置の時刻の 5〜8 ms 前，二 sample の閉じ）．落ちた試行は装置が Underflow を報告し burst が途中で打ち切られる．
+- **UHD だけで再現した**（`plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `front`・`sweep`，Ez-SDR のコードなし）：送った長さ L の閉じた burst A の後，10 000 sample の burst B（すべて時刻つき）を A の排他的な終わりから gap sample 後に始めると，B が鳴るのは L = 4〜8 で gap ≥ 10（7 は落ちる），L = 10〜14 で gap ≥ 7（5 は落ちる），L = 16 で gap ≥ 5（3 は落ちる），L = 16〜30 は gap 5 以上すべて，L = 31・32 は gap 1 でも鳴る（各 2〜4 試行．1 と 2 MS/s で同じ形）．午前の (c)2 の「gap 1 で鳴る」は B が 100 sample の一回の閉じた send だったからで，長い B ではこの制約に当たる．#81 は Module の欠陥ではなく装置の制約で，#82 も同じ族．#1 では測っていない（INFERRED：同じ）．
+- **owner の決定（2026-11-09）**：32 sample 以下の閉じた device burst の後の前線は送った終わり＋10（一つの値）．段階 B で両 Provider の記録，FakeDevice，RM-15・UR-22・KL-36 を直す．

@@ -16,7 +16,7 @@
 // per trial. Ticks are device ticks at the master clock rate (200 MHz on X300).
 //
 // Build (in ezsdr-v4-dev:uhd4.10): g++ -O2 -std=c++17 tx_repro.cpp -o tx_repro -luhd -lpthread
-// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1] [--trials 5] [--lead seconds]
+// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1|head|front] [--trials 5] [--lead seconds]
 
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/types/time_spec.hpp>
@@ -370,6 +370,99 @@ int main(int argc, char** argv) {
                     std::printf("summary %s trial %d start %lld %s\n", name, t, start, counts(rep).c_str());
                     ack_offsets(name, rep, start + (long long)(b.size() + 1) * PER);
                     if (g_invalid) return finish(tx, 6);
+                }
+            }
+        }
+    }
+    if (which == "front") {
+        // case 8 (bench 2026-11-09, #81): the Module's shape of hw_n47s5_front_after_a_short_burst. Head A: `len` samples
+        // (padded to four when len <= 3), one timed SOB+EOB send. Tone B: 10 000 samples starting `gap` samples after A's
+        // transmitted end, every send timed, closed by a timed two-sample EOB (held tail + zero), sent in one of three ways:
+        //   paced:  first send of 150 samples when its end is W ahead, then 2 500-sample sends each when its end is W ahead
+        //           (the Module's in-flight window W = 10 ms, as in the 2026-11-09 send trace);
+        //   atonce: the same sends, all issued at once right after A;
+        //   single: B's body in one send right after A, then the close.
+        // Q: which shape underflows after a short closed head, and does the gap matter?
+        auto b = tone(10000);
+        const long long W = (long long)(0.010 * MCR);
+        auto wait_until = [&](long long tick) { while (ticks(u->get_time_now()) < tick) std::this_thread::sleep_for(std::chrono::microseconds(50)); };
+        for (const char* mode : {"paced", "atonce", "single"}) {
+            for (size_t len : {1, 3, 10, 32}) {
+                for (long long gap : {1, 5}) {
+                    for (int t = 0; t < trials; t++) {
+                        drain(tx, 0.05, 0.5);
+                        size_t padded = len <= 3 ? 4 : len;
+                        std::vector<samp> a(padded, samp(0, 0));
+                        for (size_t i = 0; i < len; i++) a[i] = samp(0.4f, 0.0f);
+                        long long a_start = ahead(u, 0.1);
+                        // gap g from A's exclusive transmitted end (gap 1 = the record's front, iii::head_front)
+                        long long b_start = a_start + (long long)(padded + gap) * PER;
+                        wait_until(a_start + (long long)padded * PER - W);
+                        send(tx, a.data(), a.size(), a_start, true, true);
+                        size_t body = b.size() - 1, off = 0;
+                        bool paced = std::string(mode) == "paced";
+                        if (std::string(mode) == "single") {
+                            send(tx, b.data(), body, b_start, true, false);
+                            off = body;
+                        } else {
+                            while (off < body) {
+                                size_t k = std::min<size_t>(off == 0 ? 150 : 2500, body - off);
+                                if (paced) wait_until(b_start + (long long)(off + k) * PER - W);
+                                send(tx, &b[off], k, b_start + (long long)off * PER, off == 0, false);
+                                off += k;
+                            }
+                        }
+                        if (paced) wait_until(b_start + (long long)(body + 1) * PER - W);
+                        samp close[2] = {b.back(), samp(0, 0)};
+                        send(tx, close, 2, b_start + (long long)body * PER, false, true);
+                        auto rep = drain(tx, 0.3, 2.0);
+                        char name[64];
+                        std::snprintf(name, sizeof name, "front-%s-len%zu-gap%lld", mode, len, gap);
+                        print_reports(name, t, rep);
+                        std::printf("summary %s trial %d a_start %lld b_start %lld %s\n", name, t, a_start, b_start, counts(rep).c_str());
+                        if (g_invalid) return finish(tx, 6);
+                    }
+                }
+            }
+        }
+    }
+    if (which == "sweep") {
+        // case 9 (bench 2026-11-09, #81): after a closed head of `len` samples (padded to four when <= 3), tone B of
+        // 10 000 samples at `gap` samples after A's exclusive transmitted end, sent at once: a first timed SOB send of
+        // `first` samples, the rest in timed 1 996-sample sends, a timed two-sample EOB close.
+        // Q: which (len, first, gap) underflow or draw late packets?
+        auto b = tone(10000);
+        // --lead selects the grid (bench 2026-11-09): <= 0 coarse, 1 the second pass, 2 the threshold pass
+        const int grid = g_lead >= 2 ? 2 : g_lead > 0 ? 1 : 0;
+        const std::vector<size_t> firsts = grid == 2 ? std::vector<size_t>{1996} : grid == 1 ? std::vector<size_t>{100, 1996} : std::vector<size_t>{100, 500, 1996};
+        const std::vector<size_t> lens = grid == 2 ? std::vector<size_t>{1, 6, 8, 10, 12, 14, 16} : grid == 1 ? std::vector<size_t>{1, 10, 16, 20, 24, 28, 30} : std::vector<size_t>{1, 3, 10, 31, 32};
+        const std::vector<long long> gaps = grid == 2 ? std::vector<long long>{1, 3, 5, 7, 10, 15} : grid == 1 ? std::vector<long long>{5, 10, 20, 30, 40, 50} : std::vector<long long>{1, 5, 50, 500};
+        for (size_t first : firsts) {
+            for (size_t len : lens) {
+                for (long long gap : gaps) {
+                    for (int t = 0; t < trials; t++) {
+                        drain(tx, 0.05, 0.5);
+                        size_t padded = len <= 3 ? 4 : len;
+                        std::vector<samp> a(padded, samp(0, 0));
+                        for (size_t i = 0; i < len; i++) a[i] = samp(0.4f, 0.0f);
+                        long long a_start = ahead(u, 0.1);
+                        long long b_start = a_start + (long long)(padded + gap) * PER;
+                        send(tx, a.data(), a.size(), a_start, true, true);
+                        size_t body = b.size() - 1, off = 0;
+                        while (off < body) {
+                            size_t k = std::min<size_t>(off == 0 ? first : 1996, body - off);
+                            send(tx, &b[off], k, b_start + (long long)off * PER, off == 0, false);
+                            off += k;
+                        }
+                        samp close[2] = {b.back(), samp(0, 0)};
+                        send(tx, close, 2, b_start + (long long)body * PER, false, true);
+                        auto rep = drain(tx, 0.3, 2.0);
+                        char name[64];
+                        std::snprintf(name, sizeof name, "sweep-first%zu-len%zu-gap%lld", first, len, gap);
+                        print_reports(name, t, rep);
+                        std::printf("summary %s trial %d a_start %lld b_start %lld %s\n", name, t, a_start, b_start, counts(rep).c_str());
+                        if (g_invalid) return finish(tx, 6);
+                    }
                 }
             }
         }

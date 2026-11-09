@@ -3688,9 +3688,16 @@ fn hw_n47s5_front_after_a_short_burst() {
     for rate in [1e6, 2e6] {
         for samples in [1usize, 2, 3, 4, 10, 32] {
             let dir = TempDir::new();
-            let trial = n47s5::front_trial(tx_session_at(device.clone(), &dir, Some(rate)), samples, rate);
+            let probe = Arc::new(probe_device::ProbeDevice::new(device.clone()));
+            let trial = n47s5::front_trial(tx_session_at(probe.clone(), &dir, Some(rate)), samples, rate);
             let claim = format!("T2 front after a {samples}-sample head at {rate} S/s, booked at +{} samples (RM-15, UR-22)", iii::head_front(0, samples as i64));
             record(&mut failures, &claim, n47s5::front_outcome(&trial));
+            for send in n47s5::data_sends(&probe) {
+                println!(
+                    "{claim}: T2 send: at {}, samples {}, sob {}, eob {}, accepted {}, host_before_ns {}, host_after_ns {}",
+                    send["at"], send["sample_counts"], send["sob"], send["eob"], send["result"], send["host_before_ns"], send["host_after_ns"]
+                );
+            }
         }
     }
     assert!(failures.is_empty(), "{failures:?}");

@@ -239,6 +239,14 @@ pub fn repeat_switch_verdict(trial: &SwitchEvidence) -> Verdict {
     let flags: Vec<(bool, bool)> = data_sends(&trial.probe).iter().map(|row| (row["sob"] == true, row["eob"] == true)).collect();
     let seams = (!flags.is_empty()).then(|| iii::seam_count(&flags));
     println!("T4 switch: row {outcome:?}, boundary {boundary:?} samples (before the loop delay), loop delay {delay:?} ticks, seams {seams:?}, sends {flags:?}, refusals {:?}", trial.refusals);
+    if let (Some(boundary), Some(delay)) = (boundary, delay) {
+        let b = origin + boundary * per + delay;
+        let near: Vec<String> = tone.iter().filter(|(t, _)| (t - b).abs() <= 10 * TICKS_PER_MS).map(|(t, hz)| format!("({:.1}, {hz:.0})", (t - b) as f64 * 1e3 / TICKS_PER_MS as f64)).collect();
+        let far: Vec<f64> = tone.iter().filter(|(t, _)| (t - b).abs() > 10 * TICKS_PER_MS).map(|(_, hz)| *hz).collect();
+        let range =
+            if far.is_empty() { "none".to_owned() } else { format!("{:.0} to {:.0} Hz", far.iter().cloned().fold(f64::INFINITY, f64::min), far.iter().cloned().fold(f64::NEG_INFINITY, f64::max)) };
+        println!("T4 switch tone windows near the boundary (us, Hz): [{}]; {} farther, Hz {range}", near.join(", "), far.len());
+    }
     iii::switch_verdict(&iii::SwitchTrial {
         refusals: &trial.refusals,
         row: outcome.as_deref(),
