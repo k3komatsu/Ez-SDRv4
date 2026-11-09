@@ -330,7 +330,7 @@ impl Tx {
                 held.tile_repeat();
                 if self.clock.is_some_and(|c| c.domain == held.domain) {
                     if held.switch && !self.install(&mut held) {
-                        self.core.command_rejected(held.settings.action(), "tx_burst", "UR-21: the repeat switch was not taken: its boundary had passed or it was cancelled");
+                        self.core.command_rejected(held.settings.action(), "tx_burst", "UR-21: the repeat switch was not taken: the repeat it replaces has no handed cursor or it was cancelled");
                         return;
                     }
                     self.held.insert(held.k, held);
@@ -345,17 +345,15 @@ impl Tx {
     }
 
     /// UR-36, UR-38, RM-37: takes the switch `held` at the handed cursor: the open repeat's next sample, or the device burst's when none
-    /// is open. A cursor past the boundary moves a SendAsapAndFlag switch to its next boundary, which `held.k` takes, and reports one
-    /// `TIME_ERROR { send_asap }` naming the switch. False when the switch is refused (DropAndFlag, or the cursor is past it) or no
-    /// longer pending.
+    /// is open. A cursor past the boundary moves the switch to its next boundary, which `held.k` takes, and reports one
+    /// `TIME_ERROR { send_asap }` naming the switch. False when the switch is no longer pending or has no cursor to take it at.
     fn install(&self, held: &mut Held) -> bool {
         let cursor = self.open.as_ref().map(|open| open.next).or_else(|| self.chain.next());
         let (Some(id), Some(clock)) = (held.settings.action(), self.clock) else { return false };
-        let moves = held.policy == LatePolicy::SendAsapAndFlag;
         let mut streams = lock(&self.core.streams);
         let stream = streams.stream_mut(stream_key(Dir::Tx, self.k));
         // A switch with no cursor to take it at is refused like any other, so its row is settled (S4).
-        let Some((cursor, boundary)) = cursor.and_then(|cursor| stream.busy.install(id, cursor, moves).map(|boundary| (cursor, boundary))) else {
+        let Some((cursor, boundary)) = cursor.and_then(|cursor| stream.busy.install(id, cursor).map(|boundary| (cursor, boundary))) else {
             stream.busy.refuse(id);
             return false;
         };
@@ -2147,6 +2145,32 @@ mod tests {
         assert_eq!(moved.len(), 1, "{moved:?}");
         assert_eq!(moved[0].payload["outcome"], "send_asap");
         assert!(tx.held.contains_key(&2_042), "B starts past A's front (2_042): {:?}", tx.held.keys().collect::<Vec<_>>());
+    }
+
+    /// RM-14, RM-15 (UHD): lateness is decided before overlap, so a late `DropAndFlag` booking whose requested start meets an accepted span is
+    /// dropped with `TIME_ERROR { drop }`, not refused for overlap.
+    #[test]
+    fn ur_21_s6_a_late_drop_and_flag_booking_is_dropped_before_the_overlap_is_judged() {
+        let (a_wave, a_bytes) = waveform_input("s6_a", &vec![[0.25, 0.0]; 40]);
+        let (b_wave, b_bytes) = waveform_input("s6_b", &vec![[0.75, -0.25]; 40]);
+        let device = Arc::new(FakeDevice::new(FakeConfig { clock: ClockMode::Manual, ..FakeConfig::default() }));
+        let inputs = BTreeMap::from([(a_wave.hash.clone(), Arc::<[u8]>::from(a_bytes)), (b_wave.hash.clone(), Arc::<[u8]>::from(b_bytes))]);
+        let (core, time, events) = crate::provider::test_support::rig_on_inputs(device.clone(), Vec::new(), 2_000, inputs);
+        let _frozen = crate::provider::test_support::Frozen::of(&device);
+        device_at(&core, &time, &device, 0);
+        device.tx_open(0, &[0]).unwrap();
+        device.apply(Dir::Tx, 0, &Settings { rate: Some(1e6), ..Settings::default() }).unwrap();
+        let (mut control, cmds) = booking_control(&core);
+        let clock = tx_clock(&core);
+        let mut tx = Tx::new(core.clone(), 0, cmds, Some(clock), Channels::first(1));
+        book_burst(&mut control, &core, 1, clock, 2_000, &a_wave, false, LatePolicy::DropAndFlag);
+        book_burst(&mut control, &core, 2, clock, 1_990, &b_wave, false, LatePolicy::DropAndFlag);
+        drain_tx(&mut tx);
+        let events = events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+        let drops: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+        assert_eq!(drops.len(), 1, "{events:?}");
+        assert_eq!(drops[0].payload["outcome"], "drop");
+        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED), "no overlap refusal: {events:?}");
     }
 
     /// RM-15 (UR-21, sequence 5, UHD only): an untimed head that is late at dispatch moves to the bound silently, with no `TIME_ERROR`, and
@@ -6714,14 +6738,9 @@ mod tests {
         book_with(&mut rig.control, &rig.core, id, 0, rig.clock, k, &rig.waves[wave], true, LatePolicy::DropAndFlag, BTreeMap::new());
     }
 
-    /// Books the switch to `rig.waves[wave]` at sample `k`: a marked repeat (RM-37).
+    /// Books the switch to `rig.waves[wave]` at sample `k`: a marked repeat under `start_repeat`'s SendAsapAndFlag (RM-37).
     fn book_switch(rig: &mut SwitchRig, id: u64, k: i64, wave: usize) {
-        book_switch_under(rig, id, k, wave, LatePolicy::DropAndFlag);
-    }
-
-    /// Books the switch to `rig.waves[wave]` at sample `k` under `policy`: `start_repeat`'s SendAsapAndFlag, or DropAndFlag.
-    fn book_switch_under(rig: &mut SwitchRig, id: u64, k: i64, wave: usize, policy: LatePolicy) {
-        book_with(&mut rig.control, &rig.core, id, 0, rig.clock, k, &rig.waves[wave], true, policy, switch_mark());
+        book_with(&mut rig.control, &rig.core, id, 0, rig.clock, k, &rig.waves[wave], true, LatePolicy::SendAsapAndFlag, switch_mark());
     }
 
     /// uhd-control's Stop of transmit stream 0 (UR-26, which books the record's Stop), then the owner's delivery of it.
@@ -6777,17 +6796,21 @@ mod tests {
 
     #[test]
     fn ur_21_s8_switch_at_the_exact_handed_cursor_installs() {
-        // S8 (Sol 4): the cursor is the first sample not yet handed. Below or at the boundary the switch installs; past it, it is refused.
-        for (cursor, installs) in [(14_999, true), (15_000, true), (15_001, false)] {
+        // S8 (Sol 4): the cursor is the first sample not yet handed. Below or at the boundary the switch installs there; past it, it
+        // installs at the next boundary of the grid (UR-38).
+        for (cursor, boundary) in [(14_999, 15_000), (15_000, 15_000), (15_001, 16_000)] {
             let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
             book_repeat(&mut rig, 1, 2_000, 0);
             run(&mut rig, 0, 3);
             book_switch(&mut rig, 2, 3_000, 1);
             rig.tx.open = Some(super::Open { held: one_shot(&rig.clock, 2_000, 1, vec![OLD; 1_000]), next: cursor, first: false });
             drain_tx(&mut rig.tx);
-            let reasons = refusals(&rig.events);
-            assert_eq!(rig.tx.held.contains_key(&15_000), installs, "cursor {cursor}");
-            assert_eq!(reasons.is_empty(), installs, "cursor {cursor}: {reasons:?}");
+            let events = rig.events.drain(TimePoint::new(ezsdr_kernel::id::ClockDomainId::HOST_MONOTONIC, 0));
+            assert!(rig.tx.held.contains_key(&boundary), "cursor {cursor}");
+            assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED), "cursor {cursor}: {events:?}");
+            // Only a cursor past the boundary moves the switch, and only a moved switch reports a `TIME_ERROR` naming it (UR-38).
+            let moved = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).count();
+            assert_eq!(moved, usize::from(cursor > 15_000), "cursor {cursor}: {events:?}");
         }
     }
 
@@ -6799,7 +6822,7 @@ mod tests {
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
-        book_switch_under(&mut rig, 2, 3_000, 1, LatePolicy::SendAsapAndFlag);
+        book_switch(&mut rig, 2, 3_000, 1);
         for ms in 4..=8 {
             device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(ms * 1_000_000));
             for _ in 0..8 {
@@ -6830,56 +6853,6 @@ mod tests {
         let late: Vec<_> = bursts.iter().filter(|burst| !burst["late_by"].is_null()).collect();
         assert_eq!(late.len(), 1, "{bursts:?}");
         assert_eq!(late[0]["late_by"]["ticks"], (cursor - 15_000) * 1_000, "{bursts:?}");
-    }
-
-    #[test]
-    fn ur_21_s12_drop_and_flag_switch_handed_past_is_refused() {
-        // S12 (UR-36): under DropAndFlag the owner hands on past the boundary before it takes the switch. The switch is refused with
-        // its id, and the old repeat plays on.
-        let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
-        book_repeat(&mut rig, 1, 2_000, 0);
-        run(&mut rig, 0, 3);
-        book_switch(&mut rig, 2, 3_000, 1);
-        for ms in 4..=8 {
-            device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(ms * 1_000_000));
-            for _ in 0..8 {
-                if !rig.tx.step() {
-                    break;
-                }
-            }
-        }
-        drain_tx(&mut rig.tx);
-        assert_eq!(refusals(&rig.events), ["UR-21: the repeat switch was not taken: its boundary had passed or it was cancelled"]);
-        run(&mut rig, 8, 12);
-        assert_eq!(rig.device.transmitted(rig.clock.instant(15_000), 2), vec![Some(OLD), Some(OLD)]);
-        assert_eq!(switch_row(&rig.core, 0)["outcome"], "refused_past_boundary");
-        assert!(switch_row(&rig.core, 0)["moved_to"].is_null());
-    }
-
-    #[test]
-    fn ur_21_a_refused_switch_leaves_the_repeat_it_replaces_playing() {
-        // RM-37, UR-36: a switch the owner refuses changes nothing, so the next switch replaces the repeat still playing (A, period
-        // 1 000 from 2 000), not the refused one (B, period 500 from 15 000).
-        let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 500], vec![NEW; 300]]);
-        book_repeat(&mut rig, 1, 2_000, 0);
-        run(&mut rig, 0, 3);
-        book_switch(&mut rig, 2, 3_000, 1);
-        for ms in 4..=8 {
-            device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(ms * 1_000_000));
-            for _ in 0..8 {
-                if !rig.tx.step() {
-                    break;
-                }
-            }
-        }
-        drain_tx(&mut rig.tx);
-        assert_eq!(refusals(&rig.events), ["UR-21: the repeat switch was not taken: its boundary had passed or it was cancelled"]);
-        book_switch(&mut rig, 3, 20_100, 2);
-        assert!(refusals(&rig.events).is_empty(), "{:?}", lock(&rig.core.rec).rejected);
-        run(&mut rig, 8, 22);
-        let third = switch_row(&rig.core, 1);
-        assert_eq!((third["predecessor"].as_u64(), third["old_period"].as_i64(), third["boundary"].as_i64()), (Some(1), Some(1_000), Some(21_000)), "{third}");
-        assert_eq!(third["outcome"], "applied");
     }
 
     #[test]
@@ -7001,6 +6974,9 @@ mod tests {
         book_switch(&mut rig, 2, 3_000, 1);
         drain_tx(&mut rig.tx);
         assert_eq!(switch_row(&rig.core, 0)["outcome"], "refused_past_boundary", "{:?}", lock(&rig.core.rec).rejected);
+        // RM-37: the refused switch is not the stream's playing repeat; the repeat it would have replaced still is.
+        let playing = lock(&rig.core.streams).stream(stream_key(Dir::Tx, 0)).playing;
+        assert_eq!(playing.map(|playing| playing.id), Some(ActionId(1)), "the refused switch (id 2) must not be the playing repeat");
     }
 
     #[test]
@@ -7008,22 +6984,20 @@ mod tests {
         // S4 (note 47 stage 5, Opus re-check of round 7, Minor A): the switch joins the open repeat at its boundary, and the host is late past
         // that boundary. The record applies the switch, then the timeline's expiry abandons the repeat at the joined cursor. No sample of the
         // new waveform is sent, so the switch is settled cancelled and its held burst is not sent late.
-        for policy in [LatePolicy::DropAndFlag, LatePolicy::SendAsapAndFlag] {
-            let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
-            book_repeat(&mut rig, 1, 2_000, 0);
-            run(&mut rig, 0, 3);
-            book_switch_under(&mut rig, 2, 3_000, 1, policy);
-            drain_tx(&mut rig.tx);
-            rig.tx.open.as_mut().expect("the repeat is handed").next = 15_000;
-            assert!(rig.tx.step(), "the held switch joins the open burst at its boundary");
-            device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(16_000_000));
-            assert!(rig.tx.step());
-            drain_tx(&mut rig.tx);
-            assert!(rig.tx.held.is_empty(), "the switch's held burst goes with the switch");
-            assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{policy:?}: {:?}", lock(&rig.core.rec).rejected);
-            run(&mut rig, 16, 25);
-            assert!(!rig.device.transmitted(rig.clock.instant(15_000), 1_000).contains(&Some(NEW)), "{policy:?}: {:?}", rig.device.calls());
-        }
+        let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
+        book_repeat(&mut rig, 1, 2_000, 0);
+        run(&mut rig, 0, 3);
+        book_switch(&mut rig, 2, 3_000, 1);
+        drain_tx(&mut rig.tx);
+        rig.tx.open.as_mut().expect("the repeat is handed").next = 15_000;
+        assert!(rig.tx.step(), "the held switch joins the open burst at its boundary");
+        device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(16_000_000));
+        assert!(rig.tx.step());
+        drain_tx(&mut rig.tx);
+        assert!(rig.tx.held.is_empty(), "the switch's held burst goes with the switch");
+        assert_eq!(switch_row(&rig.core, 0)["outcome"], "cancelled", "{:?}", lock(&rig.core.rec).rejected);
+        run(&mut rig, 16, 25);
+        assert!(!rig.device.transmitted(rig.clock.instant(15_000), 1_000).contains(&Some(NEW)), "{:?}", rig.device.calls());
     }
 
     #[test]
@@ -7121,7 +7095,7 @@ mod tests {
         let mut rig = switch_rig(vec![vec![OLD; 1_000], vec![NEW; 1_000]]);
         book_repeat(&mut rig, 1, 2_000, 0);
         run(&mut rig, 0, 3);
-        book_switch_under(&mut rig, 2, 3_000, 1, LatePolicy::SendAsapAndFlag);
+        book_switch(&mut rig, 2, 3_000, 1);
         for ns in (4..=9).map(|ms| ms * 1_000_000).chain([9_500_000]) {
             device_at(&rig.core, &rig.time, &rig.device, rig.core.ticks(ns));
             for _ in 0..8 {
@@ -7176,17 +7150,25 @@ mod tests {
 
     #[test]
     fn ur_21_metadata_is_empty_or_the_mark_only() {
-        // Row 45: a repeat takes no metadata but the switch mark, and the mark alone on a repeat is a switch.
+        // Row 45: a repeat takes no metadata but the switch mark, and the mark alone on a repeat under SendAsapAndFlag is a switch.
         let mut rig = switch_rig(vec![vec![OLD; 1_000]]);
         let other = BTreeMap::from([(ezsdr_kernel::spec::Key::parse("radio.repeat_operation").unwrap(), ezsdr_kernel::spec::Value::Scalar(ezsdr_kernel::spec::Scalar::from("start")))]);
         book_with(&mut rig.control, &rig.core, 1, 0, rig.clock, 2_000, &rig.waves[0], true, LatePolicy::DropAndFlag, other);
         assert_eq!(refusals(&rig.events), ["UR-21: TxBurst.metadata must be empty or the repeat-switch mark"]);
         book_with(&mut rig.control, &rig.core, 4, 0, rig.clock, 2_000, &rig.waves[0], false, LatePolicy::DropAndFlag, switch_mark());
         assert_eq!(refusals(&rig.events), ["UR-21: TxBurst.metadata must be empty or the repeat-switch mark"], "the mark alone on a finite burst is not a switch");
+        book_with(&mut rig.control, &rig.core, 6, 0, rig.clock, 2_000, &rig.waves[0], false, LatePolicy::SendAsapAndFlag, switch_mark());
+        assert_eq!(refusals(&rig.events), ["UR-21: TxBurst.metadata must be empty or the repeat-switch mark"], "nor under SendAsapAndFlag");
         book_switch(&mut rig, 2, 2_000, 0);
         assert_eq!(refusals(&rig.events), ["UR-21: a repeat switch needs a playing repeat and no pending switch"]);
         book_repeat(&mut rig, 3, 2_000, 0);
         assert!(refusals(&rig.events).is_empty(), "{:?}", lock(&rig.core.rec).rejected);
+        // RM-13: the mark on a repeat under another late policy is refused at receipt as any misplaced mark, and the repeat plays on.
+        for policy in [LatePolicy::DropAndFlag, LatePolicy::RejectAtPlan] {
+            book_with(&mut rig.control, &rig.core, 5, 0, rig.clock, 3_000, &rig.waves[0], true, policy, switch_mark());
+            assert_eq!(refusals(&rig.events), ["UR-21: TxBurst.metadata must be empty or the repeat-switch mark"], "{policy:?}");
+        }
+        assert!(time_errors(&rig.events).is_empty() && lock(&rig.core.rec).switches.is_empty());
     }
 
     #[test]

@@ -1577,7 +1577,7 @@ impl MockRadio {
     fn handle_tx_burst(&mut self, k: usize, id: ActionId, action: Action, node: Option<&ResourceId>, untimed: bool, now: i64) -> Result<(), ModuleError> {
         let Action::TxBurst { waveform, repeat, at, requested_at, late_policy, metadata, .. } = action else { unreachable!("only TxBurst is dispatched to handle_tx_burst") };
         let size_bytes = waveform.size_bytes;
-        let switch = repeat && is_switch(&metadata);
+        let switch = is_switch(repeat, late_policy, &metadata);
         let metadata_ok = metadata.is_empty() || switch;
         let root = self.root.expect("prepared root");
         let tx_id = self.tx[k].node.clone();
@@ -1707,7 +1707,7 @@ impl MockRadio {
         let refusal = if start_v < self.sync_end.unwrap_or(i64::MIN) {
             Some("MR-16: burst begins before synchronization")
         } else if switch {
-            (!(switched_from.is_some_and(|from| self.tx[k].busy.switch(id, (from.origin, from.period), start, now_k)) && self.tx[k].busy.install(id, now_k, false).is_some()))
+            (!(switched_from.is_some_and(|from| self.tx[k].busy.switch(id, (from.origin, from.period), start, now_k)) && self.tx[k].busy.install(id, now_k).is_some()))
                 .then_some("MR-16: a repeat switch needs a playing repeat and no pending switch")
         } else if unplaced {
             Some("MR-16: burst overlaps an accepted booking")

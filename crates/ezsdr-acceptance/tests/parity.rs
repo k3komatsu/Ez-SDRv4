@@ -2036,7 +2036,7 @@ fn s15_parity_s4b_three_bookings_b_continues_a_and_c_plays_on_time() {
 }
 
 /// A repeat of `waveform` on transmit stream 0, at `samples` after T0 + `relative` ms on each Provider; with the switch mark when
-/// `switch` (RM-37).
+/// `switch` (RM-37), which `start_repeat` compiles under SendAsapAndFlag.
 fn repeat_action(pair: &CancellationPair, waveform: &ezsdr_kernel::manifest::ArtifactRef, relative: i64, samples: i64, switch: bool) -> (Action, Action) {
     let action = |at: TimePoint| Action::TxBurst {
         target: Target::Resource { resource: Ident::parse("radio").unwrap(), path: "tx/s0".to_owned() },
@@ -2044,7 +2044,7 @@ fn repeat_action(pair: &CancellationPair, waveform: &ezsdr_kernel::manifest::Art
         repeat: true,
         at: ezsdr_kernel::time::AbsoluteDeadline::new(at),
         requested_at: None,
-        late_policy: ezsdr_kernel::stream::LatePolicy::DropAndFlag,
+        late_policy: if switch { ezsdr_kernel::stream::LatePolicy::SendAsapAndFlag } else { ezsdr_kernel::stream::LatePolicy::DropAndFlag },
         metadata: if switch { BTreeMap::from([(key("radio.repeat_operation"), Value::Scalar(Scalar::from("switch")))]) } else { BTreeMap::new() },
     };
     (action(tx_samples_after(&pair.mock.clocks, 0, pair.t0 + ms(relative), samples)), action(tx_samples_after(&pair.uhd.clocks, 0, pair.uhd_t0 + ms(relative), samples)))
@@ -2110,6 +2110,45 @@ fn s15_parity_second_pending_switch_is_refused() {
     let (mock_rows, uhd_rows) = (switch_rows(&mock, "ezsdr.radio.mock.switches"), switch_rows(&uhd, "ezsdr.radio.uhd.switches"));
     assert_eq!(mock_rows, uhd_rows, "the Providers record alike");
     assert_eq!(mock_rows, [(1, 1_000, 500, "applied".to_owned())], "the first switch still applies: {mock_rows:?}");
+}
+
+#[test]
+fn s15_parity_switch_mark_under_another_late_policy_is_refused_at_receipt() {
+    // RM-13, X1: the switch mark on a repeat whose late policy is not SendAsapAndFlag is refused at receipt on both Providers, with its
+    // id, as a rejected action and no `TIME_ERROR`; no `switches` row is made and the repeat playing plays on.
+    let mut pair = CancellationPair::new(
+        selector(&["0:A:ubx:0"], &["0:A:ubx:0"]),
+        &[("radio.rx.c0.stream", eq(Scalar::from(0))), ("radio.tx.c0.stream", eq(Scalar::from(0)))],
+        &["rx0"],
+        FakeConfig::default(),
+        BTreeMap::new(),
+    );
+    let long = pair.sized(1_000).clone();
+    let short = pair.sized(500).clone();
+    let dropping = |(mock, uhd): (Action, Action)| {
+        let policy = |mut action: Action| {
+            if let Action::TxBurst { late_policy, .. } = &mut action {
+                *late_policy = ezsdr_kernel::stream::LatePolicy::DropAndFlag;
+            }
+            action
+        };
+        (policy(mock), policy(uhd))
+    };
+    submit(&mut pair, 201, 6, |pair| vec![repeat_action(pair, &long, 20, 0, false)]);
+    submit(&mut pair, 202, 24, |pair| vec![dropping(repeat_action(pair, &short, 26, 0, true))]);
+    submit(&mut pair, 203, 28, |_| Vec::new());
+    pair.uhd.wait_until(pair.uhd_t0 + ms(60));
+    pair.mock.step(pair.t0 + ms(60));
+    let (mock, uhd) = (tx_decisions(&pair.mock.events()), tx_decisions(&pair.uhd.events()));
+    assert_eq!(mock.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["tx_burst"], "the marked repeat is refused: {mock:?}");
+    assert_eq!(uhd.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["tx_burst"], "the marked repeat is refused: {uhd:?}");
+    for events in [pair.mock.events(), pair.uhd.events()] {
+        assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "a refusal at receipt reports no TIME_ERROR: {events:?}");
+    }
+    let mock = pair.mock.finish_in_place();
+    let uhd = pair.uhd.finish_in_place();
+    assert_eq!(switch_rows(&mock, "ezsdr.radio.mock.switches"), []);
+    assert_eq!(switch_rows(&uhd, "ezsdr.radio.uhd.switches"), []);
 }
 
 #[test]

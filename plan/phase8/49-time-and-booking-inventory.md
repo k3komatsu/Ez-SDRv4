@@ -601,6 +601,7 @@ D′ の最初の移行は区切りの値を変えないので，今の設計と
 | C1 | KL-38 の撤回（§11.4 の C1：configure の拒否の後，発行していない piece を区切り直す）．予約の境をまたぐ最初の send を FakeDevice と実機で確かめてから | 変える（UHD だけが拒否を持つ．Mock は変わらない） | はい（queue） |
 | C2 | 差し替えの outcome を境目を送ったかで決める（§11.10）．両 Provider と schema を同時に | 変える | はい（寿命） |
 | C4・C5 | Stop (a)，短い頭への継ぎ (a)：owner が後で承認した時だけ，それぞれ独立に両 Provider を同時に | 変える | はい |
+| C6 | 打ち切りの後の範囲を縮める（§5.4.4 の 2）：送った所とその閉じ方までにし，残りは装置の状態として late policy．owner が後で承認した時だけ（2026-11-09，それまでは KL-39 の Ceiling）．E2a の後なら状態機械が「送った」を持つので安い．Mock には送信の故障の模型がない（M5）ので UHD だけの規則になる | 変える | はい |
 
 D′ の段階は送信の行（N47S5 の 185 本と N48S1・N48S3・N47S4 の送信の分）の多くを付け替える．AGENTS §9 の Maintainability の 3 に従い，状態機械の判断は純粋な遷移の表で試し，Own と Mock のテストは配線と順序（結果，報告，lock，装置の道）に残す．E2a の前に，消えるテスト・移す assert・行の対応表を試験計画に入れる（設計メモ 48 §2 の 4 と同じ）．O1 の oracle と FakeDevice の規則は E1〜E3 の間ずっと緑のまま保つ．lock の最長の待ちの記録（§5.4.9）は E2a で入れ，E3 と B1 で見る．
 
@@ -637,3 +638,5 @@ D′ の段階は送信の行（N47S5 の 185 本と N48S1・N48S3・N47S4 の�
 | 2026-11-08 | 再確認（Opus，narrow）：PASS WITH MINORS．N1・N2・2.a〜2.c は閉じた．minor 5 件を §12.1 に（E1・E2a の brief で拾う．N2 の refused の出し方は owner に諮る）．設計の段はここで終わり |
 | 2026-11-09 | orchestrator：2026-11-09 の実機の結果を §8 に入れ（前線の +1 と Stop の c＋3・c＋4・J(e) の継ぎ・時刻なし・Stop の終わり・送信の rate・ssh 切断は VERIFIED．Stop の後の詰めた頭の c＋3 は記録の誤り〈#82〉，Module の前線の burst の飢え〈#81〉），tree に入れた（`plan/phase8/49-time-and-booking-inventory.md`） |
 | 2026-11-09 | orchestrator：段階 B（#81・#82）の後．§3 の R3・R6・R8・U2 の前線は「32 sample 以下の閉じた device burst の後は詰めた終わり＋10」に変わった（打ち切りと T3 flush の閉じも＋10，Stop が残す・落とす短い頭は自分の前線まで．記録 `reviews/stepB-dispositions.md`）．D′ の区切りの関数はこの値を profile の値として受け取る（§6 の 6） |
+| 2026-11-09 | orchestrator：N0 の Sol のコードレビュー（FAIL）で，RM-15 の文の二つの項が今のコードと違うと分かった：遅れの判定が重なりより先（遅れた DropAndFlag・RejectAtPlan は重なりを見ずに落ちる），Stop や打ち切りが切った chain は境まで記録に残り Stop の範囲を作らない（`staging.rs:385-391`）．文はコードに合わせた．打ち切りの後の残りの範囲を予約の footprint として拒む今の振る舞いは，§11.2 の Sol の注意（打ち切りの残りは late policy）とずれる．owner の決定（2026-11-09）：今は KL-39 の Ceiling として残し，範囲を縮めるのは §12 の C6（後で承認した時だけ） |
+| 2026-11-09 | orchestrator：N0 は済（X1，RM-15 の footprint の文，KL-39．記録 `reviews/n0-dispositions.md`，gate PASS）．re-check の note から #84（dispatch で落ちた repeat の保留の差し替えが cancelled でなく refused．E2a で直す．O1 の oracle は spec の答えで書き，既知の食い違いの印を E2a で外す） |

@@ -405,7 +405,7 @@ impl Control {
     ) {
         let reject = |reason: &str| self.core.command_rejected(Some(id), "tx_burst", reason);
         // RM-37: a repeat with the switch mark replaces the repeat playing on its stream; the mark on anything else is refused.
-        let switch = repeat && ezsdr_radio::staging::is_switch(metadata);
+        let switch = ezsdr_radio::staging::is_switch(repeat, late_policy, metadata);
         // RM-12, RM-29: the target must be a transmit stream's node.
         let k = match addressed {
             Addressed::Stream { direction: Direction::Tx, k } => k,

@@ -152,6 +152,13 @@ Rule IDs (UR-7, RM-16, …) are stable and point into the accepted specs under `
 - **Evidence:** RM-15 (`design/07-radio-model.md`, the one exception to the receipt-order rule); UR-22, UR-23 (`design/18-uhd-radio.md`); the tests `rm_15_a_short_head_left_alone_is_closed_and_takes_no_join` (`crates/ezsdr-radio/tests/staging.rs`) and `ur_21_s2_a_short_surviving_head_is_closed_and_a_piece_joined_behind_it_is_late` (`crates/ezsdr-radio-uhd/src/provider/tx.rs`).
 - **Status:** Ceiling (by design: a short burst closed at its standalone end is the device framing UR-22 allows, and a refused configure is a device refusal that removes the burst).
 
+### KL-39 After a burst is abandoned, a burst booked inside its unplayed rest is refused
+- **Symptom:** a timed burst is refused at receipt with `radio.COMMAND_REJECTED` (`UR-21: the burst overlaps an accepted booking`), although the burst it overlaps stopped sounding earlier.
+- **When:** the UHD Module abandoned a burst (UR-22: an underflow, a sequence error, a failed or short send, a continuation past its time), and the new burst starts inside what the abandoned burst still holds: a finite burst keeps its whole booked region; a repeat keeps its region up to the cursor it was abandoned at plus three samples (RM-15), which can be up to the in-flight window (`radio.timing.tx_in_flight_ns`) ahead of device time. MockRadio has no transmit fault model, so it never abandons a burst.
+- **Workaround:** book the burst untimed (it is placed after the held region, RM-15), or after the abandoned burst's booked end; or send a `Stop` for the stream first, which cuts the held region at its bound (RM-16) but also cancels every burst booked after the Stop's instant.
+- **Evidence:** RM-15 (`design/07-radio-model.md`), UR-22 (`design/18-uhd-radio.md`); `crates/ezsdr-radio/src/staging.rs` (`halt`: a chain started before the cut is kept up to the bound); design note 49 §5.4.4 item 2 and §12 (C6). No test pins either case (RM-15's *Test:* line); the `Stop` workaround is read from the code, not tested (INFERRED).
+- **Status:** Ceiling (owner, 2026-11-09: kept as it is; shrinking the region to what was sent is the contract change C6 of design note 49, made only if the owner later approves it).
+
 ## The `x3xx` profile (MockRadio and USRP)
 
 ### KL-14 With the HG image, rates above 25 MS/s are refused unless the link is declared

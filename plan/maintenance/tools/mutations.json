@@ -14913,19 +14913,19 @@
     "file": "crates/ezsdr-radio/src/staging.rs",
     "old": "if cursor_k <= switch.boundary {",
     "new": "if cursor_k < switch.boundary {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_21_s8_switch_at_the_exact_handed_cursor_installs"
+    "crate": "ezsdr-radio",
+    "test_bin": "staging",
+    "filter": "rm_37_install_at_the_boundary_is_not_a_move"
   },
   {
     "id": "N47S5-42",
-    "name": "5d-U: install takes a switch whose cursor is past its boundary (S12 under DropAndFlag: the refusal is removed)",
+    "name": "5d-U: install takes a switch handed past its boundary at that boundary, not at the next of its grid (UR-38)",
     "file": "crates/ezsdr-radio/src/staging.rs",
     "old": "if cursor_k <= switch.boundary {",
     "new": "if true {",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_21_s12_drop_and_flag_switch_handed_past_is_refused"
+    "filter": "ur_21_s8_switch_at_the_exact_handed_cursor_installs"
   },
   {
     "id": "N47S5-43",
@@ -15048,16 +15048,6 @@
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_the_moved_one"
-  },
-  {
-    "id": "N47S5-76",
-    "name": "5g: a DropAndFlag switch handed past its boundary is moved anyway (the policy branch is removed)",
-    "file": "crates/ezsdr-radio/src/staging.rs",
-    "old": "} else if moves {",
-    "new": "} else if true {",
-    "crate": "ezsdr-radio-uhd",
-    "test_bin": "lib",
-    "filter": "ur_21_s12_drop_and_flag_switch_handed_past_is_refused"
   },
   {
     "id": "N47S5-77",
@@ -15191,13 +15181,13 @@
   },
   {
     "id": "N47S5-90",
-    "name": "5i (F21): a refused switch sets the repeat it would replace as playing (the owner's refusal is not checked)",
+    "name": "5i (F21): a refused switch sets the repeat it would replace as playing (the owner's refusal is not checked; a switch refused for want of a cursor is left as playing)",
     "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
     "old": "if repeat && !switch {",
     "new": "if repeat {",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
-    "filter": "ur_21_a_refused_switch_leaves_the_repeat_it_replaces_playing"
+    "filter": "ur_21_s4_a_switch_whose_repeat_the_host_dispatched_late_is_refused_without_a_cursor"
   },
   {
     "id": "N47S5-91",
@@ -15212,9 +15202,9 @@
   {
     "id": "N47S5-92",
     "name": "5i (F24): a mark on a finite burst is taken as a switch (the repeat term of the switch test is removed)",
-    "file": "crates/ezsdr-radio-uhd/src/provider/control.rs",
-    "old": "let switch = repeat && ezsdr_radio::staging::is_switch(metadata);",
-    "new": "let switch = ezsdr_radio::staging::is_switch(metadata);",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "repeat && late_policy == LatePolicy::SendAsapAndFlag && metadata.len() == 1",
+    "new": "late_policy == LatePolicy::SendAsapAndFlag && metadata.len() == 1",
     "crate": "ezsdr-radio-uhd",
     "test_bin": "lib",
     "filter": "ur_21_metadata_is_empty_or_the_mark_only"
@@ -15222,9 +15212,9 @@
   {
     "id": "N47S5-93",
     "name": "5i (F24, Mock): a mark on a finite burst is taken as a switch (the repeat term of the switch test is removed)",
-    "file": "crates/ezsdr-mock-radio/src/lib.rs",
-    "old": "let switch = repeat && is_switch(&metadata);",
-    "new": "let switch = is_switch(&metadata);",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "repeat && late_policy == LatePolicy::SendAsapAndFlag && metadata.len() == 1",
+    "new": "late_policy == LatePolicy::SendAsapAndFlag && metadata.len() == 1",
     "crate": "ezsdr-mock-radio",
     "test_bin": "mock_radio",
     "filter": "mr_16_metadata_is_empty_or_the_mark_only"
@@ -16435,5 +16425,25 @@
     "crate": "ezsdr-radio",
     "test_bin": "staging",
     "filter": "rm_16_a_long_piece_handed_before_the_bound_does_not_extend_a_short_head"
+  },
+  {
+    "id": "N0-1",
+    "name": "N0 (X1, UHD): the switch mark is accepted under any late policy (the SendAsapAndFlag term of the switch test is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "repeat && late_policy == LatePolicy::SendAsapAndFlag && metadata.len() == 1",
+    "new": "repeat && metadata.len() == 1",
+    "crate": "ezsdr-radio-uhd",
+    "test_bin": "lib",
+    "filter": "ur_21_metadata_is_empty_or_the_mark_only"
+  },
+  {
+    "id": "N0-2",
+    "name": "N0 (X1, Mock): the switch mark is accepted under any late policy (the SendAsapAndFlag term of the switch test is removed)",
+    "file": "crates/ezsdr-radio/src/staging.rs",
+    "old": "repeat && late_policy == LatePolicy::SendAsapAndFlag && metadata.len() == 1",
+    "new": "repeat && metadata.len() == 1",
+    "crate": "ezsdr-mock-radio",
+    "test_bin": "mock_radio",
+    "filter": "mr_16_metadata_is_empty_or_the_mark_only"
   }
 ]

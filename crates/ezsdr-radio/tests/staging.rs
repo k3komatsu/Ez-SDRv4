@@ -895,7 +895,7 @@ fn rm_37_a_switch_taken_at_the_abandoned_cursor_is_cancelled() {
     let mut bookings = Bookings::default();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 100, false).is_some());
+    assert!(bookings.install(ActionId(2), 100).is_some());
     assert!(bookings.cancel_switch_from(100));
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Cancelled)]);
 }
@@ -905,7 +905,7 @@ fn rm_16_switch_pending_until_the_boundary_is_reached() {
     let mut bookings = Bookings::default();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 10, false).is_some());
+    assert!(bookings.install(ActionId(2), 10).is_some());
     assert!(!bookings.switch(ActionId(3), GRID, 200, 99), "pending before its boundary: a second switch is refused");
     bookings.advance(99);
     assert_eq!(settled(&mut bookings), [], "not applied before its boundary");
@@ -920,7 +920,7 @@ fn rm_16_advance_runs_inside_every_call() {
     let mut bookings = Bookings::default();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 10, false).is_some());
+    assert!(bookings.install(ActionId(2), 10).is_some());
     bookings.prune(101);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Applied)], "a receipt at 101 applies the switch due at 100");
     assert!(bookings.switch(ActionId(3), GRID, 200, 101), "a second switch after the first boundary is not refused by a stale pending");
@@ -930,7 +930,7 @@ fn rm_16_advance_runs_inside_every_call() {
     let mut direct = Bookings::default();
     direct.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(direct.switch(ActionId(2), GRID, 100, 10));
-    assert!(direct.install(ActionId(2), 10, false).is_some());
+    assert!(direct.install(ActionId(2), 10).is_some());
     assert!(direct.switch(ActionId(3), GRID, 200, 101), "the switch itself applies the first switch due at 100");
     assert_eq!(settled(&mut direct), [(ActionId(2), SwitchOutcome::Applied)]);
 }
@@ -940,7 +940,7 @@ fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
     let mut bookings = Bookings::default();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert!(bookings.install(ActionId(2), 10, false).is_some());
+    assert!(bookings.install(ActionId(2), 10).is_some());
     bookings.halt(150, 160);
     assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Applied)], "a switch whose boundary the Stop has passed is applied");
     assert_eq!(bookings.accept(159, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the new repeat holds up to the bound");
@@ -948,16 +948,27 @@ fn rm_16_a_stop_after_a_boundary_cuts_the_new_repeat_at_its_bound() {
 }
 
 #[test]
-fn rm_37_install_takes_the_switch_only_while_the_cursor_is_not_past_its_boundary() {
+fn rm_37_install_takes_only_the_pending_switch() {
     let mut bookings = Bookings::default();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
     bookings.advance(120);
     assert_eq!(settled(&mut bookings), [], "a switch the owner has not taken is not applied");
-    assert!(bookings.install(ActionId(3), 50, false).is_none(), "another id is not pending");
-    assert!(bookings.install(ActionId(2), 101, false).is_none(), "a cursor past the boundary refuses the switch");
-    assert_eq!(settled(&mut bookings), [(ActionId(2), SwitchOutcome::Refused)]);
+    assert!(bookings.install(ActionId(3), 50).is_none(), "another id is not pending");
     assert_eq!(bookings.accept(100, Some(1), 0, ON_TIME, UNHANDED), Err(Overlap::Booking), "the old repeat keeps playing: nothing was applied");
+}
+
+#[test]
+fn rm_37_install_at_the_boundary_is_not_a_move() {
+    // UR-38: a cursor at the boundary takes it unmoved, so the settlement carries no `moved_to`; one sample past it is a move.
+    for (cursor, moved_to) in [(100, None), (101, Some(110))] {
+        let mut bookings = Bookings::default();
+        bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
+        assert!(bookings.switch(ActionId(2), GRID, 100, 10));
+        assert_eq!(bookings.install(ActionId(2), cursor), Some(moved_to.unwrap_or(100)));
+        bookings.advance(200);
+        assert_eq!(bookings.take_settled(), [Settled { id: ActionId(2), outcome: SwitchOutcome::Applied, moved_to }], "cursor {cursor}");
+    }
 }
 
 #[test]
@@ -965,7 +976,7 @@ fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_t
     let mut bookings = Bookings::default();
     bookings.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(bookings.switch(ActionId(2), GRID, 100, 10));
-    assert_eq!(bookings.install(ActionId(2), 101, true), Some(110), "the first boundary of the grid at or after the cursor");
+    assert_eq!(bookings.install(ActionId(2), 101), Some(110), "the first boundary of the grid at or after the cursor");
     assert_eq!(settled(&mut bookings), [], "installed at 110, not settled");
     bookings.halt(105, 109);
     assert_eq!(bookings.take_settled(), [Settled { id: ActionId(2), outcome: SwitchOutcome::Cancelled, moved_to: Some(110) }], "a Stop bounded before the moved boundary cancels it");
@@ -973,7 +984,7 @@ fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_t
     let mut on_a_boundary = Bookings::default();
     on_a_boundary.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(on_a_boundary.switch(ActionId(2), GRID, 100, 10));
-    assert_eq!(on_a_boundary.install(ActionId(2), 111, true), Some(120), "one sample past a boundary takes the next");
+    assert_eq!(on_a_boundary.install(ActionId(2), 111), Some(120), "one sample past a boundary takes the next");
     on_a_boundary.halt(105, 121);
     assert_eq!(
         on_a_boundary.take_settled(),
@@ -984,7 +995,7 @@ fn rm_37_a_late_switch_moves_to_the_next_boundary_of_its_grid_and_a_stop_reads_t
     let mut at_a_boundary = Bookings::default();
     at_a_boundary.accept(0, None, 0, ON_TIME, UNHANDED).unwrap();
     assert!(at_a_boundary.switch(ActionId(2), GRID, 100, 10));
-    assert_eq!(at_a_boundary.install(ActionId(2), 120, true), Some(120), "a cursor on a boundary takes that boundary");
+    assert_eq!(at_a_boundary.install(ActionId(2), 120), Some(120), "a cursor on a boundary takes that boundary");
 }
 
 #[test]

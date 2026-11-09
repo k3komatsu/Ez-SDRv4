@@ -1154,6 +1154,24 @@ fn mr_16_s6_send_asap_moves_past_an_accepted_span() {
     assert_eq!(moved_burst.requested_target, Some(TimePoint::new(domain, 2_001_000)), "the record keeps the requested target");
 }
 
+/// RM-14, RM-15 (Mock): lateness is decided before overlap, so a late `DropAndFlag` booking whose requested start meets an accepted span
+/// is dropped with `TIME_ERROR { drop }`, not refused for overlap.
+#[test]
+fn mr_16_s6_a_late_drop_and_flag_booking_is_dropped_before_the_overlap_is_judged() {
+    let t0 = 2_000_000_000;
+    let mut harness = tx_harness("x3xx");
+    harness.arm_start(t0).unwrap();
+    let domain = tx_domain(&harness);
+    harness.actions.push(tx_action(domain, 2_002_000, 2_000, false, LatePolicy::DropAndFlag));
+    harness.actions.push(tx_action(domain, 2_001_990, 40, false, LatePolicy::DropAndFlag));
+    harness.step(t0).unwrap();
+    let events = harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0));
+    let drops: Vec<_> = events.iter().filter(|event| event.kind.as_str() == ezsdr_radio::kinds::TIME_ERROR).collect();
+    assert_eq!(drops.len(), 1, "{events:?}");
+    assert_eq!(drops[0].payload["outcome"], "drop");
+    assert!(events.iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::COMMAND_REJECTED), "no overlap refusal: {events:?}");
+}
+
 /// S6 (Mock, note 47 stage 5 §2 M1): a late `SendAsap` burst whose moved region meets a later booking is placed after that booking,
 /// not refused: the chain at 2_009_960 has its front at 2_010_002, which the booking at 2_010_010 meets, so the move jumps to the
 /// booking's front, 2_010_010 + 42 = 2_010_052. One `TIME_ERROR{send_asap}`; the booking itself is unchanged.
@@ -1820,6 +1838,20 @@ fn mr_16_metadata_is_empty_or_the_mark_only() {
         harness.step(2_005_000_000).unwrap();
         assert_eq!(switch_rows(&harness).len(), usize::from(accepted));
         assert_eq!(rejected_rows(&harness).len(), usize::from(!accepted));
+    }
+    // RM-13: the mark on a repeat under another late policy is refused as invalid, with no `TIME_ERROR` and no switch.
+    for policy in [LatePolicy::DropAndFlag, LatePolicy::RejectAtPlan] {
+        let (mut harness, domain) = playing_x3xx();
+        let mut action = tx_action(domain, 2_005_000, 2_000, true, policy);
+        if let Action::TxBurst { metadata: slot, .. } = &mut action {
+            *slot = BTreeMap::from([(key("radio.repeat_operation"), Value::Scalar(Scalar::from("switch")))]);
+        }
+        harness.actions.push(action);
+        harness.step(2_005_000_000).unwrap();
+        assert_eq!(switch_rows(&harness).len(), 0, "{policy:?}");
+        assert_eq!(rejected_rows(&harness).len(), 1, "{policy:?}");
+        assert_eq!(rejected_rows(&harness)[0].1, "MR-16: target, clock, waveform size, channel count or metadata is invalid", "{policy:?}");
+        assert!(harness.events.drain(ezsdr_kernel::time::TimePoint::new(ClockDomainId::HOST_MONOTONIC, 0)).iter().all(|event| event.kind.as_str() != ezsdr_radio::kinds::TIME_ERROR), "{policy:?}");
     }
     // On an idle stream only the metadata rule refuses: empty metadata is a burst, anything else is invalid, and the mark on a finite burst is
     // not a switch.

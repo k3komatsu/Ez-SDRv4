@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use ezsdr_kernel::event::ActionId;
 use ezsdr_kernel::spec::{Key, Scalar, Value};
+use ezsdr_kernel::stream::LatePolicy;
 use ezsdr_kernel::time::TimePoint;
 
 use crate::{Concrete, concrete};
@@ -130,7 +131,7 @@ impl Chain {
 
 /// A repeat switch accepted and not yet applied (RM-37, note 47 §1.2): the Action that asked for it and
 /// the sample at which the new waveform starts. The boundary is chosen at receipt; the owner moves it
-/// only under its late policy, when its cursor has passed it (UR-38).
+/// when its cursor has passed it (UR-38).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Switch {
     /// The Action that asked for the switch.
@@ -157,15 +158,15 @@ pub struct Settled {
     pub moved_to: Option<i64>,
 }
 
-/// How a switch was settled: applied at its boundary, or cancelled by a Stop before it, or refused because the owner took it
-/// after its boundary had passed.
+/// How a switch was settled: applied at its boundary, or cancelled by a Stop before it, or refused because the owner had no handed
+/// cursor to take it at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SwitchOutcome {
     /// The old repeat ended at the boundary and the new one began there.
     Applied,
     /// A Stop reached the boundary first, so the new waveform never started.
     Cancelled,
-    /// The owner's handed cursor had passed the boundary when it took the switch: the old repeat keeps playing.
+    /// The owner had no handed cursor to take the switch at (the repeat it replaces left the record first): the old repeat keeps playing.
     Refused,
 }
 
@@ -420,19 +421,15 @@ impl Bookings {
     }
 
     /// UR-36, UR-38 (RM-37): the owner takes the pending switch `id` at its handed cursor `cursor_k`. A cursor at or before the
-    /// boundary installs it there. A later cursor moves it to the first boundary of its grid at or after the cursor when `moves`
-    /// (its late policy is SendAsapAndFlag), and otherwise refuses it, so the old repeat keeps playing. Returns the boundary it is
-    /// installed at, or `None` when `id` is not pending or it was refused.
-    pub fn install(&mut self, id: ActionId, cursor_k: i64, moves: bool) -> Option<i64> {
+    /// boundary installs it there. A later cursor moves it to the first boundary of its grid at or after the cursor (a switch is
+    /// always SendAsapAndFlag, RM-13). Returns the boundary it is installed at, or `None` when `id` is not pending.
+    pub fn install(&mut self, id: ActionId, cursor_k: i64) -> Option<i64> {
         let switch = self.pending.filter(|s| s.id == id && !s.installed)?;
         let (boundary, moved_to) = if cursor_k <= switch.boundary {
             (switch.boundary, None)
-        } else if moves {
+        } else {
             let moved = repeat_boundary(switch.grid.0, switch.grid.1, cursor_k);
             (moved, Some(moved))
-        } else {
-            self.refuse(id);
-            return None;
         };
         self.pending = Some(Switch { boundary, installed: true, moved_to, ..switch });
         Some(boundary)
@@ -669,9 +666,12 @@ pub fn repeat_boundary(origin: i64, period: i64, bound: i64) -> i64 {
     origin + ((bound - origin).max(0) + period - 1) / period * period
 }
 
-/// RM-13: whether a burst's metadata is exactly the repeat-switch mark `radio.repeat_operation = "switch"`.
-pub fn is_switch(metadata: &BTreeMap<Key, Value>) -> bool {
-    metadata.len() == 1 && metadata.get(&Key::parse("radio.repeat_operation").expect("a declared metadata key")) == Some(&Value::Scalar(Scalar::from("switch")))
+/// RM-13: whether a burst is a repeat switch: a repeat under `send_asap_and_flag` whose metadata is exactly the mark `radio.repeat_operation = "switch"`.
+pub fn is_switch(repeat: bool, late_policy: LatePolicy, metadata: &BTreeMap<Key, Value>) -> bool {
+    repeat
+        && late_policy == LatePolicy::SendAsapAndFlag
+        && metadata.len() == 1
+        && metadata.get(&Key::parse("radio.repeat_operation").expect("a declared metadata key")) == Some(&Value::Scalar(Scalar::from("switch")))
 }
 
 /// The values of record: the Run's configuration, changed by the values a stopped receive stream
