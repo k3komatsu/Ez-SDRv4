@@ -16,7 +16,8 @@
 // per trial. Ticks are device ticks at the master clock rate (200 MHz on X300).
 //
 // Build (in ezsdr-v4-dev:uhd4.10): g++ -O2 -std=c++17 tx_repro.cpp -o tx_repro -luhd -lpthread
-// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1|head|front] [--trials 5] [--lead seconds]
+// Run: tx_repro --args addr=192.168.47.37 [--case all|flush|gap|p70|len|split|s1|head|front|sweep] [--trials 5] [--lead seconds] [--rate S/s]
+//      sweep grid: [--lens a,b] [--gaps a,b] [--firsts a,b] (samples; each replaces the --lead grid's list)
 
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/types/time_spec.hpp>
@@ -83,6 +84,9 @@ static std::vector<samp> tone(size_t n, size_t phase0 = 0) {
 
 static bool g_invalid = false;
 static double g_lead = -1;
+static bool g_lenient = false;   // --lenient 1: an unacknowledged initial flush is printed, not fatal (bench 2026-11-10, 0.25 MS/s)
+static std::vector<long long> g_lens, g_gaps, g_firsts;   // case sweep: --lens/--gaps/--firsts a,b,c replace the --lead grid (bench 2026-11-10)
+static std::vector<long long> csv(const std::string& v) { std::vector<long long> out; size_t p0 = 0; while (p0 <= v.size()) { size_t q = v.find(',', p0); if (q == std::string::npos) q = v.size(); out.push_back(std::stoll(v.substr(p0, q - p0))); p0 = q + 1; } return out; }
 static std::vector<size_t> g_heads = {4, 8, 28, 100, 2000};   // case head: first-send sizes (--heads a,b,c); --lead is the gap before the rest   // case s1: seconds ahead of B's start when B is sent; < 0 sends at once
 
 // One send; returns the samples accepted. `at` < 0 means untimed.
@@ -177,6 +181,10 @@ int main(int argc, char** argv) {
         else if (k == "--trials") trials = std::atoi(v.c_str());
         else if (k == "--lead") g_lead = std::atof(v.c_str());
         else if (k == "--heads") { g_heads.clear(); size_t p0 = 0; while (p0 <= v.size()) { size_t q = v.find(',', p0); if (q == std::string::npos) q = v.size(); g_heads.push_back(std::stoul(v.substr(p0, q - p0))); p0 = q + 1; } }
+        else if (k == "--lenient") g_lenient = std::atoi(v.c_str()) != 0;
+        else if (k == "--lens") g_lens = csv(v);
+        else if (k == "--gaps") g_gaps = csv(v);
+        else if (k == "--firsts") g_firsts = csv(v);
         else if (k == "--rate") { RATE = std::atof(v.c_str()); PER = (long long)std::llround(MCR / RATE); }
     }
     if (args.empty()) { std::fprintf(stderr, "--args required\n"); return 2; }
@@ -209,7 +217,7 @@ int main(int argc, char** argv) {
         drain(tx, 0.2, 1.0);
         bool ok = flush(tx, &init);
         std::printf("initial flush %s: %s\n", ok ? "acknowledged" : "NOT acknowledged", counts(init).c_str());
-        if (!ok && which != "flush") return finish(tx, 5);
+        if (!ok && which != "flush" && !g_lenient) return finish(tx, 5);
     }
 
     try {
@@ -228,7 +236,7 @@ int main(int argc, char** argv) {
 
     if (which == "all" || which == "gap") {
         auto a = tone(10000), b = tone(1000);
-        for (long long gap : {0LL, 1LL, 2LL, 3LL, 1000LL}) {
+        for (long long gap : g_gaps.empty() ? std::vector<long long>{0, 1, 2, 3, 1000} : g_gaps) {
             for (int t = 0; t < trials; t++) {
                 drain(tx, 0.05, 0.5);
                 long long a_start = ahead(u, 0.1);
@@ -434,9 +442,12 @@ int main(int argc, char** argv) {
         auto b = tone(10000);
         // --lead selects the grid (bench 2026-11-09): <= 0 coarse, 1 the second pass, 2 the threshold pass
         const int grid = g_lead >= 2 ? 2 : g_lead > 0 ? 1 : 0;
-        const std::vector<size_t> firsts = grid == 2 ? std::vector<size_t>{1996} : grid == 1 ? std::vector<size_t>{100, 1996} : std::vector<size_t>{100, 500, 1996};
-        const std::vector<size_t> lens = grid == 2 ? std::vector<size_t>{1, 6, 8, 10, 12, 14, 16} : grid == 1 ? std::vector<size_t>{1, 10, 16, 20, 24, 28, 30} : std::vector<size_t>{1, 3, 10, 31, 32};
-        const std::vector<long long> gaps = grid == 2 ? std::vector<long long>{1, 3, 5, 7, 10, 15} : grid == 1 ? std::vector<long long>{5, 10, 20, 30, 40, 50} : std::vector<long long>{1, 5, 50, 500};
+        std::vector<size_t> firsts = grid == 2 ? std::vector<size_t>{1996} : grid == 1 ? std::vector<size_t>{100, 1996} : std::vector<size_t>{100, 500, 1996};
+        std::vector<size_t> lens = grid == 2 ? std::vector<size_t>{1, 6, 8, 10, 12, 14, 16} : grid == 1 ? std::vector<size_t>{1, 10, 16, 20, 24, 28, 30} : std::vector<size_t>{1, 3, 10, 31, 32};
+        std::vector<long long> gaps = grid == 2 ? std::vector<long long>{1, 3, 5, 7, 10, 15} : grid == 1 ? std::vector<long long>{5, 10, 20, 30, 40, 50} : std::vector<long long>{1, 5, 50, 500};
+        if (!g_firsts.empty()) firsts.assign(g_firsts.begin(), g_firsts.end());
+        if (!g_lens.empty()) lens.assign(g_lens.begin(), g_lens.end());
+        if (!g_gaps.empty()) gaps = g_gaps;
         for (size_t first : firsts) {
             for (size_t len : lens) {
                 for (long long gap : gaps) {

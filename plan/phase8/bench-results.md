@@ -392,3 +392,40 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 - **(c)1 を send の trace つきで流し直した**：同じ形で FAIL（行ごとに PASS と FAIL が入れ替わる）．trace では Module の send は設計どおり（頭は一回の SOB＋EOB，tone は送った終わり＋1 から最初の send 149〜226 sample，続きは時刻つきの 2 500 sample で装置の時刻の 5〜8 ms 前，二 sample の閉じ）．落ちた試行は装置が Underflow を報告し burst が途中で打ち切られる．
 - **UHD だけで再現した**（`plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `front`・`sweep`，Ez-SDR のコードなし）：送った長さ L の閉じた burst A の後，10 000 sample の burst B（すべて時刻つき）を A の排他的な終わりから gap sample 後に始めると，B が鳴るのは L = 4〜8 で gap ≥ 10（7 は落ちる），L = 10〜14 で gap ≥ 7（5 は落ちる），L = 16 で gap ≥ 5（3 は落ちる），L = 16〜30 は gap 5 以上すべて，L = 31・32 は gap 1 でも鳴る（各 2〜4 試行．1 と 2 MS/s で同じ形）．午前の (c)2 の「gap 1 で鳴る」は B が 100 sample の一回の閉じた send だったからで，長い B ではこの制約に当たる．#81 は Module の欠陥ではなく装置の制約で，#82 も同じ族．#1 では測っていない（INFERRED：同じ）．
 - **owner の決定（2026-11-09）**：32 sample 以下の閉じた device burst の後の前線は送った終わり＋10（一つの値）．段階 B で両 Provider の記録，FakeDevice，RM-15・UR-22・KL-36 を直す．
+
+## 2026-11-10：E1 の後の実機と，前線の UHD だけの掃引（#2＝X300 347D541＋UBX，#1＝X300 347D545＋OBX，commit `f127246`）
+
+att は二台とも 30 dB の loopback（owner 確認）．基準は内部．log は `~/.cache/ezsdr-bench/2026-11-10/`（repo の外．Module の試験は `hw_*.<36|37>.log`，掃引は `repro/`）．掃引は `plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `sweep`・`gap`・`flush`（格子は `--lens`・`--gaps`・`--firsts`，回し方と表は同じ dir の `sweep.py`・`table.py`）．開くときの `Reference Clock PLL failed to lock` は #2 で 3 回，#1 で 2 回出た（手順どおり一度開き直し，続けて出た盤は owner が電源を入れ直した）．
+
+**Module の試験（段階 B の前線＝送った終わり＋10）**：
+- (c)1 `hw_n47s5_front_after_a_short_burst`：1 MS/s は二台とも 6/6 PASS．2 MS/s は #2 5/6，#1 4/6．FAIL はどれも 4 に詰めた頭（1〜4 sample）の後の +14 で，late 約 116（underflow 0〜1）．
+- (d) `hw_n47s5_held_tail_and_stop`：二台とも (f) 3 行，(b) raw，(h) R5-m5（c＋13，12 試行）PASS．Session の行は INCONCLUSIVE（11-09 と同じ）．
+- N-H1 `hw_n47s5_long_b_after_a_short_head_gap_9_and_10`：二台とも PASS（gap 9 も 16/16 鳴った．1 MS/s だけの試験）．
+- `restart_trial`（`hw_n47_rx_start_lead_group`）：二台とも PASS，最小の start lead 5 ms．
+
+**11-09 の記録の訂正**：11-09（午後）の「1 と 2 MS/s で同じ形」は gap 1・5・50・500 の粗い格子での一致で，2 MS/s の閾値は測っていなかった．段階 B の＋10 は 1 MS/s の値だった．
+
+**UHD だけの掃引**（A は 1 回の SOB＋EOB の閉じた頭，1〜3 sample は 4 に詰める．B は 10 000 sample の tone で，最初の send が 100 か 1996 sample，残りは時刻つきの 1996 sample，閉じは時刻つきの 2 sample．すべて A の 0.1 s 前に送る．gap は A の送った排他的な終わりから．粗い格子は各 3 試行，細かい格子は各 10 試行．二台の表は一致し，境目の上はすべて鳴り下はすべて落ちる．ずれた行は UHD の console の `U`・`L` が summary に混ざったもので，`table.py` が取り除く）．B が鳴る最小の gap（100 / 1996）：
+
+| rate（補間の比） | L ≤ 4 | L 8 | L 12 | L 16 | L 24 | L ≥ 32 | 長い burst の閉じの後（`gap`） |
+|---|---|---|---|---|---|---|---|
+| 0.5 MS/s（400，粗） | 2 / 5 | 1 / 4 | — | 1 / 4 | — | 1 | 1 |
+| 1 MS/s（200） | 6 / 9 | 5 / 8 | 3 / 6 | 2 / 5 | 1 / 3 | 1（L ≥ 28） | 1 |
+| 2 MS/s（100） | 14 / 18 | 12 / 16 | 10 / 12 | 6 / 10 | 1 / 4 | 1 | 1 |
+| 2.5 MS/s（80，粗） | 18 / 25 | 18 / 18 | — | 10 / 12 | — | 1 | 1 |
+| 2.86 MS/s（70，粗） | 20 / 29 | 20 / 29 | — | 9 / 14 | 3 / 9（L 23） | 1 | 1 |
+| 3.125 MS/s（64，粗） | 22 / 1 | 16 / 1 | 16 / 1 | 9 / 1 | — | 1 | 1 |
+| 3.33 MS/s（60，粗） | 17 / 1 | 10 / 1 | 7 / 1（L 13） | 2 / 1 | — | 1 | 1 |
+| 4〜50 MS/s（50〜4，粗） | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
+| 100 MS/s（2） | 2 | 2 | — | 2 | — | 2（L 1000 も） | 2 |
+| 200 MS/s（1） | 3 | 3 | — | 3 | — | 3（L 1000 も） | 3 |
+
+- 補間の比 60〜400 の短い頭の後に要る時間は最大で約 10 µs（2.86 MS/s の 29 sample）．頭が 28〜32 sample を超えると要らない．
+- 100・200 MS/s は頭の長さによらず，どの閉じの後も 2・3 sample 要る（今の規則の「終わり＋1」は足りない）．
+
+**低い rate**（`--lenient 1`，L は 1〜256，最初の send 1996，各 3 試行）：0.4 MS/s（500）以下では 4 sample 以下の閉じた頭そのものが途中で underflow し，後の B は gap 40 でも late．8 sample の頭は閉じる（0.4：gap 3，0.25・0.2：gap 2，0.125：gap 1）．2 sample の 0 の flush は 0.4 MS/s で ACK（その前に underflow 22），0.25 MS/s 以下は 1 s の間 ACK なし（underflow 33）．0.098 MS/s は PLL の失敗で測れなかった．
+
+**owner の決定（2026-11-10）**：
+- **前線は時間で決める一つの規則（A）**：32 sample 以下の閉じた device burst の後の次の開始は送った終わり＋max(3 sample, 15 µs) 以降，ほかの閉じた burst の後は終わり＋3 sample 以降．補間の比ごとの表（B）と，比 80 以上だけの guard（C）は採らない．理由（owner）：32 sample 以下という限られた場合にしか生じないので，多くの corner case を生むより単純に解決できる方式がよい．
+- **送信の rate は 1 MS/s 以上（補間の比 200 以下）に限る**．受信は今のまま．0.5 MS/s で区切る案は粗い格子でしか確かめていないので採らない．利用者から見える Ceiling（KNOWN_LIMITATIONS に足す）．
+- #81・#82 は，この二つを入れる段階の後の実機（Module の試験を複数の rate で）で閉じる．
