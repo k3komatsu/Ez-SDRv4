@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-10-front-sweep (private)
+asset:   2026-11-10-front-sweep.tar.xz  3 385 192 bytes
+sha256:  e1d6c9d4de484f9f7526c8dbd4b229e244a1af8ceeb6867b4e0606d0bd708d41
+source:  ~/.cache/ezsdr-bench/2026-11-10 on usrp-lnx03 (build dirs and the tx_repro binary excluded)
+fetch:   gh release download 2026-11-10-front-sweep -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-10 bench/2026-11-10-front-sweep/results

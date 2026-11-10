@@ -1,0 +1,13 @@
+{
+  "session": "2026-11-09-stage5",
+  "commit": "134b273 (morning); the stage A work branch edb4a22..28ccfbb (afternoon)",
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "boards": [
+    { "id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG)", "slot_a": "UBX-160 v2", "slot_b": "CBX (not used)", "addr": "192.168.47.37", "nic": "enp1s0f0np0" },
+    { "id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG)", "slot_a": "OBX", "addr": "192.168.40.36", "nic": "enp1s0f1np1" }
+  ],
+  "rf": { "wiring": "slot-A TX/RX -> 30 dB -> RX2 on each board; for (i) #1 TX/RX -> 30 dB -> splitter -> #1 RX2 and #2 UBX RX2", "attenuation_db": 30, "owner_confirmed": true, "frequency_hz": 1000000000, "tx_gain_db": 0 },
+  "reference": "internal (#1 ref_locked stayed false over three power cycles)",
+  "procedure": "plan/phase8/bench.md, the section after note 47 stage 5",
+  "sweep": "afternoon: tx_repro cases front and sweep on #2 only, 1 and 2 MS/s, 2-4 trials per cell (the grid step B's + 10 came from)"
+}

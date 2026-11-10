@@ -371,7 +371,7 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 
 ## 2026-11-09：note 47 段階 5 の後（#2＝X300 347D541＋UBX/CBX，#1＝X300 347D545＋OBX，commit `134b273`）
 
-手順は [bench.md](bench.md) の「<DATE> の手順（note 47 段階 5 の後）」．att は三つの board とも 30 dB（owner 確認）．基準は内部．log は `~/.cache/ezsdr-bench/2026-11-09/`（repo の外），(i) の記録は `~/ezsdr-bench/2026-11-09/ssh-drop-134b273ae038-124352051758802/`．各 FAIL の後は手順の stop の規則どおり owner が盤の電源を入れ直し，止まった試験の次から続けた．
+手順は [bench.md](bench.md) の「<DATE> の手順（note 47 段階 5 の後）」．条件と機械で読める結果は [bench/2026-11-09-stage5](../../bench/2026-11-09-stage5/README.md)．att は三つの board とも 30 dB（owner 確認）．基準は内部．log は `~/.cache/ezsdr-bench/2026-11-09/`（repo の外），(i) の記録は `~/ezsdr-bench/2026-11-09/ssh-drop-134b273ae038-124352051758802/`．各 FAIL の後は手順の stop の規則どおり owner が盤の電源を入れ直し，止まった試験の次から続けた．
 
 - **(a)**：二台とも ping，`bench-host.sh`，`uhd_usrp_probe`（serial，FPGA 39.3，UBX・CBX／OBX）は正常．`mboards/0/sensors/ref_locked` は #2 が true，**#1 は false**（`clock_source=internal` でも，電源を 3 回入れ直しても false）．前回までの (a) はセンサーの名前しか記録していない（`~/.cache/ezsdr-bench/2026-11-0[56]/probe-192.168.40.36.log`）ので，以前の値は分からない．Module は基準が `internal` の時 `ref_locked` を見ない（`crates/ezsdr-radio-uhd/src/provider/mod.rs:541-546`）．#1 の結果は以下のとおり #2 と同じで，loopback の測定への影響は見えない（INFERRED：送受が同じ clock）．
 - **(b) 回帰**：二台とも 9 試験すべて PASS．想定外の `radio.TIME_ERROR`・`radio.TX_UNDERFLOW` はなし．`hw_b8_burst_one_sample_after_a_burst` の end＋1 は段階 5 の期待どおり受付で拒否（`UR-21: the burst overlaps an accepted booking`），end＋2 は流れる．
@@ -395,7 +395,7 @@ owner が電源を入れ直した後，att は三つの board とも 30 dB（own
 
 ## 2026-11-10：E1 の後の実機と，前線の UHD だけの掃引（#2＝X300 347D541＋UBX，#1＝X300 347D545＋OBX，commit `f127246`）
 
-att は二台とも 30 dB の loopback（owner 確認）．基準は内部．log は `~/.cache/ezsdr-bench/2026-11-10/`（repo の外．Module の試験は `hw_*.<36|37>.log`，掃引は `repro/`）．掃引は `plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `sweep`・`gap`・`flush`（格子は `--lens`・`--gaps`・`--firsts`，回し方と表は同じ dir の `sweep.py`・`table.py`）．開くときの `Reference Clock PLL failed to lock` は #2 で 3 回，#1 で 2 回出た（手順どおり一度開き直し，続けて出た盤は owner が電源を入れ直した）．
+条件と機械で読める結果は [bench/2026-11-10-front-sweep](../../bench/2026-11-10-front-sweep/README.md)（生の log は非公開の `k3komatsu/Ez-SDRv4-bench-raw` の release）．att は二台とも 30 dB の loopback（owner 確認）．基準は内部．log は `~/.cache/ezsdr-bench/2026-11-10/`（repo の外．Module の試験は `hw_*.<36|37>.log`，掃引は `repro/`）．掃引は `plan/phase8/tools/uhd-repro/tx_repro.cpp` の case `sweep`・`gap`・`flush`（格子は `--lens`・`--gaps`・`--firsts`，回し方と表は同じ dir の `sweep.py`・`table.py`）．開くときの `Reference Clock PLL failed to lock` は #2 で 3 回，#1 で 2 回出た（手順どおり一度開き直し，続けて出た盤は owner が電源を入れ直した）．
 
 **Module の試験（段階 B の前線＝送った終わり＋10）**：
 - (c)1 `hw_n47s5_front_after_a_short_burst`：1 MS/s は二台とも 6/6 PASS．2 MS/s は #2 5/6，#1 4/6．FAIL はどれも 4 に詰めた頭（1〜4 sample）の後の +14 で，late 約 116（underflow 0〜1）．

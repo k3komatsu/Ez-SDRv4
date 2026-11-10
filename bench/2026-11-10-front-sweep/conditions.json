@@ -1,0 +1,23 @@
+{
+  "session": "2026-11-10-front-sweep",
+  "commit": "f127246",
+  "tools": { "hardware tests": "crates/ezsdr-radio-uhd/tests/hardware.rs at f127246", "sweep": "plan/phase8/tools/uhd-repro/tx_repro.cpp (--lens/--gaps/--firsts/--lenient added this session), sweep.py, table.py" },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "boards": [
+    { "id": "#2", "board_arg": "37", "serial": "347D541", "fpga": "39.3 (HG)", "slot_a": "UBX-160 v2", "slot_b": "CBX (not used)", "addr": "192.168.47.37", "nic": "enp1s0f0np0" },
+    { "id": "#1", "board_arg": "36", "serial": "347D545", "fpga": "39.3 (HG)", "slot_a": "OBX", "slot_b": "empty", "addr": "192.168.40.36", "nic": "enp1s0f1np1" }
+  ],
+  "rf": { "wiring": "each board's slot-A TX/RX -> 30 dB attenuator -> RX2 (coax and attenuators rated to 18 GHz)", "attenuation_db": 30, "owner_confirmed": true, "frequency_hz": 1000000000, "tx_gain_db": 0, "amplitude_max": 0.5 },
+  "reference": "internal",
+  "host": "usrp-lnx03; MTU 9000; frame 8000 bytes",
+  "module_tests": { "rates_sps": [1000000, 2000000], "front_rule": "step B: transmitted end + 10 after a closed burst of <= 32 samples" },
+  "sweep": {
+    "case_sweep": "closed head A of L samples (1-3 padded to 4), then 10 000-sample tone B at A's exclusive end + gap, first send of B = first samples, the rest timed 1996-sample sends, timed two-sample close; all sent 0.1 s ahead",
+    "case_gap": "10 000-sample burst A closed by its last sample + 1 zero, then 1 000-sample B at the close's exclusive end + gap",
+    "case_flush": "two zero samples, untimed SOB+EOB",
+    "rates_sps": [98039, 125000, 200000, 250000, 400000, 500000, 1000000, 2000000, 2500000, 2857143, 3125000, 3333333, 4000000, 5000000, 10000000, 25000000, 50000000, 100000000, 200000000],
+    "trials_per_cell": "3 (coarse, low rates), 10 (fine: 1, 2, 100, 200 MS/s)",
+    "grids": "per-rate lens/gaps in plan/phase8/tools/uhd-repro/sweep.py (coarse and FINE); low rates: lens 1..256, gaps 1..40"
+  },
+  "power_cycles": "#2 after (c)1 FAIL; #1 after (c)1 FAIL; #2 after two PLL lock failures; both after PLL lock failures at 0.098 MS/s"
+}
