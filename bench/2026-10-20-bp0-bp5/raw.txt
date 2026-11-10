@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-10-20-bp0-bp5 (private)
+asset:   2026-10-20-bp0-bp5.tar.xz  3214084 bytes
+sha256:  ced39475d1946ce4f524013c36f7133b0da337802c76b712d9d984a03a44cc5d
+source:  home-ezsdr-bench = ~/ezsdr-bench on usrp-lnx03
+fetch:   gh release download 2026-10-20-bp0-bp5 -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-10-20-bp0-bp5 bench/2026-10-20-bp0-bp5/results

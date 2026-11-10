@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-10-21-front-end-move (private)
+asset:   2026-10-21-front-end-move.tar.xz  1896 bytes
+sha256:  e1d9ff2c7eb3bfef6381588e7da509e80892937fd4828bf43b164f9d59c96233
+source:  home-ezsdr-bench = ~/ezsdr-bench on usrp-lnx03
+fetch:   gh release download 2026-10-21-front-end-move -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-10-21-front-end-move bench/2026-10-21-front-end-move/results

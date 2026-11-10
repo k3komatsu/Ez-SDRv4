@@ -1,0 +1,28 @@
+{
+  "session": "2026-10-21-front-end-move",
+  "commit": "dd4746a (passing), 7b71f8f and 94e6a30 (earlier runs)",
+  "boards": [
+    {
+      "id": "#1",
+      "board_arg": "36",
+      "serial": "347D545",
+      "fpga": "39.3 (HG, git d375d68)",
+      "slot_a": "OBX",
+      "slot_b": "empty",
+      "addr": "192.168.40.36",
+      "nic": "enp1s0f0np0"
+    }
+  ],
+  "rf": {
+    "wiring": "#1 OBX TX/RX -> 30 dB -> RX2",
+    "attenuation_db": 30
+  },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "reference": "internal",
+  "rf_common": {
+    "frequency_hz": 1000000000,
+    "tx_gain_db": 0,
+    "owner_confirmed_attenuators": true
+  },
+  "source": "plan/phase8/bench-results.md section \"2026-10-21：front end を streamer から streamer へ移す\" (backfilled 2026-11-10 from that prose)"
+}
