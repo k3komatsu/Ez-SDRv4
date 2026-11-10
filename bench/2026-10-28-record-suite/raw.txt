@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-10-28-record-suite (private)
+asset:   2026-10-28-record-suite.tar.xz  3841964 bytes
+sha256:  eb9cf3537bedddd2d264393340f26009adde8ab2748a96bbcb1defe966742cc2
+source:  cache-ezsdr-bench = ~/.cache/ezsdr-bench/2026-10-28; home-ezsdr-bench = ~/ezsdr-bench/2026-10-28 on usrp-lnx03
+fetch:   gh release download 2026-10-28-record-suite -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-10-28-record-suite bench/2026-10-28-record-suite/results

@@ -1,0 +1,38 @@
+{
+  "session": "2026-11-06-n48s3",
+  "commit": "de7720c",
+  "boards": [
+    {
+      "id": "#1",
+      "board_arg": "36",
+      "serial": "347D545",
+      "fpga": "39.3 (HG, git d375d68)",
+      "slot_a": "OBX",
+      "slot_b": "empty",
+      "addr": "192.168.40.36",
+      "nic": "enp1s0f1np1"
+    },
+    {
+      "id": "#2",
+      "board_arg": "37",
+      "serial": "347D541",
+      "fpga": "39.3 (HG, git d375d68)",
+      "slot_a": "UBX-160 v2",
+      "slot_b": "CBX",
+      "addr": "192.168.47.37",
+      "nic": "enp1s0f0np0"
+    }
+  ],
+  "rf": {
+    "wiring": "each board's own 30 dB loopback",
+    "attenuation_db": 30
+  },
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "reference": "internal",
+  "rf_common": {
+    "frequency_hz": 1000000000,
+    "tx_gain_db": 0,
+    "owner_confirmed_attenuators": true
+  },
+  "source": "plan/phase8/bench-results.md section \"2026-11-06（続き）：note 48 S3 の後\" (backfilled 2026-11-10 from that prose)"
+}

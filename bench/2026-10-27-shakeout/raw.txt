@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-10-27-shakeout (private)
+asset:   2026-10-27-shakeout.tar.xz  265456 bytes
+sha256:  ea079a63f3fc2d62f5046e5ae03b2cb6b0fa2488e0673dbb682eba1b48464519
+source:  ezsdr-bench = ~/.cache/ezsdr-bench/2026-10-27 on usrp-lnx03
+fetch:   gh release download 2026-10-27-shakeout -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-10-27-shakeout bench/2026-10-27-shakeout/results

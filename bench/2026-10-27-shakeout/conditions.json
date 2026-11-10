@@ -1,0 +1,29 @@
+{
+  "session": "2026-10-27-shakeout",
+  "commit": "8f4f060 (4th run with a temporary local change)",
+  "boards": [
+    {
+      "id": "#1",
+      "board_arg": "36",
+      "serial": "347D545",
+      "fpga": "39.3 (HG, git d375d68)",
+      "slot_a": "OBX",
+      "slot_b": "empty",
+      "addr": "192.168.40.36",
+      "nic": "enp1s0f0np0"
+    }
+  ],
+  "rf": {
+    "wiring": "OBX TX/RX -> 40 dB / 18 GHz attenuator -> RX2",
+    "attenuation_db": 40
+  },
+  "note": "shake-out; results not used for the profile",
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "reference": "internal",
+  "rf_common": {
+    "frequency_hz": 1000000000,
+    "tx_gain_db": 0,
+    "owner_confirmed_attenuators": true
+  },
+  "source": "plan/phase8/bench-results.md section \"2026-10-27：shake-out\" (backfilled 2026-11-10 from that prose)"
+}

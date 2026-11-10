@@ -3,8 +3,8 @@
 One directory per bench session, `YYYY-MM-DD-<topic>/` (AGENTS.md §9, Bench records; owner 2026-11-10):
 
 - `conditions.json`: commit, boards (serial, FPGA, daughterboards), attenuation and wiring, reference, UHD image, RF envelope, rates and grids.
-- `results/`: machine-readable rows made from the raw logs by `plan/phase8/tools/bench_extract.py` (hardware-test VERDICT lines; `tx_repro` sweep cells), never typed by hand.
+- `results/`: machine-readable rows made from the raw logs by `plan/phase8/tools/bench_extract.py`, never typed by hand: `verdicts.tsv` (hardware-test VERDICT lines), `cells.csv` (`tx_repro` sweep cells), `measurements/` (measurement records without their observations). A session whose logs have none of these keeps only the header row; its raw logs hold the rest.
 - `README.md`: the human summary and the decisions it fed.
 - `raw.txt`: the raw logs' archive in a release of the private repository `k3komatsu/Ez-SDRv4-bench-raw`, with its sha256 and how to fetch it.
 
-Procedures stay in `plan/phaseN/bench.md`; conclusions and the index of sessions in `plan/phaseN/bench-results.md`. Sessions before 2026-11-09 are recorded only in those files; their raw logs (2026-10-27 … 2026-11-06) are still on the development PC under `~/.cache/ezsdr-bench/`.
+Procedures stay in `plan/phaseN/bench.md`; conclusions and the index of sessions in `plan/phaseN/bench-results.md`. The sessions from 2026-10-27 to 2026-11-06 were backfilled on 2026-11-10 (their `conditions.json` comes from the prose record). The Phase 8 sessions of 2026-10-20 and 2026-10-21 and the Phase 7 bench are recorded only in `plan/phase7/bench-results.md` and `plan/phase8/bench-results.md`.

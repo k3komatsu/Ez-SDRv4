@@ -1,0 +1,4880 @@
+{
+ "schema": "ezsdr.radio.measurement.v1",
+ "source": "hardware",
+ "profile": {
+  "name": "x3xx",
+  "version": {
+   "major": 0,
+   "minor": 1,
+   "patch": 0
+  }
+ },
+ "selector": {
+  "args": "type=fake-rig",
+  "id": "usrp",
+  "link_gbps": [
+   10
+  ],
+  "rx": [
+   "0:A:ubx:0",
+   "0:B:cbx:0"
+  ],
+  "tx": [
+   "0:A:ubx:0",
+   "0:B:cbx:0"
+  ]
+ },
+ "device": {
+  "serial": "347D541",
+  "mboard": "X300",
+  "fpga_image": "39.3 git d375d68",
+  "uhd_version": "4.10.0.0-0-unknown"
+ },
+ "host": {
+  "name": "usrp-lnx03",
+  "settings_script": "plan/phase8/tools/bench-host.sh",
+  "settings_version": "bench-host 1"
+ },
+ "load": "none",
+ "commit": "98b0d9a919c981f4aee9b4a7abe04c2b3c1ee974",
+ "conditions": [
+  {
+   "id": "tx-1msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "cold-1msps-2msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "cold-390625-400000",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 390625.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-cold-1msps-2msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-cold-390625-1msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 390625.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-10msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-20msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-25msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-40msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-50msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-100msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-200msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-10m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-20m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-25m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-40m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-50m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-100m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-grouped-200m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-10m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-20m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-25m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-40m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-50m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-100m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-split-200m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-mixed-20m-10m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-mixed-25m-20m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-mixed-40m-25m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-mixed-50m-40m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-mixed-100m-50m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-mixed-200m-100m",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-1msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-10msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-20msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-25msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-40msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-50msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-100msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-200msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-10m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-20m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-25m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-40m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-50m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-100m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-grouped-200m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0,
+      1
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-10m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-20m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-25m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-40m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-50m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-100m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-split-200m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-mixed-20m-10m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-mixed-25m-20m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-mixed-40m-25m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-mixed-50m-40m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-mixed-100m-50m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-mixed-200m-100m",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "duplex-1msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "cold-1msps-2msps-with-tx",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "cold-390625-400000-with-tx",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 390625.0
+    },
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-cold-1msps-2msps-with-rx",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "tx-cold-390625-1msps-with-rx",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 390625.0
+    },
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "rx-50msps-with-tx",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "duplex-at-the-measured-limits",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    },
+    {
+     "direction": "rx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 50000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 1,
+     "channels": [
+      1
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "rx",
+     "stream": 1
+    },
+    {
+     "direction": "tx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 1
+    }
+   ],
+   "reopened": false
+  },
+  {
+   "id": "queue-rx-gain",
+   "streams": [],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "queue-tx-gain",
+   "streams": [],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "queue-rx-frequency",
+   "streams": [],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "raw-device-coercion",
+   "streams": [],
+   "concurrent": [],
+   "reopened": false
+  }
+ ],
+ "values": [
+  {
+   "status": "measured",
+   "key": "radio.full_duplex",
+   "worst": true,
+   "trials": 20,
+   "condition": "duplex-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.hardware_time",
+   "worst": true,
+   "trials": 20,
+   "condition": "duplex-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.perf.rx_bytes_per_s",
+   "worst": 600000000.0,
+   "trials": 1,
+   "condition": "rx-mixed-100m-50m",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.perf.tx_bytes_per_s",
+   "worst": 260000000.0,
+   "trials": 1,
+   "condition": "tx-mixed-40m-25m",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.perf.wire_bytes_per_sample",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c0.antenna",
+   "worst": [
+    "RX2",
+    "TX/RX"
+   ],
+   "trials": 2,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c0.frequency_hz",
+   "worst": {
+    "kind": "step",
+    "lo": 10000000.0,
+    "hi": 6000000000.0,
+    "step": 1.0
+   },
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c0.frequency_step_hz",
+   "worst": 0.0,
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c0.gain_db",
+   "worst": {
+    "kind": "values",
+    "values": [
+     0.0,
+     0.5,
+     1.0,
+     1.5,
+     2.0,
+     2.5,
+     3.0,
+     3.5,
+     4.0,
+     4.5,
+     5.0,
+     5.5,
+     6.0,
+     6.5,
+     7.0,
+     7.5,
+     8.0,
+     8.5,
+     9.0,
+     9.5,
+     10.0,
+     10.5,
+     11.0,
+     11.5,
+     12.0,
+     12.5,
+     13.0,
+     13.5,
+     14.0,
+     14.5,
+     15.0,
+     15.5,
+     16.0,
+     16.5,
+     17.0,
+     17.5,
+     18.0,
+     18.5,
+     19.0,
+     19.5,
+     20.0,
+     20.5,
+     21.0,
+     21.5,
+     22.0,
+     22.5,
+     23.0,
+     23.5,
+     24.0,
+     24.5,
+     25.0,
+     25.5,
+     26.0,
+     26.5,
+     27.0,
+     27.5,
+     28.0,
+     28.5,
+     29.0,
+     29.5,
+     30.0,
+     30.5,
+     31.0,
+     31.5
+    ]
+   },
+   "trials": 64,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c0.gain_step_db",
+   "worst": 0.5,
+   "trials": 316,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.path_delay_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.phase_behavior_on_retune",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c1.antenna",
+   "worst": [
+    "RX2",
+    "TX/RX"
+   ],
+   "trials": 2,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c1.frequency_hz",
+   "worst": {
+    "kind": "step",
+    "lo": 1200000000.0,
+    "hi": 6000000000.0,
+    "step": 1.0
+   },
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c1.frequency_step_hz",
+   "worst": 0.0,
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c1.gain_db",
+   "worst": {
+    "kind": "values",
+    "values": [
+     0.0,
+     0.5,
+     1.0,
+     1.5,
+     2.0,
+     2.5,
+     3.0,
+     3.5,
+     4.0,
+     4.5,
+     5.0,
+     5.5,
+     6.0,
+     6.5,
+     7.0,
+     7.5,
+     8.0,
+     8.5,
+     9.0,
+     9.5,
+     10.0,
+     10.5,
+     11.0,
+     11.5,
+     12.0,
+     12.5,
+     13.0,
+     13.5,
+     14.0,
+     14.5,
+     15.0,
+     15.5,
+     16.0,
+     16.5,
+     17.0,
+     17.5,
+     18.0,
+     18.5,
+     19.0,
+     19.5,
+     20.0,
+     20.5,
+     21.0,
+     21.5,
+     22.0,
+     22.5,
+     23.0,
+     23.5,
+     24.0,
+     24.5,
+     25.0,
+     25.5,
+     26.0,
+     26.5,
+     27.0,
+     27.5,
+     28.0,
+     28.5,
+     29.0,
+     29.5,
+     30.0,
+     30.5,
+     31.0,
+     31.5
+    ]
+   },
+   "trials": 64,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.c1.gain_step_db",
+   "worst": 0.5,
+   "trials": 316,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c1.path_delay_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c1.phase_behavior_on_retune",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.s0.sample_rate_hz",
+   "worst": {
+    "kind": "values",
+    "values": [
+     98039.2156862745,
+     98425.1968503937,
+     98814.22924901186,
+     99206.3492063492,
+     99601.593625498,
+     100000.0,
+     100401.6064257028,
+     100806.45161290323,
+     101214.57489878543,
+     101626.0162601626,
+     102040.8163265306,
+     102459.01639344262,
+     102880.658436214,
+     103305.78512396694,
+     103734.4398340249,
+     104166.66666666667,
+     104602.51046025104,
+     105042.01680672269,
+     105485.23206751054,
+     105932.20338983051,
+     106382.97872340426,
+     106837.60683760684,
+     107296.1373390558,
+     107758.62068965517,
+     108225.10822510823,
+     108695.65217391304,
+     109170.30567685589,
+     109649.12280701754,
+     110132.15859030838,
+     110619.46902654867,
+     111111.11111111111,
+     111607.14285714286,
+     112107.62331838565,
+     112612.61261261262,
+     113122.17194570135,
+     113636.36363636363,
+     114155.25114155251,
+     114678.89908256881,
+     115207.3732718894,
+     115740.74074074074,
+     116279.06976744186,
+     116822.42990654205,
+     117370.89201877934,
+     117924.52830188679,
+     118483.41232227487,
+     119047.61904761905,
+     119617.22488038277,
+     120192.30769230769,
+     120772.94685990339,
+     121359.22330097087,
+     121951.21951219512,
+     122549.01960784313,
+     123152.70935960591,
+     123762.37623762376,
+     124378.10945273632,
+     125000.0,
+     125628.1407035176,
+     126262.62626262626,
+     126903.55329949239,
+     127551.02040816327,
+     128205.1282051282,
+     128865.97938144329,
+     129533.67875647669,
+     130208.33333333333,
+     130890.05235602094,
+     131578.94736842104,
+     132275.1322751323,
+     132978.72340425532,
+     133689.83957219252,
+     134408.60215053763,
+     135135.13513513515,
+     135869.5652173913,
+     136612.0218579235,
+     137362.63736263735,
+     138121.54696132598,
+     138888.88888888888,
+     139664.80446927375,
+     140449.4382022472,
+     141242.93785310735,
+     142045.45454545456,
+     142857.14285714287,
+     143678.16091954024,
+     144508.67052023122,
+     145348.83720930232,
+     146198.8304093567,
+     147058.82352941178,
+     147928.99408284025,
+     148809.52380952382,
+     149700.59880239522,
+     150602.4096385542,
+     151515.15151515152,
+     152439.0243902439,
+     153374.23312883437,
+     154320.98765432098,
+     155279.50310559006,
+     156250.0,
+     157232.70440251572,
+     158227.84810126582,
+     159235.66878980893,
+     160256.41025641025,
+     161290.32258064515,
+     162337.66233766233,
+     163398.69281045752,
+     164473.68421052632,
+     165562.91390728476,
+     166666.66666666666,
+     167785.23489932885,
+     168918.9189189189,
+     170068.02721088435,
+     171232.87671232875,
+     172413.7931034483,
+     173611.11111111112,
+     174825.17482517482,
+     176056.338028169,
+     177304.96453900708,
+     178571.42857142858,
+     179856.11510791368,
+     181159.42028985507,
+     182481.7518248175,
+     183823.5294117647,
+     185185.1851851852,
+     186567.16417910447,
+     187969.92481203008,
+     189393.9393939394,
+     190839.69465648854,
+     192307.6923076923,
+     193798.4496124031,
+     195312.5,
+     196078.431372549,
+     196850.3937007874,
+     197628.4584980237,
+     198412.6984126984,
+     199203.187250996,
+     200000.0,
+     200803.2128514056,
+     201612.90322580645,
+     202429.14979757086,
+     203252.0325203252,
+     204081.6326530612,
+     204918.03278688525,
+     205761.316872428,
+     206611.57024793388,
+     207468.8796680498,
+     208333.33333333334,
+     209205.02092050208,
+     210084.03361344538,
+     210970.4641350211,
+     211864.40677966102,
+     212765.95744680852,
+     213675.2136752137,
+     214592.2746781116,
+     215517.24137931035,
+     216450.21645021645,
+     217391.30434782608,
+     218340.61135371178,
+     219298.24561403508,
+     220264.31718061675,
+     221238.93805309734,
+     222222.22222222222,
+     223214.2857142857,
+     224215.2466367713,
+     225225.22522522524,
+     226244.3438914027,
+     227272.72727272726,
+     228310.50228310502,
+     229357.79816513762,
+     230414.7465437788,
+     231481.4814814815,
+     232558.13953488372,
+     233644.8598130841,
+     234741.78403755868,
+     235849.05660377358,
+     236966.82464454975,
+     238095.2380952381,
+     239234.44976076554,
+     240384.61538461538,
+     241545.89371980677,
+     242718.44660194175,
+     243902.43902439025,
+     245098.03921568627,
+     246305.41871921183,
+     247524.75247524751,
+     248756.21890547263,
+     250000.0,
+     251256.2814070352,
+     252525.25252525252,
+     253807.10659898477,
+     255102.04081632654,
+     256410.2564102564,
+     257731.95876288658,
+     259067.35751295337,
+     260416.66666666666,
+     261780.10471204188,
+     263157.8947368421,
+     264550.2645502646,
+     265957.44680851063,
+     267379.67914438504,
+     268817.20430107525,
+     270270.2702702703,
+     271739.1304347826,
+     273224.043715847,
+     274725.2747252747,
+     276243.09392265195,
+     277777.77777777775,
+     279329.6089385475,
+     280898.8764044944,
+     282485.8757062147,
+     284090.9090909091,
+     285714.28571428574,
+     287356.3218390805,
+     289017.34104046243,
+     290697.67441860464,
+     292397.6608187134,
+     294117.64705882355,
+     295857.9881656805,
+     297619.04761904763,
+     299401.19760479045,
+     301204.8192771084,
+     303030.30303030304,
+     304878.0487804878,
+     306748.46625766874,
+     308641.97530864197,
+     310559.0062111801,
+     312500.0,
+     314465.40880503145,
+     316455.69620253163,
+     318471.33757961786,
+     320512.8205128205,
+     322580.6451612903,
+     324675.32467532466,
+     326797.38562091504,
+     328947.36842105264,
+     331125.8278145695,
+     333333.3333333333,
+     335570.4697986577,
+     337837.8378378378,
+     340136.0544217687,
+     342465.7534246575,
+     344827.5862068966,
+     347222.22222222225,
+     349650.34965034964,
+     352112.676056338,
+     354609.92907801416,
+     357142.85714285716,
+     359712.23021582735,
+     362318.84057971014,
+     364963.503649635,
+     367647.0588235294,
+     370370.3703703704,
+     373134.32835820894,
+     375939.84962406015,
+     378787.8787878788,
+     381679.3893129771,
+     384615.3846153846,
+     387596.8992248062,
+     390625.0,
+     392156.862745098,
+     393700.7874015748,
+     395256.9169960474,
+     396825.3968253968,
+     398406.374501992,
+     400000.0,
+     401606.4257028112,
+     403225.8064516129,
+     404858.2995951417,
+     406504.0650406504,
+     408163.2653061224,
+     409836.0655737705,
+     411522.633744856,
+     413223.14049586776,
+     414937.7593360996,
+     416666.6666666667,
+     418410.04184100416,
+     420168.06722689077,
+     421940.9282700422,
+     423728.81355932204,
+     425531.91489361704,
+     427350.4273504274,
+     429184.5493562232,
+     431034.4827586207,
+     432900.4329004329,
+     434782.60869565216,
+     436681.22270742356,
+     438596.49122807017,
+     440528.6343612335,
+     442477.8761061947,
+     444444.44444444444,
+     446428.5714285714,
+     448430.4932735426,
+     450450.4504504505,
+     452488.6877828054,
+     454545.45454545453,
+     456621.00456621003,
+     458715.59633027524,
+     460829.4930875576,
+     462962.962962963,
+     465116.27906976745,
+     467289.7196261682,
+     469483.56807511736,
+     471698.11320754717,
+     473933.6492890995,
+     476190.4761904762,
+     478468.8995215311,
+     480769.23076923075,
+     483091.78743961354,
+     485436.8932038835,
+     487804.8780487805,
+     490196.07843137253,
+     492610.83743842365,
+     495049.50495049503,
+     497512.43781094527,
+     500000.0,
+     502512.5628140704,
+     505050.50505050505,
+     507614.21319796954,
+     510204.0816326531,
+     512820.5128205128,
+     515463.91752577317,
+     518134.71502590674,
+     520833.3333333333,
+     523560.20942408376,
+     526315.7894736842,
+     529100.5291005292,
+     531914.8936170213,
+     534759.3582887701,
+     537634.4086021505,
+     540540.5405405406,
+     543478.2608695652,
+     546448.087431694,
+     549450.5494505494,
+     552486.1878453039,
+     555555.5555555555,
+     558659.217877095,
+     561797.7528089888,
+     564971.7514124294,
+     568181.8181818182,
+     571428.5714285715,
+     574712.643678161,
+     578034.6820809249,
+     581395.3488372093,
+     584795.3216374269,
+     588235.2941176471,
+     591715.976331361,
+     595238.0952380953,
+     598802.3952095809,
+     602409.6385542168,
+     606060.6060606061,
+     609756.0975609756,
+     613496.9325153375,
+     617283.9506172839,
+     621118.0124223602,
+     625000.0,
+     628930.8176100629,
+     632911.3924050633,
+     636942.6751592357,
+     641025.641025641,
+     645161.2903225806,
+     649350.6493506493,
+     653594.7712418301,
+     657894.7368421053,
+     662251.655629139,
+     666666.6666666666,
+     671140.9395973154,
+     675675.6756756756,
+     680272.1088435374,
+     684931.506849315,
+     689655.1724137932,
+     694444.4444444445,
+     699300.6993006993,
+     704225.352112676,
+     709219.8581560283,
+     714285.7142857143,
+     719424.4604316547,
+     724637.6811594203,
+     729927.00729927,
+     735294.1176470588,
+     740740.7407407408,
+     746268.6567164179,
+     751879.6992481203,
+     757575.7575757576,
+     763358.7786259542,
+     769230.7692307692,
+     775193.7984496125,
+     781250.0,
+     784313.725490196,
+     787401.5748031496,
+     790513.8339920948,
+     793650.7936507936,
+     796812.749003984,
+     800000.0,
+     803212.8514056224,
+     806451.6129032258,
+     809716.5991902835,
+     813008.1300813009,
+     816326.5306122449,
+     819672.131147541,
+     823045.267489712,
+     826446.2809917355,
+     829875.5186721992,
+     833333.3333333334,
+     836820.0836820083,
+     840336.1344537815,
+     843881.8565400844,
+     847457.6271186441,
+     851063.8297872341,
+     854700.8547008547,
+     858369.0987124464,
+     862068.9655172414,
+     865800.8658008658,
+     869565.2173913043,
+     873362.4454148471,
+     877192.9824561403,
+     881057.268722467,
+     884955.7522123894,
+     888888.8888888889,
+     892857.1428571428,
+     896860.9865470852,
+     900900.900900901,
+     904977.3755656108,
+     909090.9090909091,
+     913242.0091324201,
+     917431.1926605505,
+     921658.9861751152,
+     925925.925925926,
+     930232.5581395349,
+     934579.4392523364,
+     938967.1361502347,
+     943396.2264150943,
+     947867.298578199,
+     952380.9523809524,
+     956937.7990430621,
+     961538.4615384615,
+     966183.5748792271,
+     970873.786407767,
+     975609.756097561,
+     980392.1568627451,
+     985221.6748768473,
+     990099.0099009901,
+     995024.8756218905,
+     1000000.0,
+     1005025.1256281408,
+     1010101.0101010101,
+     1015228.4263959391,
+     1020408.1632653062,
+     1025641.0256410256,
+     1030927.8350515463,
+     1036269.4300518135,
+     1041666.6666666666,
+     1047120.4188481675,
+     1052631.5789473683,
+     1058201.0582010583,
+     1063829.7872340425,
+     1069518.7165775402,
+     1075268.817204301,
+     1081081.0810810812,
+     1086956.5217391304,
+     1092896.174863388,
+     1098901.0989010988,
+     1104972.3756906078,
+     1111111.111111111,
+     1117318.43575419,
+     1123595.5056179776,
+     1129943.5028248588,
+     1136363.6363636365,
+     1142857.142857143,
+     1149425.287356322,
+     1156069.3641618497,
+     1162790.6976744186,
+     1169590.6432748537,
+     1176470.5882352942,
+     1183431.952662722,
+     1190476.1904761905,
+     1197604.7904191618,
+     1204819.2771084337,
+     1212121.2121212122,
+     1219512.1951219512,
+     1226993.865030675,
+     1234567.9012345679,
+     1242236.0248447205,
+     1250000.0,
+     1257861.6352201258,
+     1265822.7848101265,
+     1273885.3503184714,
+     1282051.282051282,
+     1290322.5806451612,
+     1298701.2987012987,
+     1307189.5424836602,
+     1315789.4736842106,
+     1324503.311258278,
+     1333333.3333333333,
+     1342281.8791946308,
+     1351351.3513513512,
+     1360544.2176870748,
+     1369863.01369863,
+     1379310.3448275863,
+     1388888.888888889,
+     1398601.3986013986,
+     1408450.704225352,
+     1418439.7163120566,
+     1428571.4285714286,
+     1438848.9208633094,
+     1449275.3623188406,
+     1459854.01459854,
+     1470588.2352941176,
+     1481481.4814814816,
+     1492537.3134328357,
+     1503759.3984962406,
+     1515151.5151515151,
+     1526717.5572519084,
+     1538461.5384615385,
+     1550387.596899225,
+     1562500.0,
+     1574803.1496062991,
+     1587301.5873015872,
+     1600000.0,
+     1612903.2258064516,
+     1626016.2601626017,
+     1639344.262295082,
+     1652892.561983471,
+     1666666.6666666667,
+     1680672.268907563,
+     1694915.2542372881,
+     1709401.7094017095,
+     1724137.9310344828,
+     1739130.4347826086,
+     1754385.9649122807,
+     1769911.5044247787,
+     1785714.2857142857,
+     1801801.801801802,
+     1818181.8181818181,
+     1834862.385321101,
+     1851851.851851852,
+     1869158.8785046728,
+     1886792.4528301887,
+     1904761.9047619049,
+     1923076.923076923,
+     1941747.572815534,
+     1960784.3137254901,
+     1980198.0198019801,
+     2000000.0,
+     2020202.0202020202,
+     2040816.3265306123,
+     2061855.6701030927,
+     2083333.3333333333,
+     2105263.1578947366,
+     2127659.574468085,
+     2150537.634408602,
+     2173913.0434782607,
+     2197802.1978021977,
+     2222222.222222222,
+     2247191.011235955,
+     2272727.272727273,
+     2298850.574712644,
+     2325581.395348837,
+     2352941.1764705884,
+     2380952.380952381,
+     2409638.5542168673,
+     2439024.3902439023,
+     2469135.8024691357,
+     2500000.0,
+     2531645.569620253,
+     2564102.564102564,
+     2597402.5974025973,
+     2631578.947368421,
+     2666666.6666666665,
+     2702702.7027027025,
+     2739726.02739726,
+     2777777.777777778,
+     2816901.408450704,
+     2857142.8571428573,
+     2898550.724637681,
+     2941176.470588235,
+     2985074.6268656715,
+     3030303.0303030303,
+     3076923.076923077,
+     3125000.0,
+     3174603.1746031744,
+     3225806.4516129033,
+     3278688.524590164,
+     3333333.3333333335,
+     3389830.5084745763,
+     3448275.8620689656,
+     3508771.9298245613,
+     3571428.5714285714,
+     3636363.6363636362,
+     3703703.703703704,
+     3773584.9056603773,
+     3846153.846153846,
+     3921568.6274509802,
+     4000000.0,
+     4081632.6530612246,
+     4166666.6666666665,
+     4255319.14893617,
+     4347826.0869565215,
+     4444444.444444444,
+     4545454.545454546,
+     4651162.790697674,
+     4761904.761904762,
+     4878048.780487805,
+     5000000.0,
+     5128205.128205128,
+     5263157.894736842,
+     5405405.405405405,
+     5555555.555555556,
+     5714285.714285715,
+     5882352.94117647,
+     6060606.060606061,
+     6250000.0,
+     6451612.903225807,
+     6666666.666666667,
+     6896551.724137931,
+     7142857.142857143,
+     7407407.407407408,
+     7692307.692307692,
+     8000000.0,
+     8333333.333333333,
+     8695652.173913043,
+     9090909.090909092,
+     9523809.523809524,
+     10000000.0,
+     10526315.789473685,
+     11111111.111111112,
+     11764705.88235294,
+     12500000.0,
+     13333333.333333334,
+     14285714.285714285,
+     15384615.384615384,
+     16666666.666666666,
+     18181818.181818184,
+     20000000.0,
+     22222222.222222224,
+     25000000.0,
+     28571428.57142857,
+     33333333.333333332,
+     40000000.0,
+     50000000.0,
+     66666666.666666664,
+     100000000.0,
+     200000000.0
+    ]
+   },
+   "trials": 639,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.rx.s1.sample_rate_hz",
+   "worst": {
+    "kind": "values",
+    "values": [
+     98039.2156862745,
+     98425.1968503937,
+     98814.22924901186,
+     99206.3492063492,
+     99601.593625498,
+     100000.0,
+     100401.6064257028,
+     100806.45161290323,
+     101214.57489878543,
+     101626.0162601626,
+     102040.8163265306,
+     102459.01639344262,
+     102880.658436214,
+     103305.78512396694,
+     103734.4398340249,
+     104166.66666666667,
+     104602.51046025104,
+     105042.01680672269,
+     105485.23206751054,
+     105932.20338983051,
+     106382.97872340426,
+     106837.60683760684,
+     107296.1373390558,
+     107758.62068965517,
+     108225.10822510823,
+     108695.65217391304,
+     109170.30567685589,
+     109649.12280701754,
+     110132.15859030838,
+     110619.46902654867,
+     111111.11111111111,
+     111607.14285714286,
+     112107.62331838565,
+     112612.61261261262,
+     113122.17194570135,
+     113636.36363636363,
+     114155.25114155251,
+     114678.89908256881,
+     115207.3732718894,
+     115740.74074074074,
+     116279.06976744186,
+     116822.42990654205,
+     117370.89201877934,
+     117924.52830188679,
+     118483.41232227487,
+     119047.61904761905,
+     119617.22488038277,
+     120192.30769230769,
+     120772.94685990339,
+     121359.22330097087,
+     121951.21951219512,
+     122549.01960784313,
+     123152.70935960591,
+     123762.37623762376,
+     124378.10945273632,
+     125000.0,
+     125628.1407035176,
+     126262.62626262626,
+     126903.55329949239,
+     127551.02040816327,
+     128205.1282051282,
+     128865.97938144329,
+     129533.67875647669,
+     130208.33333333333,
+     130890.05235602094,
+     131578.94736842104,
+     132275.1322751323,
+     132978.72340425532,
+     133689.83957219252,
+     134408.60215053763,
+     135135.13513513515,
+     135869.5652173913,
+     136612.0218579235,
+     137362.63736263735,
+     138121.54696132598,
+     138888.88888888888,
+     139664.80446927375,
+     140449.4382022472,
+     141242.93785310735,
+     142045.45454545456,
+     142857.14285714287,
+     143678.16091954024,
+     144508.67052023122,
+     145348.83720930232,
+     146198.8304093567,
+     147058.82352941178,
+     147928.99408284025,
+     148809.52380952382,
+     149700.59880239522,
+     150602.4096385542,
+     151515.15151515152,
+     152439.0243902439,
+     153374.23312883437,
+     154320.98765432098,
+     155279.50310559006,
+     156250.0,
+     157232.70440251572,
+     158227.84810126582,
+     159235.66878980893,
+     160256.41025641025,
+     161290.32258064515,
+     162337.66233766233,
+     163398.69281045752,
+     164473.68421052632,
+     165562.91390728476,
+     166666.66666666666,
+     167785.23489932885,
+     168918.9189189189,
+     170068.02721088435,
+     171232.87671232875,
+     172413.7931034483,
+     173611.11111111112,
+     174825.17482517482,
+     176056.338028169,
+     177304.96453900708,
+     178571.42857142858,
+     179856.11510791368,
+     181159.42028985507,
+     182481.7518248175,
+     183823.5294117647,
+     185185.1851851852,
+     186567.16417910447,
+     187969.92481203008,
+     189393.9393939394,
+     190839.69465648854,
+     192307.6923076923,
+     193798.4496124031,
+     195312.5,
+     196078.431372549,
+     196850.3937007874,
+     197628.4584980237,
+     198412.6984126984,
+     199203.187250996,
+     200000.0,
+     200803.2128514056,
+     201612.90322580645,
+     202429.14979757086,
+     203252.0325203252,
+     204081.6326530612,
+     204918.03278688525,
+     205761.316872428,
+     206611.57024793388,
+     207468.8796680498,
+     208333.33333333334,
+     209205.02092050208,
+     210084.03361344538,
+     210970.4641350211,
+     211864.40677966102,
+     212765.95744680852,
+     213675.2136752137,
+     214592.2746781116,
+     215517.24137931035,
+     216450.21645021645,
+     217391.30434782608,
+     218340.61135371178,
+     219298.24561403508,
+     220264.31718061675,
+     221238.93805309734,
+     222222.22222222222,
+     223214.2857142857,
+     224215.2466367713,
+     225225.22522522524,
+     226244.3438914027,
+     227272.72727272726,
+     228310.50228310502,
+     229357.79816513762,
+     230414.7465437788,
+     231481.4814814815,
+     232558.13953488372,
+     233644.8598130841,
+     234741.78403755868,
+     235849.05660377358,
+     236966.82464454975,
+     238095.2380952381,
+     239234.44976076554,
+     240384.61538461538,
+     241545.89371980677,
+     242718.44660194175,
+     243902.43902439025,
+     245098.03921568627,
+     246305.41871921183,
+     247524.75247524751,
+     248756.21890547263,
+     250000.0,
+     251256.2814070352,
+     252525.25252525252,
+     253807.10659898477,
+     255102.04081632654,
+     256410.2564102564,
+     257731.95876288658,
+     259067.35751295337,
+     260416.66666666666,
+     261780.10471204188,
+     263157.8947368421,
+     264550.2645502646,
+     265957.44680851063,
+     267379.67914438504,
+     268817.20430107525,
+     270270.2702702703,
+     271739.1304347826,
+     273224.043715847,
+     274725.2747252747,
+     276243.09392265195,
+     277777.77777777775,
+     279329.6089385475,
+     280898.8764044944,
+     282485.8757062147,
+     284090.9090909091,
+     285714.28571428574,
+     287356.3218390805,
+     289017.34104046243,
+     290697.67441860464,
+     292397.6608187134,
+     294117.64705882355,
+     295857.9881656805,
+     297619.04761904763,
+     299401.19760479045,
+     301204.8192771084,
+     303030.30303030304,
+     304878.0487804878,
+     306748.46625766874,
+     308641.97530864197,
+     310559.0062111801,
+     312500.0,
+     314465.40880503145,
+     316455.69620253163,
+     318471.33757961786,
+     320512.8205128205,
+     322580.6451612903,
+     324675.32467532466,
+     326797.38562091504,
+     328947.36842105264,
+     331125.8278145695,
+     333333.3333333333,
+     335570.4697986577,
+     337837.8378378378,
+     340136.0544217687,
+     342465.7534246575,
+     344827.5862068966,
+     347222.22222222225,
+     349650.34965034964,
+     352112.676056338,
+     354609.92907801416,
+     357142.85714285716,
+     359712.23021582735,
+     362318.84057971014,
+     364963.503649635,
+     367647.0588235294,
+     370370.3703703704,
+     373134.32835820894,
+     375939.84962406015,
+     378787.8787878788,
+     381679.3893129771,
+     384615.3846153846,
+     387596.8992248062,
+     390625.0,
+     392156.862745098,
+     393700.7874015748,
+     395256.9169960474,
+     396825.3968253968,
+     398406.374501992,
+     400000.0,
+     401606.4257028112,
+     403225.8064516129,
+     404858.2995951417,
+     406504.0650406504,
+     408163.2653061224,
+     409836.0655737705,
+     411522.633744856,
+     413223.14049586776,
+     414937.7593360996,
+     416666.6666666667,
+     418410.04184100416,
+     420168.06722689077,
+     421940.9282700422,
+     423728.81355932204,
+     425531.91489361704,
+     427350.4273504274,
+     429184.5493562232,
+     431034.4827586207,
+     432900.4329004329,
+     434782.60869565216,
+     436681.22270742356,
+     438596.49122807017,
+     440528.6343612335,
+     442477.8761061947,
+     444444.44444444444,
+     446428.5714285714,
+     448430.4932735426,
+     450450.4504504505,
+     452488.6877828054,
+     454545.45454545453,
+     456621.00456621003,
+     458715.59633027524,
+     460829.4930875576,
+     462962.962962963,
+     465116.27906976745,
+     467289.7196261682,
+     469483.56807511736,
+     471698.11320754717,
+     473933.6492890995,
+     476190.4761904762,
+     478468.8995215311,
+     480769.23076923075,
+     483091.78743961354,
+     485436.8932038835,
+     487804.8780487805,
+     490196.07843137253,
+     492610.83743842365,
+     495049.50495049503,
+     497512.43781094527,
+     500000.0,
+     502512.5628140704,
+     505050.50505050505,
+     507614.21319796954,
+     510204.0816326531,
+     512820.5128205128,
+     515463.91752577317,
+     518134.71502590674,
+     520833.3333333333,
+     523560.20942408376,
+     526315.7894736842,
+     529100.5291005292,
+     531914.8936170213,
+     534759.3582887701,
+     537634.4086021505,
+     540540.5405405406,
+     543478.2608695652,
+     546448.087431694,
+     549450.5494505494,
+     552486.1878453039,
+     555555.5555555555,
+     558659.217877095,
+     561797.7528089888,
+     564971.7514124294,
+     568181.8181818182,
+     571428.5714285715,
+     574712.643678161,
+     578034.6820809249,
+     581395.3488372093,
+     584795.3216374269,
+     588235.2941176471,
+     591715.976331361,
+     595238.0952380953,
+     598802.3952095809,
+     602409.6385542168,
+     606060.6060606061,
+     609756.0975609756,
+     613496.9325153375,
+     617283.9506172839,
+     621118.0124223602,
+     625000.0,
+     628930.8176100629,
+     632911.3924050633,
+     636942.6751592357,
+     641025.641025641,
+     645161.2903225806,
+     649350.6493506493,
+     653594.7712418301,
+     657894.7368421053,
+     662251.655629139,
+     666666.6666666666,
+     671140.9395973154,
+     675675.6756756756,
+     680272.1088435374,
+     684931.506849315,
+     689655.1724137932,
+     694444.4444444445,
+     699300.6993006993,
+     704225.352112676,
+     709219.8581560283,
+     714285.7142857143,
+     719424.4604316547,
+     724637.6811594203,
+     729927.00729927,
+     735294.1176470588,
+     740740.7407407408,
+     746268.6567164179,
+     751879.6992481203,
+     757575.7575757576,
+     763358.7786259542,
+     769230.7692307692,
+     775193.7984496125,
+     781250.0,
+     784313.725490196,
+     787401.5748031496,
+     790513.8339920948,
+     793650.7936507936,
+     796812.749003984,
+     800000.0,
+     803212.8514056224,
+     806451.6129032258,
+     809716.5991902835,
+     813008.1300813009,
+     816326.5306122449,
+     819672.131147541,
+     823045.267489712,
+     826446.2809917355,
+     829875.5186721992,
+     833333.3333333334,
+     836820.0836820083,
+     840336.1344537815,
+     843881.8565400844,
+     847457.6271186441,
+     851063.8297872341,
+     854700.8547008547,
+     858369.0987124464,
+     862068.9655172414,
+     865800.8658008658,
+     869565.2173913043,
+     873362.4454148471,
+     877192.9824561403,
+     881057.268722467,
+     884955.7522123894,
+     888888.8888888889,
+     892857.1428571428,
+     896860.9865470852,
+     900900.900900901,
+     904977.3755656108,
+     909090.9090909091,
+     913242.0091324201,
+     917431.1926605505,
+     921658.9861751152,
+     925925.925925926,
+     930232.5581395349,
+     934579.4392523364,
+     938967.1361502347,
+     943396.2264150943,
+     947867.298578199,
+     952380.9523809524,
+     956937.7990430621,
+     961538.4615384615,
+     966183.5748792271,
+     970873.786407767,
+     975609.756097561,
+     980392.1568627451,
+     985221.6748768473,
+     990099.0099009901,
+     995024.8756218905,
+     1000000.0,
+     1005025.1256281408,
+     1010101.0101010101,
+     1015228.4263959391,
+     1020408.1632653062,
+     1025641.0256410256,
+     1030927.8350515463,
+     1036269.4300518135,
+     1041666.6666666666,
+     1047120.4188481675,
+     1052631.5789473683,
+     1058201.0582010583,
+     1063829.7872340425,
+     1069518.7165775402,
+     1075268.817204301,
+     1081081.0810810812,
+     1086956.5217391304,
+     1092896.174863388,
+     1098901.0989010988,
+     1104972.3756906078,
+     1111111.111111111,
+     1117318.43575419,
+     1123595.5056179776,
+     1129943.5028248588,
+     1136363.6363636365,
+     1142857.142857143,
+     1149425.287356322,
+     1156069.3641618497,
+     1162790.6976744186,
+     1169590.6432748537,
+     1176470.5882352942,
+     1183431.952662722,
+     1190476.1904761905,
+     1197604.7904191618,
+     1204819.2771084337,
+     1212121.2121212122,
+     1219512.1951219512,
+     1226993.865030675,
+     1234567.9012345679,
+     1242236.0248447205,
+     1250000.0,
+     1257861.6352201258,
+     1265822.7848101265,
+     1273885.3503184714,
+     1282051.282051282,
+     1290322.5806451612,
+     1298701.2987012987,
+     1307189.5424836602,
+     1315789.4736842106,
+     1324503.311258278,
+     1333333.3333333333,
+     1342281.8791946308,
+     1351351.3513513512,
+     1360544.2176870748,
+     1369863.01369863,
+     1379310.3448275863,
+     1388888.888888889,
+     1398601.3986013986,
+     1408450.704225352,
+     1418439.7163120566,
+     1428571.4285714286,
+     1438848.9208633094,
+     1449275.3623188406,
+     1459854.01459854,
+     1470588.2352941176,
+     1481481.4814814816,
+     1492537.3134328357,
+     1503759.3984962406,
+     1515151.5151515151,
+     1526717.5572519084,
+     1538461.5384615385,
+     1550387.596899225,
+     1562500.0,
+     1574803.1496062991,
+     1587301.5873015872,
+     1600000.0,
+     1612903.2258064516,
+     1626016.2601626017,
+     1639344.262295082,
+     1652892.561983471,
+     1666666.6666666667,
+     1680672.268907563,
+     1694915.2542372881,
+     1709401.7094017095,
+     1724137.9310344828,
+     1739130.4347826086,
+     1754385.9649122807,
+     1769911.5044247787,
+     1785714.2857142857,
+     1801801.801801802,
+     1818181.8181818181,
+     1834862.385321101,
+     1851851.851851852,
+     1869158.8785046728,
+     1886792.4528301887,
+     1904761.9047619049,
+     1923076.923076923,
+     1941747.572815534,
+     1960784.3137254901,
+     1980198.0198019801,
+     2000000.0,
+     2020202.0202020202,
+     2040816.3265306123,
+     2061855.6701030927,
+     2083333.3333333333,
+     2105263.1578947366,
+     2127659.574468085,
+     2150537.634408602,
+     2173913.0434782607,
+     2197802.1978021977,
+     2222222.222222222,
+     2247191.011235955,
+     2272727.272727273,
+     2298850.574712644,
+     2325581.395348837,
+     2352941.1764705884,
+     2380952.380952381,
+     2409638.5542168673,
+     2439024.3902439023,
+     2469135.8024691357,
+     2500000.0,
+     2531645.569620253,
+     2564102.564102564,
+     2597402.5974025973,
+     2631578.947368421,
+     2666666.6666666665,
+     2702702.7027027025,
+     2739726.02739726,
+     2777777.777777778,
+     2816901.408450704,
+     2857142.8571428573,
+     2898550.724637681,
+     2941176.470588235,
+     2985074.6268656715,
+     3030303.0303030303,
+     3076923.076923077,
+     3125000.0,
+     3174603.1746031744,
+     3225806.4516129033,
+     3278688.524590164,
+     3333333.3333333335,
+     3389830.5084745763,
+     3448275.8620689656,
+     3508771.9298245613,
+     3571428.5714285714,
+     3636363.6363636362,
+     3703703.703703704,
+     3773584.9056603773,
+     3846153.846153846,
+     3921568.6274509802,
+     4000000.0,
+     4081632.6530612246,
+     4166666.6666666665,
+     4255319.14893617,
+     4347826.0869565215,
+     4444444.444444444,
+     4545454.545454546,
+     4651162.790697674,
+     4761904.761904762,
+     4878048.780487805,
+     5000000.0,
+     5128205.128205128,
+     5263157.894736842,
+     5405405.405405405,
+     5555555.555555556,
+     5714285.714285715,
+     5882352.94117647,
+     6060606.060606061,
+     6250000.0,
+     6451612.903225807,
+     6666666.666666667,
+     6896551.724137931,
+     7142857.142857143,
+     7407407.407407408,
+     7692307.692307692,
+     8000000.0,
+     8333333.333333333,
+     8695652.173913043,
+     9090909.090909092,
+     9523809.523809524,
+     10000000.0,
+     10526315.789473685,
+     11111111.111111112,
+     11764705.88235294,
+     12500000.0,
+     13333333.333333334,
+     14285714.285714285,
+     15384615.384615384,
+     16666666.666666666,
+     18181818.181818184,
+     20000000.0,
+     22222222.222222224,
+     25000000.0,
+     28571428.57142857,
+     33333333.333333332,
+     40000000.0,
+     50000000.0,
+     66666666.666666664,
+     100000000.0,
+     200000000.0
+    ]
+   },
+   "trials": 639,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.command_queue_depth",
+   "worst": 8.0,
+   "trials": 5,
+   "condition": "queue-rx-frequency",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.min_timed_command_lead_ns",
+   "worst": 5000000.0,
+   "trials": 100,
+   "condition": "tx-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.overflow_restart_gap_ns",
+   "reason": "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.release_window_ns",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.rx_start_lead_ns",
+   "worst": 3000000.0,
+   "trials": 100,
+   "condition": "cold-1msps-2msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.startup_latency_ns",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.tx_in_flight_ns",
+   "worst": 5000000.0,
+   "trials": 100,
+   "condition": "tx-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.tx_start_lead_ns",
+   "worst": 1000000.0,
+   "trials": 100,
+   "condition": "tx-cold-1msps-2msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c0.antenna",
+   "worst": [
+    "TX/RX"
+   ],
+   "trials": 1,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c0.frequency_hz",
+   "worst": {
+    "kind": "step",
+    "lo": 10000000.0,
+    "hi": 6000000000.0,
+    "step": 1.0
+   },
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c0.frequency_step_hz",
+   "worst": 0.0,
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c0.gain_db",
+   "worst": {
+    "kind": "values",
+    "values": [
+     0.0,
+     0.5,
+     1.0,
+     1.5,
+     2.0,
+     2.5,
+     3.0,
+     3.5,
+     4.0,
+     4.5,
+     5.0,
+     5.5,
+     6.0,
+     6.5,
+     7.0,
+     7.5,
+     8.0,
+     8.5,
+     9.0,
+     9.5,
+     10.0,
+     10.5,
+     11.0,
+     11.5,
+     12.0,
+     12.5,
+     13.0,
+     13.5,
+     14.0,
+     14.5,
+     15.0,
+     15.5,
+     16.0,
+     16.5,
+     17.0,
+     17.5,
+     18.0,
+     18.5,
+     19.0,
+     19.5,
+     20.0,
+     20.5,
+     21.0,
+     21.5,
+     22.0,
+     22.5,
+     23.0,
+     23.5,
+     24.0,
+     24.5,
+     25.0,
+     25.5,
+     26.0,
+     26.5,
+     27.0,
+     27.5,
+     28.0,
+     28.5,
+     29.0,
+     29.5,
+     30.0,
+     30.5,
+     31.0,
+     31.5
+    ]
+   },
+   "trials": 64,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c0.gain_step_db",
+   "worst": 0.5,
+   "trials": 316,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.path_delay_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.phase_behavior_on_retune",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c1.antenna",
+   "worst": [
+    "TX/RX"
+   ],
+   "trials": 1,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c1.frequency_hz",
+   "worst": {
+    "kind": "step",
+    "lo": 1200000000.0,
+    "hi": 6000000000.0,
+    "step": 1.0
+   },
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c1.frequency_step_hz",
+   "worst": 0.0,
+   "trials": 200,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c1.gain_db",
+   "worst": {
+    "kind": "values",
+    "values": [
+     0.0,
+     0.5,
+     1.0,
+     1.5,
+     2.0,
+     2.5,
+     3.0,
+     3.5,
+     4.0,
+     4.5,
+     5.0,
+     5.5,
+     6.0,
+     6.5,
+     7.0,
+     7.5,
+     8.0,
+     8.5,
+     9.0,
+     9.5,
+     10.0,
+     10.5,
+     11.0,
+     11.5,
+     12.0,
+     12.5,
+     13.0,
+     13.5,
+     14.0,
+     14.5,
+     15.0,
+     15.5,
+     16.0,
+     16.5,
+     17.0,
+     17.5,
+     18.0,
+     18.5,
+     19.0,
+     19.5,
+     20.0,
+     20.5,
+     21.0,
+     21.5,
+     22.0,
+     22.5,
+     23.0,
+     23.5,
+     24.0,
+     24.5,
+     25.0,
+     25.5,
+     26.0,
+     26.5,
+     27.0,
+     27.5,
+     28.0,
+     28.5,
+     29.0,
+     29.5,
+     30.0,
+     30.5,
+     31.0,
+     31.5
+    ]
+   },
+   "trials": 64,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.c1.gain_step_db",
+   "worst": 0.5,
+   "trials": 316,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c1.path_delay_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c1.phase_behavior_on_retune",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.repeat_align_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.repeat_max_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.s0.sample_rate_hz",
+   "worst": {
+    "kind": "values",
+    "values": [
+     98039.2156862745,
+     98425.1968503937,
+     98814.22924901186,
+     99206.3492063492,
+     99601.593625498,
+     100000.0,
+     100401.6064257028,
+     100806.45161290323,
+     101214.57489878543,
+     101626.0162601626,
+     102040.8163265306,
+     102459.01639344262,
+     102880.658436214,
+     103305.78512396694,
+     103734.4398340249,
+     104166.66666666667,
+     104602.51046025104,
+     105042.01680672269,
+     105485.23206751054,
+     105932.20338983051,
+     106382.97872340426,
+     106837.60683760684,
+     107296.1373390558,
+     107758.62068965517,
+     108225.10822510823,
+     108695.65217391304,
+     109170.30567685589,
+     109649.12280701754,
+     110132.15859030838,
+     110619.46902654867,
+     111111.11111111111,
+     111607.14285714286,
+     112107.62331838565,
+     112612.61261261262,
+     113122.17194570135,
+     113636.36363636363,
+     114155.25114155251,
+     114678.89908256881,
+     115207.3732718894,
+     115740.74074074074,
+     116279.06976744186,
+     116822.42990654205,
+     117370.89201877934,
+     117924.52830188679,
+     118483.41232227487,
+     119047.61904761905,
+     119617.22488038277,
+     120192.30769230769,
+     120772.94685990339,
+     121359.22330097087,
+     121951.21951219512,
+     122549.01960784313,
+     123152.70935960591,
+     123762.37623762376,
+     124378.10945273632,
+     125000.0,
+     125628.1407035176,
+     126262.62626262626,
+     126903.55329949239,
+     127551.02040816327,
+     128205.1282051282,
+     128865.97938144329,
+     129533.67875647669,
+     130208.33333333333,
+     130890.05235602094,
+     131578.94736842104,
+     132275.1322751323,
+     132978.72340425532,
+     133689.83957219252,
+     134408.60215053763,
+     135135.13513513515,
+     135869.5652173913,
+     136612.0218579235,
+     137362.63736263735,
+     138121.54696132598,
+     138888.88888888888,
+     139664.80446927375,
+     140449.4382022472,
+     141242.93785310735,
+     142045.45454545456,
+     142857.14285714287,
+     143678.16091954024,
+     144508.67052023122,
+     145348.83720930232,
+     146198.8304093567,
+     147058.82352941178,
+     147928.99408284025,
+     148809.52380952382,
+     149700.59880239522,
+     150602.4096385542,
+     151515.15151515152,
+     152439.0243902439,
+     153374.23312883437,
+     154320.98765432098,
+     155279.50310559006,
+     156250.0,
+     157232.70440251572,
+     158227.84810126582,
+     159235.66878980893,
+     160256.41025641025,
+     161290.32258064515,
+     162337.66233766233,
+     163398.69281045752,
+     164473.68421052632,
+     165562.91390728476,
+     166666.66666666666,
+     167785.23489932885,
+     168918.9189189189,
+     170068.02721088435,
+     171232.87671232875,
+     172413.7931034483,
+     173611.11111111112,
+     174825.17482517482,
+     176056.338028169,
+     177304.96453900708,
+     178571.42857142858,
+     179856.11510791368,
+     181159.42028985507,
+     182481.7518248175,
+     183823.5294117647,
+     185185.1851851852,
+     186567.16417910447,
+     187969.92481203008,
+     189393.9393939394,
+     190839.69465648854,
+     192307.6923076923,
+     193798.4496124031,
+     195312.5,
+     196078.431372549,
+     196850.3937007874,
+     197628.4584980237,
+     198412.6984126984,
+     199203.187250996,
+     200000.0,
+     200803.2128514056,
+     201612.90322580645,
+     202429.14979757086,
+     203252.0325203252,
+     204081.6326530612,
+     204918.03278688525,
+     205761.316872428,
+     206611.57024793388,
+     207468.8796680498,
+     208333.33333333334,
+     209205.02092050208,
+     210084.03361344538,
+     210970.4641350211,
+     211864.40677966102,
+     212765.95744680852,
+     213675.2136752137,
+     214592.2746781116,
+     215517.24137931035,
+     216450.21645021645,
+     217391.30434782608,
+     218340.61135371178,
+     219298.24561403508,
+     220264.31718061675,
+     221238.93805309734,
+     222222.22222222222,
+     223214.2857142857,
+     224215.2466367713,
+     225225.22522522524,
+     226244.3438914027,
+     227272.72727272726,
+     228310.50228310502,
+     229357.79816513762,
+     230414.7465437788,
+     231481.4814814815,
+     232558.13953488372,
+     233644.8598130841,
+     234741.78403755868,
+     235849.05660377358,
+     236966.82464454975,
+     238095.2380952381,
+     239234.44976076554,
+     240384.61538461538,
+     241545.89371980677,
+     242718.44660194175,
+     243902.43902439025,
+     245098.03921568627,
+     246305.41871921183,
+     247524.75247524751,
+     248756.21890547263,
+     250000.0,
+     251256.2814070352,
+     252525.25252525252,
+     253807.10659898477,
+     255102.04081632654,
+     256410.2564102564,
+     257731.95876288658,
+     259067.35751295337,
+     260416.66666666666,
+     261780.10471204188,
+     263157.8947368421,
+     264550.2645502646,
+     265957.44680851063,
+     267379.67914438504,
+     268817.20430107525,
+     270270.2702702703,
+     271739.1304347826,
+     273224.043715847,
+     274725.2747252747,
+     276243.09392265195,
+     277777.77777777775,
+     279329.6089385475,
+     280898.8764044944,
+     282485.8757062147,
+     284090.9090909091,
+     285714.28571428574,
+     287356.3218390805,
+     289017.34104046243,
+     290697.67441860464,
+     292397.6608187134,
+     294117.64705882355,
+     295857.9881656805,
+     297619.04761904763,
+     299401.19760479045,
+     301204.8192771084,
+     303030.30303030304,
+     304878.0487804878,
+     306748.46625766874,
+     308641.97530864197,
+     310559.0062111801,
+     312500.0,
+     314465.40880503145,
+     316455.69620253163,
+     318471.33757961786,
+     320512.8205128205,
+     322580.6451612903,
+     324675.32467532466,
+     326797.38562091504,
+     328947.36842105264,
+     331125.8278145695,
+     333333.3333333333,
+     335570.4697986577,
+     337837.8378378378,
+     340136.0544217687,
+     342465.7534246575,
+     344827.5862068966,
+     347222.22222222225,
+     349650.34965034964,
+     352112.676056338,
+     354609.92907801416,
+     357142.85714285716,
+     359712.23021582735,
+     362318.84057971014,
+     364963.503649635,
+     367647.0588235294,
+     370370.3703703704,
+     373134.32835820894,
+     375939.84962406015,
+     378787.8787878788,
+     381679.3893129771,
+     384615.3846153846,
+     387596.8992248062,
+     390625.0,
+     392156.862745098,
+     393700.7874015748,
+     395256.9169960474,
+     396825.3968253968,
+     398406.374501992,
+     400000.0,
+     401606.4257028112,
+     403225.8064516129,
+     404858.2995951417,
+     406504.0650406504,
+     408163.2653061224,
+     409836.0655737705,
+     411522.633744856,
+     413223.14049586776,
+     414937.7593360996,
+     416666.6666666667,
+     418410.04184100416,
+     420168.06722689077,
+     421940.9282700422,
+     423728.81355932204,
+     425531.91489361704,
+     427350.4273504274,
+     429184.5493562232,
+     431034.4827586207,
+     432900.4329004329,
+     434782.60869565216,
+     436681.22270742356,
+     438596.49122807017,
+     440528.6343612335,
+     442477.8761061947,
+     444444.44444444444,
+     446428.5714285714,
+     448430.4932735426,
+     450450.4504504505,
+     452488.6877828054,
+     454545.45454545453,
+     456621.00456621003,
+     458715.59633027524,
+     460829.4930875576,
+     462962.962962963,
+     465116.27906976745,
+     467289.7196261682,
+     469483.56807511736,
+     471698.11320754717,
+     473933.6492890995,
+     476190.4761904762,
+     478468.8995215311,
+     480769.23076923075,
+     483091.78743961354,
+     485436.8932038835,
+     487804.8780487805,
+     490196.07843137253,
+     492610.83743842365,
+     495049.50495049503,
+     497512.43781094527,
+     500000.0,
+     502512.5628140704,
+     505050.50505050505,
+     507614.21319796954,
+     510204.0816326531,
+     512820.5128205128,
+     515463.91752577317,
+     518134.71502590674,
+     520833.3333333333,
+     523560.20942408376,
+     526315.7894736842,
+     529100.5291005292,
+     531914.8936170213,
+     534759.3582887701,
+     537634.4086021505,
+     540540.5405405406,
+     543478.2608695652,
+     546448.087431694,
+     549450.5494505494,
+     552486.1878453039,
+     555555.5555555555,
+     558659.217877095,
+     561797.7528089888,
+     564971.7514124294,
+     568181.8181818182,
+     571428.5714285715,
+     574712.643678161,
+     578034.6820809249,
+     581395.3488372093,
+     584795.3216374269,
+     588235.2941176471,
+     591715.976331361,
+     595238.0952380953,
+     598802.3952095809,
+     602409.6385542168,
+     606060.6060606061,
+     609756.0975609756,
+     613496.9325153375,
+     617283.9506172839,
+     621118.0124223602,
+     625000.0,
+     628930.8176100629,
+     632911.3924050633,
+     636942.6751592357,
+     641025.641025641,
+     645161.2903225806,
+     649350.6493506493,
+     653594.7712418301,
+     657894.7368421053,
+     662251.655629139,
+     666666.6666666666,
+     671140.9395973154,
+     675675.6756756756,
+     680272.1088435374,
+     684931.506849315,
+     689655.1724137932,
+     694444.4444444445,
+     699300.6993006993,
+     704225.352112676,
+     709219.8581560283,
+     714285.7142857143,
+     719424.4604316547,
+     724637.6811594203,
+     729927.00729927,
+     735294.1176470588,
+     740740.7407407408,
+     746268.6567164179,
+     751879.6992481203,
+     757575.7575757576,
+     763358.7786259542,
+     769230.7692307692,
+     775193.7984496125,
+     781250.0,
+     784313.725490196,
+     787401.5748031496,
+     790513.8339920948,
+     793650.7936507936,
+     796812.749003984,
+     800000.0,
+     803212.8514056224,
+     806451.6129032258,
+     809716.5991902835,
+     813008.1300813009,
+     816326.5306122449,
+     819672.131147541,
+     823045.267489712,
+     826446.2809917355,
+     829875.5186721992,
+     833333.3333333334,
+     836820.0836820083,
+     840336.1344537815,
+     843881.8565400844,
+     847457.6271186441,
+     851063.8297872341,
+     854700.8547008547,
+     858369.0987124464,
+     862068.9655172414,
+     865800.8658008658,
+     869565.2173913043,
+     873362.4454148471,
+     877192.9824561403,
+     881057.268722467,
+     884955.7522123894,
+     888888.8888888889,
+     892857.1428571428,
+     896860.9865470852,
+     900900.900900901,
+     904977.3755656108,
+     909090.9090909091,
+     913242.0091324201,
+     917431.1926605505,
+     921658.9861751152,
+     925925.925925926,
+     930232.5581395349,
+     934579.4392523364,
+     938967.1361502347,
+     943396.2264150943,
+     947867.298578199,
+     952380.9523809524,
+     956937.7990430621,
+     961538.4615384615,
+     966183.5748792271,
+     970873.786407767,
+     975609.756097561,
+     980392.1568627451,
+     985221.6748768473,
+     990099.0099009901,
+     995024.8756218905,
+     1000000.0,
+     1005025.1256281408,
+     1010101.0101010101,
+     1015228.4263959391,
+     1020408.1632653062,
+     1025641.0256410256,
+     1030927.8350515463,
+     1036269.4300518135,
+     1041666.6666666666,
+     1047120.4188481675,
+     1052631.5789473683,
+     1058201.0582010583,
+     1063829.7872340425,
+     1069518.7165775402,
+     1075268.817204301,
+     1081081.0810810812,
+     1086956.5217391304,
+     1092896.174863388,
+     1098901.0989010988,
+     1104972.3756906078,
+     1111111.111111111,
+     1117318.43575419,
+     1123595.5056179776,
+     1129943.5028248588,
+     1136363.6363636365,
+     1142857.142857143,
+     1149425.287356322,
+     1156069.3641618497,
+     1162790.6976744186,
+     1169590.6432748537,
+     1176470.5882352942,
+     1183431.952662722,
+     1190476.1904761905,
+     1197604.7904191618,
+     1204819.2771084337,
+     1212121.2121212122,
+     1219512.1951219512,
+     1226993.865030675,
+     1234567.9012345679,
+     1242236.0248447205,
+     1250000.0,
+     1257861.6352201258,
+     1265822.7848101265,
+     1273885.3503184714,
+     1282051.282051282,
+     1290322.5806451612,
+     1298701.2987012987,
+     1307189.5424836602,
+     1315789.4736842106,
+     1324503.311258278,
+     1333333.3333333333,
+     1342281.8791946308,
+     1351351.3513513512,
+     1360544.2176870748,
+     1369863.01369863,
+     1379310.3448275863,
+     1388888.888888889,
+     1398601.3986013986,
+     1408450.704225352,
+     1418439.7163120566,
+     1428571.4285714286,
+     1438848.9208633094,
+     1449275.3623188406,
+     1459854.01459854,
+     1470588.2352941176,
+     1481481.4814814816,
+     1492537.3134328357,
+     1503759.3984962406,
+     1515151.5151515151,
+     1526717.5572519084,
+     1538461.5384615385,
+     1550387.596899225,
+     1562500.0,
+     1574803.1496062991,
+     1587301.5873015872,
+     1600000.0,
+     1612903.2258064516,
+     1626016.2601626017,
+     1639344.262295082,
+     1652892.561983471,
+     1666666.6666666667,
+     1680672.268907563,
+     1694915.2542372881,
+     1709401.7094017095,
+     1724137.9310344828,
+     1739130.4347826086,
+     1754385.9649122807,
+     1769911.5044247787,
+     1785714.2857142857,
+     1801801.801801802,
+     1818181.8181818181,
+     1834862.385321101,
+     1851851.851851852,
+     1869158.8785046728,
+     1886792.4528301887,
+     1904761.9047619049,
+     1923076.923076923,
+     1941747.572815534,
+     1960784.3137254901,
+     1980198.0198019801,
+     2000000.0,
+     2020202.0202020202,
+     2040816.3265306123,
+     2061855.6701030927,
+     2083333.3333333333,
+     2105263.1578947366,
+     2127659.574468085,
+     2150537.634408602,
+     2173913.0434782607,
+     2197802.1978021977,
+     2222222.222222222,
+     2247191.011235955,
+     2272727.272727273,
+     2298850.574712644,
+     2325581.395348837,
+     2352941.1764705884,
+     2380952.380952381,
+     2409638.5542168673,
+     2439024.3902439023,
+     2469135.8024691357,
+     2500000.0,
+     2531645.569620253,
+     2564102.564102564,
+     2597402.5974025973,
+     2631578.947368421,
+     2666666.6666666665,
+     2702702.7027027025,
+     2739726.02739726,
+     2777777.777777778,
+     2816901.408450704,
+     2857142.8571428573,
+     2898550.724637681,
+     2941176.470588235,
+     2985074.6268656715,
+     3030303.0303030303,
+     3076923.076923077,
+     3125000.0,
+     3174603.1746031744,
+     3225806.4516129033,
+     3278688.524590164,
+     3333333.3333333335,
+     3389830.5084745763,
+     3448275.8620689656,
+     3508771.9298245613,
+     3571428.5714285714,
+     3636363.6363636362,
+     3703703.703703704,
+     3773584.9056603773,
+     3846153.846153846,
+     3921568.6274509802,
+     4000000.0,
+     4081632.6530612246,
+     4166666.6666666665,
+     4255319.14893617,
+     4347826.0869565215,
+     4444444.444444444,
+     4545454.545454546,
+     4651162.790697674,
+     4761904.761904762,
+     4878048.780487805,
+     5000000.0,
+     5128205.128205128,
+     5263157.894736842,
+     5405405.405405405,
+     5555555.555555556,
+     5714285.714285715,
+     5882352.94117647,
+     6060606.060606061,
+     6250000.0,
+     6451612.903225807,
+     6666666.666666667,
+     6896551.724137931,
+     7142857.142857143,
+     7407407.407407408,
+     7692307.692307692,
+     8000000.0,
+     8333333.333333333,
+     8695652.173913043,
+     9090909.090909092,
+     9523809.523809524,
+     10000000.0,
+     10526315.789473685,
+     11111111.111111112,
+     11764705.88235294,
+     12500000.0,
+     13333333.333333334,
+     14285714.285714285,
+     15384615.384615384,
+     16666666.666666666,
+     18181818.181818184,
+     20000000.0,
+     22222222.222222224,
+     25000000.0,
+     28571428.57142857,
+     33333333.333333332,
+     40000000.0,
+     50000000.0,
+     66666666.666666664,
+     100000000.0,
+     200000000.0
+    ]
+   },
+   "trials": 639,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.tx.s1.sample_rate_hz",
+   "worst": {
+    "kind": "values",
+    "values": [
+     98039.2156862745,
+     98425.1968503937,
+     98814.22924901186,
+     99206.3492063492,
+     99601.593625498,
+     100000.0,
+     100401.6064257028,
+     100806.45161290323,
+     101214.57489878543,
+     101626.0162601626,
+     102040.8163265306,
+     102459.01639344262,
+     102880.658436214,
+     103305.78512396694,
+     103734.4398340249,
+     104166.66666666667,
+     104602.51046025104,
+     105042.01680672269,
+     105485.23206751054,
+     105932.20338983051,
+     106382.97872340426,
+     106837.60683760684,
+     107296.1373390558,
+     107758.62068965517,
+     108225.10822510823,
+     108695.65217391304,
+     109170.30567685589,
+     109649.12280701754,
+     110132.15859030838,
+     110619.46902654867,
+     111111.11111111111,
+     111607.14285714286,
+     112107.62331838565,
+     112612.61261261262,
+     113122.17194570135,
+     113636.36363636363,
+     114155.25114155251,
+     114678.89908256881,
+     115207.3732718894,
+     115740.74074074074,
+     116279.06976744186,
+     116822.42990654205,
+     117370.89201877934,
+     117924.52830188679,
+     118483.41232227487,
+     119047.61904761905,
+     119617.22488038277,
+     120192.30769230769,
+     120772.94685990339,
+     121359.22330097087,
+     121951.21951219512,
+     122549.01960784313,
+     123152.70935960591,
+     123762.37623762376,
+     124378.10945273632,
+     125000.0,
+     125628.1407035176,
+     126262.62626262626,
+     126903.55329949239,
+     127551.02040816327,
+     128205.1282051282,
+     128865.97938144329,
+     129533.67875647669,
+     130208.33333333333,
+     130890.05235602094,
+     131578.94736842104,
+     132275.1322751323,
+     132978.72340425532,
+     133689.83957219252,
+     134408.60215053763,
+     135135.13513513515,
+     135869.5652173913,
+     136612.0218579235,
+     137362.63736263735,
+     138121.54696132598,
+     138888.88888888888,
+     139664.80446927375,
+     140449.4382022472,
+     141242.93785310735,
+     142045.45454545456,
+     142857.14285714287,
+     143678.16091954024,
+     144508.67052023122,
+     145348.83720930232,
+     146198.8304093567,
+     147058.82352941178,
+     147928.99408284025,
+     148809.52380952382,
+     149700.59880239522,
+     150602.4096385542,
+     151515.15151515152,
+     152439.0243902439,
+     153374.23312883437,
+     154320.98765432098,
+     155279.50310559006,
+     156250.0,
+     157232.70440251572,
+     158227.84810126582,
+     159235.66878980893,
+     160256.41025641025,
+     161290.32258064515,
+     162337.66233766233,
+     163398.69281045752,
+     164473.68421052632,
+     165562.91390728476,
+     166666.66666666666,
+     167785.23489932885,
+     168918.9189189189,
+     170068.02721088435,
+     171232.87671232875,
+     172413.7931034483,
+     173611.11111111112,
+     174825.17482517482,
+     176056.338028169,
+     177304.96453900708,
+     178571.42857142858,
+     179856.11510791368,
+     181159.42028985507,
+     182481.7518248175,
+     183823.5294117647,
+     185185.1851851852,
+     186567.16417910447,
+     187969.92481203008,
+     189393.9393939394,
+     190839.69465648854,
+     192307.6923076923,
+     193798.4496124031,
+     195312.5,
+     196078.431372549,
+     196850.3937007874,
+     197628.4584980237,
+     198412.6984126984,
+     199203.187250996,
+     200000.0,
+     200803.2128514056,
+     201612.90322580645,
+     202429.14979757086,
+     203252.0325203252,
+     204081.6326530612,
+     204918.03278688525,
+     205761.316872428,
+     206611.57024793388,
+     207468.8796680498,
+     208333.33333333334,
+     209205.02092050208,
+     210084.03361344538,
+     210970.4641350211,
+     211864.40677966102,
+     212765.95744680852,
+     213675.2136752137,
+     214592.2746781116,
+     215517.24137931035,
+     216450.21645021645,
+     217391.30434782608,
+     218340.61135371178,
+     219298.24561403508,
+     220264.31718061675,
+     221238.93805309734,
+     222222.22222222222,
+     223214.2857142857,
+     224215.2466367713,
+     225225.22522522524,
+     226244.3438914027,
+     227272.72727272726,
+     228310.50228310502,
+     229357.79816513762,
+     230414.7465437788,
+     231481.4814814815,
+     232558.13953488372,
+     233644.8598130841,
+     234741.78403755868,
+     235849.05660377358,
+     236966.82464454975,
+     238095.2380952381,
+     239234.44976076554,
+     240384.61538461538,
+     241545.89371980677,
+     242718.44660194175,
+     243902.43902439025,
+     245098.03921568627,
+     246305.41871921183,
+     247524.75247524751,
+     248756.21890547263,
+     250000.0,
+     251256.2814070352,
+     252525.25252525252,
+     253807.10659898477,
+     255102.04081632654,
+     256410.2564102564,
+     257731.95876288658,
+     259067.35751295337,
+     260416.66666666666,
+     261780.10471204188,
+     263157.8947368421,
+     264550.2645502646,
+     265957.44680851063,
+     267379.67914438504,
+     268817.20430107525,
+     270270.2702702703,
+     271739.1304347826,
+     273224.043715847,
+     274725.2747252747,
+     276243.09392265195,
+     277777.77777777775,
+     279329.6089385475,
+     280898.8764044944,
+     282485.8757062147,
+     284090.9090909091,
+     285714.28571428574,
+     287356.3218390805,
+     289017.34104046243,
+     290697.67441860464,
+     292397.6608187134,
+     294117.64705882355,
+     295857.9881656805,
+     297619.04761904763,
+     299401.19760479045,
+     301204.8192771084,
+     303030.30303030304,
+     304878.0487804878,
+     306748.46625766874,
+     308641.97530864197,
+     310559.0062111801,
+     312500.0,
+     314465.40880503145,
+     316455.69620253163,
+     318471.33757961786,
+     320512.8205128205,
+     322580.6451612903,
+     324675.32467532466,
+     326797.38562091504,
+     328947.36842105264,
+     331125.8278145695,
+     333333.3333333333,
+     335570.4697986577,
+     337837.8378378378,
+     340136.0544217687,
+     342465.7534246575,
+     344827.5862068966,
+     347222.22222222225,
+     349650.34965034964,
+     352112.676056338,
+     354609.92907801416,
+     357142.85714285716,
+     359712.23021582735,
+     362318.84057971014,
+     364963.503649635,
+     367647.0588235294,
+     370370.3703703704,
+     373134.32835820894,
+     375939.84962406015,
+     378787.8787878788,
+     381679.3893129771,
+     384615.3846153846,
+     387596.8992248062,
+     390625.0,
+     392156.862745098,
+     393700.7874015748,
+     395256.9169960474,
+     396825.3968253968,
+     398406.374501992,
+     400000.0,
+     401606.4257028112,
+     403225.8064516129,
+     404858.2995951417,
+     406504.0650406504,
+     408163.2653061224,
+     409836.0655737705,
+     411522.633744856,
+     413223.14049586776,
+     414937.7593360996,
+     416666.6666666667,
+     418410.04184100416,
+     420168.06722689077,
+     421940.9282700422,
+     423728.81355932204,
+     425531.91489361704,
+     427350.4273504274,
+     429184.5493562232,
+     431034.4827586207,
+     432900.4329004329,
+     434782.60869565216,
+     436681.22270742356,
+     438596.49122807017,
+     440528.6343612335,
+     442477.8761061947,
+     444444.44444444444,
+     446428.5714285714,
+     448430.4932735426,
+     450450.4504504505,
+     452488.6877828054,
+     454545.45454545453,
+     456621.00456621003,
+     458715.59633027524,
+     460829.4930875576,
+     462962.962962963,
+     465116.27906976745,
+     467289.7196261682,
+     469483.56807511736,
+     471698.11320754717,
+     473933.6492890995,
+     476190.4761904762,
+     478468.8995215311,
+     480769.23076923075,
+     483091.78743961354,
+     485436.8932038835,
+     487804.8780487805,
+     490196.07843137253,
+     492610.83743842365,
+     495049.50495049503,
+     497512.43781094527,
+     500000.0,
+     502512.5628140704,
+     505050.50505050505,
+     507614.21319796954,
+     510204.0816326531,
+     512820.5128205128,
+     515463.91752577317,
+     518134.71502590674,
+     520833.3333333333,
+     523560.20942408376,
+     526315.7894736842,
+     529100.5291005292,
+     531914.8936170213,
+     534759.3582887701,
+     537634.4086021505,
+     540540.5405405406,
+     543478.2608695652,
+     546448.087431694,
+     549450.5494505494,
+     552486.1878453039,
+     555555.5555555555,
+     558659.217877095,
+     561797.7528089888,
+     564971.7514124294,
+     568181.8181818182,
+     571428.5714285715,
+     574712.643678161,
+     578034.6820809249,
+     581395.3488372093,
+     584795.3216374269,
+     588235.2941176471,
+     591715.976331361,
+     595238.0952380953,
+     598802.3952095809,
+     602409.6385542168,
+     606060.6060606061,
+     609756.0975609756,
+     613496.9325153375,
+     617283.9506172839,
+     621118.0124223602,
+     625000.0,
+     628930.8176100629,
+     632911.3924050633,
+     636942.6751592357,
+     641025.641025641,
+     645161.2903225806,
+     649350.6493506493,
+     653594.7712418301,
+     657894.7368421053,
+     662251.655629139,
+     666666.6666666666,
+     671140.9395973154,
+     675675.6756756756,
+     680272.1088435374,
+     684931.506849315,
+     689655.1724137932,
+     694444.4444444445,
+     699300.6993006993,
+     704225.352112676,
+     709219.8581560283,
+     714285.7142857143,
+     719424.4604316547,
+     724637.6811594203,
+     729927.00729927,
+     735294.1176470588,
+     740740.7407407408,
+     746268.6567164179,
+     751879.6992481203,
+     757575.7575757576,
+     763358.7786259542,
+     769230.7692307692,
+     775193.7984496125,
+     781250.0,
+     784313.725490196,
+     787401.5748031496,
+     790513.8339920948,
+     793650.7936507936,
+     796812.749003984,
+     800000.0,
+     803212.8514056224,
+     806451.6129032258,
+     809716.5991902835,
+     813008.1300813009,
+     816326.5306122449,
+     819672.131147541,
+     823045.267489712,
+     826446.2809917355,
+     829875.5186721992,
+     833333.3333333334,
+     836820.0836820083,
+     840336.1344537815,
+     843881.8565400844,
+     847457.6271186441,
+     851063.8297872341,
+     854700.8547008547,
+     858369.0987124464,
+     862068.9655172414,
+     865800.8658008658,
+     869565.2173913043,
+     873362.4454148471,
+     877192.9824561403,
+     881057.268722467,
+     884955.7522123894,
+     888888.8888888889,
+     892857.1428571428,
+     896860.9865470852,
+     900900.900900901,
+     904977.3755656108,
+     909090.9090909091,
+     913242.0091324201,
+     917431.1926605505,
+     921658.9861751152,
+     925925.925925926,
+     930232.5581395349,
+     934579.4392523364,
+     938967.1361502347,
+     943396.2264150943,
+     947867.298578199,
+     952380.9523809524,
+     956937.7990430621,
+     961538.4615384615,
+     966183.5748792271,
+     970873.786407767,
+     975609.756097561,
+     980392.1568627451,
+     985221.6748768473,
+     990099.0099009901,
+     995024.8756218905,
+     1000000.0,
+     1005025.1256281408,
+     1010101.0101010101,
+     1015228.4263959391,
+     1020408.1632653062,
+     1025641.0256410256,
+     1030927.8350515463,
+     1036269.4300518135,
+     1041666.6666666666,
+     1047120.4188481675,
+     1052631.5789473683,
+     1058201.0582010583,
+     1063829.7872340425,
+     1069518.7165775402,
+     1075268.817204301,
+     1081081.0810810812,
+     1086956.5217391304,
+     1092896.174863388,
+     1098901.0989010988,
+     1104972.3756906078,
+     1111111.111111111,
+     1117318.43575419,
+     1123595.5056179776,
+     1129943.5028248588,
+     1136363.6363636365,
+     1142857.142857143,
+     1149425.287356322,
+     1156069.3641618497,
+     1162790.6976744186,
+     1169590.6432748537,
+     1176470.5882352942,
+     1183431.952662722,
+     1190476.1904761905,
+     1197604.7904191618,
+     1204819.2771084337,
+     1212121.2121212122,
+     1219512.1951219512,
+     1226993.865030675,
+     1234567.9012345679,
+     1242236.0248447205,
+     1250000.0,
+     1257861.6352201258,
+     1265822.7848101265,
+     1273885.3503184714,
+     1282051.282051282,
+     1290322.5806451612,
+     1298701.2987012987,
+     1307189.5424836602,
+     1315789.4736842106,
+     1324503.311258278,
+     1333333.3333333333,
+     1342281.8791946308,
+     1351351.3513513512,
+     1360544.2176870748,
+     1369863.01369863,
+     1379310.3448275863,
+     1388888.888888889,
+     1398601.3986013986,
+     1408450.704225352,
+     1418439.7163120566,
+     1428571.4285714286,
+     1438848.9208633094,
+     1449275.3623188406,
+     1459854.01459854,
+     1470588.2352941176,
+     1481481.4814814816,
+     1492537.3134328357,
+     1503759.3984962406,
+     1515151.5151515151,
+     1526717.5572519084,
+     1538461.5384615385,
+     1550387.596899225,
+     1562500.0,
+     1574803.1496062991,
+     1587301.5873015872,
+     1600000.0,
+     1612903.2258064516,
+     1626016.2601626017,
+     1639344.262295082,
+     1652892.561983471,
+     1666666.6666666667,
+     1680672.268907563,
+     1694915.2542372881,
+     1709401.7094017095,
+     1724137.9310344828,
+     1739130.4347826086,
+     1754385.9649122807,
+     1769911.5044247787,
+     1785714.2857142857,
+     1801801.801801802,
+     1818181.8181818181,
+     1834862.385321101,
+     1851851.851851852,
+     1869158.8785046728,
+     1886792.4528301887,
+     1904761.9047619049,
+     1923076.923076923,
+     1941747.572815534,
+     1960784.3137254901,
+     1980198.0198019801,
+     2000000.0,
+     2020202.0202020202,
+     2040816.3265306123,
+     2061855.6701030927,
+     2083333.3333333333,
+     2105263.1578947366,
+     2127659.574468085,
+     2150537.634408602,
+     2173913.0434782607,
+     2197802.1978021977,
+     2222222.222222222,
+     2247191.011235955,
+     2272727.272727273,
+     2298850.574712644,
+     2325581.395348837,
+     2352941.1764705884,
+     2380952.380952381,
+     2409638.5542168673,
+     2439024.3902439023,
+     2469135.8024691357,
+     2500000.0,
+     2531645.569620253,
+     2564102.564102564,
+     2597402.5974025973,
+     2631578.947368421,
+     2666666.6666666665,
+     2702702.7027027025,
+     2739726.02739726,
+     2777777.777777778,
+     2816901.408450704,
+     2857142.8571428573,
+     2898550.724637681,
+     2941176.470588235,
+     2985074.6268656715,
+     3030303.0303030303,
+     3076923.076923077,
+     3125000.0,
+     3174603.1746031744,
+     3225806.4516129033,
+     3278688.524590164,
+     3333333.3333333335,
+     3389830.5084745763,
+     3448275.8620689656,
+     3508771.9298245613,
+     3571428.5714285714,
+     3636363.6363636362,
+     3703703.703703704,
+     3773584.9056603773,
+     3846153.846153846,
+     3921568.6274509802,
+     4000000.0,
+     4081632.6530612246,
+     4166666.6666666665,
+     4255319.14893617,
+     4347826.0869565215,
+     4444444.444444444,
+     4545454.545454546,
+     4651162.790697674,
+     4761904.761904762,
+     4878048.780487805,
+     5000000.0,
+     5128205.128205128,
+     5263157.894736842,
+     5405405.405405405,
+     5555555.555555556,
+     5714285.714285715,
+     5882352.94117647,
+     6060606.060606061,
+     6250000.0,
+     6451612.903225807,
+     6666666.666666667,
+     6896551.724137931,
+     7142857.142857143,
+     7407407.407407408,
+     7692307.692307692,
+     8000000.0,
+     8333333.333333333,
+     8695652.173913043,
+     9090909.090909092,
+     9523809.523809524,
+     10000000.0,
+     10526315.789473685,
+     11111111.111111112,
+     11764705.88235294,
+     12500000.0,
+     13333333.333333334,
+     14285714.285714285,
+     15384615.384615384,
+     16666666.666666666,
+     18181818.181818184,
+     20000000.0,
+     22222222.222222224,
+     25000000.0,
+     28571428.57142857,
+     33333333.333333332,
+     40000000.0,
+     50000000.0,
+     66666666.666666664,
+     100000000.0,
+     200000000.0
+    ]
+   },
+   "trials": 639,
+   "condition": "raw-device-coercion",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  }
+ ]
+}

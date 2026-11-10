@@ -1,0 +1,39 @@
+{
+  "session": "2026-10-28-record-suite",
+  "commit": "afbb125 (#1 and #2), 98b0d9a (#2 after uhd-tx priority); D9 P5-P7 rerun on 98b0d9a plus a local change",
+  "boards": [
+    {
+      "id": "#1",
+      "board_arg": "36",
+      "serial": "347D545",
+      "fpga": "39.3 (HG, git d375d68)",
+      "slot_a": "OBX",
+      "slot_b": "empty",
+      "addr": "192.168.40.36",
+      "nic": "enp1s0f0np0"
+    },
+    {
+      "id": "#2",
+      "board_arg": "37",
+      "serial": "347D541",
+      "fpga": "39.3 (HG, git d375d68)",
+      "slot_a": "UBX-160 v2",
+      "slot_b": "CBX",
+      "addr": "192.168.47.37",
+      "nic": "enp1s0f0np0 (same port, swapped)"
+    }
+  ],
+  "rf": {
+    "wiring": "#1 OBX TX/RX -> 40 dB -> RX2; #2 UBX and CBX each TX/RX -> 30 dB -> RX2 of the same board",
+    "attenuation_db": "40 (#1), 30 (#2)"
+  },
+  "note": "hw_measurements_record (measurement.json per run); the per-run source snapshots (src/) are not archived (git has them)",
+  "image": "ezsdr-v4-dev:uhd4.10 (UHD 4.10.0.0)",
+  "reference": "internal",
+  "rf_common": {
+    "frequency_hz": 1000000000,
+    "tx_gain_db": 0,
+    "owner_confirmed_attenuators": true
+  },
+  "source": "plan/phase8/bench-results.md section \"2026-10-28：最初の記録 suite\" (backfilled 2026-11-10 from that prose)"
+}

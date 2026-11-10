@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-10-29-two-boards (private)
+asset:   2026-10-29-two-boards.tar.xz  4872 bytes
+sha256:  4a9285ea523b6027699526c9e502e230e75092efdd7c44807ac60ad92195611c
+source:  ezsdr-bench = ~/.cache/ezsdr-bench/2026-10-29 on usrp-lnx03
+fetch:   gh release download 2026-10-29-two-boards -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-10-29-two-boards bench/2026-10-29-two-boards/results

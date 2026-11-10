@@ -1,0 +1,553 @@
+{
+ "schema": "ezsdr.radio.measurement.v1",
+ "source": "hardware",
+ "profile": {
+  "name": "x3xx",
+  "version": {
+   "major": 0,
+   "minor": 1,
+   "patch": 0
+  }
+ },
+ "selector": {
+  "args": "type=fake-rig",
+  "id": "usrp",
+  "link_gbps": [
+   10
+  ],
+  "rx": [
+   "0:A:obx:0"
+  ],
+  "tx": [
+   "0:A:obx:0"
+  ]
+ },
+ "device": {
+  "serial": "347D545",
+  "mboard": "X300 rev 13 serial 347D545, OBX rev 1 serial 3654040 in slot A",
+  "fpga_image": "HG, FPGA 39.3 git d375d68",
+  "uhd_version": "4.10.0.0-0-unknown"
+ },
+ "host": {
+  "name": "usrp-lnx03",
+  "settings_script": "manual (plan/phase7/bench.md B0.2): MTU 9000, rmem_max 50000000, wmem_max 33554432, already set on the host",
+  "settings_version": "shakeout-2026-10-27"
+ },
+ "load": "none",
+ "commit": "8f4f060+local: raw queue depth and coercion skipped (shake-out 4, after a power cycle)",
+ "conditions": [
+  {
+   "id": "tx-1msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "cold-1msps-2msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "cold-390625-400000",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 390625.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-cold-1msps-2msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-cold-390625-1msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 390625.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-10msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-20msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-25msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-40msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-50msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-100msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-200msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "rx-1msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-10msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 10000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-20msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 20000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-25msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 25000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-40msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 40000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-50msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 50000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-100msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 100000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "tx-200msps",
+   "streams": [
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 200000000.0
+    }
+   ],
+   "concurrent": [],
+   "reopened": false
+  },
+  {
+   "id": "duplex-1msps",
+   "streams": [
+    {
+     "direction": "rx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    },
+    {
+     "direction": "tx",
+     "stream": 0,
+     "channels": [
+      0
+     ],
+     "sample_rate_hz": 1000000.0
+    }
+   ],
+   "concurrent": [
+    {
+     "direction": "rx",
+     "stream": 0
+    },
+    {
+     "direction": "tx",
+     "stream": 0
+    }
+   ],
+   "reopened": false
+  }
+ ],
+ "values": [
+  {
+   "status": "measured",
+   "key": "radio.full_duplex",
+   "worst": true,
+   "trials": 20,
+   "condition": "duplex-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.hardware_time",
+   "worst": true,
+   "trials": 20,
+   "condition": "duplex-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.perf.rx_bytes_per_s",
+   "worst": 800000000.0,
+   "trials": 1,
+   "condition": "rx-200msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.perf.tx_bytes_per_s",
+   "worst": 200000000.0,
+   "trials": 1,
+   "condition": "tx-50msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.perf.wire_bytes_per_sample",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.antenna",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.frequency_hz",
+   "reason": "Phase 8 stage 3c-2a records frequency request/read-back samples as observations only; whether a finite sample represents a continuous tuning grid, and how to measure outside the TX safety band, awaits the owner decision."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.frequency_step_hz",
+   "reason": "Phase 8 stage 3c-2a records frequency request/read-back samples as observations only; whether a finite sample represents a continuous tuning grid, and how to measure outside the TX safety band, awaits the owner decision."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.gain_db",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.gain_step_db",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.path_delay_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.c0.phase_behavior_on_retune",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.rx.s0.sample_rate_hz",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device sample-rate read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.command_queue_depth",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device timed-apply queue back-pressure."
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.min_timed_command_lead_ns",
+   "worst": 5000000.0,
+   "trials": 100,
+   "condition": "tx-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.overflow_restart_gap_ns",
+   "reason": "Phase 8 stage 3c-1 records full overflow gaps and inferred restart-after-resume estimates as observations; the comparable key stays unmeasured pending the first hardware bench reading and owner decision."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.release_window_ns",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.rx_start_lead_ns",
+   "worst": 1000000.0,
+   "trials": 100,
+   "condition": "cold-1msps-2msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.timing.startup_latency_ns",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.tx_in_flight_ns",
+   "worst": 3000000.0,
+   "trials": 100,
+   "condition": "tx-1msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "measured",
+   "key": "radio.timing.tx_start_lead_ns",
+   "worst": 1000000.0,
+   "trials": 100,
+   "condition": "tx-cold-1msps-2msps",
+   "test": "tests/hardware.rs::hw_measurements_record"
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.antenna",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.frequency_hz",
+   "reason": "Phase 8 stage 3c-2a records frequency request/read-back samples as observations only; whether a finite sample represents a continuous tuning grid, and how to measure outside the TX safety band, awaits the owner decision."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.frequency_step_hz",
+   "reason": "Phase 8 stage 3c-2a records frequency request/read-back samples as observations only; whether a finite sample represents a continuous tuning grid, and how to measure outside the TX safety band, awaits the owner decision."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.gain_db",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.gain_step_db",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device coercion read-back."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.path_delay_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.c0.phase_behavior_on_retune",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.repeat_align_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.repeat_max_samples",
+   "reason": "Not measured in Phase 8 stage 3b-1; independent measurement or channel-specific calibration is required."
+  },
+  {
+   "status": "unmeasured",
+   "key": "radio.tx.s0.sample_rate_hz",
+   "reason": "Not measured in this record; Phase 8 stage 3c-2a measures raw Device sample-rate read-back."
+  }
+ ]
+}

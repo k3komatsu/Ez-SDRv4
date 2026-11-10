@@ -8,10 +8,13 @@ Writes, from every *.log under the raw dir (recursively):
   cells.csv     board, rate_hz, case, first, len, gap, trials, ok
                 one row per grid cell of plan/phase8/tools/uhd-repro/tx_repro's `summary` lines (case sweep or gap); ok counts the
                 trials with two BurstAcks and no TimeError or Underflow, the rule `table.py` applies. Per-trial rows stay in the raw logs.
+  measurements/<path>.json   for every JSON file of schema `ezsdr.radio.measurement.v1` (`measurement.json`, shake-out records): the
+                record without its `observations` (schema, source, profile, selector, device, host, load, commit, conditions, values);
+                the observations and the `.rows` files stay in the raw logs.
 UHD's console prints `U` and `L` characters anywhere in a line; they are removed first (no summary token contains an `L`, or a `U` not
 followed by `n`). Standard library only.
 """
-import csv, pathlib, re, sys
+import csv, json, pathlib, re, sys
 
 def clean(line):
     return re.sub(r"U(?!n)", "", line.replace("L", ""))
@@ -46,6 +49,20 @@ def main(raw, out):
                 sweeps.append((board, rate, "gap", "", "", f[2], ok))
             elif m := re.fullmatch(r"sweep-first(\d+)-len(\d+)-gap(-?\d+)", f[1]):
                 sweeps.append((board, rate, "sweep", *m.groups(), ok))
+    for js in sorted(raw.rglob("*.json")):
+        try:
+            with open(js) as fh:
+                head = fh.read(200)
+                if '"ezsdr.radio.measurement.v1"' not in head:
+                    continue
+                fh.seek(0)
+                record = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        record.pop("observations", None)
+        target = out / "measurements" / (str(js.relative_to(raw)).replace("/", "__"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(record, ensure_ascii=False, indent=1) + "\n")
     with open(out / "verdicts.tsv", "w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         w.writerow(["log", "board", "verdict", "text"])

@@ -1,0 +1,245 @@
+log	board	verdict	text
+ezsdr-bench/b-36.console.log	36	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/b-36.console.log	36	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/b-36.console.log	36	FAIL	S1 3-sample first send (UR-22, #78): FAIL: 3-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 159 device fault report(s)
+ezsdr-bench/b-36.console.log	36	FAIL	S1 4-sample first send (UR-22, #78): FAIL: 4-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 159 device fault report(s)
+ezsdr-bench/b-36.console.log	36	PASS	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked with the first): PASS: the onset differs from the control's by 1 samples
+ezsdr-bench/b-36.console.log	36	FAIL	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked after the first was sent): FAIL: four-sample control: 1 radio.TIME_ERROR, 0 expected
+ezsdr-bench/b-36.console.log	36	PASS	#72 1a (T1, T2, T3 on the production path): every send is timed, closing sends have two samples, the flush is acknowledged: PASS: 26 sends, each timed; 1 closing send(s) with two or more samples; 1 flush(es) acknowledged
+ezsdr-bench/b-36.console.log	36	PASS	B6 (#78): no TIME_ERROR and no TX_UNDERFLOW in the burst's Run or the repeat's: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report; repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault r
+ezsdr-bench/b-36.console.log	36	PASS	B7 (#78): no TIME_ERROR and no TX_UNDERFLOW in the Session loopback: PASS: loopback: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	B8 burst at a sent burst's end, trial 0 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	B8 burst at a sent burst's end, trial 1 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	B8 burst at a sent burst's end, trial 2 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	FAIL	B8 burst at end + 2 samples, booked late false (UR-22, #78): 0 TIME_ERROR (cause late), no TX_UNDERFLOW: FAIL: 1 radio.TX_UNDERFLOW and 160 device fault report(s) in the async section
+ezsdr-bench/b-36.console.log	36	PASS	B8 preempt lead 20 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects Some(0); no TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	B8 preempt lead 10 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects None; no TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	"B8 preempt lead 5 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/b-36.console.log	36	PASS	"B8 preempt lead 3 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/b-36.console.log	36	PASS	H5 held last sample (UR-22, #78): no TIME_ERROR and no TX_UNDERFLOW in the prebooked and deadline runs: PASS: held-sample run: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	TXP B0 rate 1000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-36.console.log	36	PASS	TXP B0 rate 5000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked with the first): PASS: the onset differs from the control's by 0 samples
+ezsdr-bench/b-37-rest.console.log	37	FAIL	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked after the first was sent): FAIL: one-sample trial: 1 radio.TIME_ERROR, 0 expected
+ezsdr-bench/b-37-rest.console.log	37	PASS	#72 1a (T1, T2, T3 on the production path): every send is timed, closing sends have two samples, the flush is acknowledged: PASS: 26 sends, each timed; 1 closing send(s) with two or more samples; 1 flush(es) acknowledged
+ezsdr-bench/b-37-rest.console.log	37	PASS	B6 (#78): no TIME_ERROR and no TX_UNDERFLOW in the burst's Run or the repeat's: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report; repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault r
+ezsdr-bench/b-37-rest.console.log	37	PASS	B7 (#78): no TIME_ERROR and no TX_UNDERFLOW in the Session loopback: PASS: loopback: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at a sent burst's end, trial 0 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at a sent burst's end, trial 1 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at a sent burst's end, trial 2 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at end + 2 samples, booked late false (UR-22, #78): 0 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at end + 2 samples, booked late true (UR-22, #78): 0 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at end + 1 samples, booked late false (UR-22, #78): 1 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 1 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 burst at end + 1 samples, booked late true (UR-22, #78): 1 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 1 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 preempt lead 20 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects Some(0); no TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	B8 preempt lead 10 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects None; no TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	"B8 preempt lead 5 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/b-37-rest.console.log	37	PASS	"B8 preempt lead 3 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/b-37-rest.console.log	37	PASS	H5 held last sample (UR-22, #78): no TIME_ERROR and no TX_UNDERFLOW in the prebooked and deadline runs: PASS: held-sample run: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	TXP B0 rate 1000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37-rest.console.log	37	PASS	TXP B0 rate 5000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/b-37.console.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/b-37.console.log	37	FAIL	S1 2-sample first send (UR-22, #78): FAIL: 2-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/b-37.console.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/b-37.console.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 1000000 S/s (T2, note 48): PASS: 1000000 S/s: 5 complete trials; zeros [15, 14, 14, 14, 14]; samples to 90 % [9, 10, 10, 10, 10]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 2000000 S/s (T2, note 48): PASS: 2000000 S/s: 5 complete trials; zeros [10, 10, 10, 10, 10]; samples to 90 % [8, 8, 8, 8, 8]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 5000000 S/s (T2, note 48): PASS: 5000000 S/s: 5 complete trials; zeros [14, 14, 15, 14, 14]; samples to 90 % [10, 10, 9, 10, 10]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 10000000 S/s (T2, note 48): PASS: 10000000 S/s: 5 complete trials; zeros [10, 10, 11, 11, 11]; samples to 90 % [8, 8, 7, 7, 7]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 25000000 S/s (T2, note 48): PASS: 25000000 S/s: 5 complete trials; zeros [13, 13, 13, 13, 13]; samples to 90 % [11, 11, 11, 11, 11]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 50000000 S/s (T2, note 48): PASS: 50000000 S/s: 5 complete trials; zeros [9, 9, 9, 9, 9]; samples to 90 % [8, 8, 8, 8, 8]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 100000000 S/s (T2, note 48): PASS: 100000000 S/s: 5 complete trials; zeros [4, 3, 3, 3, 3]; samples to 90 % [8, 9, 9, 9, 9]
+ezsdr-bench/c-37.console.log	37	PASS	n47 raw rx restart fill at 200000000 S/s (T2, note 48): PASS: 200000000 S/s: 5 complete trials; zeros [0, 0, 0, 0, 0]; samples to 90 % [0, 0, 0, 0, 0]
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (a): the first segment holds the 100 kHz tone: PASS: the tone holds at 99966 Hz
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (b): a receive value while the stream runs is refused with its Action id: PASS: one radio.COMMAND_REJECTED names the Action
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (b): the refused value leaves the stream at f1 without a gap: PASS: the tone holds at 99985 Hz
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (c): the timed restart is booked at its request: PASS: the booked origin is the request 462564600
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE: PASS: the device start and the first block are at the booked origin 462564600, without GAP_BEFORE
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (c): the new segment's first millisecond holds the tone at 50 kHz: PASS: every window of the segment's first millisecond holds the tone at 50040 Hz, above 4 x the noise
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (c): the restart is not reported late: PASS: no radio.LATE_COMMAND
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (b): the first segment has no gap across the refusal: PASS: 55 blocks advance without a hole
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (d): the configure read back the new frequency_hz (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 1000050000 and the device read back 1000050000
+ezsdr-bench/c-37.console.log	37	PASS	n47 stage 3 (d): the configure read back the new gain_db (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 6 and the device read back 6
+ezsdr-bench/c-37.console.log	37	PASS	n47 start lead: the smallest candidate lead leaves every stage's restart at its origin: PASS: the smallest candidate lead is 5000000 ns
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 1000000 S/s (T2, note 48): PASS: 1000000 S/s: 5 complete trials; zeros [15, 14, 15, 14, 15]; samples to 90 % [9, 10, 9, 10, 9]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 2000000 S/s (T2, note 48): PASS: 2000000 S/s: 5 complete trials; zeros [10, 10, 10, 10, 10]; samples to 90 % [8, 8, 8, 8, 8]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 5000000 S/s (T2, note 48): PASS: 5000000 S/s: 5 complete trials; zeros [14, 14, 14, 14, 14]; samples to 90 % [10, 10, 10, 10, 10]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 10000000 S/s (T2, note 48): PASS: 10000000 S/s: 5 complete trials; zeros [10, 10, 10, 10, 11]; samples to 90 % [8, 8, 8, 8, 7]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 25000000 S/s (T2, note 48): PASS: 25000000 S/s: 5 complete trials; zeros [13, 13, 13, 13, 13]; samples to 90 % [11, 11, 11, 11, 11]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 50000000 S/s (T2, note 48): PASS: 50000000 S/s: 5 complete trials; zeros [10, 9, 9, 9, 9]; samples to 90 % [7, 8, 8, 8, 8]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 100000000 S/s (T2, note 48): PASS: 100000000 S/s: 5 complete trials; zeros [4, 3, 3, 3, 3]; samples to 90 % [8, 9, 9, 9, 9]
+ezsdr-bench/cd.console.log		PASS	n47 raw rx restart fill at 200000000 S/s (T2, note 48): PASS: 200000000 S/s: 5 complete trials; zeros [0, 0, 0, 0, 0]; samples to 90 % [0, 0, 0, 0, 0]
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (a): the first segment holds the 100 kHz tone: PASS: the tone holds at 99928 Hz
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (b): a receive value while the stream runs is refused with its Action id: PASS: one radio.COMMAND_REJECTED names the Action
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (b): the refused value leaves the stream at f1 without a gap: PASS: the tone holds at 99942 Hz
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (c): the timed restart is booked at its request: PASS: the booked origin is the request 462491400
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE: PASS: the device start and the first block are at the booked origin 462491400, without GAP_BEFORE
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (c): the new segment's first millisecond holds the tone at 50 kHz: PASS: every window of the segment's first millisecond holds the tone at 49987 Hz, above 4 x the noise
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (c): the restart is not reported late: PASS: no radio.LATE_COMMAND
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (b): the first segment has no gap across the refusal: PASS: 55 blocks advance without a hole
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (d): the configure read back the new frequency_hz (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 1000050000 and the device read back 1000050000
+ezsdr-bench/cd.console.log		PASS	n47 stage 3 (d): the configure read back the new gain_db (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 6 and the device read back 6
+ezsdr-bench/cd.console.log		PASS	n47 start lead: the smallest candidate lead leaves every stage's restart at its origin: PASS: the smallest candidate lead is 5000000 ns
+ezsdr-bench/cd.console.log		PASS	n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz: PASS: 2000000 S/s read back; A's ACK at 75667201 (+1 from its end 75667200); B at its tick; the tones hold
+ezsdr-bench/cd.console.log		INCONCLUSIVE	n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz: INCONCLUSIVE: the rest holds; B starts -1200 ticks off the expected 101383600: onset precision
+ezsdr-bench/ef.console.log		PASS	TX200 len=1000 shape=single rate=200000000: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/ef.console.log		PASS	TX200 len=20000 shape=single rate=200000000: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/ef.console.log		PASS	T4 rx at 200 MS/s for 600 s: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/ef.console.log		FAIL	T4 tx at 200 MS/s for 600 s: FAIL: class DeviceFailure
+ezsdr-bench/ef.console.log		FAIL	T4 duplex at 200 MS/s for 600 s: FAIL: class DeviceFailure
+ezsdr-bench/ef.console.log		FAIL	T4 rx at 200 MS/s for 600 s: FAIL: the Module's feed did not report zero dropped blocks: 46
+ezsdr-bench/ef.console.log		FAIL	T4 tx at 200 MS/s for 600 s: FAIL: class DeviceFailure
+ezsdr-bench/ef.console.log		PASS	T4 duplex at 200 MS/s for 600 s: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/hw_b6_txrx_and_repeat.36.log	36	PASS	B6 (#78): no TIME_ERROR and no TX_UNDERFLOW in the burst's Run or the repeat's: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report; repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b6_txrx_and_repeat.37.log	37	PASS	B6 (#78): no TIME_ERROR and no TX_UNDERFLOW in the burst's Run or the repeat's: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report; repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b7_session_loopback.36.log	36	PASS	B7 (#78): no TIME_ERROR and no TX_UNDERFLOW in the Session loopback: PASS: loopback: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b7_session_loopback.37.log	37	PASS	B7 (#78): no TIME_ERROR and no TX_UNDERFLOW in the Session loopback: PASS: loopback: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_at_a_sent_burst_s_end.36.log	36	PASS	B8 burst at a sent burst's end, trial 0 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_at_a_sent_burst_s_end.36.log	36	PASS	B8 burst at a sent burst's end, trial 1 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_at_a_sent_burst_s_end.36.log	36	PASS	B8 burst at a sent burst's end, trial 2 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_at_a_sent_burst_s_end.37.log	37	PASS	B8 burst at a sent burst's end, trial 0 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_at_a_sent_burst_s_end.37.log	37	PASS	B8 burst at a sent burst's end, trial 1 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_at_a_sent_burst_s_end.37.log	37	PASS	B8 burst at a sent burst's end, trial 2 (UR-23, #78): no TIME_ERROR and no TX_UNDERFLOW: PASS: burst: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_one_sample_after_a_burst.36.log	36	FAIL	B8 burst at end + 2 samples, booked late false (UR-22, #78): 0 TIME_ERROR (cause late), no TX_UNDERFLOW: FAIL: 1 radio.TX_UNDERFLOW and 160 device fault report(s) in the async section
+ezsdr-bench/hw_b8_burst_one_sample_after_a_burst.37.log	37	PASS	B8 burst at end + 2 samples, booked late false (UR-22, #78): 0 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_one_sample_after_a_burst.37.log	37	PASS	B8 burst at end + 2 samples, booked late true (UR-22, #78): 0 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_one_sample_after_a_burst.37.log	37	PASS	B8 burst at end + 1 samples, booked late false (UR-22, #78): 1 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 1 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_burst_one_sample_after_a_burst.37.log	37	PASS	B8 burst at end + 1 samples, booked late true (UR-22, #78): 1 TIME_ERROR (cause late), no TX_UNDERFLOW: PASS: 1 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_preemption.36.log	36	PASS	B8 preempt lead 20 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects Some(0); no TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_preemption.36.log	36	PASS	B8 preempt lead 10 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects None; no TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_preemption.36.log	36	PASS	"B8 preempt lead 5 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/hw_b8_preemption.36.log	36	PASS	"B8 preempt lead 3 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/hw_b8_preemption.37.log	37	PASS	B8 preempt lead 20 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects Some(0); no TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_preemption.37.log	37	PASS	B8 preempt lead 10 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 0 radio.TIME_ERROR []; the lead expects None; no TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_b8_preemption.37.log	37	PASS	"B8 preempt lead 5 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/hw_b8_preemption.37.log	37	PASS	"B8 preempt lead 3 ms (UR-21, #78): at most one late TIME_ERROR, no TX_UNDERFLOW, no device fault: PASS: 1 radio.TIME_ERROR [""late""]; the lead expects Some(1); no TX_UNDERFLOW; no device fault report"
+ezsdr-bench/hw_h5_held_last_sample.36.log	36	PASS	H5 held last sample (UR-22, #78): no TIME_ERROR and no TX_UNDERFLOW in the prebooked and deadline runs: PASS: held-sample run: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_h5_held_last_sample.37.log	37	PASS	H5 held last sample (UR-22, #78): no TIME_ERROR and no TX_UNDERFLOW in the prebooked and deadline runs: PASS: held-sample run: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_iii_load_200msps.36.log	36	FAIL	T4 rx at 200 MS/s for 600 s: FAIL: the Module's feed did not report zero dropped blocks: 46
+ezsdr-bench/hw_iii_load_200msps.36.log	36	FAIL	T4 tx at 200 MS/s for 600 s: FAIL: class DeviceFailure
+ezsdr-bench/hw_iii_load_200msps.36.log	36	PASS	T4 duplex at 200 MS/s for 600 s: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/hw_iii_load_200msps.37.log	37	PASS	T4 rx at 200 MS/s for 600 s: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/hw_iii_load_200msps.37.log	37	FAIL	T4 tx at 200 MS/s for 600 s: FAIL: class DeviceFailure
+ezsdr-bench/hw_iii_load_200msps.37.log	37	FAIL	T4 duplex at 200 MS/s for 600 s: FAIL: class DeviceFailure
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 1000000 S/s (T2, note 48): PASS: 1000000 S/s: 5 complete trials; zeros [15, 14, 15, 14, 15]; samples to 90 % [9, 10, 9, 10, 9]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 2000000 S/s (T2, note 48): PASS: 2000000 S/s: 5 complete trials; zeros [10, 10, 10, 10, 10]; samples to 90 % [8, 8, 8, 8, 8]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 5000000 S/s (T2, note 48): PASS: 5000000 S/s: 5 complete trials; zeros [14, 14, 14, 14, 14]; samples to 90 % [10, 10, 10, 10, 10]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 10000000 S/s (T2, note 48): PASS: 10000000 S/s: 5 complete trials; zeros [10, 10, 10, 10, 11]; samples to 90 % [8, 8, 8, 8, 7]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 25000000 S/s (T2, note 48): PASS: 25000000 S/s: 5 complete trials; zeros [13, 13, 13, 13, 13]; samples to 90 % [11, 11, 11, 11, 11]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 50000000 S/s (T2, note 48): PASS: 50000000 S/s: 5 complete trials; zeros [10, 9, 9, 9, 9]; samples to 90 % [7, 8, 8, 8, 8]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 100000000 S/s (T2, note 48): PASS: 100000000 S/s: 5 complete trials; zeros [4, 3, 3, 3, 3]; samples to 90 % [8, 9, 9, 9, 9]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.36.log	36	PASS	n47 raw rx restart fill at 200000000 S/s (T2, note 48): PASS: 200000000 S/s: 5 complete trials; zeros [0, 0, 0, 0, 0]; samples to 90 % [0, 0, 0, 0, 0]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 1000000 S/s (T2, note 48): PASS: 1000000 S/s: 5 complete trials; zeros [15, 14, 14, 14, 14]; samples to 90 % [9, 10, 10, 10, 10]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 2000000 S/s (T2, note 48): PASS: 2000000 S/s: 5 complete trials; zeros [10, 10, 10, 10, 10]; samples to 90 % [8, 8, 8, 8, 8]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 5000000 S/s (T2, note 48): PASS: 5000000 S/s: 5 complete trials; zeros [14, 14, 15, 14, 14]; samples to 90 % [10, 10, 9, 10, 10]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 10000000 S/s (T2, note 48): PASS: 10000000 S/s: 5 complete trials; zeros [10, 10, 11, 11, 11]; samples to 90 % [8, 8, 7, 7, 7]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 25000000 S/s (T2, note 48): PASS: 25000000 S/s: 5 complete trials; zeros [13, 13, 13, 13, 13]; samples to 90 % [11, 11, 11, 11, 11]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 50000000 S/s (T2, note 48): PASS: 50000000 S/s: 5 complete trials; zeros [9, 9, 9, 9, 9]; samples to 90 % [8, 8, 8, 8, 8]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 100000000 S/s (T2, note 48): PASS: 100000000 S/s: 5 complete trials; zeros [4, 3, 3, 3, 3]; samples to 90 % [8, 9, 9, 9, 9]
+ezsdr-bench/hw_iii_raw_rx_restart_fill.37.log	37	PASS	n47 raw rx restart fill at 200000000 S/s (T2, note 48): PASS: 200000000 S/s: 5 complete trials; zeros [0, 0, 0, 0, 0]; samples to 90 % [0, 0, 0, 0, 0]
+ezsdr-bench/hw_n47_raw_tx_rate_on_an_open_streamer.36.log	36	PASS	n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz: PASS: 2000000 S/s read back; A's ACK at 75667201 (+1 from its end 75667200); B at its tick; the tones hold
+ezsdr-bench/hw_n47_raw_tx_rate_on_an_open_streamer.37.2.log	37	INCONCLUSIVE	n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz: INCONCLUSIVE: the rest holds; B starts -2200 ticks off the expected 101439800: onset precision
+ezsdr-bench/hw_n47_raw_tx_rate_on_an_open_streamer.37.3.log	37	INCONCLUSIVE	n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz: INCONCLUSIVE: the rest holds; B starts +2200 ticks off the expected 101328400: onset precision
+ezsdr-bench/hw_n47_raw_tx_rate_on_an_open_streamer.37.log	37	INCONCLUSIVE	n47 raw tx rate 1 to 2 MS/s: A's ACK at its end, B at its tick after the loop's delay, both tones at their hertz: INCONCLUSIVE: the rest holds; B starts -1200 ticks off the expected 101383600: onset precision
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (a): the first segment holds the 100 kHz tone: PASS: the tone holds at 99928 Hz
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (b): a receive value while the stream runs is refused with its Action id: PASS: one radio.COMMAND_REJECTED names the Action
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (b): the refused value leaves the stream at f1 without a gap: PASS: the tone holds at 99942 Hz
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (c): the timed restart is booked at its request: PASS: the booked origin is the request 462491400
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE: PASS: the device start and the first block are at the booked origin 462491400, without GAP_BEFORE
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (c): the new segment's first millisecond holds the tone at 50 kHz: PASS: every window of the segment's first millisecond holds the tone at 49987 Hz, above 4 x the noise
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (c): the restart is not reported late: PASS: no radio.LATE_COMMAND
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (b): the first segment has no gap across the refusal: PASS: 55 blocks advance without a hole
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (d): the configure read back the new frequency_hz (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 1000050000 and the device read back 1000050000
+ezsdr-bench/hw_n47_rx_restart_with_new_values.36.log	36	PASS	n47 stage 3 (d): the configure read back the new gain_db (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 6 and the device read back 6
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (a): the first segment holds the 100 kHz tone: PASS: the tone holds at 99966 Hz
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (b): a receive value while the stream runs is refused with its Action id: PASS: one radio.COMMAND_REJECTED names the Action
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (b): the refused value leaves the stream at f1 without a gap: PASS: the tone holds at 99985 Hz
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (c): the timed restart is booked at its request: PASS: the booked origin is the request 462564600
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (c): the device start and the published first block are at the booked origin, without GAP_BEFORE: PASS: the device start and the first block are at the booked origin 462564600, without GAP_BEFORE
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (c): the new segment's first millisecond holds the tone at 50 kHz: PASS: every window of the segment's first millisecond holds the tone at 50040 Hz, above 4 x the noise
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (c): the restart is not reported late: PASS: no radio.LATE_COMMAND
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (b): the first segment has no gap across the refusal: PASS: 55 blocks advance without a hole
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (d): the configure read back the new frequency_hz (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 1000050000 and the device read back 1000050000
+ezsdr-bench/hw_n47_rx_restart_with_new_values.37.log	37	PASS	n47 stage 3 (d): the configure read back the new gain_db (configure-time read-back, not a post-Run measurement): PASS: the configure claimed 6 and the device read back 6
+ezsdr-bench/hw_n47_rx_start_lead_group.36.log	36	PASS	n47 start lead: the smallest candidate lead leaves every stage's restart at its origin: PASS: the smallest candidate lead is 5000000 ns
+ezsdr-bench/hw_n47_rx_start_lead_group.37.log	37	PASS	n47 start lead: the smallest candidate lead leaves every stage's restart at its origin: PASS: the smallest candidate lead is 5000000 ns
+ezsdr-bench/hw_p70_one_sample_burst_then_timed_burst.36.log	36	PASS	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked with the first): PASS: the onset differs from the control's by 1 samples
+ezsdr-bench/hw_p70_one_sample_burst_then_timed_burst.36.log	36	FAIL	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked after the first was sent): FAIL: four-sample control: 1 radio.TIME_ERROR, 0 expected
+ezsdr-bench/hw_p70_one_sample_burst_then_timed_burst.37.log	37	PASS	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked with the first): PASS: the onset differs from the control's by 0 samples
+ezsdr-bench/hw_p70_one_sample_burst_then_timed_burst.37.log	37	FAIL	#70 (T2): a one-sample burst leaves the next timed burst's onset as a four-sample control's (the second booked after the first was sent): FAIL: one-sample trial: 1 radio.TIME_ERROR, 0 expected
+ezsdr-bench/hw_p72_timed_tx_chunks_are_timed_and_flushed.36.log	36	PASS	#72 1a (T1, T2, T3 on the production path): every send is timed, closing sends have two samples, the flush is acknowledged: PASS: 26 sends, each timed; 1 closing send(s) with two or more samples; 1 flush(es) acknowledged
+ezsdr-bench/hw_p72_timed_tx_chunks_are_timed_and_flushed.37.log	37	PASS	#72 1a (T1, T2, T3 on the production path): every send is timed, closing sends have two samples, the flush is acknowledged: PASS: 26 sends, each timed; 1 closing send(s) with two or more samples; 1 flush(es) acknowledged
+ezsdr-bench/hw_s1_short_first_sends.36.log	36	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.36.log	36	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.36.log	36	FAIL	S1 3-sample first send (UR-22, #78): FAIL: 3-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 159 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.36.log	36	FAIL	S1 4-sample first send (UR-22, #78): FAIL: 4-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 159 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.10.log	37	FAIL	S1 1-sample first send (UR-22, #78): FAIL: 1-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 159 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.10.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.10.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.10.log	37	FAIL	S1 4-sample first send (UR-22, #78): FAIL: 4-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.2.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.2.log	37	FAIL	S1 2-sample first send (UR-22, #78): FAIL: 2-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.2.log	37	FAIL	S1 3-sample first send (UR-22, #78): FAIL: 3-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 159 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.2.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.3.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.3.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.3.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.3.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.4.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.4.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.4.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.4.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.5.log	37	FAIL	S1 1-sample first send (UR-22, #78): FAIL: 1-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.5.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.5.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.5.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.6.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.6.log	37	FAIL	S1 2-sample first send (UR-22, #78): FAIL: 2-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 161 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.6.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.6.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.7.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.7.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.7.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.7.log	37	FAIL	S1 4-sample first send (UR-22, #78): FAIL: 4-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.8.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.8.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.8.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.8.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.9.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.9.log	37	PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.9.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.9.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.log	37	PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.log	37	FAIL	S1 2-sample first send (UR-22, #78): FAIL: 2-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37.log	37	PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37.log	37	PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.2.log		PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.2.log		PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.2.log		PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.2.log		PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.3.log		FAIL	S1 1-sample first send (UR-22, #78): FAIL: 1-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 158 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37diag.3.log		PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.3.log		PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.3.log		PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.4.log		PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.4.log		PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.4.log		PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.4.log		FAIL	S1 4-sample first send (UR-22, #78): FAIL: 4-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 161 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37diag.5.log		FAIL	S1 1-sample first send (UR-22, #78): FAIL: 1-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 200 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37diag.5.log		PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.5.log		PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.5.log		PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.6.log		PASS	S1 1-sample first send (UR-22, #78): PASS: 1-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.6.log		PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.6.log		PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.6.log		PASS	S1 4-sample first send (UR-22, #78): PASS: 4-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.log		FAIL	S1 1-sample first send (UR-22, #78): FAIL: 1-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_s1_short_first_sends.37diag.log		PASS	S1 2-sample first send (UR-22, #78): PASS: 2-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.log		PASS	S1 3-sample first send (UR-22, #78): PASS: 3-sample first send: no TIME_ERROR, no TX_UNDERFLOW, one BurstAck for each burst
+ezsdr-bench/hw_s1_short_first_sends.37diag.log		FAIL	S1 4-sample first send (UR-22, #78): FAIL: 4-sample first send: 1 TIME_ERROR, 1 TX_UNDERFLOW, 160 device fault report(s)
+ezsdr-bench/hw_tx200_hot_path_probe.37.log	37	PASS	TX200 len=1000 shape=single rate=200000000: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/hw_tx200_hot_path_probe.37.log	37	PASS	TX200 len=20000 shape=single rate=200000000: PASS: class Success; accepted samples; no overflow, underflow or async failure; no link drop
+ezsdr-bench/hw_txp_b0_send_sizes.36.log	36	PASS	TXP B0 rate 1000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_txp_b0_send_sizes.36.log	36	PASS	TXP B0 rate 5000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_txp_b0_send_sizes.37.log	37	PASS	TXP B0 rate 1000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report
+ezsdr-bench/hw_txp_b0_send_sizes.37.log	37	PASS	TXP B0 rate 5000000 (#78): no TIME_ERROR and no TX_UNDERFLOW in the repeat's Run: PASS: repeat: 0 radio.TIME_ERROR as expected; no radio.TX_UNDERFLOW; no device fault report

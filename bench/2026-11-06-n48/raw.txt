@@ -1,0 +1,6 @@
+release: https://github.com/k3komatsu/Ez-SDRv4-bench-raw/releases/tag/2026-11-06-n48 (private)
+asset:   2026-11-06-n48.tar.xz  255052 bytes
+sha256:  fa0ab6d2816421987d8ee29ef34733b33d1ff928d6eda07392b9f07954ded05f
+source:  ezsdr-bench = ~/.cache/ezsdr-bench/2026-11-06 on usrp-lnx03
+fetch:   gh release download 2026-11-06-n48 -R k3komatsu/Ez-SDRv4-bench-raw
+results: python3 plan/phase8/tools/bench_extract.py <extracted dir>/2026-11-06-n48 bench/2026-11-06-n48/results
